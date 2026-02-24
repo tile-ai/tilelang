@@ -10,7 +10,9 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt.h>
 
+#include <functional>
 #include <memory>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -60,6 +62,16 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
   return true;
 }
 
+// Structure to store region access information with warpgroup id
+struct RegionAccessInfo {
+  BufferRegion region;
+  bool is_write;    // true for write, false for read
+  int warpgroup_id; // warpgroup id of the innermost TaskNode
+
+  RegionAccessInfo(BufferRegion region, bool is_write, int warpgroup_id)
+      : region(region), is_write(is_write), warpgroup_id(warpgroup_id) {}
+};
+
 // Base class for all IR nodes in scheduling
 class IRStructure {
 public:
@@ -101,23 +113,21 @@ public:
   // Helper methods to add regions (for incremental analysis)
   virtual void AddReadRegion(const BufferRegion &region) = 0;
   virtual void AddWriteRegion(const BufferRegion &region) = 0;
-  std::vector<std::pair<BufferRegion, bool>> GetReadWriteRegions() const {
-    std::vector<std::pair<BufferRegion, bool>> read_write_regions;
-    std::set<Buffer> buffers;
-    for (const auto &region : GetWriteRegions()) {
-      if (buffers.find(region->buffer) == buffers.end()) {
-        buffers.insert(region->buffer);
-        read_write_regions.push_back({region, true});
-      }
-    }
-    for (const auto &region : GetReadRegions()) {
-      if (buffers.find(region->buffer) == buffers.end()) {
-        buffers.insert(region->buffer);
-        read_write_regions.push_back({region, false});
-      }
-    }
-    return read_write_regions;
+
+  // Recursive region collection method
+  virtual void CollectRegions(
+      std::vector<RegionAccessInfo> &result,
+      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const = 0;
+
+  std::vector<RegionAccessInfo> GetReadWriteRegions() const {
+    std::vector<RegionAccessInfo> result;
+    std::set<std::pair<Buffer, std::pair<int, int>>> visited;
+    CollectRegions(result, visited);
+    return result;
   }
+
+  // Get warpgroup id for this node (-1 if not applicable)
+  virtual int GetWarpgroupId() const { return -1; }
 
   virtual bool containWarpgroupId(int id) const = 0;
 
@@ -165,7 +175,7 @@ public:
 
   // Warpgroup id for warpgroup specialization
   void SetWarpgroupId(int warpgroup_id) { warpgroup_id_ = warpgroup_id; }
-  int GetWarpgroupId() const { return warpgroup_id_; }
+  int GetWarpgroupId() const override { return warpgroup_id_; }
 
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
@@ -192,6 +202,10 @@ public:
     }
     write_regions_.push_back(region);
   }
+
+  void CollectRegions(
+      std::vector<RegionAccessInfo> &result,
+      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
   bool containWarpgroupId(int id) const override { return warpgroup_id_ == id; }
 
@@ -277,6 +291,10 @@ public:
       child->AddWriteRegion(region);
   }
 
+  void CollectRegions(
+      std::vector<RegionAccessInfo> &result,
+      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+
   bool hasPromote() const { return has_promote_; }
 
   void SetPromote(bool promote) { has_promote_ = promote; }
@@ -361,6 +379,10 @@ public:
       child->AddWriteRegion(region);
   }
 
+  void CollectRegions(
+      std::vector<RegionAccessInfo> &result,
+      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
 
@@ -377,8 +399,15 @@ private:
 class ScheduleUnit : public IRStructure {
 public:
   int promote;
-  std::vector<Stmt> before, after;
+  std::vector<std::vector<Stmt>> before, after;
   std::unique_ptr<IRStructure> child;
+
+  ScheduleUnit() : before(), after() {
+    for (unsigned idx = 0; idx != 2; ++idx) {
+      before.emplace_back();
+      after.emplace_back();
+    }
+  }
 
   Kind GetKind() const override { return Kind::kSchedule; }
 
@@ -438,9 +467,14 @@ public:
     if (child)
       child->AddWriteRegion(region);
   }
+
+  void CollectRegions(
+      std::vector<RegionAccessInfo> &result,
+      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
+
   bool GetPromote() const { return promote; }
   bool isInnerTask() const { return child->IsTask(); }
-  int GetWarpgroupId() const {
+  int GetWarpgroupId() const override {
     ICHECK(isInnerTask());
     const TaskNode *task = static_cast<const TaskNode *>(child.get());
     return task->GetWarpgroupId();
@@ -491,6 +525,10 @@ public:
   // Helper methods to add regions (delegate to first child if exists)
   void AddReadRegion(const BufferRegion &region) override;
   void AddWriteRegion(const BufferRegion &region) override;
+
+  void CollectRegions(
+      std::vector<RegionAccessInfo> &result,
+      std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
@@ -723,11 +761,15 @@ void PrintAllStmts(const IRStructure *node, int indent = 0) {
     const ScheduleUnit *promote = static_cast<const ScheduleUnit *>(node);
     LOG(INFO) << indent_str << "PromoteNode:";
     LOG(INFO) << indent_str << "  Promote: " << promote->promote;
-    for (auto &stmt : promote->before) {
-      LOG(INFO) << indent_str << "  Before: " << stmt;
+    for (unsigned idx = 0; idx != promote->before.size(); ++idx) {
+      for (auto &stmt : promote->before[idx]) {
+        LOG(INFO) << indent_str << "  Before " << idx << " : " << stmt;
+      }
     }
-    for (auto &stmt : promote->after) {
-      LOG(INFO) << indent_str << "  After: " << stmt;
+    for (unsigned idx = 0; idx != promote->after.size(); ++idx) {
+      for (auto &stmt : promote->after[idx]) {
+        LOG(INFO) << indent_str << "  After " << idx << " : " << stmt;
+      }
     }
     // Recursively print child statements
     if (promote->child) {
@@ -793,11 +835,15 @@ void PrintIRStructure(const IRStructure *node, int indent = 0) {
     const ScheduleUnit *promote = static_cast<const ScheduleUnit *>(node);
     LOG(INFO) << indent_str << "PromoteNode:";
     LOG(INFO) << indent_str << "  Promote: " << promote->promote;
-    for (auto &stmt : promote->before) {
-      LOG(INFO) << indent_str << "  Before: " << stmt;
+    for (unsigned idx = 0; idx != promote->before.size(); ++idx) {
+      for (auto &stmt : promote->before[idx]) {
+        LOG(INFO) << indent_str << "  Before " << idx << " : " << stmt;
+      }
     }
-    for (auto &stmt : promote->after) {
-      LOG(INFO) << indent_str << "  After: " << stmt;
+    for (unsigned idx = 0; idx != promote->after.size(); ++idx) {
+      for (auto &stmt : promote->after[idx]) {
+        LOG(INFO) << indent_str << "  After " << idx << " : " << stmt;
+      }
     }
     if (promote->child) {
       LOG(INFO) << indent_str << "  Promote body:";

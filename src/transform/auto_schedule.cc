@@ -247,11 +247,12 @@ static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
 
 // Helper function to insert a statement into PromoteNode's stmts
 static void InsertStatementIntoPromoteNode(ScheduleUnit *task, const Stmt &stmt,
-                                           bool at_beginning = false) {
+                                           bool at_beginning,
+                                           int warpgroup_id) {
   if (at_beginning) {
-    task->before.insert(task->before.begin(), stmt);
+    task->before[warpgroup_id].insert(task->before[warpgroup_id].begin(), stmt);
   } else {
-    task->after.push_back(stmt);
+    task->after[warpgroup_id].push_back(stmt);
   }
 }
 
@@ -290,14 +291,16 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
     return;
 
   // Map from (buffer, warpgroup_id) to task of last access
-  std::unordered_map<Buffer, ScheduleUnit *, ObjectPtrHash, ObjectPtrEqual>
-      last_access_map[2];
   std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                      ObjectPtrEqual>
+      last_access_map[2];
+  std::unordered_map<Buffer, std::pair<ScheduleUnit *, std::pair<int, int>>,
+                     ObjectPtrHash, ObjectPtrEqual>
       last_write_map;
   std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                      ObjectPtrEqual>
       last_wgmma_map[2];
+  std::unordered_map<ScheduleUnit *, Buffer> barrier_unit_map;
   int wait_wgmma_id[2] = {}, total_wgmma[2] = {};
 
   // Process tasks in sequence order
@@ -307,17 +310,14 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
       // If child is SequenceNode or ControlNode, recursively analyze it
       AnalyzeAndInsertBarriers(task->child.get(), next_barrier_id,
                                barrier_buffers, barrier_map, thread_count);
-      continue;
     }
-    if (!task->isInnerTask())
-      continue;
-    int wg_id = task->GetWarpgroupId();
-    if (wg_id == -1)
-      continue;
 
     // Check regions for dependencies
     for (const auto &region_access : task->GetReadWriteRegions()) {
-      auto &region = region_access.first;
+      int wg_id = region_access.warpgroup_id;
+      if (wg_id == -1)
+        continue;
+      auto &region = region_access.region;
       if (IsRegisterRegion(region)) {
         // if (task->UsesTensorCore()) continue;
         Buffer buffer = region->buffer;
@@ -330,21 +330,21 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
         Stmt wait_stmt =
             Evaluate(Call(DataType::Handle(), wait_wgmma(),
                           {total_wgmma[wg_id] - wait_wgmma_id[wg_id]}));
-        InsertStatementIntoPromoteNode(task, wait_stmt, true);
+        InsertStatementIntoPromoteNode(task, wait_stmt, true, wg_id);
       } else {
         Buffer buffer = region->buffer;
         bool need_barrier = false;
         ScheduleUnit *last_access_task;
         int last_wg_id;
         bool is_async = task->UsesTensorCore() || task->UsesTMACore();
-        if (!region_access.second) {
+        if (!region_access.is_write) {
           auto it = last_write_map.find(buffer);
           if (it != last_write_map.end()) {
             last_access_task = it->second.first;
-            last_wg_id = last_access_task->GetWarpgroupId();
+            last_wg_id = it->second.second.second;
             if (last_wg_id == -1)
               continue;
-            if (it->second.second & (1 << wg_id))
+            if (it->second.second.first & (1 << wg_id))
               continue;
             bool last_async = last_access_task->UsesTensorCore() ||
                               last_access_task->UsesTMACore();
@@ -356,8 +356,8 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
         } else {
           auto it = last_access_map[!wg_id].find(buffer);
           if (it != last_access_map[!wg_id].end()) {
-            last_access_task = it->second;
-            last_wg_id = last_access_task->GetWarpgroupId();
+            last_access_task = it->second.first;
+            last_wg_id = it->second.second;
             if (last_wg_id == -1)
               continue;
             if (last_wg_id != wg_id) {
@@ -365,36 +365,41 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
             }
           }
         }
+        if (last_access_task == task)
+          continue;
         // If warpgroup ids differ, insert barrier
         if (need_barrier) {
-          // Allocate a new barrier ID and buffer
-          int barrier_id = next_barrier_id++;
-
-          Buffer barrier_buffer = makeBarrierBuffer(
-              thread_count[last_wg_id], "barrier_" + std::to_string(barrier_id),
-              barrier_map);
-
-          // Collect the barrier buffer to be added to tilelang_root block's
-          // alloc_buffers
-          barrier_buffers.push_back(barrier_buffer);
-
-          // Create BufferLoad expression for barrier[0]
-          PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
-
-          // Insert barrier_arrive at the end of last_access_task's statements
-          Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-          InsertStatementIntoPromoteNode(last_access_task, arrive_stmt, false);
+          if (barrier_unit_map.find(last_access_task) ==
+              barrier_unit_map.end()) {
+            // Allocate a new barrier ID and buffer
+            int barrier_id = next_barrier_id++;
+            Buffer barrier_buffer = makeBarrierBuffer(
+                thread_count[last_wg_id],
+                "barrier_" + std::to_string(barrier_id), barrier_map);
+            barrier_unit_map[last_access_task] = barrier_buffer;
+            // Collect the barrier buffer to be added to tilelang_root block's
+            // alloc_buffers
+            barrier_buffers.push_back(barrier_buffer);
+            // Create BufferLoad expression for barrier[0]
+            PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
+            // Insert barrier_arrive at the end of last_access_task's statements
+            Stmt arrive_stmt = makeBarrierArrive(barrier_load);
+            InsertStatementIntoPromoteNode(last_access_task, arrive_stmt, false,
+                                           last_wg_id);
+          }
+          PrimExpr barrier_load =
+              tir::BufferLoad(barrier_unit_map[last_access_task], {0});
 
           // Insert barrier_wait at the beginning of task's statements
           Stmt wait_stmt =
               makeBarrierWait(barrier_load,
                               0); // parity = 0 for non-loop barriers
-          InsertStatementIntoPromoteNode(task, wait_stmt, true);
+          InsertStatementIntoPromoteNode(task, wait_stmt, true, wg_id);
           // Remove from map (as per user instruction)
-          if (!region_access.second) {
+          if (!region_access.is_write) {
             auto it = last_write_map.find(buffer);
-            it->second.second |= (1 << wg_id);
-            if (it->second.second == 3) {
+            it->second.second.first |= (1 << wg_id);
+            if (it->second.second.first == 3) {
               last_write_map.erase(last_write_map.find(buffer));
             }
           } else {
@@ -416,7 +421,10 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
     // Update regions
     bool found_wgmma = false;
     for (const auto &region_access : task->GetReadWriteRegions()) {
-      auto &region = region_access.first;
+      int wg_id = region_access.warpgroup_id;
+      if (wg_id == -1)
+        continue;
+      auto &region = region_access.region;
       if (IsRegisterRegion(region)) {
         if (!task->UsesTensorCore())
           continue;
@@ -429,9 +437,10 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
             std::make_pair(task, total_wgmma[wg_id]);
       } else {
         Buffer buffer = region->buffer;
-        last_access_map[wg_id][buffer] = task;
-        if (region_access.second) {
-          last_write_map[buffer] = std::make_pair(task, 0);
+        last_access_map[wg_id][buffer] = std::make_pair(task, wg_id);
+        if (region_access.is_write) {
+          last_write_map[buffer] =
+              std::make_pair(task, std::make_pair(0, wg_id));
         }
       }
     }
@@ -474,7 +483,6 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
         // If child is SequenceNode or ControlNode, recursively analyze it
         AnalyzeAndInsertBarriers(task->child.get(), next_barrier_id,
                                  barrier_buffers, barrier_map, thread_count);
-        continue;
       }
       all_tasks.push_back(task);
     }
@@ -497,33 +505,33 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                          non_promoted_tasks.end());
 
     // Map from (buffer, warpgroup_id) to task
-    std::unordered_map<Buffer, ScheduleUnit *, ObjectPtrHash, ObjectPtrEqual>
+    std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
+                       ObjectPtrEqual>
         last_access_map[2];
     std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>
         last_access_set[2];
-    std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
-                       ObjectPtrEqual>
+    std::unordered_map<Buffer, std::pair<ScheduleUnit *, std::pair<int, int>>,
+                       ObjectPtrHash, ObjectPtrEqual>
         last_write_map;
     std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> last_write_set;
     std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                        ObjectPtrEqual>
         last_wgmma_map[2];
+    std::unordered_map<ScheduleUnit *, Buffer> barrier_unit_map;
     int wait_wgmma_id[2] = {}, total_wgmma[2] = {};
 
     // Process tasks in the specified order
     for (unsigned iter = 0; iter != 2; ++iter) {
       for (ScheduleUnit *task : ordered_tasks) {
-        if (!task->isInnerTask())
-          continue;
-        int wg_id = task->GetWarpgroupId();
         bool is_promoted = task->GetPromote();
-        if (wg_id == -1)
-          continue;
         bool is_async = task->UsesTensorCore() || task->UsesTMACore();
 
         // Check regions for dependencies
         for (const auto &region_access : task->GetReadWriteRegions()) {
-          auto &region = region_access.first;
+          int wg_id = region_access.warpgroup_id;
+          if (wg_id == -1)
+            continue;
+          auto &region = region_access.region;
           if (IsRegisterRegion(region)) {
             if (task->UsesTensorCore())
               continue;
@@ -537,14 +545,14 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             Stmt wait_stmt =
                 Evaluate(Call(DataType::Handle(), wait_wgmma(),
                               {total_wgmma[wg_id] - wait_wgmma_id[wg_id]}));
-            InsertStatementIntoPromoteNode(task, wait_stmt, true);
+            InsertStatementIntoPromoteNode(task, wait_stmt, true, wg_id);
           } else {
             Buffer buffer = region->buffer;
             bool need_barrier = false;
             ScheduleUnit *last_access_task;
             int last_wg_id;
             bool last_is_promoted;
-            if (!region_access.second) {
+            if (!region_access.is_write) {
               if (iter == 1) {
                 if (last_write_set.find(buffer) != last_write_set.end()) {
                   continue;
@@ -554,11 +562,11 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               auto it = last_write_map.find(buffer);
               if (it != last_write_map.end()) {
                 last_access_task = it->second.first;
-                last_wg_id = last_access_task->GetWarpgroupId();
+                last_wg_id = it->second.second.second;
                 last_is_promoted = last_access_task->GetPromote();
                 if (last_wg_id == -1)
                   continue; // Allow barriers involving neutral tasks
-                if (it->second.second & (1 << wg_id))
+                if (it->second.second.first & (1 << wg_id))
                   continue;
 
                 bool last_async = last_access_task->UsesTensorCore() ||
@@ -580,8 +588,8 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               }
               auto it = last_access_map[!wg_id].find(buffer);
               if (it != last_access_map[!wg_id].end()) {
-                last_access_task = it->second;
-                last_wg_id = last_access_task->GetWarpgroupId();
+                last_access_task = it->second.first;
+                last_wg_id = it->second.second;
                 last_is_promoted = last_access_task->GetPromote();
                 if (last_wg_id == -1)
                   continue; // Allow barriers involving neutral tasks
@@ -593,46 +601,53 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                 }
               }
             }
+            if (last_access_task == task)
+              continue;
             // If warpgroup ids differ or promotion status differs, insert
             // barrier
             if (need_barrier) {
-              // Allocate a new barrier ID and buffer
-              int barrier_id = next_barrier_id++;
-
               // Calculate parity for barrier wait
               PrimExpr parity_expr = tvm::indexmod(
                   tvm::indexdiv(loop_var - loop_start, loop_step) +
                       IntImm(DataType::Int(32), iter + 2),
                   2);
 
-              Buffer barrier_buffer = makeBarrierBuffer(
-                  thread_count[last_wg_id],
-                  "barrier_" + std::to_string(barrier_id), barrier_map);
+              if (barrier_unit_map.find(last_access_task) ==
+                  barrier_unit_map.end()) {
+                // Allocate a new barrier ID and buffer
+                int barrier_id = next_barrier_id++;
+                Buffer barrier_buffer = makeBarrierBuffer(
+                    thread_count[last_wg_id],
+                    "barrier_" + std::to_string(barrier_id), barrier_map);
+                barrier_unit_map[last_access_task] = barrier_buffer;
 
-              // Collect the barrier buffer to be added to tilelang_root block's
-              // alloc_buffers
-              barrier_buffers.push_back(barrier_buffer);
+                // Collect the barrier buffer to be added to tilelang_root
+                // block's alloc_buffers
+                barrier_buffers.push_back(barrier_buffer);
 
-              // Create BufferLoad expression for barrier[0]
-              PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
+                // Create BufferLoad expression for barrier[0]
+                PrimExpr barrier_load = tir::BufferLoad(barrier_buffer, {0});
 
-              // Insert barrier_arrive at the end of last_access_task's
-              // statements
-              Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-              InsertStatementIntoPromoteNode(last_access_task, arrive_stmt,
-                                             false);
+                // Insert barrier_arrive at the end of last_access_task's
+                // statements
+                Stmt arrive_stmt = makeBarrierArrive(barrier_load);
+                InsertStatementIntoPromoteNode(last_access_task, arrive_stmt,
+                                               false, last_wg_id);
+              }
+              PrimExpr barrier_load =
+                  tir::BufferLoad(barrier_unit_map[last_access_task], {0});
 
               // Insert barrier_wait at the beginning of task's statements
               Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
               if (iter == 1) {
                 wait_stmt = IfThenElse(loop_var != loop_start, wait_stmt);
               }
-              InsertStatementIntoPromoteNode(task, wait_stmt, true);
+              InsertStatementIntoPromoteNode(task, wait_stmt, true, wg_id);
               // Remove from map (as per user instruction)
-              if (!region_access.second) {
+              if (!region_access.is_write) {
                 auto it = last_write_map.find(buffer);
-                it->second.second |= (1 << wg_id);
-                if (it->second.second == 3) {
+                it->second.second.first |= (1 << wg_id);
+                if (it->second.second.first == 3) {
                   last_write_map.erase(last_write_map.find(buffer));
                 }
               } else {
@@ -657,9 +672,12 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
           // Update regions
           bool found_wgmmap = false;
           for (const auto &region_access : task->GetReadWriteRegions()) {
-            auto &region = region_access.first;
+            int wg_id = region_access.warpgroup_id;
+            if (wg_id == -1)
+              continue;
+            auto &region = region_access.region;
             if (IsRegisterRegion(region)) {
-              if (!task->UsesTensorCore() || !region_access.second)
+              if (!task->UsesTensorCore() || !region_access.is_write)
                 continue;
               Buffer buffer = region->buffer;
               if (!found_wgmmap) {
@@ -672,9 +690,10 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
               if (iter == 1)
                 continue;
               Buffer buffer = region->buffer;
-              last_access_map[wg_id][buffer] = task;
-              if (region_access.second) {
-                last_write_map[buffer] = std::make_pair(task, 0);
+              last_access_map[wg_id][buffer] = std::make_pair(task, wg_id);
+              if (region_access.is_write) {
+                last_write_map[buffer] =
+                    std::make_pair(task, std::make_pair(0, wg_id));
               }
             }
           }
@@ -951,6 +970,28 @@ std::unique_ptr<IRStructure> TaskNode::Clone() const {
   return new_task;
 }
 
+void TaskNode::CollectRegions(
+    std::vector<RegionAccessInfo> &result,
+    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+  int wg_id = GetWarpgroupId();
+  // Collect write regions
+  for (const auto &region : GetWriteRegions()) {
+    auto key = std::make_pair(region->buffer, std::make_pair(true, wg_id));
+    if (visited.find(key) == visited.end()) {
+      visited.insert(key);
+      result.emplace_back(region, true, wg_id);
+    }
+  }
+  // Collect read regions
+  for (const auto &region : GetReadRegions()) {
+    auto key = std::make_pair(region->buffer, std::make_pair(false, wg_id));
+    if (visited.find(key) == visited.end()) {
+      visited.insert(key);
+      result.emplace_back(region, false, wg_id);
+    }
+  }
+}
+
 std::unique_ptr<IRStructure> ControlNode::Clone() const {
   auto new_ctrl = std::make_unique<ControlNode>();
   // Copy For control (For is a TVM object with reference counting)
@@ -991,6 +1032,40 @@ std::unique_ptr<IRStructure> ScheduleUnit::Clone() const {
   new_unit->SetLatency(GetLatency());
   new_unit->SetII(GetII());
   return new_unit;
+}
+
+void ControlNode::CollectRegions(
+    std::vector<RegionAccessInfo> &result,
+    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+  if (child) {
+    child->CollectRegions(result, visited);
+  }
+}
+
+void WrapperNode::CollectRegions(
+    std::vector<RegionAccessInfo> &result,
+    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+  if (child) {
+    child->CollectRegions(result, visited);
+  }
+}
+
+void ScheduleUnit::CollectRegions(
+    std::vector<RegionAccessInfo> &result,
+    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+  if (child) {
+    child->CollectRegions(result, visited);
+  }
+}
+
+void SequenceNode::CollectRegions(
+    std::vector<RegionAccessInfo> &result,
+    std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const {
+  for (const auto &child : children) {
+    if (child) {
+      child->CollectRegions(result, visited);
+    }
+  }
 }
 
 // Global warpgroup id assignment - should be called from the top level
@@ -2258,8 +2333,8 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
   } else if (node->IsScheduleUnit()) {
     auto unit = static_cast<ScheduleUnit *>(node);
     auto new_unit = std::make_unique<ScheduleUnit>();
-    new_unit->before = unit->before;
-    new_unit->after = unit->after;
+    new_unit->before[warpgroup_id] = unit->before[warpgroup_id];
+    new_unit->after[warpgroup_id] = unit->after[warpgroup_id];
     new_unit->promote = unit->promote;
     new_unit->child =
         CloneIRStructureWithWarpgroupFilter(unit->child.get(), warpgroup_id);
@@ -2332,13 +2407,17 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       std::vector<Stmt> stmts;
       for (const auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
-        for (auto &stmt : unit->before) {
-          stmts.push_back(stmt);
+        for (auto &before : unit->before) {
+          for (auto &stmt : before) {
+            stmts.push_back(stmt);
+          }
         }
         Stmt child_stmt = irstructure_to_stmt(unit->child.get());
         stmts.push_back(child_stmt);
-        for (auto &stmt : unit->after) {
-          stmts.push_back(stmt);
+        for (auto &after : unit->after) {
+          for (auto &stmt : after) {
+            stmts.push_back(stmt);
+          }
         }
       }
       auto flattened = SeqStmt::Flatten(stmts);
@@ -2355,24 +2434,32 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         std::vector<Stmt> stmts;
         if (ctrl->child->IsScheduleUnit()) {
           auto unit = static_cast<ScheduleUnit *>(ctrl->child.get());
-          for (auto &stmt : unit->before) {
-            stmts.push_back(stmt);
+          for (auto &before : unit->before) {
+            for (auto &stmt : before) {
+              stmts.push_back(stmt);
+            }
           }
           stmts.push_back(irstructure_to_stmt(unit->child.get()));
-          for (auto &stmt : unit->after) {
-            stmts.push_back(stmt);
+          for (auto &after : unit->after) {
+            for (auto &stmt : after) {
+              stmts.push_back(stmt);
+            }
           }
         } else if (ctrl->child->IsSequence()) {
           auto seq = static_cast<SequenceNode *>(ctrl->child.get());
           for (auto &child : seq->children) {
             ICHECK(child->IsScheduleUnit());
             auto unit = static_cast<ScheduleUnit *>(child.get());
-            for (auto &stmt : unit->before) {
-              stmts.push_back(stmt);
+            for (auto &before : unit->before) {
+              for (auto &stmt : before) {
+                stmts.push_back(stmt);
+              }
             }
             stmts.push_back(irstructure_to_stmt(unit->child.get()));
-            for (auto &stmt : unit->after) {
-              stmts.push_back(stmt);
+            for (auto &after : unit->after) {
+              for (auto &stmt : after) {
+                stmts.push_back(stmt);
+              }
             }
           }
         } else {
@@ -2388,12 +2475,16 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       for (auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
         std::vector<Stmt> stmts;
-        for (auto &stmt : unit->before) {
-          stmts.push_back(stmt);
+        for (auto &before : unit->before) {
+          for (auto &stmt : before) {
+            stmts.push_back(stmt);
+          }
         }
         stmts.push_back(irstructure_to_stmt(unit->child.get()));
-        for (auto &stmt : unit->after) {
-          stmts.push_back(stmt);
+        for (auto &after : unit->after) {
+          for (auto &stmt : after) {
+            stmts.push_back(stmt);
+          }
         }
         unit_stages[unit->promote].push_back(SeqStmt::Flatten(stmts));
       }
@@ -2421,12 +2512,16 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       for (auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
         std::vector<Stmt> stmts;
-        for (auto &stmt : unit->before) {
-          stmts.push_back(stmt);
+        for (auto &before : unit->before) {
+          for (auto &stmt : before) {
+            stmts.push_back(stmt);
+          }
         }
         stmts.push_back(irstructure_to_stmt(unit->child.get()));
-        for (auto &stmt : unit->after) {
-          stmts.push_back(stmt);
+        for (auto &after : unit->after) {
+          for (auto &stmt : after) {
+            stmts.push_back(stmt);
+          }
         }
         if (unit->promote == 1) {
           if (remove_epi) {
