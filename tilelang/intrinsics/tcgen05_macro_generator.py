@@ -426,7 +426,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         a_is_k_major = not self.a_transposed
         instr_desc = self.get_tcgen5_instr_desc(
-            atom_m, atom_n, atom_k, a_is_k_major, b_is_k_major, scale_in_a, scale_in_b,
+            atom_m,
+            atom_n,
+            atom_k,
+            a_is_k_major,
+            b_is_k_major,
+            scale_in_a,
+            scale_in_b,
         )
         a_dtype_abbrv = self.a_dtype_abbrv
         mask_zero = T.cast(0, T.int32)

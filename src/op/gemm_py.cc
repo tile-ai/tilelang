@@ -108,7 +108,8 @@ bool GemmPyNode::allowTcgen5Mma(Target target) const {
                    a_.scope() == "shared.tmem") &&
                   (b_.scope() == "shared.dyn" || b_.scope() == "shared") &&
                   c_.scope() == "shared.tmem";
-  if (!TargetIsSm100(target) || !scope_ok) return false;
+  if (!TargetIsSm100(target) || !scope_ok)
+    return false;
   // For TS variant (A from TMEM), use B's dtype as the input dtype
   DataType ab_dtype = (a_.scope() == "shared.tmem") ? b_->dtype : a_->dtype;
   return GetTCGEN5MMAMeta(m_, n_, k_, ab_dtype, c_->dtype).first;

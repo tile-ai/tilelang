@@ -39,8 +39,13 @@ def matmul_ss(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype, threads):
                 T.copy(A[by * bM, k * bK], A_shared)
                 T.copy(B[bx * bN, k * bK], B_shared)
                 T.gemm(
-                    A_shared, B_shared, C_tmem,
-                    transpose_B=True, mbar=mbar, wg_wait=-1, clear_accum=k == 0,
+                    A_shared,
+                    B_shared,
+                    C_tmem,
+                    transpose_B=True,
+                    mbar=mbar,
+                    wg_wait=-1,
+                    clear_accum=k == 0,
                 )
                 T.mbarrier_wait_parity(mbar, k % 2)
 
@@ -53,8 +58,18 @@ def matmul_ss(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype, threads):
 
 
 def chained_gemm(
-    M, N1, N2, K, bM, bN1, bN2, bK,
-    in_dtype, out_dtype, accum_dtype, threads,
+    M,
+    N1,
+    N2,
+    K,
+    bM,
+    bN1,
+    bN2,
+    bK,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    threads,
 ):
     """Chained GEMM: SS → tcgen05.ld → cast → tcgen05.st → MMA TS → output."""
 
@@ -82,13 +97,18 @@ def chained_gemm(
             D_local = T.alloc_fragment((bM, bN2), accum_dtype)
             D_shared = T.alloc_shared((bM, bN2), out_dtype)
 
-            # Stage 1: SS GEMM — S_tmem = A × B1^T (fp32 accumulator)
+            # Stage 1: SS GEMM -- S_tmem = A * B1^T (fp32 accumulator)
             for k in T.Pipelined(T.ceildiv(K, bK), num_stages=1):
                 T.copy(A[by * bM, k * bK], A_shared)
                 T.copy(B1[0, k * bK], B1_shared)
                 T.gemm(
-                    A_shared, B1_shared, S_tmem,
-                    transpose_B=True, mbar=mbar1, wg_wait=-1, clear_accum=k == 0,
+                    A_shared,
+                    B1_shared,
+                    S_tmem,
+                    transpose_B=True,
+                    mbar=mbar1,
+                    wg_wait=-1,
+                    clear_accum=k == 0,
                 )
                 T.mbarrier_wait_parity(mbar1, k % 2)
 
@@ -97,11 +117,16 @@ def chained_gemm(
             T.copy(S_local, P_local)
             T.copy(P_local, P_tmem)
 
-            # Stage 2: MMA TS — D_tmem = P_tmem × B2^T
+            # Stage 2: MMA TS -- D_tmem = P_tmem * B2^T
             T.copy(B2[bx * bN2, 0], B2_shared)
             T.gemm(
-                P_tmem, B2_shared, D_tmem,
-                transpose_B=True, mbar=mbar2, wg_wait=-1, clear_accum=True,
+                P_tmem,
+                B2_shared,
+                D_tmem,
+                transpose_B=True,
+                mbar=mbar2,
+                wg_wait=-1,
+                clear_accum=True,
             )
             T.mbarrier_wait_parity(mbar2, 0)
 
@@ -136,8 +161,7 @@ def assert_ss_gemm(M, N, K, bM, bN, bK, threads=128):
 def assert_chained_gemm(M, N1, N2, K, bM, bN1, bN2, bK, threads=128):
     """Compile and run a chained GEMM (SS + TS), verifying tcgen05.st and mma_ts presence."""
     assert bN1 == N1, f"bN1 must equal N1 (full row tile) for chained GEMM, got bN1={bN1}, N1={N1}"
-    func = chained_gemm(M, N1, N2, K, bM, bN1, bN2, bK,
-                        T.bfloat16, T.bfloat16, T.float32, threads)
+    func = chained_gemm(M, N1, N2, K, bM, bN1, bN2, bK, T.bfloat16, T.bfloat16, T.float32, threads)
     kernel = tilelang.compile(func, out_idx=-1, target="cuda", pass_configs=PASS_CFG)
 
     src = kernel.get_kernel_source()

@@ -99,9 +99,7 @@ class GemmTCGEN5(GemmBase):
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
 
         if not (self.is_gemm_ss() or self.is_gemm_ts()):
-            raise ValueError(
-                f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}"
-            )
+            raise ValueError(f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}")
 
         atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K)
 

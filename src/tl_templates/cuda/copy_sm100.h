@@ -238,8 +238,8 @@ __device__ __forceinline__ void tcgen05_st_core(uint32_t const &tmem_start_col,
   static_assert(N > 0);
   constexpr int LOG_N = get_floor_log2<N>();
   constexpr int CUR_SEGMENT_LEN = 1 << (LOG_N > MAX_LOGN ? MAX_LOGN : LOG_N);
-  target_call_cls::template copy<CUR_SEGMENT_LEN>(
-      tmem_start_col, (uint32_t const *)src_ptr);
+  target_call_cls::template copy<CUR_SEGMENT_LEN>(tmem_start_col,
+                                                  (uint32_t const *)src_ptr);
   if constexpr (N - CUR_SEGMENT_LEN > 0) {
     tcgen05_st_core<target_call_cls, MAX_LOGN, N - CUR_SEGMENT_LEN>(
         tmem_start_col + CUR_SEGMENT_LEN, src_ptr + CUR_SEGMENT_LEN);

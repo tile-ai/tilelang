@@ -1021,12 +1021,10 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   bool needs_pack_unpack = is_ld ? src_needs_pack : dst_needs_unpack;
 
   // Retrieve layout
-  ICHECK(T.layout_map.count(tmem_buf))
-      << "Tmem buffer " << tmem_buf->name
-      << " does not have a layout specified";
-  ICHECK(T.layout_map.count(reg_buf))
-      << "Register buffer " << reg_buf->name
-      << " does not have a layout specified";
+  ICHECK(T.layout_map.count(tmem_buf)) << "Tmem buffer " << tmem_buf->name
+                                       << " does not have a layout specified";
+  ICHECK(T.layout_map.count(reg_buf)) << "Register buffer " << reg_buf->name
+                                      << " does not have a layout specified";
   Layout tmem_layout = T.layout_map[tmem_buf];
   Fragment reg_layout = Downcast<Fragment>(T.layout_map[reg_buf]);
 
@@ -1142,9 +1140,8 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
     try_tcgen05_instruction(getTcgen05MetaSt_32dp256b());
   }
 
-  ICHECK(have_succeeded)
-      << "Failed to find a suitable instruction for tcgen05."
-      << (is_ld ? "ld" : "st") << ". Check your layout.";
+  ICHECK(have_succeeded) << "Failed to find a suitable instruction for tcgen05."
+                         << (is_ld ? "ld" : "st") << ". Check your layout.";
 
   return body;
 }
