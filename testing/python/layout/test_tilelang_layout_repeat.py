@@ -3,6 +3,7 @@ import pytest
 import tilelang
 import tilelang.testing
 from tilelang.layout import Layout
+from tilelang import _ffi_api
 
 tilelang.testing.set_random_seed()
 
@@ -55,6 +56,19 @@ def test_layout_repeat_invalid_args():
         _ = atom.repeat(dim=2, factor=2)
     with pytest.raises(ValueError):
         _ = atom.repeat(dim=-3, factor=2)
+
+
+def test_layout_repeat_invalid_args_cpp_raises_value_error():
+    atom = Layout([8, 64], lambda i, j: i * 64 + j)
+
+    with pytest.raises(ValueError):
+        _ = _ffi_api.Layout_repeat(atom, 0, 0)
+    with pytest.raises(ValueError):
+        _ = _ffi_api.Layout_repeat(atom, 0, -1)
+    with pytest.raises(ValueError):
+        _ = _ffi_api.Layout_repeat(atom, 2, 2)
+    with pytest.raises(ValueError):
+        _ = _ffi_api.Layout_repeat(atom, -3, 2)
 
 
 if __name__ == "__main__":
