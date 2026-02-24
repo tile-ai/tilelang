@@ -159,6 +159,37 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
   return result;
 }
 
+Layout LayoutNode::Repeat(int dim, int factor) const {
+  ICHECK_GE(factor, 1) << "factor must be >= 1, got " << factor;
+  if (factor == 1) {
+    return ffi::GetRef<Layout>(this);
+  }
+
+  const int ndim = static_cast<int>(InputDim());
+  ICHECK_GT(ndim, 0) << "Cannot repeat a 0-dim layout";
+  if (dim < 0) {
+    dim += ndim;
+  }
+  ICHECK_GE(dim, 0) << "dim out of range: dim=" << dim << ", ndim=" << ndim;
+  ICHECK_LT(dim, ndim) << "dim out of range: dim=" << dim << ", ndim=" << ndim;
+
+  Array<PrimExpr> new_input_size = input_size_;
+  PrimExpr extent_dim = input_size_[dim];
+  new_input_size.Set(dim, extent_dim * Integer(factor));
+
+  Map<Var, PrimExpr> vmap;
+  vmap.Set(InputPlaceholder(dim), FloorMod(InputPlaceholder(dim), extent_dim));
+
+  Array<PrimExpr> new_forward_index;
+  new_forward_index.reserve(OutputDim() + 1);
+  new_forward_index.push_back(FloorDiv(InputPlaceholder(dim), extent_dim));
+  for (const auto &e : forward_index_) {
+    new_forward_index.push_back(Substitute(e, vmap));
+  }
+
+  return Layout(new_input_size, new_forward_index);
+}
+
 Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
                               bool repeat_on_thread,
                               bool lower_dim_first) const {
@@ -800,6 +831,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Layout layout) { return layout->GetForwardIndex(); })
       .def("tl.Layout_forward_vars",
            [](Layout layout) { return layout->GetForwardVars(); })
+      .def("tl.Layout_repeat",
+           [](Layout layout, int dim, int factor) {
+             return layout->Repeat(dim, factor);
+           })
       .def("tl.Layout_is_equal",
            [](Layout layout, Layout other) {
              const LayoutNode *other_node = other.as<LayoutNode>();
