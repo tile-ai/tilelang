@@ -5,6 +5,7 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt.h>
 
+#include "./ir_structure.h"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -12,7 +13,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include "./ir_structure.h"
 
 namespace tvm {
 namespace tl {

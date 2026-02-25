@@ -3,8 +3,10 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/expr.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt.h>
 
+#include "./ir_structure.h"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -12,7 +14,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include "./ir_structure.h"
 
 namespace tvm {
 namespace tl {
@@ -246,9 +247,9 @@ static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
 }
 
 // Helper function to insert a statement into ScheduleUnit's stmts
-static void InsertStatementIntoScheduleUnit(ScheduleUnit *task, const Stmt &stmt,
-                                           bool at_beginning,
-                                           int warpgroup_id) {
+static void InsertStatementIntoScheduleUnit(ScheduleUnit *task,
+                                            const Stmt &stmt, bool at_beginning,
+                                            int warpgroup_id) {
   if (at_beginning) {
     task->before[warpgroup_id].insert(task->before[warpgroup_id].begin(), stmt);
   } else {
@@ -388,8 +389,8 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
             PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
             // Insert barrier_arrive at the end of last_access_task's statements
             Stmt arrive_stmt = makeBarrierArrive(barrier_load);
-            InsertStatementIntoScheduleUnit(last_access_task, arrive_stmt, false,
-                                           last_wg_id);
+            InsertStatementIntoScheduleUnit(last_access_task, arrive_stmt,
+                                            false, last_wg_id);
           }
           PrimExpr barrier_load =
               BufferLoad(barrier_unit_map[last_access_task], {0});
@@ -645,7 +646,7 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                 // statements
                 Stmt arrive_stmt = makeBarrierArrive(barrier_load);
                 InsertStatementIntoScheduleUnit(last_access_task, arrive_stmt,
-                                               false, last_wg_id);
+                                                false, last_wg_id);
               }
               PrimExpr barrier_load =
                   BufferLoad(barrier_unit_map[last_access_task], {0});
