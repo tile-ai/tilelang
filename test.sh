@@ -1,11 +1,11 @@
 cd testing
 
+N=""
 N="-n 30"
-# N=""
 pytest --verbose --color=yes --durations=0 --showlocals --cache-clear \
   $N --ignore=./python/runtime --ignore=./python/transform \
-  python/debug/test_tilelang_debug_print.py::test_debug_print_buffer_rocm_fp8
   ./python/
+  python/debug/test_tilelang_debug_print.py::test_debug_print_buffer_rocm_fp8
 
   python/amd/test_tilelang_gemm_mfma_preshuffle.py::test_assert_tl_matmul
   python/amd/test_tilelang_gemm_mfma_intrinsic.py::test_assert_tl_matmul[128-128-128-float8_e4m3fn-float16-float32-False-True-1]

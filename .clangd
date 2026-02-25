@@ -1,0 +1,35 @@
+CompileFlags:
+  Compiler: /opt/rocm/bin/hipcc --offload-arch=gfx950
+  Add: 
+    - "-x"
+    - "hip"
+    - "--offload-arch=gfx950"
+    - "-I/root/HipKittens/include"
+    - "-I/root/HipKittens/prototype"
+    - "-I/opt/rocm-7.0.0/include"
+    - "-I/opt/rocm-7.1.1/include"
+    - "-I/opt/rocm-7.0.0/include/hip"
+    - "-I/opt/rocm/include/hip"
+    - "-I//A/HipKittens/include"
+    - "-I/usr/include/python3.12/"
+    - "-I/usr/include/python3.10"
+    - "-I/opt/venv/lib/python3.10/site-packages/pybind11/include"
+    - "-I/root/.venv/lib/python3.12/site-packages/torch/include"
+    - "-I/opt/venv/lib/python3.12/site-packages/torch/include/"
+    - "-I/opt/rocm-7.1.1/include/hip/"
+    - "-I/opt/venv/lib/python3.10/site-packages/torch/include/"
+    - "-I/home/tazhu/.local/lib/python3.12/site-packages/pybind11/include/"
+    - "-I/A/HipKittens/tests/unit/testing_commons"
+    - "-DTEST_WARP_MEMORY_TILE_GLOBAL_TO_SHARED"
+    - "-Dzz"
+    - "-D__HIP_PLATFORM_AMD__"
+    - "-D__HIP_ROCclr__"
+    - "-DKITTENS_CDNA3"
+    - "-std=c++20"
+    - "-ferror-limit=1000"
+  Remove:
+    - "--save-temps"
+    - "--hip-link"
+
+Diagnostics:
+  UnusedIncludes: None
