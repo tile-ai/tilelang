@@ -205,6 +205,7 @@ class MatrixCoreIntrinEmitter:
 
     def _normalize_gfx950_f16_bf16_kpack(self):
         is_f16_or_bf16 = self.a_dtype in {T.float16, T.bfloat16} and self.b_dtype in {T.float16, T.bfloat16}
+        # https://github.com/triton-lang/triton/blob/v3.6.0/third_party/amd/backend/compiler.py#L85-L89
         if _is_gfx950() and is_f16_or_bf16 and self.k_dim == 16 and self.k_pack == 2:
             warnings.warn(
                 "On gfx950 with f16/bf16, remapping (k_dim=16, k_pack=2) to (k_dim=32, k_pack=1).",
