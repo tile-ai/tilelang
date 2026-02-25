@@ -142,11 +142,7 @@ if not env.is_light_import():
             if sys.platform.startswith("win32") and sys.version_info >= (3, 8):
                 for path in libinfo.get_dll_directories():
                     os.add_dll_directory(path)
-            try:
-                lib_path = libinfo.find_lib_path("tilelang")
-            except RuntimeError:
-                # Fallback: some builds may only provide `libtilelang_module`.
-                lib_path = libinfo.find_lib_path("tilelang_module")
+            lib_path = libinfo.find_lib_path("tilelang")
             return ctypes.CDLL(lib_path), lib_path
 
         # only load once here
