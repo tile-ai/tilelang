@@ -86,7 +86,7 @@ bool TargetIsCDNA(Target target) {
 }
 
 bool TargetIsGfx950(Target target) {
-  if (!TargetIsRocm(target)) 
+  if (!TargetIsRocm(target))
     return false;
   if (target->attrs.count("mcpu")) {
     std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
