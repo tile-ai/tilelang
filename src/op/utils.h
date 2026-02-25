@@ -52,6 +52,30 @@ inline bool IsFragmentBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.fragment";
 }
 
+// Expand a lower-rank layout by prepending the leading dimensions of `buffer`
+// so that the resulting layout input shape matches `buffer->shape`.
+//
+// This is useful when we infer a 2D swizzle layout from the trailing matrix
+// dimensions of a higher-rank buffer (e.g. batched GEMM shared-memory buffers).
+inline Layout ExpandLayoutToMatchBuffer(const Layout &layout,
+                                        const Buffer &buffer) {
+  if (!layout.defined() || !buffer.defined()) {
+    return layout;
+  }
+  const size_t buffer_ndim = buffer->shape.size();
+  const size_t layout_ndim = layout->InputDim();
+  if (buffer_ndim <= layout_ndim) {
+    return layout;
+  }
+
+  Array<PrimExpr> leading_shape;
+  leading_shape.reserve(buffer_ndim - layout_ndim);
+  for (size_t i = 0; i < buffer_ndim - layout_ndim; ++i) {
+    leading_shape.push_back(buffer->shape[i]);
+  }
+  return layout->Expand(leading_shape);
+}
+
 inline bool IsSharedBuffer(const Buffer &buffer, bool allow_dynamic = true) {
   if (allow_dynamic) {
     return buffer.defined() &&

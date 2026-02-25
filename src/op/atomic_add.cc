@@ -290,17 +290,18 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
       const int64_t mat_continuous =
           *as_const_int(shared_tensor->shape[dim - 1]);
-      Layout swizzle_layout =
+      Layout swizzle_layout_2d =
           makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
                                  shared_tensor->dtype.bits(), /*k_inner=*/true);
       // If makeGemmABLayoutHopper returns a linear layout, fallback to
       // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
-      if (StructuralEqual()(swizzle_layout, makeLinearLayout(Array<PrimExpr>{
-                                                Integer(mat_stride),
-                                                Integer(mat_continuous)}))) {
+      if (StructuralEqual()(swizzle_layout_2d, makeLinearLayout(Array<PrimExpr>{
+                                                   Integer(mat_stride),
+                                                   Integer(mat_continuous)}))) {
         result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
       } else {
-        result_map.Set(shared_tensor, swizzle_layout);
+        result_map.Set(shared_tensor, ExpandLayoutToMatchBuffer(
+                                          swizzle_layout_2d, shared_tensor));
       }
     }
 
@@ -431,8 +432,9 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
     } else {
       ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
-      auto stride = as_const_int(shared_layout->InputShape()[0]);
-      auto continuous = as_const_int(shared_layout->InputShape()[1]);
+      const int ndim = static_cast<int>(shared_layout->InputDim());
+      auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
+      auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);
       ICHECK(stride != nullptr && continuous != nullptr);
       if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(
                                                shared_tensor_unmapped))) {

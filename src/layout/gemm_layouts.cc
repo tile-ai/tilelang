@@ -392,15 +392,11 @@ SwizzleShapeInfo GetSwizzleShapeInfoChecked(const Buffer &buffer) {
       << "Swizzle layout expects rank >= 2 buffer, got rank="
       << buffer->shape.size();
   size_t ndim = buffer->shape.size();
-  int64_t stride = 1;
-  for (size_t i = 0; i + 1 < ndim; ++i) {
-    auto dim = as_const_int(buffer->shape[i]);
-    ICHECK(dim) << "Swizzle layout requires constant input shape";
-    stride *= *dim;
-  }
+  auto stride = as_const_int(buffer->shape[ndim - 2]);
   auto continuous = as_const_int(buffer->shape[ndim - 1]);
-  ICHECK(continuous) << "Swizzle layout requires constant input shape";
-  return SwizzleShapeInfo{stride, *continuous, buffer->dtype.bits()};
+  ICHECK(stride && continuous)
+      << "Swizzle layout requires constant last-2 dims";
+  return SwizzleShapeInfo{*stride, *continuous, buffer->dtype.bits()};
 }
 
 bool TryGetSwizzleShapeInfo(const Buffer &buffer, SwizzleShapeInfo *info) {
@@ -408,19 +404,12 @@ bool TryGetSwizzleShapeInfo(const Buffer &buffer, SwizzleShapeInfo *info) {
     return false;
   }
   size_t ndim = buffer->shape.size();
-  int64_t stride = 1;
-  for (size_t i = 0; i + 1 < ndim; ++i) {
-    auto dim = as_const_int(buffer->shape[i]);
-    if (!dim) {
-      return false;
-    }
-    stride *= *dim;
-  }
+  auto stride = as_const_int(buffer->shape[ndim - 2]);
   auto continuous = as_const_int(buffer->shape[ndim - 1]);
-  if (!continuous) {
+  if (!stride || !continuous) {
     return false;
   }
-  *info = SwizzleShapeInfo{stride, *continuous, buffer->dtype.bits()};
+  *info = SwizzleShapeInfo{*stride, *continuous, buffer->dtype.bits()};
   return true;
 }
 
@@ -451,7 +440,12 @@ Layout makeQuarterBankSwizzleLayout(const Buffer &buffer) {
   auto base = MakeQuarterBankSwizzleLayout2D(static_cast<int>(info.stride),
                                              static_cast<int>(info.continuous),
                                              info.element_size);
-  return base->Reshape(buffer->shape);
+  Array<PrimExpr> leading_shape;
+  leading_shape.reserve(buffer->shape.size() - 2);
+  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
+    leading_shape.push_back(buffer->shape[i]);
+  }
+  return base->Expand(leading_shape);
 }
 
 // Layout swizzling for 64 bytes
@@ -479,7 +473,12 @@ Layout makeHalfBankSwizzleLayout(const Buffer &buffer) {
   auto base = MakeHalfBankSwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
                                           info.element_size);
-  return base->Reshape(buffer->shape);
+  Array<PrimExpr> leading_shape;
+  leading_shape.reserve(buffer->shape.size() - 2);
+  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
+    leading_shape.push_back(buffer->shape[i]);
+  }
+  return base->Expand(leading_shape);
 }
 
 // Layout swizzling for 128 bytes
@@ -507,7 +506,12 @@ Layout makeFullBankSwizzleLayout(const Buffer &buffer) {
   auto base = MakeFullBankSwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
                                           info.element_size);
-  return base->Reshape(buffer->shape);
+  Array<PrimExpr> leading_shape;
+  leading_shape.reserve(buffer->shape.size() - 2);
+  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
+    leading_shape.push_back(buffer->shape[i]);
+  }
+  return base->Expand(leading_shape);
 }
 
 // Detail implementation please ref to

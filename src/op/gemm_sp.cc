@@ -243,9 +243,10 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      results.Set(a_, makeGemmABLayoutHopper(mat_stride, mat_continuous,
-                                             mat_continuous, a_->dtype.bits(),
-                                             transA_ ? 1 : 2));
+      auto layout =
+          makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
+                                 a_->dtype.bits(), transA_ ? 1 : 2);
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
     } else {
       ICHECK(false) << "Not implemented";
     }
@@ -256,9 +257,10 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
       const int64_t continuity =
           transB_ ? mat_continuous : mat_continuous / warp_n;
-      results.Set(b_,
-                  makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                         b_->dtype.bits(), transB_ ? 2 : 1));
+      auto layout =
+          makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
+                                 b_->dtype.bits(), transB_ ? 2 : 1);
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
     } else {
       ICHECK(false) << "WGMMA only support B in shared.";
     }
@@ -273,8 +275,9 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      results.Set(a_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                   a_->dtype.bits()));
+      auto layout = makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                 a_->dtype.bits());
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
     } else if (IsFragmentBuffer(a_)) {
       // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
       //                                   A->dtype.bits(), trans_A);
@@ -287,8 +290,9 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      results.Set(b_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                   b_->dtype.bits()));
+      auto layout = makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                 b_->dtype.bits());
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
     } else if (IsFragmentBuffer(b_)) {
       // auto fragment =
       //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
