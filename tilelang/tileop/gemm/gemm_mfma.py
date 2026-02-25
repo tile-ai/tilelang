@@ -30,6 +30,7 @@ class GemmMFMA(GemmBase):
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
             k_pack=self.k_pack,
+            target=target,
         )
 
         if self.is_gemm_ss():
@@ -77,6 +78,7 @@ class GemmMFMA(GemmBase):
             chunk=self.chunk,
             thread_var=thread_var,
             k_pack=self.k_pack,
+            target=target,
         )
 
         k_pack = mfma_emitter.k_pack

@@ -197,18 +197,7 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
     return return_var
 
 
-def target_is_gfx950() -> bool:
-    """Detect whether the current device is GFX950 via torch."""
-    try:
-        import torch
 
-        if torch.version.hip is None or not torch.cuda.is_available():
-            return False
-        props = torch.cuda.get_device_properties(0)
-        gcn_arch = getattr(props, "gcnArchName", "")
-        return gcn_arch.startswith("gfx950")
-    except Exception:
-        return False
 
 
 def target_is_cuda(target: Target) -> bool:
@@ -246,6 +235,8 @@ def target_is_sm120(target: Target) -> bool:
 def target_is_cdna(target: Target) -> bool:
     return _ffi_api.TargetIsCDNA(target)
 
+def target_is_gfx950(target: Target) -> bool:
+    return _ffi_api.TargetIsGfx950(target)
 
 def target_has_async_copy(target: Target) -> bool:
     return _ffi_api.TargetHasAsyncCopy(target)

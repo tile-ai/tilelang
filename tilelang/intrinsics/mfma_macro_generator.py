@@ -4,6 +4,7 @@ import tilelang.language as T
 from tvm import DataType
 from tvm import tir
 from tvm.ir import Range
+from tvm.target import Target
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.runtime import convert
 from .utils import mfma_store_index_map
@@ -81,12 +82,14 @@ class MatrixCoreIntrinEmitter:
         is_m_first: bool | None = False,
         b_preshuffle: bool | None = False,
         thread_var: Var | None = None,
+        target: Target | None = None,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.accum_dtype = accum_dtype
         self.a_transposed = a_transposed
         self.b_transposed = b_transposed
+        self.target = target
         # Hint Information
         self.block_row_warps = block_row_warps
         self.block_col_warps = block_col_warps
@@ -122,7 +125,7 @@ class MatrixCoreIntrinEmitter:
         elif a_dtype.bits == 16:
             self.k_dim = 16
         elif a_dtype.bits == 8:
-            if target_is_gfx950():
+            if target_is_gfx950(self.target):
                 self.k_dim = 32
             else:
                 self.k_dim = 16
@@ -193,7 +196,7 @@ class MatrixCoreIntrinEmitter:
     def _normalize_gfx950_f16_bf16_kpack(self):
         is_f16_or_bf16 = self.a_dtype in {T.float16, T.bfloat16} and self.b_dtype in {T.float16, T.bfloat16}
         # https://github.com/triton-lang/triton/blob/v3.6.0/third_party/amd/backend/compiler.py#L85-L89
-        if target_is_gfx950() and is_f16_or_bf16 and self.k_dim == 16 and self.k_pack == 2:
+        if target_is_gfx950(self.target) and is_f16_or_bf16 and self.k_dim == 16 and self.k_pack == 2:
             warnings.warn(
                 "On gfx950 with f16/bf16, remapping (k_dim=16, k_pack=2) to (k_dim=32, k_pack=1).",
                 stacklevel=3,
@@ -728,6 +731,7 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         a_preshuffle: bool | None = False,
         b_preshuffle: bool | None = False,
         thread_var: Var | None = None,
+        target: Target | None = None,
     ):
         super().__init__(
             a_dtype=a_dtype,
@@ -745,6 +749,7 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
             k_pack=k_pack,
             is_m_first=is_m_first,
             thread_var=thread_var,
+            target=target,
         )
         self._initialize_preshuffle(a_preshuffle, b_preshuffle)
 
