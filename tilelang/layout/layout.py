@@ -165,6 +165,51 @@ class Layout(Node):
             raise ValueError(f"dim out of range: dim={dim}, ndim={ndim}")
         return _ffi_api.Layout_repeat(self, dim, factor)
 
+    def expand(self, leading_shape) -> "Layout":
+        """
+        Expand (lift) this layout by prepending new leading input dimensions.
+
+        The new leading dimensions are forwarded unchanged to the output, and
+        the original layout is applied to the remaining trailing dimensions.
+
+        Example
+        -------
+        Given a 2D layout ``L`` over ``[J, K]``, you can lift it to a 3D layout
+        over ``[I, J, K]`` by::
+
+            L3 = L.expand([I])
+            # [i, j, k] -> [i, *L(j, k)]
+
+        Parameters
+        ----------
+        leading_shape : int or Sequence[int or PrimExpr]
+            The shape of the new leading dimensions to prepend. Use an empty
+            list/tuple for a no-op.
+
+        Returns
+        -------
+        Layout
+            A new Layout with input shape ``leading_shape + input_shape`` and
+            output indices ``[leading_dims] + old_forward_index``.
+        """
+        if isinstance(leading_shape, int):
+            leading_shape = [leading_shape]
+        if not isinstance(leading_shape, (list, tuple)):
+            raise TypeError(f"leading_shape must be an int or a sequence, got {type(leading_shape)!r}")
+
+        leading_shape = list(leading_shape)
+        if len(leading_shape) == 0:
+            return self
+
+        for idx, extent in enumerate(leading_shape):
+            if isinstance(extent, int):
+                if extent <= 0:
+                    raise ValueError(f"leading_shape[{idx}] must be > 0, got {extent}")
+            elif not isinstance(extent, PrimExpr):
+                raise TypeError(f"leading_shape elements must be int or PrimExpr, got {type(extent)!r} at index {idx}")
+
+        return _ffi_api.Layout_expand(self, leading_shape)
+
     def inverse(self) -> "Layout":
         """
         Compute the inverse of the current layout transformation.

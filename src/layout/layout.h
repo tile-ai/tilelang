@@ -69,6 +69,15 @@ public:
   //   - New forward index: [i_dim // S[dim]] + F(..., i_dim % S[dim], ...)
   virtual Layout Repeat(int dim, int factor) const;
 
+  // Expand (lift) this layout by prepending new leading input dimensions that
+  // are forwarded unchanged to the output.
+  //
+  // For example, given a 2D layout L: [J, K] -> F(J, K), calling
+  // Expand([I]) produces a 3D layout L': [I, J, K] -> [I] + F(J, K).
+  //
+  // `leading_shape` can contain multiple dimensions.
+  virtual Layout Expand(const Array<PrimExpr> &leading_shape) const;
+
   virtual Layout Inverse() const;
 
   // Reshape the layout to a new logical shape. When aliasing buffers of

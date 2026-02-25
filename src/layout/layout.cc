@@ -4,6 +4,7 @@
  */
 
 #include "layout.h"
+#include <tvm/ffi/error.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 
@@ -160,29 +161,80 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
 }
 
 Layout LayoutNode::Repeat(int dim, int factor) const {
-  ICHECK_GE(factor, 1) << "factor must be >= 1, got " << factor;
+  if (factor < 1) {
+    TVM_FFI_THROW(ValueError) << "factor must be >= 1, got " << factor;
+  }
   if (factor == 1) {
     return ffi::GetRef<Layout>(this);
   }
 
   const int ndim = static_cast<int>(InputDim());
-  ICHECK_GT(ndim, 0) << "Cannot repeat a 0-dim layout";
-  if (dim < 0) {
-    dim += ndim;
+  if (ndim <= 0) {
+    TVM_FFI_THROW(ValueError) << "Cannot repeat a 0-dim layout";
   }
-  ICHECK_GE(dim, 0) << "dim out of range: dim=" << dim << ", ndim=" << ndim;
-  ICHECK_LT(dim, ndim) << "dim out of range: dim=" << dim << ", ndim=" << ndim;
+  int normalized_dim = dim;
+  if (normalized_dim < 0) {
+    normalized_dim += ndim;
+  }
+  if (normalized_dim < 0 || normalized_dim >= ndim) {
+    TVM_FFI_THROW(ValueError)
+        << "dim out of range: dim=" << dim << ", ndim=" << ndim;
+  }
 
   Array<PrimExpr> new_input_size = input_size_;
-  PrimExpr extent_dim = input_size_[dim];
-  new_input_size.Set(dim, extent_dim * Integer(factor));
+  PrimExpr extent_dim = input_size_[normalized_dim];
+  new_input_size.Set(normalized_dim, extent_dim * Integer(factor));
 
   Map<Var, PrimExpr> vmap;
-  vmap.Set(InputPlaceholder(dim), FloorMod(InputPlaceholder(dim), extent_dim));
+  vmap.Set(InputPlaceholder(normalized_dim),
+           FloorMod(InputPlaceholder(normalized_dim), extent_dim));
 
   Array<PrimExpr> new_forward_index;
   new_forward_index.reserve(OutputDim() + 1);
-  new_forward_index.push_back(FloorDiv(InputPlaceholder(dim), extent_dim));
+  new_forward_index.push_back(
+      FloorDiv(InputPlaceholder(normalized_dim), extent_dim));
+  for (const auto &e : forward_index_) {
+    new_forward_index.push_back(Substitute(e, vmap));
+  }
+
+  return Layout(new_input_size, new_forward_index);
+}
+
+Layout LayoutNode::Expand(const Array<PrimExpr> &leading_shape) const {
+  if (leading_shape.empty()) {
+    return ffi::GetRef<Layout>(this);
+  }
+
+  for (size_t i = 0; i < leading_shape.size(); ++i) {
+    if (auto imm = leading_shape[i].as<IntImm>()) {
+      if ((*imm)->value <= 0) {
+        TVM_FFI_THROW(ValueError)
+            << "leading_shape[" << i << "] must be > 0, got " << (*imm)->value;
+      }
+    }
+  }
+
+  const size_t offset = leading_shape.size();
+
+  Array<PrimExpr> new_input_size;
+  new_input_size.reserve(offset + InputDim());
+  for (const auto &s : leading_shape) {
+    new_input_size.push_back(s);
+  }
+  for (const auto &s : input_size_) {
+    new_input_size.push_back(s);
+  }
+
+  Map<Var, PrimExpr> vmap;
+  for (size_t i = 0; i < InputDim(); ++i) {
+    vmap.Set(InputPlaceholder(i), InputPlaceholder(i + offset));
+  }
+
+  Array<PrimExpr> new_forward_index;
+  new_forward_index.reserve(offset + OutputDim());
+  for (size_t i = 0; i < offset; ++i) {
+    new_forward_index.push_back(InputPlaceholder(i));
+  }
   for (const auto &e : forward_index_) {
     new_forward_index.push_back(Substitute(e, vmap));
   }
@@ -834,6 +886,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.Layout_repeat",
            [](Layout layout, int dim, int factor) {
              return layout->Repeat(dim, factor);
+           })
+      .def("tl.Layout_expand",
+           [](Layout layout, Array<PrimExpr> leading_shape) {
+             return layout->Expand(leading_shape);
            })
       .def("tl.Layout_is_equal",
            [](Layout layout, Layout other) {
