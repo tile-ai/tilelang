@@ -8,7 +8,7 @@ from tilelang.intrinsics.mfma_macro_generator import (
     MatrixCoreIntrinEmitter,
 )
 from tilelang.transform import simplify_prim_func
-from tilelang.utils import determine_fp8_type
+from tilelang.utils import determine_fp8_type, determine_target
 
 tilelang.testing.set_random_seed(0)
 
@@ -76,6 +76,7 @@ def tl_matmul(
         warp_col_tiles=warp_col_tiles,
         chunk=chunk,
         k_pack=k_pack,
+        target=determine_target("auto", return_object=True),
     )
 
     @T.prim_func

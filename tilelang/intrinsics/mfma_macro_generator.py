@@ -11,7 +11,7 @@ from .utils import mfma_store_index_map
 from typing import Literal, Callable
 import warnings
 
-from tilelang.utils.target import target_is_gfx950
+from tilelang.utils.target import target_is_gfx950, determine_target
 from tilelang.utils import is_fragment
 from tilelang.language.utils import get_buffer_region_from_load
 from .mfma_layout import (
@@ -90,6 +90,9 @@ class MatrixCoreIntrinEmitter:
         self.a_transposed = a_transposed
         self.b_transposed = b_transposed
         self.target = target
+        if target is None:
+            warnings.warn("Target is not provided, using auto detection", stacklevel=2)
+            target = determine_target("auto", return_object=True)
         # Hint Information
         self.block_row_warps = block_row_warps
         self.block_col_warps = block_col_warps
