@@ -164,6 +164,7 @@ void CodeGenTileLangHIP::VisitStmt_(const tir::ForNode *op) {
   PrintType(op->loop_var.dtype(), stream);
   stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
          << "; ++" << vid << ") {\n";
+  // TODO(zty): tracktrip?
   int for_scope = BeginScope();
   PrintStmt(op->body);
   this->EndScope(for_scope);
@@ -566,6 +567,12 @@ void CodeGenTileLangHIP::PrintStorageSync(const CallNode *op) {
     // DO nothing.
   } else if (sync == "shared" || sync == "shared.dyn") {
     this->PrintIndent();
+    // Use bare s_barrier (without the implicit s_waitcnt vmcnt(0) that
+    // __syncthreads() adds).  This lets the async G2S pipeline (buffer_load
+    // ... lds) overlap loads with compute — vmcnt is managed explicitly by
+    // cp_async_wait.
+    // TODO(zty): correctness?
+    // this->stream << "__builtin_amdgcn_s_barrier();\n";
     this->stream << "__syncthreads();\n";
   }
 }
@@ -934,7 +941,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float32", "float"},
         {"float64", "double"},
         {"float16x4", "float16x4"},
+        {"float16x8", "float16x8"},
         {"bfloat16x4", "bfloat16x4_vec"},
+        {"bfloat16x8", "bfloat16x8_vec"},
         {"float32x4", "float32x4"},
         {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
         {"float8_e4m3fnx4", "fp8_e4_4_t"},

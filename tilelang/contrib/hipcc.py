@@ -55,6 +55,7 @@ def compile_hip(code, target_format="hsaco", arch=None, options=None, path_targe
         out_file.write(code)
 
     file_target = path_target if path_target else temp_target
+    print(__file__, "file_target: ", file_target)
     cmd = ["hipcc"]
     cmd += ["-O3", "-c"]
     if isinstance(arch, str):

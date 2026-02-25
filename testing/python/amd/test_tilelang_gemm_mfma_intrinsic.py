@@ -213,6 +213,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
     "M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack",
     [
         (128, 128, 128, T.float16, T.float16, T.float32, False, True, 1),
+        (128, 128, 128, T.bfloat16, T.bfloat16, T.float32, False, True, 1),
         (128, 256, 256, T.float16, T.float32, T.float32, False, True, 1),
         (128, 256, 256, T.float16, T.float32, T.float32, False, True, 2),
         (128, 128, 128, T.int8, T.int32, T.int32, False, True, 1),

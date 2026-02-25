@@ -31,7 +31,17 @@ from .mfma_layout import (
 )
 
 lift = convert
-
+def _is_gfx950() -> bool:
+    """Detect whether the current device is GFX950 via torch."""
+    try:
+        import torch
+        if torch.version.hip is None or not torch.cuda.is_available():
+            return False
+        props = torch.cuda.get_device_properties(0)
+        gcn_arch = getattr(props, "gcnArchName", "")
+        return gcn_arch.startswith("gfx950")
+    except Exception:
+        return False
 
 class MatrixCoreIntrinEmitter:
     """
@@ -117,7 +127,10 @@ class MatrixCoreIntrinEmitter:
         if a_dtype.bits == 32:
             self.k_dim = 4
         elif a_dtype.bits in {16, 8}:
-            self.k_dim = 16
+            if _is_gfx950():
+                self.k_dim = 32
+            else:
+                self.k_dim = 16
         else:
             raise ValueError(f"Unsupported a_dtype = {a_dtype}")
 
@@ -157,7 +170,19 @@ class MatrixCoreIntrinEmitter:
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_i8"
         elif in_dtype_abbrv == "bf16":
             # HIP intrinsic uses ...x{K}bf16_1k without an underscore before bf16
-            self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}bf16_1k"
+            if k_dim == 32:
+                # GFX950: __builtin_amdgcn_mfma_f32_16x16x32_bf16
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_bf16"
+            else:
+                # CDNA2/3: __builtin_amdgcn_mfma_f32_16x16x16bf16_1k
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}bf16_1k"
+        elif in_dtype_abbrv == "f16":
+            # HIP 950 have _ before f16
+            if k_dim == 32:
+                # GFX950: __builtin_amdgcn_mfma_f32_16x16x32_f16
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_f16"
+            else:
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
         else:
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
 
