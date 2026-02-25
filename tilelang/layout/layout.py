@@ -120,6 +120,51 @@ class Layout(Node):
         # Map the provided indices using the constructed index mapping
         return index_map.map_indices(indices)
 
+    def repeat(self, dim: int, factor: int) -> "Layout":
+        """
+        Repeat a layout along a single input dimension.
+
+        This is useful for building a larger layout by tiling an "atom" layout.
+        Conceptually, repeating on dimension ``dim`` with ``factor`` constructs a
+        new layout ``L'`` such that::
+
+            L'(*idx) = [idx[dim] // extent_dim] + L(idx with idx[dim] % extent_dim)
+
+        where ``extent_dim`` is the original extent of the repeated dimension.
+
+        Parameters
+        ----------
+        dim : int
+            The input dimension to repeat (0-based, supports negative indexing).
+        factor : int
+            The repeat factor. Must be a positive integer.
+
+        Returns
+        -------
+        Layout
+            A new Layout with the repeated input shape and an extra leading
+            output dimension representing the repeat-group index.
+        """
+        if not isinstance(dim, int):
+            raise TypeError(f"dim must be an int, got {type(dim)!r}")
+        if not isinstance(factor, int):
+            raise TypeError(f"factor must be an int, got {type(factor)!r}")
+        if factor < 1:
+            raise ValueError(f"factor must be >= 1, got {factor}")
+        if factor == 1:
+            return self
+
+        input_shape = list(self.get_input_shape())
+        ndim = len(input_shape)
+        if ndim == 0:
+            raise ValueError("Cannot repeat a 0-dim layout")
+
+        if dim < 0:
+            dim += ndim
+        if dim < 0 or dim >= ndim:
+            raise ValueError(f"dim out of range: dim={dim}, ndim={ndim}")
+        return _ffi_api.Layout_repeat(self, dim, factor)
+
     def inverse(self) -> "Layout":
         """
         Compute the inverse of the current layout transformation.
@@ -142,6 +187,8 @@ class Layout(Node):
         """
         return _ffi_api.Layout_is_equal(self, other)
 
+    def __call__(self, *args: list[PrimExpr]) -> PrimExpr:
+        return self.map_forward_index(args)
+
     def __repr__(self):
         return self._DebugOutput()
-        # return f"Layout<{self.get_input_shape()}->{self.get_output_shape()}, {self.get_forward_vars()} -> {self.get_forward_index()}>"
