@@ -578,13 +578,12 @@ public:
     ii = return_val.get<2>();
 
     // Apply start times and promote flags to nodes
-    std::map<IRStructure *, bool> stage_map;
+    std::map<IRStructure *, int> stage_map;
     size_t num_promoted = 0;
     for (size_t i = 0; i < n; ++i) {
       nodes[i]->SetStartTime(start_times[i]);
-      bool stage = stages[i] != 0; // Convert int to bool
-      stage_map[nodes[i]] = stage;
-      if (stage) {
+      stage_map[nodes[i]] = stages[i] != 0;
+      if (stages[i] != 0) {
         num_promoted++;
       }
     }
@@ -1637,8 +1636,11 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           LOG(FATAL);
         }
         Stmt body = SeqStmt::Flatten(stmts);
+        // Filter out "num_stages" annotation
+        Map<String, Any> filtered_annotations = ctrl->control->annotations;
+        filtered_annotations.erase("num_stages");
         return For(loop_var, loop_start, loop_extent, ctrl->control->kind, body,
-                   ctrl->control->thread_binding, ctrl->control->annotations);
+                   ctrl->control->thread_binding, filtered_annotations);
       }
       Stmt body = Evaluate(0);
       std::vector<Stmt> unit_stages[2];
@@ -1765,11 +1767,14 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       }
       Stmt new_body = SeqStmt::Flatten(steady);
       auto new_var = loop_var.copy_with_suffix("");
+      // Filter out "num_stages" annotation
+      Map<String, Any> filtered_annotations = ctrl->control->annotations;
+      filtered_annotations.erase("num_stages");
       Stmt new_for =
           For(new_var, loop_start,
               ctrl->control->extent + loop_step * (1 - remove_pro - remove_epi),
               ctrl->control->kind, new_body, ctrl->control->thread_binding,
-              ctrl->control->annotations);
+              filtered_annotations);
       {
         Map<Var, PrimExpr> substitution;
         substitution.Set(loop_var, new_var);
