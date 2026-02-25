@@ -32,4 +32,3 @@ def test_bank_swizzle_layout_expand_leading_dims(make_layout):
 
 if __name__ == "__main__":
     tilelang.testing.main()
-
