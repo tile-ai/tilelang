@@ -468,6 +468,12 @@ public:
     size_t n = nodes.size();
     int64_t ii = 1; // default II
 
+    auto num_stages = 1;
+    auto num_stages_val = ctrl->control.get()->annotations.Get("num_stages");
+    if (num_stages_val.has_value()) {
+      num_stages = num_stages_val.value().cast<IntImm>()->value;
+    }
+
     static std::optional<ffi::Function> z3_schedule_loop_func =
         ffi::Function::GetGlobal("tl.transform.z3_schedule_loop_python");
     if (!z3_schedule_loop_func.has_value()) {
@@ -512,7 +518,7 @@ public:
           continue; // Skip self-dependency
         if (HasDependency(nodes[i], nodes[j])) {
           // distance = 0 if i < j, 1 if i > j
-          int64_t distance = (i < j) ? 0 : 1;
+          int64_t distance = (i < j) ? 0 : num_stages;
           data_deps.emplace_back(i, j, distance);
         }
       }
@@ -559,26 +565,26 @@ public:
     }
 
     // Extract results
-    // Python function returns (start_times, promotes) as a tuple of two
+    // Python function returns (start_times, stages) as a tuple of two
     // arrays
     auto return_val =
         z3_schedule_loop_func
-            .value()(tvm_latencies, tvm_iis, tvm_resource_flags, tvm_data_deps,
-                     tvm_resource_deps)
-            .cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<bool>, int64_t>>();
+            .value()(num_stages, tvm_latencies, tvm_iis, tvm_resource_flags,
+                     tvm_data_deps, tvm_resource_deps)
+            .cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<int>, int64_t>>();
 
     ffi::Array<int64_t> start_times = return_val.get<0>();
-    ffi::Array<bool> promotes = return_val.get<1>();
+    ffi::Array<int> stages = return_val.get<1>();
     ii = return_val.get<2>();
 
     // Apply start times and promote flags to nodes
-    std::map<IRStructure *, bool> promote_map;
+    std::map<IRStructure *, bool> stage_map;
     size_t num_promoted = 0;
     for (size_t i = 0; i < n; ++i) {
       nodes[i]->SetStartTime(start_times[i]);
-      bool promote = promotes[i] != 0; // Convert int to bool
-      promote_map[nodes[i]] = promote;
-      if (promote) {
+      bool stage = stages[i] != 0; // Convert int to bool
+      stage_map[nodes[i]] = stage;
+      if (stage) {
         num_promoted++;
       }
     }
@@ -600,7 +606,7 @@ public:
     start_time_with_idx.reserve(n);
     for (size_t i = 0; i < n; ++i) {
       start_time_with_idx.emplace_back(
-          start_times[i] + promotes[i] * return_val.get<2>(), i);
+          start_times[i] + stages[i] * return_val.get<2>(), i);
     }
 
     // Sort by start_time, then by original index
@@ -648,10 +654,10 @@ public:
     }
 
     for (auto &node : seq_body->children) {
-      auto promote_node = std::make_unique<ScheduleUnit>();
-      promote_node->promote = promote_map[node.get()];
-      promote_node->child = std::move(node);
-      node = std::move(promote_node);
+      auto unit = std::make_unique<ScheduleUnit>();
+      unit->stage = stage_map[node.get()];
+      unit->child = std::move(node);
+      node = std::move(unit);
     }
 
     if (num_promoted > 0) {
@@ -830,10 +836,10 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
       seq->children = std::move(reordered_children);
     }
     for (auto &node : seq->children) {
-      auto promote_node = std::make_unique<ScheduleUnit>();
-      promote_node->promote = -1;
-      promote_node->child = std::move(node);
-      node = std::move(promote_node);
+      auto unit = std::make_unique<ScheduleUnit>();
+      unit->stage = -1;
+      unit->child = std::move(node);
+      node = std::move(unit);
     }
     return;
   } else if (node->IsControl()) {
@@ -1113,6 +1119,16 @@ private:
       bool found_tensor{false};
       bool found_cuda{false};
 
+      // Tensor Core shape information (multiple shapes possible)
+      struct TensorCoreShape {
+        int64_t m;
+        int64_t n;
+        int64_t k;
+        TensorCoreShape(int64_t m = 0, int64_t n = 0, int64_t k = 0)
+            : m(m), n(n), k(k) {}
+      };
+      std::vector<TensorCoreShape> tensor_core_shapes;
+
       ResourceAnalyzer(TaskNode *node) : task_node(node) {}
 
       void VisitExpr_(const CallNode *op) override {
@@ -1148,6 +1164,107 @@ private:
           found_tma |= found_global;
         } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op)) {
           found_tensor = true;
+
+          // Try to extract Tensor Core shape information from gemm arguments
+          // gemm arguments: A, B, C, transpose_A, transpose_B, policy,
+          // clear_accum, k_pack, wg_wait, mbar We need to extract shape from A,
+          // B, C buffers
+          if (op->args.size() >= 3) {
+            // Extract buffer regions from arguments
+            auto try_extract_shape = [&](const PrimExpr &arg, int64_t &m,
+                                         int64_t &n) -> bool {
+              // Check if argument is a BufferLoad
+              if (const auto *buffer_load = arg.as<BufferLoadNode>()) {
+                Buffer buffer = buffer_load->buffer;
+                // Get buffer shape
+                if (buffer->shape.size() >= 2) {
+                  // Try to get constant dimensions
+                  if (const auto *m_int =
+                          buffer->shape[buffer->shape.size() - 2]
+                              .as<IntImmNode>()) {
+                    if (const auto *n_int =
+                            buffer->shape[buffer->shape.size() - 1]
+                                .as<IntImmNode>()) {
+                      m = m_int->value;
+                      n = n_int->value;
+                      return true;
+                    }
+                  }
+                }
+              }
+              // Check if argument is a BufferRegion
+              else if (const auto *buffer_region = arg.as<BufferRegionNode>()) {
+                Buffer buffer = buffer_region->buffer;
+                // Get buffer shape
+                if (buffer->shape.size() >= 2) {
+                  // Try to get constant dimensions
+                  if (const auto *m_int =
+                          buffer->shape[buffer->shape.size() - 2]
+                              .as<IntImmNode>()) {
+                    if (const auto *n_int =
+                            buffer->shape[buffer->shape.size() - 1]
+                                .as<IntImmNode>()) {
+                      m = m_int->value;
+                      n = n_int->value;
+                      return true;
+                    }
+                  }
+                }
+              }
+              return false;
+            };
+
+            // Extract shapes from A, B, C arguments
+            int64_t a_m = 0, a_n = 0;
+            int64_t b_m = 0, b_n = 0;
+            int64_t c_m = 0, c_n = 0;
+
+            if (try_extract_shape(op->args[0], a_m, a_n) &&
+                try_extract_shape(op->args[1], b_m, b_n) &&
+                try_extract_shape(op->args[2], c_m, c_n)) {
+
+              // For gemm: C[M, N] = A[M, K] * B[K, N]
+              // C shape gives us M and N
+              int64_t m = c_m;
+              int64_t n = c_n;
+              int64_t k = a_n; // A's last dimension (default: no transpose)
+
+              // Extract transpose flags from gemm arguments
+              // Arguments after C: transpose_A (arg[3]), transpose_B (arg[4])
+              if (op->args.size() > 3) {
+                if (const auto *transpose_a = op->args[3].as<IntImmNode>()) {
+                  if (transpose_a->value != 0) {
+                    // A is transposed: A[K, M]
+                    k = a_m;
+                  }
+                }
+              }
+              if (op->args.size() > 4) {
+                if (const auto *transpose_b = op->args[4].as<IntImmNode>()) {
+                  if (transpose_b->value != 0) {
+                    // B is transposed: B[N, K]
+                    // Check consistency with A's K dimension
+                    if (k == 0) {
+                      k = b_n;
+                    } else if (k != b_n) {
+                      // Inconsistent K dimensions, use minimum
+                      k = std::min(k, b_n);
+                    }
+                  }
+                }
+              }
+
+              // If K is still 0, try to infer from B's first dimension
+              if (k == 0) {
+                k = b_m;
+              }
+
+              // Add this Tensor Core shape to the vector
+              if (m > 0 && n > 0 && k > 0) {
+                tensor_core_shapes.emplace_back(m, n, k);
+              }
+            }
+          }
         } else if (op->op.same_as(reduce_op) || op->op.same_as(fill_op)) {
           // Reduce and fill operations use CUDA core
           found_cuda = true;
@@ -1209,6 +1326,12 @@ private:
     }
     if (analyzer.found_tensor) {
       task_node->SetUsesTensorCore(true);
+      // Set Tensor Core shape information if available
+      for (const auto &shape : analyzer.tensor_core_shapes) {
+        if (shape.m > 0 && shape.n > 0 && shape.k > 0) {
+          task_node->AddTensorCoreShape(shape.m, shape.n, shape.k);
+        }
+      }
     }
     // If neither TMA nor Tensor core was used, and CUDA operations were found,
     // set CUDA core flag
@@ -1383,7 +1506,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
     auto new_unit = std::make_unique<ScheduleUnit>();
     new_unit->before[warpgroup_id] = unit->before[warpgroup_id];
     new_unit->after[warpgroup_id] = unit->after[warpgroup_id];
-    new_unit->promote = unit->promote;
+    new_unit->stage = unit->stage;
     new_unit->child =
         CloneIRStructureWithWarpgroupFilter(unit->child.get(), warpgroup_id);
     return new_unit;
@@ -1534,7 +1657,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
             stmts.push_back(stmt);
           }
         }
-        unit_stages[unit->promote].push_back(SeqStmt::Flatten(stmts));
+        unit_stages[unit->stage].push_back(SeqStmt::Flatten(stmts));
       }
       Stmt prologue = Evaluate(0);
       // Check if any task in this control node contains loop_break
@@ -1607,7 +1730,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
             stmts.push_back(stmt);
           }
         }
-        if (unit->promote == 1) {
+        if (unit->stage == 1) {
           if (remove_epi) {
             Map<Var, PrimExpr> substitution;
             if (remove_pro) {
@@ -1625,7 +1748,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
                 Substitute(SeqStmt::Flatten(stmts), substitution));
             steady.push_back(new_stmt);
           }
-        } else if (unit->promote == 0) {
+        } else if (unit->stage == 0) {
           Map<Var, PrimExpr> substitution;
           substitution.Set(loop_var, loop_var - loop_step);
           if (remove_pro) {
@@ -1641,11 +1764,6 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         }
       }
       Stmt new_body = SeqStmt::Flatten(steady);
-      if (unit_stages[0].empty()) {
-        Map<Var, PrimExpr> substitution;
-        substitution.Set(loop_var, loop_var - loop_step);
-        new_body = Substitute(new_body, substitution);
-      }
       auto new_var = loop_var.copy_with_suffix("");
       Stmt new_for =
           For(new_var, loop_start,

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt.h>
@@ -17,6 +19,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+using ffi::String;
 
 // Forward declarations
 class IRStructure;
@@ -38,9 +41,15 @@ struct RegionAccessInfo {
 inline bool RegionsEqual(const Region &a, const Region &b) {
   if (a.size() != b.size())
     return false;
+
+  arith::Analyzer analyzer;
   for (size_t i = 0; i < a.size(); ++i) {
-    if (!tir::is_one(a[i]->min - b[i]->min) ||
-        !tir::is_one(a[i]->extent - b[i]->extent)) {
+    // Check if min values are equal
+    if (!analyzer.CanProveEqual(a[i]->min, b[i]->min)) {
+      return false;
+    }
+    // Check if extent values are equal
+    if (!analyzer.CanProveEqual(a[i]->extent, b[i]->extent)) {
       return false;
     }
   }
@@ -152,6 +161,62 @@ public:
   void SetWarpgroupId(int warpgroup_id) { warpgroup_id_ = warpgroup_id; }
   int GetWarpgroupId() const override { return warpgroup_id_; }
 
+  // Tensor Core shape information structure
+  struct TensorCoreShape {
+    int64_t m;
+    int64_t n;
+    int64_t k;
+    TensorCoreShape(int64_t m = 0, int64_t n = 0, int64_t k = 0)
+        : m(m), n(n), k(k) {}
+  };
+  void AddTensorCoreShape(int64_t m, int64_t n, int64_t k) {
+    tensor_core_shapes_.emplace_back(m, n, k);
+  }
+  void SetTensorCoreShape(int64_t m, int64_t n, int64_t k) {
+    // For backward compatibility, clear existing shapes and add new one
+    tensor_core_shapes_.clear();
+    tensor_core_shapes_.emplace_back(m, n, k);
+  }
+
+  // Get shape information
+  size_t GetTensorCoreShapeCount() const { return tensor_core_shapes_.size(); }
+  const TensorCoreShape &GetTensorCoreShape(size_t index) const {
+    return tensor_core_shapes_[index];
+  }
+
+  // Helper methods for single shape (backward compatibility)
+  int64_t GetTensorCoreM() const {
+    return tensor_core_shapes_.empty() ? 0 : tensor_core_shapes_[0].m;
+  }
+  int64_t GetTensorCoreN() const {
+    return tensor_core_shapes_.empty() ? 0 : tensor_core_shapes_[0].n;
+  }
+  int64_t GetTensorCoreK() const {
+    return tensor_core_shapes_.empty() ? 0 : tensor_core_shapes_[0].k;
+  }
+  bool HasTensorCoreShape() const { return !tensor_core_shapes_.empty(); }
+
+  // Get aggregated shape information for II estimation
+  int64_t GetTotalTensorCoreOps() const {
+    int64_t total_ops = 0;
+    for (const auto &shape : tensor_core_shapes_) {
+      total_ops += shape.m * shape.n * shape.k * 2; // 2 ops per element
+    }
+    return total_ops;
+  }
+
+  int64_t GetTotalWGMMATiles() const {
+    int64_t total_tiles = 0;
+    int64_t tile_m = 16, tile_n = 16, tile_k = 16;
+    for (const auto &shape : tensor_core_shapes_) {
+      int64_t num_tiles_m = (shape.m + tile_m - 1) / tile_m;
+      int64_t num_tiles_n = (shape.n + tile_n - 1) / tile_n;
+      int64_t num_tiles_k = (shape.k + tile_k - 1) / tile_k;
+      total_tiles += num_tiles_m * num_tiles_n * num_tiles_k;
+    }
+    return total_tiles;
+  }
+
   // Clone method
   std::unique_ptr<IRStructure> Clone() const override;
 
@@ -204,6 +269,10 @@ private:
   int64_t ii_{0};      // Initiation interval in cycles
   int warpgroup_id_{
       -1}; // Warpgroup id for warpgroup specialization (-1 means unassigned)
+
+  // Tensor Core shape information (M, N, K dimensions)
+  // A task may contain multiple Tensor Core operations with different shapes
+  std::vector<TensorCoreShape> tensor_core_shapes_;
 
   // Cached flag for loop_break detection
   mutable std::optional<bool> contains_loop_break_cache_;
@@ -381,11 +450,11 @@ private:
 
 class ScheduleUnit : public IRStructure {
 public:
-  int promote;
+  int stage;
   std::vector<std::vector<Stmt>> before, after;
   std::unique_ptr<IRStructure> child;
 
-  ScheduleUnit() : before(), after() {
+  ScheduleUnit() {
     for (unsigned idx = 0; idx != 2; ++idx) {
       before.emplace_back();
       after.emplace_back();
@@ -455,7 +524,7 @@ public:
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
-  bool GetPromote() const { return promote; }
+  bool GetPromote() const { return stage; }
   bool isInnerTask() const { return child->IsTask(); }
   int GetWarpgroupId() const override {
     ICHECK(isInnerTask());
@@ -719,7 +788,7 @@ inline void PrintAllStmts(const IRStructure *node, int indent = 0) {
   } else if (node->IsScheduleUnit()) {
     const ScheduleUnit *promote = static_cast<const ScheduleUnit *>(node);
     LOG(INFO) << indent_str << "ScheduleUnit:";
-    LOG(INFO) << indent_str << "  Promote: " << promote->promote;
+    LOG(INFO) << indent_str << "  Promote: " << promote->stage;
     for (unsigned idx = 0; idx != promote->before.size(); ++idx) {
       for (auto &stmt : promote->before[idx]) {
         LOG(INFO) << indent_str << "  Before " << idx << " : " << stmt;
@@ -793,7 +862,7 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
   } else if (node->IsScheduleUnit()) {
     const ScheduleUnit *promote = static_cast<const ScheduleUnit *>(node);
     LOG(INFO) << indent_str << "ScheduleUnit:";
-    LOG(INFO) << indent_str << "  Promote: " << promote->promote;
+    LOG(INFO) << indent_str << "  Promote: " << promote->stage;
     for (unsigned idx = 0; idx != promote->before.size(); ++idx) {
       for (auto &stmt : promote->before[idx]) {
         LOG(INFO) << indent_str << "  Before " << idx << " : " << stmt;

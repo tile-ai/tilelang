@@ -324,7 +324,7 @@ std::unique_ptr<IRStructure> WrapperNode::Clone() const {
 std::unique_ptr<IRStructure> ScheduleUnit::Clone() const {
   auto new_unit = std::make_unique<ScheduleUnit>();
   // Copy var and value (TVM objects with reference counting)
-  new_unit->promote = promote;
+  new_unit->stage = stage;
   // Clone child if exists
   if (child) {
     new_unit->child = child->Clone();
