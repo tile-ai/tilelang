@@ -879,6 +879,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.Layout_output_shape",
            [](Layout layout) { return layout->OutputShape(); })
       .def("tl.Layout_inverse", [](Layout layout) { return layout->Inverse(); })
+      .def("tl.Layout_reshape",
+           [](Layout layout, Array<PrimExpr> shape, PrimExpr rescale_num,
+              PrimExpr rescale_den) {
+             return layout->Reshape(shape, nullptr, rescale_num, rescale_den);
+           })
       .def("tl.Layout_index",
            [](Layout layout) { return layout->GetForwardIndex(); })
       .def("tl.Layout_forward_vars",
@@ -954,17 +959,16 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                                           element_size, k_inner);
            })
       .def("tl.make_full_bank_swizzled_layout",
-           [](int stride, int continuous, int element_size) {
-             return makeFullBankSwizzleLayout(stride, continuous, element_size);
+           [](const Buffer &buffer) {
+             return makeFullBankSwizzleLayout(buffer);
            })
       .def("tl.make_half_bank_swizzled_layout",
-           [](int stride, int continuous, int element_size) {
-             return makeHalfBankSwizzleLayout(stride, continuous, element_size);
+           [](const Buffer &buffer) {
+             return makeHalfBankSwizzleLayout(buffer);
            })
       .def("tl.make_quarter_bank_swizzled_layout",
-           [](int stride, int continuous, int element_size) {
-             return makeQuarterBankSwizzleLayout(stride, continuous,
-                                                 element_size);
+           [](const Buffer &buffer) {
+             return makeQuarterBankSwizzleLayout(buffer);
            })
       .def("tl.make_linear_layout",
            [](Array<PrimExpr> shape) { return makeLinearLayout(shape); })

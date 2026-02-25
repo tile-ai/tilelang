@@ -221,6 +221,21 @@ class Layout(Node):
         """
         return _ffi_api.Layout_inverse(self)
 
+    def reshape(self, shape, rescale_num=1, rescale_den=1) -> "Layout":
+        """
+        Reshape the input shape of the layout.
+
+        Parameters
+        ----------
+        shape : list[PrimExpr] or list[int]
+            The new input shape.
+        rescale_num : int
+            Rescale numerator for element size changes.
+        rescale_den : int
+            Rescale denominator for element size changes.
+        """
+        return _ffi_api.Layout_reshape(self, shape, rescale_num, rescale_den)
+
     def is_equal(self, other: "Layout") -> bool:
         """
         Check if the current layout is equal to another layout.

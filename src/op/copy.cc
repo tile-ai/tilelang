@@ -428,17 +428,19 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
         const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
         const int64_t mat_continuous =
             *as_const_int(shared_tensor->shape[dim - 1]);
-        Layout swizzle_layout = makeGemmABLayoutHopper(
+        Layout swizzle_layout_2d = makeGemmABLayoutHopper(
             mat_stride, mat_continuous, mat_continuous,
             shared_tensor->dtype.bits(), /*k_inner=*/true);
         // If makeGemmABLayoutHopper returns a linear layout, fallback to
         // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
-        if (StructuralEqual()(swizzle_layout, makeLinearLayout(Array<PrimExpr>{
-                                                  Integer(mat_stride),
-                                                  Integer(mat_continuous)}))) {
+        if (StructuralEqual()(
+                swizzle_layout_2d,
+                makeLinearLayout(Array<PrimExpr>{Integer(mat_stride),
+                                                 Integer(mat_continuous)}))) {
           result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
         } else {
-          result_map.Set(shared_tensor, swizzle_layout);
+          result_map.Set(shared_tensor, ExpandLayoutToMatchBuffer(
+                                            swizzle_layout_2d, shared_tensor));
         }
       } else if (level == InferLevel::kFree) {
         // create a new layout map for tma linear layout
@@ -1146,6 +1148,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   bool is_load = copy_inst == CopyInst::kBulkLoad;
   Buffer global_tensor = is_load ? src : dst;
   Buffer shared_tensor = is_load ? dst : src;
+  Buffer shared_tensor_unmapped = shared_tensor;
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
   // TMA bulk copy cannot support a non-swizzled global layout, will be fallback
@@ -1299,25 +1302,21 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   } else if (StructuralEqual()(shared_layout, linear_layout)) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
-    ICHECK(shared_layout->InputDim() == 2) << "Cannot detect TMA layout.";
-    auto stride = as_const_int(shared_layout->InputShape()[0]);
-    auto continuous = as_const_int(shared_layout->InputShape()[1]);
+    ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
+    const int ndim = static_cast<int>(shared_layout->InputDim());
+    auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
+    auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);
     ICHECK(stride != nullptr && continuous != nullptr);
     // We also need to check if the shape satisfies the following doc:
     // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
     if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(
-                                             *stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
+                                             shared_tensor_unmapped))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (StructuralEqual()(
-                   shared_layout,
-                   makeHalfBankSwizzleLayout(*stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
+    } else if (StructuralEqual()(shared_layout, makeHalfBankSwizzleLayout(
+                                                    shared_tensor_unmapped))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (StructuralEqual()(
-                   shared_layout,
-                   makeFullBankSwizzleLayout(*stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
+    } else if (StructuralEqual()(shared_layout, makeFullBankSwizzleLayout(
+                                                    shared_tensor_unmapped))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else if (StructuralEqual()(
                    shared_layout,
@@ -1628,22 +1627,14 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   if (!shared_layout.defined()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
-    ICHECK(shared_layout->InputDim() == 2) << "Cannot detect TMA layout.";
-    auto stride = as_const_int(shared_layout->InputShape()[0]);
-    auto continuous = as_const_int(shared_layout->InputShape()[1]);
-    ICHECK(stride != nullptr && continuous != nullptr);
-
-    if (StructuralEqual()(shared_layout,
-                          makeQuarterBankSwizzleLayout(*stride, *continuous,
-                                                       dst_->dtype.bits()))) {
+    ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
+    if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(dst_))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (StructuralEqual()(shared_layout, makeHalfBankSwizzleLayout(
-                                                    *stride, *continuous,
-                                                    dst_->dtype.bits()))) {
+    } else if (StructuralEqual()(shared_layout,
+                                 makeHalfBankSwizzleLayout(dst_))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (StructuralEqual()(shared_layout, makeFullBankSwizzleLayout(
-                                                    *stride, *continuous,
-                                                    dst_->dtype.bits()))) {
+    } else if (StructuralEqual()(shared_layout,
+                                 makeFullBankSwizzleLayout(dst_))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
       LOG(FATAL) << "Cannot detect TMA layout.";
