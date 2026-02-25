@@ -89,10 +89,10 @@ class MatrixCoreIntrinEmitter:
         self.accum_dtype = accum_dtype
         self.a_transposed = a_transposed
         self.b_transposed = b_transposed
-        self.target = target
         if target is None:
             warnings.warn("Target is not provided, using auto detection", stacklevel=2)
             target = determine_target("auto", return_object=True)
+        self.target = target
         # Hint Information
         self.block_row_warps = block_row_warps
         self.block_col_warps = block_col_warps
