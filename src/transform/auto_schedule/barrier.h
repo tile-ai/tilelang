@@ -2,10 +2,12 @@
 
 #include <tvm/runtime/logging.h>
 #include <tvm/tir/buffer.h>
+#include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt.h>
 
+#include "../../op/builtin.h"
 #include "./ir_structure.h"
 #include <functional>
 #include <memory>
@@ -19,6 +21,8 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+using ffi::Array;
+using ffi::Map;
 
 bool IsEvaluateZero(const tvm::tir::Stmt &stmt) {
   if (const EvaluateNode *eval_node = stmt.as<EvaluateNode>()) {
