@@ -100,9 +100,9 @@ class GemmMFMA(GemmBase):
 
         clear_accum = self.clear_accum
 
-        assert block_K >= micro_size_k * k_pack, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k}) * k_pack ({self.k_pack})"
+        assert block_K >= micro_size_k * k_pack, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k}) * k_pack ({k_pack})"
         assert block_K % (micro_size_k * k_pack) == 0, (
-            f"block_K ({block_K}) must be divisible by micro_size_k ({micro_size_k}) * k_pack ({self.k_pack})"
+            f"block_K ({block_K}) must be divisible by micro_size_k ({micro_size_k}) * k_pack ({k_pack})"
         )
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
