@@ -233,6 +233,10 @@ def target_is_cdna(target: Target) -> bool:
     return _ffi_api.TargetIsCDNA(target)
 
 
+def target_is_gfx950(target: Target) -> bool:
+    return _ffi_api.TargetIsGfx950(target)
+
+
 def target_has_async_copy(target: Target) -> bool:
     return _ffi_api.TargetHasAsyncCopy(target)
 

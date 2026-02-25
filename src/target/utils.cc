@@ -85,6 +85,16 @@ bool TargetIsCDNA(Target target) {
   return false;
 }
 
+bool TargetIsGfx950(Target target) {
+  if (!TargetIsRocm(target))
+    return false;
+  if (target->attrs.count("mcpu")) {
+    std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
+    return mcpu.find("gfx950") != std::string::npos;
+  }
+  return false;
+}
+
 bool TargetHasAsyncCopy(Target target) {
   if (TargetIsCuda(target)) {
     int arch = GetArchInt(target);
@@ -285,6 +295,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsSM120(target); })
       .def("tl.TargetIsCDNA",
            [](Target target) { return TargetIsCDNA(target); })
+      .def("tl.TargetIsGfx950",
+           [](Target target) { return TargetIsGfx950(target); })
       .def("tl.TargetHasAsyncCopy",
            [](Target target) { return TargetHasAsyncCopy(target); })
       .def("tl.TargetHasLdmatrix",
