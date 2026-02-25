@@ -569,7 +569,7 @@ void CodeGenTileLangHIP::PrintStorageSync(const CallNode *op) {
     this->PrintIndent();
     // TODO: change to __builtin_amdgcn_s_barrier() later
     // __syncthreads() will add a vmcnt(0) to final asm, which will break all
-    // buffer_load_async and buffer_load_async..lds
+    // buffer_load_async and buffer_load_async...lds
     // in tilelang vmcnt should be managed explicitly by cp_async_wait.
     this->stream << "__syncthreads();\n";
   }
