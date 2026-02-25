@@ -325,7 +325,10 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         return self.mode
 
     def par_compile(
-        self, configs: Iterable[dict[str, Any] | tuple[str, Any]], num_workers: int = None, ignore_error: bool = False
+        self,
+        configs: Iterable[dict[str, Any] | tuple[str, Any]],
+        num_workers: int = None,
+        ignore_error: bool = False,
     ) -> list[JITKernel[_KP, _T]]:
         """
         Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
@@ -388,7 +391,12 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
                 func_name = self.func.attrs["global_symbol"]
             else:
                 func_name = getattr(self.func, "__name__", "jit_kernel")
-            kernel_file = f"tilelang_jit_kernel_{func_name}.c"
+
+            # cutedsl emits python executor not `c`
+            is_cutedsl = self.execution_backend == "cutedsl"
+            kernel_suffix = "py" if is_cutedsl else "c"
+            kernel_file = f"tilelang_jit_kernel_{func_name}.{kernel_suffix}"
+
             program_file = f"tilelang_jit_program_{func_name}.py"
             makedirs(self.debug_root_path, exist_ok=True)
             with open(path.join(self.debug_root_path, kernel_file), "w") as f:
