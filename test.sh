@@ -1,11 +1,11 @@
 cd testing
 
 N=""
-N="-n 5"
+N="-n 10"
 pytest --verbose --color=yes --durations=0 --showlocals --cache-clear \
   $N --ignore=./python/runtime --ignore=./python/transform \
-  python/amd/test_tilelang_test_amd.py::test_gemm_f16f32f32_nt
   python/
+  python/amd/test_tilelang_test_amd.py::test_gemm_f16f32f32_nt
   python/tilelibrary/test_tilelang_tilelibrary_gemm.py::test_gemm_sr[512-1024-768-False-True-float16-float16-float32-128-256-32-2-128] 
   python/amd/test_tilelang_gemm_mfma_intrinsic.py::test_assert_tl_matmul
   python/amd/test_tilelang_gemm_mfma_intrinsic.py::test_assert_tl_matmul[128-128-128-bfloat16-bfloat16-float32-False-True-1]
