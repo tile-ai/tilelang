@@ -114,14 +114,14 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(K_pe[bid, (2 * k + 1) * block_N : (2 * k + 2) * block_N, cur_kv_head, :], K_pe_shared_1)
 
                 # Step 1.
-                T.gemm(Q_shared_l, KV_shared_0_l, acc_s_0, transpose_B=True, clear_accum=True)
-                T.gemm(Q_shared_r, KV_shared_0_r, acc_s_0, transpose_B=True)
-                T.gemm(Q_pe_local_0, K_pe_shared_0, acc_s_0, transpose_B=True)
+                T.gemm(Q_shared_l, KV_shared_0_l, acc_s_0, transpose_B=True, clear_accum=True, wg_wait=-1)
+                T.gemm(Q_shared_r, KV_shared_0_r, acc_s_0, transpose_B=True, wg_wait=-1)
+                T.gemm(Q_pe_local_0, K_pe_shared_0, acc_s_0, transpose_B=True, wg_wait=-1)
 
                 # Step 2.
-                T.gemm(Q_shared_l, KV_shared_1_l, acc_s_1, transpose_B=True, clear_accum=True)
-                T.gemm(Q_shared_r, KV_shared_1_r, acc_s_1, transpose_B=True)
-                T.gemm(Q_pe_local_1, K_pe_shared_1, acc_s_1, transpose_B=True)
+                T.gemm(Q_shared_l, KV_shared_1_l, acc_s_1, transpose_B=True, clear_accum=True, wg_wait=-1)
+                T.gemm(Q_shared_r, KV_shared_1_r, acc_s_1, transpose_B=True, wg_wait=-1)
+                T.gemm(Q_pe_local_1, K_pe_shared_1, acc_s_1, transpose_B=True, wg_wait=-1)
 
                 # Step 3.
                 T.copy(scores_max, scores_max_0)
