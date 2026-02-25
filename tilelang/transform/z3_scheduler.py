@@ -247,6 +247,7 @@ def z3_schedule_ffi(latencies, iis, resource_flags, data_deps, resource_deps):
 
 
 def z3_schedule_loop_python(
+    num_stages: int,
     latencies: list[int],
     iis: list[int],
     resource_flags: list[int],
@@ -332,14 +333,16 @@ def z3_schedule_loop_python(
             solver.set("timeout", 10000)
 
             start_vars = [z3.Int(f"start_{i}") for i in range(n)]
-            pro_vars = [z3.Bool(f"pro_{i}") for i in range(n)]
+            stage_vars = [z3.Int(f"pro_{i}") for i in range(n)]
             begin = z3.Int("begin")
 
             for i in range(n):
                 solver.add(start_vars[i] >= 0)
-                solver.add(begin <= start_vars[i] + pro_vars[i] * ii_mid)
-                latency_i = latencies[i]
-                solver.add(start_vars[i] + latency_i + pro_vars[i] * ii_mid - begin <= ii_mid)
+                solver.add(stage_vars[i] >= 0)
+                solver.add(stage_vars[i] <= num_stages)
+                solver.add(begin <= start_vars[i] + stage_vars[i] * ii_mid)
+                ii_i = iis[i]
+                solver.add(start_vars[i] + ii_i + stage_vars[i] * ii_mid - begin <= ii_mid)
 
             # Add data dependency constraints with distance
             for u, v, distance in data_deps:
@@ -377,7 +380,7 @@ def z3_schedule_loop_python(
                 best_ii = ii_mid
                 best_model = solver.model()
                 best_start_vars = start_vars
-                best_pro_vars = pro_vars
+                best_pro_vars = stage_vars
                 # Try smaller II
                 ii_upper = ii_mid
             else:
@@ -390,23 +393,23 @@ def z3_schedule_loop_python(
             if verbose:
                 print("[Python Z3 Loop] No feasible II found in range, falling back to topological sort")
             data_deps_pairs = [(i, j) for i, j, d in data_deps]
-            return fallback_schedule(latencies, data_deps_pairs, resource_deps)
+            return fallback_schedule(latencies, data_deps_pairs, resource_deps), sum(latencies) + 1
 
         if verbose:
             print(f"[Python Z3 Loop] Minimal feasible II = {best_ii}")
 
         # Extract start times from best model
         start_times = []
-        promotes = []
+        stages = []
         for i in range(n):
             start_time = best_model.eval(best_start_vars[i]).as_long()
-            promote = z3.is_true(best_model.eval(best_pro_vars[i]))
+            stage = best_model.eval(best_pro_vars[i]).as_long()
             start_times.append(start_time)
-            promotes.append(promote)
+            stages.append(stage)
 
         # Sort tasks by start time (and by index as tie-breaker)
         task_indices = list(range(n))
-        task_indices.sort(key=lambda idx: (start_times[idx] + promotes[idx] * best_ii, idx))
+        task_indices.sort(key=lambda idx: (start_times[idx] + stages[idx] * best_ii, idx))
 
         if verbose:
             print(f"[Python Z3 Loop] Scheduling completed. Minimal II = {best_ii}")
@@ -415,23 +418,23 @@ def z3_schedule_loop_python(
             if verbose:
                 print(
                     f"[Python Z3 Loop]   Task {idx}: start_time={start_times[idx]}, "
-                    f"latency={latencies[idx]}, II={iis[idx]}, pro={promotes[idx]}, "
+                    f"latency={latencies[idx]}, II={iis[idx]}, pro={stages[idx]}, "
                     f"resource_flags={resource_flags[idx]:03b}"
                 )
 
-        return start_times, promotes, best_ii
+        return start_times, stages, best_ii
 
     except Exception as e:
         if verbose:
             print(f"[Python Z3 Loop] Error in Z3 scheduling: {e}")
         # Fallback to simple schedule
         data_deps_pairs = [(i, j) for i, j, d in data_deps]
-        return fallback_schedule(latencies, data_deps_pairs, resource_deps)
+        return fallback_schedule(latencies, data_deps_pairs, resource_deps), sum(latencies) + 1
 
 
 # FFI-exposed function for loop scheduling
 @tvm_ffi.register_global_func("tl.transform.z3_schedule_loop_python")
-def z3_schedule_loop_ffi(latencies, iis, resource_flags, data_deps, resource_deps):
+def z3_schedule_loop_ffi(num_stages, latencies, iis, resource_flags, data_deps, resource_deps):
     """FFI wrapper for z3_schedule_loop_python.
 
     This function accepts TVM containers and converts them to Python lists.
@@ -458,10 +461,10 @@ def z3_schedule_loop_ffi(latencies, iis, resource_flags, data_deps, resource_dep
                 resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
 
     # Call the actual scheduler
-    start_times, promotes, best_ii = z3_schedule_loop_python(
-        latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list
+    start_times, stages, best_ii = z3_schedule_loop_python(
+        num_stages, latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list
     )
 
     # Return start_times and promotes as separate arrays for easier FFI handling
     # C++ side expects a tuple of (start_times_array, promotes_array)
-    return (start_times, promotes, best_ii)
+    return (start_times, stages, best_ii)
