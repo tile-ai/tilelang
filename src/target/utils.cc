@@ -295,6 +295,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsSM120(target); })
       .def("tl.TargetIsCDNA",
            [](Target target) { return TargetIsCDNA(target); })
+      .def("tl.TargetIsGfx950",
+           [](Target target) { return TargetIsGfx950(target); })
       .def("tl.TargetHasAsyncCopy",
            [](Target target) { return TargetHasAsyncCopy(target); })
       .def("tl.TargetHasLdmatrix",
