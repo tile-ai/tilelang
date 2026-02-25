@@ -57,7 +57,6 @@ def cached(
     norm_target = Target(_determine_target(target)) if isinstance(target, str) else target
     requested_backend = execution_backend
     execution_backend = resolve_execution_backend(requested_backend, norm_target)
-    verbose = True
     if verbose:
         allowed_now = allowed_backends_for_target(norm_target, include_unavailable=False)
         # Avoid duplicate logs when caller already resolved explicitly

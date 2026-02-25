@@ -124,23 +124,3 @@ maint/host_checks/logs/*
 
 # perf regression test
 .perf_regression/
-
-after
-before
-.specstory
-
-*.hipi
-*.bc
-*.s
-*.out
-*.resolution.txt
-*.hipfb
-examples/gemm/__tmp.py
-outdir/**
-outdir2/**
-examples/gemm/outdir/
-examples/gemm/outdir2/
-
-examples/gemm/a.tar.gz
-core.*
-gpucore.*
