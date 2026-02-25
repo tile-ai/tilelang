@@ -173,12 +173,17 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         buffer_map = func.buffer_map
         dynamic_symbolic_map: dict[tir.Var, tuple[int, int, int]] = {}
         dynamic_symbolic_order: list[tir.Var] = []
+        # Secondary index by variable name for fallback lookup when tir.Var
+        # object identity differs (e.g. params created from a different
+        # PrimFunc instance than the one stored in ir_module).
+        self._dynamic_symbolic_name_map: dict[str, tuple[int, int, int]] = {}
 
         def unique_push_back(v: tir.Var, entry: tuple[int, int, int]):
             if v in dynamic_symbolic_map:
                 return
             dynamic_symbolic_map[v] = entry
             dynamic_symbolic_order.append(v)
+            self._dynamic_symbolic_name_map[v.name] = entry
 
         # 1) Shapes
         for i, param in enumerate(params):
@@ -201,6 +206,19 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                     unique_push_back(stride, (1, i, j))
 
         return dynamic_symbolic_map, dynamic_symbolic_order
+
+    def _lookup_dynamic_symbolic(self, v: tir.Var) -> tuple[int, int, int]:
+        """Look up a tir.Var in the dynamic symbolic map.
+
+        Falls back to name-based lookup when object identity doesn't match
+        (can happen when param_shapes and prim_func come from different
+        compilation stages).
+        """
+        if v in self.dynamic_symbolic_map:
+            return self.dynamic_symbolic_map[v]
+        if v.name in self._dynamic_symbolic_name_map:
+            return self._dynamic_symbolic_name_map[v.name]
+        raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
     def get_kernel_source(self, kernel_only: bool = True) -> str | None:
         """Get the CUDA kernel source code.
@@ -311,7 +329,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
                     if isinstance(s, tir.Var):
-                        ref_id, ref_param_idx, ref_dim_idx = self.dynamic_symbolic_map[s]
+                        ref_id, ref_param_idx, ref_dim_idx = self._lookup_dynamic_symbolic(s)
                         ref_val = param_values[ref_param_idx]
                         if not isinstance(ref_val, torch.Tensor):
                             raise TypeError(f"Dynamic shape/stride var {s} refers to a non-tensor param at index {ref_param_idx}")
