@@ -84,8 +84,6 @@ def z3_schedule_python(
         for i, j in data_deps:
             if i < j:  # Ensure i < j as in original order
                 latency_i = latencies[i]
-                if latency_i < 0:
-                    latency_i = abs(latency_i)
                 solver.add(start_vars[j] >= start_vars[i] + latency_i)
                 if verbose:
                     print(f"[Python Z3] Data dependency: task {j} >= task {i} + {latency_i}")
@@ -97,10 +95,6 @@ def z3_schedule_python(
             if i < j:  # Only consider each pair once
                 ii_i = iis[i]
                 ii_j = iis[j]
-                if ii_i < 0:
-                    ii_i = abs(ii_i)
-                if ii_j < 0:
-                    ii_j = abs(ii_j)
 
                 # Create ordering variable
                 o_ij = z3.Bool(f"O_{i}_{j}")
@@ -118,8 +112,6 @@ def z3_schedule_python(
         makespan = z3.Int("makespan")
         for i in range(n):
             latency_i = latencies[i]
-            if latency_i < 0:
-                latency_i = abs(latency_i)
             solver.add(makespan >= start_vars[i] + latency_i)
         solver.add(makespan >= 0)
 
@@ -322,7 +314,7 @@ def z3_schedule_loop_python(
         # Lower bound: 1 cycle
         # Upper bound: sum of all latencies (conservative)
         ii_lower = 1
-        ii_upper = sum(abs(l) if l > 0 else 1 for l in latencies) + 1
+        ii_upper = sum(latencies) + 1
         best_ii = ii_upper
         best_model = None
         best_start_vars = None
@@ -347,15 +339,11 @@ def z3_schedule_loop_python(
                 solver.add(start_vars[i] >= 0)
                 solver.add(begin <= start_vars[i] + pro_vars[i] * ii_mid)
                 latency_i = latencies[i]
-                if latency_i < 0:
-                    latency_i = abs(latency_i)
                 solver.add(start_vars[i] + latency_i + pro_vars[i] * ii_mid - begin <= ii_mid)
 
             # Add data dependency constraints with distance
             for u, v, distance in data_deps:
                 latency_u = latencies[u]
-                if latency_u < 0:
-                    latency_u = abs(latency_u)
                 if verbose:
                     print(f"[Python Z3 Loop] Data dependency: task {v} - task {u} >= {latency_u} - {ii_mid}*{distance}")
                 solver.add(start_vars[v] - start_vars[u] >= latency_u - ii_mid * distance)
@@ -367,10 +355,6 @@ def z3_schedule_loop_python(
                 if i < j:  # Only consider each pair once
                     ii_i = iis[i]
                     ii_j = iis[j]
-                    if ii_i < 0:
-                        ii_i = abs(ii_i)
-                    if ii_j < 0:
-                        ii_j = abs(ii_j)
 
                     # Create ordering variable
                     o_ij = z3.Bool(f"O_{i}_{j}")
