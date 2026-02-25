@@ -191,9 +191,9 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * Lowers a ReduceOpNode operating on fragment-scoped buffers into a sequence of
  * TIR statements implementing: optional initialization, thread-local reduction
  * (unrolled inner loops), inter-thread reduction via a runtime AllReduce call
- * (Hopper-specific `run_hopper` variant when TargetIsHopper(T.target) is true),
- * and an optional accumulation or copy back to the destination buffer when a
- * temporary clear buffer is used.
+ * (Hopper targets use `NamedBarrier` instead of the default
+ * `SyncThreadsBarrier`), and an optional accumulation or copy back to the
+ * destination buffer when a temporary clear buffer is used.
  *
  * Behavior notes:
  * - Only supports src and dst in "local.fragment" scope; otherwise it checks
@@ -206,7 +206,7 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * reduction.
  * - Performs iterator compression for local reduction loops using `analyzer`.
  * - Detects parallel thread splitting from the normalized iterator sum and
- *   emits a call to a templated `tl::AllReduce<...>::run` (or `run_hopper`)
+ *   emits a call to a templated `tl::AllReduce<...>::run`
  *   via `builtin::call_extern`. For sufficiently large reducing thread counts
  *   (> 32) a workspace is allocated via T.AddWorkspace and passed to the
  *   AllReduce call.
@@ -294,6 +294,11 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                !this->clear) {
       need_duplicate = true;
       need_update = true;
+    } else if ((this->type->isMax() || this->type->isMin() ||
+                this->type->isAbsMax()) &&
+               !this->clear) {
+      need_duplicate = true;
+      need_update = true;
     }
 
     // red_layout should always contain dst_layout
@@ -315,7 +320,12 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                  GetPtrStorageScope(dst_buffer->data));
     }
     // make reduce-init stmt
-    if (require_init) {
+    // For max/min/absmax with clear=false and need_duplicate, we still need to
+    // initialize the temporary buffer with identity values since the original
+    // dst values will be combined later via need_update
+    if (require_init ||
+        (need_duplicate && (this->type->isMax() || this->type->isMin() ||
+                            this->type->isAbsMax()))) {
       stmts.push_back(
           BufferStore(clear_buffer, this->MakeInitValue(), red_indices));
     }
@@ -352,6 +362,16 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       auto mark = iter_split->source->source.as<Var>();
       ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
       if (mark.value().same_as(src_vars[this->dim]->var)) {
+        // `scale` is the stride of participating threads in the thread index
+        // space.  When the thread-to-data mapping for the reduce dimension is
+        // normalized as  threadIdx = source * scale + ...,
+        //   * scale == 1  means threads are contiguous (0, 1, 2, ...),
+        //   * scale  > 1  means threads are interleaved (0, scale, 2*scale,
+        //     ...).
+        // Both cases use the recursive XOR-butterfly reduce.
+        // `extent` is the number of distinct thread positions along the reduce
+        // dimension, so reducing_threads = extent * scale covers the full
+        // thread index range that participates in the reduction.
         auto scale = as_const_int(iter_split->scale);
         auto extent = as_const_int(iter_split->extent);
         ICHECK(scale != nullptr && extent != nullptr);
@@ -362,12 +382,11 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         std::stringstream ss;
 
         auto thread_offset = T.thread_bounds->min;
-        if (TargetIsHopper(T.target) || TargetIsSm100(T.target) ||
-            TargetIsSM120(T.target)) {
+        if (TargetHasSMVersionGE(T.target, 90)) {
           auto all_threads = T.thread_bounds->extent;
           ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
              << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ", " << all_threads << ">::run_hopper";
+             << ", tl::NamedBarrier<" << all_threads << ">>::run";
         } else {
           ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
              << reducing_threads << ", " << (*scale) << ", " << thread_offset
@@ -375,9 +394,13 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         }
         Array<PrimExpr> thread_reduce_args = {
             StringImm(ss.str()), BufferLoad(clear_buffer, red_indices)};
+        // The butterfly reduce path needs one shared-memory slot per
+        // thread in the block.
         if (reducing_threads > 32) {
-          PrimExpr workspace = T.AddWorkspace(
-              *as_const_int(T.thread_bounds->extent), clear_buffer->dtype);
+          int workspace_size =
+              static_cast<int>(*as_const_int(T.thread_bounds->extent));
+          PrimExpr workspace =
+              T.AddWorkspace(workspace_size, clear_buffer->dtype);
           thread_reduce_args.push_back(workspace);
         }
         auto call = Call(clear_buffer->dtype, builtin::call_extern(),
@@ -425,6 +448,10 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           update = bitwise_or(dst_val, src_val);
         } else if (this->type->isBitXor()) {
           update = bitwise_xor(dst_val, src_val);
+        } else if (this->type->isMax() || this->type->isAbsMax()) {
+          update = Max(dst_val, src_val);
+        } else if (this->type->isMin()) {
+          update = Min(dst_val, src_val);
         } else {
           LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
         }
@@ -448,6 +475,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     if (dst_layout->InputDim() > 0) {
       body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
                            red_layout);
+      body = PragmaUnrollLoop(Downcast<For>(body));
     } else {
       auto guard = (T.thread_var == T.thread_bounds->min);
       body = IfThenElse(guard, body);

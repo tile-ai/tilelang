@@ -128,7 +128,7 @@ class GemmBase:
         return getattr(self.gemm_node, "mbarPtr", tvm.tir.const(0, T.uint32))
 
     @property
-    def mbar(self) -> tir.Buffer | tir.BufferLoad:
+    def mbar(self) -> tir.BufferLoad | None:
         return getattr(self.gemm_node, "mbar", None)
 
     @property

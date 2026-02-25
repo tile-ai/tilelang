@@ -526,7 +526,7 @@ class Builder(BaseBuilder):
         else:
             return super().assign_slice(lval, sl, value)
 
-    def aug_assign(self, op, target, aug_value):
+    def aug_assign(self, op, target, aug_value, name: str | None = None):
         self.check_continue_break()
         if isinstance(target, Ref):
             target.store(eval_op(op, target.bufload, aug_value))
@@ -540,12 +540,38 @@ class Builder(BaseBuilder):
                 "Please use slice assignment, e.g. `buf[0] += value` instead."
             )
         elif isinstance(target, Var):
-            raise RuntimeError(
-                f"Attempting to update immutable variable `{target}` using augmented assignment.\n"
-                "Please use T.alloc_var to create a mutable variable."
-            )
+            # Treat augmented assignment on immutable vars (SSA) as re-binding:
+            #   x -= y  ==>  x = x - y
+            #
+            # This matches user expectations and avoids hard failures, while still
+            # warning about re-binding immutable values (same as `x = x - y`).
+            name = name or getattr(target, "orig_name", None) or target.name  # type: ignore[attr-defined]
+            res = eval_op(op, target, aug_value)
+
+            # Mirror the `bind` fast-path: if we're at the prim_func frame and the
+            # expression is pure, keep it as a raw PrimExpr to avoid creating
+            # LetStmts before match_buffer.
+            if (
+                isinstance(res, PrimExpr)
+                and isinstance(self.frames[-1], tir.frame.PrimFuncFrame)
+                and side_effect(res) <= CallEffectKind.Pure.value
+            ):
+                return res
+
+            res = self.bind_immutable(name, res)
+            if name != "_":
+                frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
+                assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
+                if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
+                    logger.warning(
+                        f"Immutable value `{name}` is re-bound. If you want to modify its value, please use T.alloc_var to make it a variable!",
+                        stack_info=True,
+                        stacklevel=2,
+                    )
+                self.name_inside_frame[name] = self.frames[frame]
+            return res
         else:
-            return super().aug_assign(op, target, aug_value)
+            return super().aug_assign(op, target, aug_value, name=name)
 
     def aug_assign_slice(self, op, target, sl, aug_value):
         self.check_continue_break()
@@ -1096,7 +1122,7 @@ class JITFunc(Generic[_P, _T]):
         """Parse arguments and return cache key and tensor args."""
         p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
         if not tensor_args:
-            return (p1_key, None), kwargs
+            return (p1_key, None), {}
         tir_temp = self.p1_cache.get(p1_key, None)
         if tir_temp is None:
             # mode should be set by JITImpl before calling parse_args

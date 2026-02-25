@@ -1,4 +1,32 @@
 from __future__ import annotations
+
+__all__ = [
+    # cp.async operations
+    "cp_async_commit",
+    "cp_async_wait",
+    "cp_async_gs",
+    "cp_async_gs_conditional",
+    "cp_async_shared_global",
+    # TMA operations
+    "extract_tensormap_ptr",
+    "tma_load",
+    "tma_store",
+    "tma_reduce",
+    "tma_store_arrive",
+    "tma_store_wait",
+    "prefetch_tma_descriptor",
+    # Mbarrier operations (merged from mbar.py)
+    "mbarrier_init",
+    "mbarrier_expect_tx",
+    "mbarrier_arrive",
+    "arrive_and_expect_tx",
+    "mbarrier_cp_async_arrive_noinc",
+    "mbarrier_wait",
+    "mbarrier_cp_async_arrive",
+    "fence_proxy_async",
+    "fence_barrier_init",
+]
+
 from cutlass.cutlass_dsl import CuTeDSL, T, if_generate, dsl_user_op  # noqa: F401
 
 from cutlass._mlir.dialects import nvvm, cute_nvgpu  # noqa: F401
@@ -8,14 +36,17 @@ import cutlass._mlir.dialects.cute as _cute_ir
 import cutlass._mlir.dialects.cute_nvgpu as _cute_nvgpu_ir
 
 import cutlass.cute as cute
-from cutlass.cute.typing import Int, Boolean, Int32, Int16, Uint64, Union  # noqa: F401
+from cutlass.cute.typing import Int, Boolean, Int32, Int16, Uint64, Pointer, Union  # noqa: F401
 from cutlass.impl_utils import check_value_in
 
 from cutlass.cute.arch import cp_async_commit_group as cp_async_commit  # noqa: F401
 from cutlass.cute.arch import cp_async_wait_group as cp_async_wait  # noqa: F401
 
-BYTES_PER_TENSORMAP = 128
-BYTES_PER_POINTER = 8
+# Mbarrier operations (merged from mbar.py)
+from cutlass.cute.arch import mbarrier_init, mbarrier_expect_tx, mbarrier_arrive  # noqa: F401
+from cutlass.cute.arch import mbarrier_arrive_and_expect_tx as arrive_and_expect_tx  # noqa: F401
+from cutlass.cute.arch import cp_async_mbarrier_arrive_noinc as mbarrier_cp_async_arrive_noinc  # noqa: F401
+import cutlass.cute.arch as arch
 
 
 def cp_async_gs(size, dst, src):
@@ -93,6 +124,9 @@ def tma_load(tma_desc, mbar: cute.Pointer, smem_ptr: cute.Pointer, crd: Int | tu
             tma_desc_ptr = tma_desc.iterator
         else:
             tma_desc_ptr = tma_desc
+        # Ensure crd is a tuple (handle single coordinate case)
+        if not isinstance(crd, tuple):
+            crd = (crd,)
         nvvm.cp_async_bulk_tensor_shared_cluster_global(
             dst_mem=smem_ptr.llvm_ptr,
             tma_descriptor=tma_desc_ptr.llvm_ptr,
@@ -147,6 +181,48 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
             loc=loc,
             ip=ip,
         )
+
+
+@dsl_user_op
+def tma_reduce(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, loc=None, ip=None) -> None:
+    """
+    Reduce data from shared memory to global memory using TMA with atomic ADD reduction.
+
+    This performs an atomic add of shared memory data to global memory using
+    the TMA unit's reduce capability.
+
+    :param tma_desc:                 TMA descriptor for the tensor
+    :type tma_desc:                  TMA descriptor
+    :param smem_ptr:                 Source pointer in shared memory
+    :type smem_ptr:                  Pointer
+    :param crd:                      Coordinates tuple for the tensor access
+    :type crd:                       tuple[Int, ...]
+    """
+    from cutlass._mlir.dialects._nvvm_enum_gen import TMAReduxKind, TMAStoreMode
+
+    arch = CuTeDSL._get_dsl().envar.arch
+    check_value_in(arch, ["sm_90", "sm_90a", "sm_100a"], "arch")
+
+    if isinstance(tma_desc, cute.CopyAtom):
+        tma_desc_ptr = extract_tensormap_ptr(tma_desc)
+    elif isinstance(tma_desc, cute.Tensor):
+        tma_desc_ptr = tma_desc.iterator
+    else:
+        tma_desc_ptr = tma_desc
+
+    # Ensure crd is a tuple
+    if not isinstance(crd, tuple):
+        crd = (crd,)
+
+    nvvm.cp_async_bulk_tensor_reduce(
+        tma_descriptor=tma_desc_ptr.llvm_ptr,
+        src_mem=smem_ptr.llvm_ptr,
+        red_kind=TMAReduxKind.ADD,
+        coordinates=[Int32(i).ir_value(loc=loc, ip=ip) for i in crd],
+        mode=TMAStoreMode.TILE,
+        loc=loc,
+        ip=ip,
+    )
 
 
 @dsl_user_op
@@ -213,3 +289,49 @@ def prefetch_tma_descriptor(tma_desc, *, loc=None, ip=None) -> None:
     else:
         tma_desc_ptr = tma_desc
     nvvm.prefetch_tensormap(tma_desc_ptr.llvm_ptr, loc=loc, ip=ip)
+
+
+# ---------------------------------------------------------------------------
+# Mbarrier operations (merged from mbar.py)
+# ---------------------------------------------------------------------------
+
+from cutlass._mlir.dialects import llvm
+
+
+@dsl_user_op
+def mbarrier_wait(mbar_ptr: Pointer, phase: Int, timeout_ns: Int = 10000000, *, loc=None, ip=None) -> None:
+    """Waits on a mbarrier with a specified phase (blocking loop).
+
+    Uses inline PTX to loop until the try_wait succeeds.
+    The CUDA backend does: while (!mbar.try_wait(parity)) {}
+    """
+    llvm.inline_asm(
+        None,
+        [mbar_ptr.llvm_ptr, Int32(phase).ir_value(loc=loc, ip=ip), Int32(timeout_ns).ir_value(loc=loc, ip=ip)],
+        "{\n.reg .pred p;\nLAB_WAIT:\nmbarrier.try_wait.parity.shared::cta.b64 p, [$0], $1, $2;\n@!p bra LAB_WAIT;\n}",
+        "r,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def mbarrier_cp_async_arrive(mbar_ptr: Pointer, *, loc=None, ip=None) -> None:
+    mbar_llvm_ptr = mbar_ptr.llvm_ptr
+    nvvm.cp_async_mbarrier_arrive_shared(
+        mbar_llvm_ptr,
+        noinc=False,
+        loc=loc,
+        ip=ip,
+    )
+
+
+def fence_proxy_async():
+    arch.fence_proxy(arch.ProxyKind.async_shared, space=arch.SharedSpace.shared_cta)
+
+
+def fence_barrier_init():
+    arch.mbarrier_init_fence()

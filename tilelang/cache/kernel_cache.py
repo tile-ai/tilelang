@@ -55,8 +55,46 @@ class KernelCache:
 
     @staticmethod
     @functools.cache
+    def _get_tilelang_lib_stamp() -> str | None:
+        """Return a cheap build-stamp for the TileLang runtime library.
+
+        The kernel cache key historically only depended on `tilelang.__version__`
+        and the TIR script. During development, C++ pass changes can change the
+        generated kernel *without* changing the input TIR, leading to stale cache
+        hits. Including a library stamp (mtime+size) avoids this class of bugs
+        while keeping the cost low (computed once per process).
+        """
+        import importlib
+
+        lib_dirs: list[str] = []
+        try:
+            env_mod = importlib.import_module("tilelang.env")
+            lib_dirs.extend(getattr(env_mod, "TL_LIBS", []) or [])
+        except Exception:
+            pass
+
+        if sys.platform == "win32":
+            lib_names = ["tilelang.dll", "libtilelang.dll"]
+        elif sys.platform == "darwin":
+            lib_names = ["libtilelang.dylib", "libtilelang.so"]
+        else:
+            lib_names = ["libtilelang.so"]
+
+        for lib_dir in lib_dirs:
+            for name in lib_names:
+                path = os.path.join(lib_dir, name)
+                if os.path.exists(path):
+                    st = os.stat(path)
+                    return f"{name}:{st.st_size}:{st.st_mtime_ns}"
+        return None
+
+    @staticmethod
+    @functools.cache
     def _get_base_key() -> dict:
         base = {"version": __version__}
+        lib_stamp = KernelCache._get_tilelang_lib_stamp()
+        if lib_stamp:
+            base["tilelang_lib"] = lib_stamp
         if sys.platform == "darwin":
             import torch
 

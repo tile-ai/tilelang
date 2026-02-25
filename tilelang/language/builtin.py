@@ -77,6 +77,181 @@ def __ldg(load_or_buf: BufferLoad | tir.Buffer, index: PrimExpr | int | None = N
     raise TypeError("T.__ldg expects a BufferLoad or a Buffer.")
 
 
+def access_ptr(
+    base: BufferLikeType,
+    access_type: str | int = "r",
+    *extents: PrimExpr | int | tuple[PrimExpr | int, ...] | list[PrimExpr | int],
+    offset: PrimExpr | int = 0,
+    extent: PrimExpr | int | None = None,
+    ignore_last_ndim: int = 0,
+) -> PrimExpr:
+    """Create a TileLang `tl.access_ptr` from a buffer-like base location.
+
+    This is a frontend convenience wrapper that keeps a `BufferLoad` argument
+    in the resulting call so downstream passes can recover the referenced
+    `tir.Buffer` (including strides/storage scope) *and* the `rw_mask`
+    (read/write intent) required by synchronization and safety checks.
+
+    The returned `tl.access_ptr` is expected to be lowered to
+    `tir.builtin.tvm_access_ptr` later in the TileLang compilation pipeline.
+
+    Parameters
+    ----------
+    base : BufferLikeType
+        The base location to take the address of. Supported:
+        - `tir.BufferLoad` (e.g. `A[i, j]`): pointer to that element
+        - `tir.BufferRegion`: pointer to the region minima
+        - `tir.Buffer`: pointer to the beginning of the buffer
+        - `tir.Var` with let-binding to one of the above (inside TileLang frame)
+
+    access_type : str | int
+        Access mask for the pointer. Common string forms: `"r"`, `"w"`, `"rw"`.
+        Integer bitmask is also accepted (1=read, 2=write, 3=read-write).
+
+    *extents : PrimExpr | int
+        Optional per-axis extents. When provided and `extent` is not specified,
+        the 1D `extent` passed to `tvm_access_ptr` is computed as the product of
+        the provided extents (padding leading dimensions with 1 if needed).
+
+        For example:
+        - `T.access_ptr(A[i], "r")` -> extent defaults to 1 (element pointer)
+        - `T.access_ptr(A[i], "r", 16)` -> extent=16
+        - `T.access_ptr(A[i, j], "r", m, n)` -> extent=m*n
+
+    offset : PrimExpr | int
+        Additional element offset from the base location.
+
+    extent : PrimExpr | int | None
+        Optional explicit 1D extent override (in elements). If provided, it
+        takes precedence over `*extents`.
+
+    ignore_last_ndim : int
+        If non-zero, the base linear offset is computed only over the leading
+        dimensions, ignoring the last `ignore_last_ndim` axes. This is useful
+        when treating an N-D buffer as a view of its trailing sub-tensor.
+
+    Returns
+    -------
+    ptr : PrimExpr
+        A handle-typed `tir.Call` to `tl.access_ptr`.
+    """
+
+    from tilelang.language.frame import has_let_value, get_let_value
+    from tilelang.language.utils import get_buffer_region_from_load
+
+    if isinstance(base, tir.Var) and has_let_value(base):
+        base = get_let_value(base)
+
+    # Allow passing a single list/tuple as the extents argument.
+    if len(extents) == 1 and isinstance(extents[0], (list, tuple)):
+        extents = tuple(extents[0])
+
+    def _rw_mask(access_type: str | int) -> int:
+        if isinstance(access_type, int):
+            return int(access_type)
+        if isinstance(access_type, str):
+            table = {"r": 1, "w": 2, "rw": 3}
+            if access_type not in table:
+                raise ValueError(f'Invalid access_type="{access_type}", expected one of {sorted(table.keys())}.')
+            return table[access_type]
+        raise TypeError(f"T.access_ptr access_type must be str or int, but got {type(access_type)}.")
+
+    def _index_dtype(buf: tir.Buffer) -> str:
+        if len(buf.shape) > 0:
+            return str(buf.shape[0].dtype)
+        return "int32"
+
+    # Extract underlying buffer and per-axis minima (indices).
+    inferred_region_extents: list[PrimExpr] | None = None
+    is_buffer_load_base = False
+    if isinstance(base, BufferLoad):
+        is_buffer_load_base = True
+        buf = base.buffer
+        region = get_buffer_region_from_load(base)
+        if region is not None:
+            mins = [r.min for r in region.region]
+            inferred_region_extents = [r.extent for r in region.region]
+        else:
+            mins = list(base.indices)
+    elif isinstance(base, BufferRegion):
+        buf = base.buffer
+        mins = [r.min for r in base.region]
+        inferred_region_extents = [r.extent for r in base.region]
+    elif isinstance(base, tir.Buffer):
+        buf = base
+        idx_dtype = _index_dtype(buf)
+        mins = [tir.IntImm(idx_dtype, 0) for _ in buf.shape]
+    else:
+        raise TypeError(f"T.access_ptr expects a Buffer, BufferLoad, BufferRegion, or a Var bound to one of them, but got {type(base)}.")
+
+    # Apply ignore_last_ndim by zeroing-out the ignored tail indices.
+    idx_dtype = _index_dtype(buf)
+    ignore_last_ndim = int(ignore_last_ndim)
+    if ignore_last_ndim != 0:
+        upto = max(0, len(mins) - ignore_last_ndim)
+        mins = list(mins[:upto]) + [tir.IntImm(idx_dtype, 0) for _ in range(len(mins) - upto)]
+
+    # Support non-zero `offset` only for 1D buffers in the frontend meta-op.
+    if isinstance(offset, int):
+        if offset != 0:
+            if len(mins) != 1:
+                raise ValueError(
+                    "T.access_ptr(offset!=0) is only supported for 1D buffers when emitting tl.access_ptr. "
+                    "Use explicit indexing (e.g. A[i + off]) for N-D buffers."
+                )
+            mins = [mins[0] + tir.IntImm(idx_dtype, offset)]
+    elif isinstance(offset, PrimExpr):
+        if not (isinstance(offset, tir.IntImm) and int(offset.value) == 0):
+            if len(mins) != 1:
+                raise ValueError(
+                    "T.access_ptr(offset!=0) is only supported for 1D buffers when emitting tl.access_ptr. "
+                    "Use explicit indexing (e.g. A[i + off]) for N-D buffers."
+                )
+            mins = [mins[0] + offset]
+    else:
+        raise TypeError(f"T.access_ptr offset must be int or PrimExpr, but got {type(offset)}.")
+
+    base_load = BufferLoad(buf, mins)
+
+    # Compute 1D extent (in elements).
+    extent_1d: PrimExpr
+    if extent is not None:
+        extent_1d = convert(extent)
+    elif len(extents) > 0:
+        exts = [convert(e) for e in extents]
+        if len(exts) > len(buf.shape):
+            raise ValueError(f"T.access_ptr got {len(exts)} extents for a buffer with ndim={len(buf.shape)}.")
+        if len(exts) < len(buf.shape):
+            pad = [tir.IntImm(idx_dtype, 1) for _ in range(len(buf.shape) - len(exts))]
+            exts = pad + exts
+        extent_1d = tir.IntImm(idx_dtype, 1)
+        for e in exts:
+            extent_1d = extent_1d * e
+    else:
+        # Match `tir.Buffer.access_ptr` defaults:
+        # - BufferLoad base: element pointer (extent=1)
+        # - BufferRegion base: product of region extents
+        # - Buffer base: full buffer size (product of shape)
+        if is_buffer_load_base:
+            extent_1d = tir.IntImm(idx_dtype, 1)
+        elif inferred_region_extents is not None:
+            extent_1d = tir.IntImm(idx_dtype, 1)
+            for e in inferred_region_extents:
+                extent_1d = extent_1d * convert(e)
+        else:
+            extent_1d = tir.IntImm(idx_dtype, 1)
+            for dim in buf.shape:
+                extent_1d = extent_1d * convert(dim)
+
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.access_ptr"),
+        base_load,
+        extent_1d,
+        tir.IntImm("int32", _rw_mask(access_type)),
+    )
+
+
 def create_tma_descriptor(*args):
     """Create a Tensor Memory Access (TMA) descriptor.
 
@@ -805,15 +980,17 @@ def cp_async_barrier_noinc(barrier: BarrierType):
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
-def tcgen05_mma_arrive(mbar_ptr):
+def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr):
     """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
 
     Parameters
     ----------
-    mbar_ptr : PrimExpr
-        Pointer to the mbarrier object in shared memory (e.g., Barrier*).
+    mbar: tir.Buffer | BufferLoad | PrimExpr
+        The mbarrier object in shared memory (e.g., Barrier*) or its address.
     """
-    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar_ptr)
+    if isinstance(mbar, (tir.Buffer, BufferLoad)):
+        mbar = retrieve_ptr(mbar, access_type="rw")
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar)
 
 
 def ptx_mma_sm70(

@@ -295,6 +295,17 @@ def LegalizeSafeMemoryAccess():
     return _ffi_api.LegalizeSafeMemoryAccess()  # type: ignore
 
 
+def LowerAccessPtr():
+    """Lower TileLang frontend `tl.access_ptr` to `tir.builtin.tvm_access_ptr`.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerAccessPtr()  # type: ignore
+
+
 def MakePackedAPI():
     """MakePackedAPI
 

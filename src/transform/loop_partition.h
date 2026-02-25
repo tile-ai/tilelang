@@ -45,7 +45,7 @@ Fragment PlanLoopPartition(const For &op, size_t num_thread,
 Fragment PlanLoopPartition(const For &op, int vectorize_size,
                            const Range &thread_range);
 
-For LoopPragmaUnroll(For stmt);
+For PragmaUnrollLoop(For stmt);
 
 /*!
  * \brief Lower a parallel loop by partitioning and vectorizing it.

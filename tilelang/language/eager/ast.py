@@ -213,7 +213,7 @@ class BaseBuilder:
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot: Any = empty):
         lval[sl] = value
 
-    def aug_assign(self, op: Operator, target: Any, aug_value: Any) -> Any:
+    def aug_assign(self, op: Operator, target: Any, aug_value: Any, name: str | None = None) -> Any:
         return eval_op(op, target, aug_value)
 
     def aug_assign_slice(self, op: Operator, target: Any, sl: slice, aug_value: Any):
@@ -437,7 +437,18 @@ class DSLMutator(ast.NodeTransformer):
         target, rval = node.target, node.value
         op = get_operator_name(node.op)
         if isinstance(target, ast.Name):
-            return quote(f"name = __tb.aug_assign('{op}', {target.id}, value)", name=target, value=rval, span=node)
+            # NOTE: We intentionally avoid using placeholder names like `value` here because
+            # user code commonly uses `value` as a variable name, and QuoteVisitor would
+            # otherwise substitute the target identifier unexpectedly.
+            target_load = ast.Name(target.id, ctx=ast.Load())
+            ast_set_span(target_load, ast_get_span(target))
+            return quote(
+                f"__tl_lhs = __tb.aug_assign('{op}', __tl_target, __tl_aug_value, name='{target.id}')",
+                __tl_lhs=target,
+                __tl_target=target_load,
+                __tl_aug_value=rval,
+                span=node,
+            )
         elif isinstance(target, ast.Subscript):
             return quote(
                 f"__tb.aug_assign_slice('{op}', lval, slice, value)",

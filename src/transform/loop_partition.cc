@@ -161,9 +161,7 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   if (has_thread_offset) {
     body = Substitute(body, thread_offset_map);
   }
-
-  auto for_node = LoopPragmaUnroll(Downcast<For>(body));
-  return for_node;
+  return Downcast<For>(body);
 }
 
 class LoopPramaUnroller : public StmtExprMutator {
@@ -264,7 +262,7 @@ Fragment PlanLoopPartition(const For &op, int vectorize_size,
   return fragment->BindThreadRange(thread_range);
 }
 
-For LoopPragmaUnroll(For stmt) {
+For PragmaUnrollLoop(For stmt) {
   LoopPramaUnroller unroller;
   For unrolled = Downcast<For>(unroller(std::move(stmt)));
   return unrolled;
@@ -296,6 +294,8 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
   if (should_vectorize) {
     result_loop = VectorizeLoop(result_loop, saved_analyzer.get(), layout_map);
   }
+
+  result_loop = PragmaUnrollLoop(result_loop);
 
   // Step 3: Wrap with predicate if provided and this is a parallel loop
   if (predicate.defined() && parallel_loop) {
