@@ -195,7 +195,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
         ref_c = torch.matmul(A.T.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
     elif a_transposed and not b_transposed:
         # Get Reference Result
-        ref_c = torch.matmul(A.Tto(torch.float32), B.to(torch.float32)).to(getattr(torch, out_dtype))
+        ref_c = torch.matmul(A.T.to(torch.float32), B.to(torch.float32)).to(getattr(torch, out_dtype))
     elif not a_transposed and b_transposed:
         # Get Reference Result
         ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
@@ -220,6 +220,10 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 1),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 2),
         (128, 128, 128, T.float8_e4m3fnuz, T.float16, T.float32, False, True, 1),
+        (128, 256, 256, T.float8_e4m3fnuz, T.float32, T.float32, False, True, 1),
+        (128, 256, 256, T.float8_e4m3fnuz, T.float32, T.float32, False, True, 2),
+        (128, 256, 256, T.float8_e4m3fnuz, T.float32, T.float32, False, False, 1),
+        (128, 256, 256, T.float8_e4m3fnuz, T.float32, T.float32, False, False, 2),
     ],
 )
 @tilelang.testing.requires_rocm
@@ -235,10 +239,6 @@ def test_assert_tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transpose
         b_transposed=b_transposed,
         k_pack=k_pack,
     )
-    assert_tl_matmul_correctness(128, 256, 256, T.float8_e4m3fnuz, T.float32)
-    assert_tl_matmul_correctness(128, 256, 256, T.float8_e4m3fnuz, T.float32, k_pack=2)
-    assert_tl_matmul_correctness(128, 256, 256, T.float8_e4m3fnuz, T.float32, b_transposed=False)
-    assert_tl_matmul_correctness(128, 256, 256, T.float8_e4m3fnuz, T.float32, b_transposed=False, k_pack=2)
 
 
 if __name__ == "__main__":
