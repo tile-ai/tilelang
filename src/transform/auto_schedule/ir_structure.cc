@@ -386,11 +386,29 @@ void CollectAllTaskNodesWithContext(IRStructure *node,
     if (current_control_node) {
       const ForNode *for_node = current_control_node->control.get();
       PrimExpr loop_extent = for_node->extent;
-      // Try to convert loop_extent to int64_t
+      PrimExpr loop_step = for_node->step.has_value()
+                               ? for_node->step.value()
+                               : IntImm(DataType::Int(32), 1);
+
+      // Try to convert loop_extent and loop_step to int64_t
       if (const int64_t *extent_ptr = as_const_int(loop_extent)) {
-        task_ctx.tripcount = *extent_ptr;
+        if (const int64_t *step_ptr = as_const_int(loop_step)) {
+          // Calculate ceil(extent / step)
+          int64_t extent = *extent_ptr;
+          int64_t step = *step_ptr;
+          if (step > 0) {
+            // ceil(extent / step) = (extent + step - 1) / step
+            task_ctx.tripcount = (extent + step - 1) / step;
+          } else {
+            // Invalid step, use extent as fallback
+            task_ctx.tripcount = extent;
+          }
+        } else {
+          // Step is not constant, use 100 as default
+          task_ctx.tripcount = 100;
+        }
       } else {
-        // If extent is not constant, use 100 as default (as requested)
+        // Extent is not constant, use 100 as default (as requested)
         task_ctx.tripcount = 100;
       }
     } else {

@@ -128,10 +128,11 @@ struct LoopNestingInfo {
     PrimExpr total_iter = IntImm(DataType::Int(32), 0);
     PrimExpr total_multiplier = IntImm(DataType::Int(32), 1);
 
-    // Build expression: outer_var * inner_constant + inner_var
-    // For nested loops: (((outer_var * inner_extent) + inner_var) *
+    // Build expression: outer_var * inner_tripcount + inner_var
+    // For nested loops: (((outer_var * inner_tripcount) + inner_var) *
     // innermost_step) + ...
     for (int i = loop_vars.size() - 1; i >= 0; i--) {
+      // Calculate normalized iteration: (loop_var - start) / step
       PrimExpr normalized_iter =
           indexdiv(loop_vars[i] - loop_starts[i], loop_steps[i]);
 
@@ -139,15 +140,32 @@ struct LoopNestingInfo {
         // Innermost loop
         total_iter = normalized_iter;
       } else {
-        // Outer loop: multiply by inner loop extent
-        // Check if inner loop extent is constant
+        // Outer loop: multiply by inner loop tripcount (ceil(extent / step))
+        // Check if inner loop extent and step are constant
         if (const auto *extent_int = loop_extents[i + 1].as<IntImmNode>()) {
-          total_iter =
-              normalized_iter * IntImm(DataType::Int(32), extent_int->value) +
-              total_iter;
+          if (const auto *step_int = loop_steps[i + 1].as<IntImmNode>()) {
+            int64_t extent = extent_int->value;
+            int64_t step = step_int->value;
+
+            if (step <= 0) {
+              LOG(FATAL) << "Loop step must be positive for parity calculation";
+              return IntImm(DataType::Int(32), 0);
+            }
+
+            // Calculate tripcount = ceil(extent / step)
+            int64_t tripcount = (extent + step - 1) / step;
+
+            total_iter =
+                normalized_iter * IntImm(DataType::Int(32), tripcount) +
+                total_iter;
+          } else {
+            // Inner loop step is not constant
+            LOG(FATAL)
+                << "Inner loop step must be constant for parity calculation";
+            return IntImm(DataType::Int(32), 0);
+          }
         } else {
-          // If inner loop extent is not constant, we cannot compute parity
-          // This should have been caught earlier
+          // Inner loop extent is not constant
           LOG(FATAL)
               << "Inner loop extent must be constant for parity calculation";
           return IntImm(DataType::Int(32), 0);

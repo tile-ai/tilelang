@@ -664,10 +664,33 @@ public:
     }
 
     // Estimate overall latency: II * tripcount
-    // Get tripcount from For loop extent
+    // Get tripcount from For loop extent and step
     int64_t tripcount = 100; // default if not constant
-    if (const auto *extent_int = ctrl->control->extent.as<IntImmNode>()) {
-      tripcount = extent_int->value;
+    const ForNode *for_node = ctrl->control.get();
+    PrimExpr loop_extent = for_node->extent;
+    PrimExpr loop_step = for_node->step.has_value()
+                             ? for_node->step.value()
+                             : IntImm(DataType::Int(32), 1);
+
+    if (const auto *extent_int = loop_extent.as<IntImmNode>()) {
+      if (const auto *step_int = loop_step.as<IntImmNode>()) {
+        // Calculate ceil(extent / step)
+        int64_t extent = extent_int->value;
+        int64_t step = step_int->value;
+        if (step > 0) {
+          // ceil(extent / step) = (extent + step - 1) / step
+          tripcount = (extent + step - 1) / step;
+        } else {
+          // Invalid step, use extent as fallback
+          tripcount = extent;
+        }
+      } else {
+        // Step is not constant, use 100 as default
+        tripcount = 100;
+      }
+    } else {
+      // Extent is not constant, use 100 as default
+      tripcount = 100;
     }
     int64_t overall_latency = ii * tripcount;
 
