@@ -10,6 +10,7 @@ from .utils import mfma_store_index_map
 from typing import Literal, Callable
 import warnings
 
+from tilelang.utils.target import target_is_gfx950
 from tilelang.utils import is_fragment
 from tilelang.language.utils import get_buffer_region_from_load
 from .mfma_layout import (
@@ -32,20 +33,6 @@ from .mfma_layout import (
 )
 
 lift = convert
-
-
-def _is_gfx950() -> bool:
-    """Detect whether the current device is GFX950 via torch."""
-    try:
-        import torch
-
-        if torch.version.hip is None or not torch.cuda.is_available():
-            return False
-        props = torch.cuda.get_device_properties(0)
-        gcn_arch = getattr(props, "gcnArchName", "")
-        return gcn_arch.startswith("gfx950")
-    except Exception:
-        return False
 
 
 class MatrixCoreIntrinEmitter:
@@ -135,7 +122,7 @@ class MatrixCoreIntrinEmitter:
         elif a_dtype.bits == 16:
             self.k_dim = 16
         elif a_dtype.bits == 8:
-            if _is_gfx950():
+            if target_is_gfx950():
                 self.k_dim = 32
             else:
                 self.k_dim = 16
@@ -206,7 +193,7 @@ class MatrixCoreIntrinEmitter:
     def _normalize_gfx950_f16_bf16_kpack(self):
         is_f16_or_bf16 = self.a_dtype in {T.float16, T.bfloat16} and self.b_dtype in {T.float16, T.bfloat16}
         # https://github.com/triton-lang/triton/blob/v3.6.0/third_party/amd/backend/compiler.py#L85-L89
-        if _is_gfx950() and is_f16_or_bf16 and self.k_dim == 16 and self.k_pack == 2:
+        if target_is_gfx950() and is_f16_or_bf16 and self.k_dim == 16 and self.k_pack == 2:
             warnings.warn(
                 "On gfx950 with f16/bf16, remapping (k_dim=16, k_pack=2) to (k_dim=32, k_pack=1).",
                 stacklevel=3,
