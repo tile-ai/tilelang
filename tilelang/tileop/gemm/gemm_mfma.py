@@ -79,6 +79,7 @@ class GemmMFMA(GemmBase):
             k_pack=self.k_pack,
         )
 
+        self.k_pack = mfma_emitter.k_pack
         in_dtype = self.in_dtype
         warp_rows = mfma_emitter.warp_rows
         warp_cols = mfma_emitter.warp_cols
@@ -99,7 +100,12 @@ class GemmMFMA(GemmBase):
 
         clear_accum = self.clear_accum
 
-        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+        assert block_K >= micro_size_k * self.k_pack, (
+            f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k}) * k_pack ({self.k_pack})"
+        )
+        assert block_K % (micro_size_k * self.k_pack) == 0, (
+            f"block_K ({block_K}) must be divisible by micro_size_k ({micro_size_k}) * k_pack ({self.k_pack})"
+        )
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
 

@@ -4,7 +4,7 @@ N=""
 N="-n 5"
 pytest --verbose --color=yes --durations=0 --showlocals --cache-clear \
   $N --ignore=./python/runtime --ignore=./python/transform \
-  python/amd/test_tilelang_test_amd.py::test_gemm_f16f32f32_nt[False-True-2]
+  python/amd/test_tilelang_test_amd.py::test_gemm_f16f32f32_nt
   python/
   python/tilelibrary/test_tilelang_tilelibrary_gemm.py::test_gemm_sr[512-1024-768-False-True-float16-float16-float32-128-256-32-2-128] 
   python/amd/test_tilelang_gemm_mfma_intrinsic.py::test_assert_tl_matmul

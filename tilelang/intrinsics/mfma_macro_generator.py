@@ -8,6 +8,7 @@ from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.runtime import convert
 from .utils import mfma_store_index_map
 from typing import Literal, Callable
+import warnings
 
 from tilelang.utils import is_fragment
 from tilelang.language.utils import get_buffer_region_from_load
@@ -101,12 +102,13 @@ class MatrixCoreIntrinEmitter:
         self.warp_row_tiles = warp_row_tiles
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
+        self._initialize_k_pack(k_pack)
         self._initialize_k_dim(a_dtype)
+        self._normalize_gfx950_f16_bf16_kpack()
         self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
         self._initialize_local_size(self.M_DIM, self.N_DIM, self.k_dim, self.WARP_SIZE)
         self._initialize_mfma_prefix(self.k_dim)
         self._initialize_micro_size(self.M_DIM, self.N_DIM, self.k_dim)
-        self._initialize_k_pack(k_pack)
         self._initialize_is_m_first(is_m_first)
         self._initialize_b_preshuffle(b_preshuffle)
 
@@ -126,7 +128,9 @@ class MatrixCoreIntrinEmitter:
 
         if a_dtype.bits == 32:
             self.k_dim = 4
-        elif a_dtype.bits in {16, 8}:
+        elif a_dtype.bits == 16:
+            self.k_dim = 16
+        elif a_dtype.bits == 8:
             if _is_gfx950():
                 self.k_dim = 32
             else:
@@ -194,6 +198,16 @@ class MatrixCoreIntrinEmitter:
     def _initialize_k_pack(self, k_pack: int | None = None):
         if k_pack is not None:
             self.k_pack = k_pack
+
+    def _normalize_gfx950_f16_bf16_kpack(self):
+        is_f16_or_bf16 = self.a_dtype in {T.float16, T.bfloat16} and self.b_dtype in {T.float16, T.bfloat16}
+        if _is_gfx950() and is_f16_or_bf16 and self.k_dim == 16 and self.k_pack == 2:
+            warnings.warn(
+                "On gfx950 with f16/bf16, remapping (k_dim=16, k_pack=2) to (k_dim=32, k_pack=1).",
+                stacklevel=3,
+            )
+            self.k_dim = 32
+            self.k_pack = 1
 
     def _initialize_is_m_first(self, is_m_first: bool | None = False):
         if is_m_first is not None:

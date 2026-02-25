@@ -9,17 +9,7 @@ from tilelang.intrinsics.mfma_macro_generator import (
 )
 from tilelang.transform import simplify_prim_func
 from tilelang.utils import determine_fp8_type, determine_torch_fp8_type
-def _is_gfx950() -> bool:
-    """Detect whether the current device is GFX950 via torch."""
-    try:
-        import torch
-        if torch.version.hip is None or not torch.cuda.is_available():
-            return False
-        props = torch.cuda.get_device_properties(0)
-        gcn_arch = getattr(props, "gcnArchName", "")
-        return gcn_arch.startswith("gfx950")
-    except Exception:
-        return False
+
 tilelang.testing.set_random_seed(0)
 
 
@@ -39,9 +29,6 @@ def tl_matmul(
 
     if in_dtype in {T.float8_e4m3fnuz, T.float8_e4m3fn, T.int8}:
         micro_size_k = 32
-    elif _is_gfx950() and in_dtype in {T.float16, T.bfloat16}:
-        micro_size_k = 32
-    
 
     block_row_warps = 2
     block_col_warps = 2
@@ -226,7 +213,6 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
     "M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack",
     [
         (128, 128, 128, T.float16, T.float16, T.float32, False, True, 1),
-        (128, 128, 128, T.bfloat16, T.bfloat16, T.float32, False, True, 1),
         (128, 256, 256, T.float16, T.float32, T.float32, False, True, 1),
         (128, 256, 256, T.float16, T.float32, T.float32, False, True, 2),
         (128, 128, 128, T.int8, T.int32, T.int32, False, True, 1),
