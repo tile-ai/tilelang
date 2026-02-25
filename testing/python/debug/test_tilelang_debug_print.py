@@ -3,6 +3,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+from tilelang.utils import determine_fp8_type
 
 
 def debug_print_buffer(M=16, N=16, dtype=T.float16):
@@ -32,8 +33,8 @@ def test_debug_print_buffer_cuda_fp8():
 
 @tilelang.testing.requires_rocm
 def test_debug_print_buffer_rocm_fp8():
-    debug_print_buffer(dtype=T.float8_e4m3fnuz)
-    debug_print_buffer(dtype=T.float8_e5m2fnuz)
+    debug_print_buffer(dtype=getattr(T, determine_fp8_type("e4m3")))
+    debug_print_buffer(dtype=getattr(T, determine_fp8_type("e5m2")))
 
 
 def debug_print_buffer_conditional(M=16, N=16):

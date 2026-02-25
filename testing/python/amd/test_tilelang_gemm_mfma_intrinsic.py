@@ -8,6 +8,7 @@ from tilelang.intrinsics.mfma_macro_generator import (
     MatrixCoreIntrinEmitter,
 )
 from tilelang.transform import simplify_prim_func
+from tilelang.utils import determine_fp8_type, determine_torch_fp8_type
 
 tilelang.testing.set_random_seed(0)
 
@@ -26,7 +27,7 @@ def tl_matmul(
 ):
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if in_dtype in {T.float8_e4m3fnuz, T.int8}:
+    if in_dtype in {T.float8_e4m3fnuz, T.float8_e4m3fn, T.int8}:
         micro_size_k = 32
 
     block_row_warps = 2
@@ -172,7 +173,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
     if in_dtype == T.int8:
         A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
-    elif in_dtype == T.float8_e4m3fnuz:
+    elif "float8" in str(in_dtype): # for T.float8_e4m3fnuz in gfx942 and T.float8_e4m3fn in gfx950
         A = torch.rand(A_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
         B = torch.rand(B_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
     else:
@@ -219,15 +220,16 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
         (128, 256, 256, T.int8, T.int32, T.int32, False, True, 2),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 1),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 2),
-        (128, 128, 128, T.float8_e4m3fnuz, T.float16, T.float32, False, True, 1),
-        (128, 256, 256, T.float8_e4m3fnuz, T.float32, T.float32, False, True, 1),
-        (128, 256, 256, T.float8_e4m3fnuz, T.float32, T.float32, False, True, 2),
-        (128, 256, 256, T.float8_e4m3fnuz, T.float32, T.float32, False, False, 1),
-        (128, 256, 256, T.float8_e4m3fnuz, T.float32, T.float32, False, False, 2),
+        (128, 128, 128, getattr(T, determine_fp8_type()), T.float16, T.float32, False, True, 1),
+        (128, 256, 256, getattr(T, determine_fp8_type()), T.float32, T.float32, False, True, 1),
+        (128, 256, 256, getattr(T, determine_fp8_type()), T.float32, T.float32, False, True, 2),
+        (128, 256, 256, getattr(T, determine_fp8_type()), T.float32, T.float32, False, False, 1),
+        (128, 256, 256, getattr(T, determine_fp8_type()), T.float32, T.float32, False, False, 2),
     ],
 )
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack):
+    print(f"in_dtype: {in_dtype}")
     assert_tl_matmul_correctness(
         M,
         N,
