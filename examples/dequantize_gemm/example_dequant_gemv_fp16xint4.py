@@ -113,8 +113,8 @@ def dequantize_gemv(
                 if fast_decoding:
                     T.call_extern(
                         func_name,
-                        T.address_of(B_quant_local[0]),
-                        T.address_of(B_dequantize_local[0]),
+                        T.access_ptr(B_quant_local, "r"),
+                        T.access_ptr(B_dequantize_local, "w"),
                         dtype=in_dtype,
                     )
                 else:

@@ -4,9 +4,11 @@
 
 #include "codegen_cutedsl.h"
 #include "codegen_utils.h"
+#include "ptx.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ir/transform.h>
+#include <tvm/tir/builtin.h>
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
@@ -21,6 +23,30 @@
 namespace tvm {
 namespace codegen {
 namespace {
+
+// Helper to check if a statement subtree contains loop break ops
+// (either tl::loop_break() or builtin::break_loop())
+class LoopBreakDetector : public tir::StmtExprVisitor {
+public:
+  bool found = false;
+  void VisitExpr_(const CallNode *op) override {
+    if (op->op.same_as(tl::loop_break()) ||
+        op->op.same_as(builtin::break_loop())) {
+      found = true;
+    }
+    if (!found)
+      StmtExprVisitor::VisitExpr_(op);
+  }
+  void VisitStmt_(const ForNode *op) override {
+    // Don't recurse into nested for loops — their breaks are their own
+  }
+};
+
+static bool ContainsLoopBreak(const Stmt &stmt) {
+  LoopBreakDetector det;
+  det(stmt);
+  return det.found;
+}
 
 // The threshold of the loop extent to use cutlass.range_constexpr
 // Higher values would lead to DSLOptimizationWarning:
@@ -52,12 +78,13 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
 std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
     const std::string &func_name) const {
   static const std::unordered_map<std::string, std::string> kFastMathMap = {
-      {"divf", "tl.divf"},   {"exp", "tl.exp"},    {"expf", "tl.exp"},
-      {"exp2", "tl.exp2"},   {"exp2f", "tl.exp2"}, {"log", "tl.log"},
-      {"logf", "tl.log"},    {"log2", "tl.log2"},  {"log2f", "tl.log2"},
-      {"log10", "tl.log10"}, {"tan", "tl.tan"},    {"cos", "tl.cos"},
-      {"sin", "tl.sin"},     {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
-      {"tanh", "tl.tanh"},   {"tanhf", "tl.tanh"},
+      {"divf", "tl.divf"},    {"exp", "tl.exp"},    {"expf", "tl.exp"},
+      {"exp2", "tl.exp2"},    {"exp2f", "tl.exp2"}, {"log", "tl.log"},
+      {"logf", "tl.log"},     {"log2", "tl.log2"},  {"log2f", "tl.log2"},
+      {"log10", "tl.log10"},  {"tan", "tl.tan"},    {"cos", "tl.cos"},
+      {"sin", "tl.sin"},      {"sqrt", "tl.sqrt"},  {"sqrtf", "tl.sqrt"},
+      {"tanh", "tl.tanh"},    {"tanhf", "tl.tanh"}, {"rsqrt", "tl.rsqrt"},
+      {"rsqrtf", "tl.rsqrt"}, {"fabs", "tl.fabsf"}, {"fabsf", "tl.fabsf"},
   };
 
   auto it = kFastMathMap.find(func_name);
@@ -157,8 +184,20 @@ void CodeGenTileLangCuTeDSL::PrintType(DataType t,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
                                         std::ostream &os) { // NOLINT(*)
+  // Note: We need to pass the dtype to make_filled_tensor so it can create
+  // the correct CuTeDSL type (e.g., cutlass.Int32 instead of Python int)
+  std::ostringstream dtype_str;
+  DataType dt = op->value.dtype();
+  // CuTeDSL/MLIR normalizes unsigned integer tensor loads to signed types
+  // (e.g., Uint8 pointer -> i8 tensor elements). Use signed type here to
+  // match, avoiding type mismatch in tl.where() operations.
+  if (dt.is_uint()) {
+    PrintType(DataType::Int(dt.bits()), dtype_str);
+  } else {
+    PrintType(dt, dtype_str);
+  }
   os << "tl.make_filled_tensor((" << PrintExpr_(op->lanes) << ",), "
-     << PrintExpr_(op->value) << ").load()";
+     << dtype_str.str() << "(" << PrintExpr_(op->value) << ")).load()";
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
@@ -199,6 +238,27 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
   }
 }
 
+void CodeGenTileLangCuTeDSL::VisitExpr_(const IntImmNode *op,
+                                        std::ostream &os) { // NOLINT(*)
+  // CuTeDSL's tensor __setitem__ uses as_numeric() which converts bare
+  // Python ints to Int32.  For non-int32 integer literals (e.g. int16, uint8),
+  // wrap with the CuTeDSL type constructor so the value has the correct width.
+  if (op->dtype == DataType::Bool()) {
+    os << (op->value ? "True" : "False");
+  } else if (op->dtype != DataType::Int(32)) {
+    std::ostringstream temp;
+    PrintType(op->dtype, temp);
+    temp << "(" << op->value << ")";
+    MarkConst(temp.str());
+    os << temp.str();
+  } else {
+    std::ostringstream temp;
+    temp << op->value;
+    MarkConst(temp.str());
+    os << temp.str();
+  }
+}
+
 void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
                                         std::ostream &os) { // NOLINT(*)
   DataType from_ty = op->value.dtype();
@@ -208,20 +268,63 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   if (from_ty.is_scalar())
     return CodeGenTileLangPY::VisitExpr_(op, os);
 
-  // Emit this as vectorized unary ops.
-  std::string sret = name_supply_->FreshName("_");
-  PrintIndent();
-  stream << sret << " = tl.make_rmem_tensor((" << target_ty.lanes() << ",), ";
-  PrintType(target_ty.element_of(), stream);
-  stream << ")\n";
+  int lanes = target_ty.lanes();
+
+  // CuTeDSL requires narrow precision (e.g. FP8) vector .to() casts to
+  // operate on 32-bit aligned vectors.  For unaligned widths (e.g.
+  // float8x2), pad the source to aligned width, cast, then return
+  // the aligned rmem tensor.  The store path is responsible for
+  // extracting only value_lanes elements when writing back.
+  bool is_narrow_unaligned = target_ty.bits() < 32 && lanes > 1 &&
+                             (target_ty.bits() * lanes) % 32 != 0;
+  int aligned_lanes = is_narrow_unaligned ? (32 / target_ty.bits()) : lanes;
 
   std::string src = SSAGetID(PrintExpr_(op->value), from_ty);
 
+  // If unaligned, pad source to aligned width
+  std::string cast_src = src;
+  if (is_narrow_unaligned) {
+    cast_src = name_supply_->FreshName("_pad_src");
+    PrintIndent();
+    stream << cast_src << " = tl.make_rmem_tensor((" << aligned_lanes << ",), ";
+    PrintType(from_ty.element_of(), stream);
+    stream << ")\n";
+    for (int i = 0; i < aligned_lanes; ++i) {
+      PrintIndent();
+      if (i < lanes) {
+        stream << cast_src << "[" << i << "] = " << src << "[" << i << "]\n";
+      } else {
+        stream << cast_src << "[" << i << "] = ";
+        PrintType(from_ty.element_of(), stream);
+        stream << "(0)\n";
+      }
+    }
+  }
+
+  // Cast (always aligned now)
+  std::string cast_dst = name_supply_->FreshName("_cast");
   PrintIndent();
-  stream << sret << ".store(" << src << ".to(";
+  stream << cast_dst << " = tl.make_rmem_tensor((" << aligned_lanes << ",), ";
+  PrintType(target_ty.element_of(), stream);
+  stream << ")\n";
+  PrintIndent();
+  if (is_narrow_unaligned) {
+    stream << cast_dst << ".store(" << cast_src << ".load().to(";
+  } else {
+    stream << cast_dst << ".store(" << src << ".to(";
+  }
   PrintType(target_ty.element_of(), stream);
   stream << "))\n";
-  os << sret << ".load()";
+
+  if (is_narrow_unaligned) {
+    // Return the aligned rmem tensor (not .load()) so downstream code
+    // uses rmem element access (e.g. cast_dst[i]) instead of MLIR
+    // vector extractelement, which fails for FP8 types due to
+    // unrealized_conversion_cast in LLVM translation.
+    os << cast_dst;
+  } else {
+    os << cast_dst << ".load()";
+  }
   return;
 }
 
@@ -297,6 +400,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << ")\n";
   };
 
+  // NOTE: builtin::if_then_else is handled by the base class
+  // (CodeGenTileLangPY) as a Python ternary: (true_val if cond else false_val).
+  // This is correct for expression contexts (range(), arithmetic, etc.). When
+  // the result is used in a BufferStore that needs TensorSSA, the store handler
+  // wraps it with tl.where().
+
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
@@ -308,13 +417,13 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string src = PrintExpr_(op->args[1]);
     std::string size = PrintExpr_(op->args[2]);
 
-    this->PrintIndent();
     if (op->args.size() == 3) {
+      this->PrintIndent();
       stream << "tl.cp_async_gs(" << size << ", " << dst << ", " << src
              << ")\n";
     } else {
       std::string condition = PrintExpr_(op->args[3]);
-      PrintIndent();
+      this->PrintIndent();
       stream << "tl.cp_async_gs_conditional(" << size << ", " << dst << ", "
              << src << ", " << condition << ")\n";
     }
@@ -394,9 +503,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     auto phase = PrintExpr_(op->args[1]);
     stream << "tl.mbarrier_wait(" << mbarrier_obj << ", " << phase << ")\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 2U);
+    PrintIndent();
+    auto tmem_buffer = PrintExpr_(op->args[0]);
+    auto num_cols = PrintExpr_(op->args[1]);
+    stream << "tl.tmem_allocate(" << tmem_buffer << ", " << num_cols << ")\n";
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 2U);
+    PrintIndent();
+    auto tmem_buffer = PrintExpr_(op->args[0]);
+    auto num_cols = PrintExpr_(op->args[1]);
+    stream << "tl.tmem_deallocate(" << tmem_buffer << ", " << num_cols << ")\n";
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     // do nothing
   } else if (op->op.same_as(tl::tma_load())) {
@@ -444,7 +561,20 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         << op->args[op->args.size() - 2]->GetTypeKey();
     auto need_reduce = need_reduce_ptr->value;
     if (need_reduce) {
-      LOG(FATAL) << "Currently unsupported op: " << op->op;
+      // Use tma_reduce for reduce mode
+      ss << "tl.tma_reduce(";
+      auto desc = op->args[0];
+      ss << PrintExpr_(desc) << ", ";
+      ss << PrintExpr_(op->args[1]) << ", (";
+      for (size_t i = 2; i < op->args.size() - 2; i++) {
+        if (i > 2)
+          ss << ", ";
+        ss << PrintExpr_(op->args[i]);
+      }
+      ss << "))\n";
+      PrintIndent();
+      stream << ss.str();
+      return;
     }
 
     // Safely extract and validate eviction policy index
@@ -499,13 +629,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     PrintIndent();
     stream << "tl.tma_store_wait(0)\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    stream << "tl.warpgroup_arrive()\n";
   } else if (op->op.same_as(tl::warpgroup_commit_batch())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    stream << "tl.warpgroup_commit_batch()\n";
   } else if (op->op.same_as(tl::warpgroup_wait())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    int num_mma = Downcast<IntImm>(op->args[0])->value;
+    stream << "tl.warpgroup_wait(" << num_mma << ")\n";
   } else if (op->op.same_as(tl::warpgroup_fence_operand())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // no-op: warpgroup_fence_operand is not needed in CuTeDSL
   } else if (op->op.same_as(tl::set_max_nreg())) {
     PrintIndent();
     int nreg = Downcast<IntImm>(op->args[0])->value;
@@ -514,33 +648,271 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         is_inc ? "tl.warpgroup_reg_alloc" : "tl.warpgroup_reg_dealloc";
     stream << func_name << "(" << nreg << ")\n";
   } else if (op->op.same_as(tl::wait_wgmma())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    PrintIndent();
+    int num_mma = Downcast<IntImm>(op->args[0])->value;
+    stream << "tl.wgmma_wait_group(" << num_mma << ")\n";
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "tl.pack_half2(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::sync_grid())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
-  } else if (op->op.same_as(tl::loop_break())) {
     PrintIndent();
-    stream << "break\n";
+    stream << "tl.sync_grid()\n";
+  } else if (op->op.same_as(tl::loop_break()) ||
+             op->op.same_as(builtin::break_loop())) {
+    if (in_break_loop_) {
+      PrintIndent();
+      stream << "_loop_break_" << current_break_id_ << " = 1\n";
+      break_emitted_in_seq_ = true;
+    } else {
+      PrintIndent();
+      stream << "break\n";
+    }
   } else if (op->op.same_as(builtin::ptx_mma())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: shape: mXnXkX
+    // arg 1: A layout: row/col
+    // arg 2: B layout: row/col
+    // arg 3: A precision: fp16, fp64, ...
+    // arg 4: B precision: fp16, fp64, ...
+    // arg 5: C precision: fp32, fp64, ...
+    // arg 6: A multiplicand
+    // arg 7: A multiplicand index
+    // arg 8: B multiplicand
+    // arg 9: B multiplicand index
+    // arg 10: C accumulator
+    // arg 11: C accumulator index
+    // arg 12: saturate
+    // arg 13: (optional) 1-bit operator (xor or and)
+    ICHECK(op->args.size() == 13U || op->args.size() == 14U);
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[1])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_ref = GetVarPtr_(op->args[6]);
+    std::string a_bias = PrintExpr_(op->args[7]);
+    std::string b_ref = GetVarPtr_(op->args[8]);
+    std::string b_bias = PrintExpr_(op->args[9]);
+    std::string c_ref = GetVarPtr_(op->args[10]);
+    std::string c_bias = PrintExpr_(op->args[11]);
+
+    // Generate call to tl.ptx_mma dispatcher
+    PrintIndent();
+    stream << "tl.ptx_mma(\"" << shape << "\", \"" << A_layout << "\", \""
+           << B_layout << "\", \"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << a_ref << ", " << a_bias << ", " << b_ref
+           << ", " << b_bias << ", " << c_ref << ", " << c_bias << ")\n";
   } else if (op->op.same_as(tl::ptx_mma_sm70())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: shape: mXnXkX
+    // arg 1: A layout: row/col
+    // arg 2: B layout: row/col
+    // arg 3: A precision: fp16, fp32, ...
+    // arg 4: B precision: fp16, fp32, ...
+    // arg 5: C precision: fp16, fp32, ...
+    // arg 6: A multiplicand pointer
+    // arg 7: A multiplicand index
+    // arg 8: B multiplicand pointer
+    // arg 9: B multiplicand index
+    // arg 10: C accumulator pointer
+    // arg 11: C accumulator index
+    // arg 12: metadata pointer
+    // arg 13: metadata index
+    // arg 14: sparse_selector
+    // arg 15: saturate
+    ICHECK_EQ(op->args.size(), 16U);
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[1])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_ref = GetVarPtr_(op->args[6]);
+    std::string a_bias = PrintExpr_(op->args[7]);
+    std::string b_ref = GetVarPtr_(op->args[8]);
+    std::string b_bias = PrintExpr_(op->args[9]);
+    std::string c_ref = GetVarPtr_(op->args[10]);
+    std::string c_bias = PrintExpr_(op->args[11]);
+    std::string meta_ref = GetVarPtr_(op->args[12]);
+    std::string meta_bias = PrintExpr_(op->args[13]);
+    std::string sparse_selector = PrintExpr_(op->args[14]);
+    std::string saturate =
+        Downcast<Bool>(op->args[15])->value ? "True" : "False";
+
+    PrintIndent();
+    stream << "tl.ptx_mma_sp(\"" << shape << "\", \"" << A_layout << "\", \""
+           << B_layout << "\", \"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << a_ref << ", " << a_bias << ", " << b_ref
+           << ", " << b_bias << ", " << c_ref << ", " << c_bias << ", "
+           << meta_ref << ", " << meta_bias << ", " << sparse_selector << ", "
+           << saturate << ")\n";
   } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: shape (StringImm, e.g. "m64n128k16")
+    // arg 1: a_is_k_major (Bool)
+    // arg 2: b_is_k_major (Bool)
+    // arg 3: A_dtype (StringImm)
+    // arg 4: B_dtype (StringImm)
+    // arg 5: C_dtype (StringImm)
+    // arg 6: A descriptor (Var)
+    // arg 7: A offset (PrimExpr)
+    // arg 8: B descriptor (Var)
+    // arg 9: B offset (PrimExpr)
+    // arg 10: C accumulator (Var)
+    // arg 11: C offset (PrimExpr)
+    // arg 12: scale_out (PrimExpr)
+    // arg 13: scale_in_a (Bool)
+    // arg 14: scale_in_b (Bool)
+    ICHECK_EQ(op->args.size(), 15U) << "ptx_wgmma_ss expects 15 args";
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    bool a_is_k_major = Downcast<Bool>(op->args[1])->value;
+    bool b_is_k_major = Downcast<Bool>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_desc = PrintExpr_(op->args[6]);
+    std::string A_offset = PrintExpr_(op->args[7]);
+    std::string b_desc = PrintExpr_(op->args[8]);
+    std::string B_offset = PrintExpr_(op->args[9]);
+    std::string c_ref = GetVarPtr_(op->args[10]);
+    std::string c_offset = PrintExpr_(op->args[11]);
+    std::string scale_out = PrintExpr_(op->args[12]);
+    bool scale_in_a = Downcast<Bool>(op->args[13])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[14])->value;
+    // tnspA = !a_is_k_major, tnspB = !b_is_k_major
+    std::string tnspA = a_is_k_major ? "False" : "True";
+    std::string tnspB = b_is_k_major ? "False" : "True";
+    // scaleA/scaleB: True (scale_in) -> 1, False -> -1
+    int scaleA = scale_in_a ? 1 : -1;
+    int scaleB = scale_in_b ? 1 : -1;
+    PrintIndent();
+    stream << "tl.wgmma_ss(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << m << ", " << n << ", " << k << ", " << tnspA
+           << ", " << tnspB << ", " << scaleA << ", " << scaleB << ", ("
+           << a_desc << " + " << A_offset << "), (" << b_desc << " + "
+           << B_offset << "), " << c_ref << " + " << c_offset << ", "
+           << scale_out << ")\n";
   } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: shape (StringImm, e.g. "m64n128k16")
+    // arg 1: b_is_k_major (Bool)
+    // arg 2: A_dtype (StringImm)
+    // arg 3: B_dtype (StringImm)
+    // arg 4: C_dtype (StringImm)
+    // arg 5: A register buffer (Var)
+    // arg 6: A offset (PrimExpr)
+    // arg 7: B descriptor (Var)
+    // arg 8: B offset (PrimExpr)
+    // arg 9: C accumulator (Var)
+    // arg 10: C offset (PrimExpr)
+    // arg 11: scale_out (PrimExpr)
+    // arg 12: scale_in_a (Bool)
+    // arg 13: scale_in_b (Bool)
+    ICHECK_EQ(op->args.size(), 14U) << "ptx_wgmma_rs expects 14 args";
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    bool b_is_k_major = Downcast<Bool>(op->args[1])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[2])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string a_ref = GetVarPtr_(op->args[5]);
+    std::string A_offset = PrintExpr_(op->args[6]);
+    std::string b_desc = PrintExpr_(op->args[7]);
+    std::string B_offset = PrintExpr_(op->args[8]);
+    std::string c_ref = GetVarPtr_(op->args[9]);
+    std::string c_offset = PrintExpr_(op->args[10]);
+    std::string scale_out = PrintExpr_(op->args[11]);
+    bool scale_in_a = Downcast<Bool>(op->args[12])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[13])->value;
+    // tnspB = !b_is_k_major (A is always K-major in RS)
+    std::string tnspB = b_is_k_major ? "False" : "True";
+    int scaleA = scale_in_a ? 1 : -1;
+    int scaleB = scale_in_b ? 1 : -1;
+    PrintIndent();
+    stream << "tl.wgmma_rs(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << m << ", " << n << ", " << k << ", " << tnspB
+           << ", " << scaleA << ", " << scaleB << ", " << a_ref << " + "
+           << A_offset << ", (" << b_desc << " + " << B_offset << "), " << c_ref
+           << " + " << c_offset << ", " << scale_out << ")\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 14U)
+        << "ptx_tcgen05_mma_ss expects 14 arguments";
+    std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string a_desc = PrintExpr_(op->args[1]);
+    std::string A_offset = PrintExpr_(op->args[2]);
+    std::string b_desc = PrintExpr_(op->args[3]);
+    std::string B_offset = PrintExpr_(op->args[4]);
+    std::string c_ref = PrintExpr_(op->args[5]);
+    std::string c_offset = PrintExpr_(op->args[6]);
+    std::string desc_val = PrintExpr_(op->args[7]);
+    std::string scale_out = PrintExpr_(op->args[8]);
+    std::string mask0 = PrintExpr_(op->args[9]);
+    std::string mask1 = PrintExpr_(op->args[10]);
+    std::string mask2 = PrintExpr_(op->args[11]);
+    std::string mask3 = PrintExpr_(op->args[12]);
+    bool enable_ws = Downcast<Bool>(op->args[13])->value;
+    PrintIndent();
+    if (enable_ws) {
+      stream << "tl.tcgen05mma_ws_ss(\"" << kind_dtype << "\", (" << a_desc
+             << " + " << A_offset << "), (" << b_desc << " + " << B_offset
+             << "), " << c_ref << "[0] + " << c_offset << ", " << desc_val
+             << ", " << scale_out << ")\n";
+    } else {
+      stream << "tl.tcgen05mma_ss(\"" << kind_dtype << "\", (" << a_desc
+             << " + " << A_offset << "), (" << b_desc << " + " << B_offset
+             << "), " << c_ref << "[0] + " << c_offset << ", " << desc_val
+             << ", " << scale_out << ", " << mask0 << ", " << mask1 << ", "
+             << mask2 << ", " << mask3 << ")\n";
+    }
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 13U)
+        << "ptx_tcgen05_mma_ts expects 13 arguments";
+    std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string a_ref = PrintExpr_(op->args[1]);
+    std::string A_offset = PrintExpr_(op->args[2]);
+    std::string b_desc = PrintExpr_(op->args[3]);
+    std::string B_offset = PrintExpr_(op->args[4]);
+    std::string c_ref = PrintExpr_(op->args[5]);
+    std::string c_offset = PrintExpr_(op->args[6]);
+    std::string desc_val = PrintExpr_(op->args[7]);
+    std::string scale_out = PrintExpr_(op->args[8]);
+    std::string mask0 = PrintExpr_(op->args[9]);
+    std::string mask1 = PrintExpr_(op->args[10]);
+    std::string mask2 = PrintExpr_(op->args[11]);
+    std::string mask3 = PrintExpr_(op->args[12]);
+    PrintIndent();
+    stream << "tl.tcgen05mma_ts(\"" << kind_dtype << "\", " << a_ref << "[0] + "
+           << A_offset << ", (" << b_desc << " + " << B_offset << "), " << c_ref
+           << "[0] + " << c_offset << ", " << desc_val << ", " << scale_out
+           << ", " << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
+           << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
+    PrintIndent();
+    stream << "tl.tcgen05_mma_arrive(" << PrintExpr_(op->args[0]) << ")\n";
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // arg 0: whether the matrix is loaded in column major format or not.
+    // arg 1: number of matrices to load.
+    // arg 2: The data type in the matrix, .b16 is the only accepted data type.
+    // arg 3: pointer to local buffer.
+    // arg 4: The offset of the element to store in the local buffer.
+    // arg 5: pointer to the shared memory buffer to load.
+    // arg 6: The offset of the start element of the row to load in shared
+    // memory.
+    ICHECK_EQ(op->args.size(), 7U);
+    bool trans = Downcast<Bool>(op->args[0])->value;
+    int num = Downcast<Integer>(op->args[1])->value;
+    std::string local_ptr = GetVarPtr_(op->args[3]);
+    std::string local_elem_offset = PrintExpr_(op->args[4]);
+    std::string smem_ptr = PrintExpr_(op->args[5]);
+    std::string smem_elem_offset = PrintExpr_(op->args[6]);
+
+    std::string func_name = "tl.ptx_ldmatrix_x" + std::to_string(num);
+    if (trans)
+      func_name += "_trans";
+    PrintIndent();
+    stream << func_name << "(" << smem_ptr << " + " << smem_elem_offset << ", "
+           << local_ptr << " + " << local_elem_offset << ")\n";
   } else if (op->op.same_as(builtin::mma_store())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::mma_fill())) {
@@ -560,22 +932,30 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            "bits";
 
     const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
-    ICHECK(op->args.size() == 1 && load);
-    ICHECK_EQ(load->indices.size(), 1)
-        << "CodeGenTileLangCuTeDSL only supports flat memory";
+    if (load) {
+      // Path 1: BufferLoad - use recast_ptr for memory access
+      ICHECK_EQ(load->indices.size(), 1)
+          << "CodeGenTileLangCuTeDSL only supports flat memory";
 
-    PrimExpr index = load->indices[0];
-    if (const RampNode *node = index.as<RampNode>(); node) {
-      auto *p_stride = as_const_int(node->stride);
-      CHECK(p_stride);
-      ICHECK_EQ(*p_stride, 1) << "reinterpret expects contiguous elements";
-      index = node->base;
+      PrimExpr index = load->indices[0];
+      if (const RampNode *node = index.as<RampNode>(); node) {
+        auto *p_stride = as_const_int(node->stride);
+        CHECK(p_stride);
+        ICHECK_EQ(*p_stride, 1) << "reinterpret expects contiguous elements";
+        index = node->base;
+      }
+
+      auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
+      os << "tl.make_tensor(tl.recast_ptr(" << ptr_str << ", dtype=";
+      PrintType(tgt_dtype.element_of(), os);
+      os << "), (" << tgt_dtype.lanes() << ",)).load()";
+    } else {
+      // Path 2: General expression - use arith.bitcast
+      std::string expr_str = PrintExpr_(op->args[0]);
+      os << "tl.bitcast(" << expr_str << ", ";
+      PrintType(tgt_dtype.element_of(), os);
+      os << ")";
     }
-
-    auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
-    os << "tl.make_tensor(tl.recast_ptr(" << ptr_str << ", dtype=";
-    PrintType(tgt_dtype.element_of(), os);
-    os << "), (" << tgt_dtype.lanes() << ",)).load()";
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else if (op->op.same_as(tl::tl_gemm())) {
@@ -589,25 +969,71 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::get_lane_idx())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // get_lane_idx(warp_size?) -> threadIdx.x % warp_size
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_lane_idx expects at most one argument <warp_size>.";
+    std::string warp_size = op->args.empty() ? "32" : PrintExpr_(op->args[0]);
+    os << "(tl.thread_idx() % " << warp_size << ")";
   } else if (op->op.same_as(tl::get_warp_idx_sync())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // get_warp_idx_sync(warp_size?) -> threadIdx.x // warp_size
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_warp_idx_sync expects at most one argument <warp_size>.";
+    std::string warp_size = op->args.empty() ? "32" : PrintExpr_(op->args[0]);
+    os << "(tl.thread_idx() // " << warp_size << ")";
   } else if (op->op.same_as(tl::get_warp_idx())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // get_warp_idx(warp_size?) -> threadIdx.x // warp_size
+    ICHECK_LE(op->args.size(), 1U)
+        << "tl.get_warp_idx expects at most one argument <warp_size>.";
+    std::string warp_size = op->args.empty() ? "32" : PrintExpr_(op->args[0]);
+    os << "(tl.thread_idx() // " << warp_size << ")";
   } else if (op->op.same_as(tl::get_warp_group_idx())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // get_warp_group_idx(warp_size?, warps_per_group?) ->
+    //   threadIdx.x // (warp_size * warps_per_group)
+    ICHECK_LE(op->args.size(), 2U)
+        << "tl.get_warp_group_idx expects <warp_size, warps_per_group>.";
+    std::string warp_size = !op->args.empty() ? PrintExpr_(op->args[0]) : "32";
+    std::string warps_per_group =
+        op->args.size() >= 2 ? PrintExpr_(op->args[1]) : "4";
+    os << "(tl.thread_idx() // (" << warp_size << " * " << warps_per_group
+       << "))";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl.shuffle_elect(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::initialize_wgmma_descriptor())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // TIR args: (descriptor, start_address, layout_type, leading, stride)
+    // Python args: (layout_type, leading, stride, desc, start_address)
+    ICHECK_EQ(op->args.size(), 5U)
+        << "initialize_wgmma_descriptor expects 5 arguments";
+    std::string descriptor = PrintExpr_(op->args[0]);
+    std::string start_address = PrintExpr_(op->args[1]);
+    std::string layout_type = PrintExpr_(op->args[2]);
+    std::string leading = PrintExpr_(op->args[3]);
+    std::string stride = PrintExpr_(op->args[4]);
+    os << "tl.initialize_wgmma_descriptor(" << layout_type << ", " << leading
+       << ", " << stride << ", " << descriptor << ", " << start_address << ")";
   } else if (op->op.same_as(tl::initialize_tcgen05_descriptor())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 7U)
+        << "initialize_tcgen05_descriptor expects 7 arguments";
+    std::string descriptor = PrintExpr_(op->args[0]);
+    std::string start_address = PrintExpr_(op->args[1]);
+    std::string leading = PrintExpr_(op->args[2]);
+    std::string stride = PrintExpr_(op->args[3]);
+    std::string base_offset = PrintExpr_(op->args[4]);
+    std::string leading_abs = PrintExpr_(op->args[5]);
+    std::string swizzle_mode = PrintExpr_(op->args[6]);
+    os << "tl.initialize_tcgen05_descriptor(" << descriptor << ", "
+       << start_address << ", " << leading << ", " << stride << ", "
+       << base_offset << ", " << leading_abs << ", " << swizzle_mode << ")";
   } else if (op->op.same_as(tl::increase_descriptor_offset())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    ICHECK_EQ(op->args.size(), 2U)
+        << "increase_descriptor_offset expects 2 arguments";
+    std::string descriptor = PrintExpr_(op->args[0]);
+    std::string offset = PrintExpr_(op->args[1]);
+    os << "tl.increase_descriptor_offset(" << descriptor << ", " << offset
+       << ")";
   } else if (op->op.same_as(tl::__exp())) {
     os << "tl.exp2(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__exp10())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.exp10(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__log())) {
     os << "tl.log(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::__log2())) {
@@ -621,40 +1047,142 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::__sin())) {
     os << "tl.sin(" << PrintExpr_(op->args[0]) << ", fastmath=True)";
   } else if (op->op.same_as(tl::ieee_add())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // ieee_add(a, b, rounding_mode)
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    os << "tl.ieee_fadd(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_sub())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    os << "tl.ieee_fsub(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_mul())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    os << "tl.ieee_fmul(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_fmaf())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    // ieee_fmaf(a, b, c, rounding_mode)
+    std::string rounding_mode = Downcast<StringImm>(op->args[3])->value;
+    os << "tl.ieee_fmaf(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2])
+       << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_frcp())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
+    os << "tl.ieee_frcp(" << PrintExpr_(op->args[0]) << ", rounding=\""
+       << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_fsqrt())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
+    os << "tl.ieee_fsqrt(" << PrintExpr_(op->args[0]) << ", rounding=\""
+       << rounding_mode << "\")";
   } else if (op->op.same_as(tl::ieee_frsqrt())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.rsqrt(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::ieee_fdiv())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    os << "tl.ieee_fdiv(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_sum(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_max())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_max(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_min())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_min(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_bitand())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_bitand(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_bitor())) {
-    LOG(FATAL) << "Currently unsupported op: " << op->op;
+    os << "tl.warp_reduce_bitor(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::address_of())) {
     const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
     ICHECK(op->args.size() == 1 && load);
     ICHECK_EQ(load->indices.size(), 1)
         << "CodeGenTileLangCuTeDSL only supports flat memory";
     os << GetBufferPtr_(load->buffer.get(), load->indices[0]);
+  } else if (op->op.same_as(tl::atomic_add_elem_op())) {
+    // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string src_value = PrintExpr_(op->args[1]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicAdd(" << dst_ptr << ", " << src_value << ")\n";
+  } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
+    // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
+    os << "tl.AtomicAdd(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
+    // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order]) -> may return prev
+    // value
+    os << "tl.AtomicAddx2(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
+    // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order]) -> may return prev
+    // value
+    os << "tl.AtomicAddx4(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_load_elem_op())) {
+    // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
+    os << "tl.AtomicLoad(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_store_elem_op())) {
+    // atomic_store_elem_op(dst_ptr, value, memory_order)
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string value = PrintExpr_(op->args[1]);
+    std::string memory_order = PrintExpr_(op->args[2]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicStore(" << dst_ptr << ", " << value << ", "
+                 << memory_order << ")\n";
+  } else if (op->op.same_as(tl::atomic_max_elem_op())) {
+    // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string src_value = PrintExpr_(op->args[1]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicMax(" << dst_ptr << ", " << src_value << ")\n";
+  } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
+    // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
+    os << "tl.AtomicMaxRet(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_min_elem_op())) {
+    // atomic_min_elem_op(dst_ptr, src_value[, memory_order])
+    std::string dst_ptr = PrintExpr_(op->args[0]);
+    std::string src_value = PrintExpr_(op->args[1]);
+    this->PrintIndent();
+    this->stream << "tl.AtomicMin(" << dst_ptr << ", " << src_value << ")\n";
+  } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
+    // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
+    // prev value
+    os << "tl.AtomicMinRet(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(builtin::shift_right())) {
+    // CuTeDSL type promotion fix: Int8 >> 4 returns Int32 in CuTeDSL,
+    // but TIR expects result type to match operand type. Wrap in explicit
+    // type conversion to match CUDA behavior.
+    ICHECK_EQ(op->args.size(), 2U);
+    DataType result_dtype = op->dtype;
+    std::string lhs = PrintExpr_(op->args[0]);
+    std::string rhs = PrintExpr_(op->args[1]);
+    PrintType(result_dtype, os);
+    os << "((" << lhs << " >> " << rhs << "))";
+  } else if (op->op.same_as(builtin::shift_left())) {
+    // Same fix for shift_left
+    ICHECK_EQ(op->args.size(), 2U);
+    DataType result_dtype = op->dtype;
+    std::string lhs = PrintExpr_(op->args[0]);
+    std::string rhs = PrintExpr_(op->args[1]);
+    PrintType(result_dtype, os);
+    os << "((" << lhs << " << " << rhs << "))";
   } else {
     CodeGenTileLangPY::VisitExpr_(op, os);
   }
+}
+
+void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
+                                        std::ostream &os) { // NOLINT(*)
+  // Emit Python ternary: (true_val if cond else false_val).
+  // This yields ArithValue which is fine in expression contexts (range(),
+  // etc.). When used as a BufferStore value that requires TensorSSA, the store
+  // handler will wrap it with tl.where() at statement level.
+  std::string cond = PrintExpr_(op->condition);
+  std::string t = PrintExpr_(op->true_value);
+  std::string f = PrintExpr_(op->false_value);
+  os << "(" << t << " if " << cond << " else " << f << ")";
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
@@ -670,9 +1198,94 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
   DataType element_dtype = op->buffer->dtype;
 
   const int value_lanes = value_dtype.lanes();
-  if (value_lanes == element_dtype.lanes()) {
+
+  // CuTeDSL requires narrow precision vector loads to be 32-bit aligned.
+  // For unaligned widths (e.g. float8x2), load an aligned-width vector
+  // and extract the needed elements via scalar copy.
+  bool is_narrow_unaligned = value_dtype.bits() < 32 && value_lanes > 1 &&
+                             (value_dtype.bits() * value_lanes) % 32 != 0;
+
+  if (is_narrow_unaligned) {
+    int aligned_lanes = 32 / value_dtype.bits();
+    std::string vid = GetVarID(buffer_var.get());
+    std::string scope;
+    if (alloc_storage_scope_.count(buffer_var.get())) {
+      scope = alloc_storage_scope_.at(buffer_var.get());
+    }
+
+    // Compute scalar base offset
+    PrimExpr scalar_base;
+    if (value_lanes == element_dtype.lanes()) {
+      scalar_base = index * value_lanes;
+    } else {
+      // Contiguous vectorized load: extract base from ramp index
+      arith::PVar<PrimExpr> ramp_base;
+      ICHECK(arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
+                 .Match(index))
+          << "Non-contiguous narrow-precision load not supported";
+      scalar_base = ramp_base.Eval() * element_dtype.lanes();
+    }
+
+    // Load aligned vector into an rmem tensor (not a raw MLIR vector).
+    // This ensures downstream element access uses rmem tensor indexing
+    // (which CuTeDSL handles correctly for FP8) instead of MLIR
+    // extractelement (which fails due to unrealized_conversion_cast).
+    std::string aligned_rmem = name_supply_->FreshName("_aload");
+
+    if (scope == "local") {
+      // For rmem: load aligned_lanes elements without cute.assume.
+      // cute.assume(offset, divby=N) silently truncates offsets that
+      // are not exact multiples of N; for rmem there is no hardware
+      // alignment constraint, so we skip assume (use default div_by=1).
+      // Shape uses aligned_lanes so .load()/.store() satisfy CuTeDSL's
+      // 32-bit alignment requirement for narrow types (FP8 etc.).
+      PrintIndent();
+      stream << aligned_rmem << " = tl.make_rmem_tensor((" << aligned_lanes
+             << ",), ";
+      PrintType(value_dtype.element_of(), stream);
+      stream << ")\n";
+      PrintIndent();
+      stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << vid
+             << ".iterator, " << PrintExpr_(scalar_base) << ", ("
+             << aligned_lanes << ",)).load())\n";
+    } else {
+      // For shared/global memory: load exactly value_lanes elements with
+      // no alignment assumption (div_by=1).  This avoids:
+      //  - MisalignedAddress from div_by=aligned_lanes on non-aligned offsets
+      //  - OOB from loading aligned_lanes elements near the buffer boundary
+      bool is_handle_match = HandleTypeMatch_(buffer_var.get(), element_dtype);
+      std::string ptr_str;
+      if (is_handle_match) {
+        ptr_str = vid + ".iterator";
+      } else {
+        std::ostringstream ptr_os;
+        ptr_os << "tl.recast_ptr(" << vid << ".iterator, dtype=";
+        PrintType(value_dtype.element_of(), ptr_os);
+        ptr_os << ")";
+        ptr_str = ptr_os.str();
+      }
+      PrintIndent();
+      stream << aligned_rmem << " = tl.make_rmem_tensor((" << value_lanes
+             << ",), ";
+      PrintType(value_dtype.element_of(), stream);
+      stream << ")\n";
+      PrintIndent();
+      stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << ptr_str
+             << ", " << PrintExpr_(scalar_base) << ", (" << value_lanes
+             << ",)).load())\n";
+    }
+
+    // Return the rmem tensor (not .load()) so downstream code uses
+    // rmem element access instead of MLIR vector extractelement.
+    os << aligned_rmem;
+  } else if (value_lanes == element_dtype.lanes()) {
     std::string ref = GetBufferRef_(value_dtype, op->buffer.get(), index);
-    if (ref.back() == ')') {
+    // Check if this is a barrier buffer - barrier pointers don't need .load()
+    std::string scope;
+    if (alloc_storage_scope_.count(buffer_var.get())) {
+      scope = alloc_storage_scope_.at(buffer_var.get());
+    }
+    if (ref.back() == ')' && scope != "shared.barrier") {
       ref += ".load()";
     }
     os << ref;
@@ -731,17 +1344,228 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
   DataType element_dtype = op->buffer->dtype;
   PrimExpr index_expr = op->indices[0];
   Var buffer_var = op->buffer->data;
-  std::string value_str = PrintExpr_(op->value);
+
+  // Pre-compute Select/if_then_else as tl.where() at statement level.
+  // Python ternary (ArithValue) is rejected by CuTeDSL .store(); tl.where()
+  // produces TensorSSA which works in all store paths (.store(), vec store,
+  // etc.). Also handles Cast(Select/if_then_else) — the cast is applied via
+  // .to() on the tl.where result.
+  bool value_is_conditional = false;
+  PrimExpr cond_expr, true_expr, false_expr;
+  DataType cast_to_dtype; // non-void if a Cast wraps the conditional
+  // Helper to detect Select/if_then_else in a PrimExpr.
+  auto detect_conditional = [&](const PrimExpr &expr) {
+    if (auto sel = expr.as<SelectNode>()) {
+      value_is_conditional = true;
+      cond_expr = sel->condition;
+      true_expr = sel->true_value;
+      false_expr = sel->false_value;
+    } else if (auto call = expr.as<CallNode>();
+               call && call->op.same_as(tir::builtin::if_then_else())) {
+      value_is_conditional = true;
+      cond_expr = call->args[0];
+      true_expr = call->args[1];
+      false_expr = call->args[2];
+    }
+  };
+  detect_conditional(op->value);
+  if (!value_is_conditional) {
+    // Check for Cast(Select/if_then_else)
+    if (auto cast_node = op->value.as<CastNode>()) {
+      detect_conditional(cast_node->value);
+      if (value_is_conditional) {
+        cast_to_dtype = cast_node->dtype;
+      }
+    }
+  }
+
+  std::string value_str;
+  if (value_is_conditional) {
+    int lanes = value_dtype.lanes();
+    if (lanes == 0)
+      lanes = 1;
+    // Helper: wrap a sub-expression as TensorSSA via make_rmem_tensor.
+    auto as_tsa = [this](const PrimExpr &e, int n,
+                         DataType elem_dt) -> std::string {
+      std::string s = PrintExpr_(e);
+      if (n == 0)
+        n = 1;
+      if (s.size() >= 7 && s.compare(s.size() - 7, 7, ".load()") == 0)
+        return s;
+      std::string var = name_supply_->FreshName("_tsa");
+      PrintIndent();
+      if (elem_dt.is_bool()) {
+        stream << var << " = tl.make_rmem_tensor((" << n
+               << ",), cutlass.Boolean)\n";
+      } else {
+        stream << var << " = tl.make_rmem_tensor((" << n << ",), "
+               << DTypeToString(elem_dt) << ")\n";
+      }
+      for (int i = 0; i < n; ++i) {
+        PrintIndent();
+        if (n == 1) {
+          stream << var << "[0] = " << s << "\n";
+        } else {
+          stream << var << "[" << i << "] = " << s << "[" << i << "]\n";
+        }
+      }
+      return var + ".load()";
+    };
+    DataType true_ty = true_expr.dtype().element_of();
+    DataType false_ty = false_expr.dtype().element_of();
+    std::string cond_tsa = as_tsa(cond_expr, 1, DataType::Bool());
+    std::string then_tsa = as_tsa(true_expr, lanes, true_ty);
+    std::string else_tsa = as_tsa(false_expr, lanes, false_ty);
+    if (true_ty != false_ty) {
+      DataType common =
+          (true_ty.bits() >= false_ty.bits()) ? true_ty : false_ty;
+      if (common.bits() < 32 && true_ty.is_float() && false_ty.is_float())
+        common = DataType::Float(32);
+      std::string common_str = DTypeToString(common);
+      then_tsa += ".to(" + common_str + ")";
+      else_tsa += ".to(" + common_str + ")";
+    }
+    std::string result = name_supply_->FreshName("_where");
+    PrintIndent();
+    stream << result << " = tl.where(" << cond_tsa << ", " << then_tsa << ", "
+           << else_tsa << ")\n";
+    // If the conditional was wrapped in a Cast, apply .to() on the result.
+    // tl.where() returns TensorSSA, and .to() on TensorSSA returns TensorSSA.
+    if (cast_to_dtype.bits() > 0) {
+      std::string cast_result = name_supply_->FreshName("_wcast");
+      PrintIndent();
+      stream << cast_result << " = " << result << ".to("
+             << DTypeToString(cast_to_dtype.element_of()) << ")\n";
+      value_str = cast_result;
+    } else {
+      value_str = result;
+    }
+  } else {
+    value_str = PrintExpr_(op->value);
+  }
+
+  // CuTeDSL does not support implicit narrowing assignments (e.g. storing
+  // Int32 to an Int16 tensor).  When the value's scalar width exceeds the
+  // buffer element width, wrap with an explicit cast so that CuTeDSL's
+  // Integer constructor emits arith.trunci (or the appropriate float
+  // truncation).  This mirrors C/CUDA's implicit narrowing conversions.
+  DataType value_elem = value_dtype.element_of();
+  DataType buf_elem = element_dtype.element_of();
+  if (value_elem.bits() > buf_elem.bits() && value_elem.lanes() == 1 &&
+      buf_elem.lanes() == 1 &&
+      (value_elem.is_int() || value_elem.is_uint()) ==
+          (buf_elem.is_int() || buf_elem.is_uint())) {
+    value_str = CastFromTo_(value_str, value_elem, buf_elem);
+    value_dtype = buf_elem.with_lanes(value_dtype.lanes());
+  }
 
   int value_lanes = value_dtype.lanes();
-  if (value_lanes == element_dtype.lanes()) {
+
+  // CuTeDSL requires narrow precision (e.g. FP8) vector stores to be 32-bit
+  // aligned. For unaligned widths (e.g. float8x2), pad to aligned width via
+  // scalar element copy, then store as aligned vector.
+  bool is_narrow_unaligned = value_dtype.bits() < 32 && value_lanes > 1 &&
+                             (value_dtype.bits() * value_lanes) % 32 != 0;
+
+  if (is_narrow_unaligned) {
+    int aligned_lanes = 32 / value_dtype.bits(); // e.g. 4 for FP8
+    // value_str may be an rmem tensor name (from Cast/BufferLoad narrow path)
+    // or a .load() expression. SSAGetID will alias it if already a name.
+    value_str = SSAGetID(value_str, value_dtype);
+
+    // Determine store target scope
+    std::string vid = GetVarID(buffer_var.get());
+    std::string scope;
+    if (alloc_storage_scope_.count(buffer_var.get())) {
+      scope = alloc_storage_scope_.at(buffer_var.get());
+    }
+
+    if (scope == "local") {
+      // For local rmem: use element-by-element assignment.
+      // A padded (aligned_lanes,) .store() writes beyond value_lanes
+      // elements, causing overlapping writes and OOB at the end of the
+      // rmem tensor.  And cute.assume with div_by=aligned_lanes silently
+      // truncates non-aligned offsets.  Element assignment (vid[i]=val)
+      // avoids both issues and does not trigger CuTeDSL's 32-bit
+      // alignment check that .store() enforces for FP8 types.
+      PrimExpr scalar_base;
+      if (value_lanes == element_dtype.lanes()) {
+        scalar_base = index_expr * value_lanes;
+      } else {
+        arith::PVar<PrimExpr> ramp_base;
+        ICHECK(arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
+                   .Match(index_expr))
+            << "Non-contiguous narrow-precision store not supported";
+        scalar_base = ramp_base.Eval() * element_dtype.lanes();
+      }
+      for (int i = 0; i < value_lanes; ++i) {
+        PrintIndent();
+        stream << vid << "[" << PrintExpr_(scalar_base) << " + " << i
+               << "] = " << value_str << "[" << i << "]\n";
+      }
+    } else {
+      // For global/shared: use scalar element stores (works at any alignment).
+      // CuTeDSL supports scalar FP8 stores via rmem_tensor -> global_tensor[i].
+      PrimExpr scalar_base;
+      if (value_lanes == element_dtype.lanes()) {
+        scalar_base = index_expr * value_lanes;
+      } else {
+        arith::PVar<PrimExpr> ramp_base;
+        ICHECK(arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
+                   .Match(index_expr))
+            << "Non-contiguous narrow-precision store not supported";
+        scalar_base = ramp_base.Eval() * element_dtype.lanes();
+      }
+
+      bool is_handle_match = HandleTypeMatch_(buffer_var.get(), element_dtype);
+      std::string ptr_str;
+      if (is_handle_match) {
+        ptr_str = vid + ".iterator";
+      } else {
+        std::ostringstream ptr_os;
+        ptr_os << "tl.recast_ptr(" << vid << ".iterator, dtype=";
+        PrintType(value_dtype.element_of(), ptr_os);
+        ptr_os << ")";
+        ptr_str = ptr_os.str();
+      }
+
+      // Create a tensor view and store each element individually
+      std::string view_var = name_supply_->FreshName("_sview");
+      PrintIndent();
+      stream << view_var << " = tl.make_tensor(" << ptr_str << " + "
+             << PrintExpr_(scalar_base) << ", (" << value_lanes << ",))\n";
+      for (int i = 0; i < value_lanes; ++i) {
+        PrintIndent();
+        stream << view_var << "[" << i << "] = " << value_str << "[" << i
+               << "]\n";
+      }
+    }
+  } else if (value_lanes == element_dtype.lanes()) {
     std::string ref = GetBufferRef_(value_dtype, op->buffer.get(), index_expr);
     PrintIndent();
 
     if (ref.back() != ')') {
-      stream << ref << " = " << RemoveOutermostParentheses(value_str) << "\n";
+      // Direct element assignment (e.g. vid[i] = value).
+      // For conditionals (pre-computed as tl.where), extract scalar via [0].
+      if (value_is_conditional && value_lanes == 1) {
+        stream << ref << " = " << value_str << "[0]\n";
+      } else {
+        stream << ref << " = " << RemoveOutermostParentheses(value_str) << "\n";
+      }
     } else {
-      stream << ref << ".store(" << RemoveOutermostParentheses(value_str)
+      // CuTeDSL Tensor.store() expects TensorSSA; scalar expressions yield
+      // ArithValue. Conditionals are already converted to tl.where()
+      // (TensorSSA) at the top. For other scalar expressions, wrap in
+      // make_filled_tensor.
+      std::string store_rhs = value_str;
+      if (!value_is_conditional && value_lanes == 1 &&
+          !op->value.as<BufferLoadNode>()) {
+        if (store_rhs.size() < 7 ||
+            store_rhs.compare(store_rhs.size() - 7, 7, ".load()") != 0) {
+          store_rhs = "tl.make_filled_tensor((1,), " + store_rhs + ").load()";
+        }
+      }
+      stream << ref << ".store(" << RemoveOutermostParentheses(store_rhs)
              << ")\n";
     }
   } else {
@@ -787,9 +1611,9 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
   if (scope == "local.descriptor.wgmma") {
     stream << vid << " = tl.GmmaDescriptor()\n";
   } else if (scope == "local.descriptor.tcgen05_smem") {
-    LOG(FATAL) << "Currently unsupported scope: " << scope;
+    stream << vid << " = tl.Tcgen05SmemDescriptor()\n";
   } else if (scope == "local.descriptor.tcgen05_instr") {
-    LOG(FATAL) << "Currently unsupported scope: " << scope;
+    stream << vid << " = 0\n";
   } else if (scope == "shared.dyn") {
     stream << vid << " = tl.make_tensor(tl.get_dyn_smem(";
     PrintType(op->dtype, stream);
@@ -882,6 +1706,51 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
+  bool has_break = ContainsLoopBreak(op->body);
+
+  if (has_break) {
+    // Emit guard variable before the loop
+    int break_id = loop_break_counter_++;
+    PrintIndent();
+    stream << "_loop_break_" << break_id << " = 0\n";
+
+    // Save and set break loop state
+    bool old_in_break = in_break_loop_;
+    int old_break_id = current_break_id_;
+    in_break_loop_ = true;
+    current_break_id_ = break_id;
+    break_emitted_in_seq_ = false;
+
+    // Emit the for header (same logic as below, but always non-unrolled path
+    // since break loops use runtime conditions)
+    PrintIndent();
+    std::string vid = AllocVarID(op->loop_var.get());
+    stream << "for " << vid << " in range(";
+    if (is_zero(op->min)) {
+      PrintExpr_(op->extent, stream);
+    } else {
+      PrintExpr_(op->min, stream);
+      stream << ", ";
+      PrimExpr upper_bound = arith::Analyzer().Simplify(op->extent + op->min);
+      PrintExpr_(upper_bound, stream);
+    }
+    stream << "):\n";
+
+    // Emit the body wrapped in guard check
+    int for_scope = BeginScope();
+    PrintIndent();
+    stream << "if _loop_break_" << break_id << " == 0:\n";
+    int guard_scope = BeginScope();
+    PrintStmt_(op->body);
+    EndScope(guard_scope);
+    EndScope(for_scope);
+
+    // Restore state
+    in_break_loop_ = old_in_break;
+    current_break_id_ = old_break_id;
+    return;
+  }
+
   if (op->kind != tir::ForKind::kUnrolled) {
     CodeGenTileLangPY::VisitStmt_(op);
     return;
@@ -918,6 +1787,33 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
   int for_scope = BeginScope();
   PrintStmt_(op->body);
   EndScope(for_scope);
+}
+
+void CodeGenTileLangCuTeDSL::VisitStmt_(const SeqStmtNode *op) {
+  if (!in_break_loop_) {
+    // Normal path: delegate to base class
+    CodeGenTileLangPY::VisitStmt_(op);
+    return;
+  }
+
+  // In a break loop: after visiting a statement that contains loop_break(),
+  // wrap the remaining statements in an `if _loop_break_N == 0:` guard
+  // so they don't execute in the same iteration after the break.
+  int guard_scope = -1;
+  for (size_t i = 0; i < op->seq.size(); ++i) {
+    break_emitted_in_seq_ = false;
+    PrintStmt_(op->seq[i]);
+    if (break_emitted_in_seq_ && guard_scope < 0 && i + 1 < op->seq.size()) {
+      // Insert guard for remaining statements
+      PrintIndent();
+      stream << "if _loop_break_" << current_break_id_ << " == 0:\n";
+      guard_scope = BeginScope();
+      break_emitted_in_seq_ = false;
+    }
+  }
+  if (guard_scope >= 0) {
+    EndScope(guard_scope);
+  }
 }
 
 void CodeGenTileLangCuTeDSL::VisitStmt_(const IfThenElseNode *op) {
@@ -1130,6 +2026,14 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
       sargs[0] = GetBufferPtr_(load->buffer.get(), load->indices[0]);
     }
   }
+  // Quantization Functions (decode_i4u_to_f16, decode_i4s_to_f16, etc.)
+  if (global_symbol_str.substr(0, 7) == "decode_") {
+    global_symbol_str = "tl." + global_symbol_str;
+  }
+  // Warp-level primitives (__activemask, __shfl_down_sync, __shfl_sync)
+  if (global_symbol_str.substr(0, 2) == "__") {
+    global_symbol_str = "tl." + global_symbol_str;
+  }
   // some optional template arguments might be ommited, so add names explicitly
   // for remain arguments
   if (global_symbol_str == "tl.gemm_ss" || global_symbol_str == "tl.gemm_rs" ||
@@ -1202,18 +2106,52 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
   const std::string vid = GetVarID(buffer_var);
 
   DataType buffer_element_dtype = buffer->dtype;
-  bool is_handle_type_match =
-      HandleTypeMatch_(buffer_var, buffer_element_dtype);
+  // CuTeDSL only supports i1 (Boolean) in rmem; use Uint8 for gmem pointers.
+  DataType effective_dtype = buffer_element_dtype;
+  if (buffer_element_dtype.is_bool()) {
+    std::string scope;
+    if (alloc_storage_scope_.count(buffer_var)) {
+      scope = alloc_storage_scope_.at(buffer_var);
+    }
+    if (scope.empty())
+      scope = GetPtrStorageScope(buffer->data);
+    if (scope != "local" && scope != "local.var") {
+      effective_dtype = DataType::UInt(8);
+    }
+  }
+  // shared.barrier is allocated via tl.alloc_smem() which returns _Pointer
+  // (not _Tensor), so it doesn't have .iterator — use vid directly.
+  std::string scope;
+  if (alloc_storage_scope_.count(buffer_var)) {
+    scope = alloc_storage_scope_.at(buffer_var);
+  }
+  if (scope.empty())
+    scope = GetPtrStorageScope(buffer->data);
+
   std::string ptr_str;
-  if (is_handle_type_match) {
-    ptr_str = vid + ".iterator";
+  if (scope == "shared.barrier") {
+    ptr_str = vid;
   } else {
-    ptr_str = "tl.recast_ptr(" + vid +
-              ".iterator, dtype=" + DTypeToString(buffer_element_dtype) + ")";
+    bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
+    if (is_handle_type_match) {
+      ptr_str = vid + ".iterator";
+    } else {
+      ptr_str = "tl.recast_ptr(" + vid +
+                ".iterator, dtype=" + DTypeToString(effective_dtype) + ")";
+    }
   }
 
   std::string index_str = PrintExpr_(index);
   return "(" + ptr_str + " + " + index_str + ")";
+}
+
+std::string CodeGenTileLangCuTeDSL::GetVarPtr_(const PrimExpr &expr) {
+  // For local buffers (rmem tensors), we need to use .iterator to get the
+  // pointer since local buffers in CuTeDSL are tensors, not raw pointers
+  if (const VarNode *var = expr.as<VarNode>()) {
+    return GetVarID(var) + ".iterator";
+  }
+  return PrintExpr_(expr);
 }
 
 // The following forms can be returned:
@@ -1242,26 +2180,54 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   }
 
   DataType buffer_element_dtype = buffer->dtype;
-  bool is_handle_type_match =
-      HandleTypeMatch_(buffer_var, buffer_element_dtype);
+  // CuTeDSL only supports i1 (Boolean) in rmem. For gmem/shared bool buffers,
+  // use Uint8 instead (matches PyTorch's torch.bool memory layout).
+  DataType effective_dtype = buffer_element_dtype;
+  if (buffer_element_dtype.is_bool() && scope != "local" &&
+      scope != "local.var") {
+    effective_dtype = DataType::UInt(8);
+  }
+  bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
   std::string ptr_str;
   if (is_handle_type_match) {
     ptr_str = vid + ".iterator";
   } else {
     ptr_str = "tl.recast_ptr(" + vid +
-              ".iterator, dtype=" + DTypeToString(buffer_element_dtype) + ")";
+              ".iterator, dtype=" + DTypeToString(effective_dtype) + ")";
   }
 
-  const std::string index_str = PrintExpr_(index);
+  // CuTeDSL make_tensor_at_offset(ptr, offset, shape, div_by) expects a
+  // single scalar offset. For a Ramp index, pass only the base to avoid
+  // emitting a tuple (base+0, base+1, ...) that the runtime rejects.
+  PrimExpr offset_expr = index;
+  if (const RampNode *ramp = index.as<RampNode>()) {
+    ICHECK(is_one(ramp->stride))
+        << "GetBufferRef_: non-unit Ramp stride not supported, got "
+        << ramp->stride;
+    offset_expr = ramp->base;
+  } else {
+    arith::PVar<PrimExpr> ramp_base;
+    int lanes = t.lanes() > 0 ? t.lanes() : 1;
+    if (arith::ramp(ramp_base, 1, lanes).Match(index)) {
+      offset_expr = ramp_base.Eval();
+    }
+  }
+  const std::string index_str = PrintExpr_(offset_expr);
 
   if (t == buffer_element_dtype) {
-    if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
-        (scope == "local" || scope == "shared" || scope == "shared.dyn" ||
-         scope == "shared.barrier")) {
+    if (scope == "shared.barrier") {
+      // shared.barrier is allocated via tl.alloc_smem() which returns _Pointer.
+      // _Pointer does not support subscript access [i], but supports pointer
+      // arithmetic (ptr + i). Use pointer addition instead of subscript.
+      return "(" + vid + " + " + index_str + ")";
+    } else if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
+               (scope == "local" || scope == "shared")) {
       // Tensors in these scopes are allocated as one-dimensional, so can be
       // assessed via "[]" correctly. Other tensors may be multi-dimensional,
       // and must be assessed via ptr, otherwise CuTeDSL will interpret "[]"
       // access using its visiting order and layout.
+      // Note: shared.dyn is excluded because its shape is set to (1,) and
+      // direct indexing would cause out-of-bounds access.
       return vid + "[" + index_str + "]";
     } else {
       std::ostringstream os;

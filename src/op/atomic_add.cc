@@ -185,9 +185,13 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   if (src_value_arg->dtype != dst->dtype)
     src_value_arg = Cast(dst->dtype, src_value_arg);
 
-  // Build a pointer to destination element using tvm_access_ptr
-  PrimExpr dst_ptr = Call(DataType::Handle(), builtin::address_of(),
-                          {BufferLoad(dst, dst_indices)});
+  // Build an access pointer to the destination element (rw).
+  DataType idx_dtype =
+      dst_indices.empty() ? DataType::Int(32) : dst_indices[0].dtype();
+  PrimExpr dst_ptr =
+      Call(DataType::Handle(), tl::access_ptr(),
+           {BufferLoad(dst, dst_indices), make_const(idx_dtype, 1),
+            make_const(DataType::Int(32), 3)});
 
   new_args.push_back(dst_ptr);
   new_args.push_back(src_value_arg);
@@ -564,7 +568,13 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations));
     }
 
-    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_reduce);
+    Array<Stmt> seq;
+    seq.reserve(3);
+    seq.push_back(tma_reduce);
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+                      SeqStmt(std::move(seq)));
   }
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));

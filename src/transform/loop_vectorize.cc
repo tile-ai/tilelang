@@ -383,20 +383,37 @@ private:
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    } else if (node->op.same_as(builtin::tvm_access_ptr())) {
+      HandleTvmAccessPtr(node);
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == tl::atomic_add_elem_op()) {
       // Assert at least 2 args (dst_ptr and src)
       ICHECK(node->args.size() >= 2)
           << "atomic_add_elem_op requires at least 2 args (dst and src)";
 
-      // Get dst dtype from args[0] (address_of call containing BufferLoad)
-      auto address_of_call = node->args[0].as<CallNode>();
-      ICHECK(address_of_call && address_of_call->op == builtin::address_of())
-          << "atomic_add_elem_op first arg must be address_of call";
+      // Get dst dtype from args[0] (tvm_access_ptr or address_of(BufferLoad))
+      const CallNode *dst_ptr_call = node->args[0].as<CallNode>();
+      ICHECK(dst_ptr_call) << "atomic_add_elem_op first arg must be a call";
 
-      auto buffer_load = address_of_call->args[0].as<BufferLoadNode>();
-      ICHECK(buffer_load) << "address_of arg must be BufferLoad";
-
-      DataType dtype = buffer_load->buffer->dtype;
+      DataType dtype;
+      if (dst_ptr_call->op.same_as(builtin::address_of())) {
+        auto buffer_load = dst_ptr_call->args[0].as<BufferLoadNode>();
+        ICHECK(buffer_load) << "address_of arg must be BufferLoad";
+        dtype = buffer_load->buffer->dtype;
+      } else if (dst_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        ICHECK(!dst_ptr_call->args.empty());
+        dtype = dst_ptr_call->args[0].dtype();
+      } else if (dst_ptr_call->op.same_as(tl::access_ptr())) {
+        ICHECK_EQ(dst_ptr_call->args.size(), 3U)
+            << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+        auto buffer_load = dst_ptr_call->args[0].as<BufferLoadNode>();
+        ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
+        dtype = buffer_load->buffer->dtype;
+      } else {
+        LOG(FATAL) << "atomic_add_elem_op first arg must be tvm_access_ptr, "
+                      "tl.access_ptr, or address_of call, but got "
+                   << node->args[0];
+      }
       int vectorize_length = 1;
       if (dtype.is_float16() || dtype.is_bfloat16()) {
         vectorize_length = 2;
@@ -407,9 +424,10 @@ private:
 
       buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
-    } else if (node->op == builtin::address_of()) {
-      // address_of have buffer load value so we should analysis the buffer load
-      // node to update vector_size_.
+    } else if (node->op == builtin::address_of() ||
+               node->op == tl::access_ptr()) {
+      // address_of and tl.access_ptr have buffer load value so we should
+      // analysis the buffer load node to update vector_size_.
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
 
@@ -459,6 +477,17 @@ private:
                                                target_vec_size, analyzer_)) {
             all_invariant = false;
           }
+        } else if (auto *call = obj.as<CallNode>()) {
+          // tvm_access_ptr(dtype_annotation, data, offset, extent, rw_mask)
+          // The offset (args[2]) is the element offset into the buffer.
+          if (call->op.same_as(builtin::tvm_access_ptr()) &&
+              call->args.size() >= 3) {
+            PrimExpr offset = call->args[2];
+            if (!IsExprInvariantInVectorBoundary(offset, inner_for_->loop_var,
+                                                 target_vec_size, analyzer_)) {
+              all_invariant = false;
+            }
+          }
         }
       });
       return all_invariant;
@@ -478,6 +507,82 @@ private:
 
   void CheckConditionVectorized(const PrimExpr &cond) {
     // TODO: perform some checks here
+  }
+
+  void HandleTvmAccessPtr(const CallNode *node) {
+    // tvm_access_ptr format: (ptype, data, offset, extent, rw_mask)
+    if (!inner_for_) {
+      return;
+    }
+    ICHECK(node->args.size() >= 3U)
+        << "tvm_access_ptr requires at least 3 args";
+
+    // args[0] is TypeAnnotation(dtype[/lanes]); dtype() encodes the element
+    // type. See tvm::tir::Buffer::access_ptr implementation.
+    DataType dtype = node->args[0].dtype();
+    Var data_var;
+    if (auto data_var_node = node->args[1].as<VarNode>()) {
+      data_var = Downcast<Var>(node->args[1]);
+    }
+    ICHECK(data_var.defined()) << "tvm_access_ptr second arg must be a var";
+    PrimExpr offset = node->args[2];
+
+    Optional<Buffer> buffer_opt;
+    Optional<Layout> layout_opt;
+
+    // Find the Buffer whose data pointer matches data_var by searching
+    // layout_map_. The layout_map_ maps Buffer -> Layout, so we iterate
+    // to find the buffer whose ->data field is the same Var.
+    if (layout_map_.defined()) {
+      for (auto [buf, layout] : layout_map_) {
+        if (buf->data.same_as(data_var)) {
+          buffer_opt = buf;
+          layout_opt = layout;
+          break;
+        }
+      }
+    }
+
+    // Base vector size from loop extent.
+    int access_vec_size = loop_extent_vector_size_;
+    // Constrain by dtype lane capacity (128/256-bit vector load/store width).
+    // This mirrors ComputeBufferVectorSize's dtype-based lower bound.
+    int dtype_bits = dtype.bits() * dtype.lanes();
+    if (dtype_bits > 0) {
+      int dtype_lane_bound = vector_load_bits_max_ / dtype_bits;
+      if (dtype_lane_bound <= 0) {
+        dtype_lane_bound = 1;
+      }
+      access_vec_size = arith::ZeroAwareGCD(access_vec_size, dtype_lane_bound);
+    }
+
+    // If the buffer has a layout, use the last output dimension as a proxy for
+    // the maximum contiguous vector length implied by the layout.
+    if (layout_opt.defined()) {
+      Array<PrimExpr> out_shape = layout_opt.value()->OutputShape();
+      if (!out_shape.empty()) {
+        PrimExpr contig = analyzer_->Simplify(out_shape.back());
+        if (auto contig_int = as_const_int(contig);
+            contig_int && *contig_int > 1) {
+          access_vec_size = arith::ZeroAwareGCD(access_vec_size, *contig_int);
+        }
+      }
+    }
+    // tvm_access_ptr itself is not vectorizable in TLVectorizer. If its offset
+    // depends on the vectorized loop var, TLVectorizer will force scalarization
+    // of the whole loop body. To avoid planning a vector size that will be
+    // immediately scalarized (and to keep semantics sane for side-effectful
+    // calls), require the offset to be invariant within the vector boundary.
+    PrimExpr offset_s = analyzer_->Simplify(offset);
+    while (access_vec_size > 1 &&
+           !IndicesCanVectorize(offset_s, inner_for_->loop_var,
+                                inner_for_->extent, access_vec_size,
+                                analyzer_)) {
+      access_vec_size /= 2;
+    }
+    // Record as a memory-like constraint if we can resolve the buffer.
+    buffer_vector_infos_.push_back(
+        {buffer_opt.value_or(Buffer()), access_vec_size, false, {}});
   }
 
   Array<PrimExpr> TransformIndices(const Array<PrimExpr> &indices,
@@ -658,13 +763,26 @@ private:
         vmap.Set(fnode->loop_var, outer_var * vector_size_ + inner_var);
         Stmt body = Substitute(fnode->body, vmap);
         body = For(inner_var, 0, vector_size_, ForKind::kVectorized, body);
-        body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
+        // TileLang uses ForKind::kParallel in frontend SIMT loops. After
+        // vectorization, keep semantics equivalent but downgrade to serial so
+        // subsequent passes (e.g. pragma-unroll) can run.
+        ForKind outer_kind = fnode->kind;
+        if (outer_kind == ForKind::kParallel) {
+          outer_kind = ForKind::kSerial;
+        }
+        body = For(outer_var, 0, extent / vector_size_, outer_kind, body,
                    fnode->thread_binding, fnode->annotations, fnode->step,
                    fnode->span);
         return body;
       }
     } else {
-      return ret;
+      // Keep other loops intact, except for TileLang frontend "parallel" loops
+      // which should behave as serial loops after lowering.
+      For loop = ret.as<For>().value();
+      if (loop->kind == ForKind::kParallel) {
+        loop.CopyOnWrite()->kind = ForKind::kSerial;
+      }
+      return loop;
     }
   }
 
@@ -780,6 +898,38 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
   }
 }
 
+namespace {
+
+/*!
+ * \brief Convert TIR parallel loops into serial loops.
+ *
+ * TileLang uses ForKind::kParallel in a few places as a frontend "SIMT loop"
+ * marker. When vectorize size resolves to 1 (i.e. no vectorization is applied),
+ * keeping these loops as kParallel can block later loop transforms that only
+ * apply to serial loops (e.g. pragma-unroll rewriting).
+ *
+ * This rewriter is intentionally conservative: it only downgrades kParallel to
+ * kSerial and leaves all other loop kinds untouched.
+ */
+class ParallelToSerialRewriter : public StmtExprMutator {
+private:
+  Stmt VisitStmt_(const ForNode *node) final {
+    Stmt visited = StmtExprMutator::VisitStmt_(node);
+    For loop = Downcast<For>(visited);
+    if (loop->kind == ForKind::kParallel) {
+      loop.CopyOnWrite()->kind = ForKind::kSerial;
+    }
+    return loop;
+  }
+};
+
+For ParallelToSerial(const For &loop) {
+  ParallelToSerialRewriter rewriter;
+  return Downcast<For>(rewriter(loop));
+}
+
+} // namespace
+
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map,
                   int vectorize_hint) {
   if (vectorize_hint <= 0) {
@@ -788,7 +938,7 @@ For VectorizeLoop(const For &loop, const LayoutMap &layout_map,
     vectorize_hint = planner.Plan(loop);
   }
   if (vectorize_hint == 1)
-    return loop;
+    return ParallelToSerial(loop);
   auto rewriter = VectorizeRewriter(vectorize_hint);
   return Downcast<For>(rewriter(loop));
 }
@@ -800,7 +950,7 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
     vectorize_hint = planner.Plan(loop);
   }
   if (vectorize_hint == 1)
-    return loop;
+    return ParallelToSerial(loop);
   auto rewriter = VectorizeRewriter(vectorize_hint);
   return Downcast<For>(rewriter(loop));
 }

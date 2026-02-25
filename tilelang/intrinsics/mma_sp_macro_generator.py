@@ -337,7 +337,7 @@ class SparseTensorCoreIntrinEmitter:
                         ".b16",
                         A_local_buf.data,
                         i * local_size_a,
-                        T.address_of(A_shared_buf_elem),
+                        T.access_ptr(A_shared_buf_elem, "r"),
                         get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
                     )
                 else:
@@ -470,7 +470,7 @@ class SparseTensorCoreIntrinEmitter:
                             ".b16",
                             B_local_buf.data,
                             i * local_size_b,
-                            T.address_of(B_shared_buf_elem),
+                            T.access_ptr(B_shared_buf_elem, "r"),
                             get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
                         )
 
@@ -481,7 +481,7 @@ class SparseTensorCoreIntrinEmitter:
                             ".b16",
                             B_local_buf.data,
                             i * local_size_b + lift(local_size_b) // 2,
-                            T.address_of(B_shared_buf_elem),
+                            T.access_ptr(B_shared_buf_elem, "r"),
                             get_ldmatrix_offset_b("B", tx, lift(local_size_b) // 2, stride, b_dtype, b_transposed),
                         )
                     else:
@@ -492,7 +492,7 @@ class SparseTensorCoreIntrinEmitter:
                             ".b16",
                             B_local_buf.data,
                             i * local_size_b,
-                            T.address_of(B_shared_buf_elem),
+                            T.access_ptr(B_shared_buf_elem, "r"),
                             get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
                         )
 

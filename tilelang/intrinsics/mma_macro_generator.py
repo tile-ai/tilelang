@@ -337,7 +337,7 @@ class TensorCoreIntrinEmitter:
                         ".b16",
                         A_local_buf.data,
                         i * local_size_a,
-                        T.address_of(A_shared_buf_elem),
+                        T.access_ptr(A_shared_buf_elem, "r"),
                         get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
                     )
                 else:
@@ -457,7 +457,7 @@ class TensorCoreIntrinEmitter:
                         ".b16",
                         B_local_buf.data,
                         i * local_size_b,
-                        T.address_of(B_shared_buf_elem),
+                        T.access_ptr(B_shared_buf_elem, "r"),
                         get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
                     )
 
@@ -930,11 +930,12 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         ".b16",
                         A_local_buf.data,
                         i * local_size_a,
-                        T.address_of(
+                        T.access_ptr(
                             A_shared_buf[
                                 warp_m * warp_row_tiles + i * micro_size_x,
                                 rk * chunk + ki * micro_size_k,
-                            ]
+                            ],
+                            "r",
                         ),
                         get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
                     )
@@ -961,7 +962,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         ".b16",
                         A_local_buf.data,
                         i * local_size_a,
-                        T.address_of(A_shared_elem),
+                        T.access_ptr(A_shared_elem, "r"),
                         get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
                     )
             elif transform_kind_a == TransformKind.IntraWarpTransform:
@@ -986,7 +987,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         ".b16",
                         A_local_buf.data,
                         i * local_size_a,
-                        T.address_of(A_shared_elem),
+                        T.access_ptr(A_shared_elem, "r"),
                         tx * local_size_a,
                     )
             elif transform_kind_a == TransformKind.LDMatrixTransform:
@@ -1045,7 +1046,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         ".b16",
                         B_local_buf.data,
                         j * local_size_b,
-                        T.address_of(B_shared_elem),
+                        T.access_ptr(B_shared_elem, "r"),
                         get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
                     )
             elif transform_kind_b == TransformKind.InterWarpTransform:
@@ -1070,7 +1071,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         ".b16",
                         B_local_buf.data,
                         j * local_size_b,
-                        T.address_of(B_shared_elem),
+                        T.access_ptr(B_shared_elem, "r"),
                         get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
                     )
             elif transform_kind_b == TransformKind.IntraWarpTransform:
@@ -1095,7 +1096,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         ".b16",
                         B_local_buf.data,
                         j * local_size_b,
-                        T.address_of(B_shared_elem),
+                        T.access_ptr(B_shared_elem, "r"),
                         tx * local_size_b,
                     )
             elif transform_kind_b == TransformKind.LDMatrixTransform:

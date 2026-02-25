@@ -208,6 +208,7 @@ class AutoTuner:
         skip_check: bool = False,
         manual_check_prog: Callable = None,
         cache_input_tensors: bool = False,
+        backend: Literal["event", "cupti", "cudagraph"] = "event",
     ):
         """Set profiling arguments for the auto-tuner.
 
@@ -224,7 +225,7 @@ class AutoTuner:
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
-
+            backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
         Returns:
             AutoTuner: Self for method chaining.
         """
@@ -248,6 +249,7 @@ class AutoTuner:
             warmup=warmup,
             rep=rep,
             timeout=timeout,
+            backend=backend,
         )
 
         # If a custom `supply_prog` is provided, the profiler's `supply_type` setting
@@ -388,6 +390,7 @@ class AutoTuner:
             rtol = profile_args.rtol
             atol = profile_args.atol
             max_mismatched_ratio = profile_args.max_mismatched_ratio
+            backend = profile_args.backend
 
             profiler = jit_kernel.get_profiler(tensor_supply_type=supply_type)
 
@@ -448,11 +451,17 @@ class AutoTuner:
                     profiler.assert_allclose(
                         ref_prog, input_tensors=self.jit_input_tensors, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
                     )
-            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors)
+            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors, backend=backend)
 
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = ref_input_tensors_supply()
-                self.ref_latency_cache = profiler.do_bench(ref_prog, n_warmup=warmup, n_repeat=rep, input_tensors=self.ref_input_tensors)
+                self.ref_latency_cache = profiler.do_bench(
+                    ref_prog,
+                    n_warmup=warmup,
+                    n_repeat=rep,
+                    input_tensors=self.ref_input_tensors,
+                    backend=backend,
+                )
 
             return latency, self.ref_latency_cache
 
