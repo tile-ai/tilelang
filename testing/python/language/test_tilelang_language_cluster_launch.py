@@ -1,6 +1,5 @@
 import tilelang
 import tilelang.language as T
-import torch
 import tilelang.testing
 
 
@@ -30,7 +29,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
 def run_cython_cluster_launch():
     kernel = matmul(1024, 1024, 1024, 128, 128, 32)
     mod = tilelang.compile(kernel, execution_backend="cython")
-    assert 'clusterDim = {2, 1, 1}' in mod.get_host_source()
+    assert "clusterDim = {2, 1, 1}" in mod.get_host_source()
 
 
 def run_tvm_ffi_cluster_launch():
@@ -48,7 +47,7 @@ def run_tvm_ffi_cluster_launch():
   (((TVMFFIAny*)stack_ffi_any)[5].v_int64) = ((int64_t)1);
 """
     assert check_str in mod.get_host_source()
-    
+
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
