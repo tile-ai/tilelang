@@ -215,7 +215,7 @@ def assert_tl_matmul_correctness(
     if in_dtype == T.int8:
         A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
-    elif "float8" in str(in_dtype): # for T.float8_e4m3fnuz in gfx942 and T.float8_e4m3fn in gfx950
+    elif "float8" in str(in_dtype):  # for T.float8_e4m3fnuz in gfx942 and T.float8_e4m3fn in gfx950
         A = torch.rand(A_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
         B = torch.rand(B_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
     else:
