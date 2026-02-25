@@ -24,6 +24,65 @@ using namespace tir;
 using ffi::Array;
 using ffi::Map;
 
+// Barrier manager for create_list_of_mbarrier and get_mbarrier
+class BarrierManager {
+public:
+  BarrierManager() : next_barrier_id_(0) {}
+
+  // Add a barrier with arrive_count, returns barrier_id
+  int AddBarrier(PrimExpr arrive_count) {
+    int barrier_id = next_barrier_id_++;
+    barrier_arrive_counts_.push_back(arrive_count);
+    return barrier_id;
+  }
+
+  // Get barrier_id for a specific barrier (by index)
+  int GetBarrierId(int index) const { return index; }
+
+  // Get arrive_count for a barrier_id
+  PrimExpr GetArriveCount(int barrier_id) const {
+    if (barrier_id >= 0 &&
+        static_cast<size_t>(barrier_id) < barrier_arrive_counts_.size()) {
+      return barrier_arrive_counts_[barrier_id];
+    }
+    return IntImm(DataType::Int(32), 0);
+  }
+
+  // Get all arrive counts for create_list_of_mbarrier
+  Array<PrimExpr> GetAllArriveCounts() const { return barrier_arrive_counts_; }
+
+  // Check if we have any barriers
+  bool HasBarriers() const { return !barrier_arrive_counts_.empty(); }
+
+  // Create the create_list_of_mbarrier statement
+  Stmt CreateListOfMBarrier() const {
+    if (barrier_arrive_counts_.empty()) {
+      return Evaluate(0);
+    }
+    return Evaluate(Call(DataType::Handle(), tl::create_list_of_mbarrier(),
+                         barrier_arrive_counts_));
+  }
+
+  // Create get_mbarrier expression
+  PrimExpr GetMBarrier(int barrier_id) const {
+    return Call(DataType::Handle(), tl::get_mbarrier(),
+                {IntImm(DataType::Int(32), barrier_id)});
+  }
+
+  // Convert to barrier_map for annotations
+  Map<ObjectRef, ObjectRef> ToBarrierMap() const {
+    Map<ObjectRef, ObjectRef> barrier_map;
+    for (size_t i = 0; i < barrier_arrive_counts_.size(); ++i) {
+      barrier_map.Set(IntImm(DataType::Int(32), i), barrier_arrive_counts_[i]);
+    }
+    return barrier_map;
+  }
+
+private:
+  int next_barrier_id_;
+  Array<PrimExpr> barrier_arrive_counts_;
+};
+
 bool IsEvaluateZero(const tvm::tir::Stmt &stmt) {
   if (const EvaluateNode *eval_node = stmt.as<EvaluateNode>()) {
     if (is_const_int(eval_node->value, 0)) {
@@ -127,26 +186,19 @@ struct LoopNestingInfo {
 
 // Barrier synchronization helper functions
 static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
-                                         std::vector<Buffer> &barrier_buffers,
-                                         Map<ObjectRef, ObjectRef> &barrier_map,
+                                         BarrierManager &barrier_manager,
                                          PrimExpr thread_count[2]);
 // Barrier dependency analysis functions
 static void AnalyzeAndInsertBarriers(tl::IRStructure *node,
-                                     int &next_barrier_id,
-                                     std::vector<Buffer> &barrier_buffers,
-                                     Map<ObjectRef, ObjectRef> &barrier_map,
+                                     BarrierManager &barrier_manager,
                                      PrimExpr thread_count[2],
                                      tl::LoopNestingInfo &loop_info);
 static void AnalyzeSequenceNodeBarriers(tl::SequenceNode *seq,
-                                        int &next_barrier_id,
-                                        std::vector<Buffer> &barrier_buffers,
-                                        Map<ObjectRef, ObjectRef> &barrier_map,
+                                        BarrierManager &barrier_manager,
                                         PrimExpr thread_count[2],
                                         tl::LoopNestingInfo &loop_info);
 static void AnalyzeControlNodeBarriers(tl::ControlNode *ctrl,
-                                       int &next_barrier_id,
-                                       std::vector<Buffer> &barrier_buffers,
-                                       Map<ObjectRef, ObjectRef> &barrier_map,
+                                       BarrierManager &barrier_manager,
                                        PrimExpr thread_count[2],
                                        tl::LoopNestingInfo &loop_info);
 
@@ -178,54 +230,52 @@ static Stmt makeBarrierWait(PrimExpr barrier_expr, PrimExpr parity) {
 // Create a barrier allocation statement with arrive_count
 // Equivalent to T.alloc_barrier(arrive_count) in Python
 
-// Create a barrier buffer allocation and return the Buffer object along with
-// allocation statement Equivalent to Python: barrier =
-// T.alloc_buffer((arrive_count,), "uint64", scope="shared.barrier")
-static Buffer makeBarrierBuffer(PrimExpr arrive_count, const std::string &name,
-                                Map<ObjectRef, ObjectRef> &barrier_map) {
-  // Create buffer shape: (arrive_count,)
-  Array<PrimExpr> shape = {1};
+// Create a barrier using create_list_of_mbarrier and get_mbarrier
+// Equivalent to Python: T.create_list_of_mbarrier(arrive_counts...)
+// and T.get_mbarrier(barrier_id)
+static int AddBarrierToManager(BarrierManager &barrier_manager,
+                               PrimExpr arrive_count) {
+  return barrier_manager.AddBarrier(arrive_count);
+}
 
-  // Create buffer data type: uint64
-  DataType dtype = DataType::UInt(64);
-  Type ptr_type = PointerType(PrimType(dtype), "shared.barrier");
-  Var handle(name, ptr_type);
-  barrier_map.Set(handle, Array<ObjectRef>{arrive_count});
+// Get mbarrier expression by barrier_id
+static PrimExpr GetMBarrierExpr(const BarrierManager &barrier_manager,
+                                int barrier_id) {
+  return barrier_manager.GetMBarrier(barrier_id);
+}
 
-  // Create buffer
-  Buffer buffer =
-      Buffer(handle, dtype, shape, {}, PrimExpr(), name, 0, 0, kDefault);
+// Create the create_list_of_mbarrier statement
+static Stmt CreateListOfMBarrierStmt(const BarrierManager &barrier_manager) {
+  return barrier_manager.CreateListOfMBarrier();
+}
 
-  return buffer;
+// Convert barrier manager to barrier_map for annotations
+static Map<ObjectRef, ObjectRef>
+BarrierManagerToMap(const BarrierManager &barrier_manager) {
+  return barrier_manager.ToBarrierMap();
 }
 
 // Insert barriers between neutral tasks and warpgroup-specific work
 // This ensures neutral tasks complete before any warpgroup-specific work begins
 static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
-                                         std::vector<Buffer> &barrier_buffers,
-                                         Map<ObjectRef, ObjectRef> &barrier_map,
+                                         BarrierManager &barrier_manager,
                                          PrimExpr thread_count[2]) {
   // If either body is empty, no barriers needed
   if (IsEvaluateZero(neutral_body) || IsEvaluateZero(warpgroup_body)) {
     return SeqStmt({neutral_body, warpgroup_body});
   }
 
-  // Allocate barrier buffer for neutral-to-warpgroup synchronization
-  // Equivalent to Python: barrier = T.alloc_buffer((thread_count*2,), "uint64",
-  // scope="shared.barrier") Using arrive_count = thread_count * 2 (number of
-  // threads * 2 for neutral-to-warpgroup synchronization)
+  // Create barrier for neutral-to-warpgroup synchronization
+  // Using arrive_count = thread_count[0] + thread_count[1] (number of threads
+  // for neutral-to-warpgroup synchronization)
   PrimExpr arrive_count = thread_count[0] + thread_count[1];
-  Buffer barrier_buffer =
-      makeBarrierBuffer(arrive_count, "neutral_warpgroup_barrier", barrier_map);
-  barrier_buffers.push_back(barrier_buffer);
+  int barrier_id = AddBarrierToManager(barrier_manager, arrive_count);
+  PrimExpr barrier_expr = GetMBarrierExpr(barrier_manager, barrier_id);
 
-  // Create BufferLoad expression for barrier[0]
-  PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
-
-  // Use barrier buffer for neutral-to-warpgroup synchronization
+  // Use barrier for neutral-to-warpgroup synchronization
   // Parity 0 for wait, parity 1 for arrive (simplified)
-  Stmt arrive_barrier = makeBarrierArrive(barrier_load);
-  Stmt wait_barrier = makeBarrierWait(barrier_load, 0);
+  Stmt arrive_barrier = makeBarrierArrive(barrier_expr);
+  Stmt wait_barrier = makeBarrierWait(barrier_expr, 0);
 
   // Combine: neutral_body -> arrive_barrier -> wait_barrier -> warpgroup_body
   std::vector<Stmt> stmts;
@@ -262,9 +312,8 @@ static void InsertStatementIntoScheduleUnit(ScheduleUnit *task,
 }
 
 // Barrier dependency analysis implementation
-static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
-                                     std::vector<Buffer> &barrier_buffers,
-                                     Map<ObjectRef, ObjectRef> &barrier_map,
+static void AnalyzeAndInsertBarriers(IRStructure *node,
+                                     BarrierManager &barrier_manager,
                                      PrimExpr thread_count[2],
                                      LoopNestingInfo &loop_info) {
   if (!node)
@@ -272,17 +321,14 @@ static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
 
   if (node->IsSequence()) {
     AnalyzeSequenceNodeBarriers(static_cast<SequenceNode *>(node),
-                                next_barrier_id, barrier_buffers, barrier_map,
-                                thread_count, loop_info);
+                                barrier_manager, thread_count, loop_info);
   } else if (node->IsControl()) {
     AnalyzeControlNodeBarriers(static_cast<ControlNode *>(node),
-                               next_barrier_id, barrier_buffers, barrier_map,
-                               thread_count, loop_info);
+                               barrier_manager, thread_count, loop_info);
   } else if (node->IsWrapper()) {
     auto wrapper = static_cast<WrapperNode *>(node);
-    AnalyzeAndInsertBarriers(wrapper->child.get(), next_barrier_id,
-                             barrier_buffers, barrier_map, thread_count,
-                             loop_info);
+    AnalyzeAndInsertBarriers(wrapper->child.get(), barrier_manager,
+                             thread_count, loop_info);
   } else if (node->IsTask()) {
     // For TaskNode, nothing to do at this level
   } else {
@@ -290,9 +336,8 @@ static void AnalyzeAndInsertBarriers(IRStructure *node, int &next_barrier_id,
   }
 }
 
-static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
-                                        std::vector<Buffer> &barrier_buffers,
-                                        Map<ObjectRef, ObjectRef> &barrier_map,
+static void AnalyzeSequenceNodeBarriers(SequenceNode *seq,
+                                        BarrierManager &barrier_manager,
                                         PrimExpr thread_count[2],
                                         LoopNestingInfo &loop_info) {
   if (!seq)
@@ -308,7 +353,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
   std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                      ObjectPtrEqual>
       last_wgmma_map[2];
-  std::unordered_map<ScheduleUnit *, Buffer> barrier_unit_map;
+  std::unordered_map<ScheduleUnit *, int> barrier_unit_map;
   int wait_wgmma_id[2] = {}, total_wgmma[2] = {};
 
   // Process tasks in sequence order
@@ -316,8 +361,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
     auto task = static_cast<ScheduleUnit *>(promote_child.get());
     if (task->child->IsSequence() || task->child->IsControl()) {
       // If child is SequenceNode or ControlNode, recursively analyze it
-      AnalyzeAndInsertBarriers(task->child.get(), next_barrier_id,
-                               barrier_buffers, barrier_map, thread_count,
+      AnalyzeAndInsertBarriers(task->child.get(), barrier_manager, thread_count,
                                loop_info);
     }
 
@@ -380,28 +424,24 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
         if (need_barrier) {
           if (barrier_unit_map.find(last_access_task) ==
               barrier_unit_map.end()) {
-            // Allocate a new barrier ID and buffer
-            int barrier_id = next_barrier_id++;
-            Buffer barrier_buffer = makeBarrierBuffer(
-                thread_count[last_wg_id],
-                "barrier_" + std::to_string(barrier_id), barrier_map);
-            barrier_unit_map[last_access_task] = barrier_buffer;
-            // Collect the barrier buffer to be added to tilelang_root block's
-            // alloc_buffers
-            barrier_buffers.push_back(barrier_buffer);
-            // Create BufferLoad expression for barrier[0]
-            PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
+            // Allocate a new barrier using BarrierManager
+            int barrier_id =
+                AddBarrierToManager(barrier_manager, thread_count[last_wg_id]);
+            barrier_unit_map[last_access_task] = barrier_id;
+            // Create get_mbarrier expression
+            PrimExpr barrier_expr =
+                GetMBarrierExpr(barrier_manager, barrier_id);
             // Insert barrier_arrive at the end of last_access_task's statements
-            Stmt arrive_stmt = makeBarrierArrive(barrier_load);
+            Stmt arrive_stmt = makeBarrierArrive(barrier_expr);
             InsertStatementIntoScheduleUnit(last_access_task, arrive_stmt,
                                             false, last_wg_id);
           }
-          PrimExpr barrier_load =
-              BufferLoad(barrier_unit_map[last_access_task], {0});
+          int barrier_id = barrier_unit_map[last_access_task];
+          PrimExpr barrier_expr = GetMBarrierExpr(barrier_manager, barrier_id);
 
           // Insert barrier_wait at the beginning of task's statements
           Stmt wait_stmt =
-              makeBarrierWait(barrier_load,
+              makeBarrierWait(barrier_expr,
                               0); // parity = 0 for non-loop barriers
           InsertStatementIntoScheduleUnit(task, wait_stmt, true, wg_id);
           // Remove from map (as per user instruction)
@@ -456,9 +496,8 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
   }
 }
 
-static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
-                                       std::vector<Buffer> &barrier_buffers,
-                                       Map<ObjectRef, ObjectRef> &barrier_map,
+static void AnalyzeControlNodeBarriers(ControlNode *ctrl,
+                                       BarrierManager &barrier_manager,
                                        PrimExpr thread_count[2],
                                        LoopNestingInfo &loop_info) {
   if (!ctrl || !ctrl->child)
@@ -498,9 +537,8 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
       auto task = static_cast<ScheduleUnit *>(child.get());
       if (task->child->IsSequence() || task->child->IsControl()) {
         // If child is SequenceNode or ControlNode, recursively analyze it
-        AnalyzeAndInsertBarriers(task->child.get(), next_barrier_id,
-                                 barrier_buffers, barrier_map, thread_count,
-                                 loop_info);
+        AnalyzeAndInsertBarriers(task->child.get(), barrier_manager,
+                                 thread_count, loop_info);
       }
       all_tasks.push_back(task);
     }
@@ -535,7 +573,7 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
     std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                        ObjectPtrEqual>
         last_wgmma_map[2];
-    std::unordered_map<ScheduleUnit *, Buffer> barrier_unit_map;
+    std::unordered_map<ScheduleUnit *, int> barrier_unit_map;
     int wait_wgmma_id[2] = {}, total_wgmma[2] = {};
 
     // Process tasks in the specified order
@@ -632,31 +670,25 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
 
               if (barrier_unit_map.find(last_access_task) ==
                   barrier_unit_map.end()) {
-                // Allocate a new barrier ID and buffer
-                int barrier_id = next_barrier_id++;
-                Buffer barrier_buffer = makeBarrierBuffer(
-                    thread_count[last_wg_id],
-                    "barrier_" + std::to_string(barrier_id), barrier_map);
-                barrier_unit_map[last_access_task] = barrier_buffer;
-
-                // Collect the barrier buffer to be added to tilelang_root
-                // block's alloc_buffers
-                barrier_buffers.push_back(barrier_buffer);
-
-                // Create BufferLoad expression for barrier[0]
-                PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
-
+                // Allocate a new barrier using BarrierManager
+                int barrier_id = AddBarrierToManager(barrier_manager,
+                                                     thread_count[last_wg_id]);
+                barrier_unit_map[last_access_task] = barrier_id;
+                // Create get_mbarrier expression
+                PrimExpr barrier_expr =
+                    GetMBarrierExpr(barrier_manager, barrier_id);
                 // Insert barrier_arrive at the end of last_access_task's
                 // statements
-                Stmt arrive_stmt = makeBarrierArrive(barrier_load);
+                Stmt arrive_stmt = makeBarrierArrive(barrier_expr);
                 InsertStatementIntoScheduleUnit(last_access_task, arrive_stmt,
                                                 false, last_wg_id);
               }
-              PrimExpr barrier_load =
-                  BufferLoad(barrier_unit_map[last_access_task], {0});
+              int barrier_id = barrier_unit_map[last_access_task];
+              PrimExpr barrier_expr =
+                  GetMBarrierExpr(barrier_manager, barrier_id);
 
               // Insert barrier_wait at the beginning of task's statements
-              Stmt wait_stmt = makeBarrierWait(barrier_load, parity_expr);
+              Stmt wait_stmt = makeBarrierWait(barrier_expr, parity_expr);
               if (iter == 1) {
                 // Check if at least one loop is not at its start iteration
                 // (not the first iteration of all nested loops)
@@ -722,8 +754,7 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
       }
     }
   } else {
-    AnalyzeAndInsertBarriers(ctrl->child.get(), next_barrier_id,
-                             barrier_buffers, barrier_map, thread_count,
+    AnalyzeAndInsertBarriers(ctrl->child.get(), barrier_manager, thread_count,
                              loop_info);
   }
 
