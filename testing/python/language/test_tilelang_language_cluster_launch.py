@@ -1,6 +1,7 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+import torch
 
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
@@ -24,6 +25,23 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return gemm
+
+
+@tilelang.jit(out_idx=-1)
+def get_cta_rank_in_cluster(cluster_size=4):
+    assert 128 % cluster_size == 0
+
+    @T.prim_func
+    def main(A: T.Tensor((128), T.int32)):
+        with T.Kernel(128, cluster_dims=(cluster_size, 1, 1)) as bx:
+            T.cluster_arrive()
+            T.cluster_wait()
+            cta_rank_in_cluster = T.block_rank_in_cluster()
+            if T.get_thread_binding() == 0:
+                A[bx] = cta_rank_in_cluster
+            T.cluster_sync()
+
+    return main
 
 
 def run_cython_cluster_launch():
@@ -56,5 +74,15 @@ def test_cluster_launch():
     run_tvm_ffi_cluster_launch()
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_cluster_launch_intrinsics(cluster_size=4):
+    kernel = get_cta_rank_in_cluster(cluster_size)
+    result = kernel()
+    ref = torch.arange(128, dtype=torch.int32, device="cuda") % cluster_size
+    assert torch.all(result == ref)
+
+
 if __name__ == "__main__":
     test_cluster_launch()
+    test_cluster_launch_intrinsics()
