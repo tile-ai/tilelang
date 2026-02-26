@@ -280,6 +280,18 @@ def tma_load(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args)
 
 
+def tma_load_2sm(*args):
+    """Perform a Tensor Memory Access (TMA) load operation with 2SM on Blackwell.
+
+    Args:
+        *args: Variable arguments specifying the TMA load parameters
+
+    Returns:
+        tir.Call: A handle to the TMA load operation
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args, annotations={"use_2cta": 1})
+
+
 def fence_proxy_async(*args):
     """Create a fence for asynchronous proxy operations.
 
