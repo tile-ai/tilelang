@@ -106,6 +106,4 @@ def test_cluster_barrier():
 
 
 if __name__ == "__main__":
-    # test_cluster_launch()
-    # test_cluster_launch_intrinsics()
-    test_cluster_barrier()
+    tilelang.testing.main()
