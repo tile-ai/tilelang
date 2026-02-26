@@ -1280,7 +1280,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
     if (alloc_storage_scope_.count(buffer_var.get())) {
       scope = alloc_storage_scope_.at(buffer_var.get());
     }
-    if (ref.back() == ')' && scope != "shared.barrier" && scope != "shared.cluster_barrier") {
+    if (ref.back() == ')' && scope != "shared.barrier" &&
+        scope != "shared.cluster_barrier") {
       ref += ".load()";
     }
     os << ref;
@@ -2114,8 +2115,9 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
       effective_dtype = DataType::UInt(8);
     }
   }
-  // shared.barrier and shared.cluster_barrier are allocated via tl.alloc_smem() which returns _Pointer
-  // (not _Tensor), so it doesn't have .iterator — use vid directly.
+  // shared.barrier and shared.cluster_barrier are allocated via tl.alloc_smem()
+  // which returns _Pointer (not _Tensor), so it doesn't have .iterator — use
+  // vid directly.
   std::string scope;
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
@@ -2211,9 +2213,10 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
 
   if (t == buffer_element_dtype) {
     if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
-      // shared.barrier and shared.cluster_barrier are allocated via tl.alloc_smem() which returns _Pointer.
-      // _Pointer does not support subscript access [i], but supports pointer
-      // arithmetic (ptr + i). Use pointer addition instead of subscript.
+      // shared.barrier and shared.cluster_barrier are allocated via
+      // tl.alloc_smem() which returns _Pointer. _Pointer does not support
+      // subscript access [i], but supports pointer arithmetic (ptr + i). Use
+      // pointer addition instead of subscript.
       return "(" + vid + " + " + index_str + ")";
     } else if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
                (scope == "local" || scope == "shared")) {

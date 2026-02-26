@@ -270,7 +270,6 @@ TVM_DLL const Op &tma_store();
  */
 const Op &ptx_fence_barrier_init();
 
-
 /*
  * \brief tvm intrinsics for cluster barrier arrive
  *
