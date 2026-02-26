@@ -166,37 +166,39 @@ TL_DEVICE fp4_e2_32_t make_fp4_e2_32_t(
 // ============================================================================
 // https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__FP4__MISC.html
 
-
 // Custom fp4_e2m1 -> half convertion for CUDA version < 13.1
 __device__ __half_raw
 __tl_cvt_fp4_to_halfraw(const __nv_fp4_storage_t x,
                         const __nv_fp4_interpretation_t fp4_interpretation) {
-    __half_raw res;
-    res.x = 0U;
-    // fp4_interpretation == __NV_E2M1
-    // convert to e2m3 first
-    __nv_fp6_storage_t fp6e2m3 = (x & 0xFU) << 2U;
-    res = __nv_cvt_fp6_to_halfraw(fp6e2m3, __NV_E2M3);
-    return res;
+  __half_raw res;
+  res.x = 0U;
+  // fp4_interpretation == __NV_E2M1
+  // convert to e2m3 first
+  __nv_fp6_storage_t fp6e2m3 = (x & 0xFU) << 2U;
+  res = __nv_cvt_fp6_to_halfraw(fp6e2m3, __NV_E2M3);
+  return res;
 }
 
 // Custom fp4_e2m1x2 -> half2 convertion for CUDA version < 13.1
 __device__ __half2_raw
 __tl_cvt_fp4x2_to_halfraw2(const __nv_fp4x2_storage_t x,
                            const __nv_fp4_interpretation_t fp4_interpretation) {
-    __half2_raw res;
-    res.x = __tl_cvt_fp4_to_halfraw((__nv_fp4_storage_t)x, fp4_interpretation).x;
-    res.y = __tl_cvt_fp4_to_halfraw((__nv_fp4_storage_t)(x >> 4U), fp4_interpretation).x;
-    return res;
+  __half2_raw res;
+  res.x = __tl_cvt_fp4_to_halfraw((__nv_fp4_storage_t)x, fp4_interpretation).x;
+  res.y =
+      __tl_cvt_fp4_to_halfraw((__nv_fp4_storage_t)(x >> 4U), fp4_interpretation)
+          .x;
+  return res;
 }
 
 // fp4_e2m1 -> half
-TL_DEVICE __half __tl_cvt_fp4_to_half(const __nv_fp4_storage_t src) {  
-  #if __CUDACC_VER_MAJOR__ > 13 or (__CUDACC_VER_MAJOR__ == 13 and __CUDACC_VER_MINOR__ > 0) 
-    __half_raw raw = __nv_cvt_fp4_to_halfraw(src, __NV_E2M1);
-  #else
-    __half_raw raw = __tl_cvt_fp4_to_halfraw(src, __NV_E2M1);
-  #endif
+TL_DEVICE __half __tl_cvt_fp4_to_half(const __nv_fp4_storage_t src) {
+#if __CUDACC_VER_MAJOR__ > 13 or                                               \
+    (__CUDACC_VER_MAJOR__ == 13 and __CUDACC_VER_MINOR__ > 0)
+  __half_raw raw = __nv_cvt_fp4_to_halfraw(src, __NV_E2M1);
+#else
+  __half_raw raw = __tl_cvt_fp4_to_halfraw(src, __NV_E2M1);
+#endif
   __half result;
   result = *reinterpret_cast<__half *>(&raw);
   return result;
@@ -204,11 +206,12 @@ TL_DEVICE __half __tl_cvt_fp4_to_half(const __nv_fp4_storage_t src) {
 
 // fp4_e2m1x2 (1 byte) -> half2
 TL_DEVICE half2 __tl_cvt_fp4x2_to_half2(const __nv_fp4x2_storage_t src) {
-  #if __CUDACC_VER_MAJOR__ > 13 or (__CUDACC_VER_MAJOR__ == 13 and __CUDACC_VER_MINOR__ > 0)
-    __half2_raw raw = __nv_cvt_fp4x2_to_halfraw2(src, __NV_E2M1);
-  #else
-    __half2_raw raw = __tl_cvt_fp4x2_to_halfraw2(src, __NV_E2M1);
-  #endif
+#if __CUDACC_VER_MAJOR__ > 13 or                                               \
+    (__CUDACC_VER_MAJOR__ == 13 and __CUDACC_VER_MINOR__ > 0)
+  __half2_raw raw = __nv_cvt_fp4x2_to_halfraw2(src, __NV_E2M1);
+#else
+  __half2_raw raw = __tl_cvt_fp4x2_to_halfraw2(src, __NV_E2M1);
+#endif
   half2 result;
   result = *reinterpret_cast<half2 *>(&raw);
   return result;
