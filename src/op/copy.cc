@@ -311,6 +311,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
 
   // Handle tensor memory (tmem) layout inference for both load and store
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
+    // TODO (mzw) Add support for tcgen05.cp (in conj. with LowerTmemCopy)
     LayoutMap results;
     bool is_tmem_load = (copy_inst == CopyInst::kTMemLoad);
     Buffer tmem_buf = is_tmem_load ? src : dst;
