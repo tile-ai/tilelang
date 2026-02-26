@@ -57,7 +57,8 @@ private:
       if (!ptr_type)
         continue;
       auto storage_scope = ptr_type->storage_scope;
-      if (storage_scope == "shared.barrier") {
+      if (storage_scope == "shared.barrier" || 
+          storage_scope == "shared.cluster_barrier") {
         barrier_buffers.push_back(buffer);
       }
     }

@@ -270,6 +270,15 @@ TVM_DLL const Op &tma_store();
  */
 const Op &ptx_fence_barrier_init();
 
+
+/*
+ * \brief tvm intrinsics for cluster barrier arrive
+ *
+ * ptx_arrive_cluster_barrier(mbarrier, cta_id)
+ *
+ */
+TVM_DLL const Op &ptx_arrive_cluster_barrier();
+
 /*!
  * \brief tvm intrinsics for mbarrier wait with parity bit
  *

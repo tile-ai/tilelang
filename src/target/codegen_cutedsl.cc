@@ -442,21 +442,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string barrier_id = PrintExpr_(op->args[0]);
     os << "(" << mbarrier_name_ << "+" << barrier_id << ")";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
-    if (op->args.size() == 1) {
-      PrintIndent();
-      auto mbarrier_obj = PrintExpr_(op->args[0]);
-      stream << "tl.mbarrier_arrive(" << mbarrier_obj << ")\n";
-    } else if (op->args.size() == 3) {
-      PrintIndent();
-      auto mbarrier_obj = PrintExpr_(op->args[0]);
-      auto cta_id = PrintExpr_(op->args[1]);
-      auto pred = PrintExpr_(op->args[2]);
-      stream << "tl.mbarrier_arrive(" << mbarrier_obj << ", " << cta_id << ", "
-             << pred << ")\n";
-    } else {
-      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier "
-                 << op->args.size();
-    }
+    ICHECK_EQ(op->args.size(), 1);
+    PrintIndent();
+    auto mbarrier_obj = PrintExpr_(op->args[0]);
+    stream << "tl.mbarrier_arrive(" << mbarrier_obj << ")\n";
+  } else if (op->op.same_as(tl::ptx_arrive_cluster_barrier())) {
+    ICHECK_EQ(op->args.size(), 2);
+    PrintIndent();
+    auto mbarrier_obj = PrintExpr_(op->args[0]);
+    auto cta_id = PrintExpr_(op->args[1]);
+    stream << "tl.mbarrier_arrive(" << mbarrier_obj << ", " << cta_id << ")\n";
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintIndent();
@@ -1285,7 +1280,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
     if (alloc_storage_scope_.count(buffer_var.get())) {
       scope = alloc_storage_scope_.at(buffer_var.get());
     }
-    if (ref.back() == ')' && scope != "shared.barrier") {
+    if (ref.back() == ')' && scope != "shared.barrier" && scope != "shared.cluster_barrier") {
       ref += ".load()";
     }
     os << ref;
@@ -1629,7 +1624,7 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocateNode *op) {
       stream << vid << " = tl.make_tensor(tl.alloc_smem(";
       PrintType(op->dtype, stream);
       stream << ", " << constant_size << "), (" << constant_size << ",))\n";
-    } else if (scope == "shared.barrier") {
+    } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
       stream << vid << " = tl.alloc_smem(cutlass.Uint64, size_in_elems="
              << constant_size << ")\n";
     } else if (scope == "local") {
@@ -2119,7 +2114,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
       effective_dtype = DataType::UInt(8);
     }
   }
-  // shared.barrier is allocated via tl.alloc_smem() which returns _Pointer
+  // shared.barrier and shared.cluster_barrier are allocated via tl.alloc_smem() which returns _Pointer
   // (not _Tensor), so it doesn't have .iterator — use vid directly.
   std::string scope;
   if (alloc_storage_scope_.count(buffer_var)) {
@@ -2129,7 +2124,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
     scope = GetPtrStorageScope(buffer->data);
 
   std::string ptr_str;
-  if (scope == "shared.barrier") {
+  if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
     ptr_str = vid;
   } else {
     bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
@@ -2215,8 +2210,8 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   const std::string index_str = PrintExpr_(offset_expr);
 
   if (t == buffer_element_dtype) {
-    if (scope == "shared.barrier") {
-      // shared.barrier is allocated via tl.alloc_smem() which returns _Pointer.
+    if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
+      // shared.barrier and shared.cluster_barrier are allocated via tl.alloc_smem() which returns _Pointer.
       // _Pointer does not support subscript access [i], but supports pointer
       // arithmetic (ptr + i). Use pointer addition instead of subscript.
       return "(" + vid + " + " + index_str + ")";

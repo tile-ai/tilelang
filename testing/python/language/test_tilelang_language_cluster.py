@@ -44,6 +44,21 @@ def get_cta_rank_in_cluster(cluster_size=4):
     return main
 
 
+@tilelang.jit(out_idx=-1)
+def barrier_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((128), T.int32)):
+        with T.Kernel(128, threads=128, cluster_dims=(4, 1, 1)) as bx:
+            mbar = T.alloc_cluster_barrier([256])
+            T.cluster_sync()
+            T.mbarrier_arrive(mbar, 0)
+            if T.block_rank_in_cluster() == 0:
+                T.mbarrier_wait_parity(mbar, 0)
+            T.cluster_sync()
+
+    return main
+
+
 def run_cython_cluster_launch():
     kernel = matmul(1024, 1024, 1024, 128, 128, 32)
     mod = tilelang.compile(kernel, execution_backend="cython")
@@ -83,6 +98,14 @@ def test_cluster_launch_intrinsics(cluster_size=4):
     assert torch.all(result == ref)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_cluster_barrier():
+    kernel = barrier_kernel()
+    kernel()
+
+
 if __name__ == "__main__":
-    test_cluster_launch()
-    test_cluster_launch_intrinsics()
+    # test_cluster_launch()
+    # test_cluster_launch_intrinsics()
+    test_cluster_barrier()
