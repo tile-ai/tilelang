@@ -1038,7 +1038,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     } else if (op->op.same_as(builtin::tvm_storage_sync())) {
       ICHECK(allow_append_);
       const std::string &s = op->args[0].as<StringImmNode>()->value;
-      if (s != "warp") {
+      if (s != "warp" && s != "cluster") {
         StorageScope scope = StorageScope::Create(s);
         AccessEntry e{.cset = {constr_stack_}};
         e.threads = env_threads();

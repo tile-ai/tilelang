@@ -54,6 +54,7 @@ public:
           return Stmt();
         }
       } else if (call->op.same_as(builtin::ptx_arrive_barrier()) ||
+                 call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
                  call->op.same_as(builtin::ptx_wait_barrier())) {
         in_mbarrier_region_ = true;
       }

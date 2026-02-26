@@ -1100,6 +1100,10 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
     }
+  } else if (sync == "cluster") {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_sync();\n";
   } else if (sync == "global") {
     if (!need_global_barrier_) {
       need_global_barrier_ = true;
