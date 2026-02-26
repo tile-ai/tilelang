@@ -1439,7 +1439,12 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     if (!is_load)
       args.push_back(need_reduce);
     args.push_back(GetEvictionPolicy());
-    tma_copy = Evaluate(Call(DataType::Handle(), op, args));
+    Map<String, ObjectRef> ann;
+    if (TargetIsSm100(T.target) && is_load &&
+        annotations.find("use_2cta") != annotations.end()) {
+      ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+    }
+    tma_copy = Evaluate(Call(DataType::Handle(), op, args, ann));
   }
 
   // Bulk TMA stores participate in the cp.async.bulk group mechanism, so we
