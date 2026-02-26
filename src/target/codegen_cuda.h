@@ -130,6 +130,8 @@ private:
   bool need_cooperative_groups_{false};
   // whether need curand_kernel.h
   bool need_curand_kernel_h_{false};
+  // whether need cluster.h
+  bool need_cluster_h_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");

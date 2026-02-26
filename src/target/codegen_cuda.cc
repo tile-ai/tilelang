@@ -479,6 +479,10 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <cooperative_groups.h>\n";
   }
 
+  if (need_cluster_h_) {
+    decl_stream << "#include <tl_templates/cuda/cluster.h>\n";
+  }
+
   if (need_curand_kernel_h_) {
     decl_stream << "#include <curand_kernel.h>\n";
   }
@@ -1988,6 +1992,25 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pdl_sync())) {
     this->PrintIndent();
     this->stream << "cudaGridDependencySynchronize();\n";
+  } else if (op->op.same_as(tl::cluster_arrive_relaxed())) {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_arrive_relaxed();\n";
+  } else if (op->op.same_as(tl::cluster_arrive())) {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_arrive();\n";
+  } else if (op->op.same_as(tl::cluster_wait())) {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_wait();\n";
+  } else if (op->op.same_as(tl::cluster_sync())) {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_sync();\n";
+  } else if (op->op.same_as(tl::block_rank_in_cluster())) {
+    need_cluster_h_ = true;
+    os << "tl::block_rank_in_cluster()";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";

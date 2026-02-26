@@ -124,6 +124,14 @@ from .pdl import (
     pdl_sync,  # noqa: F401
 )
 
+from .cluster import (
+    cluster_arrive_relaxed,  # noqa: F401
+    cluster_arrive,  # noqa: F401
+    cluster_wait,  # noqa: F401
+    cluster_sync,  # noqa: F401
+    block_rank_in_cluster,  # noqa: F401
+)
+
 
 def import_source(source: str | None = None):
     # source is the source code to be imported
