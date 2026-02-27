@@ -195,6 +195,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
+    print(mod)
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
     # Decouple type cast vectorization constraints before vectorization

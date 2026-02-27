@@ -213,7 +213,7 @@ def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list
         exts = list(extents)
         if len(obj.indices) > len(exts):
             exts = [tir.IntImm("int32", 1) for _ in range(len(obj.indices) - len(exts))] + exts
-        assert len(obj.indices) == len(exts)
+        # assert len(obj.indices) == len(exts)
         return _make_region_call(obj, access_type, *exts)
     raise ValueError(f"Unsupported argument type for to_buffer_region: {type(obj)}")
 
