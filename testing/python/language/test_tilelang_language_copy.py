@@ -213,5 +213,4 @@ def test_tilelang_copy_fp4():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_tilelang_copy_shape_mismatched()
+    tilelang.testing.main()

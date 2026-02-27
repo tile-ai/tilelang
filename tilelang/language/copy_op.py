@@ -78,6 +78,8 @@ def copy(
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
 
+    # Align and broadcast extents from the right (tail) side.
+    # This is majorly for supporting some sytactic sugar, not the whole broadcasting ability of copy op.
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
     # Use legalized extents for src and dst respectively.

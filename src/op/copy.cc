@@ -208,7 +208,6 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
 // Constructs a SIMT-style nested loop that implements the copy.
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
-  std::cout << "loop vars: " << loop_vars << std::endl;
   bool is_scalar = loop_vars.empty();
 
   for (const auto &iv : loop_vars)
