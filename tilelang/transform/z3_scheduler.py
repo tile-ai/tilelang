@@ -339,7 +339,7 @@ def z3_schedule_loop_python(
             for i in range(n):
                 solver.add(start_vars[i] >= 0)
                 solver.add(stage_vars[i] >= 0)
-                solver.add(stage_vars[i] <= num_stages)
+                solver.add(stage_vars[i] < num_stages * 2)
                 solver.add(begin <= start_vars[i] + stage_vars[i] * ii_mid)
                 ii_i = iis[i]
                 solver.add(start_vars[i] + ii_i + stage_vars[i] * ii_mid - begin <= ii_mid)

@@ -223,7 +223,7 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
 
   int64_t max_latency = std::max(warpgroup0_latency, warpgroup1_latency);
   int64_t min_latency = std::min(warpgroup0_latency, warpgroup1_latency);
-  if ((double)max_latency / min_latency < 1.1) {
+  if ((double)max_latency / min_latency < 2) {
     int64_t warpgroup0_latency = 0;
     int64_t warpgroup1_latency = 0;
 
@@ -580,27 +580,18 @@ public:
     // Apply start times and promote flags to nodes
     std::map<IRStructure *, int> stage_map;
     size_t num_promoted = 0;
+    int min_stage = ii * 2;
     for (size_t i = 0; i < n; ++i) {
       nodes[i]->SetStartTime(start_times[i]);
-      stage_map[nodes[i]] = stages[i] != 0;
-      if (stages[i] != 0) {
+      min_stage = std::min(min_stage, stages[i]);
+    }
+    // Force all stages to start from 0
+    for (size_t i = 0; i < n; ++i) {
+      stage_map[nodes[i]] = stages[i] - min_stage;
+      if (stages[i] != min_stage) {
         num_promoted++;
       }
     }
-    // Promote transformation will be applied in IRStructureRewriter
-    // For promoted tasks, they should be executed in previous iteration
-    // Loop bounds will be extended by step (not II) as per user requirement
-    // Example transformation:
-    // for i = start to end:
-    //   Task0 (not promoted)
-    //   Task1 (promoted)
-    // =>
-    // for i = start to end+step:
-    //   if i > start: Task1 with index i-step
-    //   if i < end+step: Task0 with index i
-
-    // Create sorted task list based on start_time (and original index as
-    // tie-breaker)
     std::vector<std::pair<int64_t, size_t>> start_time_with_idx;
     start_time_with_idx.reserve(n);
     for (size_t i = 0; i < n; ++i) {
@@ -1624,7 +1615,17 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
       PrimExpr loop_step = ctrl->control->step.has_value()
                                ? ctrl->control->step.value()
                                : IntImm(DataType::Int(32), 1);
-      if (!ctrl->hasPromote() || !ctrl->child->IsSequence()) {
+      int min_stages = 100, max_stages = -1;
+      if (ctrl->child->IsSequence()) {
+        auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+        for (auto &child : seq->children) {
+          auto unit = static_cast<ScheduleUnit *>(child.get());
+          min_stages = std::min(min_stages, unit->stage);
+          max_stages = std::max(max_stages, unit->stage);
+        }
+      }
+      if (!ctrl->hasPromote() || !ctrl->child->IsSequence() ||
+          min_stages == max_stages) {
         std::vector<Stmt> stmts;
         if (ctrl->child->IsScheduleUnit()) {
           auto unit = static_cast<ScheduleUnit *>(ctrl->child.get());
@@ -1666,9 +1667,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
         return For(loop_var, loop_start, loop_extent, ctrl->control->kind, body,
                    ctrl->control->thread_binding, filtered_annotations);
       }
-      Stmt body = Evaluate(0);
-      std::vector<Stmt> unit_stages[2];
       auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+      Stmt body = Evaluate(0);
+      std::vector<std::vector<Stmt>> unit_stages;
+      unit_stages.resize(max_stages - min_stages + 1);
       for (auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
         std::vector<Stmt> stmts;
@@ -1683,9 +1685,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
             stmts.push_back(stmt);
           }
         }
-        unit_stages[unit->stage].push_back(SeqStmt::Flatten(stmts));
+        unit_stages[unit->stage - min_stages].push_back(
+            SeqStmt::Flatten(stmts));
       }
-      Stmt prologue = Evaluate(0);
       // Check if any task in this control node contains loop_break
       // If any task contains loop_break, disable prologue
       std::function<bool(IRStructure *)> check_contains_loop_break;
@@ -1721,27 +1723,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
 
       // Set enable_pro to true only if no task contains loop_break
       bool enable_pro = !check_contains_loop_break(ctrl->child.get());
-
-      if (enable_pro && !unit_stages[1].empty()) {
-        prologue = SeqStmt::Flatten(unit_stages[1]);
-        Map<Var, PrimExpr> substitution;
-        substitution.Set(loop_var, loop_start);
-        prologue = Substitute(prologue, substitution);
-        prologue = IfThenElse(loop_extent > 0, prologue);
-      }
-      Stmt epilogue = Evaluate(0);
       bool enable_epi = outer_enable_epi && enable_pro;
-      if (enable_epi && !unit_stages[0].empty()) {
-        epilogue = SeqStmt::Flatten(unit_stages[0]);
-        Map<Var, PrimExpr> substitution;
-        substitution.Set(loop_var, loop_start + loop_extent - loop_step);
-        epilogue = Substitute(epilogue, substitution);
-        epilogue = IfThenElse(loop_extent > 0, epilogue);
-      }
       std::vector<Stmt> steady;
 
-      bool remove_pro = enable_pro || unit_stages[1].empty();
-      bool remove_epi = enable_epi || unit_stages[0].empty();
       for (auto &child : seq->children) {
         auto unit = static_cast<ScheduleUnit *>(child.get());
         std::vector<Stmt> stmts;
@@ -1756,55 +1740,66 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
             stmts.push_back(stmt);
           }
         }
-        if (unit->stage == 1) {
-          if (remove_epi) {
-            Map<Var, PrimExpr> substitution;
-            if (remove_pro) {
-              substitution.Set(loop_var, loop_var + loop_step);
-            }
-            Stmt new_stmt = Substitute(SeqStmt::Flatten(stmts), substitution);
-            steady.push_back(new_stmt);
-          } else {
-            Map<Var, PrimExpr> substitution;
-            if (remove_pro) {
-              substitution.Set(loop_var, loop_var + loop_step);
-            }
-            Stmt new_stmt = IfThenElse(
-                loop_var < loop_start + loop_extent - loop_step * remove_pro,
-                Substitute(SeqStmt::Flatten(stmts), substitution));
-            steady.push_back(new_stmt);
-          }
-        } else if (unit->stage == 0) {
-          Map<Var, PrimExpr> substitution;
-          substitution.Set(loop_var, loop_var - loop_step);
-          if (remove_pro) {
-            steady.push_back(SeqStmt::Flatten(stmts));
-          } else {
-            Stmt new_stmt =
-                IfThenElse(loop_var > loop_start,
-                           Substitute(SeqStmt::Flatten(stmts), substitution));
-            steady.push_back(new_stmt);
-          }
-        } else {
-          steady.push_back(SeqStmt::Flatten(stmts));
+        Map<Var, PrimExpr> substitution;
+        PrimExpr condition =
+            And(loop_var < loop_extent, loop_var >= loop_start);
+        if (unit->stage == min_stages) {
+          condition = loop_var >= loop_start;
         }
+        if (unit->stage == max_stages) {
+          condition = loop_var < loop_extent;
+        }
+        Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+        substitution.Set(loop_var,
+                         loop_var - loop_step * (max_stages - unit->stage));
+        steady.push_back(Substitute(stmt, substitution));
       }
       Stmt new_body = SeqStmt::Flatten(steady);
       auto new_var = loop_var.copy_with_suffix("");
       // Filter out "num_stages" annotation
       Map<String, Any> filtered_annotations = ctrl->control->annotations;
       filtered_annotations.erase("num_stages");
-      Stmt new_for =
+      Map<Var, PrimExpr> substitution;
+      substitution.Set(loop_var, new_var);
+      For for_op =
           For(new_var, loop_start,
-              ctrl->control->extent + loop_step * (1 - remove_pro - remove_epi),
-              ctrl->control->kind, new_body, ctrl->control->thread_binding,
-              filtered_annotations);
-      {
-        Map<Var, PrimExpr> substitution;
-        substitution.Set(loop_var, new_var);
-        new_for = Substitute(new_for, substitution);
+              ctrl->control->extent + loop_step * (max_stages - min_stages),
+              ctrl->control->kind, Substitute(new_body, substitution),
+              ctrl->control->thread_binding, filtered_annotations);
+
+      Stmt prologue = Evaluate(0);
+      if (enable_pro) {
+        Map<Var, PrimExpr> sub;
+        For new_for = for_op;
+        auto pro = loop_var.copy_with_suffix("_prologue");
+        sub.Set(new_var, pro);
+        new_for.CopyOnWrite()->loop_var = pro;
+        new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
+        new_for.CopyOnWrite()->extent =
+            min(max_stages - min_stages, for_op.get()->extent);
+        for_op.CopyOnWrite()->min += loop_step * (max_stages - min_stages);
+        for_op.CopyOnWrite()->extent =
+            max(0, for_op.get()->extent - (max_stages - min_stages));
+        prologue = Substitute(new_for, sub);
       }
-      return SeqStmt({prologue, new_for, epilogue});
+      Stmt epilogue = Evaluate(0);
+      if (enable_epi) {
+        Map<Var, PrimExpr> sub;
+        For new_for = for_op;
+        auto epi = loop_var.copy_with_suffix("_epilogue");
+        sub.Set(new_var, epi);
+        new_for.CopyOnWrite()->loop_var = epi;
+        new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
+        new_for.CopyOnWrite()->min =
+            for_op.get()->min +
+            loop_step * (for_op.get()->extent - (max_stages - min_stages));
+        new_for.CopyOnWrite()->extent =
+            min(max_stages - min_stages, for_op.get()->extent);
+        for_op.CopyOnWrite()->extent =
+            max(0, for_op.get()->extent - (max_stages - min_stages));
+        epilogue = Substitute(new_for, sub);
+      }
+      return SeqStmt({prologue, for_op, epilogue});
     } else if (structure->IsWrapper()) {
       auto wrapper = static_cast<const WrapperNode *>(structure);
       Stmt body = Evaluate(0);
