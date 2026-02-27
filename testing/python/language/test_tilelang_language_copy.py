@@ -143,12 +143,12 @@ def test_tilelang_copy_buffer_load_with_parallel():
 def tilelang_copy_shape_mismatched(M, N, src_dtype=T.float16, dst_dtype=T.float16):
     @T.prim_func
     def main(
-        A: T.Tensor((M, 1), src_dtype),
+        A: T.Tensor((M, N), src_dtype),
         B: T.Tensor((M, N), dst_dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(1, threads=128):
-            T.copy(A, B)
+            T.copy(A[:, :2], B[:, :3])
 
     return main
 
@@ -160,9 +160,9 @@ def run_tilelang_copy_shape_mismatched(M=1024, N=1024, dtype=T.float16):
         out_idx=[1],
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
     )
-    a = torch.randn(M, 1, device="cuda", dtype=getattr(torch, dtype))
+    a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
-    torch.testing.assert_close(b[:, :1], a, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(b[:, :1], a[:, :1], rtol=1e-2, atol=1e-2)
 
 
 def test_tilelang_copy_shape_mismatched():
@@ -213,4 +213,5 @@ def test_tilelang_copy_fp4():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_tilelang_copy_shape_mismatched()

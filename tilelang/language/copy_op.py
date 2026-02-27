@@ -8,7 +8,7 @@ from tilelang.utils.language import (
     legalize_pairwise_extents,
 )
 from tilelang.language.utils import get_extent
-from tvm import tir
+from tvm import ir, tir
 
 
 def copy(
@@ -49,7 +49,7 @@ def copy(
     - Normally, we require the extents of both sides to be the same. If they
       differ, the copy instruction follows an internal rule to select one side
       as the base range and create iteration space. This may generate unexpected
-      code.
+      code. And if some dimensions are 1, unexpected errors may happen.
     - Small Optimization: If both `src` and `dst` are scalar `BufferLoad` without
       region extents, lowers to a direct store: `dst[...] = src[...]`.
     - Syntactic Sugar: TileLang supports passing the head address of a buffer to represent
@@ -60,6 +60,10 @@ def copy(
       and passed through to the backend; low-level loop construction and any
       scope-specific decisions happen during lowering.
     """
+    # If both side are buffers, we should make sure their shapes are equal
+    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
+        ir.assert_structural_equal(src.shape, dst.shape)
+
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
 
