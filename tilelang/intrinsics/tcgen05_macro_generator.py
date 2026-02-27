@@ -264,10 +264,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 buffer = buffer_load.buffer
                 for i, shape in enumerate(reversed(buffer.shape)):
                     indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
-                        offset += indice * stride
-                    elif isinstance(indice, tvm.tir.Ramp):
+                    if isinstance(indice, tvm.tir.Ramp):
                         offset += indice.base * stride
+                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                        offset += indice * stride
                     else:
                         raise ValueError(f"Unsupported index type: {type(indice)}")
                     stride *= shape
@@ -456,10 +456,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 buffer = buffer_load.buffer
                 for i, shape in enumerate(reversed(buffer.shape)):
                     indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
-                        offset += indice * stride
-                    elif isinstance(indice, tvm.tir.Ramp):
+                    if isinstance(indice, tvm.tir.Ramp):
                         offset += indice.base * stride
+                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                        offset += indice * stride
                     else:
                         raise ValueError(f"Unsupported index type: {type(indice)}")
                     stride *= shape
