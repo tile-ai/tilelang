@@ -650,6 +650,63 @@ public:
     return Call(op->dtype, GetVectorizedAtomicOp(vector_size), {dst, src});
   }
 
+  // cp.async call vectorization.
+  // Pattern:
+  //   for i in vectorized(k): ptx_cp_async(dst, src, elem_bytes)
+  // => ptx_cp_async(dst_base, src_base, elem_bytes * k)
+  PrimExpr MutatePTXCPAsyncExpr_(const CallNode *op) {
+    ICHECK(op->op.same_as(builtin::ptx_cp_async()) ||
+           op->op.same_as(tl::ptx_cp_async()));
+    if (op->args.size() != 3 && op->args.size() != 4) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr dst = VisitExpr(op->args[0]);
+    PrimExpr src = VisitExpr(op->args[1]);
+    PrimExpr bytes = VisitExpr(op->args[2]);
+    Optional<PrimExpr> predicate = std::nullopt;
+    if (op->args.size() == 4) {
+      auto pred = VisitExpr(op->args[3]);
+      if (pred.dtype().is_scalable_or_fixed_length_vector()) {
+        need_scalarize_ = true;
+        return tvm::ffi::GetRef<PrimExpr>(op);
+      }
+      predicate = pred;
+    }
+
+    auto lanes_ptr = as_const_int(var_lanes_);
+    if (!lanes_ptr || *lanes_ptr <= 1) {
+      Array<PrimExpr> new_args{dst, src, bytes};
+      if (predicate.defined()) {
+        new_args.push_back(predicate.value());
+      }
+      if (new_args.same_as(op->args)) {
+        return tvm::ffi::GetRef<PrimExpr>(op);
+      }
+      return Call(op->dtype, op->op, new_args);
+    }
+
+    const auto *bytes_imm = bytes.as<IntImmNode>();
+    if (bytes_imm == nullptr) {
+      need_scalarize_ = true;
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    int vector_size = static_cast<int>(*lanes_ptr);
+    int total_bytes = static_cast<int>(bytes_imm->value) * vector_size;
+    if (!(total_bytes == 4 || total_bytes == 8 || total_bytes == 16)) {
+      need_scalarize_ = true;
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+
+    Array<PrimExpr> new_args{dst, src,
+                             IntImm(bytes_imm->dtype, total_bytes)};
+    if (predicate.defined()) {
+      new_args.push_back(predicate.value());
+    }
+    return Call(op->dtype, op->op, new_args);
+  }
+
   // Call
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
@@ -680,6 +737,9 @@ public:
       return MutateTLAccessPtrCall_(op);
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       return MutateAccessPtrCall_(op);
+    } else if (op->op.same_as(builtin::ptx_cp_async()) ||
+               op->op.same_as(tl::ptx_cp_async())) {
+      return MutatePTXCPAsyncExpr_(op);
     }
     auto optional_op = op->op.as<Op>();
     bool vectorizable = optional_op &&
