@@ -78,12 +78,13 @@ def copy(
         return tir.BufferStore(dst.buffer, src, dst.indices)
 
     assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
-    # Treat missing extent as length-matched ones to enable broadcasting.
+    # Treat missing extent as length-matched ones for convenience. This provides limited
+    # broadcasting-like syntactic sugar, but does not implement general broadcasting support.
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
 
     # Align and broadcast extents from the right (tail) side.
-    # This is majorly for supporting some sytactic sugar, not the whole broadcasting ability of copy op.
+    # This is majorly for supporting some syntactic sugar, not the whole broadcasting ability of copy op.
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
     # Use legalized extents for src and dst respectively.
