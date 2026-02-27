@@ -20,9 +20,9 @@ class _LoopVarUseAnalyzer(PyStmtExprVisitor):
         # Don't recursively visit children to avoid infinite recursion
 
 
-def collect_local_buffer_accesses(statement) -> list[BufferLoad | BufferStore]:
+def collect_fragment_accesses(statement) -> list[BufferLoad | BufferStore]:
     """
-    Collect local buffer accesses in the loop body.
+    Collect fragment accesses in the loop body.
 
     Args:
         statement: The TIR statement to analyze
@@ -34,7 +34,7 @@ def collect_local_buffer_accesses(statement) -> list[BufferLoad | BufferStore]:
     buffer_accesses = []
 
     def visit_buffer_access(node):
-        if isinstance(node, (BufferLoad, BufferStore)) and node.buffer.scope().startswith("local"):
+        if isinstance(node, (BufferLoad, BufferStore)) and node.buffer.scope() == "local.fragment":
             buffer_accesses.append(node)
 
     post_order_visit(statement, visit_buffer_access)
@@ -64,13 +64,14 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
         # This may cause repeated check for cases like: For1{Stmt1; For2{}; For3{};};
         # But it's OK since the check is idempotent.
         if not isinstance(child, For):
-            buffer_accesses = collect_local_buffer_accesses(child)
+            buffer_accesses = collect_fragment_accesses(child)
 
             loops_with_symbolic_ranges = []
             non_parallel_loops = []
 
             for loop in self.loop_stack:
-                if loop.kind != tir.ForKind.PARALLEL:
+                # Vectorized is also allowed
+                if loop.kind != tir.ForKind.PARALLEL and loop.kind != tir.ForKind.VECTORIZED:
                     non_parallel_loops.append(loop)
                 # symbolic
                 elif not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
@@ -87,7 +88,7 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
                         raise ValueError(
                             "[Tilelang Semantic Check] "
                             f"Loop variable {loop.loop_var} in a T.Parallel loop with symbolic range (min={loop.min}, extent={loop.extent}) is used to index "
-                            "a local/fragment buffer, which is not allowed in Tilelang."
+                            "a fragment buffer, which is not allowed in Tilelang."
                         )
                 # Check 2
                 for loop in non_parallel_loops:
@@ -98,7 +99,7 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
                         raise ValueError(
                             "[Tilelang Semantic Check] "
                             f"A non-parallel loop iterator {loop.loop_var} is used to index "
-                            "a local/fragment buffer, which is not allowed in Tilelang."
+                            "a fragment buffer, which is not allowed in Tilelang."
                         )
 
         self.visit_stmt(op.body)
