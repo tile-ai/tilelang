@@ -6,8 +6,10 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt.h>
+#include <tvm/tir/stmt_functor.h>
 
 #include "../../op/builtin.h"
+#include "../../op/utils.h"
 #include "./ir_structure.h"
 #include <functional>
 #include <memory>
@@ -23,6 +25,25 @@ namespace tl {
 using namespace tir;
 using ffi::Array;
 using ffi::Map;
+
+// Helper function to rewrite alloc_buffer for multi-version support
+Buffer RewriteAllocBuffer(const Buffer &buffer, int num_stages) {
+  // Create a copy of the buffer
+  ObjectPtr<BufferNode> new_buffer =
+      tvm::ffi::make_object<BufferNode>(*(buffer.get()));
+
+  // Add num_stages as first dimension
+  new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_stages));
+
+  // Update strides if they exist
+  if (!new_buffer->strides.empty()) {
+    ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
+    PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
+    new_buffer->strides.insert(new_buffer->strides.begin(), stride_0);
+  }
+
+  return Buffer(new_buffer);
+}
 
 // Barrier manager for create_list_of_mbarrier and get_mbarrier
 class BarrierManager {
@@ -65,8 +86,12 @@ public:
 
   // Create get_mbarrier expression
   PrimExpr GetMBarrier(int barrier_id) const {
-    return Call(DataType::Handle(), tl::get_mbarrier(),
-                {IntImm(DataType::Int(32), barrier_id)});
+    return GetMBarrier(IntImm(DataType::Int(32), barrier_id));
+  }
+
+  // Create get_mbarrier expression
+  PrimExpr GetMBarrier(PrimExpr barrier_id) const {
+    return Call(DataType::Handle(), tl::get_mbarrier(), {barrier_id});
   }
 
   // Convert to barrier_map for annotations
@@ -119,12 +144,8 @@ struct LoopNestingInfo {
     }
   }
 
-  // Calculate parity expression considering all nested loops
-  PrimExpr CalculateParityExpr(PrimExpr iter_offset = 0) const {
-    if (loop_vars.empty()) {
-      return IntImm(DataType::Int(32), 0);
-    }
-
+  PrimExpr CalculateIterationCount() const {
+    ICHECK(!loop_vars.empty());
     PrimExpr total_iter = IntImm(DataType::Int(32), 0);
     PrimExpr total_multiplier = IntImm(DataType::Int(32), 1);
 
@@ -137,88 +158,48 @@ struct LoopNestingInfo {
           indexdiv(loop_vars[i] - loop_starts[i], loop_steps[i]);
 
       if (i == static_cast<int>(loop_vars.size()) - 1) {
-        // Innermost loop
         total_iter = normalized_iter;
       } else {
-        // Outer loop: multiply by inner loop tripcount (ceil(extent / step))
-        // Check if inner loop extent and step are constant
-        if (const auto *extent_int = loop_extents[i + 1].as<IntImmNode>()) {
-          if (const auto *step_int = loop_steps[i + 1].as<IntImmNode>()) {
-            int64_t extent = extent_int->value;
-            int64_t step = step_int->value;
-
-            if (step <= 0) {
-              LOG(FATAL) << "Loop step must be positive for parity calculation";
-              return IntImm(DataType::Int(32), 0);
-            }
-
-            // Calculate tripcount = ceil(extent / step)
-            int64_t tripcount = (extent + step - 1) / step;
-
-            total_iter =
-                normalized_iter * IntImm(DataType::Int(32), tripcount) +
-                total_iter;
-          } else {
-            // Inner loop step is not constant
-            LOG(FATAL)
-                << "Inner loop step must be constant for parity calculation";
-            return IntImm(DataType::Int(32), 0);
-          }
-        } else {
-          // Inner loop extent is not constant
-          LOG(FATAL)
-              << "Inner loop extent must be constant for parity calculation";
-          return IntImm(DataType::Int(32), 0);
-        }
+        total_iter = total_iter + normalized_iter * total_multiplier;
       }
+      total_multiplier = total_multiplier * loop_extents[i];
     }
+    return total_iter;
+  }
+
+  // Calculate parity expression considering all nested loops
+  PrimExpr CalculateParityExpr(PrimExpr iter_offset, int num_stages) const {
+    PrimExpr total_iter = indexdiv(CalculateIterationCount(), num_stages);
 
     // Add iteration offset and calculate parity
     return indexmod(total_iter + iter_offset, 2);
   }
-
-  // Check if at least one loop is not at its start iteration
-  // Returns true if NOT all loops are at their start iteration
-  PrimExpr NotAllLoopsAtStart() const {
-    if (loop_vars.empty()) {
-      return Bool(false);
-    }
-
-    // Build expression: (loop_var0 != loop_start0) || (loop_var1 !=
-    // loop_start1) || ...
-    PrimExpr condition = Bool(false);
-
-    for (size_t i = 0; i < loop_vars.size(); ++i) {
-      PrimExpr loop_not_at_start = (loop_vars[i] != loop_starts[i]);
-
-      if (i == 0) {
-        condition = loop_not_at_start;
-      } else {
-        condition = (condition || loop_not_at_start);
-      }
-    }
-
-    return condition;
-  }
 };
 
-// Barrier synchronization helper functions
-static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
-                                         BarrierManager &barrier_manager,
-                                         PrimExpr thread_count[2]);
-// Barrier dependency analysis functions
-static void AnalyzeAndInsertBarriers(tl::IRStructure *node,
-                                     BarrierManager &barrier_manager,
-                                     PrimExpr thread_count[2],
-                                     tl::LoopNestingInfo &loop_info);
-static void AnalyzeSequenceNodeBarriers(tl::SequenceNode *seq,
-                                        BarrierManager &barrier_manager,
-                                        PrimExpr thread_count[2],
-                                        tl::LoopNestingInfo &loop_info);
-static void AnalyzeControlNodeBarriers(tl::ControlNode *ctrl,
-                                       BarrierManager &barrier_manager,
-                                       PrimExpr thread_count[2],
-                                       tl::LoopNestingInfo &loop_info);
+// Structure to store multi-version buffer information
+struct MultiVersionBufferInfo {
+  Buffer buffer;
+  int num_stages;
+  Buffer new_buffer;
+
+  MultiVersionBufferInfo(Buffer buffer, int num_stages, Buffer new_buffer)
+      : buffer(buffer), num_stages(num_stages), new_buffer(new_buffer) {}
+};
+
+// Barrier dependency analysis function declarations
+static void
+AnalyzeAndInsertBarriers(IRStructure *node, BarrierManager &barrier_manager,
+                         PrimExpr thread_count[2], LoopNestingInfo &loop_info,
+                         std::vector<MultiVersionBufferInfo> &buffer_infos);
+static void
+AnalyzeSequenceNodeBarriers(SequenceNode *seq, BarrierManager &barrier_manager,
+                            PrimExpr thread_count[2],
+                            LoopNestingInfo &loop_info,
+                            std::vector<MultiVersionBufferInfo> &buffer_infos);
+static void
+AnalyzeControlNodeBarriers(ControlNode *ctrl, BarrierManager &barrier_manager,
+                           PrimExpr thread_count[2], LoopNestingInfo &loop_info,
+                           std::vector<MultiVersionBufferInfo> &buffer_infos);
 
 // Create a barrier_arrive statement for the given barrier expression
 // Equivalent to T.barrier_arrive(barrier_expr) in Python
@@ -252,13 +233,23 @@ static Stmt makeBarrierWait(PrimExpr barrier_expr, PrimExpr parity) {
 // Equivalent to Python: T.create_list_of_mbarrier(arrive_counts...)
 // and T.get_mbarrier(barrier_id)
 static int AddBarrierToManager(BarrierManager &barrier_manager,
-                               PrimExpr arrive_count) {
-  return barrier_manager.AddBarrier(arrive_count);
+                               PrimExpr arrive_count, int num_stages = 1) {
+  auto begin = barrier_manager.AddBarrier(arrive_count);
+  for (int idx = 1; idx < num_stages; ++idx) {
+    barrier_manager.AddBarrier(arrive_count);
+  }
+  return begin;
 }
 
 // Get mbarrier expression by barrier_id
 static PrimExpr GetMBarrierExpr(const BarrierManager &barrier_manager,
                                 int barrier_id) {
+  return barrier_manager.GetMBarrier(barrier_id);
+}
+
+// Get mbarrier expression by barrier_id
+static PrimExpr GetMBarrierExpr(const BarrierManager &barrier_manager,
+                                PrimExpr barrier_id) {
   return barrier_manager.GetMBarrier(barrier_id);
 }
 
@@ -274,7 +265,8 @@ BarrierManagerToMap(const BarrierManager &barrier_manager) {
 }
 
 // Insert barriers between neutral tasks and warpgroup-specific work
-// This ensures neutral tasks complete before any warpgroup-specific work begins
+// This ensures neutral tasks complete before any warpgroup-specific work
+// begins
 static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
                                          BarrierManager &barrier_manager,
                                          PrimExpr thread_count[2]) {
@@ -318,6 +310,124 @@ static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
   return sync_body;
 }
 
+// StmtExprMutator to rewrite BufferLoad/BufferStore for multi-version buffers
+class MultiBufferAccessRewriter : public StmtExprMutator {
+public:
+  MultiBufferAccessRewriter(
+      const std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
+          &multi_buffer,
+      PrimExpr version_index)
+      : multi_buffer_(multi_buffer), version_index_(version_index) {}
+
+private:
+  PrimExpr VisitExpr_(const BufferLoadNode *op) override {
+    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+
+    // Check if this buffer is in multi_buffer
+    if (multi_buffer_.find(load->buffer) != multi_buffer_.end()) {
+      // Add version_index as first dimension
+      auto *n = load.CopyOnWrite();
+      n->buffer = multi_buffer_.at(load->buffer);
+      n->indices.insert(n->indices.begin(), version_index_);
+    }
+
+    return load;
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) override {
+    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+
+    // Check if this buffer is in multi_buffer
+    if (multi_buffer_.find(store->buffer) != multi_buffer_.end()) {
+      // Add version_index as first dimension
+      auto *n = store.CopyOnWrite();
+      n->buffer = multi_buffer_.at(store->buffer);
+      n->indices.insert(n->indices.begin(), version_index_);
+    }
+
+    return store;
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) override {
+    // Check if this is a tl.tileop.region call
+    static const auto region_op = Op::Get("tl.tileop.region");
+    if (op->op.same_as(region_op)) {
+      // Handle tl.tileop.region call for multi-version buffers
+      // args[0] = buffer (BufferLoad), args[1] = access_type (1: read, 2:
+      // write, 3: read/write) args[2..] = extents
+      if (op->args.size() >= 2) {
+        // Check if the buffer in BufferLoad needs multi-version support
+        if (const auto *buffer_load = op->args[0].as<BufferLoadNode>()) {
+          auto it = multi_buffer_.find(buffer_load->buffer);
+          if (it != multi_buffer_.end()) {
+            // This buffer needs multi-version support
+            // Create new arguments array
+            Array<PrimExpr> new_args;
+
+            // Add the updated BufferLoad (already processed by VisitExpr)
+            new_args.push_back(VisitExpr(op->args[0]));
+
+            // Add access_type (unchanged)
+            new_args.push_back(VisitExpr(op->args[1]));
+
+            // Add extent for version dimension (value = 1)
+            new_args.push_back(IntImm(DataType::Int(32), 1));
+
+            // Add existing extents (if any)
+            for (size_t i = 2; i < op->args.size(); i++) {
+              new_args.push_back(VisitExpr(op->args[i]));
+            }
+
+            // Create new Call node with updated arguments
+            return Call(op->dtype, op->op, new_args, op->annotations, op->span);
+          }
+        }
+      }
+    }
+
+    // For other Call nodes, use default processing
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  const std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
+      &multi_buffer_;
+  PrimExpr version_index_;
+};
+
+// Recursive function to rewrite BufferLoad/BufferStore in TaskNode stmts
+static void RewriteTaskNodeBuffers(
+    IRStructure *node,
+    const std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
+        &multi_buffer,
+    PrimExpr version_index) {
+  if (!node)
+    return;
+
+  if (node->IsTask()) {
+    auto task = static_cast<TaskNode *>(node);
+
+    // Apply MultiBufferAccessRewriter to all stmts in the task
+    MultiBufferAccessRewriter rewriter(multi_buffer, version_index);
+    for (auto &stmt : task->stmts) {
+      stmt = rewriter(stmt);
+    }
+  } else if (node->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(node);
+    for (auto &child : seq->children) {
+      RewriteTaskNodeBuffers(child.get(), multi_buffer, version_index);
+    }
+  } else if (node->IsControl()) {
+    auto ctrl = static_cast<ControlNode *>(node);
+    RewriteTaskNodeBuffers(ctrl->child.get(), multi_buffer, version_index);
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<WrapperNode *>(node);
+    RewriteTaskNodeBuffers(wrapper->child.get(), multi_buffer, version_index);
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<ScheduleUnit *>(node);
+    RewriteTaskNodeBuffers(unit->child.get(), multi_buffer, version_index);
+  }
+}
+
 // Helper function to insert a statement into ScheduleUnit's stmts
 static void InsertStatementIntoScheduleUnit(ScheduleUnit *task,
                                             const Stmt &stmt, bool at_beginning,
@@ -330,23 +440,25 @@ static void InsertStatementIntoScheduleUnit(ScheduleUnit *task,
 }
 
 // Barrier dependency analysis implementation
-static void AnalyzeAndInsertBarriers(IRStructure *node,
-                                     BarrierManager &barrier_manager,
-                                     PrimExpr thread_count[2],
-                                     LoopNestingInfo &loop_info) {
+static void
+AnalyzeAndInsertBarriers(IRStructure *node, BarrierManager &barrier_manager,
+                         PrimExpr thread_count[2], LoopNestingInfo &loop_info,
+                         std::vector<MultiVersionBufferInfo> &buffer_infos) {
   if (!node)
     return;
 
   if (node->IsSequence()) {
     AnalyzeSequenceNodeBarriers(static_cast<SequenceNode *>(node),
-                                barrier_manager, thread_count, loop_info);
+                                barrier_manager, thread_count, loop_info,
+                                buffer_infos);
   } else if (node->IsControl()) {
     AnalyzeControlNodeBarriers(static_cast<ControlNode *>(node),
-                               barrier_manager, thread_count, loop_info);
+                               barrier_manager, thread_count, loop_info,
+                               buffer_infos);
   } else if (node->IsWrapper()) {
     auto wrapper = static_cast<WrapperNode *>(node);
     AnalyzeAndInsertBarriers(wrapper->child.get(), barrier_manager,
-                             thread_count, loop_info);
+                             thread_count, loop_info, buffer_infos);
   } else if (node->IsTask()) {
     // For TaskNode, nothing to do at this level
   } else {
@@ -354,10 +466,11 @@ static void AnalyzeAndInsertBarriers(IRStructure *node,
   }
 }
 
-static void AnalyzeSequenceNodeBarriers(SequenceNode *seq,
-                                        BarrierManager &barrier_manager,
-                                        PrimExpr thread_count[2],
-                                        LoopNestingInfo &loop_info) {
+static void
+AnalyzeSequenceNodeBarriers(SequenceNode *seq, BarrierManager &barrier_manager,
+                            PrimExpr thread_count[2],
+                            LoopNestingInfo &loop_info,
+                            std::vector<MultiVersionBufferInfo> &buffer_infos) {
   if (!seq)
     return;
 
@@ -380,7 +493,7 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq,
     if (task->child->IsSequence() || task->child->IsControl()) {
       // If child is SequenceNode or ControlNode, recursively analyze it
       AnalyzeAndInsertBarriers(task->child.get(), barrier_manager, thread_count,
-                               loop_info);
+                               loop_info, buffer_infos);
     }
 
     // Check regions for dependencies
@@ -449,7 +562,8 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq,
             // Create get_mbarrier expression
             PrimExpr barrier_expr =
                 GetMBarrierExpr(barrier_manager, barrier_id);
-            // Insert barrier_arrive at the end of last_access_task's statements
+            // Insert barrier_arrive at the end of last_access_task's
+            // statements
             Stmt arrive_stmt = makeBarrierArrive(barrier_expr);
             InsertStatementIntoScheduleUnit(last_access_task, arrive_stmt,
                                             false, last_wg_id);
@@ -514,10 +628,10 @@ static void AnalyzeSequenceNodeBarriers(SequenceNode *seq,
   }
 }
 
-static void AnalyzeControlNodeBarriers(ControlNode *ctrl,
-                                       BarrierManager &barrier_manager,
-                                       PrimExpr thread_count[2],
-                                       LoopNestingInfo &loop_info) {
+static void
+AnalyzeControlNodeBarriers(ControlNode *ctrl, BarrierManager &barrier_manager,
+                           PrimExpr thread_count[2], LoopNestingInfo &loop_info,
+                           std::vector<MultiVersionBufferInfo> &buffer_infos) {
   if (!ctrl || !ctrl->child)
     return;
 
@@ -556,7 +670,7 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl,
       if (task->child->IsSequence() || task->child->IsControl()) {
         // If child is SequenceNode or ControlNode, recursively analyze it
         AnalyzeAndInsertBarriers(task->child.get(), barrier_manager,
-                                 thread_count, loop_info);
+                                 thread_count, loop_info, buffer_infos);
       }
       all_tasks.push_back(task);
     }
@@ -591,8 +705,48 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl,
     std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
                        ObjectPtrEqual>
         last_wgmma_map[2];
-    std::unordered_map<ScheduleUnit *, int> barrier_unit_map;
+    std::unordered_map<ScheduleUnit *, PrimExpr> barrier_unit_map;
     int wait_wgmma_id[2] = {}, total_wgmma[2] = {};
+    auto num_stages = 1;
+    auto num_stages_val = ctrl->control.get()->annotations.Get("num_stages");
+    if (num_stages_val.has_value()) {
+      num_stages = num_stages_val.value().cast<IntImm>()->value;
+    }
+
+    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
+        multi_buffer;
+    if (num_stages != 1) {
+      for (auto &region : ctrl->GetReadRegions()) {
+        auto &buffer = region.get()->buffer;
+        if (!IsSharedBuffer(buffer))
+          continue;
+        if (multi_buffer.find(buffer) != multi_buffer.end())
+          continue;
+        multi_buffer[buffer] = RewriteAllocBuffer(buffer, num_stages);
+      }
+      for (auto &region : ctrl->GetWriteRegions()) {
+        auto &buffer = region.get()->buffer;
+        if (!IsSharedBuffer(buffer))
+          continue;
+        if (multi_buffer.find(buffer) != multi_buffer.end())
+          continue;
+        multi_buffer[buffer] = RewriteAllocBuffer(buffer, num_stages);
+      }
+      // Need multi-version buffer rewriter
+      // Add collected buffers to buffer_infos
+      for (auto &buffer : multi_buffer) {
+        buffer_infos.emplace_back(buffer.first, num_stages, buffer.second);
+      }
+
+      // Rewrite BufferLoad/BufferStore in TaskNode stmts for multi-version
+      // buffers Calculate version index:
+      // indexmod(loop_info.CalculateIterationCount(), num_stages)
+      PrimExpr version_index =
+          indexmod(loop_info.CalculateIterationCount(), num_stages);
+
+      // Recursively rewrite all TaskNode stmts
+      RewriteTaskNodeBuffers(ctrl, multi_buffer, version_index);
+    }
 
     // Process tasks in the specified order
     for (unsigned iter = 0; iter != 2; ++iter) {
@@ -680,30 +834,34 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl,
             // If warpgroup ids differ or promotion status differs, insert
             // barrier
             if (need_barrier) {
-              // Calculate parity for barrier wait considering all nested loops
-              // Use loop_info to calculate parity expression: outer_var *
-              // inner_constant + inner_var
-              PrimExpr parity_expr = loop_info.CalculateParityExpr(
-                  IntImm(DataType::Int(32), iter + 2));
+              // Calculate parity for barrier wait considering all nested
+              // loops Use loop_info to calculate parity expression: outer_var
+              // * inner_constant + inner_var
+              PrimExpr iter_offset = IntImm(DataType::Int(32), iter);
+              PrimExpr parity_expr =
+                  loop_info.CalculateParityExpr(iter_offset, num_stages);
 
               if (barrier_unit_map.find(last_access_task) ==
                   barrier_unit_map.end()) {
                 // Allocate a new barrier using BarrierManager
-                int barrier_id = AddBarrierToManager(barrier_manager,
-                                                     thread_count[last_wg_id]);
-                barrier_unit_map[last_access_task] = barrier_id;
+                int barrier_id = AddBarrierToManager(
+                    barrier_manager, thread_count[last_wg_id], num_stages);
+                PrimExpr barrier = IntImm(DataType::Int(32), barrier_id);
+                barrier =
+                    barrier +
+                    indexmod(loop_info.CalculateIterationCount(), num_stages);
+                barrier_unit_map[last_access_task] = barrier;
                 // Create get_mbarrier expression
                 PrimExpr barrier_expr =
-                    GetMBarrierExpr(barrier_manager, barrier_id);
+                    GetMBarrierExpr(barrier_manager, barrier);
                 // Insert barrier_arrive at the end of last_access_task's
                 // statements
                 Stmt arrive_stmt = makeBarrierArrive(barrier_expr);
                 InsertStatementIntoScheduleUnit(last_access_task, arrive_stmt,
                                                 false, last_wg_id);
               }
-              int barrier_id = barrier_unit_map[last_access_task];
-              PrimExpr barrier_expr =
-                  GetMBarrierExpr(barrier_manager, barrier_id);
+              PrimExpr barrier = barrier_unit_map[last_access_task];
+              PrimExpr barrier_expr = GetMBarrierExpr(barrier_manager, barrier);
 
               // Insert barrier_wait at the beginning of task's statements
               Stmt wait_stmt = makeBarrierWait(barrier_expr, parity_expr);
@@ -711,7 +869,9 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl,
                 // Check if at least one loop is not at its start iteration
                 // (not the first iteration of all nested loops)
                 wait_stmt =
-                    IfThenElse(loop_info.NotAllLoopsAtStart(), wait_stmt);
+                    IfThenElse(indexdiv(loop_info.CalculateIterationCount(),
+                                        num_stages) != 0,
+                               wait_stmt);
               }
               InsertStatementIntoScheduleUnit(task, wait_stmt, true, wg_id);
               // Remove from map (as per user instruction)
@@ -773,7 +933,7 @@ static void AnalyzeControlNodeBarriers(ControlNode *ctrl,
     }
   } else {
     AnalyzeAndInsertBarriers(ctrl->child.get(), barrier_manager, thread_count,
-                             loop_info);
+                             loop_info, buffer_infos);
   }
 
   // Remove this loop from nesting info when exiting

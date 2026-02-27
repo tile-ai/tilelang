@@ -223,7 +223,7 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
 
   int64_t max_latency = std::max(warpgroup0_latency, warpgroup1_latency);
   int64_t min_latency = std::min(warpgroup0_latency, warpgroup1_latency);
-  if ((double)max_latency / min_latency < 2) {
+  if ((double)max_latency / min_latency < 1.1) {
     int64_t warpgroup0_latency = 0;
     int64_t warpgroup1_latency = 0;
 
@@ -1407,8 +1407,9 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
                                 double_thread ? thread_var->dom->extent
                                               : IntImm(DataType::Int(32), 128)};
     LoopNestingInfo loop_info;
+    std::vector<MultiVersionBufferInfo> buffer_infos;
     AnalyzeAndInsertBarriers(ir_structure.get(), barrier_manager, thread_count,
-                             loop_info);
+                             loop_info, buffer_infos);
 
     // Print the modified summary view
     // PrintIRStructure(ir_structure.get());
@@ -1417,6 +1418,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
         ir_structure.get(), thread_var, barrier_manager, enable_epi,
         thread_count);
+
     if (double_thread) {
       updated_thread_extent = thread_var->dom->extent * 2;
     } else {
@@ -1469,6 +1471,11 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
 
       BarrierInserter inserter(create_mbarrier_stmt, barrier_map);
       final_body = inserter(final_body);
+    }
+
+    // Apply multi-version alloc_buffer rewrite if needed
+    if (!buffer_infos.empty()) {
+      final_body = RewriteAllocBuffers(final_body, buffer_infos);
     }
 
     // Create a new PrimFunc with the updated body
@@ -1950,6 +1957,59 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
   }
 
   return combined_stmt;
+}
+
+// StmtMutator to rewrite alloc_buffers in Block nodes
+class AllocBufferRewriter : public StmtMutator {
+public:
+  AllocBufferRewriter(const std::vector<MultiVersionBufferInfo> &buffer_infos)
+      : buffer_infos_(buffer_infos) {
+    // Create mapping from original buffer to new buffer
+    for (const auto &info : buffer_infos_) {
+      buffer_remap_[info.buffer] = info.new_buffer;
+    }
+  }
+
+private:
+  Stmt VisitStmt_(const BlockNode *op) override {
+    Stmt new_body = this->VisitStmt(op->body);
+
+    // Check if we need to update alloc_buffers
+    bool needs_update = false;
+    Array<Buffer> new_alloc_buffers;
+
+    for (auto buffer : op->alloc_buffers) {
+      auto it = buffer_remap_.find(buffer);
+      if (it != buffer_remap_.end()) {
+        new_alloc_buffers.push_back(it->second);
+        needs_update = true;
+      } else {
+        new_alloc_buffers.push_back(buffer);
+      }
+    }
+
+    auto new_block = CopyOnWrite(op);
+    new_block->body = new_body;
+    if (needs_update) {
+      new_block->alloc_buffers = new_alloc_buffers;
+    }
+    return Stmt(new_block);
+  }
+
+  const std::vector<MultiVersionBufferInfo> &buffer_infos_;
+  std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
+      buffer_remap_;
+};
+
+// Main function to rewrite alloc_buffers
+Stmt RewriteAllocBuffers(
+    const Stmt &stmt, const std::vector<MultiVersionBufferInfo> &buffer_infos) {
+  if (buffer_infos.empty()) {
+    return stmt;
+  }
+
+  AllocBufferRewriter rewriter(buffer_infos);
+  return rewriter(stmt);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

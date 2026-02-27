@@ -81,5 +81,9 @@ struct ComponentInfo {
 // extent)
 bool AssignWarpgroupIdsGlobal(IRStructure *root);
 
+// Function to rewrite alloc_buffers for multi-version support
+Stmt RewriteAllocBuffers(
+    const Stmt &stmt, const std::vector<MultiVersionBufferInfo> &buffer_infos);
+
 } // namespace tl
 } // namespace tvm
