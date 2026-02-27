@@ -716,14 +716,6 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, BarrierManager &barrier_manager,
     std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
         multi_buffer;
     if (num_stages != 1) {
-      for (auto &region : ctrl->GetReadRegions()) {
-        auto &buffer = region.get()->buffer;
-        if (!IsSharedBuffer(buffer))
-          continue;
-        if (multi_buffer.find(buffer) != multi_buffer.end())
-          continue;
-        multi_buffer[buffer] = RewriteAllocBuffer(buffer, num_stages);
-      }
       for (auto &region : ctrl->GetWriteRegions()) {
         auto &buffer = region.get()->buffer;
         if (!IsSharedBuffer(buffer))

@@ -517,9 +517,13 @@ public:
         if (i == j)
           continue; // Skip self-dependency
         if (HasDependency(nodes[i], nodes[j])) {
-          // distance = 0 if i < j, 1 if i > j
-          int64_t distance = (i < j) ? 0 : num_stages;
-          data_deps.emplace_back(i, j, distance);
+          if (i < j) {
+            data_deps.emplace_back(i, j, 0);
+          } else {
+            int64_t distance =
+                HasRegisterDependency(nodes[i], nodes[j]) ? 1 : num_stages;
+            data_deps.emplace_back(i, j, distance);
+          }
         }
       }
     }
@@ -742,6 +746,59 @@ private:
       }
     }
     for (const auto &read_region_a : a->GetReadRegions()) {
+      for (const auto &write_region_b : b->GetWriteRegions()) {
+        if (SameBuffer(read_region_a, write_region_b))
+          return true;
+      }
+    }
+    return false;
+  }
+
+  // Check if two IRStructures have data dependency (excluding read-after-read)
+  bool HasRegisterDependency(const IRStructure *a, const IRStructure *b) const {
+    // Check if either node contains loop_break (if it's a TaskNode)
+    // Tasks with loop_break have control dependencies with all other tasks
+    // because loop_break can change control flow and affect execution order
+    if (a->IsTask()) {
+      const TaskNode *task_a = static_cast<const TaskNode *>(a);
+      if (task_a->ContainsLoopBreak()) {
+        // If task_a contains loop_break, it has dependency with b
+        // because loop_break affects control flow and execution order
+        return true;
+      }
+    }
+    if (b->IsTask()) {
+      const TaskNode *task_b = static_cast<const TaskNode *>(b);
+      if (task_b->ContainsLoopBreak()) {
+        // If task_b contains loop_break, it has dependency with a
+        // because loop_break affects control flow and execution order
+        return true;
+      }
+    }
+
+    // Check all combinations of accesses
+    // a writes, b reads (RAW)
+    // a reads, b writes (WAR)
+    // a writes, b writes (WAW)
+    // a reads, b reads (RAR) - no dependency
+
+    // For simplicity, we check if they access the same buffer
+    // and at least one of them writes to that buffer
+    for (const auto &write_region_a : a->GetWriteRegions()) {
+      if (IsSharedBuffer(write_region_a.get()->buffer))
+        continue;
+      for (const auto &read_region_b : b->GetReadRegions()) {
+        if (SameBuffer(write_region_a, read_region_b))
+          return true;
+      }
+      for (const auto &write_region_b : b->GetWriteRegions()) {
+        if (SameBuffer(write_region_a, write_region_b))
+          return true;
+      }
+    }
+    for (const auto &read_region_a : a->GetReadRegions()) {
+      if (IsSharedBuffer(read_region_a.get()->buffer))
+        continue;
       for (const auto &write_region_b : b->GetWriteRegions()) {
         if (SameBuffer(read_region_a, write_region_b))
           return true;
