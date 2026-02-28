@@ -1,6 +1,7 @@
 # Runtime requirements
 
-apache-tvm-ffi~=0.1.0,>=0.1.2
+apache-tvm-ffi~=0.1.0,>0.1.2
+apache-tvm-ffi<0.1.8; platform_system == 'Darwin'
 torch-c-dlpack-ext; python_version < '3.14'
 cloudpickle
 ml-dtypes
