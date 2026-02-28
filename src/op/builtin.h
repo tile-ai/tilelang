@@ -270,6 +270,14 @@ TVM_DLL const Op &tma_store();
  */
 const Op &ptx_fence_barrier_init();
 
+/*
+ * \brief tvm intrinsics for cluster barrier arrive
+ *
+ * ptx_arrive_cluster_barrier(mbarrier, cta_id)
+ *
+ */
+TVM_DLL const Op &ptx_arrive_cluster_barrier();
+
 /*!
  * \brief tvm intrinsics for mbarrier wait with parity bit
  *
@@ -497,6 +505,46 @@ TVM_DLL const Op &get_warp_group_idx();
  *
  */
 TVM_DLL const Op &wait_wgmma();
+
+/*!
+ * \brief Cluster barrier arrive with relaxed ordering
+ *
+ * cluster_arrive_relaxed()
+ *
+ */
+TVM_DLL const Op &cluster_arrive_relaxed();
+
+/*!
+ * \brief Cluster barrier arrive
+ *
+ * cluster_arrive()
+ *
+ */
+TVM_DLL const Op &cluster_arrive();
+
+/*!
+ * \brief Cluster barrier wait
+ *
+ * cluster_wait()
+ *
+ */
+TVM_DLL const Op &cluster_wait();
+
+/*!
+ * \brief Cluster barrier arrive + wait (full sync)
+ *
+ * cluster_sync()
+ *
+ */
+TVM_DLL const Op &cluster_sync();
+
+/*!
+ * \brief Return the 1-D rank of the calling CTA within its cluster
+ *
+ * uint32_t block_rank_in_cluster()
+ *
+ */
+TVM_DLL const Op &block_rank_in_cluster();
 
 /*!
  * \brief Synchronize all threads in a grid

@@ -64,6 +64,10 @@ public:
     }
   }
 
+  void SetClusterDims(Array<Integer> cluster_dims) {
+    cluster_dims_ = std::move(cluster_dims);
+  }
+
   tir::Stmt VisitStmt_(const tir::AttrStmtNode *op) final {
     if (op->attr_key == tvm::attr::kTarget) {
       found_device_region_ = true;
@@ -101,6 +105,7 @@ public:
 private:
   bool found_device_region_{false};
   Array<tir::Var> non_restrict_params_;
+  Optional<Array<Integer>> cluster_dims_{std::nullopt};
 
   // Wrap body with assumes, substituting variables in assumes with the
   // corresponding variables in the device body based on name_hint matching.
@@ -233,12 +238,15 @@ private:
     }
 
     tir::PrimFunc device_func(params, body, kernel_ret_type);
-    device_func = WithAttrs(
-        std::move(device_func),
-        {{tvm::attr::kTarget, device_target},
-         {tir::attr::kNoAlias, true},
-         {tir::attr::kIsGlobalFunc, true},
-         {tl::attr::kNonRestrictParams, remapped_non_restrict_params}});
+    Map<String, ffi::Any> device_attrs = {
+        {tvm::attr::kTarget, device_target},
+        {tir::attr::kNoAlias, true},
+        {tir::attr::kIsGlobalFunc, true},
+        {tl::attr::kNonRestrictParams, remapped_non_restrict_params}};
+    if (cluster_dims_.defined()) {
+      device_attrs.Set("cluster_dims", cluster_dims_.value());
+    }
+    device_func = WithAttrs(std::move(device_func), device_attrs);
 
     GlobalVar kernel_symbol_global = var_supply_();
     (*device_mod_)->Add(kernel_symbol_global, device_func);
@@ -279,6 +287,13 @@ tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,
     // Remove the attribute from host-side PrimFunc; it only matters for device
     // codegen.
     func = tvm::WithoutAttr(std::move(func), tl::attr::kNonRestrictParams);
+  }
+  // Propagate cluster_dims from host func to device kernel.
+  // LowerOpaqueBlock sets this attr on the pre-split kernel; after splitting
+  // it must live on the device side so the codegen can emit a cluster launch.
+  if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
+    splitter.SetClusterDims(opt.value());
+    func = tvm::WithoutAttr(std::move(func), "cluster_dims");
   }
 
   if (auto body = splitter(func->body); !body.same_as(func->body)) {

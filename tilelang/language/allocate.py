@@ -169,6 +169,29 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     return buffer
 
 
+def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
+    """Allocate a cluster barrier buffer.
+
+    Args:
+        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated as a cluster barrier
+    """
+    # Normalize to list
+    if isinstance(arrive_count, int):
+        arrive_count = [arrive_count]
+    else:
+        arrive_count = list(arrive_count)
+    buffer = T.alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier")
+    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
+    # Use buffer.data as key to support multiple barrier buffer allocations
+    arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
+    block_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+
+    return buffer
+
+
 def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
