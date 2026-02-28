@@ -443,7 +443,7 @@ def z3_schedule_loop_python(
         task_indices.sort(key=lambda idx: (start_times[idx] + stages[idx] * best_ii, idx))
 
         if verbose:
-            print(f"[Python Z3 Loop] Scheduling completed. Minimal II = {best_ii}. Beging = {begin}")
+            print(f"[Python Z3 Loop] Scheduling completed. Minimal II = {best_ii}. Begin = {begin}")
         for i in range(n):
             idx = task_indices[i]
             if verbose:

@@ -211,54 +211,56 @@ public:
         ii = std::max(ii, bandwidth_ii);
       }
     } else if (!has_tma && has_tensor) {
+      ii = total_latency;
       // Case 2: Only Tensor Core operations (no TMA)
       // Tensor Core operations are highly pipelined
 
       // Start with minimum II
-      ii = params_.tensor_core_min_ii;
+      // ii = params_.tensor_core_min_ii;
 
       // If we have shape information, calculate more accurate II
-      if (task->HasTensorCoreShape()) {
-        // Calculate total number of WGMMA tiles across all shapes
-        int64_t total_wgmma_tiles = task->GetTotalWGMMATiles();
+      // if (task->HasTensorCoreShape()) {
+      // Calculate total number of WGMMA tiles across all shapes
+      // int64_t total_wgmma_tiles = task->GetTotalWGMMATiles();
 
-        // II based on tile count and parallelism
-        // More tiles may require larger II due to resource constraints
-        int64_t tile_based_ii =
-            params_.tensor_core_min_ii +
-            (total_wgmma_tiles + params_.tensor_core_max_parallel_tiles - 1) /
-                params_.tensor_core_max_parallel_tiles;
+      // II based on tile count and parallelism
+      // More tiles may require larger II due to resource constraints
+      // int64_t tile_based_ii =
+      //     params_.tensor_core_min_ii +
+      //     (total_wgmma_tiles + params_.tensor_core_max_parallel_tiles - 1) /
+      //         params_.tensor_core_max_parallel_tiles;
 
-        ii = std::max(ii, tile_based_ii);
+      // ii = std::max(ii, tile_based_ii);
 
-        // For very small operations, II can be smaller
-        if (total_wgmma_tiles <= 2) {
-          ii = std::min(ii, static_cast<int64_t>(2));
-        }
-      }
+      // For very small operations, II can be smaller
+      //   if (total_wgmma_tiles <= 2) {
+      //     ii = std::min(ii, static_cast<int64_t>(2));
+      //   }
+      // }
 
       // II must be at least the bandwidth-limited II
-      if (global_memory_bytes > 0) {
-        int64_t bandwidth_ii =
-            (global_memory_bytes + params_.global_memory_bandwidth - 1) /
-            params_.global_memory_bandwidth;
-        ii = std::max(ii, bandwidth_ii);
-      }
+      // if (global_memory_bytes > 0) {
+      //   int64_t bandwidth_ii =
+      //       (global_memory_bytes + params_.global_memory_bandwidth - 1) /
+      //       params_.global_memory_bandwidth;
+      //   ii = std::max(ii, bandwidth_ii);
+      // }
 
-      if (shared_memory_bytes > 0) {
-        int64_t bandwidth_ii =
-            (shared_memory_bytes + params_.shared_memory_bandwidth - 1) /
-            params_.shared_memory_bandwidth;
-        ii = std::max(ii, bandwidth_ii);
-      }
+      // if (shared_memory_bytes > 0) {
+      //   int64_t bandwidth_ii =
+      //       (shared_memory_bytes + params_.shared_memory_bandwidth - 1) /
+      //       params_.shared_memory_bandwidth;
+      //   ii = std::max(ii, bandwidth_ii);
+      // }
 
       // For Tensor Core, II should be reasonable compared to latency
       // Typically II << latency for pipelined operations
-      int64_t max_ii_ratio = 4; // II should not exceed latency/4
-      int64_t max_reasonable_ii =
-          (total_latency + max_ii_ratio - 1) / max_ii_ratio;
-      ii =
-          std::min(ii, std::max(max_reasonable_ii, params_.tensor_core_min_ii));
+      // int64_t max_ii_ratio = 4; // II should not exceed latency/4
+      // int64_t max_reasonable_ii =
+      //     (total_latency + max_ii_ratio - 1) / max_ii_ratio;
+      // ii =
+      //     std::min(ii, std::max(max_reasonable_ii,
+      //     params_.tensor_core_min_ii));
 
     } else {
       // Case 3: Other cases (both TMA and Tensor Core, or neither)

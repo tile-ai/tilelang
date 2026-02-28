@@ -1778,8 +1778,19 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
         return false;
       };
 
-      // Set enable_pro to true only if no task contains loop_break
+      // Set enable_pro to true only if:
+      // 1. No task contains loop_break
+      // 2. Loop boundaries (min and extent) are constants
       bool enable_pro = !check_contains_loop_break(ctrl->child.get());
+
+      // Check if loop boundaries are constants
+      bool loop_min_is_const = tir::is_const_int(loop_start);
+      bool loop_extent_is_const = tir::is_const_int(loop_extent);
+
+      if (!loop_min_is_const || !loop_extent_is_const) {
+        enable_pro = false;
+      }
+
       bool enable_epi = outer_enable_epi && enable_pro;
       std::vector<Stmt> steady;
 
