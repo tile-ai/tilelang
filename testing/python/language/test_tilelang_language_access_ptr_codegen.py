@@ -1,6 +1,8 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+import pytest
+from tilelang import tvm
 
 
 @tilelang.testing.requires_cuda
@@ -79,6 +81,50 @@ def test_copy_global_to_shared_lowers_to_cp_async():
     assert "cp_async_gs<8>" in src, "Expected T.copy(global->shared) to lower to cp_async_gs<8>"
     assert "tl::cp_async_commit" in src, "Expected CPAsync lowering to emit commit"
     assert "tl::cp_async_wait<0>" in src, "Expected CPAsync lowering to emit wait"
+
+
+@tilelang.testing.requires_cuda
+def test_async_copy_tileop_lowers_to_cp_async():
+    """Check T.async_copy always uses CPAsync path and does not auto-wait."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4,), T.float16),
+        B: T.Tensor((4,), T.float16),
+    ):
+        with T.Kernel(1, threads=1):
+            S = T.alloc_shared((4,), T.float16)
+            T.async_copy(A[0:4], S)
+            T.copy(S, B[0:4])
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== async_copy -> cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs<8>" in src, "Expected T.async_copy to lower to cp_async_gs<8>"
+    assert "tl::cp_async_commit" in src, "Expected async_copy lowering to emit commit"
+    assert "tl::cp_async_wait<0>" not in src, "Did not expect async_copy lowering to auto-emit wait"
+
+
+@tilelang.testing.requires_cuda
+def test_async_copy_tileop_rejects_invalid_cp_async_scope():
+    """Check T.async_copy rejects non global->shared patterns."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4,), T.float16),
+        B: T.Tensor((4,), T.float16),
+    ):
+        with T.Kernel(1, threads=1):
+            S0 = T.alloc_shared((4,), T.float16)
+            S1 = T.alloc_shared((4,), T.float16)
+            T.copy(A[0:4], S0)
+            # shared->shared cannot use cp.async and should fail for async_copy.
+            T.async_copy(S0, S1)
+            T.copy(S1, B[0:4])
+
+    with pytest.raises(tvm.error.InternalError, match="T.async_copy requires a valid cp.async path"):
+        tilelang.compile(main, out_idx=[1], target="cuda")
 
 
 if __name__ == "__main__":

@@ -135,9 +135,6 @@ Block MakeBlock(const Stmt &body,
 struct PipelineAnnotation {
   int stage;
   int order;
-  bool async;
-  // Index of the statement in the original loop body order (SeqStmt order)
-  int original_idx = -1;
 };
 
 using PipelineInfo = std::unordered_map<Block, PipelineAnnotation,
@@ -344,60 +341,18 @@ public:
       ordered_stmts_.Set(anno.order, block);
     }
 
-    for (const Block &block : ordered_stmts_) {
-      int stage = pipeline_info_[block].stage;
-      if (pipeline_info_[block].async) {
-        auto &state = async_states[stage];
-        state.producer_head = pipeline_loop_->min - 1;
-        for (auto write_region : block->writes) {
-          auto buffer = write_region->buffer;
-          state.dst_buffers.insert(buffer.get());
-          if (buffer_remap_.count(buffer))
-            state.dst_buffers.insert(buffer_remap_[buffer].get());
-        }
-      }
-    }
-    std::unordered_set<int> consumed;
-    for (const Block &block : ordered_stmts_) {
-      int stage = pipeline_info_[block].stage;
-      if (pipeline_info_[block].async) {
-        auto &state = async_states[stage];
-        if (state.commit_groups.empty() || consumed.count(stage)) {
-          state.commit_groups.push_back({});
-        }
-        state.commit_groups.back().push_back(pipeline_info_[block].order);
-        consumed.erase(stage);
-        for (auto write_region : block->writes) {
-          auto buffer = buffer_remap_.count(write_region->buffer)
-                            ? buffer_remap_[write_region->buffer]
-                            : write_region->buffer;
-          state.buffer_to_commit_group_[buffer.get()] =
-              state.commit_groups.size() - 1;
-        }
-      }
-
-      for (auto read_region : block->reads) {
-        for (const auto &[producer_stage_id, producer_state] : async_states) {
-          if (producer_stage_id <= stage &&
-              producer_state.writes(read_region->buffer)) {
-            consumed.insert(producer_stage_id);
-          }
-        }
-      }
-    }
-
     // Step 2: Emit the pipeline prologue, body and epilogue.
     Stmt prologue =
         EmitImpl(pipeline_loop_->min, pipeline_loop_->min + max_stage_, true,
-                 true, false);
+                 true);
     Stmt body = EmitImpl(pipeline_loop_->min + max_stage_,
                          pipeline_loop_->min + pipeline_loop_->extent, false,
-                         false, false);
+                         false);
 
     Stmt epilogue =
         EmitImpl(pipeline_loop_->min + pipeline_loop_->extent,
                  pipeline_loop_->min + pipeline_loop_->extent + max_stage_,
-                 true, true, true);
+                 true, true);
     SeqStmt stmt = SeqStmt({prologue, body, epilogue});
 
     // Step 3: Make a new block that contains new buffer allocations after
@@ -405,8 +360,6 @@ public:
     // Only include buffers that are locally allocated in the pipeline block.
     // Buffers from outer blocks will be handled separately.
     Array<Buffer> alloc_buffers;
-    std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> local_allocs_set(
-        local_allocs_.begin(), local_allocs_.end());
     for (const auto &alloc : local_allocs_) {
       alloc_buffers.push_back(buffer_remap_.Get(alloc).value_or(alloc));
       buffer_data_to_buffer_.erase(alloc->data);
@@ -572,201 +525,11 @@ private:
     return Buffer(new_buffer);
   }
 
-  // Per-stage states that need to be tracked across pipeline prologue, body,
-  // and epilogue.
-  struct AsyncStateGlobal {
-    // Buffers that this stage asynchronously writes.
-    std::unordered_set<const BufferNode *> dst_buffers;
-    // An imaginary index that the latest async operation associated with this
-    // stage has written into. Only valid if all associated predicates are true,
-    // so that we can count the number of async invocations exactly. When it is
-    // valid, it is the "sum of extents of loops that have been executed" - 1,
-    // e.g. for epilogue it is prologue extent + body extent - 1. This is only
-    // needed to compute wait count for epilogue without async producers.
-    PrimExpr producer_head;
-    std::vector<std::vector<int>> commit_groups;
-    std::unordered_map<const BufferNode *, int> buffer_to_commit_group_;
-    bool writes(const Buffer &buf) const {
-      return dst_buffers.count(buf.get()) > 0;
-    }
-  };
-
-  // Per-stage states that are local to each of pipeline prologue, body, and
-  // epilogue.
-  struct AsyncStateLocal {
-    struct PendingWait {
-      // The index into a list of blocks, where async_wait_queue should be
-      // attached at the beginning.
-      int insert_before;
-      // in_flight_count would be a more precise name, but the implementation
-      // uses wait_count for brevity.
-      PrimExpr wait_count{nullptr};
-
-      bool valid() const { return wait_count.defined(); }
-    };
-
-    std::vector<PendingWait> pending_waits;
-
-    // A symbolic expression representing the index the latest async operation
-    // associated with this stage has written into, at the "current" iteration.
-    Optional<PrimExpr> producer_head;
-    // the commit block's predicate
-    PrimExpr commit_predicate{nullptr};
-  };
-
   /*! Structure holding intermediate information for pipeline loop rewriting. */
   struct RewrittenBlockInfo {
-    int stage;
-    int order;
-    PrimExpr start;
-    PrimExpr end;
     PrimExpr predicate;
     Block block;
-    PrimExpr access_index;
-    bool is_async;
   };
-
-  void PopulateWaitCounts(const std::vector<RewrittenBlockInfo> &new_blocks,
-                          std::map<int, AsyncStateLocal> *async_states_local,
-                          bool is_epilogue = false) {
-    // Precompute which orders are present in this emit, and their access_index
-    std::unordered_map<int, PrimExpr> order_to_access_index;
-    std::unordered_set<int> present_orders;
-    for (const auto &nb : new_blocks) {
-      order_to_access_index[nb.order] = nb.access_index;
-      present_orders.insert(nb.order);
-    }
-    for (size_t i = 0; i < new_blocks.size(); ++i) {
-      // 1. Find the unique async producer stage
-      int producer_stage_idx = -1;
-      for (const auto &read_region : new_blocks[i].block->reads) {
-        for (const auto &[stage, state] : async_states) {
-          if (stage <= new_blocks[i].stage &&
-              state.writes(read_region->buffer)) {
-            // Currently only a single async stage dependency is supported
-            ICHECK(producer_stage_idx == -1 || producer_stage_idx == stage)
-                << "A dependency on multiple async stages is not supported";
-            producer_stage_idx = stage;
-          }
-        }
-      }
-      if (producer_stage_idx == -1) {
-        // This block does not depend on any async producer
-        continue;
-      }
-      const auto &state = async_states[producer_stage_idx];
-
-      auto &dep_local_state = (*async_states_local)[producer_stage_idx];
-
-      // 2. Use buffer_to_commit_group_ to find all actually dependent commit
-      // groups
-      std::unordered_set<int> dependent_groups;
-      for (const auto &read_region : new_blocks[i].block->reads) {
-        auto it = state.buffer_to_commit_group_.find(read_region->buffer.get());
-        if (it != state.buffer_to_commit_group_.end()) {
-          dependent_groups.insert(it->second);
-        }
-      }
-
-      // If there is no dependent commit group, no wait needs to be inserted
-      if (dependent_groups.empty()) {
-        continue;
-      }
-
-      // 3. Compute wait = max_g max(0, t_consumer - committed_before[g])
-      PrimExpr t_consumer = new_blocks[i].access_index;
-      PrimExpr wait_expr = make_zero(t_consumer.dtype());
-
-      PrimExpr current_head = dep_local_state.producer_head.defined()
-                                  ? dep_local_state.producer_head.value()
-                                  : state.producer_head;
-      int consumer_order = new_blocks[i].order;
-
-      for (int g : dependent_groups) {
-        const auto &group = state.commit_groups[g];
-        if (group.empty())
-          continue;
-        int commit_order = group.back();
-        bool commit_present = present_orders.count(commit_order) > 0;
-
-        PrimExpr committed_before;
-        if (commit_present && commit_order <= consumer_order) {
-          // Commit point is in this iteration and earlier than the current
-          // consumer; this iteration's head is visible
-          auto commit_predicate = dep_local_state.commit_predicate;
-          if (analyzer_.CanProve(!commit_predicate,
-                                 arith::ProofStrength::kSymbolicBound)) {
-            // it means the commit block is not executed in this iteration
-            committed_before = new_blocks[i].start - 1;
-          } else if (is_epilogue) {
-            committed_before = new_blocks[i].start - 1;
-          } else {
-            committed_before = order_to_access_index.at(commit_order);
-          }
-        } else {
-          // Commit point is later than the current consumer or not in this
-          // iteration; only the previous iteration's head is visible
-          if (dep_local_state.producer_head.defined()) {
-            auto commit_predicate = dep_local_state.commit_predicate;
-            if (analyzer_.CanProve(!commit_predicate,
-                                   arith::ProofStrength::kSymbolicBound)) {
-              committed_before = new_blocks[i].start - 1;
-            } else if (is_epilogue) {
-              committed_before = new_blocks[i].start - 1;
-            } else {
-              committed_before = current_head - 1;
-            }
-          }
-        }
-
-        wait_expr = analyzer_.Simplify(committed_before - t_consumer);
-      }
-
-      wait_expr = analyzer_.Simplify(wait_expr);
-      dep_local_state.pending_waits.push_back({static_cast<int>(i), wait_expr});
-    }
-  }
-
-  // Given pipelined blocks and async-related information, generate final loop
-  // statements with async scopes (if any).
-  Array<Stmt> CompletePipelineLoopStatements(
-      const std::vector<RewrittenBlockInfo> &blocks,
-      const std::map<int, AsyncStateLocal> &async_states_local) const {
-    std::vector<RewrittenBlockInfo> new_blocks = blocks;
-    for (const auto &[stage_id, state] : async_states_local) {
-      for (const auto &pw : state.pending_waits) {
-        auto &block = new_blocks[pw.insert_before].block;
-        BlockNode *n = block.CopyOnWrite();
-        auto zero = make_zero(DataType::Int(32));
-        n->body = AttrStmt(zero, tir::attr::async_wait_queue_scope, stage_id,
-                           AttrStmt(zero, tir::attr::async_wait_inflight_count,
-                                    pw.wait_count, n->body));
-      }
-    }
-
-    // mark the last async stmt as commit
-    std::unordered_set<int> commit_group_indices;
-    for (const auto &[stage_id, state] : async_states) {
-      for (size_t i = 0; i < state.commit_groups.size(); ++i) {
-        commit_group_indices.insert(state.commit_groups[i].back());
-      }
-    }
-
-    Array<Stmt> stmts;
-
-    for (size_t i = 0; i < new_blocks.size(); i++) {
-      Block block = new_blocks[i].block;
-      if (commit_group_indices.count(new_blocks[i].order)) {
-        auto commit_queue_scope = AttrStmt(make_zero(DataType::Int(32)),
-                                           tir::attr::async_commit_queue_scope,
-                                           new_blocks[i].stage, block->body);
-        block = MakeBlock(commit_queue_scope, buffer_data_to_buffer_);
-      }
-      stmts.push_back(BlockRealize({}, new_blocks[i].predicate, block));
-    }
-
-    return stmts;
-  }
 
   /*!
    * \brief Emit the pipeline loop in the given range.
@@ -776,7 +539,7 @@ private:
    * \return The result loop.
    */
   Stmt EmitImpl(const PrimExpr &start, const PrimExpr &end, bool unroll_loop,
-                bool need_bound_check, bool is_epilogue = false) {
+                bool need_bound_check) {
     PrimExpr new_loop_var;
     PrimExpr extent = end - start;
     auto make_nop = []() {
@@ -806,13 +569,8 @@ private:
 
     std::vector<RewrittenBlockInfo> new_blocks;
 
-    // Async related
-    std::map<int, AsyncStateLocal> async_states_local;
-
     for (const Block &block : ordered_stmts_) {
       int stage = pipeline_info_.at(block).stage;
-      int order = pipeline_info_.at(block).order;
-
       PrimExpr inbound = Bool(true);
       PrimExpr skewed_loop_var = new_loop_var - stage;
       if (need_bound_check)
@@ -825,10 +583,6 @@ private:
                                pipeline_loop_, max_stage_ != 1)(block));
 
       PrimExpr delta = start - pipeline_loop_->min;
-      // This variable corresponds to
-      // - "producer_head" if this stage is an async producer
-      // - "consumer_head" if this stage reads from asynchronously written
-      // buffers.
       PrimExpr normalized_access_index =
           is_unit_loop ? skewed_loop_var : skewed_loop_var + delta;
 
@@ -885,23 +639,13 @@ private:
         n->body = inner;
       }
 
-      if (pipeline_info_[block].async) {
-        auto &local_state = async_states_local[stage];
-        local_state.producer_head = normalized_access_index;
-        local_state.commit_predicate = inbound;
-        BlockNode *n = new_block.CopyOnWrite();
-        n->body = AttrStmt(make_zero(DataType::Int(32)), tir::attr::async_scope,
-                           1, n->body);
-      }
-
-      new_blocks.push_back({stage, order, start, end, inbound, new_block,
-                            normalized_access_index,
-                            pipeline_info_[block].async});
+      new_blocks.push_back({inbound, new_block});
     }
 
-    PopulateWaitCounts(new_blocks, &async_states_local, is_epilogue);
-
-    auto stmts = CompletePipelineLoopStatements(new_blocks, async_states_local);
+    Array<Stmt> stmts;
+    for (const auto &block_info : new_blocks) {
+      stmts.push_back(BlockRealize({}, block_info.predicate, block_info.block));
+    }
 
     Stmt new_loop{nullptr};
 
@@ -929,11 +673,6 @@ private:
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
                      std::move(new_loop), std::nullopt, preserved_annotations);
     }
-    // Update producer heads in the global async states.
-    for (const auto &[stage_id, state] : async_states_local) {
-      async_states[stage_id].producer_head += extent;
-    }
-
     return BlockRealize({}, Bool(true),
                         MakeBlock(new_loop, buffer_data_to_buffer_));
   }
@@ -947,7 +686,6 @@ private:
   int max_stage_ = -1;
   Map<Buffer, Buffer> buffer_remap_;
   Array<Block> ordered_stmts_;
-  std::map<int, AsyncStateGlobal> async_states;
   std::vector<LetWrapper> loop_var_let_wrappers_;
   std::vector<IfWrapper> loop_var_if_wrappers_;
 };
@@ -1208,23 +946,6 @@ private:
     BufferUsageCollector collector(buffer_data_to_buffer_, allocated_buffers_);
     pipeline_allocs = collector.Collect(SeqStmt(pipeline_body_seq->seq));
 
-    // Build a set of local allocs (buffers allocated in the pipeline block
-    // itself) for efficient lookup
-    std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> local_allocs_set;
-    for (const auto &buffer : block_local_allocs) {
-      local_allocs_set.insert(buffer);
-    }
-    for (size_t i = 0; i < pipeline_body_seq->seq.size(); i++) {
-      const Stmt &child = pipeline_body_seq->seq[i];
-      const auto *nested_block_realize = child.as<BlockRealizeNode>();
-      if (nested_block_realize && is_one(nested_block_realize->predicate) &&
-          nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
-        for (const auto &buffer : nested_block_realize->block->alloc_buffers) {
-          local_allocs_set.insert(buffer);
-        }
-      }
-    }
-
     auto pipeline_stages = Downcast<Array<Integer>>(
         op->annotations.at(tir::attr::software_pipeline_stage));
     auto pipeline_orders = Downcast<Array<Integer>>(
@@ -1242,22 +963,10 @@ private:
         << ", but pipeline annotation is " << pipeline_orders
         << " with different size";
 
-    std::unordered_set<int> pipeline_async_stages;
-    if (auto annot =
-            op->annotations.Get(tir::attr::software_pipeline_async_stages)) {
-      for (auto s : Downcast<Array<Integer>>(annot.value())) {
-        pipeline_async_stages.insert(s->value);
-      }
-    }
-
     for (size_t i = 0; i < pipeline_stages.size(); i++) {
       int stage = static_cast<int>(pipeline_stages[i]->value);
-      bool is_async =
-          pipeline_async_stages.find(stage) != pipeline_async_stages.end();
       PipelineAnnotation stage_order{
-          stage,
-          /*order=*/static_cast<int>(pipeline_orders[i]->value), is_async,
-          /*original_idx=*/static_cast<int>(i)};
+          stage, /*order=*/static_cast<int>(pipeline_orders[i]->value)};
       pipeline_info.emplace(original_order[i], stage_order);
     }
 

@@ -7,7 +7,9 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "../target/utils.h"
@@ -237,6 +239,32 @@ public:
   bool GetGlobalCopyPattern() const { return is_global_copy_pattern_; }
 
 private:
+  Optional<Buffer> TryGetBufFromAccessPtr(const PrimExpr &expr) const {
+    auto call = expr.as<CallNode>();
+    if (!call)
+      return Optional<Buffer>();
+    if (call->op.same_as(builtin::tvm_access_ptr())) {
+      if (call->args.size() <= 1)
+        return Optional<Buffer>();
+      auto *var = call->args[1].as<VarNode>();
+      if (!var)
+        return Optional<Buffer>();
+      auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+      if (it == buffer_data_to_buffer_.end())
+        return Optional<Buffer>();
+      return (*it).second;
+    }
+    if (call->op.same_as(tl::access_ptr())) {
+      if (call->args.empty())
+        return Optional<Buffer>();
+      auto *load = call->args[0].as<BufferLoadNode>();
+      if (!load)
+        return Optional<Buffer>();
+      return load->buffer;
+    }
+    return Optional<Buffer>();
+  }
+
   void VisitStmt_(const BufferStoreNode *op) final {
     Buffer store_buffer = op->buffer;
     Array<PrimExpr> indices = op->indices;
@@ -304,6 +332,32 @@ private:
         // because we only care about the buffer itself instead of indices
         reads_.push_back(buffer_region);
       }
+    } else if (op->op.same_as(builtin::ptx_cp_async()) ||
+               op->op.same_as(tl::ptx_cp_async())) {
+      // Explicit cp.async call: args[0] = dst access ptr, args[1] = src access
+      // ptr. Treat as a global->shared copy candidate in pipeline planning.
+      if (args.size() >= 2) {
+        auto dst_buf = TryGetBufFromAccessPtr(args[0]);
+        auto src_buf = TryGetBufFromAccessPtr(args[1]);
+        if (src_buf.defined()) {
+          reads_.push_back(BufferRegion::FullRegion(src_buf.value()));
+        }
+        if (dst_buf.defined()) {
+          writes_.push_back(BufferRegion::FullRegion(dst_buf.value()));
+        }
+        if (src_buf.defined() && dst_buf.defined() &&
+            (src_buf.value().scope() == "global" ||
+             src_buf.value().scope().empty()) &&
+            (dst_buf.value().scope() == "shared" ||
+             dst_buf.value().scope() == "shared.dyn")) {
+          is_global_copy_pattern_ = true;
+        }
+      }
+      if (args.size() == 4) {
+        // Preserve dependence from a predicated guard expression.
+        this->VisitExpr(args[3]);
+      }
+      return;
     } else if (op->op.same_as(builtin::if_then_else())) {
       within_condition_expr_ = true;
       this->VisitExpr(op->args[0]);
@@ -400,6 +454,14 @@ private:
     int order = -1, stage = -1;
     bool copy_stage = false;
     bool producer_for_copy = false;
+    int cp_async_call_count = 0;
+    int cp_async_commit_count = 0;
+    int cp_async_wait_count = 0;
+    // Minimal static wait_group(n) value in this stmt.
+    // numeric_limits<int>::max() means no static wait value is observed.
+    int cp_async_wait_min_inflight = std::numeric_limits<int>::max();
+    bool cp_async_wait_has_dynamic = false;
+    int cp_async_group = -1;
     int last_use_stmt_index =
         -1; // Initialized to -1, indicating no consumers found yet
 
@@ -407,10 +469,51 @@ private:
     bool is_first_stage() const { return copy_stage || producer_for_copy; }
     bool is_copy_stage() const { return copy_stage; }
     bool is_producer_for_copy() const { return producer_for_copy; }
+    bool has_cp_async_call() const { return cp_async_call_count > 0; }
+    bool has_cp_async_commit() const { return cp_async_commit_count > 0; }
+    bool has_cp_async_wait() const { return cp_async_wait_count > 0; }
     bool is_last_use_stmt_index_valid() const {
       return last_use_stmt_index != -1;
     }
   };
+
+  struct AsyncIntrinInfo {
+    int cp_async_call_count = 0;
+    int cp_async_commit_count = 0;
+    int cp_async_wait_count = 0;
+    int cp_async_wait_min_inflight = std::numeric_limits<int>::max();
+    bool cp_async_wait_has_dynamic = false;
+  };
+
+  AsyncIntrinInfo AnalyzeAsyncIntrinsics(const Stmt &stmt) {
+    AsyncIntrinInfo info;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      if (call->op.same_as(builtin::ptx_cp_async()) ||
+          call->op.same_as(tl::ptx_cp_async())) {
+        ++info.cp_async_call_count;
+      } else if (call->op.same_as(builtin::ptx_commit_group())) {
+        ++info.cp_async_commit_count;
+      } else if (call->op.same_as(builtin::ptx_wait_group())) {
+        ++info.cp_async_wait_count;
+        if (!call->args.empty()) {
+          if (const auto *imm = call->args[0].as<IntImmNode>()) {
+            info.cp_async_wait_min_inflight =
+                std::min(info.cp_async_wait_min_inflight,
+                         static_cast<int>(imm->value));
+          } else {
+            info.cp_async_wait_has_dynamic = true;
+          }
+        } else {
+          info.cp_async_wait_has_dynamic = true;
+        }
+      }
+    });
+    return info;
+  }
 
   PipelineStageInfo
   MakePipelineStageInfo(Stmt stmt, int idx,
@@ -427,6 +530,12 @@ private:
     pinfo.writes = std::move(collector.GetWrites());
     pinfo.original_stmt_index = idx;
     pinfo.copy_stage = collector.GetGlobalCopyPattern();
+    auto async_info = AnalyzeAsyncIntrinsics(block->body);
+    pinfo.cp_async_call_count = async_info.cp_async_call_count;
+    pinfo.cp_async_commit_count = async_info.cp_async_commit_count;
+    pinfo.cp_async_wait_count = async_info.cp_async_wait_count;
+    pinfo.cp_async_wait_min_inflight = async_info.cp_async_wait_min_inflight;
+    pinfo.cp_async_wait_has_dynamic = async_info.cp_async_wait_has_dynamic;
     return std::move(pinfo);
   }
 
@@ -533,6 +642,82 @@ private:
       auto pinfo =
           MakePipelineStageInfo(pipeline_body_seq->seq[i], i, chain_builder);
       pipeline_stage_infos.push_back(std::move(pinfo));
+    }
+
+    // Build a formal cp.async synchronization model in original statement
+    // order:
+    //   group := cp_async* then commit
+    // and map wait_group(n) to the committed groups it must wait for.
+    struct CPAsyncGroupInfo {
+      int group_id = -1;
+      int anchor_cp_async_stmt = -1;
+      std::vector<int> cp_async_stmt_indices;
+      std::vector<int> commit_stmt_indices;
+      std::unordered_set<const BufferNode *> written_buffers;
+    };
+    struct WaitDependencyInfo {
+      int wait_stmt_index = -1;
+      // Committed groups that must be completed before this wait can pass.
+      std::vector<int> required_group_ids;
+    };
+
+    std::vector<CPAsyncGroupInfo> cp_async_groups;
+    std::vector<WaitDependencyInfo> wait_dependencies;
+    std::vector<int> committed_groups_in_order;
+
+    auto create_new_group = [&]() -> int {
+      int group_id = static_cast<int>(cp_async_groups.size());
+      CPAsyncGroupInfo group;
+      group.group_id = group_id;
+      cp_async_groups.push_back(std::move(group));
+      return group_id;
+    };
+
+    int open_group = -1;
+    for (size_t i = 0; i < pipeline_stage_infos.size(); ++i) {
+      auto &pinfo = pipeline_stage_infos[i];
+      if (pinfo.has_cp_async_call()) {
+        if (open_group == -1) {
+          open_group = create_new_group();
+        }
+        pinfo.cp_async_group = open_group;
+        auto &group = cp_async_groups[open_group];
+        group.cp_async_stmt_indices.push_back(static_cast<int>(i));
+        if (group.anchor_cp_async_stmt == -1) {
+          group.anchor_cp_async_stmt = static_cast<int>(i);
+        }
+        for (const auto &write : pinfo.writes) {
+          group.written_buffers.insert(write->buffer.get());
+        }
+      }
+      if (pinfo.has_cp_async_commit()) {
+        if (open_group == -1) {
+          open_group = create_new_group();
+        }
+        pinfo.cp_async_group = open_group;
+        cp_async_groups[open_group].commit_stmt_indices.push_back(
+            static_cast<int>(i));
+        committed_groups_in_order.push_back(open_group);
+        // A commit closes the currently open cp.async group.
+        open_group = -1;
+      }
+      if (pinfo.has_cp_async_wait()) {
+        int committed_count = static_cast<int>(committed_groups_in_order.size());
+        int retain_inflight = pinfo.cp_async_wait_has_dynamic
+                                  ? 0
+                                  : pinfo.cp_async_wait_min_inflight;
+        int required_count =
+            pinfo.cp_async_wait_has_dynamic
+                ? committed_count
+                : std::max(0, committed_count - retain_inflight);
+
+        WaitDependencyInfo wait_dep;
+        wait_dep.wait_stmt_index = static_cast<int>(i);
+        wait_dep.required_group_ids.assign(committed_groups_in_order.begin(),
+                                           committed_groups_in_order.begin() +
+                                               required_count);
+        wait_dependencies.push_back(std::move(wait_dep));
+      }
     }
 
     // For every copy stage, mark all its dependency stages as producer_for_copy
@@ -745,6 +930,98 @@ private:
             (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
         if (!pinfo.is_copy_stage() && !pinfo.is_producer_for_copy())
           pinfo.stage--;
+      }
+    }
+
+    // Enforce stage(commit) == stage(cp_async anchor) per group.
+    for (const auto &group : cp_async_groups) {
+      if (group.anchor_cp_async_stmt < 0) {
+        continue;
+      }
+      int anchor_stage = pipeline_stage_infos[group.anchor_cp_async_stmt].stage;
+      for (int commit_stmt_idx : group.commit_stmt_indices) {
+        pipeline_stage_infos[commit_stmt_idx].stage = anchor_stage;
+      }
+    }
+
+    // Enforce wait placement based on the formal group dependency model.
+    // For static wait_group(n), it depends on committed groups except the
+    // latest n groups. For dynamic wait args, we conservatively treat it as
+    // wait_group(0), i.e. draining all committed groups.
+    auto get_group_stage = [&](int group_id) -> int {
+      if (group_id < 0 || group_id >= static_cast<int>(cp_async_groups.size())) {
+        return 0;
+      }
+      const auto &group = cp_async_groups[group_id];
+      if (!group.commit_stmt_indices.empty()) {
+        return pipeline_stage_infos[group.commit_stmt_indices.back()].stage;
+      }
+      if (group.anchor_cp_async_stmt >= 0) {
+        return pipeline_stage_infos[group.anchor_cp_async_stmt].stage;
+      }
+      return 0;
+    };
+
+    for (const auto &wait_dep : wait_dependencies) {
+      if (wait_dep.wait_stmt_index < 0 ||
+          wait_dep.wait_stmt_index >=
+              static_cast<int>(pipeline_stage_infos.size())) {
+        continue;
+      }
+      const auto &wait_stmt_info = pipeline_stage_infos[wait_dep.wait_stmt_index];
+      // If wait is fused with cp.async/commit in the same statement, we cannot
+      // place it independently at stage granularity. Keep the statement stage
+      // unchanged and rely on the statement's explicit local ordering.
+      if (wait_stmt_info.has_cp_async_call() ||
+          wait_stmt_info.has_cp_async_commit()) {
+        continue;
+      }
+      if (wait_dep.required_group_ids.empty()) {
+        continue;
+      }
+
+      int required_stage = pipeline_stage_infos[wait_dep.wait_stmt_index].stage;
+      std::unordered_set<const BufferNode *> waited_buffers;
+      for (int group_id : wait_dep.required_group_ids) {
+        required_stage = std::max(required_stage, get_group_stage(group_id));
+        if (group_id >= 0 &&
+            group_id < static_cast<int>(cp_async_groups.size())) {
+          const auto &group = cp_async_groups[group_id];
+          waited_buffers.insert(group.written_buffers.begin(),
+                                group.written_buffers.end());
+        }
+      }
+
+      int dependent_consumer_stage = -1;
+      if (!waited_buffers.empty()) {
+        for (int stmt_idx = wait_dep.wait_stmt_index + 1;
+             stmt_idx < static_cast<int>(pipeline_stage_infos.size());
+             ++stmt_idx) {
+          bool dependent_read = false;
+          for (const BufferRegion &read : pipeline_stage_infos[stmt_idx].reads) {
+            if (waited_buffers.count(read->buffer.get())) {
+              dependent_read = true;
+              break;
+            }
+          }
+          if (dependent_read) {
+            dependent_consumer_stage = pipeline_stage_infos[stmt_idx].stage;
+            break;
+          }
+        }
+      }
+
+      if (dependent_consumer_stage >= 0) {
+        CHECK_GE(dependent_consumer_stage, required_stage)
+            << "Pipeline planning error: wait_group stage cannot be after its "
+               "dependent consumer stage. wait_stmt="
+            << wait_dep.wait_stmt_index
+            << ", required_stage=" << required_stage
+            << ", consumer_stage=" << dependent_consumer_stage;
+        pipeline_stage_infos[wait_dep.wait_stmt_index].stage =
+            dependent_consumer_stage;
+      } else {
+        pipeline_stage_infos[wait_dep.wait_stmt_index].stage = required_stage;
       }
     }
 

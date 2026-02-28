@@ -161,6 +161,21 @@ public:
     return 0; // default: evict_normal
   }
 
+  bool GetIsAsyncCopy() const {
+    if (auto val = annotations.Get("is_async_copy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    // Backward-compatibility with historical annotation key.
+    if (auto val = annotations.Get("force_cp_async")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
   /*!
    * \brief Lower the copy operator to a TIR statement.
    * \param T        Arguments for lowering.

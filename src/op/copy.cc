@@ -63,15 +63,20 @@ private:
       return StmtMutator::VisitStmt_(op);
     }
 
-    PrimExpr dst_offset = op->buffer.OffsetOf(op->indices).back();
-    PrimExpr src_offset = load->buffer.OffsetOf(load->indices).back();
-
-    PrimExpr dst_access_ptr = op->buffer.access_ptr(
-        /*access_mask=*/2, DataType::Handle(), /*content_lanes=*/1, dst_offset,
-        /*extent=*/PrimExpr(1));
-    PrimExpr src_access_ptr = load->buffer.access_ptr(
-        /*access_mask=*/1, DataType::Handle(), /*content_lanes=*/1, src_offset,
-        /*extent=*/PrimExpr(1));
+    // Keep pointer metadata in tl.access_ptr form for downstream analysis;
+    // LowerAccessPtr will translate it to tvm_access_ptr later.
+    PrimExpr dst_access_ptr =
+        Call(DataType::Handle(), tvm::tl::access_ptr(),
+             {BufferLoad(op->buffer, op->indices),
+              IntImm(DataType::Int(32), 1), // extent
+              IntImm(DataType::Int(32), 2)  // rw_mask: write
+             });
+    PrimExpr src_access_ptr =
+        Call(DataType::Handle(), tvm::tl::access_ptr(),
+             {BufferLoad(load->buffer, load->indices),
+              IntImm(DataType::Int(32), 1), // extent
+              IntImm(DataType::Int(32), 1)  // rw_mask: read
+             });
 
     return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(),
                          {dst_access_ptr, src_access_ptr, PrimExpr(bytes)}));
@@ -745,6 +750,24 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
 
   // Check if target is CuTeDSL backend
   bool is_cutedsl = TargetIsCuTeDSL(target);
+  bool is_async_copy = GetIsAsyncCopy();
+
+  if (is_async_copy) {
+    bool cp_async_supported =
+        CheckCPAsyncCopy(target, layout_map, analyzer, buffer_oob);
+    if (!cp_async_supported) {
+      std::ostringstream oss;
+      oss << "T.async_copy requires a valid cp.async path, but constraints are "
+             "not satisfied for src="
+          << src->name << " (scope=" << src.scope() << ", dtype=" << src->dtype
+          << "), dst=" << dst->name << " (scope=" << dst.scope()
+          << ", dtype=" << dst->dtype
+          << "). Expected: global->shared/shared.dyn, equal dtypes, no OOB "
+             "predicates, and vectorized bytes in {4,8,16}.";
+      LOG(FATAL) << oss.str();
+    }
+    return CopyInst::kCPAsync;
+  }
 
   // Check tensor memory operations first (highest priority for SM100/Blackwell)
   // 1d tma access can not support out of bound access
@@ -817,8 +840,10 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 }
 
-// Lowers copy to cp.async global->shared transfers and keeps T.copy semantics
-// synchronous by committing and waiting after the loop.
+// Lowers copy to cp.async global->shared transfers.
+// - T.copy (auto cp.async) keeps synchronous semantics by committing and
+//   waiting after the loop.
+// - T.async_copy commits but does not wait (explicit async semantics).
 Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
                                 arith::Analyzer *analyzer) const {
   auto simt_loop = MakeSIMTLoop(analyzer);
@@ -846,6 +871,9 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
   Stmt cp_async_loop = cp_async_rewriter.Rewrite(lowered_loop);
   Stmt commit_group =
       Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
+  if (GetIsAsyncCopy()) {
+    return SeqStmt({cp_async_loop, commit_group});
+  }
   Stmt wait_group = Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
                                   {IntImm(DataType::Int(32), 0)}));
   return SeqStmt({cp_async_loop, commit_group, wait_group});
@@ -1888,6 +1916,19 @@ void CopyNode::CollectFragmentLayouts(const PrimExpr &expr,
 // eviction_policy
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.tileop.async_copy")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "async_copy")
+    .set_attr<OpBuilderFunc>(
+        "TLOpBuilder",
+        [](Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+          Map<String, ObjectRef> ann = annotations;
+          ann.Set("is_async_copy", IntImm(DataType::Int(32), 1));
+          return Copy(args, ann);
+        })
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
