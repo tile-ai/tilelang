@@ -900,6 +900,26 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       return;
     }
 
+    // Mark async cp.async load context so that tvm_access_ptr within the call
+    // can be tagged accordingly. This allows the sync planner to avoid
+    // inserting unnecessary barriers between back-to-back cp.async writes.
+    auto is_cp_async = [&]() {
+      if (auto opt = op->op.as<Op>()) {
+        const Op &call_op = opt.value();
+        return call_op.same_as(builtin::ptx_cp_async()) ||
+               call_op.same_as(tl::ptx_cp_async());
+      }
+      return false;
+    }();
+    if (is_cp_async) {
+      cp_async_depth_++;
+      for (const auto &a : op->args) {
+        this->VisitExpr(a);
+      }
+      cp_async_depth_--;
+      return;
+    }
+
     // Mark the pointer argument of atomic ops as atomic so the sync planner
     // doesn't insert barriers between atomics.
     auto is_atomic_op = [&]() {
@@ -1025,12 +1045,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.scope = scope;
         if (flag->value & 1) {
           e.type = kRead;
-          e.is_async_copy = (tma_depth_ > 0);
+          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
         if (flag->value & 2) {
           e.type = kWrite;
-          e.is_async_copy = (tma_depth_ > 0);
+          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
       }
@@ -1258,6 +1278,8 @@ private:
   bool in_device_env_{false};
   // Nesting depth of tma_load/tma_load_im2col calls
   int tma_depth_{0};
+  // Nesting depth of cp.async calls (ptx_cp_async)
+  int cp_async_depth_{0};
   // Whether we're visiting the pointer argument expression of an atomic call
   // (e.g., atomic_add/atomic_max/atomic_load). When > 0, accesses produced by
   // the pointer metadata ops are tagged as atomic.
