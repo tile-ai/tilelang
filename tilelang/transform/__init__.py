@@ -71,6 +71,22 @@ def InjectSoftwarePipeline():
     return _ffi_api.InjectSoftwarePipeline()  # type: ignore
 
 
+def OptimizeCPAsyncSync():
+    """Optimize explicit cp.async commit/wait synchronization intrinsics.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.OptimizeCPAsyncSync()  # type: ignore
+
+
+def SimplifyCPAsyncSync():
+    """Backward-compatible alias of OptimizeCPAsyncSync."""
+    return OptimizeCPAsyncSync()
+
+
 def FrontendLegalize():
     """FrontendLegalize
 
