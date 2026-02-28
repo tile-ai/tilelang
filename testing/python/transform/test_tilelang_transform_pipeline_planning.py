@@ -121,8 +121,10 @@ def test_pipeline_planning_binds_commit_to_cp_async_stage():
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
     stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
     assert len(stages) == 3, f"Expected 3 pipeline stages for 3 statements, got {len(stages)}"
     assert stages[0] == stages[1], f"Expected cp.async and commit to be in the same stage, got stages={stages}"
+    assert orders[0] < orders[1], f"Expected cp.async to be ordered before commit in the same stage, got orders={orders}"
 
 
 def test_pipeline_planning_binds_wait_to_cp_async_consumer_stage():

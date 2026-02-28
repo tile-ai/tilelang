@@ -7,7 +7,9 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include <functional>
 #include <limits>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1024,6 +1026,160 @@ private:
             dependent_consumer_stage;
       } else {
         pipeline_stage_infos[wait_dep.wait_stmt_index].stage = required_stage;
+      }
+    }
+
+    // Enforce cp.async ordering constraints.
+    //
+    // PipelinePlanning's scheduling heuristic may float pure control intrinsics
+    // like `ptx_commit_group` earlier because they have no buffer read/write
+    // regions. This can break cp.async group semantics and generate illegal
+    // code patterns such as:
+    //   cp_async_commit();
+    //   cp_async_gs<...>(...);
+    //
+    // We fix this by building a small control-dependency graph among pipeline
+    // body statements and doing a stable topological sort with the existing
+    // `order` as the tie-breaker.
+    {
+      int n = static_cast<int>(pipeline_stage_infos.size());
+      std::vector<int> order_rank(n, 0);
+      for (int i = 0; i < n; ++i) {
+        order_rank[i] = pipeline_stage_infos[i].order;
+      }
+
+      std::vector<std::unordered_set<int>> edges(n);
+      std::vector<int> indeg(n, 0);
+
+      auto add_edge = [&](int u, int v) {
+        if (u < 0 || v < 0 || u >= n || v >= n || u == v) {
+          return;
+        }
+        if (edges[u].insert(v).second) {
+          indeg[v] += 1;
+        }
+      };
+
+      // (1) cp.async group semantics:
+      //   group := cp_async* ; commit
+      // and group boundaries must be preserved:
+      //   commit(group_i) happens before cp_async(group_{i+1}).
+      for (size_t g = 0; g < cp_async_groups.size(); ++g) {
+        const auto &group = cp_async_groups[g];
+        for (int cp_stmt_idx : group.cp_async_stmt_indices) {
+          for (int commit_stmt_idx : group.commit_stmt_indices) {
+            // Only enforce intra-iteration order (same stage).
+            if (pipeline_stage_infos[cp_stmt_idx].stage ==
+                pipeline_stage_infos[commit_stmt_idx].stage) {
+              add_edge(cp_stmt_idx, commit_stmt_idx);
+            }
+          }
+        }
+        if (g + 1 < cp_async_groups.size() &&
+            !group.commit_stmt_indices.empty()) {
+          const auto &next_group = cp_async_groups[g + 1];
+          for (int commit_stmt_idx : group.commit_stmt_indices) {
+            for (int next_cp_stmt_idx : next_group.cp_async_stmt_indices) {
+              if (pipeline_stage_infos[commit_stmt_idx].stage ==
+                  pipeline_stage_infos[next_cp_stmt_idx].stage) {
+                add_edge(commit_stmt_idx, next_cp_stmt_idx);
+              }
+            }
+          }
+        }
+      }
+
+      // (2) wait_group must stay ordered before dependent consumers in the same
+      // stage, and if wait is in the same stage as a required commit, it must
+      // happen after that commit.
+      for (const auto &wait_dep : wait_dependencies) {
+        int wait_stmt_idx = wait_dep.wait_stmt_index;
+        if (wait_stmt_idx < 0 || wait_stmt_idx >= n) {
+          continue;
+        }
+
+        const auto &wait_stmt_info = pipeline_stage_infos[wait_stmt_idx];
+        // If wait is fused with cp.async/commit, rely on local statement order.
+        if (wait_stmt_info.has_cp_async_call() ||
+            wait_stmt_info.has_cp_async_commit()) {
+          continue;
+        }
+
+        std::unordered_set<const BufferNode *> waited_buffers;
+        for (int group_id : wait_dep.required_group_ids) {
+          if (group_id < 0 ||
+              group_id >= static_cast<int>(cp_async_groups.size())) {
+            continue;
+          }
+          const auto &group = cp_async_groups[group_id];
+          waited_buffers.insert(group.written_buffers.begin(),
+                                group.written_buffers.end());
+
+          // If wait shares the same stage with a required commit, it must be
+          // ordered after that commit for the same original iteration.
+          for (int commit_stmt_idx : group.commit_stmt_indices) {
+            if (pipeline_stage_infos[commit_stmt_idx].stage ==
+                wait_stmt_info.stage) {
+              add_edge(commit_stmt_idx, wait_stmt_idx);
+            }
+          }
+        }
+
+        if (waited_buffers.empty()) {
+          continue;
+        }
+
+        // Ensure wait happens before all same-stage consumers that read any of
+        // the waited buffers.
+        for (int consumer_stmt_idx = wait_stmt_idx + 1; consumer_stmt_idx < n;
+             ++consumer_stmt_idx) {
+          if (pipeline_stage_infos[consumer_stmt_idx].stage !=
+              wait_stmt_info.stage) {
+            continue;
+          }
+          bool dependent_read = false;
+          for (const BufferRegion &read :
+               pipeline_stage_infos[consumer_stmt_idx].reads) {
+            if (waited_buffers.count(read->buffer.get())) {
+              dependent_read = true;
+              break;
+            }
+          }
+          if (dependent_read) {
+            add_edge(wait_stmt_idx, consumer_stmt_idx);
+          }
+        }
+      }
+
+      // Stable topological sort: pick the smallest existing order each time.
+      using Item = std::pair<int, int>; // (order_rank, stmt_idx)
+      std::priority_queue<Item, std::vector<Item>, std::greater<Item>> ready;
+      for (int i = 0; i < n; ++i) {
+        if (indeg[i] == 0) {
+          ready.push({order_rank[i], i});
+        }
+      }
+
+      std::vector<int> topo_order;
+      topo_order.reserve(n);
+      while (!ready.empty()) {
+        auto [rank, u] = ready.top();
+        ready.pop();
+        topo_order.push_back(u);
+        for (int v : edges[u]) {
+          indeg[v] -= 1;
+          if (indeg[v] == 0) {
+            ready.push({order_rank[v], v});
+          }
+        }
+      }
+
+      CHECK_EQ(static_cast<int>(topo_order.size()), n)
+          << "Pipeline planning error: cycle detected while enforcing cp.async "
+             "ordering constraints.";
+
+      for (int new_order = 0; new_order < n; ++new_order) {
+        pipeline_stage_infos[topo_order[new_order]].order = new_order;
       }
     }
 
