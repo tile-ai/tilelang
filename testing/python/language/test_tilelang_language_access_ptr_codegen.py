@@ -130,5 +130,64 @@ def test_async_copy_tileop_rejects_invalid_cp_async_scope():
         tilelang.compile(main, out_idx=[1], target="cuda")
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_copy_global_to_shared_oob_lowers_to_predicated_cp_async():
+    """Check T.copy can lower OOB-guarded global->shared copy to predicated cp.async."""
+
+    M = 130
+    K = 32
+    block_m = 128
+    block_k = 32
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((M, K), T.float16),
+    ):
+        with T.Kernel(T.ceildiv(M, block_m)) as pid_m:
+            S = T.alloc_shared((block_m, block_k), T.float16)
+            # OOB on the M dimension for the last block -> requires predicate,
+            # but predicate is uniform across the vectorized K dimension.
+            T.copy(A[pid_m * block_m : (pid_m + 1) * block_m, 0:block_k], S, disable_tma=True)
+            T.copy(S, B[pid_m * block_m : (pid_m + 1) * block_m, 0:block_k])
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== OOB copy -> predicated cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs_conditional<" in src, "Expected predicated cp.async (zero-fill) in generated CUDA source"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_async_copy_oob_lowers_to_predicated_cp_async_without_wait():
+    """Check T.async_copy supports OOB via predicated cp.async and does not auto-wait."""
+
+    M = 130
+    K = 32
+    block_m = 128
+    block_k = 32
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((M, K), T.float16),
+    ):
+        with T.Kernel(T.ceildiv(M, block_m)) as pid_m:
+            S = T.alloc_shared((block_m, block_k), T.float16)
+            T.async_copy(A[pid_m * block_m : (pid_m + 1) * block_m, 0:block_k], S)
+            # Don't read S here (no wait). Keep B live so kernel has an output.
+            B[0, 0] = A[0, 0]
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== OOB async_copy -> predicated cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs_conditional<" in src, "Expected predicated cp.async (zero-fill) in generated CUDA source"
+    assert "tl::cp_async_commit" in src, "Expected async_copy lowering to emit commit"
+    assert "tl::cp_async_wait<0>" not in src, "Did not expect async_copy lowering to auto-emit wait"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

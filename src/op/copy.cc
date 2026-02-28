@@ -49,8 +49,36 @@ public:
   Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
 
 private:
+  static bool IsZeroValue(const PrimExpr &e) {
+    if (auto *b = e.as<BroadcastNode>()) {
+      return IsZeroValue(b->value);
+    }
+    if (auto *f = e.as<FloatImmNode>()) {
+      return f->value == 0.0f;
+    }
+    if (auto *i = e.as<IntImmNode>()) {
+      return i->value == 0;
+    }
+    return false;
+  }
+
   Stmt VisitStmt_(const BufferStoreNode *op) final {
-    const auto *load = op->value.as<BufferLoadNode>();
+    const BufferLoadNode *load = op->value.as<BufferLoadNode>();
+    Optional<PrimExpr> predicate = std::nullopt;
+    if (load == nullptr) {
+      // Pattern: dst = if_then_else(pred, src_load, 0)
+      // This represents OOB guarding with zero-fill, which can map to
+      // predicated cp.async using the 4-operand form (zfill via src_size=0).
+      const auto *call = op->value.as<CallNode>();
+      if (call && call->op.same_as(builtin::if_then_else()) &&
+          call->args.size() == 3) {
+        load = call->args[1].as<BufferLoadNode>();
+        if (load && IsZeroValue(call->args[2])) {
+          predicate = call->args[0];
+        }
+      }
+    }
+
     if (load == nullptr || !IsGlobalLikeScope(load->buffer.scope())) {
       return StmtMutator::VisitStmt_(op);
     }
@@ -80,8 +108,11 @@ private:
                  IntImm(DataType::Int(32), 1)  // rw_mask: read
              });
 
-    return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(),
-                         {dst_access_ptr, src_access_ptr, PrimExpr(bytes)}));
+    Array<PrimExpr> args{dst_access_ptr, src_access_ptr, PrimExpr(bytes)};
+    if (predicate.defined()) {
+      args.push_back(predicate.value());
+    }
+    return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(), args));
   }
 };
 
@@ -725,14 +756,15 @@ bool CopyNode::CheckTMemStore(Target target) const {
 // Checks if copy can use cp.async global->shared path.
 // Requirements:
 // - target has async copy capability
-// - no OOB guards are required
 // - source is global and destination is shared/shared.dyn
 // - source/destination dtypes match
 // - vectorized copy width (bytes) is one of {4, 8, 16}
+// - if OOB guards are required, only a *uniform* (scalar) source predicate
+//   is supported (dst must be in-bounds)
 bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
                                 arith::Analyzer *analyzer,
                                 bool buffer_oob) const {
-  if (!TargetHasAsyncCopy(target) || buffer_oob) {
+  if (!TargetHasAsyncCopy(target)) {
     return false;
   }
   if (!IsGlobalLikeScope(src.scope()) ||
@@ -752,7 +784,9 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
       MakePredicate(local_analyzer.get(), loop_vars, src->shape, 0);
   PrimExpr dst_predicate =
       MakePredicate(local_analyzer.get(), loop_vars, dst->shape, 1);
-  if (src_predicate.defined() || dst_predicate.defined()) {
+  // cp.async always writes to shared memory. We can only guard the global
+  // load side (via zero-fill), not the shared write side.
+  if (dst_predicate.defined()) {
     return false;
   }
 
@@ -761,7 +795,35 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
   int vector_size =
       GetVectorizeSize(fused_loop, local_analyzer.get(), layout_map);
   int vectorized_bytes = vector_size * src->dtype.bytes();
-  return IsCPAsyncInstructionBytes(vectorized_bytes);
+  if (!IsCPAsyncInstructionBytes(vectorized_bytes)) {
+    return false;
+  }
+
+  // OOB handling: allow a scalar (uniform) source predicate that does not
+  // depend on the vectorized loop var. Otherwise, VectorizeLoop will
+  // scalarize the body, leaving illegal sub-4B cp.async calls.
+  if (src_predicate.defined()) {
+    // Find the innermost loop var (the one VectorizeLoop will turn into a ramp)
+    Var inner_var;
+    {
+      const ForNode *cur = fused_loop.get();
+      while (cur) {
+        inner_var = cur->loop_var;
+        const auto *next = cur->body.as<ForNode>();
+        cur = next;
+      }
+    }
+    if (inner_var.defined()) {
+      bool depends_on_inner = UsesVar(src_predicate, [&](const VarNode *v) {
+        return v == inner_var.get();
+      });
+      if (depends_on_inner) {
+        return false;
+      }
+    }
+  }
+  (void)buffer_oob; // buffer_oob is subsumed by predicate checks above.
+  return true;
 }
 
 // Selects the most specific copy instruction for the given target and buffers.
@@ -795,6 +857,8 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
       PrimExpr dst_predicate;
       int vector_size = 1;
       int vectorized_bytes = 0;
+      Var vectorized_loop_var;
+      bool src_predicate_depends_on_vectorized_var = false;
       if (analyzer != nullptr) {
         auto local_analyzer = analyzer->Clone();
         Array<IterVar> loop_vars = MakeIterVars();
@@ -811,6 +875,22 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
         vector_size =
             GetVectorizeSize(fused_loop, local_analyzer.get(), layout_map);
         vectorized_bytes = vector_size * src->dtype.bytes();
+
+        if (src_predicate.defined()) {
+          // Find the innermost loop var (the one that will become the
+          // vectorized ramp var after tl.VectorizeLoop).
+          const ForNode *cur = fused_loop.get();
+          while (cur) {
+            vectorized_loop_var = cur->loop_var;
+            cur = cur->body.as<ForNode>();
+          }
+          if (vectorized_loop_var.defined()) {
+            src_predicate_depends_on_vectorized_var =
+                UsesVar(src_predicate, [&](const VarNode *v) {
+                  return v == vectorized_loop_var.get();
+                });
+          }
+        }
       }
 
       std::ostringstream oss;
@@ -856,6 +936,13 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
       if (dst_predicate.defined()) {
         oss << "    - dst_predicate: " << dst_predicate << "\n";
       }
+      if (src_predicate.defined()) {
+        oss << "    - src_predicate_depends_on_vectorized_var="
+            << bool_str(src_predicate_depends_on_vectorized_var) << "\n";
+        if (vectorized_loop_var.defined()) {
+          oss << "      - vectorized_loop_var: " << vectorized_loop_var << "\n";
+        }
+      }
 
       oss << "  - planned_vector_size=" << vector_size
           << ", vectorized_bytes=" << vectorized_bytes
@@ -864,8 +951,11 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
       oss << "Hints:\n";
       oss << "  - Ensure the copy can be vectorized so the final cp.async size "
              "is 4/8/16 bytes.\n";
-      oss << "  - Avoid out-of-bounds access (or guard it outside the "
-             "async_copy) since predicated async_copy is not supported here.\n";
+      oss << "  - If the copy needs OOB guarding, only src-side zero-fill is "
+             "supported (global->shared); dst must be in-bounds.\n";
+      oss << "  - OOB predicates that depend on the vectorized loop var are "
+             "not supported (they would force scalarization and leave illegal "
+             "sub-4B cp.async calls).\n";
 
       LOG(FATAL) << oss.str();
     }
