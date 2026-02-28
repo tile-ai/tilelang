@@ -1374,7 +1374,7 @@ private:
     }
     // If neither TMA nor Tensor core was used, and CUDA operations were found,
     // set CUDA core flag
-    if (!analyzer.found_tma && !analyzer.found_tensor && analyzer.found_cuda) {
+    if (!analyzer.found_tma && !analyzer.found_tensor) {
       task_node->SetUsesCUDACore(true);
     }
 
@@ -1501,32 +1501,25 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       // Create a new mutator to add the statement and annotations
       class BarrierInserter : public StmtMutator {
       public:
-        BarrierInserter(Stmt barrier_stmt,
-                        Map<ObjectRef, ObjectRef> barrier_map)
-            : barrier_stmt_(barrier_stmt), barrier_map_(barrier_map) {}
+        BarrierInserter(Stmt barrier_stmt) : barrier_stmt_(barrier_stmt) {}
 
         Stmt VisitStmt_(const BlockNode *op) override {
           auto block = GetRef<Block>(op);
           if (op->name_hint == "tilelang_root") {
             // Insert barrier statement at the beginning of the block body
             Stmt new_body = SeqStmt({barrier_stmt_, op->body});
-            // Add barrier map to annotations
-            auto new_annotations = op->annotations;
-            new_annotations.Set("barrier_init", barrier_map_);
-            // Create new block with updated body and annotations
             return Block(op->iter_vars, op->reads, op->writes, op->name_hint,
                          new_body, op->init, op->alloc_buffers,
-                         op->match_buffers, new_annotations);
+                         op->match_buffers, op->annotations);
           }
           return StmtMutator::VisitStmt_(op);
         }
 
       private:
         Stmt barrier_stmt_;
-        Map<ObjectRef, ObjectRef> barrier_map_;
       };
 
-      BarrierInserter inserter(create_mbarrier_stmt, barrier_map);
+      BarrierInserter inserter(create_mbarrier_stmt);
       final_body = inserter(final_body);
     }
 

@@ -5,6 +5,10 @@ called from C++ via TVM FFI.
 """
 
 import tvm_ffi
+import os
+import json
+import time
+from pathlib import Path
 
 # Try to import z3, but handle missing installation gracefully
 try:
@@ -14,6 +18,32 @@ try:
 except ImportError:
     Z3_AVAILABLE = False
     print("[Python Z3] WARNING: z3-solver package not installed. Z3 scheduling will not work.")
+
+
+def _find_next_schedule_number(base_dir="test"):
+    """Find the smallest available number for schedule_xxx directory."""
+    if not os.path.exists(base_dir):
+        return 0
+
+    existing_numbers = []
+    for item in os.listdir(base_dir):
+        if item.startswith("schedule_") and os.path.isdir(os.path.join(base_dir, item)):
+            try:
+                num = int(item[9:])  # Extract number from "schedule_xxx"
+                existing_numbers.append(num)
+            except ValueError:
+                continue
+
+    if not existing_numbers:
+        return 0
+
+    existing_numbers.sort()
+    # Find the first gap in the sequence
+    for i, num in enumerate(existing_numbers):
+        if i != num:
+            return i
+
+    return len(existing_numbers)
 
 
 def z3_schedule_python(
@@ -380,7 +410,7 @@ def z3_schedule_loop_python(
                 best_ii = ii_mid
                 best_model = solver.model()
                 best_start_vars = start_vars
-                best_pro_vars = stage_vars
+                best_stage_vars = stage_vars
                 # Try smaller II
                 ii_upper = ii_mid
             else:
@@ -401,9 +431,10 @@ def z3_schedule_loop_python(
         # Extract start times from best model
         start_times = []
         stages = []
+        begin = best_model.eval(begin).as_long()
         for i in range(n):
             start_time = best_model.eval(best_start_vars[i]).as_long()
-            stage = best_model.eval(best_pro_vars[i]).as_long()
+            stage = best_model.eval(best_stage_vars[i]).as_long()
             start_times.append(start_time)
             stages.append(stage)
 
@@ -412,15 +443,402 @@ def z3_schedule_loop_python(
         task_indices.sort(key=lambda idx: (start_times[idx] + stages[idx] * best_ii, idx))
 
         if verbose:
-            print(f"[Python Z3 Loop] Scheduling completed. Minimal II = {best_ii}")
+            print(f"[Python Z3 Loop] Scheduling completed. Minimal II = {best_ii}. Beging = {begin}")
         for i in range(n):
             idx = task_indices[i]
             if verbose:
                 print(
                     f"[Python Z3 Loop]   Task {idx}: start_time={start_times[idx]}, "
-                    f"latency={latencies[idx]}, II={iis[idx]}, pro={stages[idx]}, "
+                    f"latency={latencies[idx]}, II={iis[idx]}, stage={stages[idx]}, "
                     f"resource_flags={resource_flags[idx]:03b}"
                 )
+
+        # Save schedule visualization when verbose is True
+        if verbose:
+            try:
+                # Find the next available schedule number
+                schedule_num = _find_next_schedule_number()
+                schedule_dir = Path(f"test/schedule_{schedule_num:03d}")
+                schedule_dir.mkdir(parents=True, exist_ok=True)
+
+                # Save schedule information
+                schedule_info = {
+                    "num_stages": num_stages,
+                    "num_tasks": n,
+                    "minimal_II": best_ii,
+                    "latencies": latencies,
+                    "iis": iis,
+                    "resource_flags": resource_flags,
+                    "data_dependencies": data_deps,
+                    "resource_dependencies": resource_deps,
+                    "start_times": start_times,
+                    "stages": stages,
+                    "sorted_indices": task_indices,
+                    "timestamp": time.time(),
+                }
+
+                # Save as JSON
+                info_file = schedule_dir / "schedule_info.json"
+                with open(info_file, "w") as f:
+                    json.dump(schedule_info, f, indent=2)
+
+                # Create a simple text visualization
+                viz_file = schedule_dir / "schedule_visualization.txt"
+                with open(viz_file, "w") as f:
+                    f.write(f"Z3 Schedule Visualization (II={best_ii})\n")
+                    f.write("=" * 50 + "\n\n")
+
+                    f.write("Task Information:\n")
+                    f.write("-" * 30 + "\n")
+                    for i in range(n):
+                        idx = task_indices[i]
+                        f.write(
+                            f"Task {idx:3d}: start={start_times[idx]:3d}, "
+                            f"latency={latencies[idx]:3d}, II={iis[idx]:3d}, "
+                            f"stage={stages[idx]:2d}, "
+                            f"resources={resource_flags[idx]:03b}\n"
+                        )
+
+                    f.write("\nData Dependencies:\n")
+                    f.write("-" * 30 + "\n")
+                    for u, v, distance in data_deps:
+                        f.write(f"  Task {v} depends on Task {u} (distance={distance})\n")
+
+                    f.write("\nResource Dependencies:\n")
+                    f.write("-" * 30 + "\n")
+                    for i, j in resource_deps:
+                        f.write(f"  Task {i} and Task {j} share resources\n")
+
+                    f.write("\nDetailed Schedule Timeline:\n")
+                    f.write("-" * 50 + "\n")
+                    f.write("Phase Legend:\n")
+                    f.write("  # = Initial Phase [start, start+II] (first II cycles)\n")
+                    f.write("  = = Remaining Phase [start+II, end] (rest of execution)\n")
+                    f.write("  | = II boundary between phases\n")
+                    f.write("  [ = Task start\n")
+                    f.write("  ] = Task end\n")
+                    f.write("  B = Loop Begin (earliest task start)\n")
+                    f.write("  E = Loop End (Begin + Minimal II)\n")
+                    f.write("-" * 50 + "\n")
+
+                    # Find max time for timeline using actual start times
+                    actual_start_times = [start_times[i] + best_ii * stages[i] for i in range(n)]
+                    max_time = max(actual_start_times[i] + latencies[i] for i in range(n))
+                    timeline_end = max_time + 5
+
+                    loop_end = begin + best_ii
+
+                    # Create timeline header
+                    f.write("Time: ")
+                    for t in range(0, timeline_end, 10):
+                        f.write(f"{t:10d}")
+                    f.write("\n")
+                    f.write("      ")
+                    for _ in range(0, timeline_end, 10):
+                        f.write("|         ")
+                    f.write("\n")
+
+                    # Create detailed timeline for each task
+                    for idx in task_indices:
+                        # Get task info
+                        # Calculate actual start time: start_times[idx] + best_ii * stages[idx]
+                        start = start_times[idx] + best_ii * stages[idx]
+                        end = start + latencies[idx]
+                        ii = iis[idx]
+                        stage = stages[idx]
+                        resource = resource_flags[idx]
+
+                        # Calculate ii boundary
+                        ii_boundary = start + ii if start + ii < end else end
+
+                        # Determine resource type symbol
+                        if resource & 4:  # Tensor core
+                            symbol = "T"
+                        elif resource & 2:  # TMA core
+                            symbol = "M"
+                        elif resource & 1:  # CUDA core
+                            symbol = "C"
+                        else:
+                            symbol = "?"
+
+                        # Create timeline row for this task
+                        f.write(f"Task {idx:2d} ({symbol}): ")
+
+                        for t in range(timeline_end):
+                            if t == begin:
+                                f.write("B")  # Loop Begin
+                            elif t == loop_end:
+                                f.write("E")  # Loop End (Begin + best_ii)
+                            elif t == start:
+                                f.write("[")  # Start of task
+                            elif t == ii_boundary - 1 and ii_boundary < end:
+                                f.write("|")  # II boundary (end of initial phase)
+                            elif t == end - 1:
+                                f.write("]")  # End of task
+                            elif start < t < ii_boundary:
+                                f.write("#")  # Initial phase [start, start+ii]
+                            elif ii_boundary <= t < end - 1:
+                                f.write("=")  # Remaining Phase [start+ii, end]
+                            elif t == 0 or t % 10 == 0:
+                                f.write("|")  # Time marker
+                            else:
+                                f.write(" ")  # Empty space
+
+                        # Add phase information
+                        phase1_len = ii_boundary - start
+                        phase2_len = end - ii_boundary
+                        f.write(
+                            f"  (start={start}, II={ii}, phase1[{phase1_len}]=[start,start+II], phase2[{phase2_len}]=[start+II,end], stage={stage})\n"
+                        )
+
+                    f.write("\nASCII Gantt Chart:\n")
+                    f.write("-" * 40 + "\n")
+
+                    # Create a more compact ASCII Gantt chart
+                    # Group tasks by resource type for better visualization
+                    resource_groups = {
+                        "CUDA": [i for i in range(n) if resource_flags[i] & 1],
+                        "TMA": [i for i in range(n) if resource_flags[i] & 2],
+                        "Tensor": [i for i in range(n) if resource_flags[i] & 4],
+                    }
+
+                    for resource_name, task_list in resource_groups.items():
+                        if not task_list:
+                            continue
+
+                        f.write(f"\n{resource_name} Core Tasks:\n")
+
+                        # Create timeline for this resource group
+                        time_scale = 2  # Each character represents 2 time units
+                        scaled_end = (timeline_end + time_scale - 1) // time_scale
+
+                        # Time axis
+                        f.write("Time: ")
+                        for t_scaled in range(0, scaled_end, 5):
+                            t_actual = t_scaled * time_scale
+                            f.write(f"{t_actual:5d}")
+                        f.write("\n")
+                        f.write("      ")
+                        for _ in range(0, scaled_end, 5):
+                            f.write("|    ")
+                        f.write("\n")
+
+                        # Task rows
+                        for idx in sorted(task_list, key=lambda i: start_times[i]):
+                            start = start_times[idx]
+                            end = start + latencies[idx]
+                            ii = iis[idx]
+                            start_scaled = start // time_scale
+                            end_scaled = (end + time_scale - 1) // time_scale
+                            ii_boundary_scaled = (start + ii) // time_scale if start + ii < end else end_scaled
+
+                            f.write(f"Task {idx:2d}: ")
+
+                            for t_scaled in range(scaled_end):
+                                if start_scaled <= t_scaled < end_scaled:
+                                    if t_scaled == start_scaled:
+                                        f.write("[")
+                                    elif t_scaled == ii_boundary_scaled - 1 and ii_boundary_scaled < end_scaled:
+                                        f.write("|")  # II boundary
+                                    elif t_scaled == end_scaled - 1:
+                                        f.write("]")
+                                    elif start_scaled <= t_scaled < ii_boundary_scaled:
+                                        f.write("#")  # Initial phase
+                                    else:
+                                        f.write("=")  # Remaining phase
+                                else:
+                                    f.write(" ")
+                            f.write(f"  ({start}-{end}, ii={ii})\n")
+
+                # Directly generate matplotlib visualization (PNG and PDF)
+                try:
+                    import matplotlib.pyplot as plt
+                    import matplotlib.patches as patches
+                    import colorsys
+                    from matplotlib.patches import Patch
+
+                    fig, ax = plt.subplots(figsize=(16, 10))
+                    # Set background color to light gray
+                    fig.patch.set_facecolor("#f0f0f0")
+                    ax.set_facecolor("#888888")
+
+                    # Create color map for resources
+                    resource_colors = {
+                        1: "green",  # CUDA core
+                        2: "red",  # TMA core
+                        4: "gold",  # Tensor core
+                        3: "orange",  # CUDA + TMA
+                        5: "lime",  # CUDA + Tensor
+                        6: "pink",  # TMA + Tensor
+                        7: "purple",  # All three
+                    }
+
+                    # Plot each task as a horizontal bar with two phases
+                    for i in range(n):
+                        color = resource_colors.get(resource_flags[i], "blue")
+                        # Calculate actual start time: start_times[i] + best_ii * stages[i]
+                        start = start_times[i] + best_ii * stages[i]
+                        latency = latencies[i]
+                        ii = iis[i]
+
+                        # Calculate ii boundary
+                        ii_boundary = start + ii if start + ii < start + latency else start + latency
+
+                        # Plot [start, start+ii] phase with darker color
+                        phase1_width = ii_boundary - start
+                        if phase1_width > 0:
+                            # Darken the color for initial phase
+                            rgb = plt.cm.colors.to_rgb(color)
+                            hls = colorsys.rgb_to_hls(*rgb)
+                            darker_color = colorsys.hls_to_rgb(hls[0], max(0, hls[1] * 0.7), hls[2])
+
+                            rect1 = patches.Rectangle(
+                                (start, i - 0.4),  # (x, y)
+                                phase1_width,
+                                0.8,  # width, height
+                                linewidth=1,
+                                edgecolor="black",
+                                facecolor=darker_color,
+                                alpha=0.9,
+                                hatch="//",
+                                label="Initial Phase [start, start+II]" if i == 0 else "",
+                            )
+                            ax.add_patch(rect1)
+
+                        # Plot [start+ii, end] phase with original color
+                        phase2_width = (start + latency) - ii_boundary
+                        if phase2_width > 0:
+                            rect2 = patches.Rectangle(
+                                (ii_boundary, i - 0.4),  # (x, y)
+                                phase2_width,
+                                0.8,  # width, height
+                                linewidth=1,
+                                edgecolor="black",
+                                facecolor=color,
+                                alpha=0.7,
+                                label="Remaining Phase [start+II, end]" if i == 0 else "",
+                            )
+                            ax.add_patch(rect2)
+
+                        # Add task label (black text for better visibility)
+                        ax.text(
+                            start + latency / 2,
+                            i,
+                            f"T{i}\nS{stages[i]}\nII={ii}",
+                            ha="center",
+                            va="center",
+                            fontsize=8,
+                            color="white",
+                            fontweight="bold",
+                        )
+
+                        # Add vertical line at ii boundary
+                        if phase1_width > 0 and phase2_width > 0:
+                            ax.axvline(x=ii_boundary, color="white", linestyle="-", alpha=0.8, linewidth=1)
+
+                    # Set limits and labels
+                    max_time = max(start_times[i] + best_ii * stages[i] + latencies[i] for i in range(n))
+                    ax.set_xlim(begin - 5, max_time + 5)
+                    ax.set_ylim(-1, n)
+                    ax.set_xlabel("Time (cycles)")
+                    ax.set_ylabel("Task Index")
+                    ax.set_title(f"Z3 Schedule Timeline (Minimal II={best_ii})")
+                    ax.grid(True, alpha=0.3)
+
+                    # Add legend for resource types and phases (outside the plot)
+                    legend_elements = [
+                        Patch(facecolor="green", edgecolor="black", label="CUDA Core"),
+                        Patch(facecolor="red", edgecolor="black", label="TMA Core"),
+                        Patch(facecolor="gold", edgecolor="black", label="Tensor Core"),
+                        Patch(facecolor="blue", edgecolor="black", label="Other"),
+                        Patch(facecolor="darkgreen", edgecolor="black", hatch="//", alpha=0.9, label="Initial Phase [start, start+II]"),
+                        Patch(facecolor="green", edgecolor="black", alpha=0.7, label="Remaining Phase [start+II, end]"),
+                    ]
+                    # Place legend outside the plot on the right side
+                    ax.legend(
+                        handles=legend_elements,
+                        loc="center left",
+                        bbox_to_anchor=(1.02, 0.5),
+                        fontsize=9,
+                        frameon=True,
+                        framealpha=0.9,
+                        facecolor="white",
+                    )
+
+                    # Add vertical lines for each 10 time units
+                    for t in range(0, max_time + 10, 10):
+                        ax.axvline(x=t, color="gray", linestyle="--", alpha=0.3, linewidth=0.5)
+
+                    # Add two vertical lines for loop boundaries (begin, begin+best_ii)
+                    # Find the earliest start time as begin
+                    loop_end = begin + best_ii
+
+                    # Add thick red line for loop begin
+                    ax.axvline(x=begin, color="red", linestyle="-", alpha=0.8, linewidth=2, label="Loop Begin")
+                    # Add thick blue line for loop end (begin + best_ii)
+                    ax.axvline(x=loop_end, color="blue", linestyle="-", alpha=0.8, linewidth=2, label=f"Loop End (Begin+II={loop_end})")
+
+                    # Shade the loop region
+                    ax.axvspan(begin, loop_end, alpha=0.1, color="yellow", label="Loop Region")
+
+                    # Add text annotation for loop boundaries
+                    ax.text(
+                        begin,
+                        n - 0.5,
+                        f"Begin\n{begin}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        bbox=dict(boxstyle="round", facecolor="red", alpha=0.3, edgecolor="red"),
+                    )
+                    ax.text(
+                        loop_end,
+                        n - 0.5,
+                        f"Begin+II\n{loop_end}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        bbox=dict(boxstyle="round", facecolor="blue", alpha=0.3, edgecolor="blue"),
+                    )
+
+                    # # Adjust layout to make room for the legend and phase explanation outside the plot
+                    # plt.tight_layout(rect=[0, 0, 0.75, 1])  # Leave 25% space on the right for legend and phase explanation
+
+                    # # Add phase explanation text outside the plot (to the right of legend)
+                    # fig.text(
+                    #     0.88,  # x position (88% of figure width)
+                    #     0.5,  # y position (center)
+                    #     "Phase Explanation:\n"
+                    #     "• Initial Phase [start, start+II]:\n  Hatched pattern, darker color\n"
+                    #     "• Remaining Phase [start+II, end]:\n  Solid fill, lighter color\n"
+                    #     "• Red vertical line: Loop Begin\n"
+                    #     "• Blue vertical line: Loop End\n  (Begin + Minimal II)\n"
+                    #     "• Yellow shaded area: Loop Region",
+                    #     transform=fig.transFigure,
+                    #     fontsize=9,
+                    #     verticalalignment="center",
+                    #     bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="black", pad=10),
+                    # )
+
+                    # Save PNG and PDF files
+                    png_file = schedule_dir / "schedule_timeline.png"
+                    pdf_file = schedule_dir / "schedule_timeline.pdf"
+                    plt.savefig(png_file, dpi=150, bbox_inches="tight")
+                    plt.savefig(pdf_file, bbox_inches="tight")
+                    plt.close(fig)  # Close the figure to free memory
+
+                    print(f"[Python Z3 Loop] Schedule visualization saved as PNG: {png_file}")
+                    print(f"[Python Z3 Loop] Schedule visualization saved as PDF: {pdf_file}")
+
+                except ImportError as e:
+                    print(f"[Python Z3 Loop] Warning: matplotlib not available, skipping visualization: {e}")
+                except Exception as e:
+                    print(f"[Python Z3 Loop] Warning: Failed to generate visualization: {e}")
+
+                print(f"[Python Z3 Loop] Schedule visualization saved to {schedule_dir}/ (text, JSON, PNG, PDF)")
+
+            except Exception as e:
+                print(f"[Python Z3 Loop] Warning: Failed to save schedule visualization: {e}")
 
         return start_times, stages, best_ii
 
