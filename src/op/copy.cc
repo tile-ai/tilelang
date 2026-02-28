@@ -352,8 +352,32 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
-                               T.layout_map, T.analyzer, T.buffer_oob);
+  CopyInst copy_inst;
+  if (GetIsAsyncCopy()) {
+    // Layout inference does not require a full cp.async legality proof (which
+    // depends on final vectorization decisions). Keep the op as CPAsync for
+    // inference, and enforce legality during lowering.
+    if (!TargetHasAsyncCopy(target)) {
+      LOG(FATAL) << "T.async_copy is only supported on targets with cp.async "
+                    "support (SM80+). Got target="
+                 << target;
+    }
+    if (!IsGlobalLikeScope(src.scope()) || !IsSharedBuffer(dst)) {
+      LOG(FATAL)
+          << "T.async_copy only supports global->shared/shared.dyn copies. "
+          << "Got src=" << src->name << " (scope=" << src.scope()
+          << "), dst=" << dst->name << " (scope=" << dst.scope() << ").";
+    }
+    if (src->dtype != dst->dtype || src->dtype.bits() % 8 != 0) {
+      LOG(FATAL) << "T.async_copy requires equal byte-addressable dtypes. "
+                 << "Got src dtype=" << src->dtype
+                 << ", dst dtype=" << dst->dtype << ".";
+    }
+    copy_inst = CopyInst::kCPAsync;
+  } else {
+    copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
+                            T.layout_map, T.analyzer, T.buffer_oob);
+  }
 
   // If user annotated a loop layout on T.copy, enforce SIMT (normal) copy.
   // Parallel-loop layout only applies to SIMT-style loops we generate here;
@@ -759,14 +783,90 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
     bool cp_async_supported =
         CheckCPAsyncCopy(target, layout_map, analyzer, buffer_oob);
     if (!cp_async_supported) {
+      auto bool_str = [](bool v) { return v ? "true" : "false"; };
+
+      bool target_has_async_copy = TargetHasAsyncCopy(target);
+      bool src_is_global_like = IsGlobalLikeScope(src.scope());
+      bool dst_is_shared = IsSharedBuffer(dst);
+      bool dtype_match = src->dtype == dst->dtype;
+      bool dtype_bits_multiple_of_8 = src->dtype.bits() % 8 == 0;
+
+      PrimExpr src_predicate;
+      PrimExpr dst_predicate;
+      int vector_size = 1;
+      int vectorized_bytes = 0;
+      if (analyzer != nullptr) {
+        auto local_analyzer = analyzer->Clone();
+        Array<IterVar> loop_vars = MakeIterVars();
+        for (const auto &iv : loop_vars) {
+          local_analyzer->Bind(iv->var, iv->dom);
+        }
+        src_predicate =
+            MakePredicate(local_analyzer.get(), loop_vars, src->shape, 0);
+        dst_predicate =
+            MakePredicate(local_analyzer.get(), loop_vars, dst->shape, 1);
+
+        auto simt_loop = MakeSIMTLoop(local_analyzer.get());
+        auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+        vector_size =
+            GetVectorizeSize(fused_loop, local_analyzer.get(), layout_map);
+        vectorized_bytes = vector_size * src->dtype.bytes();
+      }
+
       std::ostringstream oss;
-      oss << "T.async_copy requires a valid cp.async path, but constraints are "
-             "not satisfied for src="
-          << src->name << " (scope=" << src.scope() << ", dtype=" << src->dtype
-          << "), dst=" << dst->name << " (scope=" << dst.scope()
-          << ", dtype=" << dst->dtype
-          << "). Expected: global->shared/shared.dyn, equal dtypes, no OOB "
-             "predicates, and vectorized bytes in {4,8,16}.";
+      oss << "T.async_copy must lower to cp.async, but constraints were not "
+             "satisfied.\n";
+      oss << "src=" << src->name << " (scope=" << src.scope()
+          << ", dtype=" << src->dtype << ")\n";
+      oss << "dst=" << dst->name << " (scope=" << dst.scope()
+          << ", dtype=" << dst->dtype << ")\n";
+
+      oss << "src_range=[";
+      for (size_t i = 0; i < src_range.size(); ++i) {
+        if (i != 0) {
+          oss << ", ";
+        }
+        oss << "[" << src_range[i]->min << ", " << src_range[i]->extent << "]";
+      }
+      oss << "]\n";
+      oss << "dst_range=[";
+      for (size_t i = 0; i < dst_range.size(); ++i) {
+        if (i != 0) {
+          oss << ", ";
+        }
+        oss << "[" << dst_range[i]->min << ", " << dst_range[i]->extent << "]";
+      }
+      oss << "]\n";
+
+      oss << "Constraint checks:\n";
+      oss << "  - target_has_async_copy=" << bool_str(target_has_async_copy)
+          << "\n";
+      oss << "  - buffer_oob=" << bool_str(buffer_oob) << "\n";
+      oss << "  - src_is_global_like=" << bool_str(src_is_global_like) << "\n";
+      oss << "  - dst_is_shared=" << bool_str(dst_is_shared) << "\n";
+      oss << "  - dtype_match=" << bool_str(dtype_match) << "\n";
+      oss << "  - dtype_bits_multiple_of_8="
+          << bool_str(dtype_bits_multiple_of_8) << "\n";
+
+      bool needs_predicate = src_predicate.defined() || dst_predicate.defined();
+      oss << "  - needs_predicate=" << bool_str(needs_predicate) << "\n";
+      if (src_predicate.defined()) {
+        oss << "    - src_predicate: " << src_predicate << "\n";
+      }
+      if (dst_predicate.defined()) {
+        oss << "    - dst_predicate: " << dst_predicate << "\n";
+      }
+
+      oss << "  - planned_vector_size=" << vector_size
+          << ", vectorized_bytes=" << vectorized_bytes
+          << " (required bytes in {4, 8, 16})\n";
+
+      oss << "Hints:\n";
+      oss << "  - Ensure the copy can be vectorized so the final cp.async size "
+             "is 4/8/16 bytes.\n";
+      oss << "  - Avoid out-of-bounds access (or guard it outside the "
+             "async_copy) since predicated async_copy is not supported here.\n";
+
       LOG(FATAL) << oss.str();
     }
     return CopyInst::kCPAsync;

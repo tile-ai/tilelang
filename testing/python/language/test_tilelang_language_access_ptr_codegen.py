@@ -123,7 +123,10 @@ def test_async_copy_tileop_rejects_invalid_cp_async_scope():
             T.async_copy(S0, S1)
             T.copy(S1, B[0:4])
 
-    with pytest.raises(tvm.error.InternalError, match="T.async_copy requires a valid cp.async path"):
+    with pytest.raises(
+        tvm.error.InternalError,
+        match="T\\.async_copy only supports global->shared/shared\\.dyn copies",
+    ):
         tilelang.compile(main, out_idx=[1], target="cuda")
 
 
