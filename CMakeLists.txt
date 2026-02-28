@@ -131,6 +131,22 @@ option(TILELANG_USE_CUDA_STUBS
        "Use POSIX dlopen-based CUDA stub libraries (cuda/cudart/nvrtc) for portable wheels"
        ${_TILELANG_USE_CUDA_STUBS_DEFAULT})
 unset(_TILELANG_USE_CUDA_STUBS_DEFAULT)
+
+# HIP stub libraries (hip/hiprtc) are used to build wheels that can be imported
+# on machines without ROCm installed by avoiding hard DT_NEEDED dependencies on
+# libamdhip64.so / libhiprtc.so.
+#
+# These stubs are currently POSIX-only (dlopen/dlsym via <dlfcn.h>).
+if(WIN32 AND NOT CYGWIN)
+  set(_TILELANG_USE_HIP_STUBS_DEFAULT OFF)
+else()
+  # Only meaningful when USE_ROCM is enabled.
+  set(_TILELANG_USE_HIP_STUBS_DEFAULT ON)
+endif()
+option(TILELANG_USE_HIP_STUBS
+       "Use POSIX dlopen-based HIP stub libraries (hip/hiprtc) for portable wheels"
+       ${_TILELANG_USE_HIP_STUBS_DEFAULT})
+unset(_TILELANG_USE_HIP_STUBS_DEFAULT)
 # Configs end
 
 include(cmake/load_tvm.cmake)
@@ -224,6 +240,63 @@ elseif(USE_ROCM)
   include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
   find_rocm(${USE_ROCM})
   add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
+
+  if(TILELANG_USE_HIP_STUBS)
+    if(WIN32 AND NOT CYGWIN)
+      message(FATAL_ERROR "TILELANG_USE_HIP_STUBS=ON is not supported on Windows. "
+                          "Please configure with -DTILELANG_USE_HIP_STUBS=OFF.")
+    endif()
+
+    # ============================================================================
+    # HIP Stub Library (libhip_stub.so)
+    # ============================================================================
+    # This library provides drop-in replacements for HIP runtime/module APIs by
+    # lazily loading libamdhip64.so at runtime.
+    #
+    # It also provides minimal HSA wrappers (hsa_init / hsa_shut_down) to avoid a
+    # hard DT_NEEDED dependency on libhsa-runtime64 in ROCm-enabled wheels.
+    # ============================================================================
+    add_library(hip_stub SHARED src/target/stubs/hip.cc)
+    target_include_directories(hip_stub PRIVATE ${ROCM_INCLUDE_DIRS})
+    target_compile_definitions(hip_stub PRIVATE TILELANG_HIP_STUB_EXPORTS)
+    target_link_libraries(hip_stub PRIVATE ${CMAKE_DL_LIBS})
+    set_target_properties(hip_stub PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+      ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+      OUTPUT_NAME "hip_stub"
+    )
+
+    # ============================================================================
+    # HIPRTC Stub Library (libhiprtc_stub.so)
+    # ============================================================================
+    # This library provides a minimal HIPRTC API surface and lazily loads
+    # libhiprtc.so at runtime.
+    # ============================================================================
+    add_library(hiprtc_stub SHARED src/target/stubs/hiprtc.cc)
+    target_include_directories(hiprtc_stub PRIVATE ${ROCM_INCLUDE_DIRS})
+    target_compile_definitions(hiprtc_stub PRIVATE TILELANG_HIPRTC_STUB_EXPORTS)
+    target_link_libraries(hiprtc_stub PRIVATE ${CMAKE_DL_LIBS})
+    set_target_properties(hiprtc_stub PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+      ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+      OUTPUT_NAME "hiprtc_stub"
+    )
+
+    # Make TVM link against our HIP stub instead of the real libamdhip64.so.
+    #
+    # NOTE: TVM's `find_rocm()` calls `find_library(ROCM_HIPHCC_LIBRARY amdhip64 ...)`.
+    # `find_library()` will not override an already-cached variable, so setting it
+    # here ensures TVM doesn't record a DT_NEEDED on libamdhip64.
+    set(ROCM_HIPHCC_LIBRARY hip_stub CACHE STRING "HIP runtime library to link against" FORCE)
+
+    # Prevent TVM from recording a DT_NEEDED on libhsa-runtime64.
+    # The few HSA entrypoints used by TVM are stubbed by hip_stub and resolved
+    # lazily when available.
+    set(ROCM_HSA_LIBRARY ROCM_HSA_LIBRARY-NOTFOUND CACHE STRING
+        "HSA runtime library to link against" FORCE)
+  endif()
 
   file(GLOB TILE_LANG_HIP_SRCS
     src/target/codegen_hip.cc
@@ -434,6 +507,17 @@ if(USE_CUDA AND TILELANG_USE_CUDA_STUBS)
   endforeach()
   # Include CUDA stubs in output targets for RPATH configuration
   list(APPEND TILELANG_OUTPUT_TARGETS cuda_stub cudart_stub nvrtc_stub)
+endif()
+
+if(USE_ROCM AND TILELANG_USE_HIP_STUBS)
+  # Link against HIP stub library instead of libamdhip64.so
+  # This enables lazy loading of libamdhip64.so at runtime, allowing
+  # `import tilelang` to succeed on CPU-only machines.
+  foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+    target_link_libraries(${target} PUBLIC hip_stub)
+  endforeach()
+  # Include HIP stubs in output targets for RPATH configuration / installation
+  list(APPEND TILELANG_OUTPUT_TARGETS hip_stub hiprtc_stub)
 endif()
 
 unset(PATCHELF_EXECUTABLE CACHE)
