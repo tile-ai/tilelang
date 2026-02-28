@@ -1008,6 +1008,12 @@ private:
       }
       for (int commit_stmt_idx : group.commit_stmt_indices) {
         if (pipeline_stage_infos[commit_stmt_idx].stage == anchor_stage) {
+          // If commit is fused with cp.async calls in the same statement, the
+          // statement-local order is preserved and we cannot enforce an
+          // inter-statement order relation.
+          if (pipeline_stage_infos[commit_stmt_idx].has_cp_async_call()) {
+            continue;
+          }
           CHECK_GT(pipeline_stage_infos[commit_stmt_idx].order,
                    max_cp_async_order)
               << "Pipeline planning error: cp.async commit is scheduled before "
