@@ -699,8 +699,7 @@ public:
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
-    Array<PrimExpr> new_args{dst, src,
-                             IntImm(bytes_imm->dtype, total_bytes)};
+    Array<PrimExpr> new_args{dst, src, IntImm(bytes_imm->dtype, total_bytes)};
     if (predicate.defined()) {
       new_args.push_back(predicate.value());
     }

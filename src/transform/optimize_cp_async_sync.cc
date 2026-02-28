@@ -60,8 +60,7 @@ public:
         uncommitted_state = UncommittedState::kNonZero;
         simplified.push_back(current);
         break;
-      case AsyncStmtKind::kCommit:
-      {
+      case AsyncStmtKind::kCommit: {
         if (uncommitted_state == UncommittedState::kZero) {
           // Proven redundant commit: no cp.async issued since the last commit.
           break;
@@ -70,8 +69,10 @@ public:
             (uncommitted_state == UncommittedState::kNonZero);
         simplified.push_back(current);
         uncommitted_state = UncommittedState::kZero;
-        if (outstanding_committed_groups.has_value() && commit_has_new_cpasync) {
-          outstanding_committed_groups = outstanding_committed_groups.value() + 1;
+        if (outstanding_committed_groups.has_value() &&
+            commit_has_new_cpasync) {
+          outstanding_committed_groups =
+              outstanding_committed_groups.value() + 1;
         } else {
           outstanding_committed_groups = std::nullopt;
         }
@@ -163,8 +164,8 @@ private:
     DataType wait_dtype =
         call->args.empty() ? DataType::Int(32) : call->args[0].dtype();
     Array<PrimExpr> args{make_const(wait_dtype, new_wait_n)};
-    return Evaluate(Call(call->dtype, call->op, args, call->annotations,
-                         call->span));
+    return Evaluate(
+        Call(call->dtype, call->op, args, call->annotations, call->span));
   }
 
   Stmt RewriteWaitStaticInSimpleWrapper(const Stmt &stmt, int new_wait_n,
@@ -200,8 +201,8 @@ private:
     }
     if (const auto *iff = stmt.as<IfThenElseNode>()) {
       if (!iff->else_case.defined()) {
-        Stmt then_case = RewriteWaitStaticInSimpleWrapper(
-            iff->then_case, new_wait_n, changed);
+        Stmt then_case = RewriteWaitStaticInSimpleWrapper(iff->then_case,
+                                                          new_wait_n, changed);
         if (*changed) {
           return IfThenElse(iff->condition, then_case, Stmt(), iff->span);
         }
@@ -274,7 +275,8 @@ private:
         if (cls.wait_n == 0 && cp_async_before_wait > 0 &&
             commit_before_wait > 0) {
           bool changed_wait = false;
-          body.Set(i, RewriteWaitStaticInSimpleWrapper(body[i], 1, &changed_wait));
+          body.Set(i,
+                   RewriteWaitStaticInSimpleWrapper(body[i], 1, &changed_wait));
           changed = changed || changed_wait;
         }
         break;
@@ -282,7 +284,8 @@ private:
       if (cls.kind == AsyncStmtKind::kWaitDynamic) {
         break;
       }
-      if (cls.kind == AsyncStmtKind::kOther && ContainsAsyncIntrinsics(body[i])) {
+      if (cls.kind == AsyncStmtKind::kOther &&
+          ContainsAsyncIntrinsics(body[i])) {
         AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(body[i]);
         if (summary.cp_async > 0 && summary.commit == 0 && summary.wait == 0) {
           cp_async_before_wait += summary.cp_async;
@@ -399,8 +402,7 @@ private:
     if (IsWaitCall(call)) {
       if (!call->args.empty()) {
         if (const auto *imm = call->args[0].as<IntImmNode>()) {
-          return {AsyncStmtKind::kWaitStatic,
-                  static_cast<int>(imm->value)};
+          return {AsyncStmtKind::kWaitStatic, static_cast<int>(imm->value)};
         }
       }
       return {AsyncStmtKind::kWaitDynamic, 0};
@@ -416,8 +418,8 @@ tvm::transform::Pass OptimizeCPAsyncSync() {
     fptr->body = CPAsyncSyncOptimizer()(std::move(fptr->body));
     return f;
   };
-  return tvm::tir::transform::CreatePrimFuncPass(
-      pass_func, 0, "tl.OptimizeCPAsyncSync", {});
+  return tvm::tir::transform::CreatePrimFuncPass(pass_func, 0,
+                                                 "tl.OptimizeCPAsyncSync", {});
 }
 
 // Backward-compatible alias.

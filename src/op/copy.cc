@@ -54,7 +54,7 @@ private:
     if (load == nullptr || !IsGlobalLikeScope(load->buffer.scope())) {
       return StmtMutator::VisitStmt_(op);
     }
-    if (!(op->buffer.scope() == "shared" || op->buffer.scope() == "shared.dyn")) {
+    if (!IsSharedBuffer(op->buffer)) {
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -67,15 +67,17 @@ private:
     // LowerAccessPtr will translate it to tvm_access_ptr later.
     PrimExpr dst_access_ptr =
         Call(DataType::Handle(), tvm::tl::access_ptr(),
-             {BufferLoad(op->buffer, op->indices),
-              IntImm(DataType::Int(32), 1), // extent
-              IntImm(DataType::Int(32), 2)  // rw_mask: write
+             {
+                 BufferLoad(op->buffer, op->indices),
+                 IntImm(DataType::Int(32), 1), // extent
+                 IntImm(DataType::Int(32), 2)  // rw_mask: write
              });
     PrimExpr src_access_ptr =
         Call(DataType::Handle(), tvm::tl::access_ptr(),
-             {BufferLoad(load->buffer, load->indices),
-              IntImm(DataType::Int(32), 1), // extent
-              IntImm(DataType::Int(32), 1)  // rw_mask: read
+             {
+                 BufferLoad(load->buffer, load->indices),
+                 IntImm(DataType::Int(32), 1), // extent
+                 IntImm(DataType::Int(32), 1)  // rw_mask: read
              });
 
     return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(),
@@ -732,7 +734,8 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
 
   auto simt_loop = MakeSIMTLoop(local_analyzer.get());
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  int vector_size = GetVectorizeSize(fused_loop, local_analyzer.get(), layout_map);
+  int vector_size =
+      GetVectorizeSize(fused_loop, local_analyzer.get(), layout_map);
   int vectorized_bytes = vector_size * src->dtype.bytes();
   return IsCPAsyncInstructionBytes(vectorized_bytes);
 }
@@ -863,9 +866,9 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
-  Stmt lowered_loop = LowerParallelLoop(par_op->GetRoot(), loop_layout,
-                                        T.thread_var, analyzer, T.layout_map,
-                                        par_op->GetPredicate(T.thread_var));
+  Stmt lowered_loop =
+      LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var, analyzer,
+                        T.layout_map, par_op->GetPredicate(T.thread_var));
 
   CPAsyncStoreRewriter cp_async_rewriter;
   Stmt cp_async_loop = cp_async_rewriter.Rewrite(lowered_loop);
@@ -1922,13 +1925,14 @@ TIR_REGISTER_TL_TILE_OP(Copy, copy)
 
 TVM_REGISTER_OP("tl.tileop.async_copy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "async_copy")
-    .set_attr<OpBuilderFunc>(
-        "TLOpBuilder",
-        [](Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-          Map<String, ObjectRef> ann = annotations;
-          ann.Set("is_async_copy", IntImm(DataType::Int(32), 1));
-          return Copy(args, ann);
-        })
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_async_copy",
+                                       IntImm(DataType::Int(32), 1));
+                               return Copy(args, ann);
+                             })
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

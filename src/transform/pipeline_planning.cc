@@ -501,9 +501,8 @@ private:
         ++info.cp_async_wait_count;
         if (!call->args.empty()) {
           if (const auto *imm = call->args[0].as<IntImmNode>()) {
-            info.cp_async_wait_min_inflight =
-                std::min(info.cp_async_wait_min_inflight,
-                         static_cast<int>(imm->value));
+            info.cp_async_wait_min_inflight = std::min(
+                info.cp_async_wait_min_inflight, static_cast<int>(imm->value));
           } else {
             info.cp_async_wait_has_dynamic = true;
           }
@@ -702,7 +701,8 @@ private:
         open_group = -1;
       }
       if (pinfo.has_cp_async_wait()) {
-        int committed_count = static_cast<int>(committed_groups_in_order.size());
+        int committed_count =
+            static_cast<int>(committed_groups_in_order.size());
         int retain_inflight = pinfo.cp_async_wait_has_dynamic
                                   ? 0
                                   : pinfo.cp_async_wait_min_inflight;
@@ -949,7 +949,8 @@ private:
     // latest n groups. For dynamic wait args, we conservatively treat it as
     // wait_group(0), i.e. draining all committed groups.
     auto get_group_stage = [&](int group_id) -> int {
-      if (group_id < 0 || group_id >= static_cast<int>(cp_async_groups.size())) {
+      if (group_id < 0 ||
+          group_id >= static_cast<int>(cp_async_groups.size())) {
         return 0;
       }
       const auto &group = cp_async_groups[group_id];
@@ -968,7 +969,8 @@ private:
               static_cast<int>(pipeline_stage_infos.size())) {
         continue;
       }
-      const auto &wait_stmt_info = pipeline_stage_infos[wait_dep.wait_stmt_index];
+      const auto &wait_stmt_info =
+          pipeline_stage_infos[wait_dep.wait_stmt_index];
       // If wait is fused with cp.async/commit in the same statement, we cannot
       // place it independently at stage granularity. Keep the statement stage
       // unchanged and rely on the statement's explicit local ordering.
@@ -998,7 +1000,8 @@ private:
              stmt_idx < static_cast<int>(pipeline_stage_infos.size());
              ++stmt_idx) {
           bool dependent_read = false;
-          for (const BufferRegion &read : pipeline_stage_infos[stmt_idx].reads) {
+          for (const BufferRegion &read :
+               pipeline_stage_infos[stmt_idx].reads) {
             if (waited_buffers.count(read->buffer.get())) {
               dependent_read = true;
               break;
@@ -1015,8 +1018,7 @@ private:
         CHECK_GE(dependent_consumer_stage, required_stage)
             << "Pipeline planning error: wait_group stage cannot be after its "
                "dependent consumer stage. wait_stmt="
-            << wait_dep.wait_stmt_index
-            << ", required_stage=" << required_stage
+            << wait_dep.wait_stmt_index << ", required_stage=" << required_stage
             << ", consumer_stage=" << dependent_consumer_stage;
         pipeline_stage_infos[wait_dep.wait_stmt_index].stage =
             dependent_consumer_stage;

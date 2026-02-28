@@ -342,17 +342,15 @@ public:
     }
 
     // Step 2: Emit the pipeline prologue, body and epilogue.
-    Stmt prologue =
-        EmitImpl(pipeline_loop_->min, pipeline_loop_->min + max_stage_, true,
-                 true);
-    Stmt body = EmitImpl(pipeline_loop_->min + max_stage_,
-                         pipeline_loop_->min + pipeline_loop_->extent, false,
-                         false);
+    Stmt prologue = EmitImpl(pipeline_loop_->min,
+                             pipeline_loop_->min + max_stage_, true, true);
+    Stmt body =
+        EmitImpl(pipeline_loop_->min + max_stage_,
+                 pipeline_loop_->min + pipeline_loop_->extent, false, false);
 
-    Stmt epilogue =
-        EmitImpl(pipeline_loop_->min + pipeline_loop_->extent,
-                 pipeline_loop_->min + pipeline_loop_->extent + max_stage_,
-                 true, true);
+    Stmt epilogue = EmitImpl(
+        pipeline_loop_->min + pipeline_loop_->extent,
+        pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true);
     SeqStmt stmt = SeqStmt({prologue, body, epilogue});
 
     // Step 3: Make a new block that contains new buffer allocations after

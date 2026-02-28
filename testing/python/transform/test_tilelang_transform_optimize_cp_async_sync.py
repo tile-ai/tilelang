@@ -21,11 +21,15 @@ def _collect_wait_args(func):
     wait_args = []
 
     def _visit(node):
-        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op):
-            if str(node.op.name) == "tir.ptx_wait_group" and len(node.args) == 1:
-                arg = node.args[0]
-                if isinstance(arg, tvm.tir.IntImm):
-                    wait_args.append(int(arg.value))
+        if (
+            isinstance(node, tvm.tir.Call)
+            and isinstance(node.op, tvm.ir.Op)
+            and str(node.op.name) == "tir.ptx_wait_group"
+            and len(node.args) == 1
+        ):
+            arg = node.args[0]
+            if isinstance(arg, tvm.tir.IntImm):
+                wait_args.append(int(arg.value))
 
     post_order_visit(func.body, _visit)
     return wait_args

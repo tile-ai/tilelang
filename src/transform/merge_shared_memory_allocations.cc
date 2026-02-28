@@ -584,7 +584,7 @@ private:
       }
 
       DataType dtype = op->dtype;
-      DataType ptr_dtype = dst_access_ptr->args[0].dtype();;
+      DataType ptr_dtype = dst_access_ptr->args[0].dtype();
       PrimExpr extra_offset = GetBufferOffset(buffer, ptr_dtype);
       PrimExpr offset = this->VisitExpr(dst_access_ptr->args[2]);
 
@@ -595,8 +595,8 @@ private:
                    dst_access_ptr->args[0], // ptype
                    merged_buf_var_,         // merged buffer
                    extra_offset + offset,   // adjusted offset
-                   dst_access_ptr->args[3],     // extent
-                   dst_access_ptr->args[4]      // rw_mask
+                   dst_access_ptr->args[3], // extent
+                   dst_access_ptr->args[4]  // rw_mask
                });
 
       Array<PrimExpr> cp_async_args = {new_dst_access_ptr, op->args[1],

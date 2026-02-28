@@ -23,9 +23,8 @@ def _collect_pipeline_loop_annotations(func):
     annos = []
 
     def _visit(node):
-        if isinstance(node, tvm.tir.For):
-            if "software_pipeline_stage" in node.annotations:
-                annos.append(node.annotations)
+        if isinstance(node, tvm.tir.For) and "software_pipeline_stage" in node.annotations:
+            annos.append(node.annotations)
 
     post_order_visit(func.body, _visit)
     return annos
@@ -123,9 +122,7 @@ def test_pipeline_planning_binds_commit_to_cp_async_stage():
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
     stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
     assert len(stages) == 3, f"Expected 3 pipeline stages for 3 statements, got {len(stages)}"
-    assert stages[0] == stages[1], (
-        f"Expected cp.async and commit to be in the same stage, got stages={stages}"
-    )
+    assert stages[0] == stages[1], f"Expected cp.async and commit to be in the same stage, got stages={stages}"
 
 
 def test_pipeline_planning_binds_wait_to_cp_async_consumer_stage():
@@ -154,18 +151,10 @@ def test_pipeline_planning_binds_wait_to_cp_async_consumer_stage():
     stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
     orders = [int(v) for v in annos[0]["software_pipeline_order"]]
     assert len(stages) == 4, f"Expected 4 pipeline stages for 4 statements, got {len(stages)}"
-    assert stages[0] == stages[1], (
-        f"Expected cp.async and commit to be in the same stage, got stages={stages}"
-    )
-    assert stages[2] == stages[3], (
-        f"Expected wait and its dependent consumer to be in the same stage, got stages={stages}"
-    )
-    assert stages[2] >= stages[1], (
-        f"Expected wait stage to not precede commit stage, got stages={stages}"
-    )
-    assert orders[2] < orders[3], (
-        f"Expected wait to stay ordered before consumer, got orders={orders}"
-    )
+    assert stages[0] == stages[1], f"Expected cp.async and commit to be in the same stage, got stages={stages}"
+    assert stages[2] == stages[3], f"Expected wait and its dependent consumer to be in the same stage, got stages={stages}"
+    assert stages[2] >= stages[1], f"Expected wait stage to not precede commit stage, got stages={stages}"
+    assert orders[2] < orders[3], f"Expected wait to stay ordered before consumer, got orders={orders}"
 
 
 if __name__ == "__main__":
