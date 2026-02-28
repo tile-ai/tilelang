@@ -20,9 +20,9 @@ class _LoopVarUseAnalyzer(PyStmtExprVisitor):
         # Don't recursively visit children to avoid infinite recursion
 
 
-def collect_local_buffer_accesses(statement) -> list[BufferLoad | BufferStore]:
+def collect_fragment_accesses(statement) -> list[BufferLoad | BufferStore]:
     """
-    Collect local buffer accesses in the loop body.
+    Collect fragment accesses in the loop body.
 
     Args:
         statement: The TIR statement to analyze
@@ -34,7 +34,7 @@ def collect_local_buffer_accesses(statement) -> list[BufferLoad | BufferStore]:
     buffer_accesses = []
 
     def visit_buffer_access(node):
-        if isinstance(node, (BufferLoad, BufferStore)) and node.buffer.scope().startswith("local"):
+        if isinstance(node, (BufferLoad, BufferStore)) and node.buffer.scope() == "local.fragment":
             buffer_accesses.append(node)
 
     post_order_visit(statement, visit_buffer_access)
@@ -44,29 +44,43 @@ def collect_local_buffer_accesses(statement) -> list[BufferLoad | BufferStore]:
 
 @tir.functor.visitor
 class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
+    """
+    Check whether the fragment accesses are valid.
+
+    This checker will recursively visit all the for loops until it reaches certain "inner most loop".
+    Then it will start to check the validity of fragment access in the loop body. We need to maintain a stack of
+    loops during the traversal since this is the context/scope of the fragment access.
+    """
+
     def __init__(self) -> None:
         super().__init__()
+        self.loop_stack = []
 
     def visit_for_(self, op: For) -> None:
-        if op.kind == tir.ForKind.PARALLEL:
-            # Fuse consecutive parallel loops
-            # Other nested cases are all invalid in TileLang.
-            loops = [op]
-            child = op.body
-            while isinstance(child, For) and child.kind == tir.ForKind.PARALLEL:
-                loops.append(child)
-                child = child.body
+        self.loop_stack.append(op)
+        child = op.body
+
+        # Reach the the innermost loop
+        # This may cause repeated check for cases like: For1{Stmt1; For2{}; For3{};};
+        # But it's OK since the check is idempotent.
+        if not isinstance(child, For):
+            buffer_accesses = collect_fragment_accesses(child)
 
             loops_with_symbolic_ranges = []
-            for loop in loops:
-                if not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
+            non_parallel_loops = []
+
+            for loop in self.loop_stack:
+                # Vectorized is also allowed
+                if loop.kind != tir.ForKind.PARALLEL and loop.kind != tir.ForKind.VECTORIZED:
+                    non_parallel_loops.append(loop)
+                # symbolic
+                elif not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
                     loops_with_symbolic_ranges.append(loop)
 
-            if len(loops_with_symbolic_ranges) > 0:
-                buffer_accesses = collect_local_buffer_accesses(child)
-            for loop in loops_with_symbolic_ranges:
-                for buffer_access in buffer_accesses:
-                    indices = buffer_access.indices
+            for buffer_access in buffer_accesses:
+                indices = buffer_access.indices
+                # Check 1
+                for loop in loops_with_symbolic_ranges:
                     analyzer = _LoopVarUseAnalyzer(loop.loop_var)
                     for index in indices:
                         analyzer.visit_expr(index)
@@ -74,12 +88,22 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
                         raise ValueError(
                             "[Tilelang Semantic Check] "
                             f"Loop variable {loop.loop_var} in a T.Parallel loop with symbolic range (min={loop.min}, extent={loop.extent}) is used to index "
-                            "a local/fragment buffer, which is not allowed in Tilelang."
+                            "a fragment buffer, which is not allowed in Tilelang."
+                        )
+                # Check 2
+                for loop in non_parallel_loops:
+                    analyzer = _LoopVarUseAnalyzer(loop.loop_var)
+                    for index in indices:
+                        analyzer.visit_expr(index)
+                    if analyzer.used:
+                        raise ValueError(
+                            "[Tilelang Semantic Check] "
+                            f"A non-parallel loop iterator {loop.loop_var} is used to index "
+                            "a fragment buffer, which is not allowed in Tilelang."
                         )
 
-            return
-
         self.visit_stmt(op.body)
+        self.loop_stack.pop()
 
 
 def FragmentLoopChecker():
@@ -88,6 +112,7 @@ def FragmentLoopChecker():
     to ensure that the parallelization is valid.
 
     1. The range of loop can not be symbolic.
+    2. Any access/indexing of the fragment buffer should not contain other types of iterators (like loop variables from T.Serial).
 
     Returns:
         A prim_func_pass that applies the transformation
