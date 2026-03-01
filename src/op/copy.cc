@@ -78,9 +78,11 @@ private:
     }
 
     if (load == nullptr || !IsGlobalLikeScope(load->buffer.scope())) {
+      successfully_rewritten_ = false;
       return StmtMutator::VisitStmt_(op);
     }
     if (!IsSharedBuffer(op->buffer)) {
+      successfully_rewritten_ = false;
       return StmtMutator::VisitStmt_(op);
     }
     int bytes = op->value.dtype().bytes();
@@ -112,6 +114,7 @@ private:
     if (predicate.defined()) {
       args.push_back(predicate.value());
     }
+    successfully_rewritten_ = true;
     return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(), args));
   }
 
@@ -122,8 +125,6 @@ private:
       // This is guaranteed by tl.VectorizeLoop: if an access pattern is not
       // vectorizable/contiguous for the chosen iter, it is scalarized instead
       // of staying as ForKind::kVectorized.
-      LOG(INFO) << "CP Async Vectorized Loop Iter: " << op->loop_var
-                << ", extent=" << op->extent;
       if (const auto *extent_imm = op->extent.as<IntImmNode>()) {
         int lanes = static_cast<int>(extent_imm->value);
         if (lanes > 1 && current_vectorized_lanes_ <=
@@ -138,7 +139,7 @@ private:
     return stmt;
   }
 
-  bool successfully_rewritten_ = false;
+  bool successfully_rewritten_ = true;
   int current_vectorized_lanes_ = 1;
 };
 
