@@ -4,11 +4,14 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/expr.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <algorithm>
 #include <optional>
+#include <unordered_set>
 
 #include "../op/builtin.h"
 
@@ -27,6 +30,8 @@ public:
     for (const Stmt &stmt : op->seq) {
       visited.push_back(this->VisitStmt(stmt));
     }
+
+    visited = MaybeSplitEpilogueWait(std::move(visited));
 
     enum class UncommittedState { kUnknown, kZero, kNonZero };
 
@@ -51,6 +56,8 @@ public:
         }
         if (has_following_wait) {
           current = MaybeRelaxLoopFirstWait(Downcast<For>(current));
+          current = MaybeRelaxLoopHeadWait(Downcast<For>(current),
+                                           outstanding_committed_groups);
         }
       }
 
@@ -150,6 +157,249 @@ private:
     int commit = 0;
     int wait = 0;
   };
+
+  Array<Stmt> MaybeSplitEpilogueWait(Array<Stmt> seq) const {
+    // Schedule cp.async drains in a software-pipeline epilogue more formally.
+    //
+    // In TileLang software pipelining, async global->shared copies are committed
+    // in the steady-state loop and consumed in one or more epilogue "consumer
+    // phases". A conservative lowering often emits:
+    //
+    //   for ...:  (contains cp.async + commit)
+    //   ptx_wait_group(0)              # full drain
+    //   tvm_storage_sync("shared")
+    //   ... consumer phase 0 ...
+    //   tvm_storage_sync("shared")
+    //   ... consumer phase 1 ...
+    //
+    // Draining all groups immediately after the loop can destroy overlap between
+    // the work in phase 0 and the last in-flight committed group(s) that are
+    // only needed in phase 1. We improve overlap by:
+    //   - relaxing the post-loop wait_group(0) to keep some groups in flight,
+    //   - inserting a final wait_group(0) right before the shared barrier that
+    //     starts the next consumer phase.
+    //
+    // Unlike the earlier heuristic that looked for global stores, we identify
+    // consumer phases by detecting reads from buffers written by ptx_cp_async.
+    const int n = static_cast<int>(seq.size());
+    if (n < 6) {
+      return seq;
+    }
+
+    auto is_shared_storage_sync = [&](const Stmt &s) -> bool {
+      const auto *eval = s.as<EvaluateNode>();
+      if (!eval) {
+        return false;
+      }
+      const auto *call = eval->value.as<CallNode>();
+      if (!call || !call->op.same_as(builtin::tvm_storage_sync())) {
+        return false;
+      }
+      if (call->args.size() != 1) {
+        return false;
+      }
+      const auto *scope = call->args[0].as<StringImmNode>();
+      return scope && scope->value == "shared";
+    };
+
+    auto make_wait_stmt = [&](int wait_n) -> Stmt {
+      return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
+                           {IntImm(DataType::Int(32), wait_n)}));
+    };
+
+    auto access_ptr_buffer_var = [&](const PrimExpr &ptr) -> Optional<Var> {
+      // Support both `tl.access_ptr(BufferLoad, extent, rw_mask)` (frontend) and
+      // `tvm_access_ptr(ptype, data, offset, extent, rw_mask)` (lowered).
+      const auto *call = ptr.as<CallNode>();
+      if (!call) {
+        return Optional<Var>();
+      }
+      if (call->op.same_as(tl::access_ptr())) {
+        if (call->args.size() != 3) {
+          return Optional<Var>();
+        }
+        const auto *base_load = call->args[0].as<BufferLoadNode>();
+        if (!base_load) {
+          return Optional<Var>();
+        }
+        return base_load->buffer->data;
+      }
+      if (call->op.same_as(builtin::tvm_access_ptr())) {
+        if (call->args.size() != 5) {
+          return Optional<Var>();
+        }
+        if (call->args[1].as<VarNode>()) {
+          return Downcast<Var>(call->args[1]);
+        }
+      }
+      return Optional<Var>();
+    };
+
+    auto collect_cp_async_dst_buffers = [&](const Stmt &s) {
+      std::unordered_set<const VarNode *> vars;
+      PostOrderVisit(s, [&](const ObjectRef &node) {
+        const auto *call = node.as<CallNode>();
+        if (!call || !IsCPAsyncCall(call)) {
+          return;
+        }
+        if (call->args.empty()) {
+          return;
+        }
+        if (Optional<Var> buf_var = access_ptr_buffer_var(call->args[0])) {
+          vars.insert(buf_var.value().get());
+        }
+      });
+      return vars;
+    };
+
+    auto contains_async_smem_read = [&](const Stmt &s,
+                                        const std::unordered_set<const VarNode *>
+                                            &async_smem_vars) -> bool {
+      if (async_smem_vars.empty()) {
+        return false;
+      }
+      bool found = false;
+      PostOrderVisit(s, [&](const ObjectRef &node) {
+        if (found) {
+          return;
+        }
+        const auto *load = node.as<BufferLoadNode>();
+        if (!load) {
+          return;
+        }
+        if (async_smem_vars.count(load->buffer->data.get()) == 0) {
+          return;
+        }
+        // Only treat shared memory reads as cp.async consumers.
+        const String &scope = load->buffer.scope();
+        if (scope == "shared" || scope == "shared.dyn") {
+          found = true;
+        }
+      });
+      return found;
+    };
+
+    for (int i = 1; i + 1 < n; ++i) {
+      ClassifiedStmt cls = ClassifySimpleAsyncStmt(seq[i]);
+      if (cls.kind != AsyncStmtKind::kWaitStatic || cls.wait_n != 0) {
+        continue;
+      }
+
+      const auto *loop = seq[i - 1].as<ForNode>();
+      if (!loop) {
+        continue;
+      }
+      For loop_ref = Downcast<For>(seq[i - 1]);
+      AsyncIntrinSummary loop_summary = SummarizeAsyncIntrinsics(loop_ref);
+      if (loop_summary.cp_async <= 0 || loop_summary.commit <= 0) {
+        continue;
+      }
+
+      if (!is_shared_storage_sync(seq[i + 1])) {
+        continue;
+      }
+
+      int retain = PipelinedRetainGroups(loop_ref);
+      if (retain <= 0) {
+        continue;
+      }
+
+      // Avoid relaxing wait_group(0) into a no-op when we cannot prove there is
+      // at least (retain + 1) committed groups that can be drained here.
+      //
+      // When loop extent is a compile-time constant, we can conservatively
+      // lower-bound the total number of commit_group calls executed. Otherwise,
+      // fall back to the per-iteration count (syntactic).
+      int64_t min_commits = static_cast<int64_t>(loop_summary.commit);
+      if (const auto* ext = loop_ref->extent.as<IntImmNode>()) {
+        min_commits *= static_cast<int64_t>(ext->value);
+      }
+      if (min_commits < static_cast<int64_t>(retain + 1)) {
+        continue;
+      }
+
+      std::unordered_set<const VarNode *> async_smem_vars =
+          collect_cp_async_dst_buffers(loop_ref);
+      if (async_smem_vars.empty()) {
+        continue;
+      }
+
+      // Identify at least two "consumer phases" after the post-loop wait by
+      // scanning barrier-separated regions for reads from async-written shared
+      // buffers.
+      int insert_before_sync = -1;
+      int segment_start = i + 2; // after the first sync
+      int prev_sync = i + 1;
+      int found_phases = 0;
+      for (int j = segment_start; j <= n; ++j) {
+        bool end_segment = (j == n) || is_shared_storage_sync(seq[j]);
+        if (!end_segment) {
+          continue;
+        }
+        bool consumes = false;
+        for (int k = segment_start; k < j; ++k) {
+          if (contains_async_smem_read(seq[k], async_smem_vars)) {
+            consumes = true;
+            break;
+          }
+        }
+        if (consumes) {
+          ++found_phases;
+          if (found_phases == 2) {
+            // The barrier immediately before this segment starts the next
+            // consumer phase.
+            if (prev_sync > i + 1) {
+              insert_before_sync = prev_sync;
+            }
+            break;
+          }
+        }
+        // Start next segment after this sync (if any).
+        if (j < n) {
+          prev_sync = j;
+          segment_start = j + 1;
+        }
+      }
+      if (insert_before_sync == -1) {
+        continue;
+      }
+
+      Array<Stmt> out;
+      out.reserve(n + 1);
+      for (int j = 0; j < n; ++j) {
+        if (j == i) {
+          bool changed = false;
+          out.push_back(RewriteWaitStaticInSimpleWrapper(seq[j], retain,
+                                                         &changed));
+          // If rewrite failed (non-simple wrapper), keep original.
+          if (!changed) {
+            out.Set(out.size() - 1, seq[j]);
+          }
+          continue;
+        }
+        if (j == insert_before_sync) {
+          // Drain all groups before the next consumer phase.
+          bool rewrote_existing = false;
+          if (!out.empty()) {
+            bool changed_prev = false;
+            Stmt prev = RewriteWaitStaticInSimpleWrapper(out.back(), 0,
+                                                        &changed_prev);
+            if (changed_prev) {
+              out.Set(out.size() - 1, prev);
+              rewrote_existing = true;
+            }
+          }
+          if (!rewrote_existing) {
+            out.push_back(make_wait_stmt(0));
+          }
+        }
+        out.push_back(seq[j]);
+      }
+      return out;
+    }
+
+    return seq;
+  }
 
   Stmt MakeStaticWaitStmtLike(const Stmt &stmt, int new_wait_n) const {
     const auto *eval = stmt.as<EvaluateNode>();
@@ -306,6 +556,81 @@ private:
     ForNode *n = new_loop.CopyOnWrite();
     n->body = body.size() == 1 ? body[0] : SeqStmt(body);
     return new_loop;
+  }
+
+  Stmt MaybeRelaxLoopHeadWait(const For &loop,
+                              const std::optional<int> &pre_outstanding) const {
+    if (!loop.defined() || loop->kind != ForKind::kSerial) {
+      return loop;
+    }
+    int retain = PipelinedRetainGroups(loop);
+    if (retain <= 0) {
+      return loop;
+    }
+    if (!pre_outstanding.has_value() ||
+        pre_outstanding.value() < (retain + 1)) {
+      // Without enough committed groups before the loop, relaxing a leading
+      // wait_group(0) could turn it into a no-op and violate correctness.
+      return loop;
+    }
+
+    const auto *seq = loop->body.as<SeqStmtNode>();
+    if (!seq || seq->seq.empty()) {
+      return loop;
+    }
+
+    // Only consider loops that start with a static wait_group(0).
+    ClassifiedStmt first = ClassifySimpleAsyncStmt(seq->seq[0]);
+    if (first.kind != AsyncStmtKind::kWaitStatic || first.wait_n != 0) {
+      return loop;
+    }
+
+    // Require a prefetch pattern inside the loop (cp.async + commit after the
+    // leading wait). Otherwise relaxing does not help and can be risky.
+    int cp_async_after = 0;
+    int commit_after = 0;
+    for (int i = 1, n = static_cast<int>(seq->seq.size()); i < n; ++i) {
+      AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(seq->seq[i]);
+      cp_async_after += summary.cp_async;
+      commit_after += summary.commit;
+      // No need to track waits here.
+    }
+    if (cp_async_after <= 0 || commit_after <= 0) {
+      return loop;
+    }
+
+    Array<Stmt> body = seq->seq;
+    bool changed = false;
+    body.Set(
+        0, RewriteWaitStaticInSimpleWrapper(body[0], retain, &changed));
+    if (!changed) {
+      return loop;
+    }
+
+    For new_loop = loop;
+    ForNode *n = new_loop.CopyOnWrite();
+    n->body = body.size() == 1 ? body[0] : SeqStmt(body);
+    return new_loop;
+  }
+
+  int PipelinedRetainGroups(const For &loop) const {
+    // Keep (num_stages - 1) committed groups in flight when possible.
+    // This metadata is preserved by PipelinePlanning under the dedicated
+    // annotation key "tl_pipelined_num_stages".
+    int retain = 1;
+    if (!loop.defined()) {
+      return retain;
+    }
+    if (auto anno = loop->annotations.Get("tl_pipelined_num_stages")) {
+      int num_stages = -1;
+      if (const auto *imm = anno.value().as<IntImmNode>()) {
+        num_stages = static_cast<int>(imm->value);
+      }
+      if (num_stages >= 1) {
+        retain = std::max(0, num_stages - 1);
+      }
+    }
+    return retain;
   }
 
   bool IsCPAsyncCall(const CallNode *call) const {

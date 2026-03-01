@@ -456,6 +456,9 @@ private:
     int order = -1, stage = -1;
     bool copy_stage = false;
     bool producer_for_copy = false;
+    // Commit statements have no buffer writes, but they must be scheduled as a
+    // part of their cp.async producer group (after the cp.async calls).
+    bool cp_async_commit_stage = false;
     int cp_async_call_count = 0;
     int cp_async_commit_count = 0;
     int cp_async_wait_count = 0;
@@ -468,9 +471,12 @@ private:
         -1; // Initialized to -1, indicating no consumers found yet
 
   public:
-    bool is_first_stage() const { return copy_stage || producer_for_copy; }
+    bool is_first_stage() const {
+      return copy_stage || producer_for_copy || cp_async_commit_stage;
+    }
     bool is_copy_stage() const { return copy_stage; }
     bool is_producer_for_copy() const { return producer_for_copy; }
+    bool is_cp_async_commit_stage() const { return cp_async_commit_stage; }
     bool has_cp_async_call() const { return cp_async_call_count > 0; }
     bool has_cp_async_commit() const { return cp_async_commit_count > 0; }
     bool has_cp_async_wait() const { return cp_async_wait_count > 0; }
@@ -871,6 +877,46 @@ private:
       }
     }
 
+    // CPAsync commit statements are pure sync ops without explicit buffer
+    // accesses, but they must be kept with their corresponding cp.async group.
+    // Otherwise pipeline planning may schedule commit early (since it has no
+    // data deps), and then later force stage(commit)=stage(cp_async), causing
+    // illegal order like "commit; cp_async" in the generated prologue/body.
+    //
+    // We treat commit-only statements as "first-stage" scheduling candidates
+    // and reuse the group's last_use to place them right after the group's
+    // cp.async calls (in original statement order).
+    for (const auto &group : cp_async_groups) {
+      if (group.anchor_cp_async_stmt < 0) {
+        continue;
+      }
+      int group_last_use = -1;
+      int group_last_cp_async_stmt = group.anchor_cp_async_stmt;
+      for (int cp_async_stmt_idx : group.cp_async_stmt_indices) {
+        group_last_cp_async_stmt =
+            std::max(group_last_cp_async_stmt, cp_async_stmt_idx);
+        group_last_use = std::max(
+            group_last_use,
+            pipeline_stage_infos[cp_async_stmt_idx].last_use_stmt_index);
+      }
+      if (group_last_use < 0) {
+        // Fallback to the latest cp.async statement when no consumer is found
+        // (rare, but keep local ordering correct).
+        group_last_use = group_last_cp_async_stmt;
+      }
+      for (int commit_stmt_idx : group.commit_stmt_indices) {
+        auto &commit_info = pipeline_stage_infos[commit_stmt_idx];
+        // Only mark commit-only statements. If commit is already fused with
+        // cp.async calls in the same statement, its local ordering is
+        // preserved.
+        if (commit_info.has_cp_async_commit() &&
+            !commit_info.has_cp_async_call()) {
+          commit_info.cp_async_commit_stage = true;
+          commit_info.last_use_stmt_index = group_last_use;
+        }
+      }
+    }
+
     // Making stages and orders
     int order_idx = 0;
     // Stage 1. Create pipeline stages and assign order
@@ -930,7 +976,8 @@ private:
       for (auto &pinfo : pipeline_stage_infos) { // move copy to the beginning
         pinfo.order =
             (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
-        if (!pinfo.is_copy_stage() && !pinfo.is_producer_for_copy())
+        if (!pinfo.is_copy_stage() && !pinfo.is_producer_for_copy() &&
+            !pinfo.is_cp_async_commit_stage())
           pinfo.stage--;
       }
     }
@@ -943,6 +990,41 @@ private:
       int anchor_stage = pipeline_stage_infos[group.anchor_cp_async_stmt].stage;
       for (int commit_stmt_idx : group.commit_stmt_indices) {
         pipeline_stage_infos[commit_stmt_idx].stage = anchor_stage;
+      }
+    }
+
+    // Sanity check: within a cp.async group, commit statements must appear
+    // after all cp.async calls in the same stage order.
+    for (const auto &group : cp_async_groups) {
+      if (group.anchor_cp_async_stmt < 0) {
+        continue;
+      }
+      int max_cp_async_order = -1;
+      int anchor_stage = pipeline_stage_infos[group.anchor_cp_async_stmt].stage;
+      for (int cp_async_stmt_idx : group.cp_async_stmt_indices) {
+        if (pipeline_stage_infos[cp_async_stmt_idx].stage == anchor_stage) {
+          max_cp_async_order =
+              std::max(max_cp_async_order,
+                       pipeline_stage_infos[cp_async_stmt_idx].order);
+        }
+      }
+      for (int commit_stmt_idx : group.commit_stmt_indices) {
+        if (pipeline_stage_infos[commit_stmt_idx].stage == anchor_stage) {
+          // If commit is fused with cp.async calls in the same statement, the
+          // statement-local order is preserved and we cannot enforce an
+          // inter-statement order relation.
+          if (pipeline_stage_infos[commit_stmt_idx].has_cp_async_call()) {
+            continue;
+          }
+          CHECK_GT(pipeline_stage_infos[commit_stmt_idx].order,
+                   max_cp_async_order)
+              << "Pipeline planning error: cp.async commit is scheduled before "
+                 "its cp.async calls. commit_stmt="
+              << commit_stmt_idx << ", commit_order="
+              << pipeline_stage_infos[commit_stmt_idx].order
+              << ", max_cp_async_order=" << max_cp_async_order
+              << ", stage=" << anchor_stage;
+        }
       }
     }
 
@@ -1190,6 +1272,12 @@ private:
         annotations.Set(key, value);
       }
     }
+    // Preserve the original TileLang pipelining depth for downstream scheduling
+    // (e.g. cp.async wait_group relaxation/splitting). We intentionally do NOT
+    // keep the legacy key "num_stages" here because multiple downstream passes
+    // (e.g. MultiVersionBuffer/WarpSpecialized) treat it as an active pipeline
+    // marker and do not support nested pipelines.
+    annotations.Set("tl_pipelined_num_stages", Integer(num_stages));
 
     std::vector<Integer> orders, stages;
     orders.reserve(pipeline_stage_infos.size());
