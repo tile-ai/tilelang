@@ -33,10 +33,6 @@ inline bool IsCPAsyncInstructionBytes(int bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
 
-inline bool IsCPAsyncElementBytes(int bytes) {
-  return bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8 || bytes == 16;
-}
-
 inline bool IsGlobalLikeScope(const String &scope) {
   return scope == "global" || scope.empty();
 }
@@ -47,6 +43,8 @@ inline bool IsGlobalLikeScope(const String &scope) {
 class CPAsyncStoreRewriter : public StmtMutator {
 public:
   Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
+
+  bool RewriteSuccess() const { return successfully_rewritten_; }
 
 private:
   static bool IsZeroValue(const PrimExpr &e) {
@@ -85,9 +83,11 @@ private:
     if (!IsSharedBuffer(op->buffer)) {
       return StmtMutator::VisitStmt_(op);
     }
-
     int bytes = op->value.dtype().bytes();
-    if (!IsCPAsyncElementBytes(bytes)) {
+    int vectorized_lanes = current_vectorized_lanes_;
+
+    if (!IsCPAsyncInstructionBytes(bytes * vectorized_lanes)) {
+      successfully_rewritten_ = false;
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -114,6 +114,32 @@ private:
     }
     return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(), args));
   }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    int previous_vectorized_lanes = current_vectorized_lanes_;
+    if (op->kind == ForKind::kVectorized) {
+      // Assume vectorized access pattern is contiguous on the vectorized iter.
+      // This is guaranteed by tl.VectorizeLoop: if an access pattern is not
+      // vectorizable/contiguous for the chosen iter, it is scalarized instead
+      // of staying as ForKind::kVectorized.
+      LOG(INFO) << "CP Async Vectorized Loop Iter: " << op->loop_var
+                << ", extent=" << op->extent;
+      if (const auto *extent_imm = op->extent.as<IntImmNode>()) {
+        int lanes = static_cast<int>(extent_imm->value);
+        if (lanes > 1 &&
+            current_vectorized_lanes_ <= std::numeric_limits<int>::max() / lanes) {
+          current_vectorized_lanes_ *= lanes;
+        }
+      }
+    }
+
+    Stmt stmt = StmtMutator::VisitStmt_(op);
+    current_vectorized_lanes_ = previous_vectorized_lanes;
+    return stmt;
+  }
+
+  bool successfully_rewritten_ = false;
+  int current_vectorized_lanes_ = 1;
 };
 
 } // namespace
@@ -761,67 +787,19 @@ bool CopyNode::CheckTMemStore(Target target) const {
 // - if OOB guards are required, only a *uniform* (scalar) source predicate
 //   is supported (dst must be in-bounds)
 bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
-                                arith::Analyzer *analyzer,
-                                bool buffer_oob) const {
+                                arith::Analyzer *analyzer) const {
   if (!TargetHasAsyncCopy(target)) {
     return false;
   }
   if (!IsGlobalLikeScope(src.scope()) ||
-      !(dst.scope() == "shared" || dst.scope() == "shared.dyn")) {
+      !IsSharedBuffer(dst)) {
     return false;
   }
-  if (src->dtype != dst->dtype || src->dtype.bits() % 8 != 0) {
+  if (src->dtype != dst->dtype) {
     return false;
   }
-
-  auto local_analyzer = analyzer->Clone();
-  Array<IterVar> loop_vars = MakeIterVars();
-  for (const auto &iv : loop_vars) {
-    local_analyzer->Bind(iv->var, iv->dom);
-  }
-  PrimExpr src_predicate =
-      MakePredicate(local_analyzer.get(), loop_vars, src->shape, 0);
-  PrimExpr dst_predicate =
-      MakePredicate(local_analyzer.get(), loop_vars, dst->shape, 1);
-  // cp.async always writes to shared memory. We can only guard the global
-  // load side (via zero-fill), not the shared write side.
-  if (dst_predicate.defined()) {
-    return false;
-  }
-
-  auto simt_loop = MakeSIMTLoop(local_analyzer.get());
-  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  int vector_size =
-      GetVectorizeSize(fused_loop, local_analyzer.get(), layout_map);
-  int vectorized_bytes = vector_size * src->dtype.bytes();
-  if (!IsCPAsyncInstructionBytes(vectorized_bytes)) {
-    return false;
-  }
-
-  // OOB handling: allow a scalar (uniform) source predicate that does not
-  // depend on the vectorized loop var. Otherwise, VectorizeLoop will
-  // scalarize the body, leaving illegal sub-4B cp.async calls.
-  if (src_predicate.defined()) {
-    // Find the innermost loop var (the one VectorizeLoop will turn into a ramp)
-    Var inner_var;
-    {
-      const ForNode *cur = fused_loop.get();
-      while (cur) {
-        inner_var = cur->loop_var;
-        const auto *next = cur->body.as<ForNode>();
-        cur = next;
-      }
-    }
-    if (inner_var.defined()) {
-      bool depends_on_inner = UsesVar(src_predicate, [&](const VarNode *v) {
-        return v == inner_var.get();
-      });
-      if (depends_on_inner) {
-        return false;
-      }
-    }
-  }
-  (void)buffer_oob; // buffer_oob is subsumed by predicate checks above.
+  // Skip vectorize size check here because, during the Infer Layout stage,
+  // the layout is not stable and the vectorized size cannot be determined.
   return true;
 }
 
@@ -842,7 +820,7 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
 
   if (is_async_copy) {
     bool cp_async_supported =
-        CheckCPAsyncCopy(target, layout_map, analyzer, buffer_oob);
+        CheckCPAsyncCopy(target, layout_map, analyzer);
     if (!cp_async_supported) {
       auto bool_str = [](bool v) { return v ? "true" : "false"; };
 
@@ -985,7 +963,7 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
     return CopyInst::kTMemLoad;
   } else if (CheckTMemStore(target)) {
     return CopyInst::kTMemStore;
-  } else if (CheckCPAsyncCopy(target, layout_map, analyzer, buffer_oob)) {
+  } else if (CheckCPAsyncCopy(target, layout_map, analyzer)) {
     return CopyInst::kCPAsync;
   } else {
     return CopyInst::kNormal;
@@ -1061,6 +1039,15 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
 
   CPAsyncStoreRewriter cp_async_rewriter;
   Stmt cp_async_loop = cp_async_rewriter.Rewrite(lowered_loop);
+  if (!cp_async_rewriter.RewriteSuccess()) {
+    if (GetIsAsyncCopy()) {
+      LOG(FATAL) << "T.async_copy cannot be lowered to cp.async: no eligible "
+                    "global->shared store was rewritten.";
+    }
+    LOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
+                    "no eligible global->shared store.";
+    return LowerNormalCopy(T, analyzer);
+  }
   Stmt commit_group =
       Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
   if (GetIsAsyncCopy()) {

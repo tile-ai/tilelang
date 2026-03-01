@@ -248,7 +248,7 @@ public:
    * \brief Check if cp.async copy is supported.
    */
   bool CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
-                        arith::Analyzer *analyzer, bool buffer_oob) const;
+                        arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Get the copy instruction type.
