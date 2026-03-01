@@ -98,6 +98,160 @@ private:
   StorageScope sync_scope_;
 };
 
+// Similar to ThreadSyncAfterWaitQueueInserter, but for explicit cp.async
+// synchronization intrinsics (ptx_wait_group).
+//
+// In TileLang, cp.async copies may be lowered to explicit ptx_cp_async +
+// ptx_commit_group, and pipelining can move ptx_wait_group away from the copy
+// statement it originally guarded. tvm_storage_sync barriers inserted by
+// ThreadSyncPlanner are based on memory conflicts and may end up *before* the
+// wait_group, which is incorrect for cp.async because __syncthreads() does not
+// wait for outstanding asynchronous copies.
+//
+// Correct usage requires:
+//   ptx_wait_group(N);
+//   tvm_storage_sync("shared");   // __syncthreads()
+// before any cross-thread consumption of the shared memory written by cp.async.
+//
+// This rewriter conservatively inserts a shared-memory storage sync
+// immediately after every ptx_wait_group statement unless an identical sync
+// already follows.
+class ThreadSyncAfterWaitGroupInserter : public StmtExprMutator {
+public:
+  explicit ThreadSyncAfterWaitGroupInserter(StorageScope sync_scope)
+      : sync_scope_(std::move(sync_scope)) {}
+
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    Array<Stmt> visited;
+    visited.reserve(op->seq.size());
+    for (const Stmt &stmt : op->seq) {
+      visited.push_back(this->VisitStmt(stmt));
+    }
+
+    Array<Stmt> rewritten;
+    rewritten.reserve(visited.size());
+    for (int i = 0, n = static_cast<int>(visited.size()); i < n; ++i) {
+      const Stmt &stmt = visited[i];
+      rewritten.push_back(stmt);
+      if (IsWaitGroupStmt(stmt)) {
+        bool next_is_sync = false;
+        if (i + 1 < n && IsStorageSyncStmt(visited[i + 1])) {
+          next_is_sync = true;
+        }
+        if (!next_is_sync) {
+          rewritten.push_back(MakeStorageSyncStmt());
+        }
+      }
+    }
+
+    if (rewritten.empty()) {
+      return Evaluate(0);
+    }
+    if (rewritten.size() == 1) {
+      return rewritten[0];
+    }
+    return SeqStmt(rewritten);
+  }
+
+private:
+  StorageScope sync_scope_;
+
+  Stmt MakeStorageSyncStmt() const {
+    return Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
+                         {StringImm(sync_scope_.to_string())}));
+  }
+
+  bool IsWaitGroupStmt(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return IsWaitGroupStmt(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return IsWaitGroupStmt(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return IsWaitGroupStmt(seq->seq[0]);
+      }
+      return false;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return IsWaitGroupStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return IsWaitGroupStmt(realize->block->body);
+      }
+      return false;
+    }
+    if (const auto *iff = stmt.as<IfThenElseNode>()) {
+      if (!iff->else_case.defined()) {
+        return IsWaitGroupStmt(iff->then_case);
+      }
+      return false;
+    }
+
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    if (!call) {
+      return false;
+    }
+    return call->op.same_as(builtin::ptx_wait_group());
+  }
+
+  bool IsStorageSyncStmt(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return IsStorageSyncStmt(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return IsStorageSyncStmt(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return IsStorageSyncStmt(seq->seq[0]);
+      }
+      return false;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return IsStorageSyncStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return IsStorageSyncStmt(realize->block->body);
+      }
+      return false;
+    }
+    if (const auto *iff = stmt.as<IfThenElseNode>()) {
+      if (!iff->else_case.defined()) {
+        return IsStorageSyncStmt(iff->then_case);
+      }
+      return false;
+    }
+
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    if (!call) {
+      return false;
+    }
+    if (!call->op.same_as(builtin::tvm_storage_sync())) {
+      return false;
+    }
+    if (call->args.size() != 1) {
+      return false;
+    }
+    const auto *scope = call->args[0].as<StringImmNode>();
+    if (!scope) {
+      return false;
+    }
+    return scope->value == sync_scope_.to_string();
+  }
+};
+
 class ThreadSyncInserter : public StmtExprMutator {
 public:
   ThreadSyncInserter(StorageScope sync_scope,
@@ -1727,6 +1881,7 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   auto stmt = n->body;
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
+    stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
   }
   // Get warp size from target, defaulting to 32 if not available
   int warp_size = 32;
