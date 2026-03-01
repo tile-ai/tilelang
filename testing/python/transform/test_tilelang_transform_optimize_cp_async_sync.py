@@ -263,9 +263,9 @@ def test_optimize_cp_async_sync_splits_epilogue_wait_between_two_consumer_phases
     # The original post-loop wait_group(0) should be relaxed to wait_group(1).
     wait1_idx = next((i for i, s in enumerate(seq) if _is_wait_stmt(s, 1)), None)
     assert wait1_idx is not None, f"Expected a top-level wait_group(1), got:\n{mod['main']}"
-    assert wait1_idx + 1 < len(seq) and _is_shared_storage_sync(
-        seq[wait1_idx + 1]
-    ), "Expected tvm_storage_sync('shared') immediately after relaxed wait_group(1)"
+    assert wait1_idx + 1 < len(seq) and _is_shared_storage_sync(seq[wait1_idx + 1]), (
+        "Expected tvm_storage_sync('shared') immediately after relaxed wait_group(1)"
+    )
 
     store_indices = [i for i, s in enumerate(seq) if isinstance(s, tvm.tir.BufferStore)]
     store_indices = [i for i in store_indices if i > wait1_idx]
@@ -277,9 +277,9 @@ def test_optimize_cp_async_sync_splits_epilogue_wait_between_two_consumer_phases
         None,
     )
     assert split_sync_idx is not None, "Expected a shared barrier between the two global stores"
-    assert split_sync_idx - 1 >= 0 and _is_wait_stmt(
-        seq[split_sync_idx - 1], 0
-    ), "Expected an inserted wait_group(0) immediately before the barrier between epilogue blocks"
+    assert split_sync_idx - 1 >= 0 and _is_wait_stmt(seq[split_sync_idx - 1], 0), (
+        "Expected an inserted wait_group(0) immediately before the barrier between epilogue blocks"
+    )
 
 
 def test_optimize_cp_async_sync_does_not_relax_wait_without_prefetch():

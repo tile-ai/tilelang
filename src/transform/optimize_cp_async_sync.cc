@@ -161,9 +161,9 @@ private:
   Array<Stmt> MaybeSplitEpilogueWait(Array<Stmt> seq) const {
     // Schedule cp.async drains in a software-pipeline epilogue more formally.
     //
-    // In TileLang software pipelining, async global->shared copies are committed
-    // in the steady-state loop and consumed in one or more epilogue "consumer
-    // phases". A conservative lowering often emits:
+    // In TileLang software pipelining, async global->shared copies are
+    // committed in the steady-state loop and consumed in one or more epilogue
+    // "consumer phases". A conservative lowering often emits:
     //
     //   for ...:  (contains cp.async + commit)
     //   ptx_wait_group(0)              # full drain
@@ -172,9 +172,9 @@ private:
     //   tvm_storage_sync("shared")
     //   ... consumer phase 1 ...
     //
-    // Draining all groups immediately after the loop can destroy overlap between
-    // the work in phase 0 and the last in-flight committed group(s) that are
-    // only needed in phase 1. We improve overlap by:
+    // Draining all groups immediately after the loop can destroy overlap
+    // between the work in phase 0 and the last in-flight committed group(s)
+    // that are only needed in phase 1. We improve overlap by:
     //   - relaxing the post-loop wait_group(0) to keep some groups in flight,
     //   - inserting a final wait_group(0) right before the shared barrier that
     //     starts the next consumer phase.
@@ -208,8 +208,8 @@ private:
     };
 
     auto access_ptr_buffer_var = [&](const PrimExpr &ptr) -> Optional<Var> {
-      // Support both `tl.access_ptr(BufferLoad, extent, rw_mask)` (frontend) and
-      // `tvm_access_ptr(ptype, data, offset, extent, rw_mask)` (lowered).
+      // Support both `tl.access_ptr(BufferLoad, extent, rw_mask)` (frontend)
+      // and `tvm_access_ptr(ptype, data, offset, extent, rw_mask)` (lowered).
       const auto *call = ptr.as<CallNode>();
       if (!call) {
         return Optional<Var>();
@@ -252,9 +252,10 @@ private:
       return vars;
     };
 
-    auto contains_async_smem_read = [&](const Stmt &s,
-                                        const std::unordered_set<const VarNode *>
-                                            &async_smem_vars) -> bool {
+    auto contains_async_smem_read =
+        [&](const Stmt &s,
+            const std::unordered_set<const VarNode *> &async_smem_vars)
+        -> bool {
       if (async_smem_vars.empty()) {
         return false;
       }
@@ -311,7 +312,7 @@ private:
       // lower-bound the total number of commit_group calls executed. Otherwise,
       // fall back to the per-iteration count (syntactic).
       int64_t min_commits = static_cast<int64_t>(loop_summary.commit);
-      if (const auto* ext = loop_ref->extent.as<IntImmNode>()) {
+      if (const auto *ext = loop_ref->extent.as<IntImmNode>()) {
         min_commits *= static_cast<int64_t>(ext->value);
       }
       if (min_commits < static_cast<int64_t>(retain + 1)) {
@@ -369,8 +370,8 @@ private:
       for (int j = 0; j < n; ++j) {
         if (j == i) {
           bool changed = false;
-          out.push_back(RewriteWaitStaticInSimpleWrapper(seq[j], retain,
-                                                         &changed));
+          out.push_back(
+              RewriteWaitStaticInSimpleWrapper(seq[j], retain, &changed));
           // If rewrite failed (non-simple wrapper), keep original.
           if (!changed) {
             out.Set(out.size() - 1, seq[j]);
@@ -382,8 +383,8 @@ private:
           bool rewrote_existing = false;
           if (!out.empty()) {
             bool changed_prev = false;
-            Stmt prev = RewriteWaitStaticInSimpleWrapper(out.back(), 0,
-                                                        &changed_prev);
+            Stmt prev =
+                RewriteWaitStaticInSimpleWrapper(out.back(), 0, &changed_prev);
             if (changed_prev) {
               out.Set(out.size() - 1, prev);
               rewrote_existing = true;
@@ -601,8 +602,7 @@ private:
 
     Array<Stmt> body = seq->seq;
     bool changed = false;
-    body.Set(
-        0, RewriteWaitStaticInSimpleWrapper(body[0], retain, &changed));
+    body.Set(0, RewriteWaitStaticInSimpleWrapper(body[0], retain, &changed));
     if (!changed) {
       return loop;
     }
