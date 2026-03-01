@@ -104,12 +104,15 @@ TileOperator GemmPyNode::Clone() const {
 }
 
 bool GemmPyNode::allowTcgen5Mma(Target target) const {
-  return TargetIsSm100(target) &&
-         ((a_.scope() == "shared.dyn" || a_.scope() == "shared" ||
-           a_.scope() == "shared.tmem") &&
-          (b_.scope() == "shared.dyn" || b_.scope() == "shared") &&
-          c_.scope() == "shared.tmem") &&
-         GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype).first;
+  bool scope_ok = (a_.scope() == "shared.dyn" || a_.scope() == "shared" ||
+                   a_.scope() == "shared.tmem") &&
+                  (b_.scope() == "shared.dyn" || b_.scope() == "shared") &&
+                  c_.scope() == "shared.tmem";
+  if (!TargetIsSm100(target) || !scope_ok)
+    return false;
+  // For TS variant (A from TMEM), use B's dtype as the input dtype
+  DataType ab_dtype = (a_.scope() == "shared.tmem") ? b_->dtype : a_->dtype;
+  return GetTCGEN5MMAMeta(m_, n_, k_, ab_dtype, c_->dtype).first;
 }
 
 bool GemmPyNode::allowWgmma(int block_size, Target target) const {

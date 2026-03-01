@@ -24,7 +24,19 @@ _FLOAT8_DTYPES = {
 
 
 class GemmTCGEN5(GemmBase):
+    """GEMM operator for Blackwell (SM100) TCGEN5MMA instructions.
+
+    Supports the SS (Shared-Shared) and TS (TensorMemory-Shared) variants.
+    Layout inference and lowering are dispatched based on the memory scopes
+    of operands A and B.
+    """
+
     def infer_layout(self, target: Target, thread_nums: int):
+        """Infer swizzled layouts for operands and accumulator.
+
+        For SS: both A and B get swizzled shared-memory layouts.
+        For TS: A and C get TMEM store layouts, B gets a swizzled shared-memory layout.
+        """
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -48,15 +60,22 @@ class GemmTCGEN5(GemmBase):
             b_continuity = self.K if b_is_k_major else self.N // n_warp
 
             return {
-                # WGMMA does not support padding
                 self.A: make_tcgen05mma_swizzled_layout(self.A, continuity=a_continuity, k_major=a_is_k_major),
                 self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
-        # No special swizzle requirement; rely on existing layout.
+        if self.is_gemm_ts():
+            b_continuity = self.K if b_is_k_major else self.N // n_warp
+            layouts = {
+                self.A: mma_emitter.make_mma_store_layout(self.A),
+                self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
+            }
+            return layouts
         return {}
 
     def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+        """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
         warp_row_tiles = int(self.M // m_warp)
@@ -79,8 +98,8 @@ class GemmTCGEN5(GemmBase):
         if self.B in layout_map:
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
 
-        if not self.is_gemm_ss():
-            raise ValueError(f"TCGEN5MMA currently only supports gemm_ss, got A scope {self.A.scope()}, B scope {self.B.scope()}")
+        if not (self.is_gemm_ss() or self.is_gemm_ts()):
+            raise ValueError(f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}")
 
         atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K)
 
