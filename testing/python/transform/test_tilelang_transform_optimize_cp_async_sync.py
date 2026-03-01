@@ -217,6 +217,48 @@ def test_optimize_cp_async_sync_merge_commit_groups_and_relax_wait():
     assert 0 in func_waits, "Expected at least one epilogue wait_group(0) to remain in the function"
 
 
+def test_optimize_cp_async_sync_does_not_relax_wait_when_prefetch_is_conditional():
+    # If cp.async prefetch + commit is guarded by a runtime predicate, the
+    # number of committed groups before a wait_group(0) is not guaranteed at
+    # runtime. Relaxing to wait_group(N>0) can become a no-op and break
+    # correctness (e.g. blocksparse kernels).
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.uint8), B: T.Tensor((64,), T.uint8)):
+        SA = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+        SB = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+
+        for k in T.serial(0, 4, annotations={"tl_pipelined_num_stages": T.int32(2)}):
+            if k < 3:
+                T.ptx_cp_async(
+                    T.access_ptr(SA[(k + 1) * 4], "w", 4),
+                    T.access_ptr(A[(k + 1) * 4], "r", 4),
+                    4,
+                )
+                T.ptx_commit_group()
+                T.ptx_cp_async(
+                    T.access_ptr(SB[(k + 1) * 4], "w", 4),
+                    T.access_ptr(A[(k + 1) * 4], "r", 4),
+                    4,
+                )
+                T.ptx_commit_group()
+
+            # Consumer wait for current stage.
+            T.ptx_wait_group(0)
+            B[k * 4] = SA[k * 4] + SB[k * 4]
+
+        # Epilogue drain.
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = _run(mod)
+
+    func = mod["main"]
+    loop = _find_pipelined_loop(func)
+    _, loop_waits = _count_commit_and_wait(loop.body)
+    assert 0 in loop_waits, f"Expected wait_group(0) to remain in loop, got waits={loop_waits}"
+    assert 2 not in loop_waits, f"Did not expect wait_group(2) under conditional prefetch, got waits={loop_waits}"
+
+
 def test_optimize_cp_async_sync_relaxes_loop_head_wait_with_prefetch():
     @T.prim_func
     def before(A: T.Tensor((32,), T.uint8), B: T.Tensor((32,), T.uint8)):

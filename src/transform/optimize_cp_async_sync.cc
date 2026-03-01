@@ -843,12 +843,9 @@ private:
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       return ClassifySimpleAsyncStmt(attr->body);
     }
-    if (const auto *iff = stmt.as<IfThenElseNode>()) {
-      if (!iff->else_case.defined()) {
-        return ClassifySimpleAsyncStmt(iff->then_case);
-      }
-      return {};
-    }
+    // Do not treat IfThenElse as a "simple wrapper": conditional execution can
+    // invalidate cp.async bookkeeping and make wait relaxation unsafe when the
+    // prefetch path is skipped at runtime (e.g. blocksparse kernels).
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
       if (seq->seq.size() == 1) {
         return ClassifySimpleAsyncStmt(seq->seq[0]);
