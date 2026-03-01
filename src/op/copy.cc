@@ -126,8 +126,8 @@ private:
                 << ", extent=" << op->extent;
       if (const auto *extent_imm = op->extent.as<IntImmNode>()) {
         int lanes = static_cast<int>(extent_imm->value);
-        if (lanes > 1 &&
-            current_vectorized_lanes_ <= std::numeric_limits<int>::max() / lanes) {
+        if (lanes > 1 && current_vectorized_lanes_ <=
+                             std::numeric_limits<int>::max() / lanes) {
           current_vectorized_lanes_ *= lanes;
         }
       }
@@ -791,8 +791,7 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
   if (!TargetHasAsyncCopy(target)) {
     return false;
   }
-  if (!IsGlobalLikeScope(src.scope()) ||
-      !IsSharedBuffer(dst)) {
+  if (!IsGlobalLikeScope(src.scope()) || !IsSharedBuffer(dst)) {
     return false;
   }
   if (src->dtype != dst->dtype) {
@@ -819,8 +818,7 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
   bool is_async_copy = GetIsAsyncCopy();
 
   if (is_async_copy) {
-    bool cp_async_supported =
-        CheckCPAsyncCopy(target, layout_map, analyzer);
+    bool cp_async_supported = CheckCPAsyncCopy(target, layout_map, analyzer);
     if (!cp_async_supported) {
       auto bool_str = [](bool v) { return v ? "true" : "false"; };
 
