@@ -31,6 +31,8 @@ public:
       visited.push_back(this->VisitStmt(stmt));
     }
 
+    visited = MaybeMergeCommitsBeforeWait0(std::move(visited));
+
     visited = MaybeSplitEpilogueWait(std::move(visited));
 
     enum class UncommittedState { kUnknown, kZero, kNonZero };
@@ -157,6 +159,143 @@ private:
     int commit = 0;
     int wait = 0;
   };
+
+  Array<Stmt> MaybeMergeCommitsBeforeWait0(Array<Stmt> seq) const {
+    // Merge adjacent cp.async commit groups when the program is still using a
+    // full drain (wait_group(0)) as the synchronization point.
+    //
+    // Pattern (within a SeqStmt segment that ends at wait_group(0)):
+    //   cp_async*; commit; cp_async*; commit; wait_group(0)
+    // =>
+    //   cp_async*;         cp_async*; commit; wait_group(0)
+    //
+    // This reduces the number of committed groups without weakening the drain,
+    // and lets later wait relaxation derive the right retain count from the
+    // new (smaller) group topology.
+    const int n = static_cast<int>(seq.size());
+    if (n < 4) {
+      return seq;
+    }
+
+    auto is_direct_commit = [&](const Stmt &s) -> bool {
+      const auto *eval = s.as<EvaluateNode>();
+      if (!eval) {
+        return false;
+      }
+      const auto *call = eval->value.as<CallNode>();
+      return call && IsCommitCall(call);
+    };
+
+    Array<Stmt> out;
+    out.reserve(n);
+    int seg_start = 0;
+
+    auto flush_segment = [&](int seg_end, bool merge_commits) {
+      if (!merge_commits) {
+        for (int j = seg_start; j < seg_end; ++j) {
+          out.push_back(seq[j]);
+        }
+        return;
+      }
+
+      // We only want to merge commits in the immediately preceding cp.async
+      // region, so we analyze a maximal suffix that contains only:
+      //   - cp.async-only statements (possibly wrapped in loops/attrs), and
+      //   - standalone commit_group statements.
+      // This avoids blocking on unrelated statements (e.g. barriers) that may
+      // appear earlier in the segment.
+      auto is_cp_async_only_stmt = [&](const Stmt &s) -> bool {
+        ClassifiedStmt cls = ClassifySimpleAsyncStmt(s);
+        if (cls.kind == AsyncStmtKind::kCPAsync) {
+          return true;
+        }
+        if (!ContainsAsyncIntrinsics(s)) {
+          return false;
+        }
+        AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(s);
+        return (summary.cp_async > 0 && summary.commit == 0 &&
+                summary.wait == 0);
+      };
+      auto is_direct_commit_stmt = [&](const Stmt &s) -> bool {
+        ClassifiedStmt cls = ClassifySimpleAsyncStmt(s);
+        return cls.kind == AsyncStmtKind::kCommit && is_direct_commit(s);
+      };
+
+      int merge_start = seg_end;
+      bool saw_cp_async = false;
+      for (int j = seg_end - 1; j >= seg_start; --j) {
+        if (is_direct_commit_stmt(seq[j])) {
+          merge_start = j;
+          continue;
+        }
+        if (is_cp_async_only_stmt(seq[j])) {
+          saw_cp_async = true;
+          merge_start = j;
+          continue;
+        }
+        // Stop at the first non-async statement.
+        break;
+      }
+
+      std::vector<int> commit_indices;
+      commit_indices.reserve(4);
+      bool has_complex_async = false;
+      for (int j = merge_start; j < seg_end; ++j) {
+        if (is_direct_commit_stmt(seq[j])) {
+          commit_indices.push_back(j);
+          continue;
+        }
+        if (is_cp_async_only_stmt(seq[j])) {
+          continue;
+        }
+        // Shouldn't happen given how merge_start is determined, but be safe.
+        has_complex_async = true;
+        break;
+      }
+
+      if (has_complex_async || !saw_cp_async || commit_indices.size() != 2) {
+        for (int j = seg_start; j < seg_end; ++j) {
+          out.push_back(seq[j]);
+        }
+        return;
+      }
+
+      // Emit prefix unchanged.
+      for (int j = seg_start; j < merge_start; ++j) {
+        out.push_back(seq[j]);
+      }
+      // Drop the first commit in the mergeable suffix so both copy regions are
+      // committed as a single group by the second commit.
+      int dropped_commit_idx = commit_indices[0];
+      for (int j = merge_start; j < seg_end; ++j) {
+        if (j == dropped_commit_idx) {
+          continue;
+        }
+        out.push_back(seq[j]);
+      }
+    };
+
+    for (int i = 0; i < n; ++i) {
+      ClassifiedStmt cls = ClassifySimpleAsyncStmt(seq[i]);
+      if (cls.kind == AsyncStmtKind::kWaitStatic && cls.wait_n == 0) {
+        flush_segment(/*seg_end=*/i, /*merge_commits=*/true);
+        out.push_back(seq[i]);
+        seg_start = i + 1;
+        continue;
+      }
+      if (cls.kind == AsyncStmtKind::kWaitStatic ||
+          cls.kind == AsyncStmtKind::kWaitDynamic) {
+        // For non-(wait0) waits, we don't attempt to merge commits because it
+        // can weaken synchronization unless we also adjust wait counts.
+        flush_segment(/*seg_end=*/i, /*merge_commits=*/false);
+        out.push_back(seq[i]);
+        seg_start = i + 1;
+        continue;
+      }
+    }
+    flush_segment(/*seg_end=*/n, /*merge_commits=*/false);
+    return out;
+  }
 
   Array<Stmt> MaybeSplitEpilogueWait(Array<Stmt> seq) const {
     // Schedule cp.async drains in a software-pipeline epilogue more formally.
@@ -525,9 +664,25 @@ private:
       if (cls.kind == AsyncStmtKind::kWaitStatic) {
         if (cls.wait_n == 0 && cp_async_before_wait > 0 &&
             commit_before_wait > 0) {
+          // In a pipelined loop, each iteration may commit multiple cp.async
+          // groups (e.g. separate A/B shared-memory copies). For a K-stage
+          // software pipeline, a good default is to keep (K - 1) iterations'
+          // worth of committed groups in flight.
+          //
+          // `commit_before_wait` is a syntactic approximation of the number of
+          // committed groups produced per iteration before the first wait.
+          int new_wait_n = 1;
+          if (loop->annotations.Get("tl_pipelined_num_stages")) {
+            int per_iter_groups = std::max(1, commit_before_wait);
+            int stage_retain = PipelinedRetainGroups(loop);
+            new_wait_n = stage_retain * per_iter_groups;
+            // `cp.async.wait_group` takes a small immediate operand. Clamp to a
+            // conservative range to avoid generating illegal SASS/PTX.
+            new_wait_n = std::max(0, std::min(new_wait_n, 7));
+          }
           bool changed_wait = false;
-          body.Set(i,
-                   RewriteWaitStaticInSimpleWrapper(body[i], 1, &changed_wait));
+          body.Set(i, RewriteWaitStaticInSimpleWrapper(body[i], new_wait_n,
+                                                       &changed_wait));
           changed = changed || changed_wait;
         }
         break;
