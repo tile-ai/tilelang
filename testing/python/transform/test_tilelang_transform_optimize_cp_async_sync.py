@@ -44,6 +44,37 @@ def _run(mod):
     return mod
 
 
+def _find_pipelined_loop(func):
+    loops = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tir.For) and "tl_pipelined_num_stages" in node.annotations:
+            loops.append(node)
+
+    post_order_visit(func.body, _visit)
+    assert loops, "Expected at least one loop annotated with tl_pipelined_num_stages"
+    return loops[0]
+
+
+def _count_commit_and_wait(stmt):
+    commit = 0
+    waits = []
+
+    def _visit(node):
+        nonlocal commit, waits
+        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op):
+            if node.op.name == "tir.ptx_commit_group":
+                commit += 1
+            elif node.op.name == "tir.ptx_wait_group":
+                if node.args and isinstance(node.args[0], tvm.tir.IntImm):
+                    waits.append(int(node.args[0]))
+                else:
+                    waits.append(None)
+
+    post_order_visit(stmt, _visit)
+    return commit, waits
+
+
 def test_optimize_cp_async_sync_removes_redundant_commit():
     @T.prim_func
     def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
@@ -129,6 +160,61 @@ def test_optimize_cp_async_sync_relaxes_loop_wait_with_prefetch():
     mod = _run(mod)
     wait_args = _collect_wait_args(mod["main"])
     assert 1 in wait_args, f"Expected a relaxed wait_group(1), got wait args {wait_args}"
+
+
+def test_optimize_cp_async_sync_merge_commit_groups_and_relax_wait():
+    # Pattern inside a pipelined loop:
+    #   cp_async(A); commit; cp_async(B); commit; wait_group(0)
+    # After OptimizeCPAsyncSync:
+    #   cp_async(A); cp_async(B); commit; wait_group(1)   (for num_stages=2)
+    @T.prim_func
+    def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
+        SA = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
+        SB = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
+
+        for ko in T.serial(4, annotations={"tl_pipelined_num_stages": T.int32(2)}):
+            with T.block("copyA"):
+                T.reads(A[ko * 4 : ko * 4 + 4])
+                T.writes(SA[ko * 4 : ko * 4 + 4])
+                T.ptx_cp_async(
+                    T.access_ptr(SA[ko * 4], "w", 4),
+                    T.access_ptr(A[ko * 4], "r", 4),
+                    4,
+                )
+            T.ptx_commit_group()
+            with T.block("copyB"):
+                T.reads(A[ko * 4 : ko * 4 + 4])
+                T.writes(SB[ko * 4 : ko * 4 + 4])
+                T.ptx_cp_async(
+                    T.access_ptr(SB[ko * 4], "w", 4),
+                    T.access_ptr(A[ko * 4], "r", 4),
+                    4,
+                )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+            # Consumer placeholder.
+            with T.block("consume"):
+                T.reads(SA[ko * 4], SB[ko * 4])
+                T.writes(B[ko * 4])
+                B[ko * 4] = SA[ko * 4] + SB[ko * 4]
+
+        # Epilogue drain (typical pipeline lowering shape).
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = _run(mod)
+
+    func = mod["main"]
+    loop = _find_pipelined_loop(func)
+
+    loop_commit, loop_waits = _count_commit_and_wait(loop.body)
+    assert loop_commit == 1, f"Expected 1 commit_group in loop after merge, got {loop_commit}"
+    assert 1 in loop_waits, f"Expected wait_group(1) in loop after relaxation, got waits={loop_waits}"
+    assert 0 not in loop_waits, f"Expected wait_group(0) inside loop to be relaxed, got waits={loop_waits}"
+
+    func_commit, func_waits = _count_commit_and_wait(func.body)
+    assert 0 in func_waits, "Expected at least one epilogue wait_group(0) to remain in the function"
 
 
 def test_optimize_cp_async_sync_relaxes_loop_head_wait_with_prefetch():
