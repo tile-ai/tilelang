@@ -53,6 +53,13 @@ def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     return not disable_vectorize
 
 
+def allow_autoschedule(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    enable_autoschedule = pass_ctx.config.get("tl.enable_auto_schedule", False)
+    return enable_autoschedule
+
+
 def allow_global_thread_synchronization(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -187,6 +194,9 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
+    if allow_autoschedule():
+        # Auto schedule for high-level operations
+        mod = tilelang.transform.AutoSchedule(False)(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
