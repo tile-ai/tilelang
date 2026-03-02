@@ -18,8 +18,8 @@
  */
 
 /*!
- * \brief Rewrite eligible global->shared copies into PTX cp.async
- * \file inject_ptx_async_copy.cc
+ * \brief Lower eligible global->shared copies into PTX cp.async
+ * \file lower_ptx_async_copy.cc
  */
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/target/target.h>
@@ -699,7 +699,7 @@ private:
 
 using namespace tir::transform;
 
-tvm::transform::Pass InjectPTXAsyncCopy() {
+tvm::transform::Pass LowerPTXAsyncCopy() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
     if (!target_opt.defined()) {
@@ -725,12 +725,12 @@ tvm::transform::Pass InjectPTXAsyncCopy() {
     n->body = injector.Finalize(injector(n->body));
     return f;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.InjectPTXAsyncCopy", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.LowerPTXAsyncCopy", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.InjectPTXAsyncCopy", InjectPTXAsyncCopy);
+  refl::GlobalDef().def("tl.transform.LowerPTXAsyncCopy", LowerPTXAsyncCopy);
 }
 
 } // namespace tl

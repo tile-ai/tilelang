@@ -192,7 +192,6 @@ def tl_matmul(
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     src_code = kernel.get_kernel_source()
-    print(src_code)
     # src_code is the generated cuda source
     assert src_code is not None
 
@@ -245,7 +244,6 @@ def run_regression_perf():
     out_dtype, accum_dtype = "float32", "float32"
     in_dtype = determine_fp8_type()
     kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    print(kernel_e4m3.get_kernel_source())
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
     if torch.version.hip is None:
         latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")

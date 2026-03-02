@@ -381,8 +381,8 @@ def VectorizeLoop(enable_vectorize: bool = True):
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
 
 
-def InjectPTXAsyncCopy():
-    """Rewrite eligible global->shared copies into PTX `cp.async` on CUDA.
+def LowerPTXAsyncCopy():
+    """Lower eligible global->shared copies into PTX `cp.async` on CUDA.
 
     When enabled (pass config `tl.enable_async_copy`, default True), this pass
     may rewrite plain user-written global->shared `BufferStore` patterns (e.g.
@@ -397,7 +397,12 @@ def InjectPTXAsyncCopy():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.InjectPTXAsyncCopy()  # type: ignore
+    return _ffi_api.LowerPTXAsyncCopy()  # type: ignore
+
+
+def InjectPTXAsyncCopy():
+    """Deprecated alias of `LowerPTXAsyncCopy`."""
+    return LowerPTXAsyncCopy()
 
 
 def LowerDeviceStorageAccessInfo():

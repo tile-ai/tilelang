@@ -96,7 +96,7 @@ class PassConfigKey(str, Enum):
     - `T.copy(global -> shared, ...)` to `ptx_cp_async + commit + wait`
     - `T.async_copy(global -> shared, ...)` to `ptx_cp_async + commit` (no wait)
     - plain user-written global->shared copy stores (e.g. in `T.Parallel`) via
-      `InjectPTXAsyncCopy`
+      `LowerPTXAsyncCopy`
 
     When False, TileLang will avoid the cp.async lowering path for `T.copy`.
     Explicit `T.async_copy` still requires cp.async support and may error if
