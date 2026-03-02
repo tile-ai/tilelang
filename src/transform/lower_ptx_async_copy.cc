@@ -113,8 +113,6 @@ public:
 
     auto dst_elem_type = GetPointerType(store->buffer->data->type_annotation);
     auto src_elem_type = GetPointerType(load->buffer->data->type_annotation);
-    LOG(INFO) << "src_elem_type: " << src_elem_type;
-    LOG(INFO) << "dst_elem_type: " << dst_elem_type;
     if (!dst_elem_type.has_value() || !src_elem_type.has_value()) {
       // Be conservative: if pointer metadata is missing, skip injection.
       return Optional<Stmt>();
