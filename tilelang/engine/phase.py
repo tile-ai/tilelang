@@ -246,9 +246,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         # See the TMA path: inject cp.async before pipeline planning.
-        print("Before LowerPTXAsyncCopy\n", mod)
         mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
-        print("After LowerPTXAsyncCopy\n", mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
 

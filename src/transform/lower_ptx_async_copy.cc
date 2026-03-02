@@ -308,7 +308,7 @@ public:
     if (!IsSharedBuffer(store->buffer)) {
       return StmtMutator::VisitStmt_(store);
     }
-    // Only lower copies that are either explicitly marked async_scope, or are
+    // Only lower copies that are either explicitly
     // in the automatic lowering mode controlled by pass config.
     if (!enable_auto_async_copy_) {
       return StmtMutator::VisitStmt_(store);
