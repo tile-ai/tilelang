@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \brief Lower eligible global->shared copies into PTX cp.async
  * \file lower_ptx_async_copy.cc
@@ -31,9 +12,12 @@
 #include <tvm/tir/transform.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../op/utils.h"
 #include "../target/utils.h"
 #include "tir/ir/buffer_common.h"
 #include "tvm/tir/stmt.h"
@@ -52,6 +36,7 @@ public:
     if (pending_sync_copies_ <= 0) {
       return body;
     }
+
     Array<Stmt> seq;
     seq.reserve(3);
     seq.push_back(body);
@@ -64,46 +49,35 @@ public:
     return SeqStmt(seq);
   }
 
-  Stmt VisitStmt_(const AttrStmtNode *attr) final {
-    if (attr->attr_key == tir::attr::async_scope) {
-      // async_scope is treated as an explicit request for async lowering; we
-      // keep behavior compatible with historical usage by not auto-inserting
-      // synchronous waits for copies injected under this scope.
-      ICHECK(!in_async_scope_) << "Nested async scopes not supported";
-      in_async_scope_ = true;
-      Stmt body = this->VisitStmt(attr->body);
-      in_async_scope_ = false;
-      // Drop the marker after lowering.
-      return body;
-    }
-    return StmtMutator::VisitStmt_(attr);
-  }
-
   Stmt VisitStmt_(const ForNode *op) final {
-    // Rewrite a vectorized copy loop into a single cp.async.
+    // Track nested vectorized loop extents so we can rewrite element-wise
+    // copies (e.g. float16 stores) into `tir.ptx_cp_async` with element bytes,
+    // relying on the later `tl.VectorizeLoop` pass to widen:
+    //   for v in T.vectorized(k): ptx_cp_async(dst, src, elem_bytes)
+    // => ptx_cp_async(dst_base, src_base, elem_bytes * k)
     //
-    // This pass runs before PipelinePlanning (and before the later global
-    // VectorizeLoop), so user-written SIMT copies may still appear as scalar
-    // float16 BufferStore statements inside a `ForKind::kVectorized` loop:
-    //   for vec in T.vectorized(8):
-    //     S[base + vec] = A[base + vec]
-    //
-    // We collapse such a loop into one `tir.ptx_cp_async` of 16 bytes so that
-    // downstream pipeline passes can observe and schedule cp.async groups.
+    // This mirrors the logic in `CPAsyncStoreRewriter` used by `T.copy`
+    // lowering, and avoids duplicating vectorize-loop collapse here.
+    int previous_vectorized_lanes = current_vectorized_lanes_;
     if (op->kind == ForKind::kVectorized) {
-      Optional<Stmt> injected = TryInjectVectorizedCopyLoop(op);
-      if (injected.defined()) {
-        return injected.value();
+      if (const auto *extent_imm = op->extent.as<IntImmNode>()) {
+        int lanes = static_cast<int>(extent_imm->value);
+        if (lanes > 1 && current_vectorized_lanes_ <=
+                             std::numeric_limits<int>::max() / lanes) {
+          current_vectorized_lanes_ *= lanes;
+        }
       }
     }
-    return StmtMutator::VisitStmt_(op);
+    Stmt stmt = StmtMutator::VisitStmt_(op);
+    current_vectorized_lanes_ = previous_vectorized_lanes;
+    return stmt;
   }
 
   Optional<Stmt> TryInjectPTX(const BufferLoadNode *load,
                               const BufferStoreNode *store,
                               bool predicated = false,
                               const PrimExpr &predicate_value = PrimExpr()) {
-    if (!IsGlobalLikeScope(load->buffer.scope())) {
+    if (!IsGlobalBuffer(load->buffer)) {
       return Optional<Stmt>();
     }
 
@@ -129,13 +103,18 @@ public:
       return Optional<Stmt>();
     }
     const int lanes = std::max(value_lanes, index_lanes);
-    const int bytes = lanes * load->dtype.bytes();
-    if (bytes != 4 && bytes != 8 && bytes != 16) {
+    const int elem_bytes = lanes * load->dtype.bytes();
+    const int total_bytes = static_cast<int>(elem_bytes) *
+                            static_cast<int>(current_vectorized_lanes_);
+    if (total_bytes != 4 && total_bytes != 8 && total_bytes != 16) {
       return Optional<Stmt>();
     }
+    const int bytes = elem_bytes;
 
     auto dst_elem_type = GetPointerType(store->buffer->data->type_annotation);
     auto src_elem_type = GetPointerType(load->buffer->data->type_annotation);
+    LOG(INFO) << "src_elem_type: " << src_elem_type;
+    LOG(INFO) << "dst_elem_type: " << dst_elem_type;
     if (!dst_elem_type.has_value() || !src_elem_type.has_value()) {
       // Be conservative: if pointer metadata is missing, skip injection.
       return Optional<Stmt>();
@@ -348,25 +327,20 @@ public:
   }
 
   Stmt VisitStmt_(const BufferStoreNode *store) final {
-    bool is_shared = (store->buffer.scope() == "shared" ||
-                      store->buffer.scope() == "shared.dyn");
-    if (!is_shared) {
+    if (!IsSharedBuffer(store->buffer)) {
       return StmtMutator::VisitStmt_(store);
     }
-
     // Only lower copies that are either explicitly marked async_scope, or are
     // in the automatic lowering mode controlled by pass config.
-    if (!in_async_scope_ && !enable_auto_async_copy_) {
+    if (!enable_auto_async_copy_) {
       return StmtMutator::VisitStmt_(store);
     }
 
     if (auto *load = store->value.as<BufferLoadNode>()) {
       Optional<Stmt> injected = TryInjectPTX(load, store);
       if (injected.defined()) {
-        if (!in_async_scope_) {
-          ++pending_sync_copies_;
-          ++uncommitted_sync_copies_;
-        }
+        ++pending_sync_copies_;
+        ++uncommitted_sync_copies_;
         return injected.value();
       }
       return StmtMutator::VisitStmt_(store);
@@ -384,10 +358,8 @@ public:
                 TryInjectPTX(load, store, /*predicated=*/true,
                              /*predicate_value=*/call->args[0]);
             if (injected.defined()) {
-              if (!in_async_scope_) {
-                ++pending_sync_copies_;
-                ++uncommitted_sync_copies_;
-              }
+              ++pending_sync_copies_;
+              ++uncommitted_sync_copies_;
               return injected.value();
             }
           }
@@ -399,10 +371,6 @@ public:
   }
 
 private:
-  static bool IsGlobalLikeScope(const String &scope) {
-    return scope == "global" || scope.empty();
-  }
-
   static Optional<PrimExpr>
   FlattenToLinearOffset(const Buffer &buf,
                         const ffi::Array<PrimExpr> &indices) {
@@ -419,166 +387,6 @@ private:
       linear = linear * flattened_buf->shape[i] + physical[i];
     }
     return linear;
-  }
-
-  static Optional<PrimExpr> StripUnitStrideVar(const PrimExpr &expr,
-                                               const Var &var) {
-    // Return `base` such that expr == base + var (unit-stride contiguous).
-    // Handles nested adds like (base0 + var) + base1.
-    if (!UsesVar(expr, [&](const VarNode *n) { return n == var.get(); })) {
-      return Optional<PrimExpr>();
-    }
-    if (expr.same_as(var)) {
-      return make_zero(var.dtype());
-    }
-    if (const auto *add = expr.as<AddNode>()) {
-      // Direct match: var + base or base + var.
-      if (add->a.same_as(var) &&
-          !UsesVar(add->b, [&](const VarNode *n) { return n == var.get(); })) {
-        return add->b;
-      }
-      if (add->b.same_as(var) &&
-          !UsesVar(add->a, [&](const VarNode *n) { return n == var.get(); })) {
-        return add->a;
-      }
-
-      // Nested: (subexpr_with_var) + other_const
-      if (!UsesVar(add->b, [&](const VarNode *n) { return n == var.get(); })) {
-        Optional<PrimExpr> base = StripUnitStrideVar(add->a, var);
-        if (base.defined()) {
-          return base.value() + add->b;
-        }
-      }
-      if (!UsesVar(add->a, [&](const VarNode *n) { return n == var.get(); })) {
-        Optional<PrimExpr> base = StripUnitStrideVar(add->b, var);
-        if (base.defined()) {
-          return add->a + base.value();
-        }
-      }
-    }
-    return Optional<PrimExpr>();
-  }
-
-  Optional<Stmt> TryInjectVectorizedCopyLoop(const ForNode *loop) {
-    // Only lower copies that are either explicitly marked async_scope, or are
-    // in the automatic lowering mode controlled by pass config.
-    if (!in_async_scope_ && !enable_auto_async_copy_) {
-      return Optional<Stmt>();
-    }
-
-    const auto *extent_imm = loop->extent.as<IntImmNode>();
-    if (!extent_imm) {
-      return Optional<Stmt>();
-    }
-    if (!is_zero(loop->min)) {
-      // Only handle canonical 0-based vectorized loops.
-      return Optional<Stmt>();
-    }
-    int lanes = static_cast<int>(extent_imm->value);
-    if (lanes <= 0) {
-      return Optional<Stmt>();
-    }
-
-    // Only handle the simplest form:
-    //   for vec in vectorized(L):
-    //     S[...] = A[...]
-    // or predicated zero-fill:
-    //     S[...] = if_then_else(pred, A[...], 0)
-    const auto *store = loop->body.as<BufferStoreNode>();
-    if (!store) {
-      return Optional<Stmt>();
-    }
-
-    bool is_shared = (store->buffer.scope() == "shared" ||
-                      store->buffer.scope() == "shared.dyn");
-    if (!is_shared) {
-      return Optional<Stmt>();
-    }
-
-    const BufferLoadNode *load = store->value.as<BufferLoadNode>();
-    bool predicated = false;
-    PrimExpr predicate_value;
-    if (!load) {
-      const auto *call = store->value.as<CallNode>();
-      if (call && call->op.same_as(builtin::if_then_else()) &&
-          call->args.size() == 3) {
-        load = call->args[1].as<BufferLoadNode>();
-        if (load && IsZeroValue(call->args[2])) {
-          predicated = true;
-          predicate_value = call->args[0];
-        }
-      }
-    }
-    if (!load) {
-      return Optional<Stmt>();
-    }
-    if (!IsGlobalLikeScope(load->buffer.scope())) {
-      return Optional<Stmt>();
-    }
-
-    if (predicated && UsesVar(predicate_value, [&](const VarNode *n) {
-          return n == loop->loop_var.get();
-        })) {
-      // cp.async predicate applies to the whole transaction; skip if predicate
-      // varies per-lane.
-      return Optional<Stmt>();
-    }
-
-    const int bytes = lanes * load->dtype.bytes();
-    if (bytes != 4 && bytes != 8 && bytes != 16) {
-      return Optional<Stmt>();
-    }
-
-    // Extract base element offsets for src/dst such that linear == base + vec.
-    Optional<PrimExpr> dst_linear_opt =
-        FlattenToLinearOffset(store->buffer, store->indices);
-    Optional<PrimExpr> src_linear_opt =
-        FlattenToLinearOffset(load->buffer, load->indices);
-    if (!dst_linear_opt.defined() || !src_linear_opt.defined()) {
-      return Optional<Stmt>();
-    }
-
-    Optional<PrimExpr> dst_base_opt =
-        StripUnitStrideVar(dst_linear_opt.value(), loop->loop_var);
-    Optional<PrimExpr> src_base_opt =
-        StripUnitStrideVar(src_linear_opt.value(), loop->loop_var);
-    if (!dst_base_opt.defined() || !src_base_opt.defined()) {
-      return Optional<Stmt>();
-    }
-    PrimExpr dst_offset = dst_base_opt.value();
-    PrimExpr src_offset = src_base_opt.value();
-
-    auto dst_elem_type = GetPointerType(store->buffer->data->type_annotation);
-    auto src_elem_type = GetPointerType(load->buffer->data->type_annotation);
-    if (!dst_elem_type.has_value() || !src_elem_type.has_value()) {
-      return Optional<Stmt>();
-    }
-
-    int dst_elem_count = bytes / dst_elem_type->bytes();
-    int src_elem_count = bytes / src_elem_type->bytes();
-    if (dst_elem_count <= 0 || src_elem_count <= 0) {
-      return Optional<Stmt>();
-    }
-
-    PrimExpr dst_access_ptr = store->buffer.access_ptr(
-        2, DataType::Handle(), 1, dst_offset, PrimExpr(dst_elem_count));
-    PrimExpr src_access_ptr = load->buffer.access_ptr(
-        1, DataType::Handle(), 1, src_offset, PrimExpr(src_elem_count));
-
-    ffi::Array<PrimExpr> cp_async_args;
-    if (predicated) {
-      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes),
-                       predicate_value};
-    } else {
-      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes)};
-    }
-
-    if (!in_async_scope_) {
-      ++pending_sync_copies_;
-      ++uncommitted_sync_copies_;
-    }
-    return Evaluate(
-        Call(DataType::Handle(), builtin::ptx_cp_async(), cp_async_args));
   }
 
   struct AsyncIntrinSummary {
@@ -692,7 +500,7 @@ private:
   }
 
   bool enable_auto_async_copy_{true};
-  bool in_async_scope_{false};
+  int current_vectorized_lanes_{1};
   int pending_sync_copies_{0};
   int uncommitted_sync_copies_{0};
 };
@@ -706,19 +514,17 @@ tvm::transform::Pass LowerPTXAsyncCopy() {
       return f;
     }
     Target target = target_opt.value();
-    if (target->kind->name != "cuda") {
+    if (!TargetIsCuda(target)) {
       return f;
     }
-    if (tl::TargetIsCuTeDSL(target)) {
+
+    if (!TargetHasAsyncCopy(target)) {
+      // Graceful fallback on older architectures.
       return f;
     }
 
     bool enable_auto_async_copy =
         ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-    if (!TargetHasAsyncCopy(target)) {
-      // Graceful fallback on older architectures.
-      return f;
-    }
 
     auto *n = f.CopyOnWrite();
     PTXAsyncCopyInjector injector(enable_auto_async_copy);

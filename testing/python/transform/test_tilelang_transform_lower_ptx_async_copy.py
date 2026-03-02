@@ -81,8 +81,8 @@ def test_lower_ptx_async_copy_supports_multi_dim_indices():
     assert calls.get("tir.ptx_wait_group", 0) > 0
 
 
-def test_lower_ptx_async_copy_collapses_vectorized_float16_loop():
-    """Vectorized float16 copies should become a single 16B cp.async per loop."""
+def test_lower_ptx_async_copy_rewrites_vectorized_float16_loop():
+    """Vectorized float16 copies should be rewritten to cp.async (widened later)."""
 
     @T.prim_func
     def before(
@@ -274,6 +274,51 @@ def test_lower_ptx_async_copy_keeps_sync_out_of_inner_unrolled_loops_in_pipeline
     inner_calls = _count_calls_in_stmt(inner_unrolled.body)
     assert inner_calls.get("tir.ptx_commit_group", 0) == 0
     assert inner_calls.get("tir.ptx_wait_group", 0) == 0
+
+
+def test_lower_ptx_async_copy_from_vectorized_loop():
+    """LowerPTXAsyncCopy should rewrite vectorized loop to cp.async."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((4,), T.float32),
+        B: T.Tensor((4,), T.float32),
+    ):
+        S = T.alloc_buffer((4,), dtype=T.float32, scope="shared")
+        for i in T.vectorized(4):
+            S[i] = A[i]
+        B[0] = S[0]
+
+    target = tvm.target.Target("cuda -arch=sm_80")
+    func = before.with_attr("global_symbol", "main").with_attr("target", target)
+    mod = tvm.IRModule.from_expr(func)
+
+    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    calls = _count_calls(mod["main"])
+    assert calls.get("tir.ptx_cp_async", 0) > 0
+
+
+def test_lower_ptx_async_copy_from_ramp():
+    """LowerPTXAsyncCopy should rewrite ramp to cp.async."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((4,), T.float32),
+        B: T.Tensor((4,), T.float32),
+    ):
+        S = T.alloc_buffer((4,), dtype=T.float32, scope="shared")
+        S[0:4] = A[0:4]
+        B[0:4] = S[0:4]
+
+    target = tvm.target.Target("cuda -arch=sm_80")
+    func = before.with_attr("global_symbol", "main").with_attr("target", target)
+    mod = tvm.IRModule.from_expr(func)
+
+    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    print(mod)
+    calls = _count_calls(mod["main"])
+    print(calls)
+    assert calls.get("tir.ptx_cp_async", 0) > 0
 
 
 if __name__ == "__main__":
