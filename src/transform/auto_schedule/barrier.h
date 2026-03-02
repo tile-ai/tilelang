@@ -857,14 +857,14 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, BarrierManager &barrier_manager,
 
               // Insert barrier_wait at the beginning of task's statements
               Stmt wait_stmt = makeBarrierWait(barrier_expr, parity_expr);
-              if (iter == 1) {
-                // Check if at least one loop is not at its start iteration
-                // (not the first iteration of all nested loops)
-                wait_stmt =
-                    IfThenElse(indexdiv(loop_info.CalculateIterationCount(),
-                                        num_stages) != 0,
-                               wait_stmt);
-              }
+              // if (iter == 1) {
+              //   // Check if at least one loop is not at its start iteration
+              //   // (not the first iteration of all nested loops)
+              //   wait_stmt =
+              //       IfThenElse(indexdiv(loop_info.CalculateIterationCount(),
+              //                           num_stages) != 0,
+              //                  wait_stmt);
+              // }
               InsertStatementIntoScheduleUnit(task, wait_stmt, true, wg_id);
               // Remove from map (as per user instruction)
               if (!region_access.is_write) {

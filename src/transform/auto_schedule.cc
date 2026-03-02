@@ -67,7 +67,8 @@ using ffi::GetRef;
 Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
                                           BarrierManager &barrier_manager,
                                           const bool enable_epi,
-                                          PrimExpr thread_count[2]);
+                                          PrimExpr thread_count[2],
+                                          bool producer_consumer);
 
 // Helper function to collect all prefix tasks (consecutive tasks without
 // register region at the beginning of sequences)
@@ -1474,7 +1475,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     // Apply warpgroup partition to entire IRStructure
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
         ir_structure.get(), thread_var, barrier_manager, enable_epi,
-        thread_count);
+        thread_count, double_thread);
 
     if (double_thread) {
       updated_thread_extent = thread_var->dom->extent * 2;
@@ -1589,7 +1590,8 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
 Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
                                           BarrierManager &barrier_manager,
                                           const bool outer_enable_epi,
-                                          PrimExpr thread_count[2]) {
+                                          PrimExpr thread_count[2],
+                                          bool producer_consumer) {
   if (!root)
     return Evaluate(0);
 
@@ -1599,7 +1601,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
     if (wrapper->child) {
       body = ApplyWarpgroupPartitionToIRStructure(
           wrapper->child.get(), thread_var, barrier_manager, outer_enable_epi,
-          thread_count);
+          thread_count, producer_consumer);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -1973,7 +1975,14 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
   if (wg0_has_stmts && wg1_has_stmts) {
     // Both warpgroups exist: insert barriers for cross-warpgroup
     // synchronization
-    if_then_else = IfThenElse(condition, then_body, else_body);
+    std::vector<Stmt> then_body_with_nreg{
+        Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {240, 1})),
+        then_body};
+    std::vector<Stmt> else_body_with_nreg{
+        Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {24, 0})),
+        else_body};
+    if_then_else = IfThenElse(condition, SeqStmt(then_body_with_nreg),
+                              SeqStmt(else_body_with_nreg));
   } else if (wg0_has_stmts) {
     // Only warpgroup 0 has statements, execute unconditionally
     if_then_else = then_body;
