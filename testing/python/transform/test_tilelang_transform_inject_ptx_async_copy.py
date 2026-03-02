@@ -253,9 +253,8 @@ def test_inject_ptx_async_copy_keeps_sync_out_of_inner_unrolled_loops_in_pipelin
 
     def _find_pipelined_for(node):
         nonlocal pipelined_loop
-        if pipelined_loop is None and isinstance(node, tvm.tir.For):
-            if "num_stages" in node.annotations:
-                pipelined_loop = node
+        if pipelined_loop is None and isinstance(node, tvm.tir.For) and "num_stages" in node.annotations:
+            pipelined_loop = node
 
     post_order_visit(mod["main"].body, _find_pipelined_for)
     assert pipelined_loop is not None
