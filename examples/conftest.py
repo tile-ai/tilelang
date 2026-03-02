@@ -1,9 +1,10 @@
 import os
 import random
 import pytest
+import contextlib
 
+# Keep deterministic behavior consistent with the original configuration
 os.environ["PYTHONHASHSEED"] = "0"
-
 random.seed(0)
 
 try:
@@ -22,7 +23,14 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# CuTeDSL backend: auto-mark known failures / unsupported tests
+# Enable TVM pytest plugin so CUDA/GPU markers are registered globally here.
+# This fixes Unknown mark warnings and allows marker-based filtering.
+# ---------------------------------------------------------------------------
+pytest_plugins = ["tvm.testing.plugin"]
+
+
+# ---------------------------------------------------------------------------
+# CuTeDSL backend: auto-mark known failures / unsupported tests (original logic)
 # ---------------------------------------------------------------------------
 
 # Known failures when running with TILELANG_TARGET=cutedsl.
@@ -37,7 +45,7 @@ CUTEDSL_KNOWN_FAILURES = {
 
 
 def _match_any(nodeid, patterns):
-    """Return True if *nodeid* contains any of the *patterns*."""
+    """Return True if nodeid contains any of the patterns."""
     return any(p in nodeid for p in patterns)
 
 
@@ -57,7 +65,7 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001
             )
 
 
-def pytest_terminal_summary(terminalreporter, exitstatus, config):
+def pytest_terminal_summary(terminalreporter, exitstatus, config):  # noqa: ARG001
     """Ensure that at least one test is collected. Error out if all tests are skipped."""
     known_types = {
         "failed",
@@ -75,3 +83,56 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             (f"Error: No tests were collected. {dict(sorted((k, len(v)) for k, v in terminalreporter.stats.items()))}"),
         )
         pytest.exit("No tests were collected.", returncode=5)
+
+
+# ---------------------------------------------------------------------------
+# CUDA synchronization around tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _cuda_sync_around_test(request):
+    """Synchronize CUDA before and after each test to surface async errors early.
+
+    Behavior:
+    - If CUDA is unavailable, does nothing.
+    - By default (no env set), runs for all tests when CUDA is available.
+    - If TILELANG_SYNC_CUDA_ONLY_MARKED=1, only runs for tests marked with
+      either `cuda` or `gpu` (e.g. via tilelang.testing.requires_cuda or
+      tvm.testing.requires_cuda).
+    """
+
+    try:
+        import torch as _torch  # local import to avoid import-time failure
+    except Exception:
+        yield
+        return
+
+    if not _torch.cuda.is_available():
+        yield
+        return
+
+    restrict_to_marked = os.environ.get("TILELANG_SYNC_CUDA_ONLY_MARKED", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+    if restrict_to_marked:
+        # Only sync if the test is explicitly marked as using CUDA/GPU.
+        marked = bool(request.node.get_closest_marker("cuda") or request.node.get_closest_marker("gpu"))
+        if not marked:
+            yield
+            return
+
+    # Pre-test sync: if a prior test left an async error pending in this worker,
+    # this will raise here instead of corrupting the next test.
+    with contextlib.suppress(Exception):
+        _torch.cuda.synchronize()
+
+    try:
+        yield
+    finally:
+        # Post-test sync: flush any device work so errors don't spill into the next test.
+        with contextlib.suppress(Exception):
+            _torch.cuda.synchronize()
