@@ -230,9 +230,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
         mod = tilelang.transform.InjectTmaBarrier()(mod)
-        # Inject PTX cp.async before PipelinePlanning so the planning/optimization
-        # passes can see and schedule cp.async + commit/wait patterns.
-        mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
         # Pipeline planning applies to both TMA and non-TMA paths
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)
@@ -246,7 +243,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         # See the TMA path: inject cp.async before pipeline planning.
-        mod = tilelang.transform.LowerPTXAsyncCopy()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
 

@@ -19,6 +19,7 @@
 #include "../op/builtin.h"
 #include "../op/utils.h"
 #include "../target/utils.h"
+#include "ptx_async_copy_injector.h"
 #include "tir/ir/buffer_common.h"
 #include "tvm/tir/stmt.h"
 
@@ -491,6 +492,11 @@ private:
 };
 
 using namespace tir::transform;
+
+Stmt InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy) {
+  PTXAsyncCopyInjector injector(enable_auto_async_copy);
+  return injector.Finalize(injector(body));
+}
 
 tvm::transform::Pass LowerPTXAsyncCopy() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {

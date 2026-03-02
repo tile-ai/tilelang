@@ -20,6 +20,7 @@
 #include "../op/operator.h"
 #include "../op/utils.h"
 #include "../target/utils.h"
+#include "ptx_async_copy_injector.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "layout_reducer.h"
@@ -1211,9 +1212,20 @@ private:
     bool should_vectorize =
         (has_non_local || has_cast_operations) && !has_reducer;
     // Lower the parallel loop using the common function
-    return LowerParallelLoop(for_node, loop_layout, thread_var_->var, analyzer_,
-                             layout_map_, predicate, parallel_loop,
-                             should_vectorize);
+    Stmt lowered = LowerParallelLoop(for_node, loop_layout, thread_var_->var,
+                                     analyzer_, layout_map_, predicate,
+                                     parallel_loop, should_vectorize);
+
+    // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
+    // lowering does not require converting eligible global->shared copies to
+    // `tir.ptx_cp_async`.
+    if (TargetIsCuda(target_) && TargetHasAsyncCopy(target_)) {
+      tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
+      bool enable_auto_async_copy =
+          ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
+      lowered = InjectPTXAsyncCopy(lowered, enable_auto_async_copy);
+    }
+    return lowered;
   }
 
   Target target_;
