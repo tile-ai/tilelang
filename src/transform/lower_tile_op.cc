@@ -20,6 +20,7 @@
 #include "../op/operator.h"
 #include "../op/utils.h"
 #include "../target/utils.h"
+#include "ptx_async_copy_injector.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "layout_reducer.h"
@@ -1005,6 +1006,17 @@ private:
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
                   layout_map_, buffer_remap_, let_var_to_expr},
         analyzer_);
+
+    // When users provide explicit software pipeline order/stage via
+    // T.Pipelined(..., order=..., stage=...), those annotations are attached
+    // to the loop at the frontend statement granularity. If we lower a tile op
+    // into a SeqStmt here, the parent SeqStmt may flatten it, changing the
+    // number of statements in the pipeline body and breaking the annotation
+    // arity contract. Keep multi-statement lowering results as a single Stmt
+    // in that mode.
+    if (manual_pipeline_depth_ > 0 && lowered->IsInstance<SeqStmtNode>()) {
+      lowered = AttrStmt(Integer(0), "tl.manual_pipeline_group", 1, lowered);
+    }
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 
@@ -1051,8 +1063,19 @@ private:
                          .value();
     }
 
-    // First visit the body
+    bool enter_manual_pipeline = op->annotations.count("tl_pipeline_order") &&
+                                 op->annotations.count("tl_pipeline_stage");
+    if (enter_manual_pipeline) {
+      ++manual_pipeline_depth_;
+    }
+
+    // First visit the body.
     For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+
+    if (enter_manual_pipeline) {
+      ICHECK_GT(manual_pipeline_depth_, 0);
+      --manual_pipeline_depth_;
+    }
 
     // Only process parallel loops
     if (op->kind != ForKind::kParallel) {
@@ -1189,9 +1212,20 @@ private:
     bool should_vectorize =
         (has_non_local || has_cast_operations) && !has_reducer;
     // Lower the parallel loop using the common function
-    return LowerParallelLoop(for_node, loop_layout, thread_var_->var, analyzer_,
-                             layout_map_, predicate, parallel_loop,
-                             should_vectorize);
+    Stmt lowered = LowerParallelLoop(for_node, loop_layout, thread_var_->var,
+                                     analyzer_, layout_map_, predicate,
+                                     parallel_loop, should_vectorize);
+
+    // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
+    // lowering does not require converting eligible global->shared copies to
+    // `tir.ptx_cp_async`.
+    if (TargetIsCuda(target_) && TargetHasAsyncCopy(target_)) {
+      tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
+      bool enable_auto_async_copy =
+          ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
+      lowered = InjectPTXAsyncCopy(lowered, enable_auto_async_copy);
+    }
+    return lowered;
   }
 
   Target target_;
@@ -1220,6 +1254,7 @@ private:
   // without recomputing indices, since swizzle is encoded in TMA descriptor
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
+  int manual_pipeline_depth_{0};
 };
 
 namespace transform {

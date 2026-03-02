@@ -15,7 +15,7 @@ using namespace tir;
 
 /// Copy instruction types for different memory access patterns
 enum class CopyInst : uint8_t {
-  kNormal = 0,    // utilize ldg/stg or cpasync or any buffer copy
+  kNormal = 0,    // utilize plain buffer copy
   kLDSM = 1,      // ldmatrix memory copy
   kSTSM = 2,      // stmatrix memory copy
   kBulkLoad = 3,  // utilize tma load
@@ -26,6 +26,7 @@ enum class CopyInst : uint8_t {
   kBulkStore1D = 6, // utilize tma store 1d
   kTMemLoad = 7,    // tcgen05.ld (tensor memory -> register)
   kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
+  kCPAsync = 9,     // cp.async global->shared copy
 };
 
 /// Convert CopyInst enum to string for debugging
@@ -49,6 +50,8 @@ inline const char *CopyInstToString(CopyInst inst) {
     return "TMemLoad";
   case CopyInst::kTMemStore:
     return "TMemStore";
+  case CopyInst::kCPAsync:
+    return "CPAsync";
   default:
     return "Unknown";
   }
@@ -158,6 +161,21 @@ public:
     return 0; // default: evict_normal
   }
 
+  bool GetIsAsyncCopy() const {
+    if (auto val = annotations.Get("is_async_copy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    // Backward-compatibility with historical annotation key.
+    if (auto val = annotations.Get("force_cp_async")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
   /*!
    * \brief Lower the copy operator to a TIR statement.
    * \param T        Arguments for lowering.
@@ -227,11 +245,17 @@ public:
   bool CheckTMemStore(Target target) const;
 
   /*!
+   * \brief Check if cp.async copy is supported.
+   */
+  bool CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
+                        arith::Analyzer *analyzer) const;
+
+  /*!
    * \brief Get the copy instruction type.
    */
   CopyInst GetCopyInst(Target target, bool disable_tma_lower,
                        const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                       bool buffer_oob) const;
+                       bool buffer_oob = false) const;
 
 protected:
   /*!
@@ -262,6 +286,11 @@ protected:
    * \brief Generate lowering for normal copy.
    */
   Stmt LowerNormalCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Generate lowering for cp.async global->shared copy.
+   */
+  Stmt LowerCPAsyncCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.

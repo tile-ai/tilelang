@@ -148,6 +148,14 @@ T.copy(C_local, C[by * BM, bx * BN])
 
 `T.copy` performs coalescing and scope‑specific lowering during compilation.
 
+If you need explicitly asynchronous global->shared prefetch for manual pipelining,
+use `T.async_copy(src, dst)`. Unlike `T.copy`, it does not auto-insert any wait:
+you must explicitly insert `T.ptx_wait_group(...)` before consuming `dst`. A
+shared-memory barrier is still required for cross-thread consumption, but in
+most TileLang programs you do not need to write it manually because
+`ThreadSync("shared")` will insert the necessary `T.tvm_storage_sync("shared")`
+before the first read from `dst`.
+
 ## 6. A Minimal End‑to‑End Example (Vector Add)
 
 ```python

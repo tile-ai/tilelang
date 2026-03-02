@@ -98,6 +98,160 @@ private:
   StorageScope sync_scope_;
 };
 
+// Similar to ThreadSyncAfterWaitQueueInserter, but for explicit cp.async
+// synchronization intrinsics (ptx_wait_group).
+//
+// In TileLang, cp.async copies may be lowered to explicit ptx_cp_async +
+// ptx_commit_group, and pipelining can move ptx_wait_group away from the copy
+// statement it originally guarded. tvm_storage_sync barriers inserted by
+// ThreadSyncPlanner are based on memory conflicts and may end up *before* the
+// wait_group, which is incorrect for cp.async because __syncthreads() does not
+// wait for outstanding asynchronous copies.
+//
+// Correct usage requires:
+//   ptx_wait_group(N);
+//   tvm_storage_sync("shared");   // __syncthreads()
+// before any cross-thread consumption of the shared memory written by cp.async.
+//
+// This rewriter conservatively inserts a shared-memory storage sync
+// immediately after every ptx_wait_group statement unless an identical sync
+// already follows.
+class ThreadSyncAfterWaitGroupInserter : public StmtExprMutator {
+public:
+  explicit ThreadSyncAfterWaitGroupInserter(StorageScope sync_scope)
+      : sync_scope_(std::move(sync_scope)) {}
+
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    Array<Stmt> visited;
+    visited.reserve(op->seq.size());
+    for (const Stmt &stmt : op->seq) {
+      visited.push_back(this->VisitStmt(stmt));
+    }
+
+    Array<Stmt> rewritten;
+    rewritten.reserve(visited.size());
+    for (int i = 0, n = static_cast<int>(visited.size()); i < n; ++i) {
+      const Stmt &stmt = visited[i];
+      rewritten.push_back(stmt);
+      if (IsWaitGroupStmt(stmt)) {
+        bool next_is_sync = false;
+        if (i + 1 < n && IsStorageSyncStmt(visited[i + 1])) {
+          next_is_sync = true;
+        }
+        if (!next_is_sync) {
+          rewritten.push_back(MakeStorageSyncStmt());
+        }
+      }
+    }
+
+    if (rewritten.empty()) {
+      return Evaluate(0);
+    }
+    if (rewritten.size() == 1) {
+      return rewritten[0];
+    }
+    return SeqStmt(rewritten);
+  }
+
+private:
+  StorageScope sync_scope_;
+
+  Stmt MakeStorageSyncStmt() const {
+    return Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
+                         {StringImm(sync_scope_.to_string())}));
+  }
+
+  bool IsWaitGroupStmt(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return IsWaitGroupStmt(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return IsWaitGroupStmt(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return IsWaitGroupStmt(seq->seq[0]);
+      }
+      return false;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return IsWaitGroupStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return IsWaitGroupStmt(realize->block->body);
+      }
+      return false;
+    }
+    if (const auto *iff = stmt.as<IfThenElseNode>()) {
+      if (!iff->else_case.defined()) {
+        return IsWaitGroupStmt(iff->then_case);
+      }
+      return false;
+    }
+
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    if (!call) {
+      return false;
+    }
+    return call->op.same_as(builtin::ptx_wait_group());
+  }
+
+  bool IsStorageSyncStmt(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return IsStorageSyncStmt(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return IsStorageSyncStmt(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return IsStorageSyncStmt(seq->seq[0]);
+      }
+      return false;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return IsStorageSyncStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return IsStorageSyncStmt(realize->block->body);
+      }
+      return false;
+    }
+    if (const auto *iff = stmt.as<IfThenElseNode>()) {
+      if (!iff->else_case.defined()) {
+        return IsStorageSyncStmt(iff->then_case);
+      }
+      return false;
+    }
+
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    if (!call) {
+      return false;
+    }
+    if (!call->op.same_as(builtin::tvm_storage_sync())) {
+      return false;
+    }
+    if (call->args.size() != 1) {
+      return false;
+    }
+    const auto *scope = call->args[0].as<StringImmNode>();
+    if (!scope) {
+      return false;
+    }
+    return scope->value == sync_scope_.to_string();
+  }
+};
+
 class ThreadSyncInserter : public StmtExprMutator {
 public:
   ThreadSyncInserter(StorageScope sync_scope,
@@ -900,6 +1054,26 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       return;
     }
 
+    // Mark async cp.async load context so that tvm_access_ptr within the call
+    // can be tagged accordingly. This allows the sync planner to avoid
+    // inserting unnecessary barriers between back-to-back cp.async writes.
+    auto is_cp_async = [&]() {
+      if (auto opt = op->op.as<Op>()) {
+        const Op &call_op = opt.value();
+        return call_op.same_as(builtin::ptx_cp_async()) ||
+               call_op.same_as(tl::ptx_cp_async());
+      }
+      return false;
+    }();
+    if (is_cp_async) {
+      cp_async_depth_++;
+      for (const auto &a : op->args) {
+        this->VisitExpr(a);
+      }
+      cp_async_depth_--;
+      return;
+    }
+
     // Mark the pointer argument of atomic ops as atomic so the sync planner
     // doesn't insert barriers between atomics.
     auto is_atomic_op = [&]() {
@@ -1025,12 +1199,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.scope = scope;
         if (flag->value & 1) {
           e.type = kRead;
-          e.is_async_copy = (tma_depth_ > 0);
+          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
         if (flag->value & 2) {
           e.type = kWrite;
-          e.is_async_copy = (tma_depth_ > 0);
+          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
       }
@@ -1258,6 +1432,8 @@ private:
   bool in_device_env_{false};
   // Nesting depth of tma_load/tma_load_im2col calls
   int tma_depth_{0};
+  // Nesting depth of cp.async calls (ptx_cp_async)
+  int cp_async_depth_{0};
   // Whether we're visiting the pointer argument expression of an atomic call
   // (e.g., atomic_add/atomic_max/atomic_load). When > 0, accesses produced by
   // the pointer metadata ops are tagged as atomic.
@@ -1705,6 +1881,7 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   auto stmt = n->body;
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
+    stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
   }
   // Get warp size from target, defaulting to 32 if not available
   int warp_size = 32;

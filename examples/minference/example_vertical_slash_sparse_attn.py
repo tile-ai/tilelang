@@ -48,15 +48,11 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             bz: T.int32,
             by: T.int32,
         ):
-            with T.attr("default", "async_scope", 1):
-                for i, j in T.Parallel(block_N, dim):
-                    K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
+            for i, j in T.Parallel(block_N, dim):
+                K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
 
-            with T.attr("default", "async_scope", 1):
-                for i, j in T.Parallel(block_N, dim):
-                    V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
-
-            T.ptx_commit_group()
+            for i, j in T.Parallel(block_N, dim):
+                V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
 
         @T.macro
         def Compute(
@@ -75,7 +71,6 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             logsum: T.FragmentBuffer([block_M], accum_dtype),
             count: T.int32,
         ):
-            T.ptx_wait_group(count)
             for i, j in T.Parallel(block_M, block_N):
                 acc_s[i, j] = T.if_then_else(k + j < column_count, 0, -T.infinity(acc_s.dtype))
             T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
