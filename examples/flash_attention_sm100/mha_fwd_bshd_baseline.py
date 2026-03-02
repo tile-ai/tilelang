@@ -190,7 +190,7 @@ def flashattn_ts(
     is_causal,
     block_M=128,
     block_N=128,
-    threads=128,
+    threads=256,
 ):
     """Flash Attention forward using tcgen05mma_ts for GEMM 2 (P_tmem x V_shared).
 
