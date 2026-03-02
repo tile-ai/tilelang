@@ -215,40 +215,44 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
                         kv_indices = (seqlen_kv // num_split) * bz + (i_i * 2) * block_N + r * 16 + (tx - 256) // 8
-                        with T.attr("default", "async_scope", 1):
-                            for u in T.serial(4):
-                                for v in T.vectorized(8):
-                                    KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                        bid, kv_indices, cur_kv_head, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ]
-                                    KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                        bid, kv_indices, cur_kv_head, dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v
-                                    ]
-                        with T.attr("default", "async_scope", 1):
-                            for v in T.vectorized(8):
-                                K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = K_pe[
-                                    bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8 + v
-                                ]
+                        for u in T.serial(4):
+                            T.ptx_cp_async(
+                                T.access_ptr(KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[bid, kv_indices, cur_kv_head, 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
+                            T.ptx_cp_async(
+                                T.access_ptr(KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[bid, kv_indices, cur_kv_head, dim // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
+                        T.ptx_cp_async(
+                            T.access_ptr(K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
+                            T.access_ptr(K_pe[bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8], "r", 8),
+                            16,
+                        )
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     # Buffer 1
                     T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
                         kv_indices = (seqlen_kv // num_split) * bz + (i_i * 2 + 1) * block_N + r * 16 + (tx - 256) // 8
-                        with T.attr("default", "async_scope", 1):
-                            for u in T.serial(4):
-                                for v in T.vectorized(8):
-                                    KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                        bid, kv_indices, cur_kv_head, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ]
-                                    KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                        bid, kv_indices, cur_kv_head, dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v
-                                    ]
-                        with T.attr("default", "async_scope", 1):
-                            for v in T.vectorized(8):
-                                K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = K_pe[
-                                    bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8 + v
-                                ]
+                        for u in T.serial(4):
+                            T.ptx_cp_async(
+                                T.access_ptr(KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[bid, kv_indices, cur_kv_head, 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
+                            T.ptx_cp_async(
+                                T.access_ptr(KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[bid, kv_indices, cur_kv_head, dim // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
+                        T.ptx_cp_async(
+                            T.access_ptr(K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
+                            T.access_ptr(K_pe[bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8], "r", 8),
+                            16,
+                        )
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
         # combine
@@ -459,40 +463,44 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
                         kv_indices = (i_i * 2) * block_N + r * 16 + (tx - 256) // 8
-                        with T.attr("default", "async_scope", 1):
-                            for u in T.serial(4):
-                                for v in T.vectorized(8):
-                                    KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                        bid, kv_indices, cur_kv_head, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ]
-                                    KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                        bid, kv_indices, cur_kv_head, dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v
-                                    ]
-                        with T.attr("default", "async_scope", 1):
-                            for v in T.vectorized(8):
-                                K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = K_pe[
-                                    bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8 + v
-                                ]
+                        for u in T.serial(4):
+                            T.ptx_cp_async(
+                                T.access_ptr(KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[bid, kv_indices, cur_kv_head, 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
+                            T.ptx_cp_async(
+                                T.access_ptr(KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[bid, kv_indices, cur_kv_head, dim // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
+                        T.ptx_cp_async(
+                            T.access_ptr(K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
+                            T.access_ptr(K_pe[bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8], "r", 8),
+                            16,
+                        )
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     # Buffer 1
                     T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
                         kv_indices = (i_i * 2 + 1) * block_N + r * 16 + (tx - 256) // 8
-                        with T.attr("default", "async_scope", 1):
-                            for u in T.serial(4):
-                                for v in T.vectorized(8):
-                                    KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                        bid, kv_indices, cur_kv_head, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ]
-                                    KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                        bid, kv_indices, cur_kv_head, dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v
-                                    ]
-                        with T.attr("default", "async_scope", 1):
-                            for v in T.vectorized(8):
-                                K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = K_pe[
-                                    bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8 + v
-                                ]
+                        for u in T.serial(4):
+                            T.ptx_cp_async(
+                                T.access_ptr(KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[bid, kv_indices, cur_kv_head, 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
+                            T.ptx_cp_async(
+                                T.access_ptr(KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[bid, kv_indices, cur_kv_head, dim // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
+                        T.ptx_cp_async(
+                            T.access_ptr(K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
+                            T.access_ptr(K_pe[bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8], "r", 8),
+                            16,
+                        )
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
     if num_split > 1:

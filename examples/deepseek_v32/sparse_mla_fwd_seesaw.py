@@ -217,27 +217,24 @@ def sparse_mla_fwd(
                         index = prefetch_indices_0[r]
                         is_kv_valid[0, r * 16 + (tx - 256) // 8] = index <= max_kv_i
                         if is_kv_valid[0, r * 16 + (tx - 256) // 8]:
-                            # Here we assume dim = 512, tail_dim = 64
-                            with T.attr("default", "async_scope", 1):
-                                # 8 threads collaborate to load one row of KV_dim (length 512), divided into 4 iterations
-                                # In each iteration, each thread loads 8 consecutive elements for both KV_shared_0_l
-                                # and KV_shared_0_r, 8 threads load 64 elements total for each
-                                for u in T.serial(4):
-                                    for v in T.vectorized(8):
-                                        # (tx - 256) // 8 determines which row the thread is responsible for,
-                                        # (tx - 256) % 8 determines which part of the row the thread loads
-                                        KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, index, g_i, 64 * u + (tx - 256) % 8 * 8 + v
-                                        ]
-                                        KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, index, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
-                                        ]
-                            with T.attr("default", "async_scope", 1):
-                                # tail_dim (length 64) only needs 8 threads collaborating in one iteration to complete loading
-                                for v in T.vectorized(8):
-                                    K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[
-                                        b_i, index, g_i, D + (tx - 256) % 8 * 8 + v
-                                    ]
+                            # 8 threads collaborate to load one row of KV_dim (512) in 4 iters, each loading 8 elems
+                            for u in T.serial(4):
+                                T.ptx_cp_async(
+                                    T.access_ptr(KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                    T.access_ptr(KV[b_i, index, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                    16,
+                                )
+                                T.ptx_cp_async(
+                                    T.access_ptr(KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                    T.access_ptr(KV[b_i, index, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                    16,
+                                )
+                            # tail_dim (64) needs only one iter of 8 elems per 8 collaborating threads
+                            T.ptx_cp_async(
+                                T.access_ptr(K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[b_i, index, g_i, D + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     if i_i + 1 < T.ceildiv(NI, 2):
@@ -252,20 +249,22 @@ def sparse_mla_fwd(
                         index = prefetch_indices_1[r]
                         is_kv_valid[1, r * 16 + (tx - 256) // 8] = index <= max_kv_i
                         if is_kv_valid[1, r * 16 + (tx - 256) // 8]:
-                            with T.attr("default", "async_scope", 1):
-                                for u in T.serial(4):
-                                    for v in T.vectorized(8):
-                                        KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, index, g_i, 64 * u + (tx - 256) % 8 * 8 + v
-                                        ]
-                                        KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, index, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
-                                        ]
-                            with T.attr("default", "async_scope", 1):
-                                for v in T.vectorized(8):
-                                    K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[
-                                        b_i, index, g_i, D + (tx - 256) % 8 * 8 + v
-                                    ]
+                            for u in T.serial(4):
+                                T.ptx_cp_async(
+                                    T.access_ptr(KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                    T.access_ptr(KV[b_i, index, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                    16,
+                                )
+                                T.ptx_cp_async(
+                                    T.access_ptr(KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                    T.access_ptr(KV[b_i, index, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                    16,
+                                )
+                            T.ptx_cp_async(
+                                T.access_ptr(K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[b_i, index, g_i, D + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
                     if i_i + 1 < T.ceildiv(NI, 2):
