@@ -139,17 +139,20 @@ class GemmTCGEN5(GemmBase):
             "TCGEN5MMA requires thread bounds to be multiples of warp size (32) and aligned to warps."
         )
 
+        cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0
+
         @T.prim_func
-        def _gemm_ss_cond() -> None:
-            if thread_var // 32 == thread_bounds.min // warp_size:
+        def _gemm_ss_elect_one_thread() -> None:
+            if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
         @T.prim_func
         def _gemm_ss() -> None:
-            mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            if cluster_cond:
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
         return (
             _Simplify(_gemm_ss, inline_let=True)
             if analyzer.can_prove(thread_bounds.extent == warp_size)
-            else _Simplify(_gemm_ss_cond, inline_let=True)
+            else _Simplify(_gemm_ss_elect_one_thread, inline_let=True)
         )

@@ -1864,9 +1864,21 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto phase = this->PrintExpr(op->args[1]);
     this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
-    print_extern_call_stmt("tl::tmem_allocate");
+    std::ostringstream ss;
+    ss << "tl::tmem_allocate";
+    if (op->annotations.find("use_2cta") != op->annotations.end()
+        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<use_2cta=true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
-    print_extern_call_stmt("tl::tmem_deallocate");
+    std::ostringstream ss;
+    ss << "tl::tmem_deallocate";
+    if (op->annotations.find("use_2cta") != op->annotations.end()
+        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<use_2cta=true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
@@ -1876,7 +1888,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
     // Simplify the code by using the default eviction policy
-    if (op->annotations.find("use_2cta") != op->annotations.end()) {
+    if (op->annotations.find("use_2cta") != op->annotations.end() && Downcast<Bool>(op->annotations["use_2cta"])->value) {
       if (eviction_policy != "EVICT_NORMAL") {
         ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy << ">(";
       } else {
@@ -2413,7 +2425,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     wgmma_call = replacer.rewrite(wgmma_call);
     this->stream << wgmma_call;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
-    ICHECK_EQ(op->args.size(), 14U)
+    ICHECK_EQ(op->args.size(), 15U)
         << "ptx_tcgen05_mma_ss args is " << op->args;
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_desc = this->PrintExpr(op->args[1]);
@@ -2429,20 +2441,33 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask2 = this->PrintExpr(op->args[11]);
     std::string mask3 = this->PrintExpr(op->args[12]);
     bool enable_ws = Downcast<Bool>(op->args[13])->value;
+    bool enable_2cta = Downcast<Bool>(op->args[14])->value;
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
+    std::string ab_type_str =
+        tl::codegen::ptx::DTypeEnumToString(dtype_enum);
+
+    // Currently tcgen05mma_ss<Float16|BFloat16> has use_2cta template param; 
+    // others don't. tcgen05mma_ws_ss has no use_2cta.
+    std::string use_2cta_suffix;
+    if (!enable_ws &&
+        (dtype_enum == tl::codegen::ptx::DataType::kFloat16 ||
+         dtype_enum == tl::codegen::ptx::DataType::kBFloat16)) {
+      use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
+    }
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::(tcgen05_name)<(ABType)>(uint64_t((desc_a) + (A_offset)), "
+        "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
+        "(A_offset)), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(ABType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_enum));
+    replacer.register_rule("(ABType)", ab_type_str);
+    replacer.register_rule("(USE_2CTA_SUFFIX)", use_2cta_suffix);
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
