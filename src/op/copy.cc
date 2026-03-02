@@ -1015,6 +1015,14 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 // - T.async_copy commits but does not wait (explicit async semantics).
 Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
                                 arith::Analyzer *analyzer) const {
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  bool enable_async_copy =
+      pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
+  if (!enable_async_copy && !GetIsAsyncCopy()) {
+    return LowerNormalCopy(T, analyzer);
+  }
+
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
   auto par_op = ParallelOp(fused_loop);

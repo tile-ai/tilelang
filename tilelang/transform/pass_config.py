@@ -89,6 +89,22 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
 
+    TL_ENABLE_ASYNC_COPY = "tl.enable_async_copy"
+    """Enable lowering eligible global->shared copies to PTX `cp.async`.
+
+    When True (default), TileLang may lower:
+    - `T.copy(global -> shared, ...)` to `ptx_cp_async + commit + wait`
+    - `T.async_copy(global -> shared, ...)` to `ptx_cp_async + commit` (no wait)
+    - plain user-written global->shared copy stores (e.g. in `T.Parallel`) via
+      `InjectPTXAsyncCopy`
+
+    When False, TileLang will avoid the cp.async lowering path for `T.copy`.
+    Explicit `T.async_copy` still requires cp.async support and may error if
+    it cannot be lowered.
+
+    Default: True
+    """
+
     TL_ENABLE_LOWER_LDGSTG = "tl.enable_lower_ldgstg"
     """Enable non-predicated LDG/STG lowering for global memory access.
     When enabled, converts Ramp-based global buffer load/store to ldg/stg intrinsics.

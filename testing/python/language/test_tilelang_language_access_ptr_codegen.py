@@ -132,6 +132,60 @@ def test_async_copy_tileop_rejects_invalid_cp_async_scope():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_parallel_simt_copy_lowers_to_cp_async():
+    """Check plain user-written global->shared stores can lower to cp.async."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((128,), T.float32)
+            for i in T.Parallel(128):
+                S[i] = A[i]
+            # Keep the shared buffer live so the copy cannot be DCE'd.
+            B[0] = S[0]
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== Parallel SIMT copy -> cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs<" in src, "Expected cp_async_gs in generated CUDA source"
+    assert "tl::cp_async_commit" in src, "Expected CPAsync lowering to emit commit"
+    assert "tl::cp_async_wait<0>" in src, "Expected CPAsync lowering to emit wait"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_parallel_simt_copy_respects_enable_async_copy_config():
+    """Check `tl.enable_async_copy=False` disables auto cp.async rewriting."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((128,), T.float32)
+            for i in T.Parallel(128):
+                S[i] = A[i]
+            B[0] = S[0]
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_ASYNC_COPY: False},
+    )
+    src = kernel.get_kernel_source()
+    print("=== Parallel SIMT copy (async disabled) codegen ===")
+    print(src)
+    assert "cp_async_gs<" not in src, "Did not expect cp_async_gs when async copy is disabled"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_copy_global_to_shared_oob_lowers_to_predicated_cp_async():
     """Check T.copy can lower OOB-guarded global->shared copy to predicated cp.async."""
 
