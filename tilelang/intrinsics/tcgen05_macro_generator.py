@@ -183,6 +183,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
             )
         atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
 
         # by default, we utilize non-swizzle layout offset
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
@@ -251,7 +252,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
         # TCGEN05 only has one warp group
-        num_inst_m = self.block_row_warps * self.warp_row_tiles // atom_m
+        num_inst_m = self.block_row_warps * self.warp_row_tiles // atom_m_per_cta
         num_inst_n = self.block_col_warps * self.warp_col_tiles // atom_n
 
         # Helper to allow BufferRegion/BufferLoad as inputs
@@ -310,17 +311,17 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 int(b_swizzle_mode),
             )
 
-            tmem_col_step = atom_n // (128 // atom_m)
+            tmem_col_step = atom_n // (128 // atom_m_per_cta)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, (k_dim // micro_size_k)):
                         scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
                         A_elem_offset = (
                             (ki % ak_atom_size) * micro_size_k
-                            + i * atom_m * a_swizzle_atom_elems
+                            + i * atom_m_per_cta * a_swizzle_atom_elems
                             + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
                             if a_is_k_major
-                            else i * atom_m * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                            else i * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
                         )
 
                         B_elem_offset = (
@@ -352,6 +353,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             mask2,
                             mask3,
                             enable_ws,
+                            enable_2cta,
                         )
             T.tcgen05_mma_arrive(mbar)
 
@@ -438,12 +440,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         mask_zero = T.cast(0, T.int32)
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
-        num_inst_m = m_dim // atom_m
+        num_inst_m = m_dim // atom_m_per_cta
         num_inst_n = n_dim // atom_n
 
         # TMEM column geometry for A operand
         # Each TMEM column is 32 bits; row interleaving factor = 128 / atom_m
-        interleave = max(128 // atom_m, 1)
+        interleave = max(128 // atom_m_per_cta, 1)
         a_tmem_cols_per_k_atom = atom_k * a_dtype_in_bits // 32 // interleave
         a_tmem_k_stride = k_dim * a_dtype_in_bits // 32 // interleave
 
@@ -498,7 +500,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 int(b_swizzle_mode),
             )
 
-            tmem_col_step = atom_n // (128 // atom_m)
+            tmem_col_step = atom_n // (128 // atom_m_per_cta)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, (k_dim // micro_size_k)):
@@ -577,16 +579,24 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
             )
-        atom_m, atom_n, _, _, _ = (int(x) for x in meta)
+        atom_m, atom_n, _, _, enable_2cta = (int(x) for x in meta)
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
 
-        if m % atom_m != 0 or n % atom_n != 0:
+        if m % atom_m_per_cta != 0 or n % atom_n != 0:
             raise ValueError(f"Invalid TCGEN5MMA store layout for shape ({m}, {n}) with atoms ({atom_m}, {atom_n})")
 
         def forward(i: PrimExpr, j: PrimExpr):
-            atom_idx = (i // atom_m) + (j // atom_n) * (m // atom_m)
-            ai = i % atom_m
+            atom_idx = (i // atom_m_per_cta) + (j // atom_n) * (m // atom_m_per_cta)
+            ai = i % atom_m_per_cta
             aj = j % atom_n
 
+            if atom_m == 256:
+                # Layout A (2 cta)
+                assert enable_2cta, "atom_m=256 for TCGEN5MMA must use 2cta"
+                return [
+                    ai % 128,
+                    aj + atom_idx * atom_n,
+                ]
             if atom_m == 128:
                 # Layout D
                 return [
