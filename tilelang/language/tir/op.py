@@ -1155,13 +1155,14 @@ def ptx_tcgen05_mma_ss(
     mask2,
     mask3,
     enable_ws=False,
+    enable_2cta=False,
     ws=None,
     warp_specialized=None,
     variant=None,
 ):
     """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
 
-    Expects 13 or 14 positional arguments:
+    Expects 14 or 15 positional arguments:
     (kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
      desc_val, scale_out, mask0, mask1, mask2, mask3[, enable_ws]).
     Aliases: you can also pass `ws` or `warp_specialized` (booleans) instead of `enable_ws`.
@@ -1204,6 +1205,7 @@ def ptx_tcgen05_mma_ss(
         mask2,
         mask3,
         enable_ws,
+        enable_2cta,
     )
 
 
