@@ -32,12 +32,14 @@ protected:
   void VisitExpr_(const BroadcastNode *op,
                   std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op,
-                  std::ostream &os) override;                     // NOLINT(*)
-  void VisitExpr_(const CastNode *op, std::ostream &os) override; // NOLINT(*)
-  void VisitExpr_(const DivNode *op, std::ostream &os) override;  // NOLINT(*)
-  void VisitExpr_(const MinNode *op, std::ostream &os) override;  // NOLINT(*)
-  void VisitExpr_(const MaxNode *op, std::ostream &os) override;  // NOLINT(*)
-  void VisitExpr_(const CallNode *op, std::ostream &os) override; // NOLINT(*)
+                  std::ostream &os) override;                       // NOLINT(*)
+  void VisitExpr_(const IntImmNode *op, std::ostream &os) override; // NOLINT(*)
+  void VisitExpr_(const CastNode *op, std::ostream &os) override;   // NOLINT(*)
+  void VisitExpr_(const DivNode *op, std::ostream &os) override;    // NOLINT(*)
+  void VisitExpr_(const MinNode *op, std::ostream &os) override;    // NOLINT(*)
+  void VisitExpr_(const MaxNode *op, std::ostream &os) override;    // NOLINT(*)
+  void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
+  void VisitExpr_(const SelectNode *op, std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const BufferLoadNode *op,
                   std::ostream &os) override; // NOLINT(*)
 
@@ -47,6 +49,7 @@ protected:
   void VisitStmt_(const ForNode *op) override;
   void VisitStmt_(const IfThenElseNode *op) override;
   void VisitStmt_(const EvaluateNode *op) override;
+  void VisitStmt_(const SeqStmtNode *op) override;
 
 protected:
   virtual void PrintVecElemLoad_(const std::string &vec, DataType t, int i,
@@ -72,6 +75,9 @@ protected:
   std::string GetBufferRef_(DataType t, const BufferNode *buffer,
                             PrimExpr index) override;
 
+  // Get pointer string from a Var expression (local buffer -> vid.iterator)
+  std::string GetVarPtr_(const PrimExpr &expr);
+
   /*!
    * \brief Print expr representing the thread tag
    * \param IterVar iv The thread index to be binded;
@@ -94,6 +100,15 @@ private:
 
   // Fastmath configuration (read from PassContext)
   bool enable_fastmath_ = false;
+
+  // Loop-break guard transformation state
+  // When a for-loop contains loop_break(), we replace `break` with a guard
+  // variable pattern since CuTeDSL doesn't support early exit (break).
+  bool in_break_loop_ = false;
+  int loop_break_counter_ = 0;
+  int current_break_id_ = -1;
+  // Set to true when loop_break() replacement is emitted within current SeqStmt
+  bool break_emitted_in_seq_ = false;
 };
 
 } // namespace codegen

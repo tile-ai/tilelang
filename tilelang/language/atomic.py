@@ -69,7 +69,7 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
         return T.call_intrin(
             return_type,
             op.Op.get("tl.atomic_max_elem_op"),
-            T.address_of(dst),
+            T.access_ptr(dst, "rw"),
             value,
             memory_order_id,
         )
@@ -151,7 +151,7 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
         return T.call_intrin(
             return_type,
             op.Op.get("tl.atomic_min_elem_op"),
-            T.address_of(dst),
+            T.access_ptr(dst, "rw"),
             value,
             memory_order_id,
         )
@@ -237,12 +237,12 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
 
         # Pass destination by pointer to match device signature
         if memory_order is None:
-            return T.call_intrin(return_type, atomic_add_op, T.address_of(dst), value)
+            return T.call_intrin(return_type, atomic_add_op, T.access_ptr(dst, "rw"), value)
         else:
             return T.call_intrin(
                 return_type,
                 atomic_add_op,
-                T.address_of(dst),
+                T.access_ptr(dst, "rw"),
                 value,
                 _MEMORY_ORDER_ID_MAP[memory_order],
             )
@@ -313,7 +313,7 @@ def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
     """
     atomic_addx2_op = op.Op.get("tl.atomic_addx2_elem_op") if return_prev else op.Op.get("tl.atomic_addx2_elem_op")
     return_type = dst.dtype if return_prev else "handle"
-    return T.call_intrin(return_type, atomic_addx2_op, T.address_of(dst), T.address_of(value))
+    return T.call_intrin(return_type, atomic_addx2_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 
 def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
@@ -351,7 +351,7 @@ def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
     """
     atomic_addx4_op = op.Op.get("tl.atomic_addx4_elem_op") if return_prev else op.Op.get("tl.atomic_addx4_elem_op")
     return_type = "float4" if "float" in str(dst.dtype).lower() else "handle"
-    return T.call_intrin(return_type, atomic_addx4_op, T.address_of(dst), T.address_of(value))
+    return T.call_intrin(return_type, atomic_addx4_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
 
 
 def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
@@ -390,7 +390,12 @@ def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
         >>> counter = T.Tensor([1], "int64", name="counter")
         >>> current_count = atomic_load(counter, memory_order="relaxed")
     """
-    return T.call_intrin(src.dtype, op.Op.get("tl.atomic_load_elem_op"), T.address_of(src), _MEMORY_ORDER_ID_MAP[memory_order])
+    return T.call_intrin(
+        src.dtype,
+        op.Op.get("tl.atomic_load_elem_op"),
+        T.access_ptr(src, "r"),
+        _MEMORY_ORDER_ID_MAP[memory_order],
+    )
 
 
 def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> PrimExpr:
@@ -443,4 +448,10 @@ def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> P
         >>> log_counter = T.Tensor([1], "int64", name="log_counter")
         >>> atomic_store(log_counter, 0)  # Reset counter atomically
     """
-    return T.call_intrin("handle", op.Op.get("tl.atomic_store_elem_op"), T.address_of(dst), src, _MEMORY_ORDER_ID_MAP[memory_order])
+    return T.call_intrin(
+        "handle",
+        op.Op.get("tl.atomic_store_elem_op"),
+        T.access_ptr(dst, "w"),
+        src,
+        _MEMORY_ORDER_ID_MAP[memory_order],
+    )

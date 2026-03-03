@@ -130,6 +130,25 @@ static constexpr const char *kDisableOutOfBoundWarning =
  */
 DataType cuTensorMapType();
 
+/*!
+ * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
+ *
+ * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so
+ * downstream analysis can recover the referenced `Buffer` (and its strides /
+ * scope), while also carrying the access mask required by synchronization and
+ * safety checks.
+ *
+ * The frontend is expected to lower this op to `tir.builtin.tvm_access_ptr`
+ * once the additional metadata is no longer needed.
+ *
+ * access_ptr(base_load, extent, rw_mask)
+ *
+ * - base_load: BufferLoad whose indices denote the base element address.
+ * - extent: 1D extent in elements (same meaning as tvm_access_ptr arg3).
+ * - rw_mask: 1=read, 2=write, 3=read-write.
+ */
+TVM_DLL const Op &access_ptr();
+
 // fast math related op
 // __exp(x) - fast exponential
 TVM_DLL const Op &__exp();
@@ -165,6 +184,14 @@ TVM_DLL const Op &ieee_fsqrt();
 TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
+
+// Packed FP32x2 math (PTX `.f32x2` family; may lower to FADD2/FMUL2/FFMA2)
+// fadd2(x, y) - packed FP32x2 add
+TVM_DLL const Op &fadd2();
+// fmul2(x, y) - packed FP32x2 multiply
+TVM_DLL const Op &fmul2();
+// fma2(x, y, z) - packed FP32x2 fused multiply-add
+TVM_DLL const Op &fma2();
 
 // random op
 TVM_DLL const Op &rng_init();
@@ -243,6 +270,14 @@ TVM_DLL const Op &tma_store();
  *
  */
 const Op &ptx_fence_barrier_init();
+
+/*
+ * \brief tvm intrinsics for cluster barrier arrive
+ *
+ * ptx_arrive_cluster_barrier(mbarrier, cta_id)
+ *
+ */
+TVM_DLL const Op &ptx_arrive_cluster_barrier();
 
 /*!
  * \brief tvm intrinsics for mbarrier wait with parity bit
@@ -471,6 +506,46 @@ TVM_DLL const Op &get_warp_group_idx();
  *
  */
 TVM_DLL const Op &wait_wgmma();
+
+/*!
+ * \brief Cluster barrier arrive with relaxed ordering
+ *
+ * cluster_arrive_relaxed()
+ *
+ */
+TVM_DLL const Op &cluster_arrive_relaxed();
+
+/*!
+ * \brief Cluster barrier arrive
+ *
+ * cluster_arrive()
+ *
+ */
+TVM_DLL const Op &cluster_arrive();
+
+/*!
+ * \brief Cluster barrier wait
+ *
+ * cluster_wait()
+ *
+ */
+TVM_DLL const Op &cluster_wait();
+
+/*!
+ * \brief Cluster barrier arrive + wait (full sync)
+ *
+ * cluster_sync()
+ *
+ */
+TVM_DLL const Op &cluster_sync();
+
+/*!
+ * \brief Return the 1-D rank of the calling CTA within its cluster
+ *
+ * uint32_t block_rank_in_cluster()
+ *
+ */
+TVM_DLL const Op &block_rank_in_cluster();
 
 /*!
  * \brief Synchronize all threads in a grid

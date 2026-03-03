@@ -19,7 +19,13 @@ def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:
     Returns:
         PrimExpr: Handle to the DP4A operation
     """
-    return T.call_extern("handle", "DP4A", T.address_of(A), T.address_of(B), T.address_of(C))
+    return T.call_extern(
+        "handle",
+        "DP4A",
+        T.access_ptr(A, "r"),
+        T.access_ptr(B, "r"),
+        T.access_ptr(C, "rw"),
+    )
 
 
 def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:

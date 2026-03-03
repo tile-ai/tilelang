@@ -48,6 +48,15 @@ using namespace tir::transform;
 using arith::IRMutatorWithAnalyzer;
 using arith::IRVisitorWithAnalyzer;
 
+static inline bool Is1DTmaLoad(const CallNode *op) {
+  if (!op->op.same_as(tma_load())) {
+    return false;
+  }
+  auto arg0 = op->args[0].as<Call>();
+  return arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
+         !arg0.value()->op.same_as(create_tma_im2col_descriptor());
+}
+
 class TmaTraitsCollector : public StmtExprVisitor {
 public:
   TmaTraitsCollector() { Initialize(); }
@@ -164,10 +173,7 @@ private:
 
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
-      auto arg0 = op->args[0].as<Call>();
-      bool is_1d_tma_load =
-          arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
-          op->op.same_as(tma_load());
+      bool is_1d_tma_load = Is1DTmaLoad(op);
       visited_tma_load_ = true;
       Array<PrimExpr> new_args = op->args;
       new_args.Set(is_1d_tma_load ? 2 : 1,
@@ -497,6 +503,7 @@ private:
     if (op->attr_key == "kWarpSpecializationScope") {
       has_warp_specialization_ = true;
       first_if = true;
+      cur_expect_idx_ = 0;
     } else if (op->attr_key == tir::attr::thread_extent &&
                Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
       thread_var_ = Downcast<IterVar>(op->node);
@@ -508,17 +515,22 @@ private:
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (!tma_op_to_barrier_id_.count(call_ref)) {
-        // For 1D TMA loads, promote raw integer barrier id to get_mbarrier(id)
-        // so codegen can emit mbarrier[index]. This handles degenerate
-        // producer-only kernels where no arrive() is seen and mapping is empty.
-        auto arg0 = op->args[0].as<Call>();
-        bool is_1d_tma_load =
-            arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
-            !arg0.value()->op.same_as(create_tma_im2col_descriptor());
+        // Promote raw integer barrier id to get_mbarrier(id) so codegen can
+        // emit mbarrier[index]. This handles degenerate producer-only kernels
+        // where no arrive()/expect mapping is recorded.
+        bool is_1d_tma_load = Is1DTmaLoad(op);
         if (is_1d_tma_load && op->args.size() >= 3) {
           if (const auto *imm = op->args[2].as<IntImmNode>()) {
             Array<PrimExpr> new_args = op->args;
             new_args.Set(2, Call(DataType::Handle(), get_mbarrier(),
+                                 {IntImm(DataType::Int(32),
+                                         static_cast<int>(imm->value))}));
+            return Call(op->dtype, op->op, new_args, op->annotations);
+          }
+        } else if (!is_1d_tma_load && op->args.size() >= 2) {
+          if (const auto *imm = op->args[1].as<IntImmNode>()) {
+            Array<PrimExpr> new_args = op->args;
+            new_args.Set(1, Call(DataType::Handle(), get_mbarrier(),
                                  {IntImm(DataType::Int(32),
                                          static_cast<int>(imm->value))}));
             return Call(op->dtype, op->op, new_args, op->annotations);
@@ -528,10 +540,7 @@ private:
       }
       auto barrier_id = tma_op_to_barrier_id_[call_ref];
       auto new_args = op->args;
-      auto arg0 = op->args[0].as<Call>();
-      auto is_1d_tma_load =
-          arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
-          !arg0.value()->op.same_as(create_tma_im2col_descriptor());
+      bool is_1d_tma_load = Is1DTmaLoad(op);
       if (is_1d_tma_load) {
         new_args.Set(2, barrier_id);
       } else {

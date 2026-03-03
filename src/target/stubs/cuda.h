@@ -2,6 +2,17 @@
  * \file cuda.h
  * \brief Stub library for lazy loading libcuda.so at runtime.
  *
+ * Motivation
+ * ----------
+ * libcuda.so is the CUDA Driver API library. Linking directly against it
+ * creates a strong dependency on the presence of the NVIDIA driver at build
+ * time and runtime.
+ *
+ * This stub library allows TileLang to:
+ * 1. Be imported on CPU-only machines (no libcuda.so present).
+ * 2. Avoid versioning conflicts by loading the available libcuda.so
+ * dynamically.
+ *
  * This library provides drop-in replacements for CUDA driver API functions.
  * It allows tilelang to be imported on CPU-only machines without CUDA
  * installed. The actual libcuda.so is loaded lazily on first API call.

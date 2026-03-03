@@ -23,12 +23,14 @@ bool TargetIsHopper(Target target);
 bool TargetIsSm100(Target target);
 bool TargetIsSM120(Target target);
 bool TargetIsCDNA(Target target);
+bool TargetIsGfx950(Target target);
 
 bool TargetHasAsyncCopy(Target target);
 bool TargetHasLdmatrix(Target target);
 bool TargetHasStmatrix(Target target);
 bool TargetHasTmem(Target target);
 bool TargetHasBulkCopy(Target target);
+bool TargetIsCuTeDSL(Target target);
 bool TargetSupportVectorize256(Target target);
 int TargetGetWarpSize(Target target);
 bool TargetHasSMVersionGE(Target target, int version);

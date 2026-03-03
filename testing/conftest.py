@@ -1,8 +1,15 @@
 import os
 import random
+import sys
 import pytest
 
 os.environ["PYTHONHASHSEED"] = "0"
+
+# Ensure we import the in-tree `tilelang/` instead of any globally installed
+# versions that may appear earlier on PYTHONPATH.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 random.seed(0)
 

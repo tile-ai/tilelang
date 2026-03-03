@@ -82,11 +82,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   if (args.size() > 16) {
     if (const auto *load = args[16].as<BufferLoadNode>()) {
-      node->mbarRegion_ =
-          NormalizeToBufferRegion(Downcast<BufferLoad>(args[16]));
-      node->mbar_ = node->mbarRegion_->buffer;
-    } else {
-      node->mbar_ = std::nullopt;
+      node->mbar_ = Downcast<BufferLoad>(args[16]);
     }
   }
   node->cCoords_ = Array<PrimExpr>(
@@ -461,7 +457,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ICHECK(can_use_tcgen5mma);
     ICHECK(b_.scope() == "shared.dyn" || b_.scope() == "shared");
     ICHECK(c_.scope() == "shared.tmem");
-    ICHECK(mbar_.has_value()) << "mbar must be provided for TCGEN5MMA";
+    ICHECK(mbar_.defined()) << "mbar must be provided for TCGEN5MMA";
     if (a_.scope() == "shared.tmem") {
       op_name = "tl::tcgen5mma_gemm_ts";
     } else if (a_.scope() == "shared.dyn" || a_.scope() == "shared") {
@@ -492,8 +488,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
     auto C_buffer = T.buffer_remap.count(c_) ? T.buffer_remap[c_] : c_;
     Array<PrimExpr> new_args;
-    auto mbarPtr =
-        MakeAccessPtrFromRegion(mbarRegion_, /*rw*/ 3, /*require_2d*/ true);
+    auto mbarPtr = MakeAccessPtrFromBufferLoad(mbar_, /*rw*/ 3);
     new_args.push_back(StringImm(ss.str()));
     new_args.push_back(Aptr);
     new_args.push_back(Bptr);
@@ -614,9 +609,10 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     results.Set(c_, fragment->BindThreadRange(thread_range));
     if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
       int dim_A = a_->shape.size();
-      results.Set(a_, makeGemmVoltaABLayout(*as_const_int(a_->shape[dim_A - 2]),
-                                            *as_const_int(a_->shape[dim_A - 1]),
-                                            true, !transA_));
+      auto layout = makeGemmVoltaABLayout(*as_const_int(a_->shape[dim_A - 2]),
+                                          *as_const_int(a_->shape[dim_A - 1]),
+                                          true, !transA_);
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
     } else if (IsFragmentBuffer(a_)) {
       ICHECK(transA_ == false);
       auto fragment =
@@ -628,9 +624,10 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
 
     ICHECK(b_.scope() == "shared" || b_.scope() == "shared.dyn");
     int dim_B = b_->shape.size();
-    results.Set(b_, makeGemmVoltaABLayout(*as_const_int(b_->shape[dim_B - 2]),
-                                          *as_const_int(b_->shape[dim_B - 1]),
-                                          false, transB_));
+    auto layout = makeGemmVoltaABLayout(*as_const_int(b_->shape[dim_B - 2]),
+                                        *as_const_int(b_->shape[dim_B - 1]),
+                                        false, transB_);
+    results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
              TargetIsSM120(T.target) ||
              (TargetIsSm100(T.target) && gemm_inst == GemmInst::kMMA)) {
@@ -645,9 +642,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      results.Set(a_,
-                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   a_->dtype.bits(), !transA_));
+      auto layout = makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                     a_->dtype.bits(), !transA_);
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
     } else if (IsFragmentBuffer(a_)) {
       auto fragment = makeGemmFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
                                         a_->dtype.bits(), transA_);
@@ -659,9 +656,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      results.Set(b_,
-                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   b_->dtype.bits(), transB_));
+      auto layout = makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                     b_->dtype.bits(), transB_);
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
     } else if (IsFragmentBuffer(b_)) {
       auto fragment =
           makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
@@ -691,7 +688,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                        a_->dtype.bits(), !transA_)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
                                  a_->dtype.bits(), !transA_);
-      results.Set(a_, ABLayout);
+      results.Set(a_, ExpandLayoutToMatchBuffer(ABLayout, a_));
     } else {
       auto fragment = makeGemmFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
                                         a_->dtype.bits(), transA_);
@@ -710,7 +707,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                        b_->dtype.bits(), transB_)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
                                  b_->dtype.bits(), transB_);
-      results.Set(b_, ABLayout);
+      results.Set(b_, ExpandLayoutToMatchBuffer(ABLayout, b_));
     } else {
       auto fragment =
           makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
@@ -728,18 +725,20 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      results.Set(a_, makeGemmABLayoutSm100(mat_stride, mat_continuous,
-                                            mat_continuous, a_->dtype.bits(),
-                                            transA_ ? 1 : 2));
+      auto layout =
+          makeGemmABLayoutSm100(mat_stride, mat_continuous, mat_continuous,
+                                a_->dtype.bits(), transA_ ? 1 : 2);
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
     }
     {
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
       const int64_t continuity = mat_continuous;
-      results.Set(b_,
-                  makeGemmABLayoutSm100(mat_stride, mat_continuous, continuity,
-                                        b_->dtype.bits(), transB_ ? 2 : 1));
+      auto layout =
+          makeGemmABLayoutSm100(mat_stride, mat_continuous, continuity,
+                                b_->dtype.bits(), transB_ ? 2 : 1);
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
     }
     {
       Layout res;
@@ -788,7 +787,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       auto shared_layout = makeGemmABLayoutCDNA(
           *as_const_int(a_->shape[dim_A - 2]),
           *as_const_int(a_->shape[dim_A - 1]), a_->dtype.bits(), kPack_);
-      results.Set(a_, shared_layout);
+      results.Set(a_, ExpandLayoutToMatchBuffer(shared_layout, a_));
     } else if (IsFragmentBuffer(a_)) {
       auto fragment =
           makeGemmFragmentACDNA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
@@ -803,7 +802,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
           *as_const_int(b_->shape[dim_B - 2]),
           *as_const_int(b_->shape[dim_B - 1]), b_->dtype.bits(), kPack_);
 
-      results.Set(b_, shared_layout);
+      results.Set(b_, ExpandLayoutToMatchBuffer(shared_layout, b_));
     } else if (IsFragmentBuffer(b_)) {
       auto fragment =
           makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);

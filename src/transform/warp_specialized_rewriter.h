@@ -59,6 +59,7 @@ private:
       if (call->op.same_as(create_list_of_mbarrier()) ||
           call->op.same_as(mbarrier_wait_parity()) ||
           call->op.same_as(builtin::ptx_arrive_barrier()) ||
+          call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
           call->op.same_as(builtin::ptx_cp_async_barrier())) {
         has_mbarrier_op_ = true;
       }

@@ -30,6 +30,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace tvm {
@@ -109,7 +110,8 @@ public:
   BindDLTensors(const std::vector<std::pair<Var, Buffer>> &buffer_def,
                 const PrimExpr &device_type, const PrimExpr &device_id,
                 const std::string &func_name,
-                const std::unordered_set<const VarNode *> &used_param_buffers);
+                const std::unordered_set<const VarNode *> &used_param_buffers,
+                const std::unordered_set<const VarNode *> &used_shape_vars);
 
   /*! \return The defs generated in binding. */
   const std::vector<Var> &defs() const { return defs_; }

@@ -479,6 +479,10 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <cooperative_groups.h>\n";
   }
 
+  if (need_cluster_h_) {
+    decl_stream << "#include <tl_templates/cuda/cluster.h>\n";
+  }
+
   if (need_curand_kernel_h_) {
     decl_stream << "#include <curand_kernel.h>\n";
   }
@@ -821,6 +825,28 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
+  // Fast-path for packed FP32x2 arithmetic.
+  //
+  // PTX packed `.f32x2` arithmetic is only available on SM100+.
+  // Guard emission here so older targets keep the default per-lane lowering.
+  // (The `tl::f*2` helpers also have their own compile-time guards and
+  // fallbacks, but we avoid calling them in generated code when the target
+  // cannot use the instructions.)
+  Target cur_target = Target::Current(/*allow_not_defined=*/true);
+  bool target_supports_f32x2_packed =
+      cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100);
+  if (target_supports_f32x2_packed && t.is_float() && t.bits() == 32 &&
+      t.lanes() == 2) {
+    if (op == "+") {
+      os << "tl::fadd2(" << PrintExpr(lhs) << ", " << PrintExpr(rhs) << ")";
+      return;
+    }
+    if (op == "*") {
+      os << "tl::fmul2(" << PrintExpr(lhs) << ", " << PrintExpr(rhs) << ")";
+      return;
+    }
+  }
+
   // Declare the result.
   std::string sret = name_supply_->FreshName("_");
   this->PrintIndent();
@@ -1074,6 +1100,10 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
     }
+  } else if (sync == "cluster") {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_sync();\n";
   } else if (sync == "global") {
     if (!need_global_barrier_) {
       need_global_barrier_ = true;
@@ -1112,7 +1142,8 @@ void CodeGenTileLangCUDA::PrintStorageScope(const std::string &scope,
   ICHECK_NE(scope, "global")
       << "Cannot allocate global memory when targeting CUDA. You must pass "
          "all global arrays as input instead";
-  if (scope == "shared" || scope == "shared.barrier") {
+  if (scope == "shared" || scope == "shared.barrier" ||
+      scope == "shared.cluster_barrier") {
     os << "__shared__ __align__(" << barrier_alignment_bytes_ << ") ";
   } else if (scope == "shared.dyn") {
     os << "extern __shared__ __align__(1024) ";
@@ -1412,9 +1443,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
   DataType t = op->dtype;
 
   // Standard min/max functions don't support bfloat16 or float16
-  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
-    os << "cutlass::fast_min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
-       << ")";
+  if (t.is_bfloat16() && t.is_scalar()) {
+    os << "cutlass::bfloat16_t(__hmin("
+       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
+       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
+    return;
+  }
+
+  if (t.is_float16() && t.is_scalar()) {
+    os << "cutlass::half_t(__hmin("
+       << "(" << PrintExpr(op->a) << ").to_half(), "
+       << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -1435,9 +1474,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   DataType t = op->dtype;
 
   // Standard min/max functions don't support bfloat16 or float16
-  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
-    os << "cutlass::fast_max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
-       << ")";
+  if (t.is_bfloat16() && t.is_scalar()) {
+    os << "cutlass::bfloat16_t(__hmax("
+       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
+       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
+    return;
+  }
+
+  if (t.is_float16() && t.is_scalar()) {
+    os << "cutlass::half_t(__hmax("
+       << "(" << PrintExpr(op->a) << ").to_half(), "
+       << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -1758,21 +1805,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string barrier_id = this->PrintExpr(op->args[0]);
     os << mbarrier_name_ + "[" + barrier_id + "]";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
-    if (op->args.size() == 1) {
-      this->PrintIndent();
-      auto mbarrier_obj = this->PrintExpr(op->args[0]);
-      this->stream << mbarrier_obj << ".arrive();\n";
-    } else if (op->args.size() == 3) {
-      this->PrintIndent();
-      auto mbarrier_obj = this->PrintExpr(op->args[0]);
-      auto cta_id = this->PrintExpr(op->args[1]);
-      auto pred = this->PrintExpr(op->args[2]);
-      this->stream << mbarrier_obj << ".arrive(" << cta_id << ", " << pred
-                   << ");\n";
-    } else {
-      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier "
-                 << op->args.size();
+    ICHECK_EQ(op->args.size(), 1);
+    this->PrintIndent();
+    auto mbarrier_obj = this->PrintExpr(op->args[0]);
+    this->stream << mbarrier_obj << ".arrive();\n";
+  } else if (op->op.same_as(tl::ptx_arrive_cluster_barrier())) {
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = this->PrintExpr(op->args[0]);
+    auto cta_id = this->PrintExpr(op->args[1]);
+    if (op->args[1].as<IntImmNode>()) {
+      cta_id += "u"; // Ensure cta_id as u32
     }
+    this->stream << mbarrier_obj << ".arrive(" << cta_id << ");\n";
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
@@ -1950,6 +1995,25 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pdl_sync())) {
     this->PrintIndent();
     this->stream << "cudaGridDependencySynchronize();\n";
+  } else if (op->op.same_as(tl::cluster_arrive_relaxed())) {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_arrive_relaxed();\n";
+  } else if (op->op.same_as(tl::cluster_arrive())) {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_arrive();\n";
+  } else if (op->op.same_as(tl::cluster_wait())) {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_wait();\n";
+  } else if (op->op.same_as(tl::cluster_sync())) {
+    need_cluster_h_ = true;
+    this->PrintIndent();
+    this->stream << "tl::cluster_sync();\n";
+  } else if (op->op.same_as(tl::block_rank_in_cluster())) {
+    need_cluster_h_ = true;
+    os << "tl::block_rank_in_cluster()";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
@@ -3075,6 +3139,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fadd2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl::fadd2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fmul2())) {
+    ICHECK_EQ(op->args.size(), 2U);
+    os << "tl::fmul2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::fma2())) {
+    ICHECK_EQ(op->args.size(), 3U);
+    os << "tl::fma2(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
     this->curand_random_generator_state =
@@ -3304,7 +3380,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     }
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
-    } else if (scope == "shared.barrier") {
+    } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
       auto v_id_mem = vid + "_mem";
       stream << ' ' << v_id_mem << "[" << constant_size << "];\n";
       PrintIndent();

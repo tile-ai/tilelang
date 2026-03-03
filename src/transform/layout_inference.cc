@@ -212,25 +212,12 @@ public:
           // Try to merge swizzle layouts if both are swizzle layouts
           const Layout &existing = layout_map[buffer];
           if (!layout.as<Fragment>() && !existing.as<Fragment>()) {
-            auto input_shape = layout->InputShape();
-            if (input_shape.size() >= 2) {
-              size_t ndim = input_shape.size();
-              auto stride_expr = input_shape[ndim - 2].as<IntImmNode>();
-              auto continuous_expr = input_shape[ndim - 1].as<IntImmNode>();
-              if (stride_expr && continuous_expr) {
-                int stride = stride_expr->value;
-                int continuous = continuous_expr->value;
-                int element_size = buffer->dtype.bits();
-
-                if (auto merged = MergeSwizzleLayouts(
-                        existing, layout, stride, continuous, element_size)) {
-                  LOG(WARNING) << "Swizzle layout conflict for buffer "
-                               << buffer << ", merging to smaller granularity";
-                  layout_map.Set(buffer, merged.value());
-                  propagate_alias(buffer, merged.value());
-                  continue;
-                }
-              }
+            if (auto merged = MergeSwizzleLayouts(existing, layout, buffer)) {
+              LOG(WARNING) << "Swizzle layout conflict for buffer " << buffer
+                           << ", merging to smaller granularity";
+              layout_map.Set(buffer, merged.value());
+              propagate_alias(buffer, merged.value());
+              continue;
             }
           }
           // If not swizzle layouts or merge failed, raise error

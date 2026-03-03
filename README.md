@@ -119,8 +119,8 @@ We currently provide three ways to install **tile-lang** from source:
 For users who want access to the latest features and improvements before official releases, we provide nightly builds of **tile-lang**.
 
 ```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
+pip install tilelang -f https://tile-ai.github.io/whl/nightly
+# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
 ```
 
 > **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.

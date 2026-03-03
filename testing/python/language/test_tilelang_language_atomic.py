@@ -88,6 +88,7 @@ def atomic_addx2_program(M, N, block_M, block_N, dtype=T.float16):
 
 def run_atomic_addx2(M, N, block_M, block_N, dtype=T.float16):
     kernel = atomic_addx2_program(M, N, block_M, block_N, dtype=dtype)
+    print(kernel.get_kernel_source())
     import torch
 
     A = torch.randn(M, N, dtype=torch.float32).cuda().to(getattr(torch, dtype))
@@ -229,7 +230,9 @@ def test_tma_atomic_add():
 
 
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
+    tilelang.disable_cache()
     kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
+    print(kernel.get_kernel_source())
     assert "AtomicAddx4" in kernel.get_kernel_source()
 
 

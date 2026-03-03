@@ -86,6 +86,8 @@ struct bfloat16x16 {
 
 typedef
     __attribute__((__vector_size__(4 * sizeof(short)))) short bfloat16x4_vec;
+typedef
+    __attribute__((__vector_size__(8 * sizeof(short)))) short bfloat16x8_vec;
 
 using int32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using float32x4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
@@ -108,6 +110,33 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
 }
 
 namespace tl {
+
+// Packed FP32x2 math helpers (HIP fallback)
+//
+// CUDA has PTX `.f32x2` instructions that may lower to SASS FADD2/FMUL2/FFMA2
+// on supported architectures. HIP does not expose an equivalent packed-FP32x2
+// instruction, so we provide per-lane scalar fallbacks to keep the TileLang
+// language surface portable.
+TL_DEVICE float2 fadd2(float2 a, float2 b) {
+  float2 out;
+  out.x = a.x + b.x;
+  out.y = a.y + b.y;
+  return out;
+}
+
+TL_DEVICE float2 fmul2(float2 a, float2 b) {
+  float2 out;
+  out.x = a.x * b.x;
+  out.y = a.y * b.y;
+  return out;
+}
+
+TL_DEVICE float2 fma2(float2 a, float2 b, float2 c) {
+  float2 out;
+  out.x = a.x * b.x + c.x;
+  out.y = a.y * b.y + c.y;
+  return out;
+}
 
 // Any
 template <typename T> TL_DEVICE bool Any(T *a, int size) {

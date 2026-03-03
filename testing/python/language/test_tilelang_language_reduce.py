@@ -4,6 +4,7 @@ import tilelang as tl
 import tilelang.language as T
 
 tilelang.testing.set_random_seed()
+tilelang.disable_cache()
 
 
 def _make_shared_reduce(M, N, dtype, reduce_cb):
@@ -29,7 +30,7 @@ def _run_program(program, ref_program, atol=1e-2, rtol=1e-2):
     profiler.assert_allclose(ref_program, atol=atol, rtol=rtol)
 
 
-def reduce_max_test(M, N, dtype=T.float16):
+def reduce_test(M, N, dtype=T.float16, op="sum", threads=32):
     import tilelang.language as T
 
     @T.prim_func
@@ -37,31 +38,27 @@ def reduce_max_test(M, N, dtype=T.float16):
         A: T.Tensor((M, N), dtype),
         B: T.Tensor((M,), dtype),
     ):
-        with T.Kernel(1) as _:
+        with T.Kernel(1, threads=threads) as _:
             A_local = T.alloc_fragment((M, N), dtype)
             B_local = T.alloc_fragment((M,), dtype)
 
             T.copy(A, A_local)
-            T.reduce_max(A_local, B_local, dim=1)
-            T.copy(B_local, B)
-
-    return main
-
-
-def reduce_sum_test(M, N, dtype=T.float32):
-    import tilelang.language as T
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((M, N), dtype),
-        B: T.Tensor((M,), dtype),
-    ):
-        with T.Kernel(1) as _:
-            A_local = T.alloc_fragment((M, N), dtype)
-            B_local = T.alloc_fragment((M,), dtype)
-
-            T.copy(A, A_local)
-            T.reduce_sum(A_local, B_local, dim=1)
+            if op == "sum":
+                T.reduce_sum(A_local, B_local, dim=1)
+            elif op == "max":
+                T.reduce_max(A_local, B_local, dim=1)
+            elif op == "min":
+                T.reduce_min(A_local, B_local, dim=1)
+            elif op == "abssum":
+                T.reduce_abssum(A_local, B_local, dim=1)
+            elif op == "absmax":
+                T.reduce_absmax(A_local, B_local, dim=1)
+            elif op == "bitand":
+                T.reduce_bitand(A_local, B_local, dim=1)
+            elif op == "bitor":
+                T.reduce_bitor(A_local, B_local, dim=1)
+            elif op == "bitxor":
+                T.reduce_bitxor(A_local, B_local, dim=1)
             T.copy(B_local, B)
 
     return main
@@ -87,14 +84,33 @@ def reduce_absmax_ss(M, N, dtype=T.float32):
     return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_absmax(src, dst, dim=1))
 
 
-def run_reduce_sum(M, N, dtype=T.float32, mode="rr"):
+def run_reduce(M, N, dtype=T.float32, op="sum", mode="rr", threads=32):
     if mode == "rr":
-        program = reduce_sum_test(M, N, dtype)
+        program = reduce_test(M, N, dtype, op, threads)
     elif mode == "ss":
+        assert op == "sum", f"shared reduce only supports sum, got {op}"
         program = reduce_sum_ss(M, N, dtype)
     else:
-        raise NotImplementedError("run_reduce_sum only supports rr and ss")
-    _run_program(program, lambda A: A.sum(dim=1))
+        raise NotImplementedError(f"run_reduce only supports rr and ss, got {mode}")
+
+    import torch
+
+    def ref_fn(A):
+        if op == "sum":
+            res = A.sum(dim=1)
+        elif op == "max":
+            res = A.max(dim=1).values
+        elif op == "min":
+            res = A.min(dim=1).values
+        elif op == "abssum":
+            res = A.abs().sum(dim=1)
+        elif op == "absmax":
+            res = A.abs().max(dim=1).values
+        if A.dtype in [torch.uint32, torch.int32, torch.int64]:
+            return res.to(A.dtype)
+        return res
+
+    _run_program(program, ref_fn)
 
 
 def run_shared_reduce(program_builder, ref_program, M, N, dtype=T.float32):
@@ -103,18 +119,32 @@ def run_shared_reduce(program_builder, ref_program, M, N, dtype=T.float32):
 
 
 def run_reduce_max(M, N, dtype=T.float16):
-    program = reduce_max_test(M, N, dtype)
+    program = reduce_test(M, N, dtype, "max")
     _run_program(program, lambda A: A.max(dim=1).values, atol=1e-2, rtol=1e-2)
 
 
 def test_reduce_sum():
-    run_reduce_sum(256, 256)
-    run_reduce_sum(512, 128)
-    run_reduce_sum(128, 512)
+    MN_zip = [(256, 256), (512, 128), (128, 512)]
+    for dtype in [T.float32, T.int32, T.int64]:
+        for M, N in MN_zip:
+            run_reduce(M, N, dtype, "sum")
+
+
+def test_reduce_other_op():
+    MN_zip = [(256, 256), (512, 128)]
+    for op in ["max", "min", "abssum", "absmax"]:
+        for dtype in [T.float32, T.int32, T.int64]:
+            for M, N in MN_zip:
+                run_reduce(M, N, dtype, op)
+
+
+def test_reduce_sum_threads():
+    run_reduce(32, 32, T.float32, "sum", mode="rr", threads=16)
+    run_reduce(16, 16, T.float32, "sum", mode="rr", threads=8)
 
 
 def test_reduce_sum_shared():
-    run_reduce_sum(64, 64, mode="ss")
+    run_reduce(64, 64, op="sum", mode="ss")
 
 
 def test_reduce_max():

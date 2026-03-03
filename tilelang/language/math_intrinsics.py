@@ -333,6 +333,76 @@ def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_fdiv"), x, y, rounding_mode)
 
 
+def _validate_f32x2_math_args(*args: PrimExpr) -> None:
+    for arg in args:
+        if not isinstance(arg, PrimExpr):
+            raise TypeError(f"Expected PrimExpr, got {type(arg)}: {arg}")
+        if arg.dtype != "float32x2":
+            raise ValueError(f"Expected dtype 'float32x2', got '{arg.dtype}'")
+
+
+def fadd2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed FP32x2 add.
+
+    Lowers to PTX `add.rn.f32x2` on supported NVIDIA architectures/toolchains,
+    and falls back to per-lane scalar operations otherwise.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        First operand. Must be dtype ``float32x2``.
+    y : PrimExpr
+        Second operand. Must be dtype ``float32x2``.
+
+    Returns
+    -------
+    result : PrimExpr
+        A ``float32x2`` result.
+    """
+    x = tir.convert(x)
+    y = tir.convert(y)
+    _validate_f32x2_math_args(x, y)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.fadd2"), x, y)
+
+
+def fmul2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed FP32x2 multiply.
+
+    Lowers to PTX `mul.rn.f32x2` on supported NVIDIA architectures/toolchains,
+    and falls back to per-lane scalar operations otherwise.
+    """
+    x = tir.convert(x)
+    y = tir.convert(y)
+    _validate_f32x2_math_args(x, y)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.fmul2"), x, y)
+
+
+def fma2(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
+    """Packed FP32x2 fused multiply-add (x * y + z).
+
+    Lowers to PTX `fma.rn.f32x2` on supported NVIDIA architectures/toolchains,
+    and falls back to per-lane scalar operations otherwise.
+    """
+    x = tir.convert(x)
+    y = tir.convert(y)
+    z = tir.convert(z)
+    _validate_f32x2_math_args(x, y, z)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.fma2"), x, y, z)
+
+
+# Backward-compatible aliases (not exported from `tilelang.language`).
+def fadd_f32x2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    return fadd2(x, y)
+
+
+def fmul_f32x2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    return fmul2(x, y)
+
+
+def fma_f32x2(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
+    return fma2(x, y, z)
+
+
 __all__ = [
     "__log",  # noqa: F401
     "__log2",  # noqa: F401
@@ -350,4 +420,7 @@ __all__ = [
     "ieee_fsqrt",  # noqa: F401
     "ieee_frsqrt",  # noqa: F401
     "ieee_fdiv",  # noqa: F401
+    "fadd2",  # noqa: F401
+    "fmul2",  # noqa: F401
+    "fma2",  # noqa: F401
 ]

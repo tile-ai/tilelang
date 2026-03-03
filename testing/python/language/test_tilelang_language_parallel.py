@@ -66,5 +66,21 @@ def test_parallel_dynamic_extent():
         torch.testing.assert_close(out, reference, atol=1e-5, rtol=1e-5)
 
 
+@tilelang.jit
+def _parallel_vectorize_local_and_var():
+    with T.Kernel(1) as _:
+        x = T.alloc_fragment([256], T.float32)
+        y = T.alloc_fragment([256], T.float32)
+        z = T.alloc_var(T.float32)
+        for i in T.parallel(256):
+            y[i] = x[i] * z
+
+
+def test_parallel_vectorize_var():
+    source = _parallel_vectorize_local_and_var.get_kernel_source()
+    # do not vectorize if the loop only contains local/fragment and var buffer access
+    assert "float2" not in source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -30,6 +30,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../target/utils.h"
 #include "tir/ir/buffer_common.h"
 
 namespace tvm {
@@ -503,11 +504,9 @@ tvm::transform::Pass LowerLDGSTG() {
       return f;
     }
 
-    // Check if target has "cutedsl" key - skip for CuTeDSL backend
-    for (const auto &key : target->keys) {
-      if (key == "cutedsl") {
-        return f;
-      }
+    // Skip for CuTeDSL backend
+    if (tl::TargetIsCuTeDSL(target)) {
+      return f;
     }
 
     // Read pass configurations

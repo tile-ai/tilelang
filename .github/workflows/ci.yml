@@ -395,6 +395,21 @@ jobs:
             -k metal \
             ./python
 
+      # CuTeDSL backend: run examples with TILELANG_TARGET=cutedsl
+      # Placed after core test steps so a CuTeDSL failure doesn't skip them.
+      - name: Run CuTeDSL examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        if: ${{ !cancelled() && contains(matrix.runner.toolkit, 'CUDA') }}
+        env:
+          TILELANG_TARGET: cutedsl
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+            ../examples
+
       - name: List generated files
         if: ${{ !cancelled() }}
         run: |

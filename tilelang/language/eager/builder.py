@@ -1122,7 +1122,7 @@ class JITFunc(Generic[_P, _T]):
         """Parse arguments and return cache key and tensor args."""
         p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
         if not tensor_args:
-            return (p1_key, None), kwargs
+            return (p1_key, None), {}
         tir_temp = self.p1_cache.get(p1_key, None)
         if tir_temp is None:
             # mode should be set by JITImpl before calling parse_args

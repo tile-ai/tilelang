@@ -2,6 +2,12 @@
 # https://github.com/mlc-ai/mlc-llm/blob/main/CMakeLists.txt
 
 cmake_minimum_required(VERSION 3.26)
+
+# Detect CUDA toolkit: tries host installation first, then falls back to
+# pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect).
+# Must be included before project() so CMAKE_CUDA_COMPILER is set.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
+
 project(TILE_LANG C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -142,6 +148,8 @@ foreach(BACKEND IN LISTS TILELANG_BACKENDS)
   set(${_backend_var} ${TILELANG_OPTION_${_backend_var}} CACHE STRING "${_doc}" FORCE)
   set(${_backend_var} ${TILELANG_OPTION_${_backend_var}})
 endforeach()
+# tvm tries to detect gtest by default, but may fail if its header is not installed.
+set(USE_GTEST OFF)
 
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
@@ -200,6 +208,12 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
 endif()
 
 if(USE_METAL)
+  if(NOT APPLE)
+    # On non-Apple platforms USE_METAL=ON enables only codegen (Metal source
+    # generation) without requiring the Metal/Foundation frameworks.
+    message(STATUS "Metal backend on non-Apple: enabling codegen-only mode (no Metal runtime)")
+    set(USE_METAL OFF)
+  endif()
   file(GLOB TILE_LANG_METAL_SRCS
     src/target/rt_mod_metal.cc
   )
@@ -329,6 +343,7 @@ elseif(USE_CUDA)
   list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
 
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
+  link_directories(${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR}/stubs)
 endif()
 
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")

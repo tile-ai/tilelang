@@ -148,43 +148,40 @@ template <typename AccessType> struct global_load<AccessType, 16> {
 
 // Convenience wrapper functions for direct use
 // load_global_32: Load 32 bits, return uint32_t
-template <typename T> TL_DEVICE uint32_t load_global_32(const T *ptr) {
+TL_DEVICE uint32_t load_global_32(const void *ptr) {
   uint32_t ret{};
   global_load<uint32_t, 4>(ret, ptr, true);
   return ret;
 }
 
 // load_global_64: Load 64 bits, return uint64_t
-template <typename T> TL_DEVICE uint2 load_global_64(const T *ptr) {
+TL_DEVICE uint2 load_global_64(const void *ptr) {
   uint2 ret{};
   global_load<uint2, 8>(ret, ptr, true);
   return ret;
 }
 
 // load_global_128: Load 128 bits, return uint4
-template <typename T> TL_DEVICE uint4 load_global_128(const T *ptr) {
+TL_DEVICE uint4 load_global_128(const void *ptr) {
   uint4 ret{};
   global_load<uint4, 16>(ret, ptr, true);
   return ret;
 }
 
 // Predicated (conditional) versions
-template <typename T>
-TL_DEVICE uint32_t load_global_32_conditional(const T *ptr, bool pred) {
+TL_DEVICE uint32_t load_global_32_conditional(const void *ptr, bool pred) {
   uint32_t ret{};
   global_load<uint32_t, 4>(ret, ptr, pred);
   return ret;
 }
 
-template <typename T>
-TL_DEVICE uint2 load_global_64_conditional(const T *ptr, bool pred) {
+TL_DEVICE uint2 load_global_64_conditional(const void *ptr, bool pred) {
   uint2 ret{};
   global_load<uint2, 8>(ret, ptr, pred);
   return ret;
 }
 
-template <typename T>
-TL_DEVICE uint4 load_global_128_conditional(const T *ptr, bool pred) {
+TL_DEVICE uint4 load_global_128_conditional(const void *ptr, bool pred) {
   uint4 ret{};
   global_load<uint4, 16>(ret, ptr, pred);
   return ret;
@@ -241,33 +238,31 @@ template <typename AccessType> struct global_store<AccessType, 16> {
 
 // Convenience wrapper functions for direct use
 // store_global_32: Store 32 bits
-template <typename T> TL_DEVICE void store_global_32(T *ptr, uint32_t value) {
+TL_DEVICE void store_global_32(void *ptr, uint32_t value) {
   global_store<uint32_t, 4>(ptr, value, true);
 }
 
 // store_global_64: Store 64 bits
-template <typename T> TL_DEVICE void store_global_64(T *ptr, uint2 value) {
+TL_DEVICE void store_global_64(void *ptr, uint2 value) {
   global_store<uint2, 8>(ptr, value, true);
 }
 
 // store_global_128: Store 128 bits
-template <typename T> TL_DEVICE void store_global_128(T *ptr, uint4 value) {
+TL_DEVICE void store_global_128(void *ptr, uint4 value) {
   global_store<uint4, 16>(ptr, value, true);
 }
 
 // Predicated (conditional) versions
-template <typename T>
-TL_DEVICE void store_global_32_conditional(T *ptr, uint32_t value, bool pred) {
+TL_DEVICE void store_global_32_conditional(void *ptr, uint32_t value,
+                                           bool pred) {
   global_store<uint32_t, 4>(ptr, value, pred);
 }
 
-template <typename T>
-TL_DEVICE void store_global_64_conditional(T *ptr, uint2 value, bool pred) {
+TL_DEVICE void store_global_64_conditional(void *ptr, uint2 value, bool pred) {
   global_store<uint2, 8>(ptr, value, pred);
 }
 
-template <typename T>
-TL_DEVICE void store_global_128_conditional(T *ptr, uint4 value, bool pred) {
+TL_DEVICE void store_global_128_conditional(void *ptr, uint4 value, bool pred) {
   global_store<uint4, 16>(ptr, value, pred);
 }
 

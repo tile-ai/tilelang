@@ -172,6 +172,30 @@ KERNEL_LAUNCH_FUNC_CODE = """
 \t}}
 """
 
+# Cluster launch code for SM90+
+KERNEL_CLUSTER_LAUNCH_FUNC_CODE = """
+\t{{
+\t\tcudaLaunchConfig_t config;
+\t\tcudaLaunchAttribute attribute[2];
+\t\tattribute[0].id = cudaLaunchAttributeClusterDimension;
+\t\tattribute[0].val.clusterDim = {{{5}, {6}, {7}}};
+\t\tattribute[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+\t\tattribute[1].val.programmaticStreamSerializationAllowed = 1;
+\t\tconfig.attrs = attribute;
+\t\tconfig.numAttrs = 2;
+\t\tconfig.stream = stream;
+\t\tconfig.gridDim = {0};
+\t\tconfig.blockDim = {1};
+\t\tconfig.dynamicSmemBytes = {2};
+\t\tcudaError_t cluster_attr_result = cudaFuncSetAttribute({4}, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+\t\tif (cluster_attr_result != cudaSuccess) {{
+\t\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "Failed to set cluster attribute for {4}: %s", cudaGetErrorString(cluster_attr_result));
+\t\t\treturn -1;
+\t\t}}
+\t\tcudaLaunchKernelEx(&config, {4}, {3});
+\t}}
+"""
+
 
 class BaseWrapper(ABC):
     @abstractmethod
@@ -325,36 +349,33 @@ class TLCUDASourceWrapper:
                 call_args = f"\tvoid* {function_name}_args[] = {{{', '.join(args_array)}}};\n"
                 kernel_launch_code += call_args
                 # Using cudaLaunchCooperativeKernel to launch the kernel
+                assert self.cluster_dims[function_name] is None, "Cluster launch is not supported for cooperative groups"
                 kernel_launch_code += "\tTILELANG_CHECK(cudaLaunchCooperativeKernel((void*){}, {}, {}, {}, {}, stream));\n".format(
                     function_name, grid_str, block_str, function_name + "_args", smem_str
                 )
-            elif function_name in self.pdl_sync_map:
-                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
-                assert len(function_params) == len(args_list), (
-                    f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
-                )
-
-                call_args = ", ".join(args_list)
-
-                kernel_code = KERNEL_LAUNCH_FUNC_CODE.format(
-                    grid_str,
-                    block_str,
-                    smem_str,
-                    call_args,
-                    function_name,
-                )
-
-                kernel_launch_code += kernel_code
-                kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
-
             else:
                 args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
+
                 call_args = ", ".join(args_list)
-                kernel_launch_code += f"\t{function_name}<<<{grid_str}, {block_str}, {smem_str}, stream>>>({call_args});\n"
+                if self.cluster_dims[function_name] is None:
+                    kernel_code = KERNEL_LAUNCH_FUNC_CODE.format(
+                        grid_str,
+                        block_str,
+                        smem_str,
+                        call_args,
+                        function_name,
+                    )
+                else:
+                    kernel_code = KERNEL_CLUSTER_LAUNCH_FUNC_CODE.format(
+                        grid_str, block_str, smem_str, call_args, function_name, *self.cluster_dims[function_name]
+                    )
+
+                kernel_launch_code += kernel_code
                 kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
+
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
@@ -446,10 +467,12 @@ class TLCUDASourceWrapper:
         dynamic_smem_buf_map = {}
         function_names = []
         use_cooperative_groups_map = {}
+        cluster_dims_map = {}
         for g_var, func in self.device_mod.functions.items():
             # Default block and grid configurations
             block_info = [1, 1, 1]
             grid_info = [1, 1, 1]
+            cluster_dims = None
             function_name = g_var.name_hint
             attrs = func.attrs
             dynamic_smem_buf = None
@@ -466,6 +489,10 @@ class TLCUDASourceWrapper:
                         block_info["xyz".index(tag[-1])] = extent
                     elif "blockIdx" in tag:
                         grid_info["xyz".index(tag[-1])] = extent
+            if "cluster_dims" in attrs:
+                # Extract cluster dimensions for SM90+ cluster launch
+                cluster_dims_attr = attrs["cluster_dims"]
+                cluster_dims = [int(cluster_dims_attr[i]) for i in range(len(cluster_dims_attr))]
 
             if "has_cuda_pdl_sync" in attrs:
                 self.pdl_sync_map[function_name] = 0
@@ -475,6 +502,7 @@ class TLCUDASourceWrapper:
             grid_info_map[function_name] = grid_info
             dynamic_smem_buf_map[function_name] = dynamic_smem_buf
             use_cooperative_groups_map[function_name] = use_cooperative_groups
+            cluster_dims_map[function_name] = cluster_dims
             function_names.append(function_name)
 
         # Store the mappings for use in code generation
@@ -482,6 +510,7 @@ class TLCUDASourceWrapper:
         self.grid_info = grid_info_map
         self.dynamic_smem_buf = dynamic_smem_buf_map
         self.use_cooperative_groups = use_cooperative_groups_map
+        self.cluster_dims = cluster_dims_map
 
         function_names_index = {}
         for g_var, func in self.host_mod.functions.items():
@@ -578,6 +607,7 @@ class TLCUDASourceWrapper:
                 "grid_info": self.grid_info[function_name],
                 "dynamic_smem_buf": self.dynamic_smem_buf[function_name],
                 "function_params": function_params,
+                "cluster_dims": self.cluster_dims.get(function_name, None),
             }
 
         # Create the host function wrapper for the CUDA kernel

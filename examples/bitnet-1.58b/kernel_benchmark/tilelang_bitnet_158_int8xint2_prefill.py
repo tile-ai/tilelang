@@ -253,8 +253,8 @@ def bitnet_158_int8xint2_prefill(
                     T.call_extern(
                         "handle",
                         "decode_i2u_to_i8s",
-                        T.address_of(B_local[0]),
-                        T.address_of(B_dequantize_local[0]),
+                        T.access_ptr(B_local, "r"),
+                        T.access_ptr(B_dequantize_local, "w"),
                     )
 
                     for v in T.vectorized(0, local_size):

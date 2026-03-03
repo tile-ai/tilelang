@@ -53,9 +53,9 @@ FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
  * - Builds index Vars for each output dimension.
  * - Reads the layout's ReplicateExtent and:
  *   - if extent == 1, emits a no-op Evaluate(0);
- *   - otherwise constructs an AllReduce extern call (uses `run_hopper` when the
- *     compilation target is Hopper) with an optional workspace (allocated via
- *     T.AddWorkspace when reducing_threads >= 32) and stores the result via
+ *   - otherwise constructs an AllReduce extern call (uses `NamedBarrier` when
+ *     the compilation target is Hopper) with an optional workspace (allocated
+ * via T.AddWorkspace when reducing_threads >= 32) and stores the result via
  *     BufferStore.
  * - Wraps the store in parallel outer For loops over each output dimension.
  *
@@ -99,11 +99,11 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
   int reducing_threads = extent;
   std::stringstream ss;
   auto thread_offset = T.thread_bounds->min;
-  if (TargetIsHopper(T.target) || TargetIsSm100(T.target) ||
-      TargetIsSM120(T.target)) {
+  if (TargetHasSMVersionGE(T.target, 90)) {
     auto all_threads = T.thread_bounds->extent;
     ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
-       << ", " << thread_offset << ", " << all_threads << ">::run_hopper";
+       << ", " << thread_offset << ", tl::NamedBarrier<" << all_threads
+       << ">>::run";
   } else {
     ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
        << ", " << thread_offset << ">::run";

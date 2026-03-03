@@ -241,6 +241,11 @@ private:
     for (size_t i = 0; i < flattened->shape.size(); ++i) {
       writer->shape.Set(i, analyzer_->canonical_simplify(flattened->shape[i]));
     }
+    // Flattened indices already include buf->elem_offset (see
+    // VisitBufferAccess). Zero elem_offset so later passes (e.g.
+    // Buffer::access_ptr) use index as the sole offset and do not add
+    // buffer->elem_offset again.
+    writer->elem_offset = make_const(flattened->DefaultIndexType(), 0);
 
     buffer_remap_[buf] = flattened;
     return flattened;
