@@ -1,4 +1,3 @@
-from ast import Pass
 import torch
 import tilelang.testing
 import tilelang.language as T
@@ -182,8 +181,9 @@ def test_vectorize_call_infinity():
     assert "float4" in kernel.get_kernel_source()
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_VECTORIZE_PLANNER_VERBOSE: True,
-                                tilelang.PassConfigKey.TL_ENABLE_ASYNC_COPY: False})
+@tilelang.jit(
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_VECTORIZE_PLANNER_VERBOSE: True, tilelang.PassConfigKey.TL_ENABLE_ASYNC_COPY: False}
+)
 def vectorize_test_call_bitwise_logical():
     A = T.empty((128, 32), dtype=T.float32)
     with T.Kernel(1, threads=128):

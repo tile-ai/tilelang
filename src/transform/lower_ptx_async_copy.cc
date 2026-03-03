@@ -462,12 +462,10 @@ private:
                  IntImm(DataType::Int(32), rw_mask)});
   }
 
-  static Optional<Stmt>
-  MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
-                           const PointerTypeInfo &ptr_info,
-                           const BufferLoad &dst_base_load,
-                           const BufferLoad &src_base_load, int bytes,
-                           bool predicated, const PrimExpr &predicate_value) {
+  static Optional<Stmt> MakeCPAsyncStmtFromLoads(
+      const BufferStoreNode *store, const PointerTypeInfo &ptr_info,
+      const BufferLoad &dst_base_load, const BufferLoad &src_base_load,
+      int bytes, bool predicated, const PrimExpr &predicate_value) {
     int dst_elem_count = bytes / ptr_info.dst_elem_type.bytes();
     int src_elem_count = bytes / ptr_info.src_elem_type.bytes();
     if (dst_elem_count <= 0 || src_elem_count <= 0) {
