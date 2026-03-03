@@ -82,6 +82,10 @@ public:
                               const BufferStoreNode *store,
                               bool predicated = false,
                               const PrimExpr &predicate_value = PrimExpr()) {
+    // Pipeline:
+    // 1) Analyze source/destination indices and transfer width eligibility.
+    // 2) Validate pointer type metadata for access_ptr construction.
+    // 3) Build cp.async with scalar/vectorized offsets if representable.
     std::optional<CopyIndexInfo> index_info = PrepareCopyIndexInfo(load, store);
     if (!index_info.has_value()) {
       return Optional<Stmt>();
@@ -103,13 +107,8 @@ public:
       return MakeCPAsyncStmt(load, store, ptr_info.value(),
                              /*dst_offset=*/index_info->dst_index,
                              /*src_offset=*/index_info->src_index,
-                             /*bytes=*/index_info->bytes, predicated,
+                             /*bytes=*/index_info->transfer_bytes, predicated,
                              predicate_value);
-    }
-
-    if (index_info->lanes != index_info->index_lanes) {
-      // Vector indices must cover the full transfer width.
-      return Optional<Stmt>();
     }
 
     PrimExpr src_offset = ExtractVectorBase(index_info->src_index);
@@ -126,7 +125,7 @@ public:
     return MakeCPAsyncStmt(load, store, ptr_info.value(),
                            /*dst_offset=*/dst_offset,
                            /*src_offset=*/src_offset,
-                           /*bytes=*/index_info->bytes, predicated,
+                           /*bytes=*/index_info->transfer_bytes, predicated,
                            predicate_value);
   }
 
@@ -141,7 +140,7 @@ public:
     Array<Stmt> out;
     out.reserve(op->seq.size() + 2);
 
-    CopySyncState local_sync{pending_sync_copies_, uncommitted_sync_copies_};
+    CopySyncState sync_state{pending_sync_copies_, uncommitted_sync_copies_};
     pending_sync_copies_ = false;
     uncommitted_sync_copies_ = false;
 
@@ -151,44 +150,45 @@ public:
 
       // Before we execute a non-copy statement, we must preserve synchronous
       // semantics for injected cp.async stores by making the data visible.
-      if (local_sync.open_copy_region && !stmt_is_pure_copy_region) {
-        AppendSyncVisibility(&out, local_sync.uncommitted);
-        local_sync.open_copy_region = false;
-        local_sync.uncommitted = false;
+      if (sync_state.open_copy_region && !stmt_is_pure_copy_region) {
+        AppendSyncVisibility(&out, sync_state.uncommitted_transfers);
+        sync_state.open_copy_region = false;
+        sync_state.uncommitted_transfers = false;
       }
 
       // If we are carrying uncommitted injected cp.async into an explicit wait,
       // ensure they are committed so the wait actually covers them.
-      if (local_sync.open_copy_region && local_sync.uncommitted &&
+      if (sync_state.open_copy_region && sync_state.uncommitted_transfers &&
           visited_info.analysis.wait > 0) {
         out.push_back(MakeCommitGroupStmt());
-        local_sync.uncommitted = false;
+        sync_state.uncommitted_transfers = false;
       }
 
       out.push_back(visited_info.visited);
 
-      if (visited_info.has_pending_sync_copy) {
-        local_sync.open_copy_region = true;
-        local_sync.uncommitted =
-            local_sync.uncommitted || visited_info.has_uncommitted_sync_copy;
+      if (visited_info.opens_copy_region) {
+        sync_state.open_copy_region = true;
+        sync_state.uncommitted_transfers =
+            sync_state.uncommitted_transfers ||
+            visited_info.has_uncommitted_transfers;
       }
 
       if (visited_info.analysis.commit > 0) {
         // A commit closes the currently open group, so there are no longer any
         // uncommitted injected cp.async transfers.
-        local_sync.uncommitted = false;
+        sync_state.uncommitted_transfers = false;
       }
 
       if (visited_info.analysis.wait > 0) {
         // Any explicit wait serves as a synchronization boundary for injected
         // synchronous copies.
-        local_sync.open_copy_region = false;
-        local_sync.uncommitted = false;
+        sync_state.open_copy_region = false;
+        sync_state.uncommitted_transfers = false;
       }
     }
 
-    pending_sync_copies_ = local_sync.open_copy_region;
-    uncommitted_sync_copies_ = local_sync.uncommitted;
+    pending_sync_copies_ = sync_state.open_copy_region;
+    uncommitted_sync_copies_ = sync_state.uncommitted_transfers;
 
     if (out.empty()) {
       return Evaluate(0);
@@ -278,22 +278,24 @@ public:
   }
 
 private:
+  // A copy candidate represented after flattening source/destination indexing.
   struct CopyIndexInfo {
     PrimExpr src_index;
     PrimExpr dst_index;
     int index_lanes{1};
-    int lanes{1};
-    int bytes{0};
+    int transfer_bytes{0};
   };
 
+  // Pointer element type metadata extracted from buffer handle annotations.
   struct PointerTypeInfo {
     DataType dst_elem_type;
     DataType src_elem_type;
   };
 
+  // Synchronization state for injected cp.async runs carried across statements.
   struct CopySyncState {
     bool open_copy_region{false};
-    bool uncommitted{false};
+    bool uncommitted_transfers{false};
   };
 
   struct ActiveVectorizedLoop {
@@ -301,8 +303,40 @@ private:
     int extent;
   };
 
-  static bool IsSupportedCPAsyncTransferBytes(int bytes) {
+  // ---- Copy candidate analysis helpers ----
+  static bool IsValidCPAsyncTransferBytes(int bytes) {
     return bytes == 4 || bytes == 8 || bytes == 16;
+  }
+
+  static bool IsZeroValue(const PrimExpr &expr) {
+    if (const auto *broadcast = expr.as<BroadcastNode>()) {
+      return IsZeroValue(broadcast->value);
+    }
+    if (const auto *float_imm = expr.as<FloatImmNode>()) {
+      return float_imm->value == 0.0f;
+    }
+    if (const auto *int_imm = expr.as<IntImmNode>()) {
+      return int_imm->value == 0;
+    }
+    return false;
+  }
+
+  static Optional<PrimExpr>
+  FlattenToLinearOffset(const Buffer &buf,
+                        const ffi::Array<PrimExpr> &indices) {
+    // Convert N-D indices (potentially with axis_separators) into a single
+    // row-major linear element offset.
+    ffi::Array<PrimExpr> physical = buf.OffsetOf(indices);
+    Buffer flattened_buf = buf.GetFlattenedBuffer();
+    if (physical.size() != flattened_buf->shape.size() || physical.empty()) {
+      return Optional<PrimExpr>();
+    }
+
+    PrimExpr linear = physical[0];
+    for (size_t i = 1; i < physical.size(); ++i) {
+      linear = linear * flattened_buf->shape[i] + physical[i];
+    }
+    return linear;
   }
 
   std::optional<CopyIndexInfo>
@@ -334,11 +368,11 @@ private:
       return std::nullopt;
     }
 
-    const int lanes = std::max(value_lanes, index_lanes);
-    const int elem_bytes = lanes * load->dtype.bytes();
+    const int effective_lanes = std::max(value_lanes, index_lanes);
+    const int elem_bytes = effective_lanes * load->dtype.bytes();
     const int total_bytes = static_cast<int>(elem_bytes) *
                             static_cast<int>(current_vectorized_lanes_);
-    if (!IsSupportedCPAsyncTransferBytes(total_bytes)) {
+    if (!IsValidCPAsyncTransferBytes(total_bytes)) {
       return std::nullopt;
     }
 
@@ -346,8 +380,7 @@ private:
     info.src_index = src_index;
     info.dst_index = dst_index;
     info.index_lanes = index_lanes;
-    info.lanes = lanes;
-    info.bytes = elem_bytes;
+    info.transfer_bytes = elem_bytes;
     return info;
   }
 
@@ -411,10 +444,19 @@ private:
       return Optional<Stmt>();
     }
 
-    PrimExpr dst_access_ptr = store->buffer.access_ptr(
-        2, DataType::Handle(), 1, dst_offset, PrimExpr(dst_elem_count));
-    PrimExpr src_access_ptr = load->buffer.access_ptr(
-        1, DataType::Handle(), 1, src_offset, PrimExpr(src_elem_count));
+    auto make_access_ptr = [](const Buffer &buffer, const PrimExpr &offset,
+                              int extent, int rw_mask) -> PrimExpr {
+      Buffer flattened = buffer.GetFlattenedBuffer();
+      BufferLoad base_load(flattened, {offset});
+      return Call(DataType::Handle(), tvm::tl::access_ptr(),
+                  {base_load, IntImm(DataType::Int(32), extent),
+                   IntImm(DataType::Int(32), rw_mask)});
+    };
+
+    PrimExpr dst_access_ptr = make_access_ptr(store->buffer, dst_offset,
+                                              dst_elem_count, /*rw_mask=*/2);
+    PrimExpr src_access_ptr = make_access_ptr(load->buffer, src_offset,
+                                              src_elem_count, /*rw_mask=*/1);
 
     ffi::Array<PrimExpr> cp_async_args;
     if (predicated) {
@@ -427,13 +469,16 @@ private:
                          tvm::tir::builtin::ptx_cp_async(), cp_async_args));
   }
 
-  static void AppendSyncVisibility(Array<Stmt> *seq, bool with_commit) {
-    if (with_commit) {
-      seq->push_back(MakeCommitGroupStmt());
-    }
-    seq->push_back(MakeWaitGroupStmt(0));
+  static Stmt MakeCommitGroupStmt() {
+    return Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
   }
 
+  static Stmt MakeWaitGroupStmt(int n) {
+    return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
+                         {IntImm(DataType::Int(32), n)}));
+  }
+
+  // ---- Vectorized-offset contiguity helpers ----
   static bool TryGetConstInt64(const PrimExpr &expr, int64_t *value) {
     if (const auto *imm = expr.as<IntImmNode>()) {
       *value = imm->value;
@@ -444,14 +489,9 @@ private:
 
   bool HasUnitStrideForVectorizedLoop(const PrimExpr &expr,
                                       const ActiveVectorizedLoop &loop) {
-    if (loop.extent <= 1) {
-      return false;
-    }
-
     PrimExpr prev = analyzer_.Simplify(
         Substitute(expr, {{loop.loop_var, IntImm(loop.loop_var->dtype, 0)}}));
 
-    bool stride_initialized = false;
     int64_t stride = 0;
     for (int value = 1; value < loop.extent; ++value) {
       PrimExpr curr = analyzer_.Simplify(Substitute(
@@ -461,16 +501,15 @@ private:
       if (!TryGetConstInt64(delta, &delta_value)) {
         return false;
       }
-      if (!stride_initialized) {
+      if (value == 1) {
         stride = delta_value;
-        stride_initialized = true;
       } else if (delta_value != stride) {
         return false;
       }
       prev = curr;
     }
 
-    return stride_initialized && stride == 1;
+    return stride == 1;
   }
 
   bool HasContiguousVectorizedOffsets(const PrimExpr &src_index,
@@ -484,24 +523,7 @@ private:
     return true;
   }
 
-  static Optional<PrimExpr>
-  FlattenToLinearOffset(const Buffer &buf,
-                        const ffi::Array<PrimExpr> &indices) {
-    // Convert N-D indices (potentially with axis_separators) into a single
-    // row-major linear element offset.
-    ffi::Array<PrimExpr> physical = buf.OffsetOf(indices);
-    Buffer flattened_buf = buf.GetFlattenedBuffer();
-    if (physical.size() != flattened_buf->shape.size() || physical.empty()) {
-      return Optional<PrimExpr>();
-    }
-
-    PrimExpr linear = physical[0];
-    for (size_t i = 1; i < physical.size(); ++i) {
-      linear = linear * flattened_buf->shape[i] + physical[i];
-    }
-    return linear;
-  }
-
+  // ---- Copy-region synchronization analysis helpers ----
   struct CopyRegionAnalysis {
     bool is_pure_copy_region = true;
     int commit = 0;
@@ -511,8 +533,8 @@ private:
   struct VisitedStmtInfo {
     Stmt visited;
     CopyRegionAnalysis analysis;
-    bool has_pending_sync_copy{false};
-    bool has_uncommitted_sync_copy{false};
+    bool opens_copy_region{false};
+    bool has_uncommitted_transfers{false};
   };
 
   static CopyRegionAnalysis
@@ -609,31 +631,17 @@ private:
     VisitedStmtInfo out;
     out.visited = visited;
     out.analysis = AnalyzeCopyRegion(visited);
-    out.has_pending_sync_copy = pending_sync_copies_;
-    out.has_uncommitted_sync_copy = uncommitted_sync_copies_;
+    out.opens_copy_region = pending_sync_copies_;
+    out.has_uncommitted_transfers = uncommitted_sync_copies_;
     return out;
   }
 
-  static bool IsZeroValue(const PrimExpr &e) {
-    if (auto *b = e.as<BroadcastNode>()) {
-      return IsZeroValue(b->value);
+  // ---- Synchronization emission helpers ----
+  static void AppendSyncVisibility(Array<Stmt> *seq, bool include_commit) {
+    if (include_commit) {
+      seq->push_back(MakeCommitGroupStmt());
     }
-    if (auto *f = e.as<FloatImmNode>()) {
-      return f->value == 0.0f;
-    }
-    if (auto *i = e.as<IntImmNode>()) {
-      return i->value == 0;
-    }
-    return false;
-  }
-
-  static Stmt MakeCommitGroupStmt() {
-    return Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
-  }
-
-  static Stmt MakeWaitGroupStmt(int n) {
-    return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
-                         {IntImm(DataType::Int(32), n)}));
+    seq->push_back(MakeWaitGroupStmt(0));
   }
 
   // Note: AnalyzeCopyRegion replaces both the old `IsPureCopyRegion` and
