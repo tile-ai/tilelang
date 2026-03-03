@@ -433,9 +433,9 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     }
     copy_inst = CopyInst::kCPAsync;
   } else {
-    copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
-                            T.layout_map, T.analyzer, T.buffer_oob,
-                            T.enable_auto_async_copy);
+    copy_inst =
+        GetCopyInst(target, disable_tma_lower || GetDisableTMA(), T.layout_map,
+                    T.analyzer, T.buffer_oob, T.enable_auto_async_copy);
   }
 
   // If user annotated a loop layout on T.copy, enforce SIMT (normal) copy.
@@ -809,8 +809,7 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
 // TMemLoad, TMemStore, CPAsync, Normal.
 CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
                                const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer,
-                               bool buffer_oob,
+                               arith::Analyzer *analyzer, bool buffer_oob,
                                bool enable_auto_async_copy) const {
   // disable_tma_lower is from pass_configs
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
@@ -987,9 +986,10 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
-                               T.layout_map, analyzer, /*buffer_oob=*/false,
-                               /*enable_auto_async_copy=*/T.enable_auto_async_copy);
+  auto copy_inst =
+      GetCopyInst(target, disable_tma_lower || GetDisableTMA(), T.layout_map,
+                  analyzer, /*buffer_oob=*/false,
+                  /*enable_auto_async_copy=*/T.enable_auto_async_copy);
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
     auto tmem_copy = LowerTmemCopy(T, analyzer);
     ICHECK(tmem_copy.defined()) << "Failed to lower tensor memory copy";

@@ -157,14 +157,12 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      bool is_bulk_copy =
-          call->op.same_as(tma_load()) ||
-          call->op.same_as(tma_load_im2col()) ||
-          call->op.same_as(tl::ptx_cp_async()) ||
-          call->op.same_as(builtin::ptx_cp_async());
-      bool is_cp_async_sync =
-          call->op.same_as(builtin::ptx_commit_group()) ||
-          call->op.same_as(builtin::ptx_wait_group());
+      bool is_bulk_copy = call->op.same_as(tma_load()) ||
+                          call->op.same_as(tma_load_im2col()) ||
+                          call->op.same_as(tl::ptx_cp_async()) ||
+                          call->op.same_as(builtin::ptx_cp_async());
+      bool is_cp_async_sync = call->op.same_as(builtin::ptx_commit_group()) ||
+                              call->op.same_as(builtin::ptx_wait_group());
       if (is_bulk_copy || is_cp_async_sync) {
         role = Role::kProducer;
       }
