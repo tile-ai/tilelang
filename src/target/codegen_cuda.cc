@@ -1868,7 +1868,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ss << "tl::tmem_allocate";
     if (op->annotations.find("use_2cta") != op->annotations.end()
         && Downcast<Bool>(op->annotations["use_2cta"])->value) {
-      ss << "<use_2cta=true>";
+      ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
@@ -1876,7 +1876,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ss << "tl::tmem_deallocate";
     if (op->annotations.find("use_2cta") != op->annotations.end()
         && Downcast<Bool>(op->annotations["use_2cta"])->value) {
-      ss << "<use_2cta=true>";
+      ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
@@ -2533,9 +2533,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;
-    this->PrintIndent();
-    this->stream << "tl::tcgen05_mma_arrive(" << this->PrintExpr(op->args[0])
-                 << ");\n";
+    std::ostringstream ss;
+    ss << "tl::tcgen05_mma_arrive";
+    if (op->annotations.find("use_2cta") != op->annotations.end()
+        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
