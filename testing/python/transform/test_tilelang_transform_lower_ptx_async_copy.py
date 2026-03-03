@@ -298,6 +298,31 @@ def test_lower_ptx_async_copy_from_vectorized_loop():
     assert calls.get("tir.ptx_cp_async", 0) > 0
 
 
+def test_lower_ptx_async_copy_skips_vectorized_broadcast_source():
+    """Do not lower vectorized broadcast load into cp.async."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((16,), T.float32),
+        B: T.Tensor((16,), T.float32),
+    ):
+        S = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for i in T.serial(4):
+            for v in T.vectorized(4):
+                S[i * 4 + v] = A[i * 4]
+        B[0] = S[0]
+
+    target = tvm.target.Target("cuda -arch=sm_80")
+    func = before.with_attr("global_symbol", "main").with_attr("target", target)
+    mod = tvm.IRModule.from_expr(func)
+
+    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    calls = _count_calls(mod["main"])
+    assert calls.get("tir.ptx_cp_async", 0) == 0
+    assert calls.get("tir.ptx_commit_group", 0) == 0
+    assert calls.get("tir.ptx_wait_group", 0) == 0
+
+
 def test_lower_ptx_async_copy_from_ramp():
     """LowerPTXAsyncCopy should rewrite ramp to cp.async."""
 

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include "../op/builtin.h"
@@ -41,10 +42,7 @@ public:
     Array<Stmt> seq;
     seq.reserve(3);
     seq.push_back(body);
-    if (uncommitted_sync_copies_) {
-      seq.push_back(MakeCommitGroupStmt());
-    }
-    seq.push_back(MakeWaitGroupStmt(0));
+    AppendSyncVisibility(&seq, uncommitted_sync_copies_);
     pending_sync_copies_ = false;
     uncommitted_sync_copies_ = false;
     return SeqStmt(seq);
@@ -60,16 +58,22 @@ public:
     // This mirrors the logic in `CPAsyncStoreRewriter` used by `T.copy`
     // lowering, and avoids duplicating vectorize-loop collapse here.
     int previous_vectorized_lanes = current_vectorized_lanes_;
+    bool pushed_vectorized_loop = false;
     if (op->kind == ForKind::kVectorized) {
       if (const auto *extent_imm = op->extent.as<IntImmNode>()) {
         int lanes = static_cast<int>(extent_imm->value);
         if (lanes > 1 && current_vectorized_lanes_ <=
                              std::numeric_limits<int>::max() / lanes) {
           current_vectorized_lanes_ *= lanes;
+          active_vectorized_loops_.push_back({op->loop_var, lanes});
+          pushed_vectorized_loop = true;
         }
       }
     }
     Stmt stmt = StmtMutator::VisitStmt_(op);
+    if (pushed_vectorized_loop) {
+      active_vectorized_loops_.pop_back();
+    }
     current_vectorized_lanes_ = previous_vectorized_lanes;
     return stmt;
   }
@@ -78,110 +82,38 @@ public:
                               const BufferStoreNode *store,
                               bool predicated = false,
                               const PrimExpr &predicate_value = PrimExpr()) {
-    if (!IsGlobalBuffer(load->buffer)) {
+    std::optional<CopyIndexInfo> index_info = PrepareCopyIndexInfo(load, store);
+    if (!index_info.has_value()) {
       return Optional<Stmt>();
     }
 
-    Optional<PrimExpr> src_index_opt =
-        FlattenToLinearOffset(load->buffer, load->indices);
-    Optional<PrimExpr> dst_index_opt =
-        FlattenToLinearOffset(store->buffer, store->indices);
-    if (!src_index_opt.defined() || !dst_index_opt.defined()) {
-      return Optional<Stmt>();
-    }
-    PrimExpr src_index = src_index_opt.value();
-    PrimExpr dst_index = dst_index_opt.value();
-
-    if (src_index->dtype.lanes() != dst_index->dtype.lanes()) {
-      // Not a straightforward vectorized copy; skip.
-      return Optional<Stmt>();
-    }
-
-    const int index_lanes = src_index->dtype.lanes();
-    const int value_lanes = load->dtype.lanes();
-    if (value_lanes > 1 && index_lanes > 1 && value_lanes != index_lanes) {
-      // Mismatched vector lane representations; be conservative.
-      return Optional<Stmt>();
-    }
-    const int lanes = std::max(value_lanes, index_lanes);
-    const int elem_bytes = lanes * load->dtype.bytes();
-    const int total_bytes = static_cast<int>(elem_bytes) *
-                            static_cast<int>(current_vectorized_lanes_);
-    if (total_bytes != 4 && total_bytes != 8 && total_bytes != 16) {
-      return Optional<Stmt>();
-    }
-    const int bytes = elem_bytes;
-
-    auto dst_elem_type = GetPointerType(store->buffer->data->type_annotation);
-    auto src_elem_type = GetPointerType(load->buffer->data->type_annotation);
-    if (!dst_elem_type.has_value() || !src_elem_type.has_value()) {
+    std::optional<PointerTypeInfo> ptr_info =
+        PreparePointerTypeInfo(load, store);
+    if (!ptr_info.has_value()) {
       // Be conservative: if pointer metadata is missing, skip injection.
       return Optional<Stmt>();
     }
 
-    auto make_cp_async_stmt =
-        [&](const PrimExpr &dst_offset,
-            const PrimExpr &src_offset) -> Optional<Stmt> {
-      int dst_elem_count = bytes / dst_elem_type->bytes();
-      int src_elem_count = bytes / src_elem_type->bytes();
-      if (dst_elem_count <= 0 || src_elem_count <= 0) {
+    if (index_info->index_lanes == 1) {
+      if (current_vectorized_lanes_ > 1 &&
+          !HasContiguousVectorizedOffsets(index_info->src_index,
+                                          index_info->dst_index)) {
         return Optional<Stmt>();
       }
-
-      PrimExpr dst_access_ptr = store->buffer.access_ptr(
-          2, DataType::Handle(), 1, dst_offset, PrimExpr(dst_elem_count));
-      PrimExpr src_access_ptr = load->buffer.access_ptr(
-          1, DataType::Handle(), 1, src_offset, PrimExpr(src_elem_count));
-
-      ffi::Array<PrimExpr> cp_async_args;
-      if (predicated) {
-        cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes),
-                         predicate_value};
-      } else {
-        cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes)};
-      }
-      return Evaluate(Call(store->buffer->dtype,
-                           tvm::tir::builtin::ptx_cp_async(), cp_async_args));
-    };
-
-    if (index_lanes == 1) {
-      return make_cp_async_stmt(/*dst_offset=*/dst_index,
-                                /*src_offset=*/src_index);
+      return MakeCPAsyncStmt(load, store, ptr_info.value(),
+                             /*dst_offset=*/index_info->dst_index,
+                             /*src_offset=*/index_info->src_index,
+                             /*bytes=*/index_info->bytes, predicated,
+                             predicate_value);
     }
 
-    auto vector_base = [](const PrimExpr &e) -> PrimExpr {
-      if (const auto *r = e.as<RampNode>()) {
-        return r->base;
-      }
-      if (const auto *add = e.as<AddNode>()) {
-        // Common pattern after flattening a vectorized N-D buffer access:
-        //   (broadcast(base_offset) + ramp(vec_base, 1, lanes))
-        // or its commuted form:
-        //   (ramp(vec_base, 1, lanes) + broadcast(base_offset))
-        const PrimExpr &a = add->a;
-        const PrimExpr &b = add->b;
-        if (const auto *ra = a.as<RampNode>()) {
-          if (const auto *bb = b.as<BroadcastNode>()) {
-            return tir::Add(ra->base, bb->value);
-          }
-        }
-        if (const auto *rb = b.as<RampNode>()) {
-          if (const auto *ba = a.as<BroadcastNode>()) {
-            return tir::Add(rb->base, ba->value);
-          }
-        }
-      }
-      return PrimExpr();
-    };
-
-    if (lanes != index_lanes) {
+    if (index_info->lanes != index_info->index_lanes) {
       // Vector indices must cover the full transfer width.
       return Optional<Stmt>();
     }
 
-    PrimExpr src_offset = vector_base(src_index);
-    PrimExpr dst_offset = vector_base(dst_index);
-
+    PrimExpr src_offset = ExtractVectorBase(index_info->src_index);
+    PrimExpr dst_offset = ExtractVectorBase(index_info->dst_index);
     if (!src_offset.defined() || !dst_offset.defined()) {
       // If we can't extract offsets from vectorized indices, fall back.
       if (predicated) {
@@ -191,8 +123,11 @@ public:
       }
       return Optional<Stmt>();
     }
-    return make_cp_async_stmt(/*dst_offset=*/dst_offset,
-                              /*src_offset=*/src_offset);
+    return MakeCPAsyncStmt(load, store, ptr_info.value(),
+                           /*dst_offset=*/dst_offset,
+                           /*src_offset=*/src_offset,
+                           /*bytes=*/index_info->bytes, predicated,
+                           predicate_value);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -206,61 +141,54 @@ public:
     Array<Stmt> out;
     out.reserve(op->seq.size() + 2);
 
-    bool open_copy_region = pending_sync_copies_;
-    bool uncommitted = uncommitted_sync_copies_;
+    CopySyncState local_sync{pending_sync_copies_, uncommitted_sync_copies_};
     pending_sync_copies_ = false;
     uncommitted_sync_copies_ = false;
 
     for (const Stmt &stmt : op->seq) {
-      pending_sync_copies_ = false;
-      uncommitted_sync_copies_ = false;
-      Stmt visited = this->VisitStmt(stmt);
-      const CopyRegionAnalysis analysis = AnalyzeCopyRegion(visited);
-      bool stmt_has_pending = pending_sync_copies_;
-      bool stmt_has_uncommitted = uncommitted_sync_copies_;
-      bool stmt_is_pure_copy_region = analysis.is_pure_copy_region;
+      VisitedStmtInfo visited_info = VisitAndAnalyzeStmt(stmt);
+      bool stmt_is_pure_copy_region = visited_info.analysis.is_pure_copy_region;
 
       // Before we execute a non-copy statement, we must preserve synchronous
       // semantics for injected cp.async stores by making the data visible.
-      if (open_copy_region && !stmt_is_pure_copy_region) {
-        if (uncommitted) {
-          out.push_back(MakeCommitGroupStmt());
-        }
-        out.push_back(MakeWaitGroupStmt(0));
-        open_copy_region = false;
-        uncommitted = false;
+      if (local_sync.open_copy_region && !stmt_is_pure_copy_region) {
+        AppendSyncVisibility(&out, local_sync.uncommitted);
+        local_sync.open_copy_region = false;
+        local_sync.uncommitted = false;
       }
 
       // If we are carrying uncommitted injected cp.async into an explicit wait,
       // ensure they are committed so the wait actually covers them.
-      if (open_copy_region && uncommitted && analysis.wait > 0) {
+      if (local_sync.open_copy_region && local_sync.uncommitted &&
+          visited_info.analysis.wait > 0) {
         out.push_back(MakeCommitGroupStmt());
-        uncommitted = false;
+        local_sync.uncommitted = false;
       }
 
-      out.push_back(visited);
+      out.push_back(visited_info.visited);
 
-      if (stmt_has_pending) {
-        open_copy_region = true;
-        uncommitted = uncommitted || stmt_has_uncommitted;
+      if (visited_info.has_pending_sync_copy) {
+        local_sync.open_copy_region = true;
+        local_sync.uncommitted =
+            local_sync.uncommitted || visited_info.has_uncommitted_sync_copy;
       }
 
-      if (analysis.commit > 0) {
+      if (visited_info.analysis.commit > 0) {
         // A commit closes the currently open group, so there are no longer any
         // uncommitted injected cp.async transfers.
-        uncommitted = false;
+        local_sync.uncommitted = false;
       }
 
-      if (analysis.wait > 0) {
+      if (visited_info.analysis.wait > 0) {
         // Any explicit wait serves as a synchronization boundary for injected
         // synchronous copies.
-        open_copy_region = false;
-        uncommitted = false;
+        local_sync.open_copy_region = false;
+        local_sync.uncommitted = false;
       }
     }
 
-    pending_sync_copies_ = open_copy_region;
-    uncommitted_sync_copies_ = uncommitted;
+    pending_sync_copies_ = local_sync.open_copy_region;
+    uncommitted_sync_copies_ = local_sync.uncommitted;
 
     if (out.empty()) {
       return Evaluate(0);
@@ -350,6 +278,212 @@ public:
   }
 
 private:
+  struct CopyIndexInfo {
+    PrimExpr src_index;
+    PrimExpr dst_index;
+    int index_lanes{1};
+    int lanes{1};
+    int bytes{0};
+  };
+
+  struct PointerTypeInfo {
+    DataType dst_elem_type;
+    DataType src_elem_type;
+  };
+
+  struct CopySyncState {
+    bool open_copy_region{false};
+    bool uncommitted{false};
+  };
+
+  struct ActiveVectorizedLoop {
+    Var loop_var;
+    int extent;
+  };
+
+  static bool IsSupportedCPAsyncTransferBytes(int bytes) {
+    return bytes == 4 || bytes == 8 || bytes == 16;
+  }
+
+  std::optional<CopyIndexInfo>
+  PrepareCopyIndexInfo(const BufferLoadNode *load,
+                       const BufferStoreNode *store) {
+    if (!IsGlobalBuffer(load->buffer)) {
+      return std::nullopt;
+    }
+
+    Optional<PrimExpr> src_index_opt =
+        FlattenToLinearOffset(load->buffer, load->indices);
+    Optional<PrimExpr> dst_index_opt =
+        FlattenToLinearOffset(store->buffer, store->indices);
+    if (!src_index_opt.defined() || !dst_index_opt.defined()) {
+      return std::nullopt;
+    }
+
+    PrimExpr src_index = src_index_opt.value();
+    PrimExpr dst_index = dst_index_opt.value();
+    if (src_index->dtype.lanes() != dst_index->dtype.lanes()) {
+      // Not a straightforward vectorized copy; skip.
+      return std::nullopt;
+    }
+
+    const int index_lanes = src_index->dtype.lanes();
+    const int value_lanes = load->dtype.lanes();
+    if (value_lanes > 1 && index_lanes > 1 && value_lanes != index_lanes) {
+      // Mismatched vector lane representations; be conservative.
+      return std::nullopt;
+    }
+
+    const int lanes = std::max(value_lanes, index_lanes);
+    const int elem_bytes = lanes * load->dtype.bytes();
+    const int total_bytes = static_cast<int>(elem_bytes) *
+                            static_cast<int>(current_vectorized_lanes_);
+    if (!IsSupportedCPAsyncTransferBytes(total_bytes)) {
+      return std::nullopt;
+    }
+
+    CopyIndexInfo info;
+    info.src_index = src_index;
+    info.dst_index = dst_index;
+    info.index_lanes = index_lanes;
+    info.lanes = lanes;
+    info.bytes = elem_bytes;
+    return info;
+  }
+
+  static std::optional<PointerTypeInfo>
+  PreparePointerTypeInfo(const BufferLoadNode *load,
+                         const BufferStoreNode *store) {
+    auto dst_elem_type = GetPointerType(store->buffer->data->type_annotation);
+    auto src_elem_type = GetPointerType(load->buffer->data->type_annotation);
+    if (!dst_elem_type.has_value() || !src_elem_type.has_value()) {
+      return std::nullopt;
+    }
+    return PointerTypeInfo{dst_elem_type.value(), src_elem_type.value()};
+  }
+
+  static PrimExpr ExtractVectorBase(const PrimExpr &index) {
+    if (const auto *ramp = index.as<RampNode>()) {
+      if (!is_one(ramp->stride)) {
+        return PrimExpr();
+      }
+      return ramp->base;
+    }
+
+    const auto *add = index.as<AddNode>();
+    if (!add) {
+      return PrimExpr();
+    }
+
+    // Common pattern after flattening a vectorized N-D buffer access:
+    //   (broadcast(base_offset) + ramp(vec_base, 1, lanes))
+    // or its commuted form:
+    //   (ramp(vec_base, 1, lanes) + broadcast(base_offset))
+    const PrimExpr &lhs = add->a;
+    const PrimExpr &rhs = add->b;
+    if (const auto *lhs_ramp = lhs.as<RampNode>()) {
+      if (!is_one(lhs_ramp->stride)) {
+        return PrimExpr();
+      }
+      if (const auto *rhs_broadcast = rhs.as<BroadcastNode>()) {
+        return tir::Add(lhs_ramp->base, rhs_broadcast->value);
+      }
+    }
+    if (const auto *rhs_ramp = rhs.as<RampNode>()) {
+      if (!is_one(rhs_ramp->stride)) {
+        return PrimExpr();
+      }
+      if (const auto *lhs_broadcast = lhs.as<BroadcastNode>()) {
+        return tir::Add(rhs_ramp->base, lhs_broadcast->value);
+      }
+    }
+    return PrimExpr();
+  }
+
+  static Optional<Stmt>
+  MakeCPAsyncStmt(const BufferLoadNode *load, const BufferStoreNode *store,
+                  const PointerTypeInfo &ptr_info, const PrimExpr &dst_offset,
+                  const PrimExpr &src_offset, int bytes, bool predicated,
+                  const PrimExpr &predicate_value) {
+    int dst_elem_count = bytes / ptr_info.dst_elem_type.bytes();
+    int src_elem_count = bytes / ptr_info.src_elem_type.bytes();
+    if (dst_elem_count <= 0 || src_elem_count <= 0) {
+      return Optional<Stmt>();
+    }
+
+    PrimExpr dst_access_ptr = store->buffer.access_ptr(
+        2, DataType::Handle(), 1, dst_offset, PrimExpr(dst_elem_count));
+    PrimExpr src_access_ptr = load->buffer.access_ptr(
+        1, DataType::Handle(), 1, src_offset, PrimExpr(src_elem_count));
+
+    ffi::Array<PrimExpr> cp_async_args;
+    if (predicated) {
+      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes),
+                       predicate_value};
+    } else {
+      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes)};
+    }
+    return Evaluate(Call(store->buffer->dtype,
+                         tvm::tir::builtin::ptx_cp_async(), cp_async_args));
+  }
+
+  static void AppendSyncVisibility(Array<Stmt> *seq, bool with_commit) {
+    if (with_commit) {
+      seq->push_back(MakeCommitGroupStmt());
+    }
+    seq->push_back(MakeWaitGroupStmt(0));
+  }
+
+  static bool TryGetConstInt64(const PrimExpr &expr, int64_t *value) {
+    if (const auto *imm = expr.as<IntImmNode>()) {
+      *value = imm->value;
+      return true;
+    }
+    return false;
+  }
+
+  bool HasUnitStrideForVectorizedLoop(const PrimExpr &expr,
+                                      const ActiveVectorizedLoop &loop) {
+    if (loop.extent <= 1) {
+      return false;
+    }
+
+    PrimExpr prev = analyzer_.Simplify(
+        Substitute(expr, {{loop.loop_var, IntImm(loop.loop_var->dtype, 0)}}));
+
+    bool stride_initialized = false;
+    int64_t stride = 0;
+    for (int value = 1; value < loop.extent; ++value) {
+      PrimExpr curr = analyzer_.Simplify(Substitute(
+          expr, {{loop.loop_var, IntImm(loop.loop_var->dtype, value)}}));
+      PrimExpr delta = analyzer_.Simplify(curr - prev);
+      int64_t delta_value = 0;
+      if (!TryGetConstInt64(delta, &delta_value)) {
+        return false;
+      }
+      if (!stride_initialized) {
+        stride = delta_value;
+        stride_initialized = true;
+      } else if (delta_value != stride) {
+        return false;
+      }
+      prev = curr;
+    }
+
+    return stride_initialized && stride == 1;
+  }
+
+  bool HasContiguousVectorizedOffsets(const PrimExpr &src_index,
+                                      const PrimExpr &dst_index) {
+    for (const auto &loop : active_vectorized_loops_) {
+      if (!HasUnitStrideForVectorizedLoop(src_index, loop) ||
+          !HasUnitStrideForVectorizedLoop(dst_index, loop)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   static Optional<PrimExpr>
   FlattenToLinearOffset(const Buffer &buf,
                         const ffi::Array<PrimExpr> &indices) {
@@ -372,6 +506,13 @@ private:
     bool is_pure_copy_region = true;
     int commit = 0;
     int wait = 0;
+  };
+
+  struct VisitedStmtInfo {
+    Stmt visited;
+    CopyRegionAnalysis analysis;
+    bool has_pending_sync_copy{false};
+    bool has_uncommitted_sync_copy{false};
   };
 
   static CopyRegionAnalysis
@@ -460,6 +601,19 @@ private:
     return out;
   }
 
+  VisitedStmtInfo VisitAndAnalyzeStmt(const Stmt &stmt) {
+    pending_sync_copies_ = false;
+    uncommitted_sync_copies_ = false;
+
+    Stmt visited = this->VisitStmt(stmt);
+    VisitedStmtInfo out;
+    out.visited = visited;
+    out.analysis = AnalyzeCopyRegion(visited);
+    out.has_pending_sync_copy = pending_sync_copies_;
+    out.has_uncommitted_sync_copy = uncommitted_sync_copies_;
+    return out;
+  }
+
   static bool IsZeroValue(const PrimExpr &e) {
     if (auto *b = e.as<BroadcastNode>()) {
       return IsZeroValue(b->value);
@@ -487,6 +641,8 @@ private:
 
   bool enable_auto_async_copy_{true};
   int current_vectorized_lanes_{1};
+  std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
+  arith::Analyzer analyzer_;
   bool pending_sync_copies_{false};
   bool uncommitted_sync_copies_{false};
 };
