@@ -573,3 +573,13 @@ def LowerLDGSTG():
         The result pass
     """
     return _ffi_api.LowerLDGSTG()  # type: ignore
+
+
+def LowerBlackwell2SM():
+    """Lower 2SM TCGEN5MMA and related on Blackwell target
+
+    Returns:
+        fpass : tvm.transform.Pass
+            The result pass
+    """
+    return _ffi_api.LowerBlackwell2SM()  # type: ignore

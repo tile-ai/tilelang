@@ -1011,17 +1011,21 @@ def cp_async_barrier_noinc(barrier: BarrierType):
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
-def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr):
+def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr, arrive_2cta: bool = False):
     """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
 
     Parameters
     ----------
     mbar: tir.Buffer | BufferLoad | PrimExpr
         The mbarrier object in shared memory (e.g., Barrier*) or its address.
+    arrive_2cta: bool
+        Whether to also arrive at the peer CTA's barrier.
+        If set, will be lowered to umma_arrive_multicast_2x1SM.
     """
     if isinstance(mbar, (tir.Buffer, BufferLoad)):
         mbar = retrieve_ptr(mbar, access_type="rw")
-    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar)
+    ann = {'use_2cta': 1} if arrive_2cta else {}
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann)
 
 
 def ptx_mma_sm70(

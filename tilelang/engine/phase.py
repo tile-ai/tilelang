@@ -193,6 +193,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout
     LayoutVisual(mod)
+    # Lower 2SM TCGEN5MMA and related on Blackwell target
+    mod = tilelang.transform.LowerBlackwell2SM()(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map

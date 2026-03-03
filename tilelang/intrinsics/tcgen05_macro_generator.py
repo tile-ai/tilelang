@@ -355,7 +355,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             enable_ws,
                             enable_2cta,
                         )
-            T.tcgen05_mma_arrive(mbar)
+            T.tcgen05_mma_arrive(mbar, arrive_2cta=enable_2cta)
 
         return _warp_mma(A_buf, B_buf, C_local_buf, mbar)
 
