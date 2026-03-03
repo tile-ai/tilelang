@@ -491,5 +491,4 @@ def test_nvrtc_pdl():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_nvrtc_pdl()
+    tilelang.testing.main()
