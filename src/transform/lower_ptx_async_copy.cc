@@ -104,29 +104,31 @@ public:
                                           index_info->dst_index)) {
         return Optional<Stmt>();
       }
-      return MakeCPAsyncStmt(load, store, ptr_info.value(),
-                             /*dst_offset=*/index_info->dst_index,
-                             /*src_offset=*/index_info->src_index,
-                             /*bytes=*/index_info->transfer_bytes, predicated,
-                             predicate_value);
+      return MakeCPAsyncStmtFromLoads(
+          store, ptr_info.value(),
+          /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
+          /*src_base_load=*/BufferLoad(load->buffer, load->indices),
+          /*bytes=*/index_info->transfer_bytes, predicated, predicate_value);
     }
 
-    PrimExpr src_offset = ExtractVectorBase(index_info->src_index);
-    PrimExpr dst_offset = ExtractVectorBase(index_info->dst_index);
-    if (!src_offset.defined() || !dst_offset.defined()) {
-      // If we can't extract offsets from vectorized indices, fall back.
+    Optional<Array<PrimExpr>> src_base_indices =
+        ExtractVectorBaseIndices(load->indices);
+    Optional<Array<PrimExpr>> dst_base_indices =
+        ExtractVectorBaseIndices(store->indices);
+    if (!src_base_indices.defined() || !dst_base_indices.defined()) {
+      // If we can't extract base indices from vectorized accesses, fall back.
       if (predicated) {
         LOG(WARNING)
-            << "Cannot extract offsets from vectorized indices for predicated "
-               "cp.async; falling back to regular buffer store/load";
+            << "Cannot extract base indices from vectorized accesses for "
+               "predicated cp.async; falling back to regular buffer store/load";
       }
       return Optional<Stmt>();
     }
-    return MakeCPAsyncStmt(load, store, ptr_info.value(),
-                           /*dst_offset=*/dst_offset,
-                           /*src_offset=*/src_offset,
-                           /*bytes=*/index_info->transfer_bytes, predicated,
-                           predicate_value);
+    return MakeCPAsyncStmtFromLoads(
+        store, ptr_info.value(),
+        /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
+        /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
+        /*bytes=*/index_info->transfer_bytes, predicated, predicate_value);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -396,6 +398,12 @@ private:
   }
 
   static PrimExpr ExtractVectorBase(const PrimExpr &index) {
+    if (index.dtype().lanes() == 1) {
+      return index;
+    }
+    if (const auto *broadcast = index.as<BroadcastNode>()) {
+      return broadcast->value;
+    }
     if (const auto *ramp = index.as<RampNode>()) {
       if (!is_one(ramp->stride)) {
         return PrimExpr();
@@ -433,30 +441,43 @@ private:
     return PrimExpr();
   }
 
+  static Optional<Array<PrimExpr>>
+  ExtractVectorBaseIndices(const Array<PrimExpr> &indices) {
+    Array<PrimExpr> base_indices;
+    base_indices.reserve(indices.size());
+    for (const PrimExpr &index : indices) {
+      PrimExpr base = ExtractVectorBase(index);
+      if (!base.defined()) {
+        return Optional<Array<PrimExpr>>();
+      }
+      base_indices.push_back(base);
+    }
+    return base_indices;
+  }
+
+  static PrimExpr MakeAccessPtrFromLoad(const BufferLoad &base_load, int extent,
+                                        int rw_mask) {
+    return Call(DataType::Handle(), tvm::tl::access_ptr(),
+                {base_load, IntImm(DataType::Int(32), extent),
+                 IntImm(DataType::Int(32), rw_mask)});
+  }
+
   static Optional<Stmt>
-  MakeCPAsyncStmt(const BufferLoadNode *load, const BufferStoreNode *store,
-                  const PointerTypeInfo &ptr_info, const PrimExpr &dst_offset,
-                  const PrimExpr &src_offset, int bytes, bool predicated,
-                  const PrimExpr &predicate_value) {
+  MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
+                           const PointerTypeInfo &ptr_info,
+                           const BufferLoad &dst_base_load,
+                           const BufferLoad &src_base_load, int bytes,
+                           bool predicated, const PrimExpr &predicate_value) {
     int dst_elem_count = bytes / ptr_info.dst_elem_type.bytes();
     int src_elem_count = bytes / ptr_info.src_elem_type.bytes();
     if (dst_elem_count <= 0 || src_elem_count <= 0) {
       return Optional<Stmt>();
     }
 
-    auto make_access_ptr = [](const Buffer &buffer, const PrimExpr &offset,
-                              int extent, int rw_mask) -> PrimExpr {
-      Buffer flattened = buffer.GetFlattenedBuffer();
-      BufferLoad base_load(flattened, {offset});
-      return Call(DataType::Handle(), tvm::tl::access_ptr(),
-                  {base_load, IntImm(DataType::Int(32), extent),
-                   IntImm(DataType::Int(32), rw_mask)});
-    };
-
-    PrimExpr dst_access_ptr = make_access_ptr(store->buffer, dst_offset,
-                                              dst_elem_count, /*rw_mask=*/2);
-    PrimExpr src_access_ptr = make_access_ptr(load->buffer, src_offset,
-                                              src_elem_count, /*rw_mask=*/1);
+    PrimExpr dst_access_ptr =
+        MakeAccessPtrFromLoad(dst_base_load, dst_elem_count, /*rw_mask=*/2);
+    PrimExpr src_access_ptr =
+        MakeAccessPtrFromLoad(src_base_load, src_elem_count, /*rw_mask=*/1);
 
     ffi::Array<PrimExpr> cp_async_args;
     if (predicated) {

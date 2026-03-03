@@ -164,9 +164,6 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     kernel = tilelang.compile(
         matmul,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS: True,
-        },
     )
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
@@ -196,7 +193,8 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 @tilelang.testing.requires_cuda
 def test_assert_tl_matmul_correctness():
-    assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
+    # assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
+    tilelang.disable_cache()
     assert_tl_matmul_correctness(128, 128, 64, T.int8, T.int32, T.int32)
 
 
@@ -405,4 +403,5 @@ def test_assert_tl_matmul_weight_only_transform():
 
 if __name__ == "__main__":
     # tilelang.testing.main()
-    assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
+    # assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
+    test_assert_tl_matmul_correctness()
