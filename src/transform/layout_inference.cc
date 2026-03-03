@@ -89,6 +89,7 @@ public:
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
     arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     auto buffer_oob = buffer_oob_vec_[cur_infer_id];
+    bool enable_auto_async_copy = enable_auto_async_copy_vec_[cur_infer_id];
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
                            << "] is null inside run_infer_step.";
@@ -115,7 +116,8 @@ public:
                                                      cur_analyzer,
                                                      buffer_oob,
                                                      {},
-                                                     let_var_to_expr_},
+                                                     let_var_to_expr_,
+                                                     enable_auto_async_copy},
                                      level);
 
     // Process the returned updates
@@ -292,6 +294,9 @@ public:
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
+    ICHECK_EQ(enable_auto_async_copy_vec_.size(), infer_list_.size())
+        << "Size mismatch: enable_auto_async_copy_vec_ and infer_list_ must "
+           "match in length.";
 
     DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
     for (int i = 0; i < infer_list_stmt_.size(); ++i) {
@@ -560,6 +565,7 @@ private:
       // Add the tile operator to infer_list_
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
+      enable_auto_async_copy_vec_.push_back(pipelined_depth_ > 0);
     }
   }
 
@@ -623,6 +629,16 @@ private:
   }
 
   void VisitStmt_(const ForNode *op) final {
+    bool enter_pipelined = false;
+    if (auto num_stages_anno = op->annotations.Get("num_stages")) {
+      if (const auto *imm = num_stages_anno->as<IntImmNode>()) {
+        enter_pipelined = imm->value > 0;
+      }
+    }
+    if (enter_pipelined) {
+      ++pipelined_depth_;
+    }
+
     if (op->kind == ForKind::kParallel) {
       auto infer = ParallelOp(tvm::ffi::GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
@@ -695,6 +711,7 @@ private:
       });
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
+      enable_auto_async_copy_vec_.push_back(pipelined_depth_ > 0);
       thread_var_vec_.push_back(thread_var_);
       if (thread_var_.defined() &&
           analyzer_.const_int_bound.IsBound(thread_var_->var)) {
@@ -711,6 +728,11 @@ private:
       buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
+    }
+
+    if (enter_pipelined) {
+      ICHECK_GT(pipelined_depth_, 0);
+      --pipelined_depth_;
     }
   }
 
@@ -975,6 +997,10 @@ private:
   Map<Var, PrimExpr> let_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
+  // Whether the corresponding op was observed inside a pipelined loop
+  // (i.e., a surrounding For annotated with num_stages > 0).
+  std::vector<bool> enable_auto_async_copy_vec_;
+  int pipelined_depth_{0};
   // Fragment buffers that have accesses outside of TileOps.
   // These "floating" buffers need fully replicated layouts since their
   // access patterns cannot be inferred from TileOp semantics.

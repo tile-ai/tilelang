@@ -255,7 +255,8 @@ public:
    */
   CopyInst GetCopyInst(Target target, bool disable_tma_lower,
                        const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                       bool buffer_oob = false) const;
+                       bool buffer_oob = false,
+                       bool enable_auto_async_copy = false) const;
 
 protected:
   /*!

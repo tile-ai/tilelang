@@ -95,8 +95,15 @@ class PassConfigKey(str, Enum):
     When True (default), TileLang may lower:
     - `T.copy(global -> shared, ...)` to `ptx_cp_async + commit + wait`
     - `T.async_copy(global -> shared, ...)` to `ptx_cp_async + commit` (no wait)
-    - plain user-written global->shared copy stores (e.g. in `T.Parallel`) via
-      `LowerPTXAsyncCopy`
+    - plain user-written global->shared copy stores (e.g. in `T.Parallel`) to
+      `ptx_cp_async + commit + wait`
+
+    Important: Automatic cp.async lowering is gated by the surrounding loop
+    context. TileLang will only auto-enable cp.async when the copy is observed
+    inside a software-pipelined loop annotated with `num_stages > 0`
+    (e.g. created by `T.Pipelined(..., num_stages=...)` or by pipeline planning).
+    Outside such loops, TileLang will prefer synchronous copy lowering even when
+    this flag is True.
 
     When False, TileLang will avoid the cp.async lowering path for `T.copy`.
     Explicit `T.async_copy` still requires cp.async support and may error if

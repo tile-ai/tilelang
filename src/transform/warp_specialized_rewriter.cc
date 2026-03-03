@@ -157,8 +157,18 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+      bool is_bulk_copy =
+          call->op.same_as(tma_load()) ||
+          call->op.same_as(tma_load_im2col()) ||
+          call->op.same_as(tl::ptx_cp_async()) ||
+          call->op.same_as(builtin::ptx_cp_async());
+      bool is_cp_async_sync =
+          call->op.same_as(builtin::ptx_commit_group()) ||
+          call->op.same_as(builtin::ptx_wait_group());
+      if (is_bulk_copy || is_cp_async_sync) {
         role = Role::kProducer;
+      }
+      if (is_bulk_copy) {
         has_bulk_copy_ = true;
       }
       if (call->op.same_as(loop_break())) {
@@ -1229,6 +1239,7 @@ private:
     WarpSpecializedRoleMarker marker(buffer_data_to_buffer_);
     marker.Prepare(block);
     marker(block);
+    LOG(INFO) << "HasProducer: " << marker.HasProducer();
     if (!marker.HasProducer()) {
       // Cannot detect any producer here, directly return.
       return block_realize;

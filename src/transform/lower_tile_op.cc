@@ -1004,19 +1004,10 @@ private:
 
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_, let_var_to_expr},
+                  layout_map_, buffer_remap_, let_var_to_expr,
+                  /*enable_auto_async_copy=*/pipelined_depth_ > 0},
         analyzer_);
 
-    // When users provide explicit software pipeline order/stage via
-    // T.Pipelined(..., order=..., stage=...), those annotations are attached
-    // to the loop at the frontend statement granularity. If we lower a tile op
-    // into a SeqStmt here, the parent SeqStmt may flatten it, changing the
-    // number of statements in the pipeline body and breaking the annotation
-    // arity contract. Keep multi-statement lowering results as a single Stmt
-    // in that mode.
-    if (manual_pipeline_depth_ > 0 && lowered->IsInstance<SeqStmtNode>()) {
-      lowered = AttrStmt(Integer(0), "tl.manual_pipeline_group", 1, lowered);
-    }
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 
@@ -1063,18 +1054,21 @@ private:
                          .value();
     }
 
-    bool enter_manual_pipeline = op->annotations.count("tl_pipeline_order") &&
-                                 op->annotations.count("tl_pipeline_stage");
-    if (enter_manual_pipeline) {
-      ++manual_pipeline_depth_;
+    bool enter_pipelined = false;
+    if (auto num_stages_anno = op->annotations.Get("num_stages")) {
+      if (const auto *imm = num_stages_anno->as<IntImmNode>()) {
+        enter_pipelined = imm->value > 0;
+      }
+    }
+    if (enter_pipelined) {
+      ++pipelined_depth_;
     }
 
     // First visit the body.
     For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
-
-    if (enter_manual_pipeline) {
-      ICHECK_GT(manual_pipeline_depth_, 0);
-      --manual_pipeline_depth_;
+    if (enter_pipelined) {
+      ICHECK_GT(pipelined_depth_, 0);
+      --pipelined_depth_;
     }
 
     // Only process parallel loops
@@ -1223,7 +1217,8 @@ private:
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
       bool enable_auto_async_copy =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-      lowered = InjectPTXAsyncCopy(lowered, enable_auto_async_copy);
+      lowered = InjectPTXAsyncCopy(lowered, enable_auto_async_copy &&
+                                                (pipelined_depth_ > 0));
     }
     return lowered;
   }
@@ -1254,7 +1249,7 @@ private:
   // without recomputing indices, since swizzle is encoded in TMA descriptor
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
-  int manual_pipeline_depth_{0};
+  int pipelined_depth_{0};
 };
 
 namespace transform {

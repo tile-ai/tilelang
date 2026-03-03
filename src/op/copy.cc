@@ -434,7 +434,8 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     copy_inst = CopyInst::kCPAsync;
   } else {
     copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
-                            T.layout_map, T.analyzer, T.buffer_oob);
+                            T.layout_map, T.analyzer, T.buffer_oob,
+                            T.enable_auto_async_copy);
   }
 
   // If user annotated a loop layout on T.copy, enforce SIMT (normal) copy.
@@ -809,7 +810,8 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
 CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
                                const LayoutMap &layout_map,
                                arith::Analyzer *analyzer,
-                               bool buffer_oob) const {
+                               bool buffer_oob,
+                               bool enable_auto_async_copy) const {
   // disable_tma_lower is from pass_configs
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
   // we will not use tma for bulk load/store
@@ -962,8 +964,15 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
     return CopyInst::kTMemLoad;
   } else if (CheckTMemStore(target)) {
     return CopyInst::kTMemStore;
-  } else if (CheckCPAsyncCopy(target, layout_map, analyzer)) {
-    return CopyInst::kCPAsync;
+  } else if (enable_auto_async_copy) {
+    using namespace tvm::transform;
+    PassContext pass_ctx = PassContext::Current();
+    bool enable_async_copy =
+        pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
+    if (enable_async_copy && CheckCPAsyncCopy(target, layout_map, analyzer)) {
+      return CopyInst::kCPAsync;
+    }
+    return CopyInst::kNormal;
   } else {
     return CopyInst::kNormal;
   }
@@ -979,7 +988,8 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
-                               T.layout_map, analyzer);
+                               T.layout_map, analyzer, /*buffer_oob=*/false,
+                               /*enable_auto_async_copy=*/T.enable_auto_async_copy);
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
     auto tmem_copy = LowerTmemCopy(T, analyzer);
     ICHECK(tmem_copy.defined()) << "Failed to lower tensor memory copy";
@@ -1019,7 +1029,7 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
   PassContext pass_ctx = PassContext::Current();
   bool enable_async_copy =
       pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-  if (!enable_async_copy && !GetIsAsyncCopy()) {
+  if ((!enable_async_copy || !T.enable_auto_async_copy) && !GetIsAsyncCopy()) {
     return LowerNormalCopy(T, analyzer);
   }
 
