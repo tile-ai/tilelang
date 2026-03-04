@@ -1,5 +1,14 @@
 from __future__ import annotations
 from tvm import tir, IRModule
+
+
+def should_dump_ir() -> bool:
+    import os
+
+    """Check if IR dump is enabled via environment variable."""
+    return os.environ.get("TILELANG_DUMP_IR", "0") == "1"
+
+
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
@@ -172,47 +181,98 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """
     mod = tir.transform.BindTarget(target)(mod)
+    if should_dump_ir():
+        print("=== After BindTarget ===")
+        print(mod)
 
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
+        if should_dump_ir():
+            print("=== After LetInline ===")
+            print(mod)
     # Add wrapper for single buf store
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
+    if should_dump_ir():
+        print("=== After AddWrapperForSingleBufStore ===")
+        print(mod)
     # Normalize negative indices to canonical non-negative form
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
+    if should_dump_ir():
+        print("=== After LegalizeNegativeIndex ===")
+        print(mod)
     # Verify parallel loop correctness
     if should_enable_race_check():
         mod = tilelang.transform.VerifyParallelLoop()(mod)
+        if should_dump_ir():
+            print("=== After VerifyParallelLoop ===")
+            print(mod)
     # Inject assumes to speedup tvm prover
     mod = tilelang.transform.InjectAssumes()(mod)
+    if should_dump_ir():
+        print("=== After InjectAssumes ===")
+        print(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
+    if should_dump_ir():
+        print("=== After Simplify ===")
+        print(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
+    if should_dump_ir():
+        print("=== After LayoutReducer ===")
+        print(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
+    if should_dump_ir():
+        print("=== After LayoutInference ===")
+        print(mod)
     # Visualize the layout
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
+    if should_dump_ir():
+        print("=== After LowerTileOp ===")
+        print(mod)
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
+    if should_dump_ir():
+        print("=== After LowerL2Persistent ===")
+        print(mod)
     # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
+    if should_dump_ir():
+        print("=== After DecoupleTypeCast ===")
+        print(mod)
     # Legalize vectorized loops to ensure they are valid
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
+    if should_dump_ir():
+        print("=== After LegalizeVectorizedLoop ===")
+        print(mod)
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
+    if should_dump_ir():
+        print("=== After LegalizeSafeMemoryAccess ===")
+        print(mod)
     # Lower frontend pointer metadata op to standard tvm_access_ptr
     mod = tilelang.transform.LowerAccessPtr()(mod)
+    if should_dump_ir():
+        print("=== After LowerAccessPtr ===")
+        print(mod)
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     # use an enhanced pass to simplify the dynamic symbolics
     # TODO(lei): return to tir pass when kSymbolicBound simplification
     # is merged into tvm.
     mod = tilelang.transform.Simplify()(mod)
+    if should_dump_ir():
+        print("=== After Simplify ===")
+        print(mod)
     # Hoist any root-block annotations to PrimFunc attrs if pass is available
     mod = tilelang.transform.HoistNonRestrictParams()(mod)
+    if should_dump_ir():
+        print("=== After HoistNonRestrictParams ===")
+        print(mod)
     return mod
 
 
