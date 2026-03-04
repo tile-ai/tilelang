@@ -7,7 +7,6 @@ from tvm import tir
 def test_arrive_expect_tx_in_elect_updates_barrier_thread_count():
     @T.prim_func
     def before():
-        tx = T.launch_thread("threadIdx.x", 640)
         T.call_intrin(
             "handle",
             tir.op.Op.get("tl.create_list_of_mbarrier"),
