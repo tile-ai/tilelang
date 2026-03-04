@@ -1018,7 +1018,9 @@ private:
 // Visitor to build IRStructure from TIR statements
 class IRStructureBuilder : public StmtVisitor {
 public:
-  std::unique_ptr<IRStructure> Build(const Stmt &stmt) {
+  std::unique_ptr<IRStructure> Build(const Stmt &stmt,
+                                     int64_t thread_count = 1) {
+    thread_count_ = thread_count;
     VisitStmt(stmt);
     if (!root_) {
       LOG(WARNING)
@@ -1150,6 +1152,7 @@ protected:
 
 private:
   std::unique_ptr<IRStructure> root_;
+  int64_t thread_count_ = 1;
 
   void AnalyzeResourceUsage(const Stmt &stmt, TaskNode *task_node) {
     // Recursively analyze statements to determine resource usage
@@ -1205,106 +1208,10 @@ private:
         } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op)) {
           found_tensor = true;
 
-          // Try to extract Tensor Core shape information from gemm arguments
-          // gemm arguments: A, B, C, transpose_A, transpose_B, policy,
-          // clear_accum, k_pack, wg_wait, mbar We need to extract shape from A,
-          // B, C buffers
-          if (op->args.size() >= 3) {
-            // Extract buffer regions from arguments
-            auto try_extract_shape = [&](const PrimExpr &arg, int64_t &m,
-                                         int64_t &n) -> bool {
-              // Check if argument is a BufferLoad
-              if (const auto *buffer_load = arg.as<BufferLoadNode>()) {
-                Buffer buffer = buffer_load->buffer;
-                // Get buffer shape
-                if (buffer->shape.size() >= 2) {
-                  // Try to get constant dimensions
-                  if (const auto *m_int =
-                          buffer->shape[buffer->shape.size() - 2]
-                              .as<IntImmNode>()) {
-                    if (const auto *n_int =
-                            buffer->shape[buffer->shape.size() - 1]
-                                .as<IntImmNode>()) {
-                      m = m_int->value;
-                      n = n_int->value;
-                      return true;
-                    }
-                  }
-                }
-              }
-              // Check if argument is a BufferRegion
-              else if (const auto *buffer_region = arg.as<BufferRegionNode>()) {
-                Buffer buffer = buffer_region->buffer;
-                // Get buffer shape
-                if (buffer->shape.size() >= 2) {
-                  // Try to get constant dimensions
-                  if (const auto *m_int =
-                          buffer->shape[buffer->shape.size() - 2]
-                              .as<IntImmNode>()) {
-                    if (const auto *n_int =
-                            buffer->shape[buffer->shape.size() - 1]
-                                .as<IntImmNode>()) {
-                      m = m_int->value;
-                      n = n_int->value;
-                      return true;
-                    }
-                  }
-                }
-              }
-              return false;
-            };
-
-            // Extract shapes from A, B, C arguments
-            int64_t a_m = 0, a_n = 0;
-            int64_t b_m = 0, b_n = 0;
-            int64_t c_m = 0, c_n = 0;
-
-            if (try_extract_shape(op->args[0], a_m, a_n) &&
-                try_extract_shape(op->args[1], b_m, b_n) &&
-                try_extract_shape(op->args[2], c_m, c_n)) {
-
-              // For gemm: C[M, N] = A[M, K] * B[K, N]
-              // C shape gives us M and N
-              int64_t m = c_m;
-              int64_t n = c_n;
-              int64_t k = a_n; // A's last dimension (default: no transpose)
-
-              // Extract transpose flags from gemm arguments
-              // Arguments after C: transpose_A (arg[3]), transpose_B (arg[4])
-              if (op->args.size() > 3) {
-                if (const auto *transpose_a = op->args[3].as<IntImmNode>()) {
-                  if (transpose_a->value != 0) {
-                    // A is transposed: A[K, M]
-                    k = a_m;
-                  }
-                }
-              }
-              if (op->args.size() > 4) {
-                if (const auto *transpose_b = op->args[4].as<IntImmNode>()) {
-                  if (transpose_b->value != 0) {
-                    // B is transposed: B[N, K]
-                    // Check consistency with A's K dimension
-                    if (k == 0) {
-                      k = b_n;
-                    } else if (k != b_n) {
-                      // Inconsistent K dimensions, use minimum
-                      k = std::min(k, b_n);
-                    }
-                  }
-                }
-              }
-
-              // If K is still 0, try to infer from B's first dimension
-              if (k == 0) {
-                k = b_m;
-              }
-
-              // Add this Tensor Core shape to the vector
-              if (m > 0 && n > 0 && k > 0) {
-                tensor_core_shapes.emplace_back(m, n, k);
-              }
-            }
-          }
+          int64_t m = op->args[5].as<IntImmNode>()->value;
+          int64_t n = op->args[6].as<IntImmNode>()->value;
+          int64_t k = op->args[7].as<IntImmNode>()->value;
+          tensor_core_shapes.emplace_back(m, n, k);
         } else if (op->op.same_as(reduce_op) || op->op.same_as(fill_op)) {
           // Reduce and fill operations use CUDA core
           found_cuda = true;
@@ -1369,6 +1276,7 @@ private:
       // Set Tensor Core shape information if available
       for (const auto &shape : analyzer.tensor_core_shapes) {
         if (shape.m > 0 && shape.n > 0 && shape.k > 0) {
+          LOG(WARNING) << shape.m << " " << shape.n << " " << shape.k;
           task_node->AddTensorCoreShape(shape.m, shape.n, shape.k);
         }
       }
@@ -1396,6 +1304,7 @@ private:
 
     // Estimate latency and initiation interval for this task
     LatencyEstimator latency_estimator;
+    latency_estimator.SetThreadCount(thread_count_);
     latency_estimator.Estimate(task_node);
   }
 };
@@ -1423,9 +1332,28 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       body_to_schedule = func->body;
     }
 
+    // Get thread index variable for warpgroup partition
+    // First try to get from body_to_schedule, if not found, try from the entire
+    // function body
+    thread_var = ThreadTagChecker::GetThreadVar(body_to_schedule);
+    if (!thread_var.defined()) {
+      thread_var = ThreadTagChecker::GetThreadVar(func->body);
+    }
+
+    // Calculate thread count for latency estimation
+    int64_t latency_thread_count = 1;
+    if (thread_var.defined() && thread_var->dom.defined()) {
+      PrimExpr thread_extent = thread_var->dom->extent;
+      if (const int64_t *extent_ptr = as_const_int(thread_extent)) {
+        latency_thread_count = *extent_ptr;
+        if (latency_thread_count < 1)
+          latency_thread_count = 1;
+      }
+    }
+
     // Build IRStructure from the body to schedule
     IRStructureBuilder builder;
-    auto ir_structure = builder.Build(body_to_schedule);
+    auto ir_structure = builder.Build(body_to_schedule, latency_thread_count);
 
     // Print the built IRStructure with all statements
     ICHECK(ir_structure) << "IRStructure is null (empty body?)";

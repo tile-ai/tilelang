@@ -172,11 +172,6 @@ public:
   void AddTensorCoreShape(int64_t m, int64_t n, int64_t k) {
     tensor_core_shapes_.emplace_back(m, n, k);
   }
-  void SetTensorCoreShape(int64_t m, int64_t n, int64_t k) {
-    // For backward compatibility, clear existing shapes and add new one
-    tensor_core_shapes_.clear();
-    tensor_core_shapes_.emplace_back(m, n, k);
-  }
 
   // Get shape information
   size_t GetTensorCoreShapeCount() const { return tensor_core_shapes_.size(); }

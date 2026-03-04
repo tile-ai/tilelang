@@ -2,15 +2,20 @@
 
 #include <tvm/runtime/logging.h>
 #include <tvm/tir/buffer.h>
+#include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt.h>
+#include <tvm/tir/stmt_functor.h>
 
+#include "../../op/builtin.h"
 #include "./ir_structure.h"
 #include <functional>
 #include <memory>
 #include <optional>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -26,16 +31,14 @@ public:
   // H100 latency parameters (in cycles)
   struct H100Params {
     // Base latencies
-    int64_t global_memory_read = 400; // Global memory read latency
+    int64_t global_memory_read = 1000; // Global memory read latency
     int64_t global_memory_write =
-        200; // Global memory write latency (usually lower)
-    int64_t shared_memory_read = 20;  // Shared memory read latency
-    int64_t shared_memory_write = 20; // Shared memory write latency
+        800; // Global memory write latency (usually lower)
+    int64_t shared_memory_read = 26;  // Shared memory read latency
+    int64_t shared_memory_write = 26; // Shared memory write latency
     int64_t register_access = 1;      // Register access latency
     int64_t cuda_core_operation =
-        4; // Basic CUDA core operation (add, mul, etc.)
-    int64_t tensor_core_operation =
-        64; // Tensor core operation (matrix multiply) - base latency
+        4;                       // Basic CUDA core operation (add, mul, etc.)
     int64_t tma_operation = 100; // TMA operation latency
 
     // Tensor Core shape-aware parameters
@@ -44,7 +47,7 @@ public:
     int64_t tensor_core_per_element_latency =
         1; // Additional latency per matrix element
     int64_t tensor_core_throughput =
-        4; // Number of tensor core operations per cycle (throughput)
+        4096; // Number of tensor core operations per cycle (throughput)
     int64_t wgmma_base_latency = 40;    // Base latency for WGMMA operation
     int64_t wgmma_per_tile_latency = 2; // Additional latency per tile
 
@@ -54,17 +57,34 @@ public:
     int64_t tensor_core_max_parallel_tiles = 8; // Max parallel tiles per SM
 
     // Bandwidth parameters (bytes per cycle)
-    // H100: ~2TB/s global memory, 1.8GHz clock → ~1111 bytes/cycle
-    // H100: ~19TB/s shared memory → ~10556 bytes/cycle
-    int64_t global_memory_bandwidth = 1111;  // bytes per cycle
-    int64_t shared_memory_bandwidth = 10556; // bytes per cycle
+    int64_t global_memory_bandwidth = 64;  // bytes per cycle
+    int64_t shared_memory_bandwidth = 512; // bytes per cycle
 
     // Pipeline initiation capabilities
     int64_t max_memory_ops_per_cycle =
         1; // Max memory ops that can start per cycle
+
+    // Different operation throughputs (operations per cycle)
+    int64_t add_throughput = 4; // Addition throughput (ops/cycle)
+    int64_t sub_throughput = 4; // Subtraction throughput (ops/cycle)
+    int64_t mul_throughput = 4; // Multiplication throughput (ops/cycle)
+    int64_t div_throughput =
+        1; // Division throughput (ops/cycle, usually slower)
+    int64_t mod_throughput = 1;     // Modulo throughput (ops/cycle)
+    int64_t min_max_throughput = 4; // Min/Max throughput (ops/cycle)
+    int64_t cmp_throughput = 4;     // Comparison throughput (ops/cycle)
+    int64_t logic_throughput = 4;   // Logical operations throughput (ops/cycle)
+    int64_t bitwise_throughput = 4; // Bitwise operations throughput (ops/cycle)
+    int64_t shift_throughput = 4;   // Shift operations throughput (ops/cycle)
+    int64_t special_func_throughput =
+        1; // Special functions throughput (ops/cycle, exp2, log2, sin, cos,
+           // etc.)
   };
 
   LatencyEstimator() = default;
+
+  // Set thread count for parallel execution
+  void SetThreadCount(int64_t thread_count) { thread_count_ = thread_count; }
 
   // Estimate latency for a TaskNode
   void Estimate(TaskNode *task) {
@@ -135,18 +155,24 @@ public:
       }
     }
 
-    // Estimate compute latency based on resource usage
+    // Estimate compute latency based on operation counting
     if (task->UsesCUDACore()) {
-      // Simple heuristic: assume some number of CUDA operations
-      // For now, assume 1 operation per statement as a rough estimate
-      compute_latency = params_.cuda_core_operation *
-                        std::max(1, static_cast<int>(task->stmts.size()));
+      // Use OperationCounter visitor to count operations and estimate latency
+      OperationCounter counter(thread_count_, &params_);
+
+      // Visit all statements in the task
+      for (const auto &stmt : task->stmts) {
+        counter(stmt);
+      }
+
+      // Get estimated latency
+      compute_latency = counter.GetEstimatedLatency();
     }
 
     if (task->UsesTensorCore()) {
       // Shape-aware Tensor Core latency estimation
-      int64_t tensor_core_latency =
-          params_.tensor_core_operation; // Default fallback
+      int64_t tensor_core_latency = 32;
+      ICHECK(task->HasTensorCoreShape());
 
       // Check if we have shape information
       if (task->HasTensorCoreShape()) {
@@ -163,8 +189,6 @@ public:
         // Clamp to reasonable values
         tensor_core_latency =
             std::max(tensor_core_latency, params_.tensor_core_base_latency);
-        tensor_core_latency = std::min(
-            tensor_core_latency, static_cast<int64_t>(1000)); // Max 1000 cycles
 
         // For WGMMA operations (common in TileLang), use a different model
         // WGMMA typically operates on tiles of fixed size (e.g., 16x16x16 for
@@ -267,31 +291,31 @@ public:
       // Force II = total_latency for conservative scheduling
       ii = total_latency;
 
-      // Special case: single memory operation
-      if (num_memory_ops == 1 && task->stmts.size() == 1) {
-        // Single operation that is a memory access
-        // Check if this is likely a memory operation (has read/write regions)
-        if (!task->GetReadRegions().empty() ||
-            !task->GetWriteRegions().empty()) {
-          ii = memory_latency;
-        }
-      }
+      // // Special case: single memory operation
+      // if (num_memory_ops == 1 && task->stmts.size() == 1) {
+      //   // Single operation that is a memory access
+      //   // Check if this is likely a memory operation (has read/write
+      //   regions) if (!task->GetReadRegions().empty() ||
+      //       !task->GetWriteRegions().empty()) {
+      //     ii = memory_latency;
+      //   }
+      // }
 
-      // Additional II constraints from bandwidth limitations
-      // II must be at least the time needed to transfer data based on bandwidth
-      if (global_memory_bytes > 0) {
-        int64_t bandwidth_ii =
-            (global_memory_bytes + params_.global_memory_bandwidth - 1) /
-            params_.global_memory_bandwidth;
-        ii = std::max(ii, bandwidth_ii);
-      }
+      // // Additional II constraints from bandwidth limitations
+      // // II must be at least the time needed to transfer data based on
+      // bandwidth if (global_memory_bytes > 0) {
+      //   int64_t bandwidth_ii =
+      //       (global_memory_bytes + params_.global_memory_bandwidth - 1) /
+      //       params_.global_memory_bandwidth;
+      //   ii = std::max(ii, bandwidth_ii);
+      // }
 
-      if (shared_memory_bytes > 0) {
-        int64_t bandwidth_ii =
-            (shared_memory_bytes + params_.shared_memory_bandwidth - 1) /
-            params_.shared_memory_bandwidth;
-        ii = std::max(ii, bandwidth_ii);
-      }
+      // if (shared_memory_bytes > 0) {
+      //   int64_t bandwidth_ii =
+      //       (shared_memory_bytes + params_.shared_memory_bandwidth - 1) /
+      //       params_.shared_memory_bandwidth;
+      //   ii = std::max(ii, bandwidth_ii);
+      // }
     }
 
     // II must be at least 1 cycle
@@ -305,6 +329,363 @@ public:
 
 private:
   H100Params params_;
+  int64_t thread_count_ = 1; // Default to 1 (no parallelism)
+
+  // Operation counter visitor with latency estimation
+  class OperationCounter : public StmtExprVisitor {
+  public:
+    // Loop dimension information
+    struct LoopDimension {
+      const VarNode *var;
+      int64_t trip_count;
+      int depth;
+    };
+
+    int64_t total_latency = 0;
+    int64_t thread_count = 1; // Thread count for parallel execution
+    const LatencyEstimator::H100Params *params = nullptr;
+
+    // Track loop dimensions for loop-invariant detection
+    std::vector<LoopDimension> loop_stack;
+    std::unordered_map<const VarNode *, LoopDimension *> var_to_loop;
+
+    OperationCounter(int64_t thread_count = 1,
+                     const LatencyEstimator::H100Params *params = nullptr)
+        : thread_count(thread_count), params(params) {}
+
+    // Operator to visit a statement
+    void operator()(const Stmt &stmt) { VisitStmt(stmt); }
+
+    // Get estimated latency
+    int64_t GetEstimatedLatency() const { return total_latency; }
+
+    // Helper function to update latency for an operation based on throughput
+    void update_operation(
+        int64_t throughput,
+        const std::unordered_set<const VarNode *> &contained_vars) {
+      int64_t effective_factor =
+          CalculateEffectiveParallelFactor(contained_vars);
+
+      // Throughput is operations per cycle
+      // For 1 operation: cycles = 1 / throughput
+      // For effective_factor operations: cycles = effective_factor / throughput
+      // With thread-level parallelism: cycles = (effective_factor / throughput)
+      // / thread_count
+
+      if (throughput > 0) {
+        // Calculate cycles needed for effective_factor operations with given
+        // throughput
+        int64_t cycles_for_operations =
+            (effective_factor + throughput - 1) / throughput;
+
+        if (cycles_for_operations >= thread_count) {
+          total_latency +=
+              (cycles_for_operations + thread_count - 1) / thread_count;
+        } else {
+          total_latency += 1; // At least 1 cycle
+        }
+      } else {
+        // Zero or negative throughput, assume 1 cycle
+        total_latency += 1;
+      }
+    }
+
+    // Analyze which loop variables are contained in an expression
+    std::unordered_set<const VarNode *>
+    AnalyzeContainedLoopVars(const PrimExpr &expr) {
+      class VarCollector : public ExprVisitor {
+      public:
+        const std::unordered_map<const VarNode *, LoopDimension *> &var_to_loop;
+        std::unordered_set<const VarNode *> collected_vars;
+
+        VarCollector(const std::unordered_map<const VarNode *, LoopDimension *>
+                         &var_to_loop)
+            : var_to_loop(var_to_loop) {}
+
+        void VisitExpr_(const VarNode *op) final {
+          if (var_to_loop.count(op)) {
+            collected_vars.insert(op);
+          }
+          ExprVisitor::VisitExpr_(op);
+        }
+      };
+
+      VarCollector collector(var_to_loop);
+      collector(expr);
+      return collector.collected_vars;
+    }
+
+    // Calculate effective parallel factor based on contained loop variables
+    int64_t CalculateEffectiveParallelFactor(
+        const std::unordered_set<const VarNode *> &contained_vars) {
+      if (contained_vars.empty()) {
+        return 1; // Completely loop-invariant
+      }
+
+      // Find the maximum depth of contained loop variables
+      int max_depth = -1;
+      for (const VarNode *var : contained_vars) {
+        auto it = var_to_loop.find(var);
+        if (it != var_to_loop.end()) {
+          max_depth = std::max(max_depth, it->second->depth);
+        }
+      }
+
+      // Calculate effective parallel factor: product of trip counts for loops
+      // with depth <= max_depth
+      int64_t effective_factor = 1;
+      for (const auto &loop : loop_stack) {
+        if (loop.depth <= max_depth) {
+          effective_factor *= loop.trip_count;
+        }
+      }
+
+      return effective_factor;
+    }
+
+    void VisitExpr_(const AddNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->add_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const SubNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->sub_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const MulNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->mul_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const DivNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->div_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const ModNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->mod_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const FloorDivNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->div_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const FloorModNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->mod_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const LTNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->cmp_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const LENode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->cmp_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const GTNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->cmp_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const GENode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->cmp_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const EQNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->cmp_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const NENode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->cmp_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const AndNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->logic_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const OrNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->logic_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const NotNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->logic_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const MinNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->min_max_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const MaxNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      update_operation(params->min_max_throughput, contained_vars);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitExpr_(const CallNode *op) final {
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+
+      // Check for special math functions by name
+      if (op->op.as<OpNode>()) {
+        auto op_node = op->op.as<OpNode>();
+        std::string op_name = op_node->name;
+
+        // Check for special math functions
+        if (op_name == "exp2" || op_name == "log2" || op_name == "exp" ||
+            op_name == "log" || op_name == "sin" || op_name == "cos" ||
+            op_name == "tan" || op_name == "asin" || op_name == "acos" ||
+            op_name == "atan" || op_name == "sinh" || op_name == "cosh" ||
+            op_name == "tanh" || op_name == "sqrt" || op_name == "rsqrt" ||
+            op_name == "pow" || op_name == "erf" || op_name == "sigmoid") {
+          // Special math functions have lower throughput
+          update_operation(params->special_func_throughput, contained_vars);
+        } else if (op_name.find("copy") != std::string::npos ||
+                   op_name.find("gemm") != std::string::npos ||
+                   op_name.find("tma_load") != std::string::npos ||
+                   op_name.find("tma_store") != std::string::npos) {
+          // Ignore copy, gemm, tma_load, tma_store operations
+          // Just visit arguments but don't count the call itself
+        } else {
+          // Default: assume it's a regular function call with basic throughput
+          update_operation(params->cuda_core_operation, contained_vars);
+        }
+      } else {
+        // Not an OpNode, use default throughput
+        update_operation(params->cuda_core_operation, contained_vars);
+      }
+      // Visit arguments
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitStmt_(const ForNode *op) final {
+      // Calculate trip count for the loop
+      int64_t trip_count = 1;
+      PrimExpr loop_extent = op->extent;
+      PrimExpr loop_step = op->step.has_value() ? op->step.value()
+                                                : IntImm(DataType::Int(32), 1);
+
+      // Try to get constant values
+      if (const int64_t *extent_ptr = as_const_int(loop_extent)) {
+        if (const int64_t *step_ptr = as_const_int(loop_step)) {
+          int64_t extent = *extent_ptr;
+          int64_t step = *step_ptr;
+          if (step > 0) {
+            // ceil(extent / step) = (extent + step - 1) / step
+            trip_count = (extent + step - 1) / step;
+          } else {
+            trip_count = extent; // Invalid step, use extent
+          }
+        } else {
+          trip_count = 100; // Non-constant step, use default
+        }
+      } else {
+        trip_count = 100; // Non-constant extent, use default
+      }
+
+      // Create loop dimension information
+      LoopDimension loop_dim{.var = op->loop_var.get(),
+                             .trip_count = trip_count,
+                             .depth = static_cast<int>(loop_stack.size())};
+
+      // Push loop onto stack and update mapping
+      loop_stack.push_back(loop_dim);
+      var_to_loop[op->loop_var.get()] = &loop_stack.back();
+
+      // Visit loop body
+      StmtExprVisitor::VisitStmt_(op);
+
+      // Pop loop from stack
+      var_to_loop.erase(op->loop_var.get());
+      loop_stack.pop_back();
+    }
+
+    void VisitStmt_(const EvaluateNode *op) final {
+      if (op->value.defined()) {
+        StmtExprVisitor::VisitExpr(op->value);
+      }
+    }
+
+    void VisitStmt_(const BufferStoreNode *op) final {
+      // Count operations in indices
+      for (const auto &index : op->indices) {
+        StmtExprVisitor::VisitExpr(index);
+      }
+      // Count operations in value
+      StmtExprVisitor::VisitExpr(op->value);
+    }
+
+    void VisitStmt_(const SeqStmtNode *op) final {
+      for (const auto &child : op->seq) {
+        StmtExprVisitor::VisitStmt(child);
+      }
+    }
+
+    void VisitStmt_(const AttrStmtNode *op) final {
+      StmtExprVisitor::VisitStmt(op->body);
+    }
+
+    void VisitStmt_(const LetStmtNode *op) final {
+      // Let binding: the value expression is evaluated once
+      StmtExprVisitor::VisitExpr(op->value);
+      StmtExprVisitor::VisitStmt(op->body);
+    }
+
+    void VisitStmt_(const IfThenElseNode *op) final {
+      VisitExpr(op->condition);
+
+      // For if-then-else branches, we need to take the maximum latency of both
+      // paths Save current latency
+      int64_t old_latency = total_latency;
+
+      // Count latency in then branch
+      StmtExprVisitor::VisitStmt(op->then_case);
+      int64_t then_latency = total_latency;
+
+      // Restore latency and count else branch
+      total_latency = old_latency;
+      if (op->else_case) {
+        StmtExprVisitor::VisitStmt(op->else_case.value());
+      }
+      int64_t else_latency = total_latency;
+
+      // Take the maximum of both branches
+      total_latency = old_latency + std::max(then_latency - old_latency,
+                                             else_latency - old_latency);
+    }
+
+    void VisitStmt_(const BlockNode *op) final {
+      StmtExprVisitor::VisitStmt(op->body);
+    }
+  };
 
   // Helper function to calculate total bytes accessed in a region
   int64_t CalculateAccessBytes(const BufferRegion &region) {
