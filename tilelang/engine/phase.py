@@ -245,9 +245,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         # See the TMA path: inject cp.async before pipeline planning.
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
-    # mod = tilelang.transform.OptimizeCPAsyncSync()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+    mod = tilelang.transform.OptimizeCPAsyncSync()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
