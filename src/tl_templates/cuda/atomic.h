@@ -437,15 +437,24 @@ AtomicAddx2Ret(half_t *ref, ValType val,
 }
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
-template <typename src_type>
-TL_DEVICE void AtomicAddx2(bfloat16_t *ref, src_type *val,
+template <typename T> TL_DEVICE __nv_bfloat162 ToBfloat162(T *val) {
+  return *reinterpret_cast<const __nv_bfloat162 *>(val);
+}
+
+template <typename T> TL_DEVICE __nv_bfloat162 ToBfloat162(T val) {
+  return static_cast<__nv_bfloat162>(
+      *reinterpret_cast<const __nv_bfloat162 *>(&val));
+}
+
+TL_DEVICE __nv_bfloat162 ToBfloat162(__nv_bfloat162 val) { return val; }
+
+template <typename ValType>
+TL_DEVICE void AtomicAddx2(bfloat16_t *ref, ValType val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
+  __nv_bfloat162 add_val = ToBfloat162(val);
   if (memory_order == int(cuda::memory_order_relaxed)) {
-    atomicAdd(reinterpret_cast<__nv_bfloat162 *>(ref),
-              static_cast<__nv_bfloat162>(
-                  *reinterpret_cast<const __nv_bfloat162 *>(val)));
+    atomicAdd(reinterpret_cast<__nv_bfloat162 *>(ref), add_val);
   } else {
-    __nv_bfloat162 add_val = *reinterpret_cast<const __nv_bfloat162 *>(val);
     unsigned short add_val_x_cast =
         *reinterpret_cast<unsigned short *>(&add_val.x);
     unsigned short add_val_y_cast =
