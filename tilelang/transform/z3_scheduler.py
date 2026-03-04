@@ -362,12 +362,22 @@ def z3_schedule_loop_python(
             solver = z3.Solver()
             solver.set("timeout", 10000)
 
-            start_vars = [z3.Int(f"start_{i}") for i in range(n)]
+            if num_stages == 1:
+                start_vars = [z3.Int(f"start_{i}") for i in range(n)]
+            else:
+                k_vars = [z3.Int(f"k_{i}") for i in range(n)]
+                r_vars = [z3.Int(f"r_{i}") for i in range(n)]
+                start_vars = [k_vars[i] * ii_mid + r_vars[i] for i in range(n)]
             stage_vars = [z3.Int(f"pro_{i}") for i in range(n)]
             begin = z3.Int("begin")
 
             for i in range(n):
-                solver.add(start_vars[i] >= 0)
+                if num_stages == 1:
+                    solver.add(start_vars[i] >= 0)
+                else:
+                    solver.add(k_vars[i] >= 0)
+                    solver.add(r_vars[i] >= 0)
+                    solver.add(r_vars[i] < ii_mid)
                 solver.add(stage_vars[i] >= 0)
                 solver.add(stage_vars[i] < num_stages * 2)
                 solver.add(begin <= start_vars[i] + stage_vars[i] * ii_mid)
@@ -392,11 +402,18 @@ def z3_schedule_loop_python(
                     # Create ordering variable
                     o_ij = z3.Bool(f"O_{i}_{j}")
 
+                    if num_stages == 1:
                     # If o_ij is True (i before j), then start_j >= start_i + ii_i
-                    solver.add(z3.Implies(o_ij, start_vars[j] >= start_vars[i] + ii_i))
-
                     # If o_ij is False (j before i), then start_i >= start_j + ii_j
-                    solver.add(z3.Implies(z3.Not(o_ij), start_vars[i] >= start_vars[j] + ii_j))
+                        solver.add(z3.Implies(o_ij, start_vars[j] >= start_vars[i] + ii_i))
+                        solver.add(z3.Implies(o_ij, start_vars[i] + ii_mid >= start_vars[j] + ii_j))
+                        solver.add(z3.Implies(z3.Not(o_ij), start_vars[i] >= start_vars[j] + ii_j))
+                        solver.add(z3.Implies(z3.Not(o_ij), start_vars[j] + ii_mid >= start_vars[i] + ii_i))
+                    else:
+                        solver.add(z3.Implies(o_ij, r_vars[j] - r_vars[i] >= ii_i))
+                        solver.add(z3.Implies(o_ij, r_vars[i] - r_vars[j] + ii_mid >= ii_j))
+                        solver.add(z3.Implies(z3.Not(o_ij), r_vars[i] - r_vars[j] >= ii_j))
+                        solver.add(z3.Implies(z3.Not(o_ij), r_vars[j] - r_vars[i] + ii_mid >= ii_i))
 
                     if verbose:
                         print(f"[Python Z3 Loop] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
@@ -410,6 +427,9 @@ def z3_schedule_loop_python(
                 best_ii = ii_mid
                 best_model = solver.model()
                 best_start_vars = start_vars
+                if num_stages != 1:
+                    best_k_vars = k_vars
+                    best_r_vars = r_vars
                 best_stage_vars = stage_vars
                 # Try smaller II
                 ii_upper = ii_mid
@@ -432,11 +452,23 @@ def z3_schedule_loop_python(
         start_times = []
         stages = []
         begin = best_model.eval(begin).as_long()
+        offset = 0
+        if num_stages != 1:
+            k_vars = []
+            r_vars = []
+            for i in range(n):
+                k_var = best_model.eval(best_k_vars[i]).as_long()
+                r_var = best_model.eval(best_r_vars[i]).as_long()
+                k_vars.append(k_var)
+                r_vars.append(r_var)
+            offset = min(k_vars)
+        begin = begin - offset * ii_mid
         for i in range(n):
-            start_time = best_model.eval(best_start_vars[i]).as_long()
+            start_time = best_model.eval(best_start_vars[i]).as_long() - offset * best_ii
             stage = best_model.eval(best_stage_vars[i]).as_long()
             start_times.append(start_time)
             stages.append(stage)
+
 
         # Sort tasks by start time (and by index as tie-breaker)
         task_indices = list(range(n))
