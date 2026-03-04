@@ -835,13 +835,16 @@ class TLCPUSourceWrapper:
         return host_func
 
     def parse_source_information(self):
-        with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
-            device_mod, host_mod = get_annotated_mod(self.mod, self.target)
-        assert len(device_mod.functions) >= 1, "Device module should have at least one function."
-        assert len(host_mod.functions) == 1, "Only support one function in host module."
+        if self.device_mod is None or self.host_mod is None:
+            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs), self.target:
+                device_mod, host_mod = get_annotated_mod(self.mod, self.target)
+            self.device_mod = device_mod
+            self.host_mod = host_mod
+        assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
+        assert len(self.host_mod.functions) == 1, "Only support one function in host module."
 
         function_names = []
-        for g_var, _ in device_mod.functions.items():
+        for g_var, _ in self.device_mod.functions.items():
             function_name = g_var.name_hint
             function_names.append(function_name)
 
