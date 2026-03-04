@@ -688,7 +688,7 @@ inline int CountRegisterRegions(const IRStructure *node) {
 
 // Helper function to collect all TaskNodes with context information
 void CollectAllTaskNodesWithContext(
-    const IRStructure *node, std::vector<TaskNodeWithContext> &all_tasks,
+    IRStructure *node, std::vector<TaskNodeWithContext> &all_tasks,
     ControlNode *current_control_node = nullptr);
 
 // Helper function to print BufferRegion details

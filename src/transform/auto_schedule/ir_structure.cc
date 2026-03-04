@@ -370,9 +370,9 @@ void SequenceNode::CollectRegions(
 }
 
 // Helper function to collect all TaskNodes with context information
-void CollectAllTaskNodesWithContext(IRStructure *node,
-                                    std::vector<TaskNodeWithContext> &all_tasks,
-                                    ControlNode *current_control_node) {
+void CollectAllTaskNodesWithContext(
+    IRStructure *node, std::vector<TaskNodeWithContext> &all_tasks,
+    ControlNode *current_control_node) {
   if (!node)
     return;
 
