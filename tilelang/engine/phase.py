@@ -196,7 +196,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
-    print(mod)
     mod = tilelang.transform.LowerL2Persistent()(mod)
     # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
@@ -255,9 +254,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # as it will flatten index computing
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tir.transform.Simplify()(mod)
-    print(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
-    print(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
