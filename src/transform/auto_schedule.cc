@@ -1195,7 +1195,7 @@ private:
           for (unsigned idx = 0; idx != 2; ++idx) {
             auto region = Downcast<Call>(op->args[idx]);
             if (const auto *buffer_load =
-                    region->args[idx].as<BufferLoadNode>()) {
+                    region->args[0].as<BufferLoadNode>()) {
               Buffer buffer = buffer_load->buffer;
               String scope = buffer.scope();
               MemoryType mem_type = GetMemoryTypeFromScope(scope);
