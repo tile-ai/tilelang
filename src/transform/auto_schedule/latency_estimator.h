@@ -347,7 +347,7 @@ private:
 
     // Track loop dimensions for loop-invariant detection
     std::vector<LoopDimension> loop_stack;
-    std::unordered_map<const VarNode *, LoopDimension *> var_to_loop;
+    std::unordered_map<const VarNode *, int> var_to_depth;
 
     OperationCounter(int64_t thread_count = 1,
                      const LatencyEstimator::H100Params *params = nullptr)
@@ -395,22 +395,22 @@ private:
     AnalyzeContainedLoopVars(const PrimExpr &expr) {
       class VarCollector : public ExprVisitor {
       public:
-        const std::unordered_map<const VarNode *, LoopDimension *> &var_to_loop;
+        const std::unordered_map<const VarNode *, int> &var_to_depth;
         std::unordered_set<const VarNode *> collected_vars;
 
-        VarCollector(const std::unordered_map<const VarNode *, LoopDimension *>
-                         &var_to_loop)
-            : var_to_loop(var_to_loop) {}
+        VarCollector(
+            const std::unordered_map<const VarNode *, int> &var_to_depth)
+            : var_to_depth(var_to_depth) {}
 
         void VisitExpr_(const VarNode *op) final {
-          if (var_to_loop.count(op)) {
+          if (var_to_depth.count(op)) {
             collected_vars.insert(op);
           }
           ExprVisitor::VisitExpr_(op);
         }
       };
 
-      VarCollector collector(var_to_loop);
+      VarCollector collector(var_to_depth);
       collector(expr);
       return collector.collected_vars;
     }
@@ -425,9 +425,9 @@ private:
       // Find the maximum depth of contained loop variables
       int max_depth = -1;
       for (const VarNode *var : contained_vars) {
-        auto it = var_to_loop.find(var);
-        if (it != var_to_loop.end()) {
-          max_depth = std::max(max_depth, it->second->depth);
+        auto it = var_to_depth.find(var);
+        if (it != var_to_depth.end()) {
+          max_depth = std::max(max_depth, it->second);
         }
       }
 
@@ -618,13 +618,13 @@ private:
 
       // Push loop onto stack and update mapping
       loop_stack.push_back(loop_dim);
-      var_to_loop[op->loop_var.get()] = &loop_stack.back();
+      var_to_depth[op->loop_var.get()] = loop_dim.depth;
 
       // Visit loop body
       StmtExprVisitor::VisitStmt_(op);
 
       // Pop loop from stack
-      var_to_loop.erase(op->loop_var.get());
+      var_to_depth.erase(op->loop_var.get());
       loop_stack.pop_back();
     }
 

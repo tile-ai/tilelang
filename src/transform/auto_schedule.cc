@@ -224,7 +224,7 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
 
   int64_t max_latency = std::max(warpgroup0_latency, warpgroup1_latency);
   int64_t min_latency = std::min(warpgroup0_latency, warpgroup1_latency);
-  if ((double)max_latency / min_latency < 1.1) {
+  if ((double)max_latency < 1.1 * min_latency) {
     int64_t warpgroup0_latency = 0;
     int64_t warpgroup1_latency = 0;
 
@@ -1193,9 +1193,9 @@ private:
         if (op->op.same_as(copy_op)) {
           bool found_global = false;
           for (unsigned idx = 0; idx != 2; ++idx) {
-            auto region = Downcast<Call>(op->args[0]);
+            auto region = Downcast<Call>(op->args[idx]);
             if (const auto *buffer_load =
-                    region->args[0].as<BufferLoadNode>()) {
+                    region->args[idx].as<BufferLoadNode>()) {
               Buffer buffer = buffer_load->buffer;
               String scope = buffer.scope();
               MemoryType mem_type = GetMemoryTypeFromScope(scope);

@@ -872,10 +872,6 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
     }
   }
 }
-// Helper function to collect all TaskNodes with context information
-void CollectAllTaskNodesWithContext(
-    IRStructure *node, std::vector<TaskNodeWithContext> &all_tasks,
-    ControlNode *current_control_node = nullptr);
 
 } // namespace tl
 } // namespace tvm
