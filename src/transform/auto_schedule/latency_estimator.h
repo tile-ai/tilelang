@@ -732,25 +732,21 @@ private:
       if (is_read) {
         // Base read latency + bandwidth component
         return params_.global_memory_read +
-               std::max(0L,
-                        (access_bytes - 32) / params_.global_memory_bandwidth);
+               (access_bytes - 32) / params_.global_memory_bandwidth;
       } else {
         // Write latency usually lower
         return params_.global_memory_write +
-               std::max(0L,
-                        (access_bytes - 32) / params_.global_memory_bandwidth);
+               (access_bytes - 32) / params_.global_memory_bandwidth;
       }
     case MemoryType::kShared:
       // Shared memory has high bandwidth, less sensitive to size
       // Subtract typical burst size (128 bytes) for base latency
       if (is_read) {
         return params_.shared_memory_read +
-               std::max(0L,
-                        (access_bytes - 128) / params_.shared_memory_bandwidth);
+               (access_bytes - 128) / params_.shared_memory_bandwidth;
       } else {
         return params_.shared_memory_write +
-               std::max(0L,
-                        (access_bytes - 128) / params_.shared_memory_bandwidth);
+               (access_bytes - 128) / params_.shared_memory_bandwidth;
       }
     case MemoryType::kRegister:
       // Register access latency is constant and very small
@@ -759,12 +755,10 @@ private:
       // Unknown memory type, use global memory as conservative estimate
       if (is_read) {
         return params_.global_memory_read +
-               std::max(0L,
-                        (access_bytes - 32) / params_.global_memory_bandwidth);
+               (access_bytes - 32) / params_.global_memory_bandwidth;
       } else {
         return params_.global_memory_write +
-               std::max(0L,
-                        (access_bytes - 32) / params_.global_memory_bandwidth);
+               (access_bytes - 32) / params_.global_memory_bandwidth;
       }
     }
   }
