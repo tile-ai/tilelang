@@ -403,8 +403,8 @@ def z3_schedule_loop_python(
                     o_ij = z3.Bool(f"O_{i}_{j}")
 
                     if num_stages == 1:
-                    # If o_ij is True (i before j), then start_j >= start_i + ii_i
-                    # If o_ij is False (j before i), then start_i >= start_j + ii_j
+                        # If o_ij is True (i before j), then start_j >= start_i + ii_i
+                        # If o_ij is False (j before i), then start_i >= start_j + ii_j
                         solver.add(z3.Implies(o_ij, start_vars[j] >= start_vars[i] + ii_i))
                         solver.add(z3.Implies(o_ij, start_vars[i] + ii_mid >= start_vars[j] + ii_j))
                         solver.add(z3.Implies(z3.Not(o_ij), start_vars[i] >= start_vars[j] + ii_j))
@@ -468,7 +468,6 @@ def z3_schedule_loop_python(
             stage = best_model.eval(best_stage_vars[i]).as_long()
             start_times.append(start_time)
             stages.append(stage)
-
 
         # Sort tasks by start time (and by index as tie-breaker)
         task_indices = list(range(n))
