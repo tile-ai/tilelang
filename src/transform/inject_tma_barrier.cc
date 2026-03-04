@@ -335,6 +335,16 @@ public:
   }
 
 private:
+  PrimExpr NormalizeBarrierExpr(const PrimExpr &barrier_expr) const {
+    if (const auto *call = barrier_expr.as<CallNode>()) {
+      if (call->op.same_as(get_mbarrier())) {
+        ICHECK_EQ(call->args.size(), 1);
+        return call->args[0];
+      }
+    }
+    return barrier_expr;
+  }
+
   int GetCurrentThreadCount() {
     if (inside_elect_if_) {
       return 1;
@@ -349,7 +359,9 @@ private:
 
   void UpdateBarrierThreadCount(const PrimExpr &barrier_expr,
                                 int thread_count) {
-    if (const auto *imm = barrier_expr.as<IntImmNode>()) {
+    PrimExpr normalized_barrier_expr = NormalizeBarrierExpr(barrier_expr);
+
+    if (const auto *imm = normalized_barrier_expr.as<IntImmNode>()) {
       int id = static_cast<int>(imm->value);
       auto it = barrier_thread_counts_.find(id);
       if (it == barrier_thread_counts_.end()) {
@@ -360,7 +372,7 @@ private:
       return;
     }
 
-    auto int_set = arith::EvalSet(barrier_expr, var_int_set_);
+    auto int_set = arith::EvalSet(normalized_barrier_expr, var_int_set_);
     const auto *min_imm = int_set.min().as<IntImmNode>();
     const auto *max_imm = int_set.max().as<IntImmNode>();
     if (!min_imm || !max_imm) {

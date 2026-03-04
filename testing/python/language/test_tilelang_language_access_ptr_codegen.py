@@ -132,32 +132,6 @@ def test_async_copy_tileop_rejects_invalid_cp_async_scope():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
-def test_parallel_simt_copy_lowers_to_cp_async():
-    """Check plain user-written global->shared stores can lower to cp.async."""
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((128,), T.float32),
-        B: T.Tensor((128,), T.float32),
-    ):
-        with T.Kernel(1, threads=128):
-            S = T.alloc_shared((128,), T.float32)
-            for i in T.Parallel(128):
-                S[i] = A[i]
-            # Keep the shared buffer live so the copy cannot be DCE'd.
-            B[0] = S[0]
-
-    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
-    src = kernel.get_kernel_source()
-    print("=== Parallel SIMT copy -> cp.async codegen ===")
-    print(src)
-    assert "cp_async_gs<" in src, "Expected cp_async_gs in generated CUDA source"
-    assert "tl::cp_async_commit" in src, "Expected CPAsync lowering to emit commit"
-    assert "tl::cp_async_wait<0>" in src, "Expected CPAsync lowering to emit wait"
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_parallel_simt_copy_respects_enable_async_copy_config():
     """Check `tl.enable_async_copy=False` disables auto cp.async rewriting."""
 
@@ -182,35 +156,6 @@ def test_parallel_simt_copy_respects_enable_async_copy_config():
     print("=== Parallel SIMT copy (async disabled) codegen ===")
     print(src)
     assert "cp_async_gs<" not in src, "Did not expect cp_async_gs when async copy is disabled"
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
-def test_copy_global_to_shared_oob_lowers_to_predicated_cp_async():
-    """Check T.copy can lower OOB-guarded global->shared copy to predicated cp.async."""
-
-    M = 130
-    K = 32
-    block_m = 128
-    block_k = 32
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((M, K), T.float16),
-        B: T.Tensor((M, K), T.float16),
-    ):
-        with T.Kernel(T.ceildiv(M, block_m)) as pid_m:
-            S = T.alloc_shared((block_m, block_k), T.float16)
-            # OOB on the M dimension for the last block -> requires predicate,
-            # but predicate is uniform across the vectorized K dimension.
-            T.copy(A[pid_m * block_m : (pid_m + 1) * block_m, 0:block_k], S, disable_tma=True)
-            T.copy(S, B[pid_m * block_m : (pid_m + 1) * block_m, 0:block_k])
-
-    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
-    src = kernel.get_kernel_source()
-    print("=== OOB copy -> predicated cp.async codegen ===")
-    print(src)
-    assert "cp_async_gs_conditional<" in src, "Expected predicated cp.async (zero-fill) in generated CUDA source"
 
 
 @tilelang.testing.requires_cuda

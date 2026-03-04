@@ -774,21 +774,37 @@ private:
         continue;
       }
 
-      // Move the release patterns from the cp.async enqueue statement to the
-      // commit/wait statement so the barrier is released only when async copies
-      // are synchronized, not when they are issued.
-      for (size_t k = 0; k < map->release[i].size(); ++k) {
-        map->release[target].push_back(map->release[i][k]);
-        map->release_after[target].push_back(map->release_after[i][k]);
-      }
-      map->release[i].clear();
-      map->release_after[i].clear();
+      // Move only direct releases (release_after=true) from cp.async enqueue
+      // to commit/wait so the barrier is released when async copies are
+      // synchronized, not when they are issued.
+      // Inherited releases (release_after=false) belong to later producer ops
+      // and must not be migrated.
+      std::vector<int> kept_release;
+      std::vector<bool> kept_release_after;
+      kept_release.reserve(map->release[i].size());
+      kept_release_after.reserve(map->release_after[i].size());
 
-      plan.release_uses_cp_async_barrier[target] = true;
+      bool moved_any = false;
+      for (size_t k = 0; k < map->release[i].size(); ++k) {
+        if (map->release_after[i][k]) {
+          map->release[target].push_back(map->release[i][k]);
+          map->release_after[target].push_back(true);
+          moved_any = true;
+        } else {
+          kept_release.push_back(map->release[i][k]);
+          kept_release_after.push_back(false);
+        }
+      }
+      map->release[i] = std::move(kept_release);
+      map->release_after[i] = std::move(kept_release_after);
+
+      if (moved_any) {
+        plan.release_uses_cp_async_barrier[target] = true;
+      }
 
       // The subsequent wait_group is redundant for producer/consumer
       // synchronization under warp specialization and hurts overlap.
-      if (target_commit != -1) {
+      if (target_commit != -1 && moved_any) {
         for (int j = target_commit + 1; j < n; ++j) {
           if (marker_.GetRole(seq[j]) != Role::kProducer) {
             break;
@@ -926,6 +942,24 @@ private:
             LOG(WARNING) << "Producer doesn't have corresponding consumer: "
                          << seq_transformed[i];
           }
+          block_stmt.push_back(seq_transformed[i]);
+          new_body.push_back(
+              MakeGroupBlock(block_stmt.size() == 1
+                                 ? block_stmt[0]
+                                 // NOLINTNEXTLINE(performance-move-const-arg)
+                                 : SeqStmt(std::move(block_stmt)),
+                             annotations));
+          continue;
+        }
+
+        bool has_real_release_after = false;
+        for (bool release_after : map.release_after[i]) {
+          if (release_after) {
+            has_real_release_after = true;
+            break;
+          }
+        }
+        if (!has_real_release_after) {
           block_stmt.push_back(seq_transformed[i]);
           new_body.push_back(
               MakeGroupBlock(block_stmt.size() == 1
@@ -1236,7 +1270,8 @@ private:
 
   static std::vector<SyncPattern>
   RemoveUnusedSyncPatterns(const std::vector<SyncPattern> &sync_patterns,
-                           const std::vector<bool> &is_producer) {
+                           const std::vector<bool> &is_producer,
+                           const Array<Stmt> &seq_stmt) {
     /*
       Simplify multiple release-acquire pairs into one
       ------------------
@@ -1257,6 +1292,12 @@ private:
     int M = sync_patterns.size();
     std::vector<bool> removed(M, false);
     for (int i = 0; i < M; i++) {
+      // Do not remove cp.async producer->consumer dependencies here.
+      // cp.async enqueue completion is asynchronous and needs explicit
+      // synchronization (later converted to mbarrier cp.async arrive).
+      if (ContainsPtxCpAsync(seq_stmt[sync_patterns[i].release_idx])) {
+        continue;
+      }
       for (int j = 0; j < M; j++) {
         if (is_producer[sync_patterns[i].acquire_idx] ==
                 is_producer[sync_patterns[j].acquire_idx] &&
@@ -1285,7 +1326,7 @@ private:
 
     auto sync_patterns_base = CreateBaseSyncPairs(seq_stmt, is_producer);
     auto sync_patterns =
-        RemoveUnusedSyncPatterns(sync_patterns_base, is_producer);
+        RemoveUnusedSyncPatterns(sync_patterns_base, is_producer, seq_stmt);
 
     // for (auto pattern : sync_patterns) {
     //   std::cout << pattern.release_idx << " " << pattern.acquire_idx <<

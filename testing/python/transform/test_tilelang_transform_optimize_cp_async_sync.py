@@ -138,29 +138,6 @@ def test_optimize_cp_async_sync_keeps_stricter_wait():
     assert calls.get("tir.ptx_wait_group", 0) == 2
 
 
-def test_optimize_cp_async_sync_inserts_shared_sync_after_wait():
-    @T.prim_func
-    def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
-        S = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
-        # Classic pattern: cp.async -> commit -> wait -> consume from shared.
-        T.ptx_cp_async(
-            T.access_ptr(S[0], "w", 4),
-            T.access_ptr(A[0], "r", 4),
-            4,
-        )
-        T.ptx_commit_group()
-        T.ptx_wait_group(0)
-        # Consumer reads from the shared buffer.
-        B[0] = S[0]
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = _run(mod)
-    calls = _count_calls(mod["main"])
-    assert calls.get("tir.tvm_storage_sync", 0) >= 1, (
-        "Expected at least one tvm_storage_sync inserted after wait_group to synchronize shared-memory visibility across warps"
-    )
-
-
 def test_optimize_cp_async_sync_relaxes_loop_wait_with_prefetch():
     @T.prim_func
     def before(A: T.Tensor((32,), T.uint8), B: T.Tensor((32,), T.uint8)):

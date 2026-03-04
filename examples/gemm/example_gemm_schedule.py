@@ -46,7 +46,7 @@ def main():
 
     a = torch.randn(1024, 1024).cuda().half()
     b = torch.randn(1024, 1024).cuda().half()
-
+  
     c = kernel(a, b)
 
     ref_c = a @ b
