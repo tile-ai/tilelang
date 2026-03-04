@@ -5,6 +5,7 @@ import torch
 
 from platform import mac_ver
 from typing import Literal
+from tilelang import env
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tvm.target import Target
@@ -20,6 +21,7 @@ SUPPORTED_TARGETS: dict[str, str] = {
     "webgpu": "WebGPU target for browser/WebGPU runtimes.",
     "c": "C source backend.",
     "cutedsl": "CuTe DSL GPU target.",
+    "dlcompiler": "DLCompiler for various device target.",
 }
 
 
@@ -145,7 +147,9 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
         is_hip_available = check_hip_availability()
 
         # Determine the target based on availability
-        if is_cuda_available:
+        if env.use_dlcompiler():
+            return_var = "dlcompiler"
+        elif is_cuda_available:
             if torch.cuda.is_available() and (cap := torch.cuda.get_device_capability(0)):
                 return_var = Target({"kind": "cuda", "arch": f"sm_{nvcc.get_target_arch(cap)}"})
             else:
