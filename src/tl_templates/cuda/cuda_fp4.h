@@ -193,8 +193,7 @@ __tl_cvt_fp4x2_to_halfraw2(const __nv_fp4x2_storage_t x,
 
 // fp4_e2m1 -> half
 TL_DEVICE __half __tl_cvt_fp4_to_half(const __nv_fp4_storage_t src) {
-#if __CUDACC_VER_MAJOR__ > 13 or                                               \
-    (__CUDACC_VER_MAJOR__ == 13 and __CUDACC_VER_MINOR__ > 0)
+#if __CUDACC_VER_MAJOR__ >= 13
   __half_raw raw = __nv_cvt_fp4_to_halfraw(src, __NV_E2M1);
 #else
   __half_raw raw = __tl_cvt_fp4_to_halfraw(src, __NV_E2M1);
@@ -206,8 +205,7 @@ TL_DEVICE __half __tl_cvt_fp4_to_half(const __nv_fp4_storage_t src) {
 
 // fp4_e2m1x2 (1 byte) -> half2
 TL_DEVICE half2 __tl_cvt_fp4x2_to_half2(const __nv_fp4x2_storage_t src) {
-#if __CUDACC_VER_MAJOR__ > 13 or                                               \
-    (__CUDACC_VER_MAJOR__ == 13 and __CUDACC_VER_MINOR__ > 0)
+#if __CUDACC_VER_MAJOR__ >= 13
   __half2_raw raw = __nv_cvt_fp4x2_to_halfraw2(src, __NV_E2M1);
 #else
   __half2_raw raw = __tl_cvt_fp4x2_to_halfraw2(src, __NV_E2M1);
