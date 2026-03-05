@@ -116,12 +116,9 @@ def test_matmul_compile():
 def test_matmul_with_copy_cython():
     """CPU kernel using T.copy with cython backend.
 
-    Verifies that TLCPUSourceWrapper.parse_source_information() does not
-    crash with 'Target context required' when device_mod/host_mod are
-    already provided by tilelang.lower().
-
-    Note: The full compile may fail due to missing vector type definitions
-    (float4 etc.) in common.h — that is a separate known issue.
+    Verifies that T.copy works end-to-end on CPU: the vectorized copy
+    uses vector types (e.g. float4) defined in common.h, and the
+    wrapper correctly skips redundant re-lowering.
     """
     M, N, K = 128, 128, 128
     block_M, block_N, block_K = 32, 32, 32
@@ -145,11 +142,13 @@ def test_matmul_with_copy_cython():
                     C_local[i, j] += A_local[i, k] * B_local[k, j]
             T.copy(C_local, C[by * block_M, bx * block_N])
 
-    try:
-        tilelang.compile(matmul, target="c", out_idx=-1, execution_backend="cython")
-    except Exception as e:
-        # Must not be the target context error (the bug we fixed)
-        assert "Target context required" not in str(e), f"parse_source_information still crashes without target context: {e}"
+    compiled = tilelang.compile(matmul, target="c", out_idx=-1, execution_backend="cython")
+
+    a = torch.randn(M, K, dtype=torch.float32)
+    b = torch.randn(K, N, dtype=torch.float32)
+    c = compiled(a, b)
+    ref = a @ b
+    torch.testing.assert_close(c, ref, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":
