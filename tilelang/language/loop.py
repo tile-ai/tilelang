@@ -75,9 +75,7 @@ def Parallel(
     res : frame.ForFrame
         The ForFrame.
     """
-    merged_annotations: dict[str, Any] = (
-        dict(annotations) if annotations is not None else {}
-    )
+    merged_annotations: dict[str, Any] = dict(annotations) if annotations is not None else {}
     if coalesced_width is not None:
         merged_annotations["coalesced_width"] = coalesced_width
     if loop_layout is not None:

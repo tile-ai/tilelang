@@ -13,6 +13,8 @@ import tilelang.language as T
 from tilelang.profiler import do_bench
 
 tilelang.disable_cache()
+
+
 @tilelang.jit(out_idx=[3])
 def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_size):
     block_M = 64
@@ -527,6 +529,7 @@ def vertical_slash_sparse_attention(
 
     tl_kernel = _tl_vs_sparse_flashattn(batch_size, num_heads, context_size, head_dim, v_idx.shape[2], s_idx.shape[2])
     print(tl_kernel.get_kernel_source())
+
     def run(is_triton: bool = True):
         if is_triton:
             out = _triton_mixed_sparse_attention(

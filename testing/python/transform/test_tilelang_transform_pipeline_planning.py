@@ -191,8 +191,7 @@ def test_pipeline_planning_delays_wait_order_within_consumer_stage():
     assert len(stages) == 5, f"Expected 5 pipeline stages for 5 statements, got {len(stages)}"
     assert stages[2] == stages[4], f"Expected wait and consumer to share a stage, got stages={stages}"
     assert orders[3] < orders[2] < orders[4], (
-        "Expected independent prep stmt to be scheduled before wait, and wait before consumer, "
-        f"got stages={stages}, orders={orders}"
+        f"Expected independent prep stmt to be scheduled before wait, and wait before consumer, got stages={stages}, orders={orders}"
     )
 
 
@@ -241,12 +240,9 @@ def test_pipeline_planning_prioritizes_groups_by_consumer_and_rebinds_wait0():
     #   0 cpA, 1 commitA, 2 wait0, 3 cpB, 4 commitB, 5 wait0, 6 consumeB, 7 consumeA
     assert orders[3] < orders[0], f"Expected cp_async(B) before cp_async(A), got orders={orders}"
     assert orders[4] < orders[1], f"Expected commit(B) before commit(A), got orders={orders}"
-    assert stages[2] == stages[5] == stages[6] == stages[7], (
-        f"Expected waits and consumers in the same consumer stage, got stages={stages}"
-    )
+    assert stages[2] == stages[5] == stages[6] == stages[7], f"Expected waits and consumers in the same consumer stage, got stages={stages}"
     assert orders[2] < orders[6] < orders[5] < orders[7], (
-        "Expected wait for B before consumeB, then second wait before consumeA, "
-        f"got stages={stages}, orders={orders}"
+        f"Expected wait for B before consumeB, then second wait before consumeA, got stages={stages}, orders={orders}"
     )
 
 

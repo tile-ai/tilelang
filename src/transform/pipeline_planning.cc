@@ -729,7 +729,8 @@ private:
       }
     }
 
-    const int pipeline_stmt_count = static_cast<int>(pipeline_stage_infos.size());
+    const int pipeline_stmt_count =
+        static_cast<int>(pipeline_stage_infos.size());
     auto stmt_reads_buffer_set =
         [&](int stmt_idx,
             const std::unordered_set<const BufferNode *> &buffers) -> bool {

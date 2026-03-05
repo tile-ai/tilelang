@@ -1113,12 +1113,11 @@ private:
         parallel_async_without_async_commit_wait =
             no_commit_wait_bool.value()->value;
       } else {
-        LOG(WARNING)
-            << "Loop annotation `"
-            << attr::kParallelAsyncWithoutAsyncCommitWait
-            << "` expects Bool value (True/False), but got "
-            << no_commit_wait_anno.value().GetTypeKey()
-            << ". Ignore override.";
+        LOG(WARNING) << "Loop annotation `"
+                     << attr::kParallelAsyncWithoutAsyncCommitWait
+                     << "` expects Bool value (True/False), but got "
+                     << no_commit_wait_anno.value().GetTypeKey()
+                     << ". Ignore override.";
       }
     }
 

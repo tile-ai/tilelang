@@ -719,9 +719,8 @@ tvm::transform::Pass LowerPTXAsyncCopy() {
         ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
 
     auto *n = f.CopyOnWrite();
-    PTXAsyncCopyInjector injector(
-        enable_auto_async_copy,
-        /*async_without_async_commit_wait=*/false);
+    PTXAsyncCopyInjector injector(enable_auto_async_copy,
+                                  /*async_without_async_commit_wait=*/false);
     n->body = injector.Finalize(injector(n->body));
     return f;
   };

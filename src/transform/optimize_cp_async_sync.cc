@@ -73,8 +73,8 @@ public:
         uncommitted_state = UncommittedState::kZero;
         if (outstanding_committed_groups_exact.has_value() &&
             commit_has_new_cpasync) {
-          outstanding_committed_groups_exact = AddWithCap(
-              *outstanding_committed_groups_exact, /*inc=*/1);
+          outstanding_committed_groups_exact =
+              AddWithCap(*outstanding_committed_groups_exact, /*inc=*/1);
         } else if (outstanding_committed_groups_exact.has_value() &&
                    !commit_has_new_cpasync) {
           // Keep exact outstanding unchanged when this commit has no proven new
@@ -128,22 +128,21 @@ public:
 
           if (summary.wait == 0) {
             if (auto transfer = TryGetDeterministicNoWaitTransfer(current)) {
-              int guaranteed_new_groups = std::min(
-                  transfer->groups_if_start_clear,
-                  transfer->groups_if_start_pending);
+              int guaranteed_new_groups =
+                  std::min(transfer->groups_if_start_clear,
+                           transfer->groups_if_start_pending);
               outstanding_committed_groups_lb = AddWithCap(
                   outstanding_committed_groups_lb, guaranteed_new_groups);
 
               if (outstanding_committed_groups_exact.has_value()) {
                 if (uncommitted_state == UncommittedState::kZero) {
-                  outstanding_committed_groups_exact = AddWithCap(
-                      *outstanding_committed_groups_exact,
-                      transfer->groups_if_start_clear);
-                } else if (uncommitted_state ==
-                           UncommittedState::kNonZero) {
-                  outstanding_committed_groups_exact = AddWithCap(
-                      *outstanding_committed_groups_exact,
-                      transfer->groups_if_start_pending);
+                  outstanding_committed_groups_exact =
+                      AddWithCap(*outstanding_committed_groups_exact,
+                                 transfer->groups_if_start_clear);
+                } else if (uncommitted_state == UncommittedState::kNonZero) {
+                  outstanding_committed_groups_exact =
+                      AddWithCap(*outstanding_committed_groups_exact,
+                                 transfer->groups_if_start_pending);
                 } else {
                   outstanding_committed_groups_exact = std::nullopt;
                 }
@@ -156,8 +155,7 @@ public:
               if (uncommitted_state == UncommittedState::kZero) {
                 uncommitted_state =
                     pending_to_state(transfer->pending_if_start_clear);
-              } else if (uncommitted_state ==
-                         UncommittedState::kNonZero) {
+              } else if (uncommitted_state == UncommittedState::kNonZero) {
                 uncommitted_state =
                     pending_to_state(transfer->pending_if_start_pending);
               } else {
@@ -246,9 +244,9 @@ private:
             /*groups_if_start_pending=*/1, /*pending_if_start_pending=*/false};
   }
 
-  DeterministicNoWaitTransfer ComposeTransfer(
-      const DeterministicNoWaitTransfer &first,
-      const DeterministicNoWaitTransfer &second) const {
+  DeterministicNoWaitTransfer
+  ComposeTransfer(const DeterministicNoWaitTransfer &first,
+                  const DeterministicNoWaitTransfer &second) const {
     auto compose_one = [&](int first_groups, bool first_pending) {
       if (first_pending) {
         return std::make_pair(
@@ -268,8 +266,8 @@ private:
             /*groups_if_start_pending=*/g1, /*pending_if_start_pending=*/p1};
   }
 
-  DeterministicNoWaitTransfer RepeatTransfer(
-      DeterministicNoWaitTransfer base, int64_t times) const {
+  DeterministicNoWaitTransfer RepeatTransfer(DeterministicNoWaitTransfer base,
+                                             int64_t times) const {
     DeterministicNoWaitTransfer result = IdentityTransfer();
     while (times > 0) {
       if (times & 1) {
@@ -883,9 +881,10 @@ private:
         continue;
       }
       if (auto transfer = TryGetDeterministicNoWaitTransfer(body[i])) {
-        int guaranteed_new_groups = std::min(
-            transfer->groups_if_start_clear, transfer->groups_if_start_pending);
-        guaranteed_groups = AddWithCap(guaranteed_groups, guaranteed_new_groups);
+        int guaranteed_new_groups = std::min(transfer->groups_if_start_clear,
+                                             transfer->groups_if_start_pending);
+        guaranteed_groups =
+            AddWithCap(guaranteed_groups, guaranteed_new_groups);
         UpdatePendingStateWithTransfer(&pending, *transfer);
         continue;
       }
@@ -949,12 +948,13 @@ private:
 
     For prefix_loop = loop;
     ForNode *prefix = prefix_loop.CopyOnWrite();
-    prefix->extent =
-        IntImm(loop->extent.dtype(), static_cast<int64_t>(extent_imm->value) - 1);
+    prefix->extent = IntImm(loop->extent.dtype(),
+                            static_cast<int64_t>(extent_imm->value) - 1);
     prefix->body =
         relaxed_body.size() == 1 ? relaxed_body[0] : SeqStmt(relaxed_body);
 
-    PrimExpr last_iter = loop->min + IntImm(loop->extent.dtype(), extent_imm->value - 1);
+    PrimExpr last_iter =
+        loop->min + IntImm(loop->extent.dtype(), extent_imm->value - 1);
     Map<Var, PrimExpr> vmap;
     vmap.Set(loop->loop_var, last_iter);
     Stmt tail_body = Substitute(loop->body, vmap);
@@ -1065,9 +1065,9 @@ private:
       }
       if (summary.wait == 0) {
         if (auto transfer = TryGetDeterministicNoWaitTransfer(body[i])) {
-          int guaranteed_new_groups = std::min(
-              transfer->groups_if_start_clear,
-              transfer->groups_if_start_pending);
+          int guaranteed_new_groups =
+              std::min(transfer->groups_if_start_clear,
+                       transfer->groups_if_start_pending);
           outstanding_lb = AddWithCap(outstanding_lb, guaranteed_new_groups);
           groups_since_wait_lb =
               AddWithCap(groups_since_wait_lb, guaranteed_new_groups);
@@ -1211,7 +1211,6 @@ private:
     }
     return {};
   }
-
 };
 
 tvm::transform::Pass OptimizeCPAsyncSync() {
