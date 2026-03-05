@@ -6,7 +6,8 @@ from enum import Enum
 class PassConfigKey(str, Enum):
     """Pass configuration keys for TileLang compiler."""
 
-    # TileLang specific configs
+    # TileLang specific configs: TL_XX
+
     TL_SIMPLIFY = "tl.Simplify"
     """Configuration for TileLang simplification passes.
 
@@ -189,7 +190,8 @@ class PassConfigKey(str, Enum):
     ```
     """
 
-    # TIR related configs
+    # TIR related configs: TIR_XX
+
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"
     """Enable equivalent terms in TIR Common Subexpression Elimination. Default: True"""
 
@@ -220,8 +222,16 @@ class PassConfigKey(str, Enum):
     TIR_NOALIAS = "tir.noalias"
     """Enable pointer non-aliasing assumptions. Default: True"""
 
+    # Output debugging options
+
     CUDA_KERNELS_OUTPUT_DIR = "cuda.kernels_output_dir"
     """Output directory for generated CUDA kernels. Default: empty string"""
 
     TL_DISABLE_OUT_OF_BOUND_WARNING = "tl.disable_out_of_bound_warning"
     """Disable out-of-bound access warnings in safe memory access legalization. Default: False"""
+
+    TL_ENABLE_DUMP_IR = "tl.enable_dump_ir"
+    """Enable dumping IR during lowering between passes. Default: False"""
+
+    TL_DUMP_IR_DIR = "tl.dump_ir_path"
+    """Path to the directory where IR will be dumped. Default: ./dump/"""

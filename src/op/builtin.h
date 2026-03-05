@@ -118,8 +118,23 @@ static constexpr const char *kDisableThreadStorageSync =
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
 
+/*!
+ * \brief Disable out of bound warning in LegalizeSafeMemoryAccess pass.
+ *
+ * kDisableOutOfBoundWarning = "tl.disable_out_of_bound_warning"
+ *
+ */
 static constexpr const char *kDisableOutOfBoundWarning =
     "tl.disable_out_of_bound_warning";
+
+/*!
+ * \brief Enable dumping IR during lowering between passes.
+ *
+ * kEnableDumpIR = "tl.enable_dump_ir"
+ *
+ */
+static constexpr const char *kEnableDumpIR = "tl.enable_dump_ir";
+static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 
 /*!
  * \brief Get the type of the CUDA tensor map

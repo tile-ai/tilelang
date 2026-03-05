@@ -237,7 +237,14 @@ class JITKernel(Generic[_P, _T]):
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "tvm_ffi"
         enable_device_compile = execution_backend == "tvm_ffi"
-        with tvm.transform.PassContext(opt_level=3, config=pass_configs), self.target:
+
+        # Additional pass instruments
+        pass_instruments = []
+        if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
+            dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
+            pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+
+        with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), self.target:
             artifact = tilelang.lower(
                 tilelang_func,
                 target=target,
