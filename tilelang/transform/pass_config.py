@@ -234,4 +234,4 @@ class PassConfigKey(str, Enum):
     """Enable dumping IR during lowering between passes. Default: False"""
 
     TL_DUMP_IR_DIR = "tl.dump_ir_path"
-    """Path to the directory where IR will be dumped. Default: ./dump/"""
+    """Path to the directory where IR will be dumped. Default: ./dump_ir/"""
