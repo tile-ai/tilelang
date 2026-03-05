@@ -12,7 +12,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
 
-
+tilelang.disable_cache()
 @tilelang.jit(out_idx=[3])
 def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_size):
     block_M = 64
@@ -48,11 +48,13 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             bz: T.int32,
             by: T.int32,
         ):
-            for i, j in T.Parallel(block_N, dim):
+            for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
                 K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
 
-            for i, j in T.Parallel(block_N, dim):
+            for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
                 V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
+
+            T.ptx_commit_group()
 
         @T.macro
         def Compute(
@@ -71,6 +73,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             logsum: T.FragmentBuffer([block_M], accum_dtype),
             count: T.int32,
         ):
+            T.ptx_wait_group(count)
             for i, j in T.Parallel(block_M, block_N):
                 acc_s[i, j] = T.if_then_else(k + j < column_count, 0, -T.infinity(acc_s.dtype))
             T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -523,7 +526,7 @@ def vertical_slash_sparse_attention(
     )
 
     tl_kernel = _tl_vs_sparse_flashattn(batch_size, num_heads, context_size, head_dim, v_idx.shape[2], s_idx.shape[2])
-
+    print(tl_kernel.get_kernel_source())
     def run(is_triton: bool = True):
         if is_triton:
             out = _triton_mixed_sparse_attention(

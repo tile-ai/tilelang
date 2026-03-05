@@ -10,8 +10,10 @@
 #include <tvm/tir/transform.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 #include <unordered_set>
+#include <utility>
 
 #include "../op/builtin.h"
 
@@ -40,7 +42,8 @@ public:
     UncommittedState uncommitted_state = UncommittedState::kUnknown;
     std::optional<int> last_wait_n;
     bool last_wait_dynamic = false;
-    std::optional<int> outstanding_committed_groups = 0;
+    std::optional<int> outstanding_committed_groups_exact = 0;
+    int outstanding_committed_groups_lb = 0;
 
     Array<Stmt> simplified;
     simplified.reserve(visited.size());
@@ -48,19 +51,9 @@ public:
       const Stmt &stmt = visited[stmt_idx];
       Stmt current = stmt;
       if (const auto *loop = current.as<ForNode>()) {
-        bool has_following_wait = false;
-        for (size_t j = stmt_idx + 1; j < visited.size(); ++j) {
-          AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(visited[j]);
-          if (summary.wait > 0) {
-            has_following_wait = true;
-            break;
-          }
-        }
-        if (has_following_wait) {
-          current = MaybeRelaxLoopFirstWait(Downcast<For>(current));
-          current = MaybeRelaxLoopHeadWait(Downcast<For>(current),
-                                           outstanding_committed_groups);
-        }
+        current = MaybeRelaxLoopWaits(Downcast<For>(current),
+                                      outstanding_committed_groups_exact,
+                                      outstanding_committed_groups_lb);
       }
 
       ClassifiedStmt cls = ClassifySimpleAsyncStmt(current);
@@ -78,12 +71,20 @@ public:
             (uncommitted_state == UncommittedState::kNonZero);
         simplified.push_back(current);
         uncommitted_state = UncommittedState::kZero;
-        if (outstanding_committed_groups.has_value() &&
+        if (outstanding_committed_groups_exact.has_value() &&
             commit_has_new_cpasync) {
-          outstanding_committed_groups =
-              outstanding_committed_groups.value() + 1;
+          outstanding_committed_groups_exact = AddWithCap(
+              *outstanding_committed_groups_exact, /*inc=*/1);
+        } else if (outstanding_committed_groups_exact.has_value() &&
+                   !commit_has_new_cpasync) {
+          // Keep exact outstanding unchanged when this commit has no proven new
+          // cp.async group.
         } else {
-          outstanding_committed_groups = std::nullopt;
+          outstanding_committed_groups_exact = std::nullopt;
+        }
+        if (commit_has_new_cpasync) {
+          outstanding_committed_groups_lb =
+              AddWithCap(outstanding_committed_groups_lb, /*inc=*/1);
         }
         last_wait_n.reset();
         last_wait_dynamic = false;
@@ -99,16 +100,19 @@ public:
         simplified.push_back(current);
         last_wait_n = cls.wait_n;
         last_wait_dynamic = false;
-        if (outstanding_committed_groups.has_value()) {
-          outstanding_committed_groups =
-              std::min(outstanding_committed_groups.value(), cls.wait_n);
+        if (outstanding_committed_groups_exact.has_value()) {
+          outstanding_committed_groups_exact =
+              std::min(*outstanding_committed_groups_exact, cls.wait_n);
         }
+        outstanding_committed_groups_lb =
+            std::min(outstanding_committed_groups_lb, cls.wait_n);
         break;
       case AsyncStmtKind::kWaitDynamic:
         simplified.push_back(current);
         last_wait_n.reset();
         last_wait_dynamic = true;
-        outstanding_committed_groups = std::nullopt;
+        outstanding_committed_groups_exact = std::nullopt;
+        outstanding_committed_groups_lb = 0;
         break;
       case AsyncStmtKind::kOther:
         simplified.push_back(current);
@@ -121,11 +125,60 @@ public:
             uncommitted_state = UncommittedState::kNonZero;
             break;
           }
+
+          if (summary.wait == 0) {
+            if (auto transfer = TryGetDeterministicNoWaitTransfer(current)) {
+              int guaranteed_new_groups = std::min(
+                  transfer->groups_if_start_clear,
+                  transfer->groups_if_start_pending);
+              outstanding_committed_groups_lb = AddWithCap(
+                  outstanding_committed_groups_lb, guaranteed_new_groups);
+
+              if (outstanding_committed_groups_exact.has_value()) {
+                if (uncommitted_state == UncommittedState::kZero) {
+                  outstanding_committed_groups_exact = AddWithCap(
+                      *outstanding_committed_groups_exact,
+                      transfer->groups_if_start_clear);
+                } else if (uncommitted_state ==
+                           UncommittedState::kNonZero) {
+                  outstanding_committed_groups_exact = AddWithCap(
+                      *outstanding_committed_groups_exact,
+                      transfer->groups_if_start_pending);
+                } else {
+                  outstanding_committed_groups_exact = std::nullopt;
+                }
+              }
+
+              auto pending_to_state = [](bool pending) {
+                return pending ? UncommittedState::kNonZero
+                               : UncommittedState::kZero;
+              };
+              if (uncommitted_state == UncommittedState::kZero) {
+                uncommitted_state =
+                    pending_to_state(transfer->pending_if_start_clear);
+              } else if (uncommitted_state ==
+                         UncommittedState::kNonZero) {
+                uncommitted_state =
+                    pending_to_state(transfer->pending_if_start_pending);
+              } else {
+                if (transfer->pending_if_start_clear ==
+                    transfer->pending_if_start_pending) {
+                  uncommitted_state =
+                      pending_to_state(transfer->pending_if_start_clear);
+                } else {
+                  uncommitted_state = UncommittedState::kUnknown;
+                }
+              }
+
+              break;
+            }
+          }
           // Cross this unknown boundary conservatively.
           uncommitted_state = UncommittedState::kUnknown;
           last_wait_n.reset();
           last_wait_dynamic = false;
-          outstanding_committed_groups = std::nullopt;
+          outstanding_committed_groups_exact = std::nullopt;
+          outstanding_committed_groups_lb = 0;
         }
         break;
       }
@@ -149,6 +202,8 @@ private:
     kWaitDynamic
   };
 
+  enum class PendingAsyncState { kUnknown, kZero, kNonZero };
+
   struct ClassifiedStmt {
     AsyncStmtKind kind{AsyncStmtKind::kOther};
     int wait_n{0};
@@ -159,6 +214,142 @@ private:
     int commit = 0;
     int wait = 0;
   };
+
+  // Conservative deterministic transfer for statements that contain async
+  // intrinsics but no wait_group.
+  struct DeterministicNoWaitTransfer {
+    int groups_if_start_clear{0};
+    bool pending_if_start_clear{false};
+    int groups_if_start_pending{0};
+    bool pending_if_start_pending{true};
+  };
+
+  static constexpr int kOutstandingCap = 1024;
+
+  static int AddWithCap(int base, int inc) {
+    int64_t sum = static_cast<int64_t>(base) + static_cast<int64_t>(inc);
+    return static_cast<int>(std::min<int64_t>(sum, kOutstandingCap));
+  }
+
+  DeterministicNoWaitTransfer IdentityTransfer() const {
+    return {/*groups_if_start_clear=*/0, /*pending_if_start_clear=*/false,
+            /*groups_if_start_pending=*/0, /*pending_if_start_pending=*/true};
+  }
+
+  DeterministicNoWaitTransfer CPAsyncTransfer() const {
+    return {/*groups_if_start_clear=*/0, /*pending_if_start_clear=*/true,
+            /*groups_if_start_pending=*/0, /*pending_if_start_pending=*/true};
+  }
+
+  DeterministicNoWaitTransfer CommitTransfer() const {
+    return {/*groups_if_start_clear=*/0, /*pending_if_start_clear=*/false,
+            /*groups_if_start_pending=*/1, /*pending_if_start_pending=*/false};
+  }
+
+  DeterministicNoWaitTransfer ComposeTransfer(
+      const DeterministicNoWaitTransfer &first,
+      const DeterministicNoWaitTransfer &second) const {
+    auto compose_one = [&](int first_groups, bool first_pending) {
+      if (first_pending) {
+        return std::make_pair(
+            AddWithCap(first_groups, second.groups_if_start_pending),
+            second.pending_if_start_pending);
+      }
+      return std::make_pair(
+          AddWithCap(first_groups, second.groups_if_start_clear),
+          second.pending_if_start_clear);
+    };
+
+    auto [g0, p0] =
+        compose_one(first.groups_if_start_clear, first.pending_if_start_clear);
+    auto [g1, p1] = compose_one(first.groups_if_start_pending,
+                                first.pending_if_start_pending);
+    return {/*groups_if_start_clear=*/g0, /*pending_if_start_clear=*/p0,
+            /*groups_if_start_pending=*/g1, /*pending_if_start_pending=*/p1};
+  }
+
+  DeterministicNoWaitTransfer RepeatTransfer(
+      DeterministicNoWaitTransfer base, int64_t times) const {
+    DeterministicNoWaitTransfer result = IdentityTransfer();
+    while (times > 0) {
+      if (times & 1) {
+        result = ComposeTransfer(result, base);
+      }
+      times >>= 1;
+      if (times > 0) {
+        base = ComposeTransfer(base, base);
+      }
+    }
+    return result;
+  }
+
+  std::optional<DeterministicNoWaitTransfer>
+  TryGetDeterministicNoWaitTransfer(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return TryGetDeterministicNoWaitTransfer(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return TryGetDeterministicNoWaitTransfer(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      DeterministicNoWaitTransfer result = IdentityTransfer();
+      for (const Stmt &s : seq->seq) {
+        auto part = TryGetDeterministicNoWaitTransfer(s);
+        if (!part.has_value()) {
+          return std::nullopt;
+        }
+        result = ComposeTransfer(result, *part);
+      }
+      return result;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return TryGetDeterministicNoWaitTransfer(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (!is_one(realize->predicate)) {
+        return std::nullopt;
+      }
+      return TryGetDeterministicNoWaitTransfer(realize->block->body);
+    }
+    if (const auto *for_node = stmt.as<ForNode>()) {
+      if (for_node->thread_binding.defined()) {
+        return std::nullopt;
+      }
+      const auto *extent_imm = for_node->extent.as<IntImmNode>();
+      if (extent_imm == nullptr || extent_imm->value < 0) {
+        return std::nullopt;
+      }
+      auto body_transfer = TryGetDeterministicNoWaitTransfer(for_node->body);
+      if (!body_transfer.has_value()) {
+        return std::nullopt;
+      }
+      return RepeatTransfer(*body_transfer, extent_imm->value);
+    }
+    if (stmt.as<IfThenElseNode>()) {
+      return std::nullopt;
+    }
+    if (const auto *eval = stmt.as<EvaluateNode>()) {
+      if (const auto *call = eval->value.as<CallNode>()) {
+        if (IsWaitCall(call)) {
+          return std::nullopt;
+        }
+        if (IsCPAsyncCall(call)) {
+          return CPAsyncTransfer();
+        }
+        if (IsCommitCall(call)) {
+          return CommitTransfer();
+        }
+      }
+      if (ContainsAsyncIntrinsics(stmt)) {
+        return std::nullopt;
+      }
+      return IdentityTransfer();
+    }
+    if (ContainsAsyncIntrinsics(stmt)) {
+      return std::nullopt;
+    }
+    return IdentityTransfer();
+  }
 
   Array<Stmt> MaybeMergeCommitsBeforeWait0(Array<Stmt> seq) const {
     // Merge adjacent cp.async commit groups when the program is still using a
@@ -638,95 +829,84 @@ private:
     return stmt;
   }
 
-  Stmt MaybeRelaxLoopFirstWait(const For &loop) const {
-    if (!loop.defined() || loop->kind != ForKind::kSerial) {
-      return loop;
-    }
-    const auto *seq = loop->body.as<SeqStmtNode>();
-    if (!seq) {
-      return loop;
-    }
+  void UpdatePendingStateWithTransfer(
+      PendingAsyncState *pending,
+      const DeterministicNoWaitTransfer &transfer) const {
+    auto pending_to_state = [](bool has_pending) {
+      return has_pending ? PendingAsyncState::kNonZero
+                         : PendingAsyncState::kZero;
+    };
 
-    Array<Stmt> body = seq->seq;
-    int cp_async_before_wait = 0;
-    int commit_before_wait = 0;
-    bool changed = false;
-    for (int i = 0, n = static_cast<int>(body.size()); i < n; ++i) {
+    if (*pending == PendingAsyncState::kZero) {
+      *pending = pending_to_state(transfer.pending_if_start_clear);
+      return;
+    }
+    if (*pending == PendingAsyncState::kNonZero) {
+      *pending = pending_to_state(transfer.pending_if_start_pending);
+      return;
+    }
+    if (transfer.pending_if_start_clear == transfer.pending_if_start_pending) {
+      *pending = pending_to_state(transfer.pending_if_start_clear);
+    } else {
+      *pending = PendingAsyncState::kUnknown;
+    }
+  }
+
+  int GuaranteedNewGroupsBeforeNextWait(const Array<Stmt> &body,
+                                        int start_idx) const {
+    PendingAsyncState pending = PendingAsyncState::kUnknown;
+    int guaranteed_groups = 0;
+
+    for (int i = start_idx, n = static_cast<int>(body.size()); i < n; ++i) {
+      AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(body[i]);
+      if (summary.wait > 0) {
+        break;
+      }
+      if (summary.cp_async == 0 && summary.commit == 0) {
+        continue;
+      }
+
       ClassifiedStmt cls = ClassifySimpleAsyncStmt(body[i]);
       if (cls.kind == AsyncStmtKind::kCPAsync) {
-        ++cp_async_before_wait;
+        pending = PendingAsyncState::kNonZero;
         continue;
       }
       if (cls.kind == AsyncStmtKind::kCommit) {
-        ++commit_before_wait;
+        if (pending == PendingAsyncState::kNonZero) {
+          guaranteed_groups = AddWithCap(guaranteed_groups, 1);
+        }
+        pending = PendingAsyncState::kZero;
         continue;
       }
-      if (cls.kind == AsyncStmtKind::kWaitStatic) {
-        if (cls.wait_n == 0 && cp_async_before_wait > 0 &&
-            commit_before_wait > 0) {
-          // In a pipelined loop, each iteration may commit multiple cp.async
-          // groups (e.g. separate A/B shared-memory copies). For a K-stage
-          // software pipeline, a good default is to keep (K - 1) iterations'
-          // worth of committed groups in flight.
-          //
-          // `commit_before_wait` is a syntactic approximation of the number of
-          // committed groups produced per iteration before the first wait.
-          int new_wait_n = 1;
-          if (loop->annotations.Get("tl_pipelined_num_stages")) {
-            int per_iter_groups = std::max(1, commit_before_wait);
-            int stage_retain = PipelinedRetainGroups(loop);
-            new_wait_n = stage_retain * per_iter_groups;
-            // `cp.async.wait_group` takes a small immediate operand. Clamp to a
-            // conservative range to avoid generating illegal SASS/PTX.
-            new_wait_n = std::max(0, std::min(new_wait_n, 7));
-          }
-          bool changed_wait = false;
-          body.Set(i, RewriteWaitStaticInSimpleWrapper(body[i], new_wait_n,
-                                                       &changed_wait));
-          changed = changed || changed_wait;
-        }
-        break;
+      if (summary.cp_async > 0 && summary.commit == 0) {
+        pending = PendingAsyncState::kNonZero;
+        continue;
       }
-      if (cls.kind == AsyncStmtKind::kWaitDynamic) {
-        break;
+      if (auto transfer = TryGetDeterministicNoWaitTransfer(body[i])) {
+        int guaranteed_new_groups = std::min(
+            transfer->groups_if_start_clear, transfer->groups_if_start_pending);
+        guaranteed_groups = AddWithCap(guaranteed_groups, guaranteed_new_groups);
+        UpdatePendingStateWithTransfer(&pending, *transfer);
+        continue;
       }
-      if (cls.kind == AsyncStmtKind::kOther &&
-          ContainsAsyncIntrinsics(body[i])) {
-        AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(body[i]);
-        if (summary.cp_async > 0 && summary.commit == 0 && summary.wait == 0) {
-          cp_async_before_wait += summary.cp_async;
-          continue;
-        }
-        if (summary.cp_async == 0 && summary.commit > 0 && summary.wait == 0) {
-          commit_before_wait += summary.commit;
-          continue;
-        }
-        break;
-      }
+
+      // Unknown no-wait async shape: keep already guaranteed groups but drop
+      // pending precision for subsequent commit accounting.
+      pending = PendingAsyncState::kUnknown;
     }
 
-    if (!changed) {
-      return loop;
-    }
-    For new_loop = loop;
-    ForNode *n = new_loop.CopyOnWrite();
-    n->body = body.size() == 1 ? body[0] : SeqStmt(body);
-    return new_loop;
+    return guaranteed_groups;
   }
 
-  Stmt MaybeRelaxLoopHeadWait(const For &loop,
-                              const std::optional<int> &pre_outstanding) const {
-    if (!loop.defined() || loop->kind != ForKind::kSerial) {
+  Stmt MaybeRelaxUnrolledEpilogueLoopWaits(const For &loop, int retain) const {
+    if (!loop.defined() || loop->kind != ForKind::kUnrolled) {
       return loop;
     }
-    int retain = PipelinedRetainGroups(loop);
-    if (retain <= 0) {
+    if (!loop->annotations.Get("tl_pipelined_num_stages")) {
       return loop;
     }
-    if (!pre_outstanding.has_value() ||
-        pre_outstanding.value() < (retain + 1)) {
-      // Without enough committed groups before the loop, relaxing a leading
-      // wait_group(0) could turn it into a no-op and violate correctness.
+    const auto *extent_imm = loop->extent.as<IntImmNode>();
+    if (extent_imm == nullptr || extent_imm->value <= 1) {
       return loop;
     }
 
@@ -735,33 +915,178 @@ private:
       return loop;
     }
 
-    // Only consider loops that start with a static wait_group(0).
-    ClassifiedStmt first = ClassifySimpleAsyncStmt(seq->seq[0]);
-    if (first.kind != AsyncStmtKind::kWaitStatic || first.wait_n != 0) {
+    int wait_stmt_idx = -1;
+    for (int i = 0, n = static_cast<int>(seq->seq.size()); i < n; ++i) {
+      AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(seq->seq[i]);
+      if (summary.cp_async > 0 || summary.commit > 0) {
+        return loop;
+      }
+      if (summary.wait == 0) {
+        continue;
+      }
+      ClassifiedStmt cls = ClassifySimpleAsyncStmt(seq->seq[i]);
+      if (summary.wait != 1 || cls.kind != AsyncStmtKind::kWaitStatic ||
+          cls.wait_n != 0) {
+        return loop;
+      }
+      if (wait_stmt_idx >= 0) {
+        return loop;
+      }
+      wait_stmt_idx = i;
+    }
+    if (wait_stmt_idx < 0) {
       return loop;
     }
 
-    // Require a prefetch pattern inside the loop (cp.async + commit after the
-    // leading wait). Otherwise relaxing does not help and can be risky.
-    int cp_async_after = 0;
-    int commit_after = 0;
-    for (int i = 1, n = static_cast<int>(seq->seq.size()); i < n; ++i) {
-      AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(seq->seq[i]);
-      cp_async_after += summary.cp_async;
-      commit_after += summary.commit;
-      // No need to track waits here.
+    Array<Stmt> relaxed_body = seq->seq;
+    bool changed = false;
+    relaxed_body.Set(wait_stmt_idx,
+                     RewriteWaitStaticInSimpleWrapper(
+                         relaxed_body[wait_stmt_idx], retain, &changed));
+    if (!changed) {
+      return loop;
     }
-    if (cp_async_after <= 0 || commit_after <= 0) {
+
+    For prefix_loop = loop;
+    ForNode *prefix = prefix_loop.CopyOnWrite();
+    prefix->extent =
+        IntImm(loop->extent.dtype(), static_cast<int64_t>(extent_imm->value) - 1);
+    prefix->body =
+        relaxed_body.size() == 1 ? relaxed_body[0] : SeqStmt(relaxed_body);
+
+    PrimExpr last_iter = loop->min + IntImm(loop->extent.dtype(), extent_imm->value - 1);
+    Map<Var, PrimExpr> vmap;
+    vmap.Set(loop->loop_var, last_iter);
+    Stmt tail_body = Substitute(loop->body, vmap);
+    return SeqStmt({prefix_loop, tail_body});
+  }
+
+  Stmt MaybeRelaxLoopWaits(const For &loop,
+                           const std::optional<int> & /*pre_outstanding_exact*/,
+                           int pre_outstanding_lb) const {
+    if (!loop.defined()) {
+      return loop;
+    }
+    int retain = PipelinedRetainGroups(loop);
+    if (retain <= 0) {
+      return loop;
+    }
+    if (loop->kind == ForKind::kUnrolled) {
+      return MaybeRelaxUnrolledEpilogueLoopWaits(loop, retain);
+    }
+    if (loop->kind != ForKind::kSerial) {
+      return loop;
+    }
+
+    const auto *seq = loop->body.as<SeqStmtNode>();
+    if (!seq || seq->seq.empty()) {
       return loop;
     }
 
     Array<Stmt> body = seq->seq;
     bool changed = false;
-    body.Set(0, RewriteWaitStaticInSimpleWrapper(body[0], retain, &changed));
+
+    PendingAsyncState pending = PendingAsyncState::kUnknown;
+    int outstanding_lb = std::max(0, pre_outstanding_lb);
+    int groups_since_wait_lb = 0;
+    bool seen_wait_boundary = false;
+
+    for (int i = 0, n = static_cast<int>(body.size()); i < n; ++i) {
+      ClassifiedStmt cls = ClassifySimpleAsyncStmt(body[i]);
+      if (cls.kind == AsyncStmtKind::kCPAsync) {
+        pending = PendingAsyncState::kNonZero;
+        continue;
+      }
+      if (cls.kind == AsyncStmtKind::kCommit) {
+        if (pending == PendingAsyncState::kNonZero) {
+          outstanding_lb = AddWithCap(outstanding_lb, 1);
+          groups_since_wait_lb = AddWithCap(groups_since_wait_lb, 1);
+        }
+        pending = PendingAsyncState::kZero;
+        continue;
+      }
+      if (cls.kind == AsyncStmtKind::kWaitDynamic) {
+        seen_wait_boundary = true;
+        pending = PendingAsyncState::kUnknown;
+        outstanding_lb = 0;
+        groups_since_wait_lb = 0;
+        continue;
+      }
+      if (cls.kind == AsyncStmtKind::kWaitStatic) {
+        int effective_wait_n = cls.wait_n;
+        if (cls.wait_n == 0) {
+          int groups_after_wait_lb =
+              GuaranteedNewGroupsBeforeNextWait(body, i + 1);
+
+          int per_sync_groups = groups_since_wait_lb;
+          bool uses_head_fallback =
+              (per_sync_groups == 0 && !seen_wait_boundary);
+          if (uses_head_fallback) {
+            // Head wait: even with no in-iteration prefetch before it, keep
+            // one iteration's worth in flight when there is enough prologue
+            // outstanding and deterministic producer work after the wait.
+            per_sync_groups = 1;
+          }
+
+          int candidate_wait_n =
+              std::max(0, std::min(retain * per_sync_groups, 7));
+          bool enough_pre_outstanding = true;
+          if (uses_head_fallback) {
+            // Head wait has no in-iteration prefetch before it. Require
+            // pre-loop committed groups so wait_group(N) is not a no-op.
+            enough_pre_outstanding = outstanding_lb >= (candidate_wait_n + 1);
+          }
+          if (candidate_wait_n > 0 && enough_pre_outstanding &&
+              (!uses_head_fallback || groups_after_wait_lb > 0)) {
+            bool changed_wait = false;
+            body.Set(i, RewriteWaitStaticInSimpleWrapper(
+                            body[i], candidate_wait_n, &changed_wait));
+            if (changed_wait) {
+              changed = true;
+              effective_wait_n = candidate_wait_n;
+            }
+          }
+        }
+
+        seen_wait_boundary = true;
+        outstanding_lb = std::min(outstanding_lb, effective_wait_n);
+        groups_since_wait_lb = 0;
+        continue;
+      }
+
+      if (!ContainsAsyncIntrinsics(body[i])) {
+        continue;
+      }
+
+      AsyncIntrinSummary summary = SummarizeAsyncIntrinsics(body[i]);
+      if (summary.cp_async > 0 && summary.commit == 0 && summary.wait == 0) {
+        pending = PendingAsyncState::kNonZero;
+        continue;
+      }
+      if (summary.wait == 0) {
+        if (auto transfer = TryGetDeterministicNoWaitTransfer(body[i])) {
+          int guaranteed_new_groups = std::min(
+              transfer->groups_if_start_clear,
+              transfer->groups_if_start_pending);
+          outstanding_lb = AddWithCap(outstanding_lb, guaranteed_new_groups);
+          groups_since_wait_lb =
+              AddWithCap(groups_since_wait_lb, guaranteed_new_groups);
+          UpdatePendingStateWithTransfer(&pending, *transfer);
+          continue;
+        }
+      }
+
+      if (summary.wait > 0) {
+        seen_wait_boundary = true;
+      }
+      pending = PendingAsyncState::kUnknown;
+      outstanding_lb = 0;
+      groups_since_wait_lb = 0;
+    }
+
     if (!changed) {
       return loop;
     }
-
     For new_loop = loop;
     ForNode *n = new_loop.CopyOnWrite();
     n->body = body.size() == 1 ? body[0] : SeqStmt(body);
@@ -886,6 +1211,7 @@ private:
     }
     return {};
   }
+
 };
 
 tvm::transform::Pass OptimizeCPAsyncSync() {

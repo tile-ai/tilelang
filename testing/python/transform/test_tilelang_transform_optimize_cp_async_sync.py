@@ -259,6 +259,126 @@ def test_optimize_cp_async_sync_does_not_relax_wait_when_prefetch_is_conditional
     assert 2 not in loop_waits, f"Did not expect wait_group(2) under conditional prefetch, got waits={loop_waits}"
 
 
+def test_optimize_cp_async_sync_relaxes_loop_head_wait_with_non_async_prefix():
+    # Regression case:
+    # The first statement in loop body is non-async, and the first async sync
+    # point is wait_group(0). This wait should still be relaxable.
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.uint8), B: T.Tensor((64,), T.uint8)):
+        S = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+        tmp = T.alloc_buffer((1,), dtype=T.uint8, scope="local")
+
+        # Prologue: ensure there are committed groups before the loop.
+        T.ptx_cp_async(T.access_ptr(S[0], "w", 4), T.access_ptr(A[0], "r", 4), 4)
+        T.ptx_commit_group()
+        T.ptx_cp_async(T.access_ptr(S[4], "w", 4), T.access_ptr(A[4], "r", 4), 4)
+        T.ptx_commit_group()
+
+        for k in T.serial(0, 4, annotations={"tl_pipelined_num_stages": T.int32(2)}):
+            # Non-async prefix before the first wait in this loop iteration.
+            tmp[0] = A[k * 4]
+
+            T.ptx_wait_group(0)
+
+            # Prefetch for a later tile.
+            T.ptx_cp_async(
+                T.access_ptr(S[(k + 2) * 4], "w", 4),
+                T.access_ptr(A[(k + 2) * 4], "r", 4),
+                4,
+            )
+            T.ptx_commit_group()
+
+            B[k * 4] = S[k * 4] + tmp[0]
+
+        # Epilogue drain.
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = _run(mod)
+
+    func = mod["main"]
+    loop = _find_pipelined_loop(func)
+    _, loop_waits = _count_commit_and_wait(loop.body)
+    assert 1 in loop_waits, f"Expected wait_group(1) in loop, got waits={loop_waits}"
+    assert 0 not in loop_waits, f"Expected loop wait_group(0) to be relaxed, got waits={loop_waits}"
+
+
+def test_optimize_cp_async_sync_relaxes_multiple_waits_in_loop():
+    # Two consumer waits in one pipelined loop should both be analyzed.
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.uint8), B: T.Tensor((64,), T.uint8)):
+        SA = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+        SB = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+
+        # Prologue: seed two committed groups before the loop.
+        T.ptx_cp_async(T.access_ptr(SA[0], "w", 4), T.access_ptr(A[0], "r", 4), 4)
+        T.ptx_commit_group()
+        T.ptx_cp_async(T.access_ptr(SB[0], "w", 4), T.access_ptr(A[32], "r", 4), 4)
+        T.ptx_commit_group()
+
+        for k in T.serial(0, 4, annotations={"tl_pipelined_num_stages": T.int32(2)}):
+            # Wait for SA consumer.
+            T.ptx_wait_group(0)
+            B[k * 8] = SA[k * 4]
+            T.ptx_cp_async(
+                T.access_ptr(SA[(k + 2) * 4], "w", 4),
+                T.access_ptr(A[(k + 2) * 4], "r", 4),
+                4,
+            )
+            T.ptx_commit_group()
+
+            # Wait for SB consumer.
+            T.ptx_wait_group(0)
+            B[k * 8 + 1] = SB[k * 4]
+            T.ptx_cp_async(
+                T.access_ptr(SB[(k + 2) * 4], "w", 4),
+                T.access_ptr(A[32 + (k + 2) * 4], "r", 4),
+                4,
+            )
+            T.ptx_commit_group()
+
+        # Epilogue drain.
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = _run(mod)
+
+    func = mod["main"]
+    loop = _find_pipelined_loop(func)
+    _, loop_waits = _count_commit_and_wait(loop.body)
+    assert loop_waits.count(1) >= 2, f"Expected two relaxed waits in loop, got waits={loop_waits}"
+    assert 0 not in loop_waits, f"Expected all loop wait_group(0) to be relaxed, got waits={loop_waits}"
+
+
+def test_optimize_cp_async_sync_relaxes_unrolled_epilogue_wait_but_keeps_last_drain():
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.uint8), B: T.Tensor((64,), T.uint8)):
+        S = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+
+        # Steady-state pipelined loop.
+        for k in T.serial(0, 4, annotations={"tl_pipelined_num_stages": T.int32(2)}):
+            T.ptx_cp_async(
+                T.access_ptr(S[(k + 1) * 4], "w", 4),
+                T.access_ptr(A[(k + 1) * 4], "r", 4),
+                4,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(1)
+            B[k * 4] = S[k * 4]
+
+        # Epilogue consumer loop after software-pipeline expansion.
+        for k in T.unroll(2, annotations={"tl_pipelined_num_stages": T.int32(2)}):
+            T.ptx_wait_group(0)
+            B[16 + k] = S[16 + k]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = _run(mod)
+
+    wait_args = _collect_wait_args(mod["main"])
+    assert wait_args.count(1) >= 1, f"Expected a relaxed epilogue wait_group(1), got {wait_args}"
+    assert 0 in wait_args, f"Expected a final drain wait_group(0), got {wait_args}"
+
+
 def test_optimize_cp_async_sync_relaxes_loop_head_wait_with_prefetch():
     @T.prim_func
     def before(A: T.Tensor((32,), T.uint8), B: T.Tensor((32,), T.uint8)):

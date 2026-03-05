@@ -1094,6 +1094,33 @@ private:
       predicate = Downcast<PrimExpr>(
           op->annotations.Get(attr::kParallelLoopPredicate).value());
     }
+    bool parallel_prefer_async = false;
+    if (auto prefer_async_anno = op->annotations.Get(attr::kLoopPreferAsync)) {
+      if (auto prefer_async_bool = prefer_async_anno.value().try_cast<Bool>()) {
+        parallel_prefer_async = prefer_async_bool.value()->value;
+      } else {
+        LOG(WARNING) << "Loop annotation `" << attr::kLoopPreferAsync
+                     << "` expects Bool value (True/False), but got "
+                     << prefer_async_anno.value().GetTypeKey()
+                     << ". Ignore override.";
+      }
+    }
+    bool parallel_async_without_async_commit_wait = false;
+    if (auto no_commit_wait_anno =
+            op->annotations.Get(attr::kParallelAsyncWithoutAsyncCommitWait)) {
+      if (auto no_commit_wait_bool =
+              no_commit_wait_anno.value().try_cast<Bool>()) {
+        parallel_async_without_async_commit_wait =
+            no_commit_wait_bool.value()->value;
+      } else {
+        LOG(WARNING)
+            << "Loop annotation `"
+            << attr::kParallelAsyncWithoutAsyncCommitWait
+            << "` expects Bool value (True/False), but got "
+            << no_commit_wait_anno.value().GetTypeKey()
+            << ". Ignore override.";
+      }
+    }
 
     auto root = tvm::ffi::GetRef<For>(op);
 
@@ -1217,8 +1244,11 @@ private:
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
       bool enable_auto_async_copy =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-      lowered = InjectPTXAsyncCopy(lowered, enable_auto_async_copy &&
-                                                (pipelined_depth_ > 0));
+      bool should_enable_async_copy =
+          (enable_auto_async_copy && (pipelined_depth_ > 0)) ||
+          parallel_prefer_async;
+      lowered = InjectPTXAsyncCopy(lowered, should_enable_async_copy,
+                                   parallel_async_without_async_commit_wait);
     }
     return lowered;
   }

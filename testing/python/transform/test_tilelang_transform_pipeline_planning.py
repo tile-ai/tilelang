@@ -160,5 +160,95 @@ def test_pipeline_planning_binds_wait_to_cp_async_consumer_stage():
     assert orders[2] < orders[3], f"Expected wait to stay ordered before consumer, got orders={orders}"
 
 
+def test_pipeline_planning_delays_wait_order_within_consumer_stage():
+    @T.prim_func
+    def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8), C: T.Tensor((16,), T.uint8)):
+        S = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
+        for i in T.Pipelined(4, num_stages=2):
+            with T.block():
+                T.ptx_cp_async(
+                    T.access_ptr(S[i * 4], "w", 4),
+                    T.access_ptr(A[i * 4], "r", 4),
+                    4,
+                )
+            with T.block():
+                T.ptx_commit_group()
+            with T.block():
+                T.ptx_wait_group(0)
+            # Independent prep work that does not touch waited shared buffers.
+            with T.block():
+                C[i * 4] = A[i * 4] + T.uint8(1)
+            with T.block():
+                B[i * 4] = S[i * 4]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+    assert len(stages) == 5, f"Expected 5 pipeline stages for 5 statements, got {len(stages)}"
+    assert stages[2] == stages[4], f"Expected wait and consumer to share a stage, got stages={stages}"
+    assert orders[3] < orders[2] < orders[4], (
+        "Expected independent prep stmt to be scheduled before wait, and wait before consumer, "
+        f"got stages={stages}, orders={orders}"
+    )
+
+
+def test_pipeline_planning_prioritizes_groups_by_consumer_and_rebinds_wait0():
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.uint8), B: T.Tensor((64,), T.uint8), C: T.Tensor((64,), T.uint8)):
+        SA = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+        SB = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+        TMP = T.alloc_buffer((64,), dtype=T.uint8, scope="local")
+        for i in T.Pipelined(4, num_stages=2):
+            with T.block():
+                T.ptx_cp_async(
+                    T.access_ptr(SA[(i + 1) * 4], "w", 4),
+                    T.access_ptr(A[(i + 1) * 4], "r", 4),
+                    4,
+                )
+            with T.block():
+                T.ptx_commit_group()
+            with T.block():
+                T.ptx_wait_group(0)
+            with T.block():
+                T.ptx_cp_async(
+                    T.access_ptr(SB[(i + 1) * 4], "w", 4),
+                    T.access_ptr(B[(i + 1) * 4], "r", 4),
+                    4,
+                )
+            with T.block():
+                T.ptx_commit_group()
+            with T.block():
+                T.ptx_wait_group(0)
+            with T.block():
+                TMP[i * 4] = SB[i * 4]
+            with T.block():
+                C[i * 4] = SA[i * 4] + TMP[i * 4]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+    assert len(stages) == 8, f"Expected 8 pipeline statements, got {len(stages)}"
+
+    # Statements:
+    #   0 cpA, 1 commitA, 2 wait0, 3 cpB, 4 commitB, 5 wait0, 6 consumeB, 7 consumeA
+    assert orders[3] < orders[0], f"Expected cp_async(B) before cp_async(A), got orders={orders}"
+    assert orders[4] < orders[1], f"Expected commit(B) before commit(A), got orders={orders}"
+    assert stages[2] == stages[5] == stages[6] == stages[7], (
+        f"Expected waits and consumers in the same consumer stage, got stages={stages}"
+    )
+    assert orders[2] < orders[6] < orders[5] < orders[7], (
+        "Expected wait for B before consumeB, then second wait before consumeA, "
+        f"got stages={stages}, orders={orders}"
+    )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

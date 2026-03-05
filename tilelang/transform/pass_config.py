@@ -104,6 +104,8 @@ class PassConfigKey(str, Enum):
     (e.g. created by `T.Pipelined(..., num_stages=...)` or by pipeline planning).
     Outside such loops, TileLang will prefer synchronous copy lowering even when
     this flag is True.
+    You can request local cp.async injection on a specific parallel loop via
+    `T.Parallel(..., prefer_async=True)`.
 
     When False, TileLang will avoid the cp.async lowering path for `T.copy`.
     Explicit `T.async_copy` still requires cp.async support and may error if

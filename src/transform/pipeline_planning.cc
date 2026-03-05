@@ -7,6 +7,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <queue>
@@ -728,6 +729,109 @@ private:
       }
     }
 
+    const int pipeline_stmt_count = static_cast<int>(pipeline_stage_infos.size());
+    auto stmt_reads_buffer_set =
+        [&](int stmt_idx,
+            const std::unordered_set<const BufferNode *> &buffers) -> bool {
+      if (buffers.empty() || stmt_idx < 0 || stmt_idx >= pipeline_stmt_count) {
+        return false;
+      }
+      for (const BufferRegion &read : pipeline_stage_infos[stmt_idx].reads) {
+        if (buffers.count(read->buffer.get())) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // Record earliest consumers for each cp.async group, and track all
+    // cp.async-written buffers for wait remapping.
+    std::unordered_set<const BufferNode *> async_written_buffers;
+    std::vector<int> cp_async_group_first_consumer(
+        cp_async_groups.size(), std::numeric_limits<int>::max());
+    for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
+      const auto &group = cp_async_groups[group_id];
+      async_written_buffers.insert(group.written_buffers.begin(),
+                                   group.written_buffers.end());
+      for (int stmt_idx = 0; stmt_idx < pipeline_stmt_count; ++stmt_idx) {
+        if (stmt_reads_buffer_set(stmt_idx, group.written_buffers)) {
+          cp_async_group_first_consumer[group_id] = stmt_idx;
+          break;
+        }
+      }
+    }
+
+    // Heuristic for wait_group(0): bind each wait to the first unmatched
+    // downstream consumer of cp.async-written shared buffers, then derive the
+    // required groups from that consumer's read set.
+    //
+    // This keeps wait-group scheduling buffer-aware even when wait uses a full
+    // drain value, enabling patterns like "wait/decode B first, then wait A".
+    int last_bound_consumer_stmt = -1;
+    for (auto &wait_dep : wait_dependencies) {
+      int wait_stmt_idx = wait_dep.wait_stmt_index;
+      if (wait_stmt_idx < 0 || wait_stmt_idx >= pipeline_stmt_count) {
+        continue;
+      }
+      const auto &wait_stmt_info = pipeline_stage_infos[wait_stmt_idx];
+      if (!wait_stmt_info.has_cp_async_wait() ||
+          wait_stmt_info.cp_async_wait_has_dynamic ||
+          wait_stmt_info.cp_async_wait_min_inflight != 0) {
+        continue;
+      }
+      if (wait_stmt_info.has_cp_async_call() ||
+          wait_stmt_info.has_cp_async_commit()) {
+        continue;
+      }
+
+      int search_start =
+          std::max(wait_stmt_idx + 1, last_bound_consumer_stmt + 1);
+      int consumer_stmt_idx = -1;
+      for (int stmt_idx = search_start; stmt_idx < pipeline_stmt_count;
+           ++stmt_idx) {
+        if (stmt_reads_buffer_set(stmt_idx, async_written_buffers)) {
+          consumer_stmt_idx = stmt_idx;
+          break;
+        }
+      }
+      if (consumer_stmt_idx < 0) {
+        continue;
+      }
+
+      std::vector<int> required_groups_for_consumer;
+      for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
+        if (stmt_reads_buffer_set(consumer_stmt_idx,
+                                  cp_async_groups[group_id].written_buffers)) {
+          required_groups_for_consumer.push_back(static_cast<int>(group_id));
+        }
+      }
+      if (required_groups_for_consumer.empty()) {
+        continue;
+      }
+
+      wait_dep.required_group_ids = std::move(required_groups_for_consumer);
+      last_bound_consumer_stmt = consumer_stmt_idx;
+    }
+
+    // Prioritize cp.async groups with earlier consumers when enforcing group
+    // boundary ordering. This helps place prefetches for near-term consumers
+    // earlier in the stage-0 schedule.
+    std::vector<int> cp_async_group_schedule_order;
+    cp_async_group_schedule_order.reserve(cp_async_groups.size());
+    for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
+      cp_async_group_schedule_order.push_back(static_cast<int>(group_id));
+    }
+    std::stable_sort(
+        cp_async_group_schedule_order.begin(),
+        cp_async_group_schedule_order.end(), [&](int lhs_group, int rhs_group) {
+          int lhs_first_consumer = cp_async_group_first_consumer[lhs_group];
+          int rhs_first_consumer = cp_async_group_first_consumer[rhs_group];
+          if (lhs_first_consumer != rhs_first_consumer) {
+            return lhs_first_consumer < rhs_first_consumer;
+          }
+          return lhs_group < rhs_group;
+        });
+
     // For every copy stage, mark all its dependency stages as producer_for_copy
     // Helper struct to manage copy stage dependency reads
     struct CopyStageDependencyReadsManager {
@@ -1157,23 +1261,31 @@ private:
             }
           }
         }
-        if (g + 1 < cp_async_groups.size() &&
-            !group.commit_stmt_indices.empty()) {
-          const auto &next_group = cp_async_groups[g + 1];
-          for (int commit_stmt_idx : group.commit_stmt_indices) {
-            for (int next_cp_stmt_idx : next_group.cp_async_stmt_indices) {
-              if (pipeline_stage_infos[commit_stmt_idx].stage ==
-                  pipeline_stage_infos[next_cp_stmt_idx].stage) {
-                add_edge(commit_stmt_idx, next_cp_stmt_idx);
-              }
+      }
+      for (size_t i = 0; i + 1 < cp_async_group_schedule_order.size(); ++i) {
+        const auto &group = cp_async_groups[cp_async_group_schedule_order[i]];
+        if (group.commit_stmt_indices.empty()) {
+          continue;
+        }
+        const auto &next_group =
+            cp_async_groups[cp_async_group_schedule_order[i + 1]];
+        for (int commit_stmt_idx : group.commit_stmt_indices) {
+          for (int next_cp_stmt_idx : next_group.cp_async_stmt_indices) {
+            if (pipeline_stage_infos[commit_stmt_idx].stage ==
+                pipeline_stage_infos[next_cp_stmt_idx].stage) {
+              add_edge(commit_stmt_idx, next_cp_stmt_idx);
             }
           }
         }
       }
 
-      // (2) wait_group must stay ordered before dependent consumers in the same
-      // stage, and if wait is in the same stage as a required commit, it must
-      // happen after that commit.
+      // (2) wait_group ordering:
+      //   - wait must stay before dependent same-stage consumers;
+      //   - if wait is in the same stage as a required commit, it must be
+      //     after that commit;
+      //   - when legal, delay wait to be as close as possible to its first
+      //     dependent consumer by placing independent same-stage statements
+      //     before wait (without crossing async/control-only boundaries).
       for (const auto &wait_dep : wait_dependencies) {
         int wait_stmt_idx = wait_dep.wait_stmt_index;
         if (wait_stmt_idx < 0 || wait_stmt_idx >= n) {
@@ -1213,6 +1325,7 @@ private:
 
         // Ensure wait happens before all same-stage consumers that read any of
         // the waited buffers.
+        int first_dependent_consumer_idx = -1;
         for (int consumer_stmt_idx = wait_stmt_idx + 1; consumer_stmt_idx < n;
              ++consumer_stmt_idx) {
           if (pipeline_stage_infos[consumer_stmt_idx].stage !=
@@ -1228,7 +1341,52 @@ private:
             }
           }
           if (dependent_read) {
+            if (first_dependent_consumer_idx == -1) {
+              first_dependent_consumer_idx = consumer_stmt_idx;
+            }
             add_edge(wait_stmt_idx, consumer_stmt_idx);
+          }
+        }
+
+        // Delay wait within the same stage until right before the first
+        // dependent consumer when possible, so independent prep work can run
+        // while async copies are still in flight.
+        if (first_dependent_consumer_idx != -1) {
+          for (int stmt_idx = wait_stmt_idx + 1;
+               stmt_idx < first_dependent_consumer_idx; ++stmt_idx) {
+            const auto &mid_stmt_info = pipeline_stage_infos[stmt_idx];
+            if (mid_stmt_info.stage != wait_stmt_info.stage) {
+              continue;
+            }
+            // Do not move wait across pure control statements (e.g. barriers)
+            // because they are not represented in buffer read/write regions.
+            if (mid_stmt_info.reads.empty() && mid_stmt_info.writes.empty()) {
+              break;
+            }
+            // Do not move wait across explicit async synchronization points.
+            if (mid_stmt_info.has_cp_async_call() ||
+                mid_stmt_info.has_cp_async_commit() ||
+                mid_stmt_info.has_cp_async_wait()) {
+              break;
+            }
+            bool touches_waited_buffers = false;
+            for (const BufferRegion &read : mid_stmt_info.reads) {
+              if (waited_buffers.count(read->buffer.get())) {
+                touches_waited_buffers = true;
+                break;
+              }
+            }
+            if (!touches_waited_buffers) {
+              for (const BufferRegion &write : mid_stmt_info.writes) {
+                if (waited_buffers.count(write->buffer.get())) {
+                  touches_waited_buffers = true;
+                  break;
+                }
+              }
+            }
+            if (!touches_waited_buffers) {
+              add_edge(stmt_idx, wait_stmt_idx);
+            }
           }
         }
       }

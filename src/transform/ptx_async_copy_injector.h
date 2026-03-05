@@ -12,7 +12,8 @@ namespace tl {
  * (e.g., a lowered parallel loop) rather than the whole PrimFunc.
  */
 tvm::tir::Stmt InjectPTXAsyncCopy(const tvm::tir::Stmt &body,
-                                  bool enable_auto_async_copy);
+                                  bool enable_auto_async_copy,
+                                  bool async_without_async_commit_wait = false);
 
 } // namespace tl
 } // namespace tvm

@@ -5,6 +5,7 @@ from tilelang import language as T
 from tilelang.engine.callback import register_cuda_postproc_callback
 import argparse
 
+
 @tilelang.jit(
     out_idx=[-2, -1],
     compile_flags=[
@@ -457,6 +458,7 @@ def run_regression_perf(B=1, S=4096, SKV=8192, H=128, HKV=1, DQK=576, DV=512, to
         kernel(q, kv, indices, torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda"))
 
     from tilelang.profiler import do_bench
+
     return do_bench(fn, backend="cupti")
 
 

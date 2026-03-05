@@ -31,11 +31,15 @@ using namespace tir;
 
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
-  explicit PTXAsyncCopyInjector(bool enable_auto_async_copy)
-      : enable_auto_async_copy_(enable_auto_async_copy) {}
+  explicit PTXAsyncCopyInjector(bool enable_auto_async_copy,
+                                bool async_without_async_commit_wait)
+      : enable_auto_async_copy_(enable_auto_async_copy),
+        async_without_async_commit_wait_(async_without_async_commit_wait) {}
 
   Stmt Finalize(Stmt body) {
-    if (!pending_sync_copies_) {
+    if (!pending_sync_copies_ || async_without_async_commit_wait_) {
+      pending_sync_copies_ = false;
+      uncommitted_sync_copies_ = false;
       return body;
     }
 
@@ -132,6 +136,10 @@ public:
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
+    if (async_without_async_commit_wait_) {
+      return StmtMutator::VisitStmt_(op);
+    }
+
     // Insert commit+wait at statement boundaries to preserve synchronous
     // semantics for normal global->shared BufferStore copies.
     //
@@ -202,6 +210,10 @@ public:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
+    if (async_without_async_commit_wait_) {
+      return StmtMutator::VisitStmt_(op);
+    }
+
     // Treat branches as separate control flow paths. We propagate pending
     // synchronous copies into both branches (they occur before the branch),
     // but do not let mutations in one branch affect the other.
@@ -239,8 +251,7 @@ public:
     if (!IsSharedBuffer(store->buffer)) {
       return StmtMutator::VisitStmt_(store);
     }
-    // Only lower copies that are either explicitly
-    // in the automatic lowering mode controlled by pass config.
+    // Only lower copies in regions where async-copy rewrite is enabled.
     if (!enable_auto_async_copy_) {
       return StmtMutator::VisitStmt_(store);
     }
@@ -248,8 +259,10 @@ public:
     if (auto *load = store->value.as<BufferLoadNode>()) {
       Optional<Stmt> injected = TryInjectPTX(load, store);
       if (injected.defined()) {
-        pending_sync_copies_ = true;
-        uncommitted_sync_copies_ = true;
+        if (!async_without_async_commit_wait_) {
+          pending_sync_copies_ = true;
+          uncommitted_sync_copies_ = true;
+        }
         return injected.value();
       }
       return StmtMutator::VisitStmt_(store);
@@ -267,8 +280,10 @@ public:
                 TryInjectPTX(load, store, /*predicated=*/true,
                              /*predicate_value=*/call->args[0]);
             if (injected.defined()) {
-              pending_sync_copies_ = true;
-              uncommitted_sync_copies_ = true;
+              if (!async_without_async_commit_wait_) {
+                pending_sync_copies_ = true;
+                uncommitted_sync_copies_ = true;
+              }
               return injected.value();
             }
           }
@@ -667,6 +682,7 @@ private:
   // `SummarizeAsyncIntrinsics` helpers to avoid redundant traversals.
 
   bool enable_auto_async_copy_{true};
+  bool async_without_async_commit_wait_{false};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;
@@ -676,8 +692,10 @@ private:
 
 using namespace tir::transform;
 
-Stmt InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy) {
-  PTXAsyncCopyInjector injector(enable_auto_async_copy);
+Stmt InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
+                        bool async_without_async_commit_wait) {
+  PTXAsyncCopyInjector injector(enable_auto_async_copy,
+                                async_without_async_commit_wait);
   return injector.Finalize(injector(body));
 }
 
@@ -701,7 +719,9 @@ tvm::transform::Pass LowerPTXAsyncCopy() {
         ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
 
     auto *n = f.CopyOnWrite();
-    PTXAsyncCopyInjector injector(enable_auto_async_copy);
+    PTXAsyncCopyInjector injector(
+        enable_auto_async_copy,
+        /*async_without_async_commit_wait=*/false);
     n->body = injector.Finalize(injector(n->body));
     return f;
   };
