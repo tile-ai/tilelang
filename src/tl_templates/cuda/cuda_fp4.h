@@ -167,7 +167,7 @@ TL_DEVICE fp4_e2_32_t make_fp4_e2_32_t(
 // https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__FP4__MISC.html
 
 // Custom fp4_e2m1 -> half convertion for CUDA version < 13.0 to avoid using
-// `cvt.rn.relu.f16x2.e2m1x2` There are bugs in PTXAS related to
+// `cvt.rn.relu.f16x2.e2m1x2`, as there are bugs in PTXAS related to
 // `cvt.rn.relu.f16x2.e2m1x2` between CUDA 12.6 and 12.9
 __device__ __half_raw __tl_cvt_fp4_to_halfraw_naive(
     const __nv_fp4_storage_t x,
@@ -182,7 +182,7 @@ __device__ __half_raw __tl_cvt_fp4_to_halfraw_naive(
 }
 
 // Custom fp4_e2m1 -> half convertion for CUDA version < 13.0 to avoid using
-// `cvt.rn.relu.f16x2.e2m1x2` There are bugs in PTXAS related to
+// `cvt.rn.relu.f16x2.e2m1x2`, as there are bugs in PTXAS related to
 // `cvt.rn.relu.f16x2.e2m1x2` between CUDA 12.6 and 12.9
 __device__ __half2_raw __tl_cvt_fp4x2_to_halfraw2_naive(
     const __nv_fp4x2_storage_t x,
