@@ -46,36 +46,45 @@ def copy(
     - Accepts `Buffer`/`BufferRegion`/`BufferLoad` on either side. Extents are
       derived as follows: `Buffer -> shape`, `BufferRegion -> [r.extent]`,
       `BufferLoad -> extents from its inferred/encoded region`.
-    - If both `src` and `dst` are scalar `BufferLoad` without region extents,
-      lowers to a direct store: `dst[...] = src`.
-    - If one side is missing extents, it is treated as all-ones with the other
-      side's rank to enable broadcasting.
-    - Extents are right-aligned and legalized via `legalize_pairwise_extents`:
-      per tail-dimension, equal keeps as-is, a `1` broadcasts to the other,
-      otherwise a conservative `tir.max` is used to remain safe for dynamic
-      shapes.
+    - Normally, we require the extents of both sides to be the same. If they
+      differ, the copy instruction follows an internal rule to select one side
+      as the base range and create iteration space. This may generate unexpected
+      code. And if some dimensions are 1, unexpected errors may happen.
+    - Small Optimization: If both `src` and `dst` are scalar `BufferLoad` without
+      region extents, lowers to a direct store: `dst[...] = src[...]`.
+    - Syntactic Sugar: TileLang supports passing the head address of a buffer to represent
+      the whole buffer if there are no ambiguity. For example, T.copy(A, A_shared[i, j]).
+      To support this, we need some special shape checking. But remember currently we don't
+      support something like "broadcast".
     - The finalized extents are encoded with `tl.region` via `to_buffer_region`
       and passed through to the backend; low-level loop construction and any
       scope-specific decisions happen during lowering.
     """
+    # If both side are buffers, we should make sure their shapes are equal
     if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
         ir.assert_structural_equal(src.shape, dst.shape)
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
+
+    src_is_scalar_load = src_extent is None and isinstance(src, tir.BufferLoad)
+    dst_is_scalar_load = dst_extent is None and isinstance(dst, tir.BufferLoad)
+
     # Combine the nested if statements into a single if statement as suggested by SIM102
-    if src_extent is None and dst_extent is None and isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
+    if src_is_scalar_load and dst_is_scalar_load:
         # check if the case is like this:
         # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
         # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
         return tir.BufferStore(dst.buffer, src, dst.indices)
 
-    assert src_extent or dst_extent, "Can't deduce copy extents from args"
-    # Treat missing extent as length-matched ones to enable broadcasting.
+    assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
+    # Treat missing extent as length-matched ones for convenience. This provides limited
+    # broadcasting-like syntactic sugar, but does not implement general broadcasting support.
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
 
     # Align and broadcast extents from the right (tail) side.
+    # This is majorly for supporting some syntactic sugar, not the whole broadcasting ability of copy op.
     src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
 
     # Use legalized extents for src and dst respectively.

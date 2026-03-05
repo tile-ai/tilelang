@@ -567,6 +567,10 @@ void CodeGenTileLangHIP::PrintStorageSync(const CallNode *op) {
     // DO nothing.
   } else if (sync == "shared" || sync == "shared.dyn") {
     this->PrintIndent();
+    // TODO: change to __builtin_amdgcn_s_barrier() later
+    // __syncthreads() will add a vmcnt(0) to final asm, which will break all
+    // buffer_load_async and buffer_load_async...lds
+    // in tilelang vmcnt should be managed explicitly by cp_async_wait.
     this->stream << "__syncthreads();\n";
   }
 }
@@ -947,7 +951,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float32", "float"},
         {"float64", "double"},
         {"float16x4", "float16x4"},
+        {"float16x8", "float16x8"},
         {"bfloat16x4", "bfloat16x4_vec"},
+        {"bfloat16x8", "bfloat16x8_vec"},
         {"float32x4", "float32x4"},
         {"float8_e4m3fnuzx4", "fp8_e4_4_t"},
         {"float8_e4m3fnx4", "fp8_e4_4_t"},

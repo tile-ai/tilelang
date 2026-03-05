@@ -364,6 +364,18 @@ def disable_warp_group_reg_alloc():
     return no_set_max_nreg()
 
 
+def ptx_arrive_cluster_barrier(mbarrier: BarrierType, cta_id: int | Var):
+    """Arrive at a shared barrier in cluster.
+
+    Args:
+        mbarrier: BarrierType
+            The memory barrier to arrive at
+        cta_id: int | Var
+            The peer CTA rank in cluster to arrive at.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_arrive_cluster_barrier"), mbarrier, cta_id)
+
+
 def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
     """Wait for memory barrier parity condition.
 
@@ -405,15 +417,22 @@ def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: BarrierType):
+def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
     """Arrive at memory barrier.
 
     Args:
         mbarrier: BarrierType
             The memory barrier to arrive at
+        cta_id: int | Var | None
+            The peer CTA rank in cluster to arrive at. (Only valid for cluster barriers)
+            If not provided, will arrive on current CTA's barrier.
     """
     mbarrier = _mbar_to_buffer_load(mbarrier)
-    return ptx_arrive_barrier(mbarrier)
+    if cta_id is not None:
+        assert mbarrier.buffer.scope() == "shared.cluster_barrier", f"mbarrier must be a cluster barrier, but got {mbarrier.buffer.scope}"
+        return ptx_arrive_cluster_barrier(mbarrier, cta_id)
+    else:
+        return ptx_arrive_barrier(mbarrier)
 
 
 def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):

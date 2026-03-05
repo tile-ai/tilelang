@@ -229,6 +229,7 @@ class KernelLaunchFrame(TIRFrame):
 def Kernel(
     *blocks: int | tir.PrimExpr,
     threads: int | list[int] | tuple | None = None,
+    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
     is_cpu: bool = False,
     prelude: str | None = None,
 ):
@@ -242,6 +243,11 @@ def Kernel(
         A integer representing blockDim.x
         Or a list of integers representing blockDim.(x|y|z)
         if the value is -1, we skip the threadIdx.x binding.
+    cluster_dims : int | tuple[int, int, int] | list[int] | None
+        The cluster dimensions for SM90+ cluster launch.
+        For example, use 2 or (2, 1, 1) to create 2-CTA clusters.
+        When specified, the kernel will be launched using cudaLaunchKernelEx
+        with cudaLaunchAttributeClusterDimension.
     is_cpu : bool
         Whether the kernel is running on CPU.
         Thus we will not bind threadIdx.x, threadIdx.y, threadIdx.z.
@@ -308,6 +314,17 @@ def Kernel(
 
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
+
+    if cluster_dims is not None:
+        if isinstance(cluster_dims, (list, tuple)):
+            cluster_dims = list(cluster_dims) + [1] * (3 - len(cluster_dims))
+        elif isinstance(cluster_dims, int):
+            cluster_dims = [cluster_dims, 1, 1]
+        else:
+            raise ValueError("cluster_dims must be a list or tuple of integers")
+
+        if cluster_dims != [1, 1, 1]:
+            attrs["cluster_dims"] = cluster_dims
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
 

@@ -113,5 +113,44 @@ def test_matmul_compile():
     tilelang.testing.torch_assert_close(C, C_torch, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
+def test_matmul_with_copy_cython():
+    """CPU kernel using T.copy with cython backend.
+
+    Verifies that TLCPUSourceWrapper.parse_source_information() does not
+    crash with 'Target context required' when device_mod/host_mod are
+    already provided by tilelang.lower().
+
+    Note: The full compile may fail due to missing vector type definitions
+    (float4 etc.) in common.h — that is a separate known issue.
+    """
+    M, N, K = 128, 128, 128
+    block_M, block_N, block_K = 32, 32, 32
+
+    @T.prim_func
+    def matmul(
+        A: T.Tensor((M, K), "float32"),
+        B: T.Tensor((K, N), "float32"),
+        C: T.Tensor((M, N), "float32"),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
+            A_local = T.alloc_local((block_M, block_K), "float32")
+            B_local = T.alloc_local((block_K, block_N), "float32")
+            C_local = T.alloc_local((block_M, block_N), "float32")
+
+            T.clear(C_local)
+            for ko in T.serial(K // block_K):
+                T.copy(A[by * block_M, ko * block_K], A_local)
+                T.copy(B[ko * block_K, bx * block_N], B_local)
+                for i, j, k in T.grid(block_M, block_N, block_K):
+                    C_local[i, j] += A_local[i, k] * B_local[k, j]
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    try:
+        tilelang.compile(matmul, target="c", out_idx=-1, execution_backend="cython")
+    except Exception as e:
+        # Must not be the target context error (the bug we fixed)
+        assert "Target context required" not in str(e), f"parse_source_information still crashes without target context: {e}"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

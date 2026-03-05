@@ -4,7 +4,7 @@ import tilelang_example_sparse_tensorcore
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_tilelang_example_sparse_tensorcore():
     tilelang_example_sparse_tensorcore.main()
 

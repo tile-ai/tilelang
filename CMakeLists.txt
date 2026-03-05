@@ -148,6 +148,8 @@ foreach(BACKEND IN LISTS TILELANG_BACKENDS)
   set(${_backend_var} ${TILELANG_OPTION_${_backend_var}} CACHE STRING "${_doc}" FORCE)
   set(${_backend_var} ${TILELANG_OPTION_${_backend_var}})
 endforeach()
+# tvm tries to detect gtest by default, but may fail if its header is not installed.
+set(USE_GTEST OFF)
 
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})

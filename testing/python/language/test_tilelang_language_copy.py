@@ -140,6 +140,35 @@ def test_tilelang_copy_buffer_load_with_parallel():
     run_tilelang_copy_buffer_load_with_parallel(M=1024, N=1024, block_M=128, block_N=128)
 
 
+def tilelang_copy_shape_mismatched(M, N, src_dtype=T.float16, dst_dtype=T.float16):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), src_dtype),
+        B: T.Tensor((M, N), dst_dtype),
+    ):
+        # Initialize Kernel Context
+        with T.Kernel(1, threads=128):
+            T.copy(A[:, :2], B[:, :3])
+
+    return main
+
+
+def run_tilelang_copy_shape_mismatched(M=1024, N=1024, dtype=T.float16):
+    program = tilelang_copy_shape_mismatched(M, N, src_dtype=dtype, dst_dtype=dtype)
+    kernel = tilelang.compile(
+        program,
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+    )
+    a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
+    b = kernel(a)
+    torch.testing.assert_close(b[:, :1], a[:, :1], rtol=1e-2, atol=1e-2)
+
+
+def test_tilelang_copy_shape_mismatched():
+    run_tilelang_copy_shape_mismatched(M=128, N=128)
+
+
 def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.float8_e8m0fnu, dst_dtype=T.float8_e8m0fnu):
     program = tilelang_copy(M, N, block_M, block_N, src_dtype=src_dtype, dst_dtype=dst_dtype)
     kernel = tilelang.compile(

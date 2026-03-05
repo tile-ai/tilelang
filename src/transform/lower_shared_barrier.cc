@@ -57,8 +57,12 @@ private:
       if (!ptr_type)
         continue;
       auto storage_scope = ptr_type->storage_scope;
-      if (storage_scope == "shared.barrier") {
+      if (storage_scope == "shared.barrier" ||
+          storage_scope == "shared.cluster_barrier") {
         barrier_buffers.push_back(buffer);
+        if (storage_scope == "shared.cluster_barrier") {
+          has_cluster_barrier_ = true;
+        }
       }
     }
 
@@ -141,9 +145,9 @@ private:
 
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), ptx_fence_barrier_init(), {})));
-    new_body.push_back(
-        Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
-                      {StringImm("shared")})));
+    new_body.push_back(Evaluate(
+        Call(DataType::Handle(), builtin::tvm_storage_sync(),
+             {StringImm(has_cluster_barrier_ ? "cluster" : "shared")})));
     new_body.push_back(block->body);
 
     block.CopyOnWrite()->body = SeqStmt(new_body);
@@ -191,6 +195,8 @@ private:
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   // Disable shuffle elect for the warp specialized kernel
   bool disable_shuffle_elect_;
+  // Whether the block has a cluster barrier
+  bool has_cluster_barrier_ = false;
 };
 
 PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
