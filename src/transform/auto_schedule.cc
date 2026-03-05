@@ -1276,7 +1276,6 @@ private:
       // Set Tensor Core shape information if available
       for (const auto &shape : analyzer.tensor_core_shapes) {
         if (shape.m > 0 && shape.n > 0 && shape.k > 0) {
-          LOG(WARNING) << shape.m << " " << shape.n << " " << shape.k;
           task_node->AddTensorCoreShape(shape.m, shape.n, shape.k);
         }
       }

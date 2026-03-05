@@ -18,8 +18,8 @@
  */
 
 /*!
- * \file auto_schedule.cc
- * \brief AutoSchedule pass for TileLang
+ * \file ir_structure.cc
+ * \brief IR structure analysis for TileLang
  */
 
 #include <tvm/arith/analyzer.h>
@@ -304,6 +304,7 @@ std::unique_ptr<IRStructure> ControlNode::Clone() const {
   // Copy latency and II
   new_ctrl->SetLatency(GetLatency());
   new_ctrl->SetII(GetII());
+  new_ctrl->SetPromote(hasPromote());
   return new_ctrl;
 }
 
