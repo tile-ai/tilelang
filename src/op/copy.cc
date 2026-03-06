@@ -637,6 +637,14 @@ bool CopyNode::CheckTMemStore(Target target) const {
          dst.scope() == "shared.tmem";
 }
 
+bool CopyNode::CheckSIMDGroupStore(Target target) const {
+  if (TargetIsMetal(target)) {
+    return (src.scope() == "metal.simdgroup") &&
+           (dst.scope() == "metal.simdgroup");
+  }
+  return false;
+}
+
 // Selects the most specific copy instruction for the given target and buffers.
 // Priority: BulkLoad1D, BulkStore1D, BulkLoad, BulkStore, LDSM, STSM, TMemLoad,
 // TMemStore, Normal.
@@ -675,6 +683,8 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
     return CopyInst::kTMemLoad;
   } else if (CheckTMemStore(target)) {
     return CopyInst::kTMemStore;
+  } else if (CheckSIMDGroupStore(target)) {
+    return CopyInst::kMetalSIMDGroup;
   } else {
     return CopyInst::kNormal;
   }

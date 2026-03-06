@@ -63,14 +63,14 @@ from tvm.tir.transform import prim_func_pass
 # Cache the Op for if_then_else to avoid repeated lookups
 _IF_THEN_ELSE_OP = Op.get("tir.if_then_else")
 
-from tilelang.utils.language import is_fragment, is_global, is_local, is_local_var, is_shared
+from tilelang.utils.language import is_fragment, is_global, is_local, is_local_var, is_shared, is_metal_simdgroup
 
 
 def is_local_buffer(buffer: Buffer) -> bool:
-    """Check if a buffer is local (register-level), including local.var."""
+    """Check if a buffer is local (register-level), including local.var and metal.simdgroup."""
     if buffer is None:
         return False
-    return is_local(buffer) or is_fragment(buffer) or is_local_var(buffer)
+    return is_local(buffer) or is_fragment(buffer) or is_local_var(buffer) or is_metal_simdgroup(buffer)
 
 
 def is_global_or_shared_buffer(buffer: Buffer) -> bool:

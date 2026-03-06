@@ -118,6 +118,20 @@ def is_fragment(buffer: BufferLikeType) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
+def is_metal_simdgroup(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is in the Metal simdgroup scope.
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is in metal.simdgroup scope, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "metal.simdgroup"
+
+
 def is_local_var(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the local.var memory scope.
