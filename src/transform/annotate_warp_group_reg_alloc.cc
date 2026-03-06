@@ -68,6 +68,16 @@ public:
   }
 
 private:
+  void VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(builtin::ptx_cp_async()) ||
+          call->op.same_as(tl::ptx_cp_async())) {
+        has_simt_copy_ = true;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   void VisitStmt_(const BufferStoreNode *op) final {
     auto scope =
         runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));

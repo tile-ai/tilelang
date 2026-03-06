@@ -27,6 +27,13 @@ static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
+// Loop annotation key controlling whether PTX async-copy rewriting is enabled
+// in the annotated loop subtree. Value should be Bool (False/True).
+static constexpr const char *kLoopPreferAsync = "parallel_prefer_async";
+// Loop annotation key controlling whether async commit/wait should be omitted
+// for injected cp.async in this parallel loop subtree. Value should be Bool.
+static constexpr const char *kParallelAsyncWithoutAsyncCommitWait =
+    "parallel_async_without_async_commit_wait";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.
@@ -51,6 +58,7 @@ static constexpr const char *kPtxasRegisterUsageLevel =
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
 static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
+static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
@@ -118,8 +126,23 @@ static constexpr const char *kDisableThreadStorageSync =
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
 
+/*!
+ * \brief Disable out of bound warning in LegalizeSafeMemoryAccess pass.
+ *
+ * kDisableOutOfBoundWarning = "tl.disable_out_of_bound_warning"
+ *
+ */
 static constexpr const char *kDisableOutOfBoundWarning =
     "tl.disable_out_of_bound_warning";
+
+/*!
+ * \brief Enable dumping IR during lowering between passes.
+ *
+ * kEnableDumpIR = "tl.enable_dump_ir"
+ *
+ */
+static constexpr const char *kEnableDumpIR = "tl.enable_dump_ir";
+static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 
 /*!
  * \brief Get the type of the CUDA tensor map
@@ -289,6 +312,14 @@ TVM_DLL const Op &tma_store();
  *
  */
 const Op &ptx_fence_barrier_init();
+
+/*
+ * \brief tvm intrinsics for cluster barrier arrive
+ *
+ * ptx_arrive_cluster_barrier(mbarrier, cta_id)
+ *
+ */
+TVM_DLL const Op &ptx_arrive_cluster_barrier();
 
 /*!
  * \brief tvm intrinsics for mbarrier wait with parity bit
@@ -541,6 +572,46 @@ TVM_DLL const Op &get_warp_group_idx();
  *
  */
 TVM_DLL const Op &wait_wgmma();
+
+/*!
+ * \brief Cluster barrier arrive with relaxed ordering
+ *
+ * cluster_arrive_relaxed()
+ *
+ */
+TVM_DLL const Op &cluster_arrive_relaxed();
+
+/*!
+ * \brief Cluster barrier arrive
+ *
+ * cluster_arrive()
+ *
+ */
+TVM_DLL const Op &cluster_arrive();
+
+/*!
+ * \brief Cluster barrier wait
+ *
+ * cluster_wait()
+ *
+ */
+TVM_DLL const Op &cluster_wait();
+
+/*!
+ * \brief Cluster barrier arrive + wait (full sync)
+ *
+ * cluster_sync()
+ *
+ */
+TVM_DLL const Op &cluster_sync();
+
+/*!
+ * \brief Return the 1-D rank of the calling CTA within its cluster
+ *
+ * uint32_t block_rank_in_cluster()
+ *
+ */
+TVM_DLL const Op &block_rank_in_cluster();
 
 /*!
  * \brief Synchronize all threads in a grid

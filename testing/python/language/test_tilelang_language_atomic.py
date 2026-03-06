@@ -88,7 +88,7 @@ def atomic_addx2_program(M, N, block_M, block_N, dtype=T.float16):
 
 def run_atomic_addx2(M, N, block_M, block_N, dtype=T.float16):
     kernel = atomic_addx2_program(M, N, block_M, block_N, dtype=dtype)
-    print(kernel.get_kernel_source())
+
     import torch
 
     A = torch.randn(M, N, dtype=torch.float32).cuda().to(getattr(torch, dtype))
@@ -232,8 +232,24 @@ def test_tma_atomic_add():
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
     tilelang.disable_cache()
     kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
-    print(kernel.get_kernel_source())
     assert "AtomicAddx4" in kernel.get_kernel_source()
+
+
+@tilelang.jit
+def atomic_add_auto_vectorized_unit_test(vec_size: int, dtype=T.float32):
+    @T.prim_func
+    def atomic_addx2(A: T.Tensor((vec_size,), dtype)):
+        with T.Kernel(threads=1):
+            A_local = T.alloc_fragment((vec_size,), dtype)
+            for i in T.Parallel(vec_size):
+                T.atomic_add(A[i], A_local[i])
+
+    return atomic_addx2
+
+
+def run_atomic_add_auto_vectorized_unit_test(vec_size: int, dtype=T.float32):
+    kernel = atomic_add_auto_vectorized_unit_test(vec_size, dtype)
+    assert f"AtomicAddx{vec_size}" in kernel.get_kernel_source()
 
 
 @tilelang.jit
@@ -279,6 +295,7 @@ def test_atomic_different_memory_orders():
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.bfloat16)
 
 
+# TODO: atomic_addx4 currently not support half
 def test_atomic_addx4():
     run_atomic_addx4(16, 64, 4, 4)
 
@@ -294,12 +311,21 @@ def test_atomic_add():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_atomic_add_auto_vectorized():
-    run_atomic_add_auto_vectorized(8, 128, 128, 32, 32)
+    run_atomic_add_auto_vectorized(8, 128, 128, 32, 32, dtype=T.float32)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_atomic_add_auto_vectorized_unit_test():
+    run_atomic_add_auto_vectorized_unit_test(2, dtype=T.float32)
+    run_atomic_add_auto_vectorized_unit_test(4, dtype=T.float32)
+    run_atomic_add_auto_vectorized_unit_test(2, dtype=T.float16)
+    run_atomic_add_auto_vectorized_unit_test(2, dtype=T.bfloat16)
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_atomic_add_complicated_parallel():
-    run_atomic_add_complicated_parallel(8, 128, 128, 32, 32)
+    run_atomic_add_complicated_parallel(8, 128, 128, 32, 32, dtype=T.float32)
 
 
 # ======================= Tile-level atomic add =======================

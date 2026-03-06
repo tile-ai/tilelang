@@ -6,7 +6,7 @@ from tvm.target import Target
 from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
-from tilelang.utils.language import is_shared, is_fragment
+from tilelang.utils.language import is_shared, is_fragment, is_tensor_memory
 from tilelang.tileop.base import GemmWarpPolicy
 from tvm.ir.base import Node
 from tvm.ir import PrimExpr
@@ -14,6 +14,13 @@ from tvm.ir import PrimExpr
 
 @dataclass
 class GemmBase:
+    """Base class for GEMM tile operators.
+
+    Classifies the GEMM variant by the memory scopes of operands A and B
+    (SS, SR, RS, TS, RR) and provides common property accessors for the
+    underlying ``gemm_node`` IR node.
+    """
+
     gemm_node: Node
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -23,15 +30,23 @@ class GemmBase:
         raise NotImplementedError("lower is not implemented")
 
     def is_gemm_ss(self) -> bool:
+        """Return True if both A and B are in shared memory (SS variant)."""
         return is_shared(self.A) and is_shared(self.B)
 
     def is_gemm_sr(self) -> bool:
+        """Return True if A is in shared memory and B is in registers (SR variant)."""
         return is_shared(self.A) and is_fragment(self.B)
 
     def is_gemm_rs(self) -> bool:
+        """Return True if A is in registers and B is in shared memory (RS variant)."""
         return is_fragment(self.A) and is_shared(self.B)
 
+    def is_gemm_ts(self) -> bool:
+        """Return True if A is in tensor memory and B is in shared memory (TS variant)."""
+        return is_tensor_memory(self.A) and is_shared(self.B)
+
     def is_gemm_rr(self) -> bool:
+        """Return True if both A and B are in registers (RR variant)."""
         return is_fragment(self.A) and is_fragment(self.B)
 
     @property
@@ -56,6 +71,13 @@ class GemmBase:
 
     @property
     def in_dtype(self) -> str:
+        """Input data type for the multiplication.
+
+        For the TS variant, A resides in TMEM with the accumulator dtype, so
+        the actual input dtype is derived from B.
+        """
+        if is_tensor_memory(self.A):
+            return self.B.dtype
         assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
         return self.A.dtype
 

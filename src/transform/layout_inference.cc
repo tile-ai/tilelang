@@ -89,6 +89,7 @@ public:
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
     arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     auto buffer_oob = buffer_oob_vec_[cur_infer_id];
+    bool in_pipeline = in_pipeline_vec_[cur_infer_id];
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
                            << "] is null inside run_infer_step.";
@@ -115,7 +116,8 @@ public:
                                                      cur_analyzer,
                                                      buffer_oob,
                                                      {},
-                                                     let_var_to_expr_},
+                                                     let_var_to_expr_,
+                                                     in_pipeline},
                                      level);
 
     // Process the returned updates
@@ -212,25 +214,12 @@ public:
           // Try to merge swizzle layouts if both are swizzle layouts
           const Layout &existing = layout_map[buffer];
           if (!layout.as<Fragment>() && !existing.as<Fragment>()) {
-            auto input_shape = layout->InputShape();
-            if (input_shape.size() >= 2) {
-              size_t ndim = input_shape.size();
-              auto stride_expr = input_shape[ndim - 2].as<IntImmNode>();
-              auto continuous_expr = input_shape[ndim - 1].as<IntImmNode>();
-              if (stride_expr && continuous_expr) {
-                int stride = stride_expr->value;
-                int continuous = continuous_expr->value;
-                int element_size = buffer->dtype.bits();
-
-                if (auto merged = MergeSwizzleLayouts(
-                        existing, layout, stride, continuous, element_size)) {
-                  LOG(WARNING) << "Swizzle layout conflict for buffer "
-                               << buffer << ", merging to smaller granularity";
-                  layout_map.Set(buffer, merged.value());
-                  propagate_alias(buffer, merged.value());
-                  continue;
-                }
-              }
+            if (auto merged = MergeSwizzleLayouts(existing, layout, buffer)) {
+              LOG(WARNING) << "Swizzle layout conflict for buffer " << buffer
+                           << ", merging to smaller granularity";
+              layout_map.Set(buffer, merged.value());
+              propagate_alias(buffer, merged.value());
+              continue;
             }
           }
           // If not swizzle layouts or merge failed, raise error
@@ -304,6 +293,9 @@ public:
            "length.";
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
+           "length.";
+    ICHECK_EQ(in_pipeline_vec_.size(), infer_list_.size())
+        << "Size mismatch: in_pipeline_vec_ and infer_list_ must match in "
            "length.";
 
     DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
@@ -573,6 +565,7 @@ private:
       // Add the tile operator to infer_list_
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
+      in_pipeline_vec_.push_back(pipelined_depth_ > 0);
     }
   }
 
@@ -636,6 +629,17 @@ private:
   }
 
   void VisitStmt_(const ForNode *op) final {
+    bool enter_pipelined = false;
+    if (auto num_stages_anno = op->annotations.Get("num_stages")) {
+      const auto *imm = num_stages_anno->as<IntImmNode>();
+      ICHECK(imm) << "For annotation num_stages must be IntImm, but got "
+                  << num_stages_anno.value();
+      enter_pipelined = imm->value > 0;
+    }
+    if (enter_pipelined) {
+      ++pipelined_depth_;
+    }
+
     if (op->kind == ForKind::kParallel) {
       auto infer = ParallelOp(tvm::ffi::GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
@@ -708,6 +712,7 @@ private:
       });
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
+      in_pipeline_vec_.push_back(pipelined_depth_ > 0);
       thread_var_vec_.push_back(thread_var_);
       if (thread_var_.defined() &&
           analyzer_.const_int_bound.IsBound(thread_var_->var)) {
@@ -724,6 +729,11 @@ private:
       buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
+    }
+
+    if (enter_pipelined) {
+      ICHECK_GT(pipelined_depth_, 0);
+      --pipelined_depth_;
     }
   }
 
@@ -988,6 +998,10 @@ private:
   Map<Var, PrimExpr> let_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
+  // Whether the corresponding op was observed inside a pipelined loop
+  // (i.e., a surrounding For annotated with num_stages > 0).
+  std::vector<bool> in_pipeline_vec_;
+  int pipelined_depth_{0};
   // Fragment buffers that have accesses outside of TileOps.
   // These "floating" buffers need fully replicated layouts since their
   // access patterns cannot be inferred from TileOp semantics.

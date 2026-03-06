@@ -268,6 +268,9 @@ class Environment:
         "TILELANG_DISABLE_CACHE", "0"
     )  # disable kernel cache, usually for unit testing / debugging, high priority
     TILELANG_CLEAR_CACHE = EnvVar("TILELANG_CLEAR_CACHE", "0")  # DEPRECATED! clear cache automatically if set
+    TILELANG_CLEANUP_TEMP_FILES = EnvVar(
+        "TILELANG_CLEANUP_TEMP_FILES", "0"
+    )  # cleanup temporary compiler files/dirs after compilation (default: keep for debugging)
 
     # Kernel selection options
     # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
@@ -320,6 +323,9 @@ class Environment:
 
     def is_print_on_compilation_enabled(self) -> bool:
         return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
+
+    def should_cleanup_temp_files(self) -> bool:
+        return str(self.TILELANG_CLEANUP_TEMP_FILES).lower() in ("1", "true", "yes", "on")
 
     def use_gemm_v1(self) -> bool:
         """Return True if GEMM v1 should be used based on env.

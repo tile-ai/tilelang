@@ -193,10 +193,6 @@ def gemm_v2(
     )
 
 
-# Default to v2; allow forcing v1 via environment variable
-# gemm = gemm_v1 if _env.use_gemm_v1() else gemm_v2
-
-
 def gemm(
     A: BufferLikeType,
     B: BufferLikeType,
@@ -226,6 +222,5 @@ def gemm(
     Returns:
         tir.Call: A handle to the GEMM operation.
     """
-
     impl = gemm_v1 if _env.use_gemm_v1() else gemm_v2
     return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, k_pack, wg_wait, mbar)

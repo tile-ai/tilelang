@@ -1,3 +1,12 @@
+__all__ = [
+    "dim3",
+    "ThreadIdx",
+    "BlockIdx",
+    "GridDim",
+    "rasterization2DRow",
+    "rasterization2DColumn",
+]
+
 import cutlass.cute as cute
 from cutlass.cute.typing import Constexpr
 from dataclasses import dataclass

@@ -393,9 +393,10 @@ def run_cutedsl_barrier(
     )
     matmul_kernel = tilelang.compile(program, target="cutedsl")
 
-    assert f"barriers = tl.alloc_smem(cutlass.Uint64, size_in_elems={len(mbars)})" in matmul_kernel.get_kernel_source()
+    source = matmul_kernel.get_kernel_source()
+    assert f"barriers = tl.alloc_smem(cutlass.Uint64, size_in_elems={len(mbars)})" in source
     for i, arrive_count in enumerate(mbars):
-        assert f"tl.mbarrier_init(barriers[{i}], {arrive_count})" in matmul_kernel.get_kernel_source()
+        assert f"tl.mbarrier_init((barriers + {i}), {arrive_count})" in source
 
 
 @tilelang.testing.requires_cuda

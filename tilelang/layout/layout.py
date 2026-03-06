@@ -120,6 +120,96 @@ class Layout(Node):
         # Map the provided indices using the constructed index mapping
         return index_map.map_indices(indices)
 
+    def repeat(self, dim: int, factor: int) -> "Layout":
+        """
+        Repeat a layout along a single input dimension.
+
+        This is useful for building a larger layout by tiling an "atom" layout.
+        Conceptually, repeating on dimension ``dim`` with ``factor`` constructs a
+        new layout ``L'`` such that::
+
+            L'(*idx) = [idx[dim] // extent_dim] + L(idx with idx[dim] % extent_dim)
+
+        where ``extent_dim`` is the original extent of the repeated dimension.
+
+        Parameters
+        ----------
+        dim : int
+            The input dimension to repeat (0-based, supports negative indexing).
+        factor : int
+            The repeat factor. Must be a positive integer.
+
+        Returns
+        -------
+        Layout
+            A new Layout with the repeated input shape and an extra leading
+            output dimension representing the repeat-group index.
+        """
+        if not isinstance(dim, int):
+            raise TypeError(f"dim must be an int, got {type(dim)!r}")
+        if not isinstance(factor, int):
+            raise TypeError(f"factor must be an int, got {type(factor)!r}")
+        if factor < 1:
+            raise ValueError(f"factor must be >= 1, got {factor}")
+        if factor == 1:
+            return self
+
+        input_shape = list(self.get_input_shape())
+        ndim = len(input_shape)
+        if ndim == 0:
+            raise ValueError("Cannot repeat a 0-dim layout")
+
+        if dim < 0:
+            dim += ndim
+        if dim < 0 or dim >= ndim:
+            raise ValueError(f"dim out of range: dim={dim}, ndim={ndim}")
+        return _ffi_api.Layout_repeat(self, dim, factor)
+
+    def expand(self, leading_shape) -> "Layout":
+        """
+        Expand (lift) this layout by prepending new leading input dimensions.
+
+        The new leading dimensions are forwarded unchanged to the output, and
+        the original layout is applied to the remaining trailing dimensions.
+
+        Example
+        -------
+        Given a 2D layout ``L`` over ``[J, K]``, you can lift it to a 3D layout
+        over ``[I, J, K]`` by::
+
+            L3 = L.expand([I])
+            # [i, j, k] -> [i, *L(j, k)]
+
+        Parameters
+        ----------
+        leading_shape : int or Sequence[int or PrimExpr]
+            The shape of the new leading dimensions to prepend. Use an empty
+            list/tuple for a no-op.
+
+        Returns
+        -------
+        Layout
+            A new Layout with input shape ``leading_shape + input_shape`` and
+            output indices ``[leading_dims] + old_forward_index``.
+        """
+        if isinstance(leading_shape, int):
+            leading_shape = [leading_shape]
+        if not isinstance(leading_shape, (list, tuple)):
+            raise TypeError(f"leading_shape must be an int or a sequence, got {type(leading_shape)!r}")
+
+        leading_shape = list(leading_shape)
+        if len(leading_shape) == 0:
+            return self
+
+        for idx, extent in enumerate(leading_shape):
+            if isinstance(extent, int):
+                if extent <= 0:
+                    raise ValueError(f"leading_shape[{idx}] must be > 0, got {extent}")
+            elif not isinstance(extent, PrimExpr):
+                raise TypeError(f"leading_shape elements must be int or PrimExpr, got {type(extent)!r} at index {idx}")
+
+        return _ffi_api.Layout_expand(self, leading_shape)
+
     def inverse(self) -> "Layout":
         """
         Compute the inverse of the current layout transformation.
@@ -130,6 +220,21 @@ class Layout(Node):
             A new Layout object representing the inverse transformation.
         """
         return _ffi_api.Layout_inverse(self)
+
+    def reshape(self, shape, rescale_num=1, rescale_den=1) -> "Layout":
+        """
+        Reshape the input shape of the layout.
+
+        Parameters
+        ----------
+        shape : list[PrimExpr] or list[int]
+            The new input shape.
+        rescale_num : int
+            Rescale numerator for element size changes.
+        rescale_den : int
+            Rescale denominator for element size changes.
+        """
+        return _ffi_api.Layout_reshape(self, shape, rescale_num, rescale_den)
 
     def is_equal(self, other: "Layout") -> bool:
         """
@@ -142,6 +247,8 @@ class Layout(Node):
         """
         return _ffi_api.Layout_is_equal(self, other)
 
+    def __call__(self, *args: list[PrimExpr]) -> PrimExpr:
+        return self.map_forward_index(args)
+
     def __repr__(self):
         return self._DebugOutput()
-        # return f"Layout<{self.get_input_shape()}->{self.get_output_shape()}, {self.get_forward_vars()} -> {self.get_forward_index()}>"

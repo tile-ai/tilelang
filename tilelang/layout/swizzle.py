@@ -4,51 +4,55 @@
 from __future__ import annotations
 
 import tvm
-from tvm.tir import Buffer, BufferLoad, BufferRegion
+from tvm import tir
 from tilelang import _ffi_api
+from tilelang._typing import BufferLikeType, BufferLikeTypeTuple
 
 
-def _get_buffer_info(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> tuple[Buffer, list[int], str]:
+def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tir.Buffer, list[int], str]:
     """
-    Extract buffer, shape, and dtype from Buffer, BufferLoad, or BufferRegion.
+    Extract buffer, shape, and dtype from BufferLikeType.
 
     Args:
-        buffer_or_load_or_region: Can be Buffer, BufferLoad, or BufferRegion
+        buffer_or_load_or_region: BufferLikeType
 
     Returns:
         tuple: (buffer, shape, dtype)
     """
-    if isinstance(buffer_or_load_or_region, Buffer):
+    if isinstance(buffer_or_load_or_region, tir.Buffer):
         return buffer_or_load_or_region, buffer_or_load_or_region.shape, buffer_or_load_or_region.dtype
-    elif isinstance(buffer_or_load_or_region, (BufferLoad, BufferRegion)):
+    elif isinstance(buffer_or_load_or_region, BufferLikeTypeTuple):
         buf = buffer_or_load_or_region.buffer
         return buf, buf.shape, buf.dtype
     else:
-        raise TypeError(f"Expected Buffer, BufferLoad, or BufferRegion, got {type(buffer_or_load_or_region)}")
+        raise TypeError(f"Expected BufferLikeType, got {type(buffer_or_load_or_region)}")
 
 
-def _get_stride_continuous(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> tuple[int, int]:
+def _get_stride_continuous(buffer_or_load_or_region: BufferLikeType) -> tuple[int, int]:
     """
-    Get stride (last 2nd dimension) and continuous (last dimension) from Buffer, BufferLoad, or BufferRegion.
+    Get stride (product of all dims except the last) and continuous (last dimension)
+    from BufferLikeType.
 
     Args:
-        buffer_or_load_or_region: Can be Buffer, BufferLoad, or BufferRegion
+        buffer_or_load_or_region: BufferLikeType
 
     Returns:
         tuple: (stride, continuous) as integers
     """
     _, shape, _ = _get_buffer_info(buffer_or_load_or_region)
-    stride = int(shape[-2])
+    stride = 1
+    for dim in shape[:-1]:
+        stride *= int(dim)
     continuous = int(shape[-1])
     return stride, continuous
 
 
-def _get_element_size(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion) -> int:
+def _get_element_size(buffer_or_load_or_region: BufferLikeType) -> int:
     """
-    Get element size in bits from Buffer, BufferLoad, or BufferRegion.
+    Get element size in bits from BufferLikeType.
 
     Args:
-        buffer_or_load_or_region: Can be Buffer, BufferLoad, or BufferRegion
+        buffer_or_load_or_region: BufferLikeType
 
     Returns:
         int: Element size in bits
@@ -59,137 +63,109 @@ def _get_element_size(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegi
 
 # Use a stable swizzled layout to ensure consistent memory access patterns.
 # Swizzling should be enabled or disabled based on whether TMA (Tensor Memory Access) is applied.
-def make_swizzled_layout(buffer: Buffer | BufferLoad | BufferRegion, k_major: bool = True, allow_pad: bool = True):
+def make_swizzled_layout(buffer: BufferLikeType, k_major: bool = True, allow_pad: bool = True):
+    _, shape, _ = _get_buffer_info(buffer)
     stride, continuous = _get_stride_continuous(buffer)
     element_size = _get_element_size(buffer)
-    return _ffi_api.make_swizzled_layout(
+    base = _ffi_api.make_swizzled_layout(
         stride,
         continuous,
         element_size,
         k_major,
         allow_pad,
     )
+    return base.reshape(shape)
 
 
 # for Volta Intrinsics
-def make_volta_swizzled_layout(buffer: Buffer | BufferLoad | BufferRegion, is_a: bool = True, k_inner: bool = True):
+def make_volta_swizzled_layout(buffer: BufferLikeType, is_a: bool = True, k_inner: bool = True):
+    _, shape, _ = _get_buffer_info(buffer)
     stride, continuous = _get_stride_continuous(buffer)
-    return _ffi_api.make_volta_swizzled_layout(
+    base = _ffi_api.make_volta_swizzled_layout(
         stride,
         continuous,
         is_a,
         k_inner,
     )
+    return base.reshape(shape)
 
 
 # for WGMMA Intrinsics
-def make_wgmma_swizzled_layout(buffer: Buffer | BufferLoad | BufferRegion, continuity: int = None, k_major: bool = True):
+def make_wgmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
+    _, shape, _ = _get_buffer_info(buffer)
     stride, continuous = _get_stride_continuous(buffer)
     element_size = _get_element_size(buffer)
     if continuity is None:
         continuity = continuous
-    return _ffi_api.make_wgmma_swizzled_layout(
+    base = _ffi_api.make_wgmma_swizzled_layout(
         stride,
         continuous,
         continuity,
         element_size,
         k_major,
     )
+    return base.reshape(shape)
 
 
 # for TCGEN05MMA Intrinsics
-def make_tcgen05mma_swizzled_layout(buffer: Buffer | BufferLoad | BufferRegion, continuity: int = None, k_major: bool = True):
+def make_tcgen05mma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
+    _, shape, _ = _get_buffer_info(buffer)
     stride, continuous = _get_stride_continuous(buffer)
     element_size = _get_element_size(buffer)
     if continuity is None:
         continuity = continuous
-    return _ffi_api.make_tcgen05mma_swizzled_layout(
+    base = _ffi_api.make_tcgen05mma_swizzled_layout(
         stride,
         continuous,
         continuity,
         element_size,
         k_major,
     )
+    return base.reshape(shape)
 
 
 # swizzle 128B
-# args: buffer or (stride, continuous, element_size)
-def make_full_bank_swizzled_layout(*args):
+def make_full_bank_swizzled_layout(buffer: BufferLikeType):
     """
     Args:
-        args: buffer/BufferLoad/BufferRegion or (stride, continuous, element_size)
+        buffer: BufferLikeType
     Examples:
         make_full_bank_swizzled_layout(buffer)
-        make_full_bank_swizzled_layout(stride, continuous, element_size)
     """
-    if len(args) == 1:
-        stride, continuous = _get_stride_continuous(args[0])
-        element_size = _get_element_size(args[0])
-    elif len(args) == 3:
-        stride, continuous, element_size = args
-    else:
-        raise ValueError(f"Invalid arguments: {args}")
-    return _ffi_api.make_full_bank_swizzled_layout(
-        stride,
-        continuous,
-        element_size,
-    )
+    buf, _, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_full_bank_swizzled_layout(buf)
 
 
 # swizzle 64B
-# args: buffer or (stride, continuous, element_size)
-def make_half_bank_swizzled_layout(*args):
+def make_half_bank_swizzled_layout(buffer: BufferLikeType):
     """
     Args:
-        args: buffer/BufferLoad/BufferRegion or (stride, continuous, element_size)
+        buffer: BufferLikeType
     Examples:
         make_half_bank_swizzled_layout(buffer)
-        make_half_bank_swizzled_layout(stride, continuous, element_size)
     """
-    if len(args) == 1:
-        stride, continuous = _get_stride_continuous(args[0])
-        element_size = _get_element_size(args[0])
-    elif len(args) == 3:
-        stride, continuous, element_size = args
-    else:
-        raise ValueError(f"Invalid arguments: {args}")
-    return _ffi_api.make_half_bank_swizzled_layout(
-        stride,
-        continuous,
-        element_size,
-    )
+    buf, _, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_half_bank_swizzled_layout(buf)
 
 
 # swizzle 32B
-# args: buffer or (stride, continuous, element_size)
-def make_quarter_bank_swizzled_layout(*args):
+def make_quarter_bank_swizzled_layout(buffer: BufferLikeType):
     """
     Args:
-        args: buffer/BufferLoad/BufferRegion or (stride, continuous, element_size)
+        buffer: BufferLikeType
     Examples:
         make_quarter_bank_swizzled_layout(buffer)
-        make_quarter_bank_swizzled_layout(stride, continuous, element_size)
     """
-    if len(args) == 1:
-        stride, continuous = _get_stride_continuous(args[0])
-        element_size = _get_element_size(args[0])
-    elif len(args) == 3:
-        stride, continuous, element_size = args
-    else:
-        raise ValueError(f"Invalid arguments: {args}")
-    return _ffi_api.make_quarter_bank_swizzled_layout(
-        stride,
-        continuous,
-        element_size,
-    )
+    buf, _, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_quarter_bank_swizzled_layout(buf)
 
 
-def make_linear_layout(buffer_or_load_or_region: Buffer | BufferLoad | BufferRegion):
+def make_linear_layout(buffer_or_load_or_region: BufferLikeType):
     """
     Create a row-major linear layout for any dimension.
 
     Args:
-        buffer_or_load_or_region: Buffer, BufferLoad, or BufferRegion
+        buffer_or_load_or_region: BufferLikeType
 
     Returns:
         Layout: A row-major linear layout
@@ -223,7 +199,7 @@ def make_gemm_fragment_8x8_transposed():
     return _ffi_api.make_gemm_fragment_8x8_transposed()
 
 
-def make_fully_replicated_layout_fragment(buffer: Buffer | BufferLoad | BufferRegion, threads: int):
+def make_fully_replicated_layout_fragment(buffer: BufferLikeType, threads: int):
     """
     Create a fully replicated layout for a fragment buffer.
 
@@ -232,7 +208,7 @@ def make_fully_replicated_layout_fragment(buffer: Buffer | BufferLoad | BufferRe
     accessed uniformly across all threads.
 
     Args:
-        buffer: Buffer, BufferLoad, or BufferRegion to get shape information
+        buffer: BufferLikeType to get shape information
         threads: Number of threads (replicate extent)
 
     Returns:

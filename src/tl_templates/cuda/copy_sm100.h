@@ -2,6 +2,7 @@
 #include "cuda_fp8.h"
 #include "tcgen_05.h"
 #include "tcgen_05_ld.h"
+#include "tcgen_05_st.h"
 
 namespace tl {
 
@@ -223,6 +224,62 @@ tcgen05_ld_32dp256bNx(uint32_t const &tmem_start_col,
   tcgen05_ld_core<tl::tmem_ld_32dp256bNx<pack16>, 5, N>(
       tmem_start_col + tmem_col_offset, dst_ptr);
   tl::fence_view_async_tmem_load();
+}
+
+// NOTE: The column offset increment (CUR_SEGMENT_LEN) assumes each register
+// maps to exactly one TMEM column (i.e. unpack::16b is NOT active). If
+// unpack::16b were used, each register would expand to 2 columns, requiring
+// an increment of 2*CUR_SEGMENT_LEN. Currently the codegen always passes
+// unpack16=false for stores (see copy.cc use_pack_unpack_modifier), so this
+// is correct. Do not enable unpack for stores without fixing this offset.
+template <typename target_call_cls, int MAX_LOGN, int N, typename src_t>
+__device__ __forceinline__ void tcgen05_st_core(uint32_t const &tmem_start_col,
+                                                src_t const *src_ptr) {
+  static_assert(N > 0);
+  constexpr int LOG_N = get_floor_log2<N>();
+  constexpr int CUR_SEGMENT_LEN = 1 << (LOG_N > MAX_LOGN ? MAX_LOGN : LOG_N);
+  target_call_cls::template copy<CUR_SEGMENT_LEN>(tmem_start_col,
+                                                  (uint32_t const *)src_ptr);
+  if constexpr (N - CUR_SEGMENT_LEN > 0) {
+    tcgen05_st_core<target_call_cls, MAX_LOGN, N - CUR_SEGMENT_LEN>(
+        tmem_start_col + CUR_SEGMENT_LEN, src_ptr + CUR_SEGMENT_LEN);
+  }
+}
+
+template <int N, bool unpack16, typename src_t>
+__device__ __forceinline__ void
+tcgen05_st_32dp32bNx(uint32_t const &tmem_start_col,
+                     uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+  tcgen05_st_core<tl::tmem_st_32dp32bNx<unpack16>, 7, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+}
+
+template <int N, bool unpack16, typename src_t>
+__device__ __forceinline__ void
+tcgen05_st_32dp64bNx(uint32_t const &tmem_start_col,
+                     uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+  tcgen05_st_core<tl::tmem_st_32dp64bNx<unpack16>, 7, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+}
+
+template <int N, bool unpack16, typename src_t>
+__device__ __forceinline__ void
+tcgen05_st_32dp128bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+  tcgen05_st_core<tl::tmem_st_32dp128bNx<unpack16>, 6, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+}
+
+template <int N, bool unpack16, typename src_t>
+__device__ __forceinline__ void
+tcgen05_st_32dp256bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+  tcgen05_st_core<tl::tmem_st_32dp256bNx<unpack16>, 5, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
 }
 
 } // namespace tl

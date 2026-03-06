@@ -8,7 +8,7 @@ import os
 import subprocess
 import warnings
 import contextlib
-from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
+from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 import shutil
 import tempfile
 import tvm_ffi
@@ -55,7 +55,7 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         target_arch = get_target_arch(compute_version)
         arch = ["-gencode", f"arch=compute_{target_arch},code=sm_{target_arch}"]
 
-    temp = utils.tempdir()
+    temp = utils.tempdir(keep_for_debug=not env.should_cleanup_temp_files())
     file_name = "tvm_kernels"
     if target_format not in ["cubin", "ptx", "fatbin"]:
         raise ValueError("target_format must be in cubin, ptx, fatbin")
@@ -317,71 +317,6 @@ def get_cuda_version(cuda_path=None):
         version_str = [f[1:] for f in release_fields if f.startswith("V")][0]
         return tuple(int(field) for field in version_str.split("."))
     raise RuntimeError("Cannot read cuda version file")
-
-
-@tvm_ffi.register_global_func("tilelang_callback_libdevice_path", override=True)
-def find_libdevice_path(arch):
-    """Utility function to find libdevice
-
-    Parameters
-    ----------
-    arch : int
-        The compute architecture in int
-
-    Returns
-    -------
-    path : str
-        Path to libdevice.
-    """
-    cuda_path = find_cuda_path()
-    lib_path = os.path.join(cuda_path, "nvvm/libdevice")
-    if not os.path.exists(lib_path):
-        # Debian/Ubuntu repackaged CUDA path
-        lib_path = os.path.join(cuda_path, "lib/nvidia-cuda-toolkit/libdevice")
-    selected_ver = 0
-    selected_path = None
-    cuda_ver = get_cuda_version(cuda_path)
-    major_minor = (cuda_ver[0], cuda_ver[1])
-    if major_minor in (
-        (9, 0),
-        (9, 1),
-        (10, 0),
-        (10, 1),
-        (10, 2),
-        (11, 0),
-        (11, 1),
-        (11, 2),
-        (11, 3),
-    ):
-        path = os.path.join(lib_path, "libdevice.10.bc")
-    else:
-        for fn in os.listdir(lib_path):
-            if not fn.startswith("libdevice"):
-                continue
-
-            try:
-                # expected pattern: libdevice.${ARCH}.10.bc
-                #             e.g., libdevice.compute_20.10.bc
-                ver = int(fn.split(".")[-3].split("_")[-1])
-                if selected_ver < ver <= arch:
-                    selected_ver = ver
-                    selected_path = fn
-            except ValueError:
-                # it can just be `libdevice.10.bc` in CUDA 10
-                selected_path = fn
-
-        if selected_path is None:
-            raise RuntimeError(f"Cannot find libdevice for arch {arch}")
-        path = os.path.join(lib_path, selected_path)
-    return path
-
-
-def callback_libdevice_path(arch):
-    try:
-        return find_libdevice_path(arch)
-    except RuntimeError:
-        warnings.warn("Cannot find libdevice path", stacklevel=2)
-        return ""
 
 
 @tvm_ffi.register_global_func("tvm.contrib.nvcc.get_compute_version", override=True)

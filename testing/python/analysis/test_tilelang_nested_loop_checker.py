@@ -100,7 +100,7 @@ is OK.
 
 
 def matmul_nested_pipelines(
-    M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, threads, order, stage, extra_pipeline_repeats
+    M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, threads, extra_pipeline_repeats
 ):
     A_shape = (K, M) if trans_A else (M, K)
     B_shape = (N, K) if trans_B else (K, N)
@@ -121,7 +121,7 @@ def matmul_nested_pipelines(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             for _ in T.Pipelined(extra_pipeline_repeats):
                 T.clear(C_local)
-                for k in T.Pipelined(T.ceildiv(K, block_K), order=order, stage=stage):
+                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                     if trans_A:
                         T.copy(A[k * block_K, by * block_M], A_shared)
                     else:
@@ -137,8 +137,6 @@ def matmul_nested_pipelines(
 
 
 def run_gemm_nested_pipelines(
-    order,
-    stage,
     extra_pipeline_repeats,
 ):
     M = 1024
@@ -166,8 +164,6 @@ def run_gemm_nested_pipelines(
         out_dtype,
         dtypeAccum,
         num_threads,
-        order,
-        stage,
         extra_pipeline_repeats,
     )
 
@@ -201,7 +197,7 @@ def run_gemm_nested_pipelines(
 
 
 def test_nested_pipelines():
-    run_gemm_nested_pipelines(order=[0, 1, 2], stage=[0, 0, 1], extra_pipeline_repeats=3)
+    run_gemm_nested_pipelines(extra_pipeline_repeats=3)
 
 
 """
@@ -379,8 +375,6 @@ def matmul_nested_pipa(
     out_dtype,
     accum_dtype,
     threads,
-    order,
-    stage,
 ):
     A_shape = (M, K)
     B_shape = (K, N)
@@ -398,7 +392,7 @@ def matmul_nested_pipa(
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), order=order, stage=stage):
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                 for i, j in T.Parallel(block_M, block_K):
                     A_shared[i, j] = A[by * block_M + i, k * block_K + j]
                 for i, j in T.Parallel(block_K, block_N):
@@ -424,8 +418,6 @@ def matmul_nested_papipa(
     out_dtype,
     accum_dtype,
     threads,
-    order,
-    stage,
 ):
     A_shape = (M, K)
     B_shape = (K, N)
@@ -444,7 +436,7 @@ def matmul_nested_papipa(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
             for _ in T.Parallel(1):
-                for k in T.Pipelined(T.ceildiv(K, block_K), order=order, stage=stage):
+                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                     for i, j in T.Parallel(block_M, block_K):
                         A_shared[i, j] = A[by * block_M + i, k * block_K + j]
                     for i, j in T.Parallel(block_K, block_N):
@@ -459,10 +451,7 @@ def matmul_nested_papipa(
     return main
 
 
-def run_gemm_mixed_pp(
-    order,
-    stage,
-):
+def run_gemm_mixed_pp():
     M = 1024
     N = 1024
     K = 1024
@@ -485,8 +474,6 @@ def run_gemm_mixed_pp(
         out_dtype,
         dtypeAccum,
         num_threads,
-        order,
-        stage,
     )
 
     kernel = tilelang.compile(
@@ -524,8 +511,6 @@ def run_gemm_mixed_pp(
         out_dtype,
         dtypeAccum,
         num_threads,
-        order,
-        stage,
     )
     with pytest.raises(ValueError):
         tilelang.compile(
@@ -539,7 +524,7 @@ def run_gemm_mixed_pp(
 
 
 def test_mixed_pp():
-    run_gemm_mixed_pp(order=[0, 1, 2], stage=[0, 0, 1])
+    run_gemm_mixed_pp()
 
 
 """
@@ -558,8 +543,6 @@ def matmul_with_parallel(
     out_dtype,
     accum_dtype,
     threads,
-    order,
-    stage,
 ):
     A_shape = (M, K)
     B_shape = (K, N)
@@ -577,7 +560,7 @@ def matmul_with_parallel(
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), order=order, stage=stage):
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                 for i, j in T.Parallel(block_M, block_K):
                     A_shared[i, j] = A[by * block_M + i, k * block_K + j]
                 for i, j in T.Parallel(block_K, block_N):
@@ -593,10 +576,7 @@ def matmul_with_parallel(
     return main
 
 
-def run_gemm_tiled_op_with_parallel(
-    order,
-    stage,
-):
+def run_gemm_tiled_op_with_parallel():
     M = 1024
     N = 1024
     K = 1024
@@ -619,8 +599,6 @@ def run_gemm_tiled_op_with_parallel(
         out_dtype,
         dtypeAccum,
         num_threads,
-        order,
-        stage,
     )
 
     kernel = tilelang.compile(
@@ -658,8 +636,6 @@ def run_gemm_tiled_op_with_parallel(
         out_dtype,
         dtypeAccum,
         num_threads,
-        order,
-        stage,
     )
     with pytest.raises(ValueError):
         tilelang.compile(
@@ -704,7 +680,7 @@ def customize_op_with_parallel(length=256, block=16, dtype=T.float32):
 
 
 def test_tiled_op_with_parallel():
-    run_gemm_tiled_op_with_parallel(order=[0, 1, 2], stage=[0, 0, 1])
+    run_gemm_tiled_op_with_parallel()
 
     kernel1 = tir_op_with_parallel(length=256, block=16)
     data = _require_cuda_tensor((256,), torch.float32)
