@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
+from tilelang.language.print_op import print_msg, print_var_with_condition
 from tilelang.profiler import do_bench
 import argparse
 
@@ -188,8 +189,9 @@ def flashattn_ts(
     is_causal,
     block_M=128,
     block_N=128,
-    threads=384,
+    threads=256,
     num_stages=2,
+    debug_log=False,
 ):
     """Flash Attention forward using tcgen05mma_ts for GEMM 2 (P_tmem x V_shared).
 
@@ -212,47 +214,37 @@ def flashattn_ts(
             T.ceildiv(seq_len, block_M), heads, batch, threads=threads
         ) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
-            K_shared = T.alloc_shared([num_stages, block_N, dim], dtype)
-            V_shared = T.alloc_shared([num_stages, block_N, dim], dtype)
+            # Double-buffer as two 2D buffers so tcgen05 gets supported swizzle (3D layout unsupported)
+            K_shared_0 = T.alloc_shared([block_N, dim], dtype)
+            K_shared_1 = T.alloc_shared([block_N, dim], dtype)
+            V_shared_0 = T.alloc_shared([block_N, dim], dtype)
+            V_shared_1 = T.alloc_shared([block_N, dim], dtype)
             O_shared = T.alloc_shared([block_M, dim], dtype)
 
             S_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
             P_tmem = T.alloc_tmem([block_M, block_N], dtype)
             O_tmem = T.alloc_tmem([block_M, dim], accum_dtype)
+            mbar_s = T.alloc_barrier(1)
+            mbar_d = T.alloc_barrier(1)
             
-            # TODO: to modify 
+            # TODO: to modify
             mbar_dma1_empty = T.alloc_barrier([32] * num_stages)
             mbar_dma1_full = T.alloc_barrier([32] * num_stages)
             mbar_bmm1_empty = T.alloc_barrier([128] * num_stages)
-            mbar_bmm1_full = T.alloc_barrier([32] * num_stages)
+            mbar_bmm1_full = T.alloc_barrier([1] * num_stages)  # MMA signals 1 arrive
             mbar_dma2_empty = T.alloc_barrier([32] * num_stages)
             mbar_dma2_full = T.alloc_barrier([32] * num_stages)
-            # mbar_bmm2_empty = T.alloc_barrier([1] * num_stages)
-            mbar_bmm2_full = T.alloc_barrier([32] * num_stages)
+            mbar_bmm2_full = T.alloc_barrier([1] * num_stages)  # MMA signals 1 arrive
             mbar_softmax_empty = T.alloc_barrier([32] * num_stages)
             mbar_softmax_full = T.alloc_barrier([128] * num_stages)
-            mbar_correction_full = T.alloc_barrier([32] * num_stages)
 
             tid = T.get_thread_binding()
-            is_dma1_warp = False
-            is_bmm1_warp = False
-            is_softmax_warp = False
-            # is_bmm2_warp = False
-            is_epi_warp = False
-            # is_correction_warp = False
+            T.use_swizzle(8)
 
-            if tid < 32:
-                is_dma1_warp = True
-            elif tid < 64:
-                is_bmm1_warp = True
-            # elif tid < 96:
-            #     is_dma2_warp = True
-            # elif tid < 128:
-            #     is_bmm2_warp = True
-            elif tid >= 128 and tid < 256:
-                is_softmax_warp = True
-            elif tid >= 256 and tid < 384:
-                is_epi_warp = True
+            is_softmax_warp = tid < 128
+            is_dma1_warp = tid >= 128 and tid < 160
+            is_bmm1_warp = tid >= 160 and tid < 192
+            # Softmax warp must be exactly 128 threads (warp group) for tcgen05 copy
 
             S_reg = T.alloc_fragment([block_M, block_N], accum_dtype)
             P_cast = T.alloc_fragment([block_M, block_N], dtype)
@@ -267,9 +259,6 @@ def flashattn_ts(
             T.fill(O_reg, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
-
-            if is_softmax_warp:
-                T.copy(O_reg, O_tmem) 
 
             loop_range = (
                 T.min(
@@ -288,73 +277,140 @@ def flashattn_ts(
                 stage_id = k % num_stages
                 is_clear_accum = True if k == 0 else False
 
+                # Debug: only first block to avoid flood (use debug_log=True + small batch to see order)
+                if debug_log:
+                    print_var_with_condition(
+                        tid == 0 and bx == 0 and by == 0 and bz == 0, k, "[loop] k"
+                    )
+
                 if is_dma1_warp:
-                    # DMA1
+                    # DMA1: double-buffer K, V (2D each) so load/compute can overlap
+                    if debug_log:
+                        print_var_with_condition(
+                            tid == 128 and bx == 0 and by == 0 and bz == 0,
+                            k,
+                            "[DMA1] wait_empty k",
+                        )
                     T.mbarrier_wait_parity(mbar_dma1_empty[stage_id], parity_inv)
+                    if debug_log:
+                        print_var_with_condition(
+                            tid == 128 and bx == 0 and by == 0 and bz == 0,
+                            k,
+                            "[DMA1] after wait_empty k",
+                        )
 
                     if k == 0:
                         T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
 
-                    T.copy(
-                        K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared[stage_id, :, :]
-                    )
+                    if stage_id == 0:
+                        T.copy(
+                            K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_0
+                        )
+                    else:
+                        T.copy(
+                            K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_1
+                        )
                     T.mbarrier_arrive(mbar_dma1_full[stage_id])
 
-                    # DMA2 
+                    # DMA2
                     T.mbarrier_wait_parity(mbar_dma2_empty[stage_id], parity_inv)
-                    # T.mbarrier_wait_parity(mbar_dma1_full[stage_id], parity)
-
-                    T.copy(
-                        V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared[stage_id, :, :]
-                    )
-
-                    T.mbarrier_arrive(mbar_dma2_full[stage_id]) # notify consomer
+                    if stage_id == 0:
+                        T.copy(
+                            V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_0
+                        )
+                    else:
+                        T.copy(
+                            V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_1
+                        )
+                    T.mbarrier_arrive(mbar_dma2_full[stage_id])
                     # T.mbarrier_arrive(mbar_softmax_empty[stage_id]) # notify producer
 
 
                 elif is_bmm1_warp:
-
-                    # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)
+                    if debug_log:
+                        print_var_with_condition(
+                            tid == 160 and bx == 0 and by == 0 and bz == 0,
+                            k,
+                            "[BMM1] enter k",
+                        )
+                    # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss), consume current stage K
                     T.mbarrier_wait_parity(mbar_dma1_full[stage_id], parity)
+                    if debug_log:
+                        print_var_with_condition(
+                            tid == 160 and bx == 0 and by == 0 and bz == 0,
+                            k,
+                            "[BMM1] after dma1_full k",
+                        )
                     T.mbarrier_wait_parity(mbar_bmm1_empty[stage_id], parity_inv)
 
-                    T.gemm(
-                        Q_shared,
-                        K_shared[stage_id, :, :],
-                        S_tmem,
-                        transpose_B=True,
-                        mbar=mbar_bmm1_full[stage_id],
-                        wg_wait=-1,
-                        clear_accum=True,
-                    )
+                    if stage_id == 0:
+                        T.gemm(
+                            Q_shared,
+                            K_shared_0,
+                            S_tmem,
+                            transpose_B=True,
+                            mbar=mbar_bmm1_full[stage_id],
+                            wg_wait=-1,
+                            clear_accum=True,
+                        )
+                    else:
+                        T.gemm(
+                            Q_shared,
+                            K_shared_1,
+                            S_tmem,
+                            transpose_B=True,
+                            mbar=mbar_bmm1_full[stage_id],
+                            wg_wait=-1,
+                            clear_accum=True,
+                        )
                     T.mbarrier_arrive(mbar_dma1_empty[stage_id])
 
-                    # GEMM 2: O = P_tmem @ V -> O_tmem (tcgen05mma_ts)
-                    # T.mbarrier_wait_parity(mbar_bmm2_empty[stage_id], parity_inv)
+                    # GEMM 2: O = P_tmem @ V -> O_tmem (tcgen05mma_ts), consume current stage V
                     T.mbarrier_wait_parity(mbar_softmax_full[stage_id], parity)
                     T.mbarrier_wait_parity(mbar_dma2_full[stage_id], parity)
 
-                    T.gemm(
-                        P_tmem,
-                        V_shared[stage_id, :, :],
-                        O_tmem,
-                        mbar=mbar_bmm2_full[stage_id],
-                        wg_wait=-1,
-                        clear_accum=True,
-                    )
+                    if stage_id == 0:
+                        T.gemm(
+                            P_tmem,
+                            V_shared_0,
+                            O_tmem,
+                            mbar=mbar_bmm2_full[stage_id],
+                            wg_wait=-1,
+                            clear_accum=is_clear_accum,
+                        )
+                    else:
+                        T.gemm(
+                            P_tmem,
+                            V_shared_1,
+                            O_tmem,
+                            mbar=mbar_bmm2_full[stage_id],
+                            wg_wait=-1,
+                            clear_accum=is_clear_accum,
+                        )
 
-                    T.mbarrier_arrive(mbar_softmax_empty[stage_id]) # notify producer
-                    T.mbarrier_arrive(mbar_dma2_empty[stage_id]) # notify producer
-
-                    if k == loop_range - 1:
-                        T.mbarrier_arrive(mbar_correction_full[0]) # notify consomer
+                    T.mbarrier_arrive(mbar_softmax_empty[stage_id])  # notify producer
+                    T.mbarrier_arrive(mbar_dma2_empty[stage_id])  # notify producer
 
                 elif is_softmax_warp:
-
+                    if debug_log:
+                        print_var_with_condition(
+                            tid == 0 and bx == 0 and by == 0 and bz == 0,
+                            k,
+                            "[Softmax] enter k",
+                        )
                     T.mbarrier_wait_parity(mbar_softmax_empty[stage_id], parity_inv)
                     T.mbarrier_wait_parity(mbar_bmm1_full[stage_id], parity)
+                    if debug_log:
+                        print_var_with_condition(
+                            tid == 0 and bx == 0 and by == 0 and bz == 0,
+                            k,
+                            "[Softmax] after bmm1_full k",
+                        )
 
                     T.copy(S_tmem, S_reg)
+
+                    if not is_clear_accum:
+                        T.copy(O_tmem, O_reg) 
 
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
@@ -390,34 +446,53 @@ def flashattn_ts(
                     T.reduce_sum(S_reg, scores_sum, dim=1)
                     for i in T.Parallel(block_M):
                         logsum[i] = logsum[i] * scores_rescale[i] + scores_sum[i]
-
-
-
-
                     for i, j in T.Parallel(block_M, dim):
                         O_reg[i, j] *= scores_rescale[i]
 
                     # tcgen05.st: P_cast -> P_tmem (register -> TMEM, no shared needed)
                     T.copy(S_reg, P_cast)
                     T.copy(P_cast, P_tmem)
-                    T.copy(O_reg, O_tmem) 
+                    T.copy(O_reg, O_tmem)
 
-                    T.mbarrier_arrive(mbar_softmax_full[stage_id]) # notify consomer
-                    T.mbarrier_arrive(mbar_bmm1_empty[stage_id]) # notify producer
+                    T.mbarrier_arrive(mbar_softmax_full[stage_id])  # notify consomer
+                    T.mbarrier_arrive(mbar_bmm1_empty[stage_id])  # notify producer
 
-                
-                if k == loop_range - 1:
-
-                    T.mbarrier_wait_parity(mbar_correction_full[0], 0)
-                    T.copy(O_tmem, O_reg)
-                    for i, j in T.Parallel(block_M, dim):
-                        O_reg[i, j] /= logsum[i]
-            
-                    T.copy(O_reg, O_shared)
-                    T.copy(
-                        O_shared,
-                        Output[bz, bx * block_M : (bx + 1) * block_M, by, :],
+            # Final epilogue: wait for last GEMM2 to finish, then normalize and store output.
+            if is_softmax_warp:
+                if debug_log:
+                    print_var_with_condition(
+                        bx == 0 and by == 0 and bz == 0,
+                        loop_range - 1,
+                        "[epilogue] softmax warp start last_k",
                     )
+                last_k = loop_range - 1
+                last_stage_id = last_k % num_stages
+                last_parity = (last_k // num_stages) & 1  # same parity as loop for last k
+
+                if debug_log:
+                    print_var_with_condition(
+                        bx == 0 and by == 0 and bz == 0, 0, "[epilogue] wait bmm2_full"
+                    )
+                T.mbarrier_wait_parity(mbar_bmm2_full[last_stage_id], last_parity)
+                if debug_log:
+                    print_var_with_condition(
+                        bx == 0 and by == 0 and bz == 0, 0, "[epilogue] after bmm2_full"
+                    )
+
+                T.copy(O_tmem, O_reg)
+                for i, j in T.Parallel(block_M, dim):
+                    O_reg[i, j] /= logsum[i]
+
+                T.copy(O_reg, O_shared)
+                T.copy(
+                    O_shared,
+                    Output[
+                        bz,
+                        bx * block_M : (bx + 1) * block_M,
+                        by,
+                        :,
+                    ],
+                )
 
     return main
 
@@ -447,39 +522,59 @@ def main(
     dim: int = 128,
     is_causal: bool = False,
     variant: str = "ss",
+    debug_log: bool = False,
 ):
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
     if is_causal:
         total_flops *= 0.5
 
+    # Device printf only flushes when kernel completes. If kernel hangs, no log.
+    # With debug_log, use small seq_len so loop has 1 iteration and kernel may finish.
+    run_seq_len = seq_len
+    if debug_log and variant == "ts":
+        run_seq_len = min(seq_len, 128)  # 1 iteration with block_N=128
+        if run_seq_len < seq_len:
+            print(
+                f"[debug-log] seq_len overridden {seq_len} -> {run_seq_len} so "
+                "kernel can complete and flush device printf (use 1 iter to see log)."
+            )
+        print("[debug-log] Device log will appear only after kernel returns.")
+
     print(f"=== Blackwell Flash Attention ({variant.upper()}) ===")
     print(
-        f"batch={batch}, heads={heads}, seq_len={seq_len}, "
+        f"batch={batch}, heads={heads}, seq_len={run_seq_len}, "
         f"dim={dim}, causal={is_causal}"
     )
 
     fn = flashattn_ss if variant == "ss" else flashattn_ts
-    threads = 128 if variant == "ss" else 384
-    kernel = fn(
-        batch,
-        heads,
-        seq_len,
-        dim,
-        is_causal,
+    threads = 128 if variant == "ss" else 256
+    kwargs = dict(
+        batch=batch,
+        heads=heads,
+        seq_len=run_seq_len,
+        dim=dim,
+        is_causal=is_causal,
         block_M=128,
         block_N=128,
         threads=threads,
     )
-    print(kernel.get_kernel_source())
+    if variant == "ts":
+        kwargs["debug_log"] = debug_log
+    kernel = fn(**kwargs)
+    # print(kernel.get_kernel_source())
 
     Q = torch.randn(
-        batch, seq_len, heads, dim, device="cuda", dtype=torch.bfloat16
+        batch, run_seq_len, heads, dim, device="cuda", dtype=torch.bfloat16
     )
     K = torch.randn_like(Q)
     V = torch.randn_like(Q)
 
+    if debug_log and variant == "ts":
+        print("[debug-log] Launching kernel (device printf after return)...", flush=True)
     out = kernel(Q, K, V)
+    if debug_log and variant == "ts":
+        print("[debug-log] Kernel returned.", flush=True)
     ref = ref_program(Q, K, V, is_causal).to(out.device)
     # torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
     print("Correctness check passed.")
@@ -523,6 +618,10 @@ if __name__ == "__main__":
         "--variant", choices=["ss", "ts"], default="ss",
         help="ss: both GEMMs use mma_ss; ts: GEMM 2 uses mma_ts"
     )
+    parser.add_argument(
+        "--debug-log", action="store_true",
+        help="enable device printf in ts variant to debug hang (e.g. which barrier)"
+    )
     args = parser.parse_args()
     print(args)
     main(
@@ -532,4 +631,5 @@ if __name__ == "__main__":
         args.dim,
         args.is_causal,
         args.variant,
+        args.debug_log,
     )
