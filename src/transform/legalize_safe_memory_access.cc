@@ -305,9 +305,24 @@ private:
     return src_base_load->buffer;
   }
 
-  Stmt RewriteCPAsyncWithSafeValueFallback(const Evaluate &evaluate,
-                                           const Call &call,
-                                           const Array<PrimExpr> &conditions) {
+  PrimExpr CombineConditions(const Array<PrimExpr> &conditions) {
+    ICHECK(!conditions.empty());
+    PrimExpr combined = conditions[0];
+    for (size_t i = 1; i < conditions.size(); ++i) {
+      combined = tir::And(combined, conditions[i]);
+    }
+    return analyzer_->Simplify(combined);
+  }
+
+  Optional<PrimExpr> GetCPAsyncPredicate(const Call &call) {
+    if (call->args.size() >= 4U) {
+      return call->args[3];
+    }
+    return Optional<PrimExpr>();
+  }
+
+  Stmt RewriteCPAsync(const Evaluate &evaluate, const Call &call,
+                      const Array<PrimExpr> &conditions) {
     if (conditions.empty()) {
       return evaluate;
     }
@@ -318,16 +333,31 @@ private:
         GetBaseLoadFromAccessPtrExpr(call->args[kCPAsyncDstPtrArg]);
     Buffer src_buffer = GetCPAsyncSourceBuffer(call);
 
-    PrimExpr combined = conditions[0];
-    for (size_t i = 1; i < conditions.size(); ++i) {
-      combined = tir::And(combined, conditions[i]);
-    }
+    PrimExpr combined = CombineConditions(conditions);
+    Optional<PrimExpr> existing_predicate = GetCPAsyncPredicate(call);
 
     PrimExpr safe_value = GetSafeValue(src_buffer);
     DataType dst_dtype = dst_base_load->buffer->dtype;
     if (safe_value.dtype() != dst_dtype) {
       safe_value = Cast(dst_dtype, safe_value);
     }
+    safe_value = analyzer_->Simplify(safe_value);
+
+    // Predicated cp.async zero-fills on the false path. Use that form when the
+    // buffer's safe value is zero so downstream codegen can emit the native
+    // conditional intrinsic instead of materializing an explicit fallback
+    // store.
+    if (analyzer_->CanProveEqual(safe_value, make_zero(dst_dtype))) {
+      PrimExpr predicate = existing_predicate.defined()
+                               ? analyzer_->Simplify(tir::And(
+                                     existing_predicate.value(), combined))
+                               : combined;
+      Array<PrimExpr> new_args{call->args[0], call->args[1], call->args[2]};
+      new_args.push_back(predicate);
+      return Evaluate(
+          Call(call->dtype, call->op, new_args, call->annotations, call->span));
+    }
+
     Stmt else_case =
         BufferStore(dst_base_load->buffer, safe_value, dst_base_load->indices);
     return IfThenElse(combined, evaluate, else_case);
@@ -359,7 +389,7 @@ private:
           checker(call);
           conditions = checker.GetConditions();
         }
-        return RewriteCPAsyncWithSafeValueFallback(evaluate, call, conditions);
+        return RewriteCPAsync(evaluate, call, conditions);
       }
 
       if (NeedsEvaluateBoundaryCheck(call)) {
