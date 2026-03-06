@@ -427,6 +427,36 @@ public:
   PrimExpr threadIdx_z_ext = Integer(1);
 };
 
+class ClusterInfoExtractor : public tir::StmtVisitor {
+private:
+  void VisitStmt(const PrimFunc &f) {
+    if (f->GetAttr<Array<PrimExpr>>("cluster_dims").has_value()) {
+      launch_with_cluster = true;
+      auto cluster_dims = f->GetAttr<Array<PrimExpr>>("cluster_dims").value();
+      cluster_grid_x_ext = cluster_dims[0].as<IntImmNode>()->value;
+      cluster_grid_y_ext = cluster_dims[1].as<IntImmNode>()->value;
+      cluster_grid_z_ext = cluster_dims[2].as<IntImmNode>()->value;
+      ICHECK(cluster_grid_x_ext > 0 && cluster_grid_y_ext > 0 && cluster_grid_z_ext > 0);
+    }
+    StmtVisitor::VisitStmt(f->body);
+  }
+
+  bool launch_with_cluster = false;
+  int64_t cluster_grid_x_ext = 1;
+  int64_t cluster_grid_y_ext = 1;
+  int64_t cluster_grid_z_ext = 1;
+
+public:
+  std::optional<std::tuple<int64_t, int64_t, int64_t>> extract(const PrimFunc &f) {
+    LOG(INFO) << "Extracting cluster dimensions from function";
+    this->VisitStmt(f);
+    if (launch_with_cluster) {
+      return std::make_tuple(cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext);
+    }
+    return std::nullopt;
+  }
+};
+
 void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   LaunchConfigExtractor extractor;
   extractor(f->body);
@@ -3346,9 +3376,29 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     return;
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
-    const StringImmNode *pattern = op->value.as<StringImmNode>();
-    ICHECK(pattern);
-    this->stream << "const dim3 blockIdx = " << pattern->value << "();\n";
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tir::builtin::tvm_tuple()) && call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        ICHECK(name_node && size_node)
+            << "threadblock_swizzle_pattern expects tvm_tuple(device_func, panel_size)";
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    }
+    ICHECK(!func_name.empty() && panel_size > 0);
+    if (this->cluster_dims.has_value()) {
+      auto [cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext] = this->cluster_dims.value();
+      ICHECK(cluster_grid_y_ext == 1 && cluster_grid_z_ext == 1)
+        << "Only support annotate threadblock swizzle for cluster on X dimension for now!";
+      ICHECK(panel_size % cluster_grid_x_ext == 0) << "panel_size must be divisible by clusterDim.x";
+      this->stream << "const dim3 blockIdx = tl::" << func_name << "WithCluster<" 
+        << panel_size / cluster_grid_x_ext << ", " << cluster_grid_x_ext << ">();\n";
+    } else {
+      this->stream << "const dim3 blockIdx = tl::" << func_name << "<" << panel_size << ">();\n";
+    }
     this->VisitStmt(op->body);
     return;
   } else if (op->attr_key == "pragma_unroll_factor") {
@@ -4178,6 +4228,9 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
   this->PrintExtraAttrs(f);
+
+  // Record cluster dimensions for usage in threadblock swizzle codegen
+  this->cluster_dims = ClusterInfoExtractor().extract(f);
 
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
 
