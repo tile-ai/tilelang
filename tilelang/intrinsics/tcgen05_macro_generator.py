@@ -186,7 +186,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
-
         # by default, we utilize non-swizzle layout offset
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
         a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
@@ -332,7 +331,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             + j * atom_n * b_swizzle_atom_elems
                             if b_is_k_major
                             else (
-                                ki * b_swizzle_atom_elems * micro_size_k + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+                                ki * b_swizzle_atom_elems * micro_size_k
+                                + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
                             )
                         )
 
@@ -442,12 +442,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         mask_zero = T.cast(0, T.int32)
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
-        num_inst_m = m_dim // atom_m_per_cta
+        num_inst_m = m_dim // atom_m
         num_inst_n = n_dim // atom_n
 
         # TMEM column geometry for A operand
         # Each TMEM column is 32 bits; row interleaving factor = 128 / atom_m
-        interleave = max(128 // atom_m_per_cta, 1)
+        interleave = max(128 // atom_m, 1)
         a_tmem_cols_per_k_atom = atom_k * a_dtype_in_bits // 32 // interleave
         a_tmem_k_stride = k_dim * a_dtype_in_bits // 32 // interleave
 
@@ -502,7 +502,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 int(b_swizzle_mode),
             )
 
-            tmem_col_step = atom_n // (128 // atom_m_per_cta)
+            tmem_col_step = atom_n // (128 // atom_m)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, (k_dim // micro_size_k)):
@@ -627,7 +627,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def get_tcgen5_mma_meta(self, m: int, n: int, k: int):
         """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta)."""
         pass_ctx = tilelang.transform.get_pass_context()
-        disable_2cta = pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_2CTA_TCGEN5MMA, False) 
+        disable_2cta = pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_2CTA_TCGEN5MMA, False)
         return _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype), bool(disable_2cta))
 
     def get_tcgen5_instr_desc(

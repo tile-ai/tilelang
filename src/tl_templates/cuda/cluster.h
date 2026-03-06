@@ -3,8 +3,9 @@
 #include "common.h"
 
 // Config
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && \
-  ((__CUDACC_VER_MAJOR__ >= 12) || ((__CUDACC_VER_MAJOR__ == 11) && (__CUDACC_VER_MINOR__ >= 8))))
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) &&                       \
+     ((__CUDACC_VER_MAJOR__ >= 12) ||                                          \
+      ((__CUDACC_VER_MAJOR__ == 11) && (__CUDACC_VER_MINOR__ >= 8))))
 #define TILELANG_CLUSTER_ENABLED
 #endif
 

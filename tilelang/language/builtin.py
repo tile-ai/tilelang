@@ -1024,7 +1024,7 @@ def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr, arrive_2cta: bo
     """
     if isinstance(mbar, (tir.Buffer, BufferLoad)):
         mbar = retrieve_ptr(mbar, access_type="rw")
-    ann = {'use_2cta': 1} if arrive_2cta else {}
+    ann = {"use_2cta": 1} if arrive_2cta else {}
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann)
 
 

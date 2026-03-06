@@ -2,6 +2,7 @@ import torch
 import tilelang
 import tilelang.language as T
 from tilelang.engine import register_cuda_postproc
+
 tilelang.disable_cache()
 
 
@@ -130,7 +131,7 @@ def matmul(
 
 
 M, N, K = 2048, 2048, 2048  # FIXME: buggy when size is lager
-print(f'M: {M}, N: {N}, K: {K}')
+print(f"M: {M}, N: {N}, K: {K}")
 block_M, block_N, block_K = 128, 256, 64
 in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
 num_stages = 0 if block_N >= 256 or block_M >= 256 or block_K >= 256 else 2
@@ -156,7 +157,7 @@ for _ in range(10000):
     c = jit_kernel(a, b)
     ref_c = (a @ b).to(torch.bfloat16)
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
-print('ALL CHECK PASSED. ✅')
+print("ALL CHECK PASSED. ✅")
 profiler = jit_kernel.get_profiler()
 latency = profiler.do_bench()
 print(f"Latency: {latency} ms")

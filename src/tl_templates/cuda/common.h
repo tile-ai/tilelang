@@ -1,9 +1,9 @@
 #pragma once
 
 #ifndef __CUDACC_RTC__
-#include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cuda_runtime.h>
 #endif
 
 #include "atomic.h"
@@ -60,14 +60,22 @@ using int4_t = int4;
   } while (0)
 
 #if defined(__CUDA_ARCH__)
-#define TILELANG_UNREACHABLE(msg) \
-  do { printf("%s, %s:%d\n", msg, __FILE__, __LINE__); __trap(); } while(0)
+#define TILELANG_UNREACHABLE(msg)                                              \
+  do {                                                                         \
+    printf("%s, %s:%d\n", msg, __FILE__, __LINE__);                            \
+    __trap();                                                                  \
+  } while (0)
 #elif defined(__CUDACC_RTC__)
-#define TILELANG_UNREACHABLE(msg) \
-  do { __builtin_trap(); } while(0)
+#define TILELANG_UNREACHABLE(msg)                                              \
+  do {                                                                         \
+    __builtin_trap();                                                          \
+  } while (0)
 #else
-#define TILELANG_UNREACHABLE(msg) \
-  do { fprintf(stderr, "%s, %s:%d\n", msg, __FILE__, __LINE__); abort(); } while(0)
+#define TILELANG_UNREACHABLE(msg)                                              \
+  do {                                                                         \
+    fprintf(stderr, "%s, %s:%d\n", msg, __FILE__, __LINE__);                   \
+    abort();                                                                   \
+  } while (0)
 #endif
 
 // using cutlass abs function for half_t
