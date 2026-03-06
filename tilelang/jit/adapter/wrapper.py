@@ -196,13 +196,6 @@ KERNEL_CLUSTER_LAUNCH_FUNC_CODE = """
 \t}}
 """
 
-# HIP kernel launch uses <<<>>> syntax (hipcc supports this natively)
-KERNEL_LAUNCH_FUNC_CODE_HIP = """
-\t{{
-\t\t{4}<<<{0}, {1}, {2}, stream>>>({3});
-\t}}
-"""
-
 
 class BaseWrapper(ABC):
     @abstractmethod
@@ -557,9 +550,7 @@ class TLCUDASourceWrapper:
         if cluster_dims is None:
             return KERNEL_LAUNCH_FUNC_CODE.format(grid_str, block_str, smem_str, call_args, function_name)
         else:
-            return KERNEL_CLUSTER_LAUNCH_FUNC_CODE.format(
-                grid_str, block_str, smem_str, call_args, function_name, *cluster_dims
-            )
+            return KERNEL_CLUSTER_LAUNCH_FUNC_CODE.format(grid_str, block_str, smem_str, call_args, function_name, *cluster_dims)
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
@@ -710,8 +701,8 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         return declare_kernel_code.split("{")[0]
 
     def get_kernel_launch_code(self, function_name, grid_str, block_str, smem_str, call_args, cluster_dims):
-        # HIP does not support cudaLaunchKernelEx; use <<<>>> syntax instead
-        return KERNEL_LAUNCH_FUNC_CODE_HIP.format(grid_str, block_str, smem_str, call_args, function_name)
+        # HIP does not support cudaLaunchKernelEx; use <<<>>> syntax (same as pre-cluster-launch behavior)
+        return f"\t{function_name}<<<{grid_str}, {block_str}, {smem_str}, stream>>>({call_args});\n" 
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
