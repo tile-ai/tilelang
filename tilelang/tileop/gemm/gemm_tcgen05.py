@@ -76,7 +76,7 @@ class GemmTCGEN5(GemmBase):
 
         if self.is_gemm_ss():
             a_continuity = self.M if a_is_k_major else 4 * self.K // m_warp
-            b_continuity = self.K if b_is_k_major else self.N // n_warp
+            b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
 
             return {
                 self.A: self.infer_shared_layout(a_continuity)(self.A),
@@ -84,7 +84,7 @@ class GemmTCGEN5(GemmBase):
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
-            b_continuity = self.K if b_is_k_major else self.N // n_warp
+            b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
             layouts = {
                 self.A: mma_emitter.make_mma_store_layout(self.A),
                 self.B: self.infer_shared_layout(b_continuity)(self.B),
