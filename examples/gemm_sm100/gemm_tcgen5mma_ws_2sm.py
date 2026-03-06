@@ -5,6 +5,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
 from tilelang.engine import register_cuda_postproc
+
 tilelang.disable_cache()
 
 
@@ -151,7 +152,10 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
                 T.copy(A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[k % num_stages, :, :])
-                T.copy(B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * (block_N // 2) : (by * 2 + cta_id + 1) * (block_N // 2)], B_shared[k % num_stages, :, :])
+                T.copy(
+                    B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * (block_N // 2) : (by * 2 + cta_id + 1) * (block_N // 2)],
+                    B_shared[k % num_stages, :, :],
+                )
                 T.mbarrier_arrive(loaded[k % num_stages], 0)  # arrive on leader cta's barrier
         elif cta_id == 0 and tx < 64:  # Only warp 1 on leader cta issues tcgen5
             for k in T.serial(k_iters):
@@ -190,12 +194,10 @@ def main():
     b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
     print(gemm.get_kernel_source(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages))
     c = gemm(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages)
-    
 
     ref_c = (a.to(torch.float) @ b.to(torch.float)).to(torch.bfloat16)
-    # torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("All checks passed. ✅")
-
 
     tl_latency = do_bench(lambda: gemm(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages), backend="cupti")
     torch_latency = do_bench(lambda: a @ b, backend="cupti")

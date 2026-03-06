@@ -226,8 +226,8 @@ private:
         // Track cluster barriers and their leader cta_id
         if (call->op.same_as(tl::ptx_arrive_cluster_barrier())) {
           if (const auto *imm = call->args[1].as<IntImmNode>()) {
-            cluster_barrier_cta_ids_.Set(
-                barrier_id, IntImm(DataType::Int(32), imm->value));
+            cluster_barrier_cta_ids_.Set(barrier_id,
+                                         IntImm(DataType::Int(32), imm->value));
           }
         }
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
@@ -311,7 +311,8 @@ public:
       if (tma_op_to_barrier_id_.count(call_ref)) {
         PrimExpr barrier_id = tma_op_to_barrier_id_[call_ref];
         // Cluster barriers have a BufferLoad as barrier_id (not get_mbarrier).
-        // Skip int_set computation for them — they don't need restore_barrier_ids_.
+        // Skip int_set computation for them — they don't need
+        // restore_barrier_ids_.
         bool is_cluster = (barrier_id.as<CallNode>() == nullptr);
         arith::IntSet int_set = arith::IntSet::Nothing();
         if (!is_cluster) {
@@ -524,8 +525,7 @@ public:
                      Map<ObjectRef, PrimExpr> tma_op_to_barrier_id,
                      Map<PrimExpr, IntImm> barrier_id_to_range,
                      Map<PrimExpr, IntImm> cluster_barrier_cta_ids,
-                     bool has_create_list_of_mbarrier,
-                     int cluster_size)
+                     bool has_create_list_of_mbarrier, int cluster_size)
       : IRMutatorWithAnalyzer(analyzer),
         tma_op_to_barrier_id_(std::move(tma_op_to_barrier_id)),
         barrier_id_to_range_(std::move(barrier_id_to_range)),
@@ -556,9 +556,8 @@ public:
     PostOrderVisit(f->body, [&](const ObjectRef &node) {
       if (const auto *block = node.as<BlockNode>()) {
         if (block->annotations.count("cluster_dims")) {
-          if (auto arr =
-                  block->annotations.Get("cluster_dims")
-                      ->try_cast<Array<Integer>>()) {
+          if (auto arr = block->annotations.Get("cluster_dims")
+                             ->try_cast<Array<Integer>>()) {
             int sz = 1;
             for (auto d : arr.value())
               sz *= static_cast<int>(d->value);

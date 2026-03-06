@@ -62,7 +62,8 @@ static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
-static constexpr const char *kDisable2CTATcgen5MMA = "tl.disable_2cta_tcgen5mma";
+static constexpr const char *kDisable2CTATcgen5MMA =
+    "tl.disable_2cta_tcgen5mma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kDisableLoopUnswitching =
     "tl.disable_loop_unswitching";

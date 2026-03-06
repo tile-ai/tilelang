@@ -436,7 +436,8 @@ private:
       cluster_grid_x_ext = cluster_dims[0].as<IntImmNode>()->value;
       cluster_grid_y_ext = cluster_dims[1].as<IntImmNode>()->value;
       cluster_grid_z_ext = cluster_dims[2].as<IntImmNode>()->value;
-      ICHECK(cluster_grid_x_ext > 0 && cluster_grid_y_ext > 0 && cluster_grid_z_ext > 0);
+      ICHECK(cluster_grid_x_ext > 0 && cluster_grid_y_ext > 0 &&
+             cluster_grid_z_ext > 0);
     }
     StmtVisitor::VisitStmt(f->body);
   }
@@ -447,10 +448,12 @@ private:
   int64_t cluster_grid_z_ext = 1;
 
 public:
-  std::optional<std::tuple<int64_t, int64_t, int64_t>> extract(const PrimFunc &f) {
+  std::optional<std::tuple<int64_t, int64_t, int64_t>>
+  extract(const PrimFunc &f) {
     this->VisitStmt(f);
     if (launch_with_cluster) {
-      return std::make_tuple(cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext);
+      return std::make_tuple(cluster_grid_x_ext, cluster_grid_y_ext,
+                             cluster_grid_z_ext);
     }
     return std::nullopt;
   }
@@ -1895,16 +1898,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
     std::ostringstream ss;
     ss << "tl::tmem_allocate";
-    if (op->annotations.find("use_2cta") != op->annotations.end()
-        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (op->annotations.find("use_2cta") != op->annotations.end() &&
+        Downcast<Bool>(op->annotations["use_2cta"])->value) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
     std::ostringstream ss;
     ss << "tl::tmem_deallocate";
-    if (op->annotations.find("use_2cta") != op->annotations.end()
-        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (op->annotations.find("use_2cta") != op->annotations.end() &&
+        Downcast<Bool>(op->annotations["use_2cta"])->value) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
@@ -1917,9 +1920,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
     // Simplify the code by using the default eviction policy
-    if (op->annotations.find("use_2cta") != op->annotations.end() && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (op->annotations.find("use_2cta") != op->annotations.end() &&
+        Downcast<Bool>(op->annotations["use_2cta"])->value) {
       if (eviction_policy != "EVICT_NORMAL") {
-        ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy << ">(";
+        ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy
+           << ">(";
       } else {
         ss << "tl::tma_load_2sm(";
       }
@@ -2473,15 +2478,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     bool enable_2cta = Downcast<Bool>(op->args[14])->value;
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
-    std::string ab_type_str =
-        tl::codegen::ptx::DTypeEnumToString(dtype_enum);
+    std::string ab_type_str = tl::codegen::ptx::DTypeEnumToString(dtype_enum);
 
-    // Currently tcgen05mma_ss<Float16|BFloat16> has use_2cta template param; 
+    // Currently tcgen05mma_ss<Float16|BFloat16> has use_2cta template param;
     // others don't. tcgen05mma_ws_ss has no use_2cta.
     std::string use_2cta_suffix;
-    if (!enable_ws &&
-        (dtype_enum == tl::codegen::ptx::DataType::kFloat16 ||
-         dtype_enum == tl::codegen::ptx::DataType::kBFloat16)) {
+    if (!enable_ws && (dtype_enum == tl::codegen::ptx::DataType::kFloat16 ||
+                       dtype_enum == tl::codegen::ptx::DataType::kBFloat16)) {
       use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
     }
 
@@ -2564,8 +2567,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tcgen05_mma_arrive";
-    if (op->annotations.find("use_2cta") != op->annotations.end()
-        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+    if (op->annotations.find("use_2cta") != op->annotations.end() &&
+        Downcast<Bool>(op->annotations["use_2cta"])->value) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
@@ -3378,25 +3381,31 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     std::string func_name;
     int panel_size = 0;
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tir::builtin::tvm_tuple()) && call->args.size() >= 2) {
+      if (call->op.same_as(tir::builtin::tvm_tuple()) &&
+          call->args.size() >= 2) {
         const auto *name_node = call->args[0].as<StringImmNode>();
         const auto *size_node = call->args[1].as<IntImmNode>();
-        ICHECK(name_node && size_node)
-            << "threadblock_swizzle_pattern expects tvm_tuple(device_func, panel_size)";
+        ICHECK(name_node && size_node) << "threadblock_swizzle_pattern expects "
+                                          "tvm_tuple(device_func, panel_size)";
         func_name = name_node->value;
         panel_size = static_cast<int>(size_node->value);
       }
     }
     ICHECK(!func_name.empty() && panel_size > 0);
     if (this->cluster_dims.has_value()) {
-      auto [cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext] = this->cluster_dims.value();
+      auto [cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext] =
+          this->cluster_dims.value();
       ICHECK(cluster_grid_y_ext == 1 && cluster_grid_z_ext == 1)
-        << "Only support annotate threadblock swizzle for cluster on X dimension for now!";
-      ICHECK(panel_size % cluster_grid_x_ext == 0) << "panel_size must be divisible by clusterDim.x";
-      this->stream << "const dim3 blockIdx = tl::" << func_name << "WithCluster<" 
-        << panel_size / cluster_grid_x_ext << ", " << cluster_grid_x_ext << ">();\n";
+          << "Only support annotate threadblock swizzle for cluster on X "
+             "dimension for now!";
+      ICHECK(panel_size % cluster_grid_x_ext == 0)
+          << "panel_size must be divisible by clusterDim.x";
+      this->stream << "const dim3 blockIdx = tl::" << func_name
+                   << "WithCluster<" << panel_size / cluster_grid_x_ext << ", "
+                   << cluster_grid_x_ext << ">();\n";
     } else {
-      this->stream << "const dim3 blockIdx = tl::" << func_name << "<" << panel_size << ">();\n";
+      this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
+                   << panel_size << ">();\n";
     }
     this->VisitStmt(op->body);
     return;

@@ -40,7 +40,6 @@ template <int panel_width> TL_DEVICE dim3 rasterization2DColumn() {
   return {col_idx, row_idx, blockIdx.z};
 }
 
-
 // Cluster-aware row-major swizzle: cluster_dim_x CTAs are grouped together
 // in the x-direction as one cluster unit. The swizzle operates at cluster
 // granularity; each CTA within the cluster retains its intra-cluster x offset.
@@ -69,7 +68,8 @@ TL_DEVICE dim3 rasterization2DRowWithCluster() {
                       : panel_offset / stride;
   const unsigned int swizzled_cluster_y =
       panel_offset % stride + panel_idx * panel_width;
-  const unsigned int col_idx = swizzled_cluster_x * cluster_dim_x + intra_cluster_x;
+  const unsigned int col_idx =
+      swizzled_cluster_x * cluster_dim_x + intra_cluster_x;
   const unsigned int row_idx = swizzled_cluster_y;
   return {col_idx, row_idx, blockIdx.z};
 }
