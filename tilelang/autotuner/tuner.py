@@ -342,7 +342,9 @@ class AutoTuner:
                 extra_parameters[var_name] = cell.cell_contents
 
         if isinstance(self.configs, Callable):
-            self.configs = self.configs(*self._kernel_parameters)
+            kernel_args, kernel_kwargs = self._kernel_parameters
+            kernel_kwargs = dict(kernel_kwargs)
+            self.configs = self.configs(*kernel_args, **kernel_kwargs)
 
         key = self.generate_cache_key(parameters, extra_parameters)
 
@@ -680,21 +682,64 @@ class AutoTuneImpl(Generic[_P, _T]):
         autotuner.run = partial(autotuner.run, self.warmup, self.rep, self.timeout)
         return autotuner
 
-    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
-        key_args_tuple = args
-        key_kwargs_tuple = tuple(sorted(kwargs.items()))
-        key = (key_args_tuple, key_kwargs_tuple)
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel | _T:
+        return_kernel = kwargs.pop("__return_kernel", False)
+
+        mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
+
+        def _normalize_for_key(x):
+            import torch
+
+            if isinstance(x, torch.Tensor):
+                return ("tensor", str(x.dtype), tuple(x.shape))
+            if isinstance(x, (list, tuple)):
+                return tuple(_normalize_for_key(v) for v in x)
+            if isinstance(x, dict):
+                return tuple(sorted((k, _normalize_for_key(v)) for k, v in x.items()))
+            return x
+
+        norm_args = _normalize_for_key(args)
+        norm_kwargs = tuple(sorted((k, _normalize_for_key(v)) for k, v in kwargs.items()))
+        key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache:
+            if mode == "lazy":
 
-            def jit_compile(**config_arg):
-                return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
+                def jit_compile(**config_arg):
+                    return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
 
-            autotuner = self.get_tunner()
-            autotuner.jit_compile = jit_compile
-            autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+                autotuner = self.get_tunner()
+                autotuner.jit_compile = jit_compile
+                raw_key = (args, tuple(sorted(kwargs.items())))
+                autotuner.set_kernel_parameters(raw_key, self.jit_impl.signature.parameters)
+            else:
+
+                def jit_compile(**config_arg):
+                    merged = dict(kwargs)
+                    merged.update(config_arg)
+                    return self.jit_impl.compile(*args, **merged)
+
+                autotuner = self.get_tunner()
+                autotuner.jit_compile = jit_compile
+                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+
             artifact = autotuner.run()
-            self._tuner_cache[key] = artifact.kernel
-        return self._tuner_cache[key]
+            self._tuner_cache[key] = artifact.kernel, artifact.config
+
+        best_kernel, best_config = self._tuner_cache[key]
+
+        if mode == "lazy":
+            return best_kernel
+        else:
+            if return_kernel:
+                return best_kernel
+            exec_kwargs = dict(kwargs)
+            if best_config is not None:
+                exec_kwargs.update(best_config)
+            _, kernel_args = self.jit_impl.func.parse_args(*args, **exec_kwargs)
+            return best_kernel(*kernel_args.values())
+
+    def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
+        return self(*args, **kwargs, __return_kernel=True)
 
 
 def autotune(  # This is the new public interface
