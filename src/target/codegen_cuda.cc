@@ -427,6 +427,35 @@ public:
   PrimExpr threadIdx_z_ext = Integer(1);
 };
 
+class ClusterInfoExtractor : public tir::StmtVisitor {
+private:
+  void VisitStmt(const PrimFunc &f) {
+    if (f->GetAttr<Array<PrimExpr>>("cluster_dims").has_value()) {
+      launch_with_cluster = true;
+      auto cluster_dims = f->GetAttr<Array<PrimExpr>>("cluster_dims").value();
+      cluster_grid_x_ext = cluster_dims[0].as<IntImmNode>()->value;
+      cluster_grid_y_ext = cluster_dims[1].as<IntImmNode>()->value;
+      cluster_grid_z_ext = cluster_dims[2].as<IntImmNode>()->value;
+      ICHECK(cluster_grid_x_ext > 0 && cluster_grid_y_ext > 0 && cluster_grid_z_ext > 0);
+    }
+    StmtVisitor::VisitStmt(f->body);
+  }
+
+  bool launch_with_cluster = false;
+  int64_t cluster_grid_x_ext = 1;
+  int64_t cluster_grid_y_ext = 1;
+  int64_t cluster_grid_z_ext = 1;
+
+public:
+  std::optional<std::tuple<int64_t, int64_t, int64_t>> extract(const PrimFunc &f) {
+    this->VisitStmt(f);
+    if (launch_with_cluster) {
+      return std::make_tuple(cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext);
+    }
+    return std::nullopt;
+  }
+};
+
 void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   LaunchConfigExtractor extractor;
   extractor(f->body);
@@ -1864,9 +1893,21 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto phase = this->PrintExpr(op->args[1]);
     this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
-    print_extern_call_stmt("tl::tmem_allocate");
+    std::ostringstream ss;
+    ss << "tl::tmem_allocate";
+    if (op->annotations.find("use_2cta") != op->annotations.end()
+        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
-    print_extern_call_stmt("tl::tmem_deallocate");
+    std::ostringstream ss;
+    ss << "tl::tmem_deallocate";
+    if (op->annotations.find("use_2cta") != op->annotations.end()
+        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
@@ -1876,7 +1917,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
     // Simplify the code by using the default eviction policy
-    if (eviction_policy != "EVICT_NORMAL") {
+    if (op->annotations.find("use_2cta") != op->annotations.end() && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      if (eviction_policy != "EVICT_NORMAL") {
+        ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy << ">(";
+      } else {
+        ss << "tl::tma_load_2sm(";
+      }
+    } else if (eviction_policy != "EVICT_NORMAL") {
       ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
     } else {
       ss << "tl::tma_load(";
@@ -2407,7 +2454,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     wgmma_call = replacer.rewrite(wgmma_call);
     this->stream << wgmma_call;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
-    ICHECK_EQ(op->args.size(), 14U)
+    ICHECK_EQ(op->args.size(), 15U)
         << "ptx_tcgen05_mma_ss args is " << op->args;
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_desc = this->PrintExpr(op->args[1]);
@@ -2423,20 +2470,33 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask2 = this->PrintExpr(op->args[11]);
     std::string mask3 = this->PrintExpr(op->args[12]);
     bool enable_ws = Downcast<Bool>(op->args[13])->value;
+    bool enable_2cta = Downcast<Bool>(op->args[14])->value;
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
+    std::string ab_type_str =
+        tl::codegen::ptx::DTypeEnumToString(dtype_enum);
+
+    // Currently tcgen05mma_ss<Float16|BFloat16> has use_2cta template param; 
+    // others don't. tcgen05mma_ws_ss has no use_2cta.
+    std::string use_2cta_suffix;
+    if (!enable_ws &&
+        (dtype_enum == tl::codegen::ptx::DataType::kFloat16 ||
+         dtype_enum == tl::codegen::ptx::DataType::kBFloat16)) {
+      use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
+    }
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::(tcgen05_name)<(ABType)>(uint64_t((desc_a) + (A_offset)), "
+        "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
+        "(A_offset)), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(ABType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_enum));
+    replacer.register_rule("(ABType)", ab_type_str);
+    replacer.register_rule("(USE_2CTA_SUFFIX)", use_2cta_suffix);
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
@@ -2502,9 +2562,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;
-    this->PrintIndent();
-    this->stream << "tl::tcgen05_mma_arrive(" << this->PrintExpr(op->args[0])
-                 << ");\n";
+    std::ostringstream ss;
+    ss << "tl::tcgen05_mma_arrive";
+    if (op->annotations.find("use_2cta") != op->annotations.end()
+        && Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -3311,9 +3375,29 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     return;
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
-    const StringImmNode *pattern = op->value.as<StringImmNode>();
-    ICHECK(pattern);
-    this->stream << "const dim3 blockIdx = " << pattern->value << "();\n";
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tir::builtin::tvm_tuple()) && call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        ICHECK(name_node && size_node)
+            << "threadblock_swizzle_pattern expects tvm_tuple(device_func, panel_size)";
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    }
+    ICHECK(!func_name.empty() && panel_size > 0);
+    if (this->cluster_dims.has_value()) {
+      auto [cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext] = this->cluster_dims.value();
+      ICHECK(cluster_grid_y_ext == 1 && cluster_grid_z_ext == 1)
+        << "Only support annotate threadblock swizzle for cluster on X dimension for now!";
+      ICHECK(panel_size % cluster_grid_x_ext == 0) << "panel_size must be divisible by clusterDim.x";
+      this->stream << "const dim3 blockIdx = tl::" << func_name << "WithCluster<" 
+        << panel_size / cluster_grid_x_ext << ", " << cluster_grid_x_ext << ">();\n";
+    } else {
+      this->stream << "const dim3 blockIdx = tl::" << func_name << "<" << panel_size << ">();\n";
+    }
     this->VisitStmt(op->body);
     return;
   } else if (op->attr_key == "pragma_unroll_factor") {
@@ -4143,6 +4227,9 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
   this->PrintExtraAttrs(f);
+
+  // Record cluster dimensions for usage in threadblock swizzle codegen
+  this->cluster_dims = ClusterInfoExtractor().extract(f);
 
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
 

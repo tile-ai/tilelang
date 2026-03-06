@@ -57,7 +57,7 @@ class GemmTCGEN5(GemmBase):
 
         if self.is_gemm_ss():
             a_continuity = self.M if a_is_k_major else 4 * self.K // m_warp
-            b_continuity = self.K if b_is_k_major else self.N // n_warp
+            b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
 
             return {
                 self.A: make_tcgen05mma_swizzled_layout(self.A, continuity=a_continuity, k_major=a_is_k_major),
@@ -65,7 +65,7 @@ class GemmTCGEN5(GemmBase):
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
-            b_continuity = self.K if b_is_k_major else self.N // n_warp
+            b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
             layouts = {
                 self.A: mma_emitter.make_mma_store_layout(self.A),
                 self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
@@ -139,17 +139,20 @@ class GemmTCGEN5(GemmBase):
             "TCGEN5MMA requires thread bounds to be multiples of warp size (32) and aligned to warps."
         )
 
+        cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0
+
         @T.prim_func
-        def _gemm_ss_cond() -> None:
-            if thread_var // 32 == thread_bounds.min // warp_size:
+        def _gemm_ss_elect_one_thread() -> None:
+            if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
         @T.prim_func
         def _gemm_ss() -> None:
-            mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            if cluster_cond:
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
         return (
             _Simplify(_gemm_ss, inline_let=True)
             if analyzer.can_prove(thread_bounds.extent == warp_size)
-            else _Simplify(_gemm_ss_cond, inline_let=True)
+            else _Simplify(_gemm_ss_elect_one_thread, inline_let=True)
         )

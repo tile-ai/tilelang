@@ -11,7 +11,7 @@ template <class> inline constexpr bool always_false_v = false;
 #endif
 
 // Generic declaration: unsupported by default
-template <DataType C_type>
+template <DataType C_type, bool use_2cta=false>
 TL_DEVICE void
 tcgen05mma_ss(uint64_t const & /*desc_a*/, uint64_t const & /*desc_b*/,
               uint32_t const & /*tmem_c*/, uint32_t const & /*scalec*/,
@@ -25,7 +25,7 @@ tcgen05mma_ss(uint64_t const & /*desc_a*/, uint64_t const & /*desc_b*/,
 
 // TS variants: A from TMEM, B from SMEM (desc)
 // Generic declaration: unsupported by default
-template <DataType C_type>
+template <DataType C_type, bool use_2cta=false>
 TL_DEVICE void
 tcgen05mma_ts(uint32_t const & /*tmem_a*/, uint64_t const & /*desc_b*/,
               uint32_t const & /*tmem_c*/, uint32_t const & /*scalec*/,
@@ -164,13 +164,41 @@ TL_DEVICE void tcgen05mma_ss<DataType::kFloat16>(
   }
 }
 
-// BF16 maps to the same f16-kind instruction
 template <>
-TL_DEVICE void tcgen05mma_ss<DataType::kBFloat16>(
+TL_DEVICE void tcgen05mma_ss<DataType::kFloat16, true>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ss<DataType::kFloat16>(desc_a, desc_b, tmem_c, scalec, desc_val,
+  // idescE upper 32 bits carry the instruction descriptor; lower 32 ignored for
+  // SS Load TMEM base from shared memory slot handled by caller
+
+  if (cute::elect_one_sync()) {
+    asm volatile("{\n\t"
+                 ".reg .pred p;\n\t"
+                 "setp.ne.b32 p, %4, 0;\n\t"
+                 "tcgen05.mma.cta_group::2.kind::f16 [%0], %1, %2, %3, p; \n\t"
+                 "}\n"
+                 :
+                 : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec));
+  }
+}
+
+// BF16 maps to the same f16-kind instruction
+template <>
+TL_DEVICE void tcgen05mma_ss<DataType::kBFloat16, false>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ss<DataType::kFloat16, false>(desc_a, desc_b, tmem_c, scalec, desc_val,
+                                    mask0, mask1, mask2, mask3);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_ss<DataType::kBFloat16, true>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ss<DataType::kFloat16, true>(desc_a, desc_b, tmem_c, scalec, desc_val,
                                     mask0, mask1, mask2, mask3);
 }
 
