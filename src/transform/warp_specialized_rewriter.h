@@ -30,7 +30,7 @@ using arith::IRVisitorWithAnalyzer;
 
 class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
 public:
-  // return true means this aws will be disabled
+  // return true means auto warp specialization will be disabled
   static bool Detect(const Stmt &stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
@@ -39,7 +39,11 @@ public:
                       "specialization is manually enabled";
       return true;
     }
-    if (detector.has_tma_op_ && detector.has_mbarrier_op_) {
+    // When mbarrier ops coexist with TMA loads but tma_store_cluster is also
+    // present, the barriers are for SM-to-SM cluster copy synchronisation and
+    // should not block auto warp specialisation.
+    if (detector.has_tma_op_ && detector.has_mbarrier_op_ &&
+        !detector.has_cluster_copy_) {
       LOG(WARNING) << "Auto warp specialization will be disabled because TMA "
                       "and mbarrier are both present";
       return true;
@@ -51,6 +55,7 @@ public:
     has_tma_op_ = false;
     has_mbarrier_op_ = false;
     has_warp_specialization_ = false;
+    has_cluster_copy_ = false;
   }
 
 private:
@@ -68,8 +73,12 @@ private:
 
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(tma_load_multicast()) ||
         op->op.same_as(set_max_nreg())) {
       has_tma_op_ = true;
+    }
+    if (op->op.same_as(tma_store_cluster())) {
+      has_cluster_copy_ = true;
     }
     IRVisitorWithAnalyzer::VisitExpr_(op);
   }
@@ -93,6 +102,7 @@ private:
   IterVar thread_var_;
   bool has_mbarrier_op_{false};
   bool has_warp_specialization_{false};
+  bool has_cluster_copy_{false};
 };
 
 } // namespace tl

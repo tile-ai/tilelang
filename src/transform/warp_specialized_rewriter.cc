@@ -123,7 +123,8 @@ public:
   }
 
   void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(tma_load_multicast())) {
       for (auto arg : op->args) {
         // Collect buffers from args, including through let bindings
         CollectBuffersFromExpr(arg);
@@ -157,7 +158,8 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+          call->op.same_as(tma_load_multicast())) {
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
@@ -175,6 +177,16 @@ public:
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
     bool is_shared_store = scope.rank == StorageRank::kShared;
     if (producer_buffers_.count(op->buffer.get())) {
+      SetRole(op, Role::kBoth);
+      return;
+    }
+
+    // Keep ragged-prefix bookkeeping in both producer and consumer.
+    // The MultiVersionBuffer rewriter inserts updates to a local buffer
+    // "tl_mvb_ragged_prefix" to linearize ragged pipelined loops; if we
+    // classify these as consumer-only, the producer path will miss the update
+    // and its ping-pong buffer selection will desynchronize.
+    if (op->buffer->name == "tl_mvb_ragged_prefix") {
       SetRole(op, Role::kBoth);
       return;
     }
@@ -387,14 +399,18 @@ private:
         UsesVar(op->condition, f_uses_thread_index) &&
         !(UsesVar(op->then_case, f_uses_thread_index))) {
       auto eq_op = Downcast<EQ>(op->condition);
-      if (eq_op->a.as<VarNode>() == thread_var_.get() ||
-          eq_op->b.as<VarNode>() == thread_var_.get()) {
-        maybe_thread_opt_ = true;
-      }
-      auto then_case = StmtExprMutator::VisitStmt(op->then_case);
-      maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_ && has_tma_op_;
+      bool can_shuffle = (eq_op->a.as<VarNode>() == thread_var_.get() ||
+                          eq_op->b.as<VarNode>() == thread_var_.get());
+      // Save state: visiting then_case may recursively reset maybe_thread_opt_
+      // (e.g. nested IfThenElse from multicast cluster_rank check).
+      bool saved_has_tma = has_tma_op_;
       has_tma_op_ = false;
-      if (maybe_thread_opt_) {
+      StmtExprMutator::VisitStmt(op->then_case);
+      bool local_has_tma = has_tma_op_;
+      // Restore has_tma_op_ for any outer context and clear maybe_thread_opt_
+      has_tma_op_ = saved_has_tma;
+      maybe_thread_opt_ = false;
+      if (do_shuffle_ && can_shuffle && local_has_tma) {
         return IfThenElse(
             Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}),
             StmtExprMutator::VisitStmt(op->then_case), std::nullopt);
@@ -406,6 +422,7 @@ private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_load_multicast()) ||
         op->op.same_as(tl::tma_store())) {
       has_tma_op_ = true;
     }
@@ -638,7 +655,44 @@ public:
    */
   bool hasSimtCopy() const { return has_simt_copy_; }
 
+  /**
+   * @brief Emit code with any required ragged-pipeline bookkeeping.
+   *
+   * In particular, when encountering a pipelined loop (num_stages annotated)
+   * whose extent is dynamic (ragged), we maintain a per-thread running prefix
+   * counter to compute the correct stage/parity across outer iterations.
+   */
+  Stmt Emit(const Stmt &stmt) {
+    Stmt out = StmtMutator::operator()(stmt);
+    if (!needs_ragged_prefix_) {
+      return out;
+    }
+    EnsureRaggedPrefixBuffer();
+    Array<PrimExpr> zero_indices = {0};
+    Stmt init = BufferStore(ragged_prefix_buf_, IntImm(DataType::Int(32), 0),
+                            zero_indices);
+    Stmt seq = SeqStmt({init, out});
+    seq = DeclBuffer(ragged_prefix_buf_, seq);
+    return Allocate(ragged_prefix_buf_->data, ragged_prefix_buf_->dtype,
+                    ragged_prefix_buf_->shape, const_true(), seq);
+  }
+
 private:
+  void EnsureRaggedPrefixBuffer() {
+    if (ragged_prefix_buf_.defined()) {
+      return;
+    }
+    Array<PrimExpr> shape = {IntImm(DataType::Int(32), 1)};
+    ragged_prefix_buf_ =
+        decl_buffer(shape, DataType::Int(32), "tl_ws_ragged_prefix", "local");
+  }
+
+  PrimExpr LoadRaggedPrefix() {
+    EnsureRaggedPrefixBuffer();
+    Array<PrimExpr> zero_indices = {0};
+    return BufferLoad(ragged_prefix_buf_, zero_indices);
+  }
+
   template <
       typename NodeType> /**
                           * @brief Filter a statement by its producer/consumer
@@ -888,15 +942,39 @@ private:
 
     num_stages_ = num_stages;
     pipeline_info_ = pipeline_info;
-    PrimExpr linear_index = loop_stack_[0].loop_var - loop_stack_[0].min;
-    for (size_t i = 1; i < loop_stack_.size(); ++i) {
-      linear_index = linear_index * loop_stack_[i].extent +
-                     (loop_stack_[i].loop_var - loop_stack_[i].min);
+
+    // Default (rectangular) linearization assumes loop extents are invariant.
+    // For pipelined loops with a dynamic (ragged) extent, this can produce an
+    // incorrect stage/parity mapping across outer iterations. We instead use a
+    // runtime prefix counter to linearize the iteration space.
+    bool is_pipelined_loop = static_cast<bool>(num_stages_anno);
+    bool is_dynamic_extent = is_pipelined_loop && !op->extent.as<IntImmNode>();
+
+    PrimExpr linear_index;
+    if (is_dynamic_extent) {
+      needs_ragged_prefix_ = true;
+      PrimExpr base = LoadRaggedPrefix();
+      linear_index = base + (op->loop_var - op->min);
+      stage_ = FloorMod(linear_index, num_stages);
+      parity_ = FloorMod(FloorDiv(linear_index, num_stages), 2);
+    } else {
+      linear_index = loop_stack_[0].loop_var - loop_stack_[0].min;
+      for (size_t i = 1; i < loop_stack_.size(); ++i) {
+        linear_index = linear_index * loop_stack_[i].extent +
+                       (loop_stack_[i].loop_var - loop_stack_[i].min);
+      }
+      stage_ = FloorMod(linear_index, num_stages);
+      parity_ = FloorMod(
+          parity_before * op->extent + FloorDiv(linear_index, num_stages), 2);
     }
-    stage_ = FloorMod(linear_index, num_stages);
-    parity_ = FloorMod(
-        parity_before * op->extent + FloorDiv(linear_index, num_stages), 2);
     auto result = FilterByRole(op);
+
+    if (is_dynamic_extent) {
+      Array<PrimExpr> zero_indices = {0};
+      PrimExpr new_prefix = LoadRaggedPrefix() + op->extent;
+      Stmt update = BufferStore(ragged_prefix_buf_, new_prefix, zero_indices);
+      result = SeqStmt({result, update});
+    }
 
     Stmt grouped_for_node;
     if (result.as<ForNode>() && group_anno && !group_info_array.empty() &&
@@ -1152,6 +1230,36 @@ private:
   PipelineInfo pipeline_info_;
   friend class WarpSpecializedRewriter;
   bool has_simt_copy_ = false;
+  Buffer ragged_prefix_buf_;
+  bool needs_ragged_prefix_ = false;
+};
+
+class UserBarrierInitExtractor : public StmtMutator {
+public:
+  std::vector<Stmt> init_stmts;
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    if (IsOnlyInit(op->then_case)) {
+      init_stmts.push_back(GetRef<Stmt>(op));
+      return Evaluate(0);
+    }
+    return StmtMutator::VisitStmt_(op);
+  }
+
+  bool IsOnlyInit(const Stmt &stmt) {
+    if (const auto *eval = stmt.as<EvaluateNode>()) {
+      if (const auto *call = eval->value.as<CallNode>()) {
+        return call->op.same_as(builtin::ptx_init_barrier_thread_count());
+      }
+    } else if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const auto &s : seq->seq) {
+        if (!IsOnlyInit(s))
+          return false;
+      }
+      return true;
+    }
+    return false;
+  }
 };
 
 class WarpSpecializedRewriter : public StmtExprMutator {
@@ -1234,10 +1342,18 @@ private:
       return block_realize;
     }
 
+    UserBarrierInitExtractor extractor;
+    Stmt body_without_inits = extractor(block->body);
+
+    // Re-run marker on the new body to ensure all nodes are mapped
+    WarpSpecializedRoleMarker marker_new(buffer_data_to_buffer_);
+    marker_new.Prepare(body_without_inits);
+    marker_new(body_without_inits);
+
     if (disable_warp_specialized_) {
       WSCodeEmitter mbarrier_emitter(true, thread_iv_, buffer_data_to_buffer_,
-                                     marker, true);
-      auto code = mbarrier_emitter(block->body);
+                                     marker_new, true);
+      auto code = mbarrier_emitter.Emit(body_without_inits);
       int num_barriers = mbarrier_emitter.num_barriers_;
       Array<PrimExpr> barrier_num_threads;
       barrier_num_threads.reserve(num_barriers);
@@ -1247,15 +1363,22 @@ private:
       }
       Stmt init_barrier = Evaluate(Call(
           DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
-      block.CopyOnWrite()->body = SeqStmt({init_barrier, code});
+      std::vector<Stmt> all_inits;
+      all_inits.push_back(init_barrier);
+      all_inits.insert(all_inits.end(), extractor.init_stmts.begin(),
+                       extractor.init_stmts.end());
+      // Avoid constructing SeqStmt with a single element (disallowed in TVM).
+      Stmt init_seq = SeqStmt::Flatten(all_inits);
+      block.CopyOnWrite()->body = SeqStmt({init_seq, code});
       block_realize.CopyOnWrite()->block = block;
       return block_realize;
     }
-    WSCodeEmitter producer(true, thread_iv_, buffer_data_to_buffer_, marker);
-    WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker,
-                           false);
-    Stmt producer_code = producer(block->body);
-    Stmt consumer_code = consumer(block->body);
+    WSCodeEmitter producer(true, thread_iv_, buffer_data_to_buffer_,
+                           marker_new);
+    WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_,
+                           marker_new, false);
+    Stmt producer_code = producer.Emit(body_without_inits);
+    Stmt consumer_code = consumer.Emit(body_without_inits);
     PrimExpr consumer_thread_extent = thread_iv_->dom->extent;
     PrimExpr producer_thread_extent = thread_iv_->dom->extent;
     // Need one warp-group for bulk-copy only case
@@ -1288,6 +1411,10 @@ private:
 
     Stmt init_barrier = Evaluate(Call(
         DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
+    std::vector<Stmt> all_inits;
+    all_inits.push_back(init_barrier);
+    all_inits.insert(all_inits.end(), extractor.init_stmts.begin(),
+                     extractor.init_stmts.end());
     Stmt body = IfThenElse(GE(thread_iv_->var, consumer_thread_extent),
                            producer_code, consumer_code);
     // Add an attr here to handle the partial thread count in ThreadSync pass.
@@ -1295,7 +1422,9 @@ private:
                                   Downcast<IntImm>(consumer_thread_extent)};
     body = AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, body);
 
-    block.CopyOnWrite()->body = SeqStmt({init_barrier, body});
+    // Avoid SeqStmt of length 1 by flattening any single-init sequence.
+    Stmt init_seq = SeqStmt::Flatten(all_inits);
+    block.CopyOnWrite()->body = SeqStmt({init_seq, body});
     block_realize.CopyOnWrite()->block = block;
     return block_realize;
   }

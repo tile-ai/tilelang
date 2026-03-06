@@ -20,6 +20,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
+#include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
 namespace tvm {
@@ -43,7 +44,40 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
   // Copy annotations from the Call node
+  // then override with positional
+  // args when provided for backward compatibility.
   node->annotations = annotations;
+  if (auto dst_block = node->annotations.Get("dst_block")) {
+    if (auto int_imm = dst_block->as<IntImmNode>()) {
+      if (int_imm->value != -1) {
+        node->dst_block = Integer(int_imm->value);
+      }
+    } else {
+      node->dst_block = Downcast<PrimExpr>(dst_block.value());
+    }
+  }
+  if (args.size() >= 3) {
+    auto coalesced_width = Downcast<IntImm>(args[2]);
+    if (coalesced_width->value > 0) {
+      node->annotations.Set(attr::kCoalescedWidth, coalesced_width);
+    }
+  }
+  if (args.size() >= 4) {
+    node->annotations.Set("disable_tma", Downcast<Bool>(args[3]));
+  }
+  if (args.size() >= 5) {
+    node->annotations.Set("eviction_policy", args[4]);
+  }
+  if (args.size() >= 6) {
+    auto dst_block = args[5];
+    if (auto int_imm = dst_block.as<IntImmNode>()) {
+      if (int_imm->value != -1) {
+        node->dst_block = dst_block;
+      }
+    } else {
+      node->dst_block = dst_block;
+    }
+  }
   data_ = std::move(node);
 }
 
@@ -683,6 +717,9 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
                                T.layout_map, analyzer);
+  if (dst_block.defined()) {
+    return LowerClusterCopy(T, analyzer);
+  }
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
     auto tmem_copy = LowerTmemCopy(T, analyzer);
     ICHECK(tmem_copy.defined()) << "Failed to lower tensor memory copy";
@@ -705,6 +742,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return LowerNormalCopy(T, analyzer);
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
+    return Stmt();
   }
 }
 
@@ -1130,6 +1168,159 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   return body;
 }
 
+Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
+                                arith::Analyzer *analyzer) const {
+  // Check if the target supports cluster copy
+  // Currently only support shared memory to shared memory copy
+  ICHECK(src.scope() == "shared" || src.scope() == "shared.dyn");
+  ICHECK(dst.scope() == "shared" || dst.scope() == "shared.dyn");
+
+  // ---------------------------------------------------------------------------
+  // Fast path: bulk async copy via tl::tma_store_cluster
+  // Used when the caller supplies a shared-memory mbarrier via the "barrier"
+  // annotation. A single elected thread issues the cp.async.bulk instruction;
+  // the destination CTA waits on its local copy of the same mbarrier.
+  // ---------------------------------------------------------------------------
+  if (auto barrier_opt = GetBarrier()) {
+    PrimExpr barrier_load = barrier_opt.value();
+
+    // Compute linear offsets from the copy ranges (one offset per buffer).
+    auto compute_linear_offset = [](const Buffer &buf,
+                                    const Array<Range> &ranges) -> PrimExpr {
+      PrimExpr offset = 0;
+      PrimExpr stride = 1;
+      for (int i = static_cast<int>(ranges.size()) - 1; i >= 0; --i) {
+        offset = offset + ranges[i]->min * stride;
+        if (i > 0)
+          stride = stride * buf->shape[i];
+      }
+      return offset;
+    };
+
+    PrimExpr dst_offset = compute_linear_offset(dst, dst_range);
+    PrimExpr src_offset = compute_linear_offset(src, src_range);
+
+    // Total number of elements to transfer.
+    PrimExpr total_elements = 1;
+    for (auto r : src_range)
+      total_elements = total_elements * r->extent;
+    PrimExpr size_bytes =
+        cast(DataType::UInt(32), total_elements * src->dtype.bytes());
+
+    // Build tvm_access_ptr arguments.  These are processed by LowerTileOp's
+    // HandleAccessPtrAndOffset which, for TMA ops (in_tma_context_=true),
+    // keeps the raw linear offset without applying any swizzle transformation.
+    PrimExpr dst_ptr =
+        dst.access_ptr(2, DataType::Handle(), 1, dst_offset, total_elements);
+    PrimExpr src_ptr =
+        src.access_ptr(1, DataType::Handle(), 1, src_offset, total_elements);
+
+    Stmt bulk_copy = Evaluate(
+        Call(DataType::Handle(), tma_store_cluster(),
+             {dst_ptr, src_ptr, dst_block.value(), size_bytes, barrier_load}));
+
+    // Single-thread guard: only thread_bounds->min issues the instruction.
+    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), bulk_copy);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Slow path: element-by-element SIMT copy via ptx_cluster_store
+  // Used when no barrier is provided (backward-compatible behaviour).
+  // ---------------------------------------------------------------------------
+
+  // Generate the loop nest for the copy
+  auto simt_loop = MakeSIMTLoop(analyzer);
+  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+
+  // Partition across threads but force scalar (vectorize_hint=1):
+  // ClusterCopyReplacer replaces BufferStore with ptx_cluster_store
+  // (cooperative_groups map_shared_rank + scalar write). Vectorized stores
+  // would produce vector-dtype values that cannot be written through
+  // map_shared_rank's scalar pointer return type.
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  auto par_op = ParallelOp(fused_loop);
+  for (auto level : levels) {
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
+                        level);
+  }
+  auto loop_layout = par_op->GetLoopLayout();
+  auto thread_loop =
+      PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
+  auto vectorized_thread_loop =
+      VectorizeLoop(thread_loop, T.layout_map, /*vectorize_hint=*/1);
+
+  // Replace the buffer store with the cluster copy intrinsic
+  class ClusterCopyReplacer : public StmtExprMutator {
+  public:
+    ClusterCopyReplacer(const Buffer &dst, PrimExpr dst_block,
+                        const Buffer &target_dst)
+        : dst_(dst), dst_block_(dst_block), target_dst_(target_dst) {}
+
+    Stmt VisitStmt_(const BufferStoreNode *op) final {
+      if (op->buffer.same_as(dst_)) {
+        Array<PrimExpr> args;
+        args.push_back(target_dst_.access_ptr(2)); // The buffer var (handle)
+        args.push_back(op->value);                 // The value to store
+        args.push_back(dst_block_); // The destination block index
+
+        // linearize the index.
+        PrimExpr linearized_index = op->indices[0];
+        if (op->indices.size() > 1) {
+          PrimExpr multiplier = 1;
+          linearized_index = 0;
+          for (int i = op->indices.size() - 1; i >= 0; --i) {
+            linearized_index = linearized_index + op->indices[i] * multiplier;
+            if (i > 0) {
+              multiplier = multiplier * op->buffer->shape[i];
+            }
+          }
+        }
+
+        args.push_back(linearized_index);
+
+        Buffer target_buffer = target_dst_;
+        if (target_dst_.same_as(dst_)) {
+          target_buffer = op->buffer;
+        }
+
+        // Guard against out-of-bounds remote stores when the thread count
+        // exceeds the copy extent (e.g. 128 threads for a 64-element region).
+        PrimExpr total_elems = 1;
+        for (const PrimExpr &s : target_buffer->shape) {
+          total_elems = total_elems * s;
+        }
+
+        Stmt remote_store = Evaluate(
+            Call(DataType::Handle(), ptx_cluster_store(),
+                 {target_buffer.access_ptr(2), args[1], args[2], args[3]}));
+
+        return IfThenElse(args[3] < total_elems, remote_store, Stmt());
+      }
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+  private:
+    const Buffer &dst_;
+    PrimExpr dst_block_;
+    const Buffer &target_dst_;
+  };
+
+  Buffer target_dst = dst;
+  if (T.buffer_remap.count(dst)) {
+    target_dst = T.buffer_remap[dst];
+  }
+
+  return ClusterCopyReplacer(dst, dst_block.value(),
+                             target_dst)(vectorized_thread_loop);
+}
+
 // Lowers copy to a bulk TMA (Tensor Memory Accelerator) transfer.
 // Falls back to LowerNormalCopy if preconditions are not satisfied.
 Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
@@ -1377,6 +1568,10 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
 
+  // Check for cluster multicast mask annotation (0 means no multicast)
+  int64_t cluster_mask = GetClusterMask();
+  bool use_multicast = is_load && (cluster_mask > 0);
+
   Array<PrimExpr> args;
   args.reserve(desc.rank + 4);
   args.push_back(create_descriptor);
@@ -1388,6 +1583,24 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   PrimExpr total_elements = 1;
   for (auto e : desc.smem_box)
     total_elements *= e;
+
+  // Helper lambda to build multicast args by inserting the cluster_mask
+  // value between smem_ptr (args[2]) and global coordinates.
+  // Regular tma_load args layout:  [desc, mbar, smem_ptr, coord0..., eviction]
+  // Multicast tma_load args layout: [desc, mbar, smem_ptr, mask, coord0...,
+  // eviction]
+  auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
+    Array<PrimExpr> mc_args;
+    mc_args.reserve(regular_args.size() + 1);
+    mc_args.push_back(regular_args[0]); // descriptor
+    mc_args.push_back(regular_args[1]); // mbarrier placeholder
+    mc_args.push_back(regular_args[2]); // smem_ptr
+    mc_args.push_back(
+        IntImm(DataType::Int(32), cluster_mask)); // multicast mask
+    for (size_t i = 3; i < regular_args.size(); i++)
+      mc_args.push_back(regular_args[i]); // coords + eviction_policy
+    return mc_args;
+  };
 
   if ((*inner_box_dim) != instruction_dim) {
     Var loop_var("i");
@@ -1406,6 +1619,33 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     args.push_back(GetEvictionPolicy());
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), op, args)));
+
+    if (use_multicast) {
+      // Build multicast args using the same loop_var (safe since branches are
+      // mutually exclusive in the outer IfThenElse)
+      Array<PrimExpr> mc_args = build_multicast_args(args);
+      Stmt multicast_copy = For(
+          loop_var, 0, loop_extent, ForKind::kUnrolled,
+          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args)));
+
+      // 3-way split based on cluster mask:
+      //   block_rank == min_rank_in_mask  -> tma_load_multicast (then branch)
+      //   block_rank NOT in mask          -> regular tma_load   (elif branch)
+      //   block_rank in mask, not min     -> do nothing         (no else)
+      int min_cta_rank = static_cast<int>(
+          __builtin_ctzll(static_cast<uint64_t>(cluster_mask)));
+      PrimExpr block_rank =
+          Call(DataType::Int(32), get_cluster_block_rank(), {});
+      PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
+      // (mask >> block_rank) & 1 == 0  ⟺  block_rank is NOT set in the mask
+      PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
+                                            IntImm(DataType::Int(32), 1)),
+                                IntImm(DataType::Int(32), 0));
+      Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
+      tma_copy =
+          IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
+                     multicast_copy, regular_or_noop);
+    }
   } else {
     PrimExpr shared_addr = shared_tensor.access_ptr(
         is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
@@ -1417,6 +1657,29 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       args.push_back(need_reduce);
     args.push_back(GetEvictionPolicy());
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
+
+    if (use_multicast) {
+      Array<PrimExpr> mc_args = build_multicast_args(args);
+      Stmt multicast_copy =
+          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args));
+
+      // 3-way split based on cluster mask:
+      //   block_rank == min_rank_in_mask  -> tma_load_multicast (then branch)
+      //   block_rank NOT in mask          -> regular tma_load   (elif branch)
+      //   block_rank in mask, not min     -> do nothing         (no else)
+      int min_cta_rank = static_cast<int>(
+          __builtin_ctzll(static_cast<uint64_t>(cluster_mask)));
+      PrimExpr block_rank =
+          Call(DataType::Int(32), get_cluster_block_rank(), {});
+      PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
+      PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
+                                            IntImm(DataType::Int(32), 1)),
+                                IntImm(DataType::Int(32), 0));
+      Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
+      tma_copy =
+          IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
+                     multicast_copy, regular_or_noop);
+    }
   }
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
 
@@ -1733,7 +1996,7 @@ void CopyNode::CollectFragmentLayouts(const PrimExpr &expr,
 // eviction_policy
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
-    .set_num_inputs(5)
+    .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

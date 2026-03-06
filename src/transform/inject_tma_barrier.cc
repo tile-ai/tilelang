@@ -63,13 +63,17 @@ public:
 
 private:
   void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+        call->op.same_as(tma_load_multicast())) {
       auto arg0 = call->args[0].as<Call>();
       if (call->op.same_as(tma_load()) && arg0 &&
           !arg0.value()->op.same_as(create_tma_descriptor())) {
         // 1D TMA load has tvm_access_ptr of shared tensor in its args[0]
         bulk_copy_bytes = call->args[3] * loop_extents;
       } else {
+        // Descriptor-based TMA load: smem_ptr is always at args[2]
+        // (for tma_load_multicast, args[3] is the mask, but args[2] is still
+        // the smem access_ptr)
         Call access_ptr = Downcast<Call>(call->args[2]);
         ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
         int type_bytes = access_ptr->args[0]->dtype.bytes();
@@ -84,6 +88,17 @@ private:
     loop_extents *= op->extent;
     StmtExprVisitor::VisitStmt_(op);
     loop_extents = old_loop_evtents;
+  }
+
+  // For if/else branches (mutually exclusive), count only the then branch.
+  // Both branches always transfer the same number of bytes (same tile size),
+  // so counting either one gives the correct mbarrier expect_tx byte count.
+  void VisitStmt_(const IfThenElseNode *op) final {
+    if (op->else_case.defined()) {
+      StmtExprVisitor::VisitStmt(op->then_case);
+    } else {
+      StmtExprVisitor::VisitStmt_(op);
+    }
   }
 
   PrimExpr bulk_copy_bytes = 0;
@@ -135,7 +150,21 @@ private:
     if (op->condition.as<CallNode>()) {
       flag = op->condition.as<CallNode>()->op.same_as(tl_shuffle_elect());
     }
-    if (op->condition.as<EQNode>() || flag) {
+    // Only trigger for EQ conditions that involve the thread variable
+    // (directly or offset like threadIdx.x - 128 == 0 after warp-spec
+    // remapping). Runtime function-call conditions such as
+    // get_cluster_block_rank() == min_rank must NOT trigger byte injection:
+    // they don't involve any thread variable.
+    bool is_thread_eq = false;
+    if (auto eq = op->condition.as<EQNode>()) {
+      if (thread_var_.defined()) {
+        auto f_uses_thread = [this](const VarNode *v) {
+          return v == thread_var_->var.get();
+        };
+        is_thread_eq = UsesVar(op->condition, f_uses_thread);
+      }
+    }
+    if (is_thread_eq || flag) {
       Stmt ret = IRMutatorWithAnalyzer::VisitStmt_(op);
 
       if (visited_tma_load_) {
@@ -163,8 +192,10 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(tma_load_multicast())) {
       auto arg0 = op->args[0].as<Call>();
+      // Only the 1D non-descriptor tma_load has its mbarrier at args[2]
       bool is_1d_tma_load =
           arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
           op->op.same_as(tma_load());
@@ -203,7 +234,8 @@ private:
 
   void VisitStmt_(const EvaluateNode *op) final {
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+          call->op.same_as(tma_load_multicast())) {
         pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
       } else if (call->op.same_as(mbarrier_expect_tx())) {
         pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
@@ -506,7 +538,8 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(tma_load_multicast())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (!tma_op_to_barrier_id_.count(call_ref)) {
         // For 1D TMA loads, promote raw integer barrier id to get_mbarrier(id)
@@ -515,7 +548,8 @@ private:
         auto arg0 = op->args[0].as<Call>();
         bool is_1d_tma_load =
             arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
-            !arg0.value()->op.same_as(create_tma_im2col_descriptor());
+            !arg0.value()->op.same_as(create_tma_im2col_descriptor()) &&
+            op->op.same_as(tma_load());
         if (is_1d_tma_load && op->args.size() >= 3) {
           if (const auto *imm = op->args[2].as<IntImmNode>()) {
             Array<PrimExpr> new_args = op->args;
@@ -532,10 +566,13 @@ private:
       auto arg0 = op->args[0].as<Call>();
       auto is_1d_tma_load =
           arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
-          !arg0.value()->op.same_as(create_tma_im2col_descriptor());
+          !arg0.value()->op.same_as(create_tma_im2col_descriptor()) &&
+          op->op.same_as(tma_load());
       if (is_1d_tma_load) {
         new_args.Set(2, barrier_id);
       } else {
+        // Descriptor-based tma_load, tma_load_multicast, and tma_load_im2col
+        // all have the mbarrier at args[1]
         new_args.Set(1, barrier_id);
       }
       return Call(op->dtype, op->op, new_args, op->annotations);

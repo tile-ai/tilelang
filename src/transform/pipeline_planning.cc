@@ -238,21 +238,29 @@ private:
         this->VisitExpr(op->args[i]);
       }
     } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
-      ICHECK(args[0].as<BufferLoadNode>());
-      Buffer mbar_buf = args[0].as<BufferLoadNode>()->buffer;
-      auto buffer_reads =
-          chain_builder_.mbar_to_buffer_reads_.find(mbar_buf.get());
-      auto buffer_writes =
-          chain_builder_.mbar_to_buffer_writes_.find(mbar_buf.get());
-      if (buffer_reads != chain_builder_.mbar_to_buffer_reads_.end()) {
-        reads_.insert(reads_.end(), buffer_reads->second.begin(),
-                      buffer_reads->second.end());
-      }
-      if (buffer_writes != chain_builder_.mbar_to_buffer_writes_.end()) {
-        writes_.insert(
-            writes_.end(),
-            chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).begin(),
-            chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).end());
+      // mbarrier_wait_parity may take either a BufferLoad (preferred, allows
+      // linking to associated async dependencies) or a target-specific handle
+      // expression (e.g. tl.get_mbarrier(id)). For the latter case, we cannot
+      // associate the barrier with a concrete Buffer, so we conservatively
+      // fall back to normal traversal.
+      if (const auto *load = args[0].as<BufferLoadNode>()) {
+        Buffer mbar_buf = load->buffer;
+        auto buffer_reads =
+            chain_builder_.mbar_to_buffer_reads_.find(mbar_buf.get());
+        auto buffer_writes =
+            chain_builder_.mbar_to_buffer_writes_.find(mbar_buf.get());
+        if (buffer_reads != chain_builder_.mbar_to_buffer_reads_.end()) {
+          reads_.insert(reads_.end(), buffer_reads->second.begin(),
+                        buffer_reads->second.end());
+        }
+        if (buffer_writes != chain_builder_.mbar_to_buffer_writes_.end()) {
+          writes_.insert(
+              writes_.end(),
+              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).begin(),
+              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).end());
+        }
+      } else {
+        StmtExprVisitor::VisitExpr_(op);
       }
     } else {
       StmtExprVisitor::VisitExpr_(op);
