@@ -42,11 +42,19 @@ TL_DEVICE void tmem_deallocate(uint32_t *tmem_ptr, int num_columns) {
   }
 }
 
-inline void __device__ fence_view_async_tmem_load() {
+TL_DEVICE void tcgen05_before_thread_sync() {
+  asm volatile("tcgen05.fence::before_thread_sync;");
+}
+
+TL_DEVICE void tcgen05_after_thread_sync() {
+  asm volatile("tcgen05.fence::after_thread_sync;");
+}
+
+TL_DEVICE void fence_view_async_tmem_load() {
   asm volatile("tcgen05.wait::ld.sync.aligned; " ::);
 }
 
-inline void __device__ fence_view_async_tmem_store() {
+TL_DEVICE void fence_view_async_tmem_store() {
   asm volatile("tcgen05.wait::st.sync.aligned; " ::);
 }
 
