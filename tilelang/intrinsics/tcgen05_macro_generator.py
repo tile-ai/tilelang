@@ -1,5 +1,6 @@
 from __future__ import annotations
 from enum import IntEnum
+import tilelang
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
@@ -160,6 +161,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
+        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
+        if len(meta) != 5:
+            raise ValueError(
+                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
+                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
+            )
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
         scale_in_a = 1
         scale_in_b = 1
 
@@ -173,17 +183,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         elems_in_bits = DataType(self.a_dtype).bits
         elems_in_bytes = elems_in_bits // 8
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
-        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
-        if len(meta) != 5:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
-                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
 
         # by default, we utilize non-swizzle layout offset
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
@@ -210,8 +212,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 else:
                     a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
 
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
         if not b_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
@@ -222,18 +224,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 # MN Major, K * N
                 # LBO represents the distance between two atoms along the N dimension
                 # SBO represents the distance between two atoms along the K dimension
-                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
+                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
                 if b_n_axis_atoms <= 1:
                     b_leading_byte_offset = 0
                 else:
                     b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
                 if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
+                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim_per_cta
                 else:
                     b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
 
         # for example, if [n, k] where k is 128, we should split it into 2 atoms
-        # where max specially handles the case when n_dim is 8.
+        # where max specially handles the case when n_dim_per_cta is 8.
         ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
 
@@ -325,12 +327,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         )
 
                         B_elem_offset = (
-                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                            (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
                             + (ki % bk_atom_size) * micro_size_k
                             + j * atom_n * b_swizzle_atom_elems
                             if b_is_k_major
                             else (
-                                ki * b_swizzle_atom_elems * micro_size_k + j * atom_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                                ki * b_swizzle_atom_elems * micro_size_k + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
                             )
                         )
 
@@ -624,7 +626,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def get_tcgen5_mma_meta(self, m: int, n: int, k: int):
         """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta)."""
-        return _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype))
+        pass_ctx = tilelang.transform.get_pass_context()
+        disable_2cta = pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_2CTA_TCGEN5MMA, False) 
+        return _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype), bool(disable_2cta))
 
     def get_tcgen5_instr_desc(
         self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool, b_is_k_major: bool, scale_in_a: int, scale_in_b: int
