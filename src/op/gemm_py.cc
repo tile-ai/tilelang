@@ -319,8 +319,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def(
       "tl.get_tcgen5_mma_meta",
-      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype);
+      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype, bool disable_2cta) {
+        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype, disable_2cta);
         Array<Integer> result;
         if (success) {
           result.push_back(Integer(meta.atom_m));
