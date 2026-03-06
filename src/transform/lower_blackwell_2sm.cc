@@ -10,6 +10,8 @@
  * Tilelang gemm defaults to v2 (GemmPyNode); we only support v2, not v1 (Gemm).
  */
 
+// todo: consider mixture of 1cta/2cta tcgen5mma in the same kernel
+
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/expr.h>
 #include <tvm/tir/analysis.h>
@@ -39,15 +41,13 @@ constexpr const char* kUse2Cta = "use_2cta";
  * use_2cta, sets the flag for the mutator to add block attr.
  * Only supports v2 (GemmPy); v1 (Gemm) is ignored.
  */
-class DoubleSmDetector : public StmtExprVisitor {
+class Tcgen5_2SmLower : public StmtExprMutator {
  public:
-  explicit DoubleSmDetector(Target target) : target_(std::move(target)) {}
-
-  void Detect(const Stmt& stmt) { VisitStmt(stmt); }
+  explicit Tcgen5_2SmLower(Target target) : target_(std::move(target)) {}
   bool has_2sm_tcgen5mma() const { return has_2sm_tcgen5mma_; }
 
  private:
-  void VisitStmt_(const EvaluateNode* op) final {
+  Stmt VisitStmt_(const EvaluateNode* op) final {
     if (const CallNode* call = op->value.as<CallNode>()) {
       // Tilelang gemm defaults to v2 (GemmPy); we only support v2, not v1 (Gemm).
       if (call->op.same_as(GemmPy::Get())) {
@@ -61,27 +61,29 @@ class DoubleSmDetector : public StmtExprVisitor {
               if (ok && meta.enable_2cta) {
                 LOG(INFO) << "Found 2SM TCGEN5MMA!";
                 has_2sm_tcgen5mma_ = true;
+                // NOTE(wt): Currently this only act as a detector of tcgen05 2sm,
+                // while we may add the lower logic here in the future.
               }
             }
           }
         }
       }
     }
-    StmtExprVisitor::VisitStmt_(op);
+    return StmtExprMutator::VisitStmt_(op);
   }
 
   Target target_;
   bool has_2sm_tcgen5mma_ = false;
 };
 
-class DoubleSmMutator : public StmtExprMutator {
+class Tcgen5_2SmAnnotator : public StmtExprMutator {
  public:
-  explicit DoubleSmMutator(bool use_2cta) : use_2cta_(use_2cta) {}
+  explicit Tcgen5_2SmAnnotator() {}
 
  private:
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
     Stmt new_realize = StmtExprMutator::VisitStmt_(op);
-    if (!use_2cta_ || root_block_annotated_) return new_realize;
+    if (root_block_annotated_) return new_realize;
     const auto* realize = new_realize.as<BlockRealizeNode>();
     ICHECK(realize);
     Block block = realize->block;
@@ -93,7 +95,6 @@ class DoubleSmMutator : public StmtExprMutator {
     return BlockRealize(realize->iter_values, realize->predicate, block);
   }
 
-  bool use_2cta_;
   bool root_block_annotated_ = false;
 };
 
@@ -110,11 +111,12 @@ tvm::transform::Pass LowerBlackwell2SM() {
       return f;
     }
     Stmt body = f->body;
-    DoubleSmDetector detector(target);
-    detector.Detect(body);
-    if (detector.has_2sm_tcgen5mma()) {
-      DoubleSmMutator mutator(true);
-      body = mutator(std::move(body));
+    Tcgen5_2SmLower lower(target);
+    body = lower(std::move(body));
+    if (lower.has_2sm_tcgen5mma()) {
+      // Annotate block attr for using 2cta tcgen5
+      Tcgen5_2SmAnnotator annotator;
+      body = annotator(std::move(body));
     }
     return PrimFunc(f->params, body, f->ret_type, f->buffer_map, f->attrs);
   };
