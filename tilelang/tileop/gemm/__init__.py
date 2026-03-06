@@ -131,7 +131,7 @@ class GemmPy(Node, Scriptable):
         2. WGMMA for Hopper architecture with sufficient matrix size and warp count
         3. MFMA for CDNA (AMD) architecture
         4. MMA for CUDA architecture
-        5. CPU for CPU target (scalar fallback)
+        5. Scalar for CPU target (scalar fallback)
 
         Args:
             thread_nums: Number of threads in the block
@@ -166,7 +166,7 @@ class GemmPy(Node, Scriptable):
             return GemmTCGEN5
         elif gemm_inst.is_mfma():
             return GemmMFMA
-        elif gemm_inst.is_cpu():
+        elif gemm_inst.is_scalar():
             return GemmScalar
         else:
             raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")

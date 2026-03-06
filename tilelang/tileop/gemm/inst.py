@@ -8,7 +8,7 @@ class GemmInst(IntEnum):
     WGMMA = 1
     TCGEN5MMA = 2
     MFMA = 3
-    CPU = 4
+    Scalar = 4
 
     def is_mma(self) -> bool:
         return self == GemmInst.MMA
@@ -22,8 +22,8 @@ class GemmInst(IntEnum):
     def is_mfma(self) -> bool:
         return self == GemmInst.MFMA
 
-    def is_cpu(self) -> bool:
-        return self == GemmInst.CPU
+    def is_scalar(self) -> bool:
+        return self == GemmInst.Scalar
 
     def __repr__(self) -> str:
         return self.name
