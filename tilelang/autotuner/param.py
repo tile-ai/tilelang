@@ -23,6 +23,7 @@ from tvm.runtime import Executable
 
 BEST_CONFIG_PATH = "best_config.json"
 FUNCTION_PATH = "function.pkl"
+OUT_IDX_PATH = "out_idx.json"
 LATENCY_PATH = "latency.json"
 
 # Align file names with cache/kernel_cache.py
@@ -378,6 +379,20 @@ class AutotuneResult:
             logger.debug(f"Saving function to file: {path / FUNCTION_PATH}")
         self._safe_write_file(str(path / FUNCTION_PATH), "wb", lambda f: cloudpickle.dump(self.func, f))
 
+        # save out idx (atomic)
+        if verbose:
+            logger.debug(f"Saving out idx to file: {path / OUT_IDX_PATH}")
+        self._safe_write_file(
+            str(path / OUT_IDX_PATH),
+            "w",
+            lambda f: json.dump(
+                {
+                    "out_idx": getattr(self.func, "out_idx_override", None),
+                },
+                f,
+            ),
+        )
+
         # save ref latency (atomic)
         if verbose:
             logger.debug(f"Saving latency to file: {path / LATENCY_PATH}")
@@ -421,6 +436,12 @@ class AutotuneResult:
         with open(path / FUNCTION_PATH, "rb") as f:
             func = cloudpickle.load(f)
 
+        # load out idx
+        if verbose:
+            logger.debug(f"Loading out idx from file: {path / OUT_IDX_PATH}")
+        with open(path / OUT_IDX_PATH) as f:
+            out_idx_override = json.load(f)["out_idx"]
+
         # load latency
         if verbose:
             logger.debug(f"Loading latency from file: {path / LATENCY_PATH}")
@@ -433,7 +454,7 @@ class AutotuneResult:
             path,
             norm_target,
             compile_args.target_host,
-            compile_args.out_idx,
+            out_idx_override if out_idx_override is not None else compile_args.out_idx,
             resolved_backend,
             compile_args.pass_configs,
             None,  # compile_flags not tracked here
