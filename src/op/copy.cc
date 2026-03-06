@@ -33,10 +33,6 @@ inline bool IsCPAsyncInstructionBytes(int bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
 
-inline bool IsGlobalLikeScope(const String &scope) {
-  return scope == "global" || scope.empty();
-}
-
 // Rewrite scalar global->shared stores into ptx_cp_async calls.
 // This rewriter is applied before the global vectorize pass, so each generated
 // cp.async call starts with element-wise bytes and can be widened later.
@@ -77,7 +73,7 @@ private:
       }
     }
 
-    if (load == nullptr || !IsGlobalLikeScope(load->buffer.scope())) {
+    if (load == nullptr || !IsGlobalBuffer(load->buffer)) {
       successfully_rewritten_ = false;
       return StmtMutator::VisitStmt_(op);
     }
@@ -420,7 +416,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
                     "support (SM80+). Got target="
                  << target;
     }
-    if (!IsGlobalLikeScope(src.scope()) || !IsSharedBuffer(dst)) {
+    if (!IsGlobalBuffer(src) || !IsSharedBuffer(dst)) {
       LOG(FATAL)
           << "T.async_copy only supports global->shared/shared.dyn copies. "
           << "Got src=" << src->name << " (scope=" << src.scope()
@@ -793,7 +789,7 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
   if (!TargetHasAsyncCopy(target)) {
     return false;
   }
-  if (!IsGlobalLikeScope(src.scope()) || !IsSharedBuffer(dst)) {
+  if (!IsGlobalBuffer(src) || !IsSharedBuffer(dst)) {
     return false;
   }
   if (src->dtype != dst->dtype) {
@@ -825,7 +821,7 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
       auto bool_str = [](bool v) { return v ? "true" : "false"; };
 
       bool target_has_async_copy = TargetHasAsyncCopy(target);
-      bool src_is_global_like = IsGlobalLikeScope(src.scope());
+      bool src_is_global = IsGlobalBuffer(src);
       bool dst_is_shared = IsSharedBuffer(dst);
       bool dtype_match = src->dtype == dst->dtype;
       bool dtype_bits_multiple_of_8 = src->dtype.bits() % 8 == 0;
@@ -899,7 +895,7 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
       oss << "  - target_has_async_copy=" << bool_str(target_has_async_copy)
           << "\n";
       oss << "  - buffer_oob=" << bool_str(buffer_oob) << "\n";
-      oss << "  - src_is_global_like=" << bool_str(src_is_global_like) << "\n";
+      oss << "  - src_is_global=" << bool_str(src_is_global) << "\n";
       oss << "  - dst_is_shared=" << bool_str(dst_is_shared) << "\n";
       oss << "  - dtype_match=" << bool_str(dtype_match) << "\n";
       oss << "  - dtype_bits_multiple_of_8="

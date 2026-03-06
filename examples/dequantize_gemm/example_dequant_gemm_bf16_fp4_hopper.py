@@ -43,8 +43,7 @@ def get_configs():
     out_idx=[-1],
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
     },
 )
 def matmul(
@@ -459,8 +458,5 @@ def run_regression_perf(m=4096, n=4096, k=4096, fast_dequant=True):
 
 
 if __name__ == "__main__":
-    # main(256, 256, 256, True)
-    # main(256, 256, 256, False)
-    tilelang.disable_cache()
-    latency = run_regression_perf(4096, 4096, 4096, True)
-    print(f"Latency: {latency} ms")
+    main(256, 256, 256, True)
+    main(256, 256, 256, False)

@@ -411,7 +411,6 @@ def main(batch: int = 1, heads: int = 32, groups: int = 8, kv_seqlen: int = 8192
     if not tune:
         config, sm_version = get_heuristic_config()
         kernel = flashattn(batch, heads, groups, kv_seqlen, dim, **config)
-        print(kernel.get_kernel_source())
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
 
         q = torch.randn(batch, heads, dim, device="cuda", dtype=torch.float16)
