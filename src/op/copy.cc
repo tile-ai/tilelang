@@ -73,9 +73,10 @@ private:
 
     // Nested zero-fill guards only permit issuing cp.async when every guard
     // on the path to the load is true.
-    *predicate = predicate->defined()
-                     ? Optional<PrimExpr>(And(call->args[0], predicate.value()))
-                     : Optional<PrimExpr>(call->args[0]);
+    *predicate =
+        predicate->defined()
+            ? Optional<PrimExpr>(And(call->args[0], predicate->value()))
+            : Optional<PrimExpr>(call->args[0]);
     return load;
   }
 

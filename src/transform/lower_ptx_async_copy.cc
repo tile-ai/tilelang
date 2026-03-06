@@ -336,9 +336,10 @@ private:
       return nullptr;
     }
 
-    *predicate = predicate->defined()
-                     ? Optional<PrimExpr>(And(call->args[0], predicate.value()))
-                     : Optional<PrimExpr>(call->args[0]);
+    *predicate =
+        predicate->defined()
+            ? Optional<PrimExpr>(And(call->args[0], predicate->value()))
+            : Optional<PrimExpr>(call->args[0]);
     return load;
   }
 
