@@ -31,4 +31,4 @@ def cluster_sync() -> tir.PrimExpr:
 
 def block_rank_in_cluster() -> tir.PrimExpr:
     """Return the 1-D rank of the calling CTA within its cluster (%%cluster_ctarank)."""
-    return tir.call_intrin("uint32", tir.op.Op.get("tl.block_rank_in_cluster"))
+    return tir.call_intrin("int32", tir.op.Op.get("tl.block_rank_in_cluster"))
