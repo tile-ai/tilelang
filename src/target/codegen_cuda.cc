@@ -448,7 +448,6 @@ private:
 
 public:
   std::optional<std::tuple<int64_t, int64_t, int64_t>> extract(const PrimFunc &f) {
-    LOG(INFO) << "Extracting cluster dimensions from function";
     this->VisitStmt(f);
     if (launch_with_cluster) {
       return std::make_tuple(cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext);

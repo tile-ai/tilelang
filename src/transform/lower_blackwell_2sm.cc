@@ -20,7 +20,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../op/gemm.h"
+#include "../op/builtin.h"
 #include "../op/gemm_py.h"
 #include "../op/operator.h"
 #include "../op/tcgen5_meta.h"
@@ -103,15 +103,15 @@ using namespace tir::transform;
 tvm::transform::Pass LowerBlackwell2SM() {
   auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
     Optional<Target> opt_target = f->GetAttr<Target>(tvm::attr::kTarget);
-    if (!opt_target.defined()) {
+    if (!opt_target.defined() || !TargetIsSm100(opt_target.value())) {
       return f;
     }
-    Target target = opt_target.value();
-    if (!TargetIsSm100(target)) {
+    if (ctx->GetConfig(kDisable2CTATcgen5MMA, Optional<Bool>()).value_or(false)) {
+      LOG(INFO) << "2CTA TCGEN5MMA is disabled by pass config";
       return f;
     }
     Stmt body = f->body;
-    Tcgen5_2SmLower lower(target);
+    Tcgen5_2SmLower lower(opt_target.value());
     body = lower(std::move(body));
     if (lower.has_2sm_tcgen5mma()) {
       // Annotate block attr for using 2cta tcgen5
