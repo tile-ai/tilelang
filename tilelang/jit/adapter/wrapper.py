@@ -702,7 +702,7 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
 
     def get_kernel_launch_code(self, function_name, grid_str, block_str, smem_str, call_args, cluster_dims):
         # HIP does not support cudaLaunchKernelEx; use <<<>>> syntax (same as pre-cluster-launch behavior)
-        return f"\t{function_name}<<<{grid_str}, {block_str}, {smem_str}, stream>>>({call_args});\n" 
+        return f"\t{function_name}<<<{grid_str}, {block_str}, {smem_str}, stream>>>({call_args});\n"
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
