@@ -196,6 +196,13 @@ KERNEL_CLUSTER_LAUNCH_FUNC_CODE = """
 \t}}
 """
 
+# HIP kernel launch uses <<<>>> syntax (hipcc supports this natively)
+KERNEL_LAUNCH_FUNC_CODE_HIP = """
+\t{{
+\t\t{4}<<<{0}, {1}, {2}, stream>>>({3});
+\t}}
+"""
+
 
 class BaseWrapper(ABC):
     @abstractmethod
@@ -360,18 +367,9 @@ class TLCUDASourceWrapper:
                 )
 
                 call_args = ", ".join(args_list)
-                if self.cluster_dims[function_name] is None:
-                    kernel_code = KERNEL_LAUNCH_FUNC_CODE.format(
-                        grid_str,
-                        block_str,
-                        smem_str,
-                        call_args,
-                        function_name,
-                    )
-                else:
-                    kernel_code = KERNEL_CLUSTER_LAUNCH_FUNC_CODE.format(
-                        grid_str, block_str, smem_str, call_args, function_name, *self.cluster_dims[function_name]
-                    )
+                kernel_code = self.get_kernel_launch_code(
+                    function_name, grid_str, block_str, smem_str, call_args, self.cluster_dims[function_name]
+                )
 
                 kernel_launch_code += kernel_code
                 kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
@@ -555,6 +553,14 @@ class TLCUDASourceWrapper:
 
         return list(dynamic_symbolic_set.items())
 
+    def get_kernel_launch_code(self, function_name, grid_str, block_str, smem_str, call_args, cluster_dims):
+        if cluster_dims is None:
+            return KERNEL_LAUNCH_FUNC_CODE.format(grid_str, block_str, smem_str, call_args, function_name)
+        else:
+            return KERNEL_CLUSTER_LAUNCH_FUNC_CODE.format(
+                grid_str, block_str, smem_str, call_args, function_name, *cluster_dims
+            )
+
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
         call_str = """"""
@@ -702,6 +708,10 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         # HIP code dont have function declaration, so we use '{\n' to split
         # __global__ void __launch_bounds__(128) kernel_kernel(float* __restrict__ A) {\n
         return declare_kernel_code.split("{")[0]
+
+    def get_kernel_launch_code(self, function_name, grid_str, block_str, smem_str, call_args, cluster_dims):
+        # HIP does not support cudaLaunchKernelEx; use <<<>>> syntax instead
+        return KERNEL_LAUNCH_FUNC_CODE_HIP.format(grid_str, block_str, smem_str, call_args, function_name)
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
