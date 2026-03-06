@@ -711,11 +711,12 @@ private:
     if (!call || !call->op.same_as(builtin::ptx_wait_group())) {
       return false;
     }
-    if (call->args.size() != 1) {
-      return false;
-    }
+    ICHECK_EQ(call->args.size(), 1U)
+        << "ptx_wait_group expects 1 argument, but got " << call->args;
     const auto *imm = call->args[0].as<IntImmNode>();
-    return imm && imm->value == 0;
+    ICHECK(imm) << "ptx_wait_group argument must be IntImm, but got "
+                << call->args[0];
+    return imm->value == 0;
   }
 
   struct SyncPatternMap;

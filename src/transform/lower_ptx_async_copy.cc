@@ -64,14 +64,16 @@ public:
     int previous_vectorized_lanes = current_vectorized_lanes_;
     bool pushed_vectorized_loop = false;
     if (op->kind == ForKind::kVectorized) {
-      if (const auto *extent_imm = op->extent.as<IntImmNode>()) {
-        int lanes = static_cast<int>(extent_imm->value);
-        if (lanes > 1 && current_vectorized_lanes_ <=
-                             std::numeric_limits<int>::max() / lanes) {
-          current_vectorized_lanes_ *= lanes;
-          active_vectorized_loops_.push_back({op->loop_var, lanes});
-          pushed_vectorized_loop = true;
-        }
+      const auto *extent_imm = op->extent.as<IntImmNode>();
+      ICHECK(extent_imm)
+          << "Vectorized loops must have constant extent, but got "
+          << op->extent;
+      int lanes = static_cast<int>(extent_imm->value);
+      if (lanes > 1 && current_vectorized_lanes_ <=
+                           std::numeric_limits<int>::max() / lanes) {
+        current_vectorized_lanes_ *= lanes;
+        active_vectorized_loops_.push_back({op->loop_var, lanes});
+        pushed_vectorized_loop = true;
       }
     }
     Stmt stmt = StmtMutator::VisitStmt_(op);
@@ -256,38 +258,19 @@ public:
       return StmtMutator::VisitStmt_(store);
     }
 
-    if (auto *load = store->value.as<BufferLoadNode>()) {
-      Optional<Stmt> injected = TryInjectPTX(load, store);
+    Optional<PrimExpr> predicate = std::nullopt;
+    const BufferLoadNode *load =
+        MatchZeroFillBufferLoad(store->value, &predicate);
+    if (load) {
+      Optional<Stmt> injected =
+          TryInjectPTX(load, store, predicate.defined(),
+                       predicate.defined() ? predicate.value() : PrimExpr());
       if (injected.defined()) {
         if (!async_without_async_commit_wait_) {
           pending_sync_copies_ = true;
           uncommitted_sync_copies_ = true;
         }
         return injected.value();
-      }
-      return StmtMutator::VisitStmt_(store);
-    }
-
-    if (auto *call = store->value.as<CallNode>()) {
-      // tir.if_then_else is a call to tir::builtin::if_then_else()
-      if (call->op.same_as(builtin::if_then_else()) && call->args.size() == 3) {
-        if (auto *load = call->args[1].as<BufferLoadNode>()) {
-          // Only default value of 0 is supported since 0 is the default value
-          // used by cp.async ptx.
-          bool else_value_is_zero = IsZeroValue(call->args[2]);
-          if (else_value_is_zero) {
-            Optional<Stmt> injected =
-                TryInjectPTX(load, store, /*predicated=*/true,
-                             /*predicate_value=*/call->args[0]);
-            if (injected.defined()) {
-              if (!async_without_async_commit_wait_) {
-                pending_sync_copies_ = true;
-                uncommitted_sync_copies_ = true;
-              }
-              return injected.value();
-            }
-          }
-        }
       }
     }
 
@@ -321,10 +304,6 @@ private:
   };
 
   // ---- Copy candidate analysis helpers ----
-  static bool IsValidCPAsyncTransferBytes(int bytes) {
-    return bytes == 4 || bytes == 8 || bytes == 16;
-  }
-
   static bool IsZeroValue(const PrimExpr &expr) {
     if (const auto *broadcast = expr.as<BroadcastNode>()) {
       return IsZeroValue(broadcast->value);
@@ -336,6 +315,31 @@ private:
       return int_imm->value == 0;
     }
     return false;
+  }
+
+  static const BufferLoadNode *
+  MatchZeroFillBufferLoad(const PrimExpr &value,
+                          Optional<PrimExpr> *predicate) {
+    if (const auto *load = value.as<BufferLoadNode>()) {
+      return load;
+    }
+
+    const auto *call = value.as<CallNode>();
+    if (!call || !call->op.same_as(builtin::if_then_else()) ||
+        !IsZeroValue(call->args[2])) {
+      return nullptr;
+    }
+
+    const BufferLoadNode *load =
+        MatchZeroFillBufferLoad(call->args[1], predicate);
+    if (load == nullptr) {
+      return nullptr;
+    }
+
+    *predicate = predicate->defined()
+                     ? Optional<PrimExpr>(And(call->args[0], predicate.value()))
+                     : Optional<PrimExpr>(call->args[0]);
+    return load;
   }
 
   static Optional<PrimExpr>

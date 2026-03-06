@@ -193,8 +193,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 @tilelang.testing.requires_cuda
 def test_assert_tl_matmul_correctness():
-    # assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
-    tilelang.disable_cache()
+    assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
     assert_tl_matmul_correctness(128, 128, 64, T.int8, T.int32, T.int32)
 
 
@@ -402,6 +401,4 @@ def test_assert_tl_matmul_weight_only_transform():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    # assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
-    test_assert_tl_matmul_correctness()
+    tilelang.testing.main()

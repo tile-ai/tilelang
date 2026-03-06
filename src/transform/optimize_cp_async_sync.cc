@@ -1224,15 +1224,10 @@ tvm::transform::Pass OptimizeCPAsyncSync() {
                                                  "tl.OptimizeCPAsyncSync", {});
 }
 
-// Backward-compatible alias.
-tvm::transform::Pass SimplifyCPAsyncSync() { return OptimizeCPAsyncSync(); }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.OptimizeCPAsyncSync",
                         OptimizeCPAsyncSync);
-  refl::GlobalDef().def("tl.transform.SimplifyCPAsyncSync",
-                        SimplifyCPAsyncSync);
 }
 
 } // namespace transform

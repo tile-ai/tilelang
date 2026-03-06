@@ -1005,7 +1005,7 @@ private:
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
                   layout_map_, buffer_remap_, let_var_to_expr,
-                  /*enable_auto_async_copy=*/pipelined_depth_ > 0},
+                  /*in_pipeline=*/pipelined_depth_ > 0},
         analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
@@ -1056,9 +1056,10 @@ private:
 
     bool enter_pipelined = false;
     if (auto num_stages_anno = op->annotations.Get("num_stages")) {
-      if (const auto *imm = num_stages_anno->as<IntImmNode>()) {
-        enter_pipelined = imm->value > 0;
-      }
+      const auto *imm = num_stages_anno->as<IntImmNode>();
+      ICHECK(imm) << "For annotation num_stages must be IntImm, but got "
+                  << num_stages_anno.value();
+      enter_pipelined = imm->value > 0;
     }
     if (enter_pipelined) {
       ++pipelined_depth_;

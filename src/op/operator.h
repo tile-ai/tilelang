@@ -56,10 +56,9 @@ struct LowerArgs {
   // Map from LetStmt variable to its bound expression, for resolving
   // fragment buffer accesses through let bindings
   Map<Var, PrimExpr> let_var_to_expr;
-  // Enable auto lowering of eligible copies to cp.async (when supported).
-  // This is a performance knob: explicit async copies (e.g. T.async_copy /
-  // T.ptx_cp_async) should ignore this and still lower to cp.async.
-  bool enable_auto_async_copy = false;
+  // Whether the current TileOp is nested inside a pipelined loop
+  // (i.e. a surrounding loop annotated with num_stages > 0).
+  bool in_pipeline = false;
 };
 
 struct LayoutInferArgs {
@@ -72,10 +71,9 @@ struct LayoutInferArgs {
   // Map from LetStmt variable to its bound expression, for resolving
   // fragment buffer accesses through let bindings
   Map<Var, PrimExpr> let_var_to_expr;
-  // Enable auto lowering of eligible copies to cp.async (when supported).
-  // This is a performance knob used by layout inference to pick between
-  // CPAsync vs Normal copy for plain T.copy patterns.
-  bool enable_auto_async_copy = false;
+  // Whether the current TileOp is nested inside a pipelined loop
+  // (i.e. a surrounding loop annotated with num_stages > 0).
+  bool in_pipeline = false;
 };
 
 class TileOperator;

@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../op/utils.h"
 #include "../target/utils.h"
 #include "arith/scalable_expression.h"
 #include "tir/analysis/check_contains.h"
@@ -694,7 +695,7 @@ public:
 
     int vector_size = static_cast<int>(*lanes_ptr);
     int total_bytes = static_cast<int>(bytes_imm->value) * vector_size;
-    if (!(total_bytes == 4 || total_bytes == 8 || total_bytes == 16)) {
+    if (!IsValidCPAsyncTransferBytes(total_bytes)) {
       need_scalarize_ = true;
       return tvm::ffi::GetRef<PrimExpr>(op);
     }

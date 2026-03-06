@@ -20,13 +20,13 @@ enum class CopyInst : uint8_t {
   kSTSM = 2,      // stmatrix memory copy
   kBulkLoad = 3,  // utilize tma load
   kBulkStore = 4, // utilize tma store
+  kCPAsync = 5,   // cp.async global->shared copy
   // we should separate the bulk load and store for 1d and multi-dim
   // as they have different memory access patterns
-  kBulkLoad1D = 5,  // utilize tma load 1d
-  kBulkStore1D = 6, // utilize tma store 1d
-  kTMemLoad = 7,    // tcgen05.ld (tensor memory -> register)
-  kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
-  kCPAsync = 9,     // cp.async global->shared copy
+  kBulkLoad1D = 6,  // utilize tma load 1d
+  kBulkStore1D = 7, // utilize tma store 1d
+  kTMemLoad = 8,    // tcgen05.ld (tensor memory -> register)
+  kTMemStore = 9,   // tcgen05.st (register -> tensor memory)
 };
 
 /// Convert CopyInst enum to string for debugging
@@ -42,6 +42,8 @@ inline const char *CopyInstToString(CopyInst inst) {
     return "BulkLoad";
   case CopyInst::kBulkStore:
     return "BulkStore";
+  case CopyInst::kCPAsync:
+    return "CPAsync";
   case CopyInst::kBulkLoad1D:
     return "BulkLoad1D";
   case CopyInst::kBulkStore1D:
@@ -50,8 +52,6 @@ inline const char *CopyInstToString(CopyInst inst) {
     return "TMemLoad";
   case CopyInst::kTMemStore:
     return "TMemStore";
-  case CopyInst::kCPAsync:
-    return "CPAsync";
   default:
     return "Unknown";
   }
@@ -255,8 +255,7 @@ public:
    */
   CopyInst GetCopyInst(Target target, bool disable_tma_lower,
                        const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                       bool buffer_oob = false,
-                       bool enable_auto_async_copy = false) const;
+                       bool buffer_oob = false, bool in_pipeline = false) const;
 
 protected:
   /*!

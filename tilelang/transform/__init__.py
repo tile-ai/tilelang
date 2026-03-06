@@ -82,11 +82,6 @@ def OptimizeCPAsyncSync():
     return _ffi_api.OptimizeCPAsyncSync()  # type: ignore
 
 
-def SimplifyCPAsyncSync():
-    """Backward-compatible alias of OptimizeCPAsyncSync."""
-    return OptimizeCPAsyncSync()
-
-
 def FrontendLegalize():
     """FrontendLegalize
 

@@ -246,66 +246,37 @@ private:
     return op == builtin::ptx_cp_async() || op == tl::ptx_cp_async();
   }
 
-  bool IsAccessPtrExpr(const PrimExpr &expr) {
-    const auto *call = expr.as<CallNode>();
-    if (!call) {
-      return false;
-    }
-    return call->op.same_as(tl::access_ptr()) ||
-           call->op.same_as(builtin::tvm_access_ptr());
-  }
-
-  bool IsSupportedCPAsyncCall(const Call &call) {
-    if ((call->args.size() != 3 && call->args.size() != 4) ||
-        !IsAccessPtrExpr(call->args[0]) || !IsAccessPtrExpr(call->args[1])) {
-      return false;
-    }
-    return true;
-  }
-
   static constexpr int kCPAsyncDstPtrArg = 0;
   static constexpr int kCPAsyncSrcPtrArg = 1;
 
-  int GetCPAsyncPredicateArg(const Call &call) {
-    if (call->args.size() == 4) {
-      return 3;
-    }
-    return -1;
-  }
-
-  Optional<BufferLoad> GetBaseLoadFromAccessPtrExpr(const PrimExpr &expr) {
+  BufferLoad GetBaseLoadFromAccessPtrExpr(const PrimExpr &expr) {
     const auto *ptr_call = expr.as<CallNode>();
-    if (!ptr_call) {
-      return Optional<BufferLoad>();
-    }
+    ICHECK(ptr_call) << "cp.async expects access_ptr arguments, but got "
+                     << expr;
 
     if (ptr_call->op.same_as(tl::access_ptr())) {
-      if (ptr_call->args.size() != 3) {
-        return Optional<BufferLoad>();
-      }
-      if (const auto *base_load = ptr_call->args[0].as<BufferLoadNode>()) {
-        return Downcast<BufferLoad>(ptr_call->args[0]);
-      }
-      return Optional<BufferLoad>();
+      ICHECK_EQ(ptr_call->args.size(), 3U)
+          << "tl.access_ptr expects 3 arguments, but got " << ptr_call->args;
+      const auto *base_load = ptr_call->args[0].as<BufferLoadNode>();
+      ICHECK(base_load) << "tl.access_ptr base must be BufferLoad, but got "
+                        << ptr_call->args[0];
+      return Downcast<BufferLoad>(ptr_call->args[0]);
     }
 
-    if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
-      if (ptr_call->args.size() != 5) {
-        return Optional<BufferLoad>();
-      }
-      const auto *var = ptr_call->args[1].as<VarNode>();
-      if (!var) {
-        return Optional<BufferLoad>();
-      }
-      Var buffer_data = Downcast<Var>(ptr_call->args[1]);
-      if (!buffer_data_to_buffer_.count(buffer_data)) {
-        return Optional<BufferLoad>();
-      }
-      Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
-      return BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]});
-    }
-
-    return Optional<BufferLoad>();
+    ICHECK(ptr_call->op.same_as(builtin::tvm_access_ptr()))
+        << "cp.async expects tl.access_ptr or tvm_access_ptr, but got "
+        << ptr_call->op;
+    ICHECK_EQ(ptr_call->args.size(), 5U)
+        << "tvm_access_ptr expects 5 arguments, but got " << ptr_call->args;
+    const auto *var = ptr_call->args[1].as<VarNode>();
+    ICHECK(var) << "tvm_access_ptr buffer data must be Var, but got "
+                << ptr_call->args[1];
+    Var buffer_data = Downcast<Var>(ptr_call->args[1]);
+    ICHECK(buffer_data_to_buffer_.count(buffer_data))
+        << "Buffer data var " << buffer_data
+        << " is not registered in buffer_data_to_buffer_.";
+    Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
+    return BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]});
   }
 
   bool NeedsEvaluateBoundaryCheck(const Call &call) {
@@ -314,84 +285,24 @@ private:
   }
 
   Array<PrimExpr> CollectCPAsyncConditions(const Call &call) {
+    ICHECK_GE(call->args.size(), 3U)
+        << "cp.async expects at least 3 arguments, but got " << call->args;
     Array<PrimExpr> conditions;
-    if (!IsSupportedCPAsyncCall(call)) {
-      return conditions;
-    }
-
-    Optional<BufferLoad> src_base_load =
+    BufferLoad src_base_load =
         GetBaseLoadFromAccessPtrExpr(call->args[kCPAsyncSrcPtrArg]);
-    if (!src_base_load.defined()) {
-      return conditions;
-    }
 
     SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
-    checker.CheckBufferIndices(src_base_load.value()->buffer,
-                               src_base_load.value()->indices,
+    checker.CheckBufferIndices(src_base_load->buffer, src_base_load->indices,
                                /*is_load=*/true, /*throw_warning=*/false);
     return checker.GetConditions();
   }
 
-  Optional<Buffer> GetCPAsyncSourceBuffer(const Call &call) {
-    if (!IsSupportedCPAsyncCall(call)) {
-      return Optional<Buffer>();
-    }
-
-    Optional<BufferLoad> src_base_load =
+  Buffer GetCPAsyncSourceBuffer(const Call &call) {
+    ICHECK_GE(call->args.size(), 3U)
+        << "cp.async expects at least 3 arguments, but got " << call->args;
+    BufferLoad src_base_load =
         GetBaseLoadFromAccessPtrExpr(call->args[kCPAsyncSrcPtrArg]);
-    if (!src_base_load.defined()) {
-      return Optional<Buffer>();
-    }
-    return src_base_load.value()->buffer;
-  }
-
-  bool CanUsePredicatedCPAsync(const Call &call) {
-    Optional<Buffer> src_buffer = GetCPAsyncSourceBuffer(call);
-    if (!src_buffer.defined()) {
-      return false;
-    }
-    const Buffer &src = src_buffer.value();
-    bool has_annotated_safe_value =
-        annotated_safe_value_map_.count(src) ||
-        annotated_safe_value_by_data_.count(src->data);
-    if (!has_annotated_safe_value) {
-      // Default safe value is zero for unannotated buffers.
-      return true;
-    }
-    PrimExpr safe_value = analyzer_->Simplify(GetSafeValue(src));
-    if (is_zero(safe_value)) {
-      return true;
-    }
-    return false;
-  }
-
-  Stmt RewriteCPAsyncWithPredicate(const Evaluate &evaluate, const Call &call,
-                                   const Array<PrimExpr> &conditions) {
-    if (conditions.empty()) {
-      return evaluate;
-    }
-
-    PrimExpr combined = conditions[0];
-    for (size_t i = 1; i < conditions.size(); ++i) {
-      combined = tir::And(combined, conditions[i]);
-    }
-    if (!IsSupportedCPAsyncCall(call)) {
-      return evaluate;
-    }
-
-    int predicate_arg = GetCPAsyncPredicateArg(call);
-    if (predicate_arg >= 0) {
-      combined = tir::And(call->args[predicate_arg], combined);
-    }
-
-    Array<PrimExpr> args = call->args;
-    if (predicate_arg >= 0) {
-      args.Set(predicate_arg, combined);
-    } else {
-      args.push_back(combined);
-    }
-    Call predicated_call = Call(call->dtype, call->op, args);
-    return Evaluate(predicated_call);
+    return src_base_load->buffer;
   }
 
   Stmt RewriteCPAsyncWithSafeValueFallback(const Evaluate &evaluate,
@@ -401,29 +312,24 @@ private:
       return evaluate;
     }
 
-    if (!IsSupportedCPAsyncCall(call)) {
-      return WrapEvaluateWithConditions(evaluate, conditions);
-    }
-
-    Optional<BufferLoad> dst_base_load =
+    ICHECK_GE(call->args.size(), 3U)
+        << "cp.async expects at least 3 arguments, but got " << call->args;
+    BufferLoad dst_base_load =
         GetBaseLoadFromAccessPtrExpr(call->args[kCPAsyncDstPtrArg]);
-    Optional<Buffer> src_buffer = GetCPAsyncSourceBuffer(call);
-    if (!dst_base_load.defined() || !src_buffer.defined()) {
-      return WrapEvaluateWithConditions(evaluate, conditions);
-    }
+    Buffer src_buffer = GetCPAsyncSourceBuffer(call);
 
     PrimExpr combined = conditions[0];
     for (size_t i = 1; i < conditions.size(); ++i) {
       combined = tir::And(combined, conditions[i]);
     }
 
-    PrimExpr safe_value = GetSafeValue(src_buffer.value());
-    DataType dst_dtype = dst_base_load.value()->buffer->dtype;
+    PrimExpr safe_value = GetSafeValue(src_buffer);
+    DataType dst_dtype = dst_base_load->buffer->dtype;
     if (safe_value.dtype() != dst_dtype) {
       safe_value = Cast(dst_dtype, safe_value);
     }
-    Stmt else_case = BufferStore(dst_base_load.value()->buffer, safe_value,
-                                 dst_base_load.value()->indices);
+    Stmt else_case =
+        BufferStore(dst_base_load->buffer, safe_value, dst_base_load->indices);
     return IfThenElse(combined, evaluate, else_case);
   }
 
@@ -447,13 +353,11 @@ private:
       if (call->op.as<OpNode>() && IsCPAsyncOp(Downcast<Op>(call->op))) {
         Array<PrimExpr> conditions = CollectCPAsyncConditions(call);
         if (conditions.empty()) {
-          // Fallback to recursive collection for non-canonical cp.async forms.
+          // Fallback when we cannot recover the underlying buffer access
+          // directly from the access_ptr arguments.
           SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
           checker(call);
           conditions = checker.GetConditions();
-        }
-        if (CanUsePredicatedCPAsync(call)) {
-          return RewriteCPAsyncWithPredicate(evaluate, call, conditions);
         }
         return RewriteCPAsyncWithSafeValueFallback(evaluate, call, conditions);
       }

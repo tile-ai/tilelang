@@ -295,7 +295,9 @@ private:
       return result;
     }
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
+    if (call->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK_GE(call->args.size(), 3)
+          << "tvm_access_ptr must have at least 3 arguments";
       PrimExpr offset = call->args[2];
       if (NeedsInt64Promotion(offset)) {
         Int64Promoter promoter;
