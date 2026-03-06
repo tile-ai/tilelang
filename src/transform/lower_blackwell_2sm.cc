@@ -32,8 +32,8 @@ namespace tl {
 using namespace tir;
 
 namespace attr {
-constexpr const char* kUse2Cta = "use_2cta";
-}  // namespace attr
+constexpr const char *kUse2Cta = "use_2cta";
+} // namespace attr
 
 /**
  * \brief Detect 2SM TCGEN5MMA in the kernel (before LowerTileOp).
@@ -42,27 +42,29 @@ constexpr const char* kUse2Cta = "use_2cta";
  * Only supports v2 (GemmPy); v1 (Gemm) is ignored.
  */
 class Tcgen5_2SmLower : public StmtExprMutator {
- public:
+public:
   explicit Tcgen5_2SmLower(Target target) : target_(std::move(target)) {}
   bool has_2sm_tcgen5mma() const { return has_2sm_tcgen5mma_; }
 
- private:
-  Stmt VisitStmt_(const EvaluateNode* op) final {
-    if (const CallNode* call = op->value.as<CallNode>()) {
-      // Tilelang gemm defaults to v2 (GemmPy); we only support v2, not v1 (Gemm).
+private:
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      // Tilelang gemm defaults to v2 (GemmPy); we only support v2, not v1
+      // (Gemm).
       if (call->op.same_as(GemmPy::Get())) {
         TileOperator tile_op = ParseOperator(ffi::GetRef<Stmt>(op));
         if (tile_op.defined()) {
           if (Optional<GemmPy> opt_gemm_py = tile_op.as<GemmPy>()) {
-            const GemmPyNode* node = opt_gemm_py.value().get();
+            const GemmPyNode *node = opt_gemm_py.value().get();
             if (node->allowTcgen5Mma(target_)) {
-              auto [ok, meta] = GetTCGEN5MMAMeta(
-                  node->m_, node->n_, node->k_, node->a_->dtype, node->c_->dtype);
+              auto [ok, meta] =
+                  GetTCGEN5MMAMeta(node->m_, node->n_, node->k_,
+                                   node->a_->dtype, node->c_->dtype);
               if (ok && meta.enable_2cta) {
                 LOG(INFO) << "Found 2SM TCGEN5MMA!";
                 has_2sm_tcgen5mma_ = true;
-                // NOTE(wt): Currently this only act as a detector of tcgen05 2sm,
-                // while we may add the lower logic here in the future.
+                // NOTE(wt): Currently this only act as a detector of tcgen05
+                // 2sm, while we may add the lower logic here in the future.
               }
             }
           }
@@ -77,19 +79,21 @@ class Tcgen5_2SmLower : public StmtExprMutator {
 };
 
 class Tcgen5_2SmAnnotator : public StmtExprMutator {
- public:
+public:
   explicit Tcgen5_2SmAnnotator() {}
 
- private:
-  Stmt VisitStmt_(const BlockRealizeNode* op) final {
+private:
+  Stmt VisitStmt_(const BlockRealizeNode *op) final {
     Stmt new_realize = StmtExprMutator::VisitStmt_(op);
-    if (root_block_annotated_) return new_realize;
-    const auto* realize = new_realize.as<BlockRealizeNode>();
+    if (root_block_annotated_)
+      return new_realize;
+    const auto *realize = new_realize.as<BlockRealizeNode>();
     ICHECK(realize);
     Block block = realize->block;
-    BlockNode* n = block.CopyOnWrite();
+    BlockNode *n = block.CopyOnWrite();
     // Set block attr: {use_2cta: 1}
-    // lower_shared_tmem.cc will depend on this to allocate/deallocate tmem with 2cta.
+    // lower_shared_tmem.cc will depend on this to allocate/deallocate tmem with
+    // 2cta.
     n->annotations.Set(attr::kUse2Cta, IntImm(DataType::Int(32), 1));
     root_block_annotated_ = true;
     return BlockRealize(realize->iter_values, realize->predicate, block);
@@ -101,12 +105,13 @@ class Tcgen5_2SmAnnotator : public StmtExprMutator {
 using namespace tir::transform;
 
 tvm::transform::Pass LowerBlackwell2SM() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     Optional<Target> opt_target = f->GetAttr<Target>(tvm::attr::kTarget);
     if (!opt_target.defined() || !TargetIsSm100(opt_target.value())) {
       return f;
     }
-    if (ctx->GetConfig(kDisable2CTATcgen5MMA, Optional<Bool>()).value_or(false)) {
+    if (ctx->GetConfig(kDisable2CTATcgen5MMA, Optional<Bool>())
+            .value_or(false)) {
       LOG(INFO) << "2CTA TCGEN5MMA is disabled by pass config";
       return f;
     }
@@ -124,11 +129,9 @@ tvm::transform::Pass LowerBlackwell2SM() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-    namespace refl = tvm::ffi::reflection;
-    refl::GlobalDef().def("tl.transform.LowerBlackwell2SM",
-                        LowerBlackwell2SM);
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LowerBlackwell2SM", LowerBlackwell2SM);
 }
 
 } // namespace tl
 } // namespace tvm
- 

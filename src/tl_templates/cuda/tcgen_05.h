@@ -10,13 +10,14 @@
 
 namespace tl {
 
-template <bool use_2cta=false>
+template <bool use_2cta = false>
 TL_DEVICE void tmem_allocate(void *dst_ptr, int num_columns) {
   uint32_t dst_intptr = smem_ptr_to_uint(dst_ptr);
   if constexpr (use_2cta) {
-    asm volatile("tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], %1;"
-                 :
-                 : "r"(dst_intptr), "r"(num_columns));
+    asm volatile(
+        "tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], %1;"
+        :
+        : "r"(dst_intptr), "r"(num_columns));
   } else {
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
@@ -25,7 +26,7 @@ TL_DEVICE void tmem_allocate(void *dst_ptr, int num_columns) {
   }
 }
 
-template <bool use_2cta=false>
+template <bool use_2cta = false>
 TL_DEVICE void tmem_deallocate(uint32_t *tmem_ptr, int num_columns) {
   if constexpr (use_2cta) {
     asm volatile("{\n\t"
@@ -59,20 +60,21 @@ TL_DEVICE void fence_view_async_tmem_store() {
 }
 
 // Wrapper for CUTLASS umma_arrive: elect one lane, then arrive the mbarrier
-template <bool use_2cta=false>
-TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr, const uint16_t cta_mask=3) {
+template <bool use_2cta = false>
+TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr,
+                                  const uint16_t cta_mask = 3) {
   uint32_t bar_intptr = smem_ptr_to_uint(smem_ptr);
   if constexpr (use_2cta) {
     // Adapted from cute::arch::umma_arrive_multicast_2x1SM
     // Arrive at CTAs specified by cta_mask (default to both)
     if (cute::elect_one_sync()) {
-      asm volatile(
-        "{\n\t"
-        "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1; \n\t"
-        "}" 
-        :
-        :"r"(bar_intptr), "h"(cta_mask)
-        : "memory");
+      asm volatile("{\n\t"
+                   "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::"
+                   "cluster.multicast::cluster.b64 [%0], %1; \n\t"
+                   "}"
+                   :
+                   : "r"(bar_intptr), "h"(cta_mask)
+                   : "memory");
     }
   } else {
     if (cute::elect_one_sync()) {

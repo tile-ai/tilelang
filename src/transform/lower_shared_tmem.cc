@@ -125,12 +125,13 @@ private:
       return StmtExprMutator::VisitStmt_(op);
     }
 
-    // If block has use_2cta attr, add use_2cta: 1 to tmem alloc/dealloc call annotations.
+    // If block has use_2cta attr, add use_2cta: 1 to tmem alloc/dealloc call
+    // annotations.
     Map<String, ObjectRef> tmem_call_ann;
     if (op->annotations.count("use_2cta")) {
       PrimExpr val = Downcast<PrimExpr>(op->annotations["use_2cta"]);
       // Bool in TVM is a subclass of IntImm, so only check IntImm.
-      if (const auto* i = val.as<IntImmNode>()) {
+      if (const auto *i = val.as<IntImmNode>()) {
         if (i->value != 0) {
           tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
         }
@@ -167,9 +168,9 @@ private:
                              {new_buffer_access, PrimExpr(num_cols_allocated)},
                              tmem_call_ann);
       init_mtmem_calls_.push_back(Evaluate(alloc_call));
-      auto dealloc_call =
-          Call(DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
-               {new_buffer_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
+      auto dealloc_call = Call(
+          DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
+          {new_buffer_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
       dealloc_tmem_calls_.push_back(Evaluate(dealloc_call));
     }
     auto compare_by_buffer_name = [&](const Stmt &a, const Stmt &b) {

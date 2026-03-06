@@ -19,9 +19,10 @@ struct TCGEN5MMAMeta {
 };
 
 inline std::pair<bool, TCGEN5MMAMeta>
-GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype, bool disable_2cta = false) {
+GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
+                 bool disable_2cta = false) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
-// NOTE: In case that other tcgen5mma in the same kernel must use 1-cta, 
+// NOTE: In case that other tcgen5mma in the same kernel must use 1-cta,
 // we should disable 2cta for the current tcgen5mma.
 #define FAIL                                                                   \
   return {                                                                     \
