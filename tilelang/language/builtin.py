@@ -632,14 +632,6 @@ def get_cluster_id() -> PrimExpr:
     return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_id"))
 
 
-def get_cluster_block_rank() -> PrimExpr:
-    """Return the block rank within the current cluster.
-
-    Lowers to `tl.get_cluster_block_rank` and emits
-    `cooperative_groups::this_cluster().block_rank()` in CUDA codegen.
-    """
-    return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_block_rank"))
-
 
 def cluster_block_nums() -> PrimExpr:
     """Return the number of blocks in the cluster.

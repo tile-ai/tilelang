@@ -3142,11 +3142,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 0) << "tl.get_cluster_id expects no arguments.";
     this->need_cooperative_groups_ = true;
     os << "cooperative_groups::this_grid().cluster_rank()";
-  } else if (op->op.same_as(tl::get_cluster_block_rank())) {
-    ICHECK_EQ(op->args.size(), 0)
-        << "tl.get_cluster_block_rank expects no arguments.";
-    this->need_cooperative_groups_ = true;
-    os << "cooperative_groups::this_cluster().block_rank()";
   } else if (op->op.same_as(tl::get_cluster_block_nums())) {
     ICHECK_EQ(op->args.size(), 0)
         << "tl.get_cluster_block_nums expects no arguments.";

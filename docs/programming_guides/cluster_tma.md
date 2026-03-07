@@ -1,10 +1,5 @@
 # Cluster TMA: Multicast and SM-to-SM Copy
 
-Authors: 
-- Jingkai He <hjk020101@sjtu.edu.cn>
-- Guangda Sun <2012661711@qq.com>
-
-
 This page describes two advanced data-movement features that are available on
 NVIDIA Hopper (SM90) and later: **TMA multicast** and **SM-to-SM cluster
 copy**. Both features are exposed through extensions to the existing `T.copy`
@@ -25,7 +20,7 @@ memory via the `shared::cluster` address space.
 
 ```python
 with T.Kernel(grid_x, grid_y, threads=128, cluster_size=4) as (bx, by):
-    rank  = T.get_cluster_block_rank()   # 0..3 within this cluster
+    rank  = T.block_rank_in_cluster()   # 0..3 within this cluster
     cid   = T.get_cluster_id()           # which cluster am I in
     nctas = T.get_cluster_block_nums()   # always equals cluster_size (4)
     T.cluster_sync()                     # barrier across all CTAs in cluster
@@ -242,7 +237,7 @@ overhead.
 | Builtin | Return | Description |
 |---------|--------|-------------|
 | `T.get_cluster_id()` | `int32` | Index of this cluster in the grid |
-| `T.get_cluster_block_rank()` | `int32` | Block rank (0-indexed) within the cluster |
+| `T.block_rank_in_cluster()` | `int32` | Block rank (0-indexed) within the cluster |
 | `T.get_cluster_block_nums()` | `int32` | Total number of CTAs in the cluster |
 | `T.cluster_sync()` | — | Barrier synchronisation across all cluster CTAs |
 | `T.mbarrier_init(bar, count)` | — | Initialise an mbarrier for `count` arrivals |
@@ -261,7 +256,7 @@ SM-to-SM copy (saving global-memory round trips).
 @T.prim_func
 def split_k_gemm(A, B, C):
     with T.Kernel(grid_x, grid_y, threads=256, cluster_size=4) as (bx, by):
-        rank    = T.get_cluster_block_rank()
+        rank    = T.block_rank_in_cluster()
         A_s     = T.alloc_shared((BM, BK), "float16")
         B_s     = T.alloc_shared((BK, BN), "float16")
         C_f     = T.alloc_fragment((BM, BN), "float32")

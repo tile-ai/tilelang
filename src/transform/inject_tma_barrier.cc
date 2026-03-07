@@ -163,7 +163,7 @@ private:
     // Only trigger for EQ conditions that involve the thread variable
     // (directly or offset like threadIdx.x - 128 == 0 after warp-spec
     // remapping). Runtime function-call conditions such as
-    // get_cluster_block_rank() == min_rank must NOT trigger byte injection:
+    // block_rank_in_cluster() == min_rank must NOT trigger byte injection:
     // they don't involve any thread variable.
     bool is_thread_eq = false;
     if (auto eq = op->condition.as<EQNode>()) {

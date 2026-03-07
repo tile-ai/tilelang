@@ -1924,7 +1924,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       int min_cta_rank = static_cast<int>(
           __builtin_ctzll(static_cast<uint64_t>(cluster_mask)));
       PrimExpr block_rank =
-          Call(DataType::Int(32), get_cluster_block_rank(), {});
+          Call(DataType::Int(32), block_rank_in_cluster(), {});
       PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
       // (mask >> block_rank) & 1 == 0  ⟺  block_rank is NOT set in the mask
       PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
@@ -1959,7 +1959,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       int min_cta_rank = static_cast<int>(
           __builtin_ctzll(static_cast<uint64_t>(cluster_mask)));
       PrimExpr block_rank =
-          Call(DataType::Int(32), get_cluster_block_rank(), {});
+          Call(DataType::Int(32), block_rank_in_cluster(), {});
       PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
       PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
                                             IntImm(DataType::Int(32), 1)),

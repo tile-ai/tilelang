@@ -16,6 +16,7 @@ TL_DEVICE void cluster_arrive_relaxed() {
 #if defined(CLUSTER_ENABLED)
   asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" : :);
 #else
+// TILELANG_CHECK is defined as a CUDA error-checking macro that takes a single cudaError_t argument, so we use assert instead
   assert(false && "CLUSTER_ENABLED is not defined");
 #endif
 }
