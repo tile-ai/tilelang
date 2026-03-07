@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include <cassert>
 
 // Config
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) &&                       \
@@ -15,7 +16,7 @@ TL_DEVICE void cluster_arrive_relaxed() {
 #if defined(CLUSTER_ENABLED)
   asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" : :);
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
 #endif
 }
 
@@ -23,7 +24,7 @@ TL_DEVICE void cluster_arrive() {
 #if defined(CLUSTER_ENABLED)
   asm volatile("barrier.cluster.arrive.aligned;\n" : :);
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
 #endif
 }
 
@@ -31,7 +32,7 @@ TL_DEVICE void cluster_wait() {
 #if defined(CLUSTER_ENABLED)
   asm volatile("barrier.cluster.wait.aligned;\n" : :);
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
 #endif
 }
 
@@ -40,7 +41,7 @@ TL_DEVICE void cluster_sync() {
   cluster_arrive();
   cluster_wait();
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
 #endif
 }
 
@@ -53,7 +54,8 @@ TL_DEVICE dim3 cluster_grid_dims() {
   asm volatile("mov.u32 %0, %%nclusterid.z;\n" : "=r"(z) :);
   return {x, y, z};
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
+  return {0, 0, 0};
 #endif
 }
 
@@ -66,7 +68,8 @@ TL_DEVICE dim3 cluster_id_in_grid() {
   asm volatile("mov.u32 %0, %%clusterid.z;\n" : "=r"(z) :);
   return {x, y, z};
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
+  return {0, 0, 0};
 #endif
 }
 
@@ -79,7 +82,8 @@ TL_DEVICE dim3 cluster_shape() {
   asm volatile("mov.u32 %0, %%cluster_nctaid.z;\n" : "=r"(z) :);
   return {x, y, z};
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
+  return {0, 0, 0};
 #endif
 }
 
@@ -92,7 +96,8 @@ TL_DEVICE dim3 block_id_in_cluster() {
   asm volatile("mov.u32 %0, %%cluster_ctaid.z;\n" : "=r"(z) :);
   return {x, y, z};
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
+  return {0, 0, 0};
 #endif
 }
 
@@ -103,7 +108,8 @@ TL_DEVICE uint32_t block_rank_in_cluster() {
   asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(rank) :);
   return rank;
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
+  return 0;
 #endif
 }
 
@@ -116,7 +122,8 @@ TL_DEVICE uint32_t set_block_rank(uint32_t smemAddr, uint32_t rank) {
                : "r"(smemAddr), "r"(rank));
   return result;
 #else
-  TILELANG_CHECK(false, "CLUSTER_ENABLED is not defined");
+  assert(false && "CLUSTER_ENABLED is not defined");
+  return 0;
 #endif
 }
 
