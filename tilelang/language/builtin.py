@@ -632,7 +632,6 @@ def get_cluster_id() -> PrimExpr:
     return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_id"))
 
 
-
 def cluster_block_nums() -> PrimExpr:
     """Return the number of blocks in the cluster.
 

@@ -27,7 +27,7 @@ def make_store_cluster_kernel(N: int):
         B: T.Tensor((N,), "float32"),
     ):
         # 2 CTAs in a cluster of size 2
-        with T.Kernel(2, threads=128, cluster_dims=(2,1,1)) as pid:
+        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((N,), "float32")
             s_dst = T.alloc_shared((N,), "float32")
             s_barrier = T.alloc_shared((1,), "uint64")
