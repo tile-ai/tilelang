@@ -1,18 +1,8 @@
-"""Blackwell (SM100) Flash Attention Forward using TCGEN05MMA with TMEM accumulators.
+"""Blackwell (SM100) GQA forward, BSHD layout.
 
-Replaces the Hopper WGMMA-based Flash Attention for Blackwell GPUs.
-Two variants are provided:
-  - flashattn_ss:  Both GEMMs use mma_ss (shared x shared -> TMEM)
-  - flashattn_ts:  GEMM 2 uses mma_ts (TMEM x shared -> TMEM) via tcgen05.st
-
-Data flow per iteration:
-  GEMM 1: Q_shared @ K_shared^T -> S_tmem  (tcgen05mma_ss)
-  tcgen05.ld: S_tmem -> S_reg
-  Online softmax on S_reg -> P_reg
-  Rescale O_reg in registers
-  GEMM 2: P @ V -> D_tmem  (tcgen05mma_ss or tcgen05mma_ts)
-  tcgen05.ld: D_tmem -> D_reg
-  O_reg += D_reg  (accumulate in registers)
+Q: [batch, seq_len, heads, dim], K/V: [batch, seq_len, head_kv, dim], head_kv = heads // groups.
+Pipeline (default): --variant ss.
+ts (optional): --variant ts (256 threads, single-path ts).
 """
 
 import torch
@@ -37,22 +27,25 @@ def flashattn_ss(
     seq_len,
     dim,
     is_causal,
+    groups=1,
     block_M=128,
     block_N=128,
     threads=128,
 ):
-    """Flash Attention forward using tcgen05mma_ss for both GEMMs."""
-    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
-    shape = [batch, seq_len, heads, dim]
+    """GQA forward, pipeline (ss): both GEMMs mma_ss. K/V indexed by head_kv = by // groups."""
+    head_kv = heads // groups
+    scale = (1.0 / dim) ** 0.5 * 1.44269504
+    q_shape = [batch, seq_len, heads, dim]
+    kv_shape = [batch, seq_len, head_kv, dim]
     dtype = T.bfloat16
     accum_dtype = T.float32
 
     @T.prim_func
     def main(
-        Q: T.Tensor(shape, dtype),
-        K: T.Tensor(shape, dtype),
-        V: T.Tensor(shape, dtype),
-        Output: T.Tensor(shape, dtype),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(
             T.ceildiv(seq_len, block_M), heads, batch, threads=threads
@@ -95,10 +88,9 @@ def flashattn_ss(
 
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(
-                    K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared
+                    K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared
                 )
 
-                # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)
                 T.gemm(
                     Q_shared,
                     K_shared,
@@ -127,7 +119,6 @@ def flashattn_ss(
                             S_reg[i, j],
                         )
 
-                # Online softmax
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(S_reg, scores_max, dim=1, clear=False)
@@ -152,10 +143,9 @@ def flashattn_ss(
                 T.copy(P_cast, P_shared)
 
                 T.copy(
-                    V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared
+                    V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared
                 )
 
-                # GEMM 2: D = P @ V -> D_tmem (tcgen05mma_ss, fresh per iter)
                 T.gemm(
                     P_shared,
                     V_shared,
@@ -188,26 +178,25 @@ def flashattn_ts(
     seq_len,
     dim,
     is_causal,
+    groups=1,
     block_M=128,
     block_N=128,
     threads=256,
 ):
-    """Flash Attention forward using tcgen05mma_ts for GEMM 2 (P_tmem x V_shared).
-
-    GEMM 2 reads P directly from TMEM via tcgen05.st, avoiding the shared memory
-    round-trip needed by the mma_ss variant.
-    """
-    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
-    shape = [batch, seq_len, heads, dim]
+    """GQA forward, warp (ts): GEMM 2 uses mma_ts. K/V indexed by by // groups."""
+    head_kv = heads // groups
+    scale = (1.0 / dim) ** 0.5 * 1.44269504
+    q_shape = [batch, seq_len, heads, dim]
+    kv_shape = [batch, seq_len, head_kv, dim]
     dtype = T.bfloat16
     accum_dtype = T.float32
 
     @T.prim_func
     def main(
-        Q: T.Tensor(shape, dtype),
-        K: T.Tensor(shape, dtype),
-        V: T.Tensor(shape, dtype),
-        Output: T.Tensor(shape, dtype),
+        Q: T.Tensor(q_shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
+        Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(
             T.ceildiv(seq_len, block_M), heads, batch, threads=threads
@@ -250,10 +239,9 @@ def flashattn_ts(
 
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(
-                    K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared
+                    K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared
                 )
 
-                # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)
                 T.gemm(
                     Q_shared,
                     K_shared,
@@ -282,7 +270,6 @@ def flashattn_ts(
                             S_reg[i, j],
                         )
 
-                # Online softmax
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(S_reg, scores_max, dim=1, clear=False)
@@ -303,15 +290,13 @@ def flashattn_ts(
                 for i, j in T.Parallel(block_M, dim):
                     O_reg[i, j] *= scores_scale[i]
 
-                # tcgen05.st: P_cast -> P_tmem (register -> TMEM, no shared needed)
                 T.copy(S_reg, P_cast)
                 T.copy(P_cast, P_tmem)
 
                 T.copy(
-                    V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared
+                    V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared
                 )
 
-                # GEMM 2: D = P_tmem @ V -> D_tmem (tcgen05mma_ts)
                 T.gemm(
                     P_tmem,
                     V_shared,
@@ -337,12 +322,16 @@ def flashattn_ts(
     return main
 
 
-def ref_program(Q, K, V, is_causal):
-    """CPU reference computation to avoid cuBLAS issues on Blackwell."""
+flashattn_warp = flashattn_ts
+
+
+def ref_program(Q, K, V, is_causal, groups=1):
+    """CPU reference: K/V [b,s,head_kv,d], expand to heads for einsum."""
+    assert Q.size(2) == K.size(2) * groups
+    dim = Q.size(-1)
+    K_f = K.cpu().float().repeat_interleave(groups, dim=2)
+    V_f = V.cpu().float().repeat_interleave(groups, dim=2)
     Q_f = Q.cpu().float()
-    K_f = K.cpu().float()
-    V_f = V.cpu().float()
-    dim = Q_f.size(-1)
     scores = torch.einsum("bqhd,bkhd->bhqk", Q_f, K_f)
     scores = scores / (dim**0.5)
     if is_causal:
@@ -350,9 +339,9 @@ def ref_program(Q, K, V, is_causal):
         mask = torch.tril(torch.ones(seq_len, seq_len))
         mask = mask.unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float("-inf"))
-    attention_weights = F.softmax(scores, dim=-1)
-    output = torch.einsum("bhqk,bkhd->bqhd", attention_weights, V_f)
-    return output.to(torch.bfloat16)
+    P = F.softmax(scores, dim=-1)
+    O = torch.einsum("bhqk,bkhd->bqhd", P, V_f)
+    return O.to(Q.dtype)
 
 
 def main(
@@ -361,69 +350,41 @@ def main(
     seq_len: int = 256,
     dim: int = 128,
     is_causal: bool = False,
+    groups: int = 1,
     variant: str = "ss",
 ):
+    head_kv = heads // groups
+    assert heads % groups == 0
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
     if is_causal:
         total_flops *= 0.5
 
-    print(f"=== Blackwell Flash Attention ({variant.upper()}) ===")
+    print(f"=== Blackwell GQA Forward ({variant.upper()}) ===")
     print(
-        f"batch={batch}, heads={heads}, seq_len={seq_len}, "
-        f"dim={dim}, causal={is_causal}"
+        f"batch={batch}, heads={heads}, head_kv={head_kv}, groups={groups}, "
+        f"seq_len={seq_len}, dim={dim}, causal={is_causal}"
     )
 
     fn = flashattn_ss if variant == "ss" else flashattn_ts
+    threads = 128 if variant == "ss" else 256  # ts: 256
     kernel = fn(
-        batch,
-        heads,
-        seq_len,
-        dim,
-        is_causal,
-        block_M=128,
-        block_N=128,
-        threads=128,
+        batch, heads, seq_len, dim, is_causal, groups=groups,
+        block_M=128, block_N=128, threads=threads,
     )
-    print(kernel.get_kernel_source())
 
-    Q = torch.randn(
-        batch, seq_len, heads, dim, device="cuda", dtype=torch.bfloat16
-    )
-    K = torch.randn_like(Q)
-    V = torch.randn_like(Q)
+    Q = torch.randn(batch, seq_len, heads, dim, device="cuda", dtype=torch.bfloat16)
+    K = torch.randn(batch, seq_len, head_kv, dim, device="cuda", dtype=torch.bfloat16)
+    V = torch.randn(batch, seq_len, head_kv, dim, device="cuda", dtype=torch.bfloat16)
 
     out = kernel(Q, K, V)
-    ref = ref_program(Q, K, V, is_causal).to(out.device)
+    ref = ref_program(Q, K, V, is_causal, groups).to(out.device)
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
     print("Correctness check passed.")
 
     latency = do_bench(lambda: kernel(Q, K, V), warmup=100)
-    print(f"Blackwell ({variant}): {latency:.2f} ms")
-    print(f"Blackwell ({variant}): {total_flops / latency * 1e-9:.2f} TFlops")
-
-
-def run_regression_perf(
-    batch: int = 2,
-    heads: int = 4,
-    seq_len: int = 256,
-    dim: int = 128,
-    is_causal: bool = False,
-):
-    kernel = flashattn_ss(
-        batch,
-        heads,
-        seq_len,
-        dim,
-        is_causal,
-        block_M=128,
-        block_N=128,
-        threads=128,
-    )
-    profiler = kernel.get_profiler(
-        tensor_supply_type=tilelang.TensorSupplyType.Normal
-    )
-    return profiler.do_bench(backend="cupti")
+    print(f"Blackwell GQA fwd ({variant}): {latency:.2f} ms")
+    print(f"Blackwell GQA fwd ({variant}): {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":
@@ -433,17 +394,13 @@ if __name__ == "__main__":
     parser.add_argument("--seq_len", type=int, default=256)
     parser.add_argument("--dim", type=int, default=128)
     parser.add_argument("--is_causal", action="store_true")
+    parser.add_argument("--groups", type=int, default=1, help="GQA: head_kv = heads // groups")
     parser.add_argument(
         "--variant", choices=["ss", "ts"], default="ss",
-        help="ss: both GEMMs use mma_ss; ts: GEMM 2 uses mma_ts"
+        help="ss: pipeline (default); ts: 256 threads",
     )
     args = parser.parse_args()
-    print(args)
     main(
-        args.batch,
-        args.heads,
-        args.seq_len,
-        args.dim,
-        args.is_causal,
-        args.variant,
+        args.batch, args.heads, args.seq_len, args.dim,
+        args.is_causal, args.groups, args.variant,
     )
