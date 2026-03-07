@@ -2271,10 +2271,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "}\n";
 
-  } else if (op->op.same_as(tl::cluster_sync())) {
-    this->need_cooperative_groups_ = true;
-    this->PrintIndent();
-    this->stream << "cooperative_groups::this_cluster().sync();\n";
   } else if (op->op.same_as(tl::ptx_mma_sm70())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col

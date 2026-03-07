@@ -1006,12 +1006,6 @@ TVM_DLL const Op &ptx_cluster_store();
  */
 TVM_DLL const Op &tma_store_cluster();
 
-/*!
- * \brief tilelang intrinsic for cluster sync.
- *
- *  This op is used to represent a cluster sync operation in tilelang.
- */
-TVM_DLL const Op &cluster_sync();
 } // namespace tl
 } // namespace tvm
 

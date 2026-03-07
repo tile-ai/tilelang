@@ -576,10 +576,5 @@ TIR_DEFINE_TL_BUILTIN(tma_store_cluster)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(cluster_sync)
-    .set_num_inputs(0)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
 } // namespace tl
 } // namespace tvm
