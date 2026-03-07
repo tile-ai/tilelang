@@ -69,6 +69,40 @@ def invalid_loop_with_complex_dataflow(dtype: T.dtype = T.bfloat16, accum_dtype:
 
 
 @tilelang.jit
+def invalid_indexing_with_serial_sp(
+    length=256, block=16, dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128
+):
+    block = 16
+
+    @T.prim_func
+    def main():
+        with T.Kernel(128, threads=num_threads) as _:
+            data_frag = T.alloc_fragment([128], accum_dtype)
+            for i in T.serial(8):
+                for j in T.Parallel(block):
+                    data_frag[i * block + j] = 1.0
+
+    return main
+
+
+@tilelang.jit
+def invalid_indexing_with_serial_ps(
+    length=256, block=16, dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128
+):
+    block = 16
+
+    @T.prim_func
+    def main():
+        with T.Kernel(128, threads=num_threads) as _:
+            data_frag = T.alloc_fragment([128], accum_dtype)
+            for j in T.Parallel(block):
+                for i in T.serial(8):
+                    data_frag[i * block + j] = 1.0
+
+    return main
+
+
+@tilelang.jit
 def valid_loop_not_use_loop_var(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
     A = T.dynamic("A")
 
@@ -132,6 +166,21 @@ def valid_loop_serial(dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.floa
     return main
 
 
+@tilelang.jit
+def valid_indexing_with_serial(length=256, block=16, dtype: T.dtype = T.bfloat16, accum_dtype: T.dtype = T.float32, num_threads: int = 128):
+    block = 16
+
+    @T.prim_func
+    def main():
+        with T.Kernel(128, threads=num_threads) as _:
+            data_frag = T.alloc_fragment([128], accum_dtype)
+            for i in T.serial(8):  # noqa: B007
+                for j in T.Parallel(block):
+                    data_frag[j] = 1.0
+
+    return main
+
+
 def test_invalid_loop():
     with pytest.raises(ValueError):
         simple_invalid_loop()
@@ -139,12 +188,17 @@ def test_invalid_loop():
         nested_invalid_loop()
     with pytest.raises(ValueError):
         invalid_loop_with_complex_dataflow()
+    with pytest.raises(ValueError):
+        invalid_indexing_with_serial_sp()
+    with pytest.raises(ValueError):
+        invalid_indexing_with_serial_ps()
 
 
 def test_valid_loop():
     valid_loop_not_use_loop_var()
     valid_loop_not_frag()
     valid_loop_serial()
+    valid_indexing_with_serial()
 
 
 if __name__ == "__main__":
