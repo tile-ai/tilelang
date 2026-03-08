@@ -247,6 +247,20 @@ def WarpSpecialized():
     return _ffi_api.WarpSpecialized()  # type: ignore
 
 
+def ProducerConsumerWarpSpecialized():
+    """Producer-Consumer Warp Specialization for TMA pipelines.
+
+    Splits pipelined loops with TMA loads into producer (TMA copy) and
+    consumer (compute) warp groups with mbarrier-based synchronization.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
+
+
 def AnnotateWarpGroupRegAlloc():
     """Inject set_max_nreg calls into warp-specialized functions.
 
