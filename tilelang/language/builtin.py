@@ -29,6 +29,13 @@ def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
     raise TypeError(f"Expect warp sizing argument to be int or PrimExpr, but got {type(value)}.")
 
 
+def _get_mbarrier(barrier_id: int | PrimExpr):
+    """Create an intermediate mbarrier handle from barrier id for internal lowering only."""
+    raise NotImplementedError(
+        "Direct mbarrier handle creation from id is not supported in the frontend. Use T.alloc_barrier to create mbarriers instead."
+    )
+
+
 def _mbar_to_buffer_load(mbar: BarrierType) -> BufferLoad:
     """Convert a memory barrier to a buffer load.
 
@@ -417,6 +424,25 @@ def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
+def mbarrier_init(mbarrier: int | PrimExpr | tir.Call, arrive_count: int | PrimExpr):
+    """Initialize a memory barrier.
+
+    Args:
+        mbarrier: The memory barrier to initialize
+        arrive_count: The expected arrival count
+    """
+    if isinstance(mbarrier, (tir.Call, tir.BufferLoad)):
+        mbarrier = mbarrier
+    elif isinstance(mbarrier, (tir.PrimExpr, int)):
+        mbarrier = _get_mbarrier(mbarrier)
+    elif isinstance(mbarrier, tir.Buffer):
+        mbarrier = tir.BufferLoad(mbarrier, [0])
+    else:
+        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
+
+    return tir.call_intrin("handle", tir.op.Op.get("tir.ptx_init_barrier_thread_count"), mbarrier, arrive_count)
+
+
 def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
     """Arrive at memory barrier.
 
@@ -595,6 +621,28 @@ def get_warp_group_idx(
             raise ValueError("get_warp_group_idx expects `warp_size` when specifying `warps_per_group`.")
         args.append(warps_per_group_expr)
     return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_group_idx"), *args)
+
+
+def get_cluster_id() -> PrimExpr:
+    """Return the cluster id (rank) of the current block within the cluster.
+
+    This lowers to the intrinsic `tl.get_cluster_id` and is emitted for CUDA
+    as `cooperative_groups::this_grid().cluster_rank()`.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_id"))
+
+
+def cluster_block_nums() -> PrimExpr:
+    """Return the number of blocks in the cluster.
+
+    Lowers to `tl.get_cluster_block_nums` and emits
+    `cooperative_groups::this_cluster().num_blocks()` in CUDA codegen.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_block_nums"))
+
+
+def cluster_sync():
+    return tir.call_intrin("handle", tir.op.Op.get("tl.cluster_sync"))
 
 
 def shuffle_elect(thread_extent: int) -> PrimExpr:

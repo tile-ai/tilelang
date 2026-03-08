@@ -118,6 +118,8 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
+  Optional<PrimExpr> dst_block;      // Destination block index for cluster copy
+
   Map<String, ObjectRef> annotations; // Annotations for the copy operation
   // Supported annotation keys:
   //   - "coalesced_width": IntImm, width for coalesced memory access
@@ -139,6 +141,7 @@ public:
         .def_ro("dst", &CopyNode::dst)
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
+        .def_ro("dst_block", &CopyNode::dst_block)
         .def_ro("annotations", &CopyNode::annotations);
   }
 
@@ -159,6 +162,28 @@ public:
       }
     }
     return 0; // default: evict_normal
+  }
+
+  // Returns the cluster multicast mask (0 means no multicast / regular TMA
+  // load)
+  int64_t GetClusterMask() const {
+    if (auto val = annotations.Get("cluster_mask")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 0;
+  }
+
+  // Returns the mbarrier BufferLoad (as PrimExpr) used for tma_store_cluster,
+  // or an empty Optional when the "barrier" annotation is absent.
+  Optional<PrimExpr> GetBarrier() const {
+    if (auto val = annotations.Get("barrier")) {
+      if (val->as<tir::BufferLoadNode>()) {
+        return Downcast<PrimExpr>(val.value());
+      }
+    }
+    return Optional<PrimExpr>();
   }
 
   bool GetIsAsyncCopy() const {
@@ -282,6 +307,7 @@ protected:
    */
   Stmt LowerTmemCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
+  Stmt LowerClusterCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
   /*!
    * \brief Generate lowering for normal copy.
    */

@@ -12,7 +12,6 @@
 
 #include "../op/builtin.h"
 #include "../runtime/runtime.h"
-#include "./common/mbarrier.h"
 
 namespace tvm {
 namespace tl {
@@ -138,6 +137,12 @@ public:
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
           Array<Stmt> stmt_seq;
+          if (num_managed_barriers_ > 0) {
+            auto alloc_mbarrier =
+                Evaluate(Call(DataType::Handle(), builtin::create_barriers(),
+                              {num_managed_barriers_}));
+            stmt_seq.push_back(alloc_mbarrier);
+          }
 
           auto stmts = prefetch_calls_;
           stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
@@ -171,16 +176,9 @@ public:
 
           Stmt result = SeqStmt(stmt_seq);
 
-          if (!init_mbarrier_calls_.empty()) {
-            mbarrier_buffer_ = CreateMBarrierBuffer(
-                injected_mbarrier_name_, init_mbarrier_calls_.size());
-            result = DeclBuffer(mbarrier_buffer_, result);
-            result = Allocate(mbarrier_buffer_->data, mbarrier_buffer_->dtype,
-                              mbarrier_buffer_->shape, const_true(), result);
-          }
-
           prefetch_calls_.clear();
           init_mbarrier_calls_.clear();
+          num_managed_barriers_ = 0;
           return AttrStmt(op->node, op->attr_key, op->value, result);
         }
       }
@@ -206,8 +204,9 @@ public:
       }
       return var;
     } else if (call->op.same_as(create_list_of_mbarrier())) {
-      ICHECK(init_mbarrier_calls_.empty());
+      // ICHECK(init_mbarrier_calls_.empty());
       int num_barriers = static_cast<int>(call->args.size());
+      num_managed_barriers_ += num_barriers;
       for (int i = 0; i < num_barriers; i++) {
         PrimExpr mbarrier = Call(DataType::Handle(), get_mbarrier(), {i});
         init_mbarrier_calls_.push_back(Evaluate(
@@ -215,19 +214,46 @@ public:
                  {mbarrier, call->args[i]})));
       }
       return 0;
+    } else if (call->op.same_as(builtin::ptx_init_barrier_thread_count())) {
+      init_mbarrier_calls_.push_back(Evaluate(tvm::ffi::GetRef<Call>(call)));
+      return 0;
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }
   }
 
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    Stmt new_stmt = StmtExprMutator::VisitStmt_(op);
+    if (const auto *if_node = new_stmt.as<IfThenElseNode>()) {
+      if (IsNoOp(if_node->then_case) && (!if_node->else_case.defined() ||
+                                         IsNoOp(if_node->else_case.value()))) {
+        return Evaluate(0);
+      }
+    }
+    return new_stmt;
+  }
+
+  bool IsNoOp(const Stmt &stmt) {
+    if (const auto *eval = stmt.as<EvaluateNode>()) {
+      return is_const_int(eval->value, 0);
+    } else if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const auto &s : seq->seq) {
+        if (!IsNoOp(s))
+          return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
 private:
   Array<Stmt> prefetch_calls_;
   Array<Stmt> init_mbarrier_calls_;
+  int num_managed_barriers_ = 0;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
-  Buffer mbarrier_buffer_;
 };
 
 using namespace tir::transform;

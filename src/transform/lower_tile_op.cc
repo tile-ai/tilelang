@@ -651,9 +651,20 @@ private:
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_load_multicast()) ||
         op->op.same_as(tl::tma_store())) {
       // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
+      in_tma_context_ = true;
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      in_tma_context_ = false;
+      return call;
+    }
+    if (op->op.same_as(tl::tma_store_cluster())) {
+      // SM-to-SM bulk async copy: only suppress swizzle transformation on the
+      // access pointers (in_tma_context_), but do NOT set has_tma_ because
+      // this operation does not use the TMA hardware engine and must not
+      // trigger warp specialization.
       in_tma_context_ = true;
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       in_tma_context_ = false;

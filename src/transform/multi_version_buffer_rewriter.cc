@@ -141,6 +141,21 @@ public:
 private:
   MultiVersionBufferRewriter() = default;
 
+  void EnsureRaggedPrefixBuffer() {
+    if (ragged_prefix_buf_.defined()) {
+      return;
+    }
+    Array<PrimExpr> shape = {IntImm(DataType::Int(32), 1)};
+    ragged_prefix_buf_ =
+        decl_buffer(shape, DataType::Int(32), "tl_mvb_ragged_prefix", "local");
+  }
+
+  PrimExpr LoadRaggedPrefix() {
+    EnsureRaggedPrefixBuffer();
+    Array<PrimExpr> zero_indices = {0};
+    return BufferLoad(ragged_prefix_buf_, zero_indices);
+  }
+
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
     Array<Stmt> pipeline_stmts;
@@ -292,6 +307,37 @@ private:
     return stmt;
   }
 
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    // Make sure any ragged prefix allocation lives inside the device thread
+    // scope (threadIdx.x). Allocating at PrimFunc scope can be lifted into an
+    // extra kernel parameter by downstream lowering.
+    stmt_stack_.push_back(op);
+    Stmt body = this->VisitStmt(op->body);
+    stmt_stack_.pop_back();
+
+    bool is_thread_extent = (op->attr_key == tir::attr::thread_extent);
+    bool is_threadidx_x = false;
+    if (is_thread_extent) {
+      if (const auto *iv = op->node.as<IterVarNode>()) {
+        is_threadidx_x = (iv->thread_tag == "threadIdx.x");
+      }
+    }
+
+    if (needs_ragged_prefix_ && is_threadidx_x && !inserted_ragged_prefix_) {
+      inserted_ragged_prefix_ = true;
+      EnsureRaggedPrefixBuffer();
+      Array<PrimExpr> zero_indices = {0};
+      Stmt init = BufferStore(ragged_prefix_buf_, IntImm(DataType::Int(32), 0),
+                              zero_indices);
+      Stmt seq = SeqStmt({init, body});
+      seq = DeclBuffer(ragged_prefix_buf_, seq);
+      body = Allocate(ragged_prefix_buf_->data, ragged_prefix_buf_->dtype,
+                      ragged_prefix_buf_->shape, const_true(), seq);
+    }
+
+    return AttrStmt(op->node, op->attr_key, op->value, body);
+  }
+
   Stmt VisitStmt_(const ForNode *op) final {
     stmt_stack_.push_back(op);
     loop_stack_.emplace_back(op->loop_var, op->extent);
@@ -392,6 +438,28 @@ private:
       Buffer new_buffer = RewriteAllocBuffer(buffer, num_stages);
       buffer_remap_.Set(buffer, new_buffer);
     }
+    PrimExpr version_index_before = version_index_;
+
+    // For ragged (dynamic extent) pipelined loops, rectangular linearization
+    // using loop extents is invalid. Use a runtime prefix counter so
+    // ping-pong buffer selection stays consistent across outer iterations.
+    bool is_dynamic_extent = !op->extent.as<IntImmNode>();
+    if (is_dynamic_extent) {
+      needs_ragged_prefix_ = true;
+      version_index_ =
+          FloorMod(LoadRaggedPrefix() + (op->loop_var - op->min), num_stages);
+      Stmt for_node = StmtExprMutator::VisitStmt_(op);
+      version_index_ = version_index_before;
+
+      Array<PrimExpr> zero_indices = {0};
+      Stmt update = BufferStore(ragged_prefix_buf_,
+                                LoadRaggedPrefix() + op->extent, zero_indices);
+
+      loop_stack_.pop_back();
+      stmt_stack_.pop_back();
+      return SeqStmt({for_node, update});
+    }
+
     PrimExpr linear_index = loop_stack_[0].first;
     for (size_t i = 1; i < loop_stack_.size(); ++i) {
       linear_index =
@@ -399,6 +467,7 @@ private:
     }
     version_index_ = FloorMod(linear_index, num_stages);
     auto for_node = StmtExprMutator::VisitStmt_(op);
+    version_index_ = version_index_before;
     loop_stack_.pop_back();
     stmt_stack_.pop_back();
 
@@ -472,6 +541,9 @@ private:
   }
 
   PrimExpr version_index_;
+  Buffer ragged_prefix_buf_;
+  bool needs_ragged_prefix_ = false;
+  bool inserted_ragged_prefix_ = false;
   std::vector<std::pair<Var, PrimExpr>> loop_stack_;
   // Track ancestor statements to query whether an LCA is inside the current
   // loop.

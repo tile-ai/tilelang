@@ -28,7 +28,13 @@ enum class ReservedNamedBarriers : uint8_t {
   kSyncThreads = 0,
   kReduce_0 = 1,
   kReduce_1 = 2,
-  kFirstUsedBarrier = kReduce_1 + 1
+  // TileLang convention for 256-thread CTA split into two 128-thread groups.
+  // Producer: threadIdx.x in [128, 255]
+  // Consumer: threadIdx.x in [0, 127]
+  // These must be distinct to avoid mixing barrier states and deadlocks.
+  kProducer = kReduce_1 + 1,
+  kConsumer = kProducer + 1,
+  kFirstUsedBarrier = kConsumer + 1
 };
 
 } // namespace tl
