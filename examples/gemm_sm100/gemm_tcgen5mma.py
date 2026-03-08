@@ -51,7 +51,7 @@ def matmul(
     return main
 
 
-M, N, K = 8192, 8192, 8192
+M, N, K = 4096, 4096, 8192
 block_M, block_N, block_K = 128, 128, 128
 trans_A, trans_B = False, True
 in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float

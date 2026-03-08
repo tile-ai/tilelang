@@ -33,6 +33,8 @@ def flashattn_ss(
     threads=128,
 ):
     """GQA forward, pipeline (ss): both GEMMs mma_ss. K/V indexed by head_kv = by // groups."""
+    if groups <= 0 or heads % groups != 0:
+        raise ValueError("groups must be a positive divisor of heads")
     head_kv = heads // groups
     scale = (1.0 / dim) ** 0.5 * 1.44269504
     q_shape = [batch, seq_len, heads, dim]
@@ -47,9 +49,7 @@ def flashattn_ss(
         V: T.Tensor(kv_shape, dtype),
         Output: T.Tensor(q_shape, dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(seq_len, block_M), heads, batch, threads=threads
-        ) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -87,9 +87,7 @@ def flashattn_ss(
             )
 
             for k in T.Pipelined(loop_range, num_stages=1):
-                T.copy(
-                    K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared
-                )
+                T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared)
 
                 T.gemm(
                     Q_shared,
@@ -125,13 +123,9 @@ def flashattn_ss(
                 for i in T.Parallel(block_M):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                 for i in T.Parallel(block_M):
-                    scores_scale[i] = T.exp2(
-                        scores_max_prev[i] * scale - scores_max[i] * scale
-                    )
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_M, block_N):
-                    S_reg[i, j] = T.exp2(
-                        S_reg[i, j] * scale - scores_max[i] * scale
-                    )
+                    S_reg[i, j] = T.exp2(S_reg[i, j] * scale - scores_max[i] * scale)
                 T.reduce_sum(S_reg, scores_sum, dim=1)
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -142,9 +136,7 @@ def flashattn_ss(
                 T.copy(S_reg, P_cast)
                 T.copy(P_cast, P_shared)
 
-                T.copy(
-                    V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared
-                )
+                T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared)
 
                 T.gemm(
                     P_shared,
@@ -184,6 +176,8 @@ def flashattn_ts(
     threads=256,
 ):
     """GQA forward, warp (ts): GEMM 2 uses mma_ts. K/V indexed by by // groups."""
+    if groups <= 0 or heads % groups != 0:
+        raise ValueError("groups must be a positive divisor of heads")
     head_kv = heads // groups
     scale = (1.0 / dim) ** 0.5 * 1.44269504
     q_shape = [batch, seq_len, heads, dim]
@@ -198,9 +192,7 @@ def flashattn_ts(
         V: T.Tensor(kv_shape, dtype),
         Output: T.Tensor(q_shape, dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(seq_len, block_M), heads, batch, threads=threads
-        ) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -238,9 +230,7 @@ def flashattn_ts(
             )
 
             for k in T.Pipelined(loop_range, num_stages=1):
-                T.copy(
-                    K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared
-                )
+                T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared)
 
                 T.gemm(
                     Q_shared,
@@ -276,13 +266,9 @@ def flashattn_ts(
                 for i in T.Parallel(block_M):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                 for i in T.Parallel(block_M):
-                    scores_scale[i] = T.exp2(
-                        scores_max_prev[i] * scale - scores_max[i] * scale
-                    )
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_M, block_N):
-                    S_reg[i, j] = T.exp2(
-                        S_reg[i, j] * scale - scores_max[i] * scale
-                    )
+                    S_reg[i, j] = T.exp2(S_reg[i, j] * scale - scores_max[i] * scale)
                 T.reduce_sum(S_reg, scores_sum, dim=1)
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -293,9 +279,7 @@ def flashattn_ts(
                 T.copy(S_reg, P_cast)
                 T.copy(P_cast, P_tmem)
 
-                T.copy(
-                    V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared
-                )
+                T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared)
 
                 T.gemm(
                     P_tmem,
@@ -353,24 +337,30 @@ def main(
     groups: int = 1,
     variant: str = "ss",
 ):
+    """Run GQA forward kernel (ss or ts variant) and benchmark."""
+    if groups <= 0 or heads % groups != 0:
+        raise ValueError("groups must be a positive divisor of heads")
     head_kv = heads // groups
-    assert heads % groups == 0
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
     if is_causal:
         total_flops *= 0.5
 
     print(f"=== Blackwell GQA Forward ({variant.upper()}) ===")
-    print(
-        f"batch={batch}, heads={heads}, head_kv={head_kv}, groups={groups}, "
-        f"seq_len={seq_len}, dim={dim}, causal={is_causal}"
-    )
+    print(f"batch={batch}, heads={heads}, head_kv={head_kv}, groups={groups}, seq_len={seq_len}, dim={dim}, causal={is_causal}")
 
     fn = flashattn_ss if variant == "ss" else flashattn_ts
     threads = 128 if variant == "ss" else 256  # ts: 256
     kernel = fn(
-        batch, heads, seq_len, dim, is_causal, groups=groups,
-        block_M=128, block_N=128, threads=threads,
+        batch,
+        heads,
+        seq_len,
+        dim,
+        is_causal,
+        groups=groups,
+        block_M=128,
+        block_N=128,
+        threads=threads,
     )
 
     Q = torch.randn(batch, seq_len, heads, dim, device="cuda", dtype=torch.bfloat16)
@@ -396,11 +386,18 @@ if __name__ == "__main__":
     parser.add_argument("--is_causal", action="store_true")
     parser.add_argument("--groups", type=int, default=1, help="GQA: head_kv = heads // groups")
     parser.add_argument(
-        "--variant", choices=["ss", "ts"], default="ss",
+        "--variant",
+        choices=["ss", "ts"],
+        default="ss",
         help="ss: pipeline (default); ts: 256 threads",
     )
     args = parser.parse_args()
     main(
-        args.batch, args.heads, args.seq_len, args.dim,
-        args.is_causal, args.groups, args.variant,
+        args.batch,
+        args.heads,
+        args.seq_len,
+        args.dim,
+        args.is_causal,
+        args.groups,
+        args.variant,
     )

@@ -47,9 +47,7 @@ def flashattn_ss(
         V: T.Tensor(shape, dtype),
         Output: T.Tensor(shape, dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(seq_len, block_M), heads, batch, threads=threads
-        ) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -87,9 +85,7 @@ def flashattn_ss(
             )
 
             for k in T.Pipelined(loop_range, num_stages=1):
-                T.copy(
-                    K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared
-                )
+                T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
 
                 # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)
                 T.gemm(
@@ -127,13 +123,9 @@ def flashattn_ss(
                 for i in T.Parallel(block_M):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                 for i in T.Parallel(block_M):
-                    scores_scale[i] = T.exp2(
-                        scores_max_prev[i] * scale - scores_max[i] * scale
-                    )
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_M, block_N):
-                    S_reg[i, j] = T.exp2(
-                        S_reg[i, j] * scale - scores_max[i] * scale
-                    )
+                    S_reg[i, j] = T.exp2(S_reg[i, j] * scale - scores_max[i] * scale)
                 T.reduce_sum(S_reg, scores_sum, dim=1)
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -144,9 +136,7 @@ def flashattn_ss(
                 T.copy(S_reg, P_cast)
                 T.copy(P_cast, P_shared)
 
-                T.copy(
-                    V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared
-                )
+                T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
 
                 # GEMM 2: D = P @ V -> D_tmem (tcgen05mma_ss, fresh per iter)
                 T.gemm(
@@ -198,9 +188,7 @@ def flashattn_ts(
         V: T.Tensor(shape, dtype),
         Output: T.Tensor(shape, dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(seq_len, block_M), heads, batch, threads=threads
-        ) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -238,9 +226,7 @@ def flashattn_ts(
             )
 
             for k in T.Pipelined(loop_range, num_stages=1):
-                T.copy(
-                    K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared
-                )
+                T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
 
                 # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)
                 T.gemm(
@@ -278,13 +264,9 @@ def flashattn_ts(
                 for i in T.Parallel(block_M):
                     scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                 for i in T.Parallel(block_M):
-                    scores_scale[i] = T.exp2(
-                        scores_max_prev[i] * scale - scores_max[i] * scale
-                    )
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_M, block_N):
-                    S_reg[i, j] = T.exp2(
-                        S_reg[i, j] * scale - scores_max[i] * scale
-                    )
+                    S_reg[i, j] = T.exp2(S_reg[i, j] * scale - scores_max[i] * scale)
                 T.reduce_sum(S_reg, scores_sum, dim=1)
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -296,9 +278,7 @@ def flashattn_ts(
                 T.copy(S_reg, P_cast)
                 T.copy(P_cast, P_tmem)
 
-                T.copy(
-                    V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared
-                )
+                T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
 
                 # GEMM 2: D = P_tmem @ V -> D_tmem (tcgen05mma_ts)
                 T.gemm(
@@ -351,9 +331,7 @@ def flashattn_wasp(
         V: T.Tensor(shape, dtype),
         Output: T.Tensor(shape, dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(seq_len, block_M), heads, batch, threads=threads
-        ) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             # Double-buffer as two 2D buffers (tcgen05 swizzle does not support 3D)
             K_shared_0 = T.alloc_shared([block_N, dim], dtype)
@@ -365,7 +343,7 @@ def flashattn_wasp(
             S_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
             P_tmem = T.alloc_tmem([block_M, block_N], dtype)
             O_tmem = T.alloc_tmem([block_M, dim], accum_dtype)
-            
+
             mbar_dma1_empty = T.alloc_barrier([32] * num_stages)
             mbar_dma1_full = T.alloc_barrier([32] * num_stages)
             mbar_bmm1_empty = T.alloc_barrier([32] * num_stages)
@@ -413,7 +391,7 @@ def flashattn_wasp(
                 T.mbarrier_arrive(mbar_dma1_empty[0])
                 T.mbarrier_arrive(mbar_dma2_empty[0])
                 T.mbarrier_arrive(mbar_bmm1_empty[0])
-                T.mbarrier_arrive(mbar_softmax_empty[0]) 
+                T.mbarrier_arrive(mbar_softmax_empty[0])
 
             loop_range = (
                 T.min(
@@ -423,14 +401,12 @@ def flashattn_wasp(
                 if is_causal
                 else T.ceildiv(seq_len, block_N)
             )
-            
 
             for k in T.serial(loop_range):
-                
                 parity_inv = ((k // num_stages) & 1) ^ 1
                 parity = parity_inv ^ 1
                 stage_id = k % num_stages
-                is_clear_accum = True if k == 0 else False
+                is_clear_accum = k == 0
 
                 if is_dma_warp:
                     # DMA1
@@ -440,29 +416,20 @@ def flashattn_wasp(
                         T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
 
                     if stage_id == 0:
-                        T.copy(
-                            K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_0
-                        )
+                        T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_0)
                     else:
-                        T.copy(
-                            K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_1
-                        )
+                        T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_1)
                     T.mbarrier_arrive(mbar_dma1_full[stage_id])
 
                     # DMA2
                     T.mbarrier_wait_parity(mbar_dma2_empty[stage_id], parity_inv)
 
                     if stage_id == 0:
-                        T.copy(
-                            V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_0
-                        )
+                        T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_0)
                     else:
-                        T.copy(
-                            V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_1
-                        )
+                        T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_1)
 
-                    T.mbarrier_arrive(mbar_dma2_full[stage_id]) # notify consomer
-
+                    T.mbarrier_arrive(mbar_dma2_full[stage_id])  # notify consomer
 
                 elif is_bmm_warp:
                     # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)
@@ -515,16 +482,20 @@ def flashattn_wasp(
                             clear_accum=is_clear_accum,
                         )
 
-                    T.mbarrier_arrive(mbar_softmax_empty[stage_id]) # notify producer
-                    T.mbarrier_arrive(mbar_dma2_empty[stage_id]) # notify producer
+                    T.mbarrier_arrive(mbar_softmax_empty[stage_id])  # notify producer
+                    T.mbarrier_arrive(mbar_dma2_empty[stage_id])  # notify producer
 
                     if k == loop_range - 1:
-                        T.mbarrier_arrive(mbar_correction_full[0]) # notify consomer
+                        T.mbarrier_arrive(mbar_correction_full[0])  # notify consomer
 
                 elif is_softmax_warp:
-
                     T.mbarrier_wait_parity(mbar_softmax_empty[stage_id], parity_inv)
                     T.mbarrier_wait_parity(mbar_bmm1_full[stage_id], parity)
+                    # Wait for GEMM2 of previous iteration to finish before reading O_tmem
+                    if k > 0:
+                        prev_stage = (k - 1) % num_stages
+                        prev_parity = ((k - 1) // num_stages) & 1
+                        T.mbarrier_wait_parity(mbar_bmm2_full[prev_stage], prev_parity)
 
                     # Load accumulated O from previous iteration (BMM2 wrote O_tmem)
                     T.copy(O_tmem, O_reg)
@@ -544,7 +515,7 @@ def flashattn_wasp(
                                 -T.infinity(accum_dtype),
                                 S_reg[i, j],
                             )
-    
+
                     # Online softmax
                     T.copy(scores_max, scores_max_prev)
                     T.fill(scores_max, -T.infinity(accum_dtype))
@@ -552,13 +523,9 @@ def flashattn_wasp(
                     for i in T.Parallel(block_M):
                         scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
                     for i in T.Parallel(block_M):
-                        scores_rescale[i] = T.exp2(
-                            scores_max_prev[i] * scale - scores_max[i] * scale
-                        )
+                        scores_rescale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                     for i, j in T.Parallel(block_M, block_N):
-                        S_reg[i, j] = T.exp2(
-                            S_reg[i, j] * scale - scores_max[i] * scale
-                        )
+                        S_reg[i, j] = T.exp2(S_reg[i, j] * scale - scores_max[i] * scale)
 
                     # Online correction
                     T.reduce_sum(S_reg, scores_sum, dim=1)
@@ -571,15 +538,16 @@ def flashattn_wasp(
                     # tcgen05.st: P_cast -> P_tmem (register -> TMEM, no shared needed)
                     T.copy(S_reg, P_cast)
                     T.copy(P_cast, P_tmem)
-                    T.copy(O_reg, O_tmem) 
+                    T.copy(O_reg, O_tmem)
 
-                    T.mbarrier_arrive(mbar_softmax_full[stage_id]) # notify consomer
-                    T.mbarrier_arrive(mbar_bmm1_empty[stage_id]) # notify producer
+                    T.mbarrier_arrive(mbar_softmax_full[stage_id])  # notify consomer
+                    T.mbarrier_arrive(mbar_bmm1_empty[stage_id])  # notify producer
 
                     # Epilogue inside loop (when last k) so logsum use is in same control flow
                     # as its def -> avoids "layout for fragment logsum can not be inferred"
                     if k == loop_range - 1:
                         T.mbarrier_wait_parity(mbar_correction_full[0], 0)
+                        T.mbarrier_wait_parity(mbar_bmm2_full[stage_id], parity)
                         T.copy(O_tmem, O_reg)
                         for i, j in T.Parallel(block_M, dim):
                             O_reg[i, j] /= logsum[i]
@@ -622,63 +590,83 @@ def main(
     is_causal: bool = False,
     variant: str = "ss",
 ):
+    """Run MHA forward kernel (ss / ts / wasp) and benchmark."""
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
     if is_causal:
         total_flops *= 0.5
 
     print(f"=== Blackwell Flash Attention ({variant.upper()}) ===")
-    print(
-        f"batch={batch}, heads={heads}, seq_len={seq_len}, "
-        f"dim={dim}, causal={is_causal}"
-    )
+    print(f"batch={batch}, heads={heads}, seq_len={seq_len}, dim={dim}, causal={is_causal}")
 
     # ss -> flashattn_ss; ts -> flashattn_ts; wasp -> try flashattn_wasp, fallback to flashattn_ts
     use_wasp = variant == "wasp"
     try:
         if variant == "ss":
             kernel = flashattn_ss(
-                batch, heads, seq_len, dim, is_causal,
-                block_M=128, block_N=128, threads=128,
+                batch,
+                heads,
+                seq_len,
+                dim,
+                is_causal,
+                block_M=128,
+                block_N=128,
+                threads=128,
             )
         elif variant == "ts":
             kernel = flashattn_ts(
-                batch, heads, seq_len, dim, is_causal,
-                block_M=128, block_N=128, threads=256,
+                batch,
+                heads,
+                seq_len,
+                dim,
+                is_causal,
+                block_M=128,
+                block_N=128,
+                threads=256,
             )
         else:  # wasp
             kernel = flashattn_wasp(
-                batch, heads, seq_len, dim, is_causal,
-                block_M=128, block_N=128, threads=256, num_stages=2,
+                batch,
+                heads,
+                seq_len,
+                dim,
+                is_causal,
+                block_M=128,
+                block_N=128,
+                threads=256,
+                num_stages=2,
             )
     except Exception as e:
         if variant == "wasp" and ("layout" in str(e).lower() or "infer" in str(e).lower()):
             use_wasp = False
             print("(wasp hit layout inference bug; fallback to ts.)")
             kernel = flashattn_ts(
-                batch, heads, seq_len, dim, is_causal,
-                block_M=128, block_N=128, threads=256,
+                batch,
+                heads,
+                seq_len,
+                dim,
+                is_causal,
+                block_M=128,
+                block_N=128,
+                threads=256,
             )
         else:
             raise
     if use_wasp or variant == "wasp":
         print(kernel.get_kernel_source())
 
-    Q = torch.randn(
-        batch, seq_len, heads, dim, device="cuda", dtype=torch.bfloat16
-    )
+    Q = torch.randn(batch, seq_len, heads, dim, device="cuda", dtype=torch.bfloat16)
     K = torch.randn_like(Q)
     V = torch.randn_like(Q)
 
     out = kernel(Q, K, V)
     ref = ref_program(Q, K, V, is_causal).to(out.device)
-    # torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
     print("Correctness check passed.")
 
     latency = do_bench(lambda: kernel(Q, K, V), warmup=100)
     print(f"Blackwell ({variant}): {latency:.2f} ms")
     print(f"Blackwell ({variant}): {total_flops / latency * 1e-9:.2f} TFlops")
-
 
 
 if __name__ == "__main__":
@@ -689,8 +677,10 @@ if __name__ == "__main__":
     parser.add_argument("--dim", type=int, default=128)
     parser.add_argument("--is_causal", action="store_true")
     parser.add_argument(
-        "--variant", choices=["ss", "ts", "wasp"], default="ss",
-        help="ss: pipeline 128t; ts: single-path 256t mma_ts; wasp: warp-specialized (fallback to ts if fail)"
+        "--variant",
+        choices=["ss", "ts", "wasp"],
+        default="ss",
+        help="ss: pipeline 128t; ts: single-path 256t mma_ts; wasp: warp-specialized (fallback to ts if fail)",
     )
     args = parser.parse_args()
     print(args)

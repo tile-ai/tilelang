@@ -8,7 +8,6 @@ import torch
 import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
-from tilelang.profiler import do_bench
 import argparse
 
 
@@ -53,22 +52,16 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
             loop_range = (
-                T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
-                if is_causal
-                else T.ceildiv(seq_len, block_N)
+                T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N)
             )
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(
-                            bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype)
-                        )
+                        acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype))
                 else:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(
-                            k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0
-                        )
+                        acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
                 T.copy(scores_max, scores_max_prev)
@@ -210,9 +203,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, threa
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        qkT[i, j] = T.if_then_else(
-                            by * block_M + i <= k * block_N + j, qkT[i, j], 0
-                        )
+                        qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
                 T.copy(dO[bz, k * block_N : (k + 1) * block_N, bx, :], do)
                 T.clear(dsT)
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -239,19 +230,16 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, threa
 
 def flashattn_bwd_pipeline(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     """Pipeline (default): 128 threads, 2 stages."""
-    return flashattn_bwd(
-        batch, heads, seq_len, dim, is_causal, block_M, block_N, threads=128, num_stages=2
-    )
+    return flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, threads=128, num_stages=2)
 
 
 def flashattn_bwd_warp(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     """ts: 256 threads, 2 stages. Use --variant ts to enable."""
-    return flashattn_bwd(
-        batch, heads, seq_len, dim, is_causal, block_M, block_N, threads=256, num_stages=2
-    )
+    return flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, threads=256, num_stages=2)
 
 
 def ref_program(Q, K, V, is_causal):
+    """CPU reference forward (for validation); backward ref not implemented."""
     dim = Q.size(-1)
     Q_f = Q.cpu().float()
     K_f = K.cpu().float()
@@ -264,8 +252,8 @@ def ref_program(Q, K, V, is_causal):
         mask = mask.unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float("-inf"))
     P = F.softmax(scores, dim=-1)
-    O = torch.einsum("bhqk,bkhd->bqhd", P, V_f)
-    return O.to(Q.dtype)
+    out_ref = torch.einsum("bhqk,bkhd->bqhd", P, V_f)
+    return out_ref.to(Q.dtype)
 
 
 def main(
@@ -276,6 +264,7 @@ def main(
     is_causal: bool = False,
     variant: str = "ss",
 ):
+    """Run MHA backward kernels (fwd + preprocess + bwd + postprocess)."""
     block_M = 64
     block_N = 64 if dim <= 64 else 32
     use_ts = variant == "ts"
@@ -296,8 +285,8 @@ def main(
     dK = torch.empty_like(K, device="cuda")
     dV = torch.empty_like(V, device="cuda")
     kernel_bwd(Q, K, V, dO, lse, Delta, dQ, dK, dV)
-    dQ_out = kernel_post(dQ)
-    print("Blackwell MHA bwd ({}): correctness run OK.".format(variant))
+    _ = kernel_post(dQ)  # dQ_out in output layout; not compared to ref (no backward ref)
+    print("Blackwell MHA bwd ({}): run OK (backward gradients not verified against ref).".format(variant))
 
 
 if __name__ == "__main__":

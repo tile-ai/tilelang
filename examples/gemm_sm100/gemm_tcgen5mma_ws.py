@@ -66,7 +66,7 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
 
 def main():
     M, N, K = 8192, 8192, 8192
-    block_M, block_N, block_K = 128, 256, 128
+    block_M, block_N, block_K = 128, 256, 64
     in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
     num_stages = 4
 
@@ -76,7 +76,7 @@ def main():
     print(gemm.get_kernel_source(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages))
 
     ref_c = (a.to(torch.float) @ b.to(torch.float)).to(torch.bfloat16)
-    # torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("All checks passed. ✅")
 
     tl_latency = do_bench(lambda: gemm(a, b, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages), backend="cupti")

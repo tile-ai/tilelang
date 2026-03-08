@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
-from tilelang.profiler import do_bench
 import argparse
 
 
@@ -23,6 +22,8 @@ PASS_CFG = {
 @tilelang.jit(out_idx=[3, 4], pass_configs=PASS_CFG)
 def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, groups=1):
     """Forward for LSE; K/V indexed by by // groups."""
+    if groups <= 0 or heads % groups != 0:
+        raise ValueError("groups must be a positive divisor of heads")
     head_kv = heads // groups
     scale = (1.0 / dim) ** 0.5 * 1.44269504
     q_shape = [batch, seq_len, heads, dim]
@@ -56,22 +57,16 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
             loop_range = (
-                T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
-                if is_causal
-                else T.ceildiv(seq_len, block_N)
+                T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N)
             )
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared)
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(
-                            bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype)
-                        )
+                        acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype))
                 else:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(
-                            k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0
-                        )
+                        acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared)
                 T.copy(scores_max, scores_max_prev)
@@ -161,6 +156,8 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 @tilelang.jit(pass_configs=PASS_CFG)
 def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, groups=1, threads=128, num_stages=2):
     """GQA backward: K/V/dK/dV use bx // groups; dK/dV use atomic_add."""
+    if groups <= 0 or heads % groups != 0:
+        raise ValueError("groups must be a positive divisor of heads")
     head_kv = heads // groups
     sm_scale = (1.0 / dim) ** 0.5
     scale = (1.0 / dim) ** 0.5 * 1.44269504
@@ -215,9 +212,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        qkT[i, j] = T.if_then_else(
-                            by * block_M + i <= k * block_N + j, qkT[i, j], 0
-                        )
+                        qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
                 T.copy(dO[bz, k * block_N : (k + 1) * block_N, bx, :], do)
                 T.clear(dsT)
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -244,15 +239,31 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
 
 def flashattn_bwd_pipeline(batch, heads, seq_len, dim, is_causal, block_M, block_N, groups=1):
     return flashattn_bwd(
-        batch, heads, seq_len, dim, is_causal, block_M, block_N, groups=groups,
-        threads=128, num_stages=2,
+        batch,
+        heads,
+        seq_len,
+        dim,
+        is_causal,
+        block_M,
+        block_N,
+        groups=groups,
+        threads=128,
+        num_stages=2,
     )
 
 
 def flashattn_bwd_warp(batch, heads, seq_len, dim, is_causal, block_M, block_N, groups=1):
     return flashattn_bwd(
-        batch, heads, seq_len, dim, is_causal, block_M, block_N, groups=groups,
-        threads=256, num_stages=2,
+        batch,
+        heads,
+        seq_len,
+        dim,
+        is_causal,
+        block_M,
+        block_N,
+        groups=groups,
+        threads=256,
+        num_stages=2,
     )
 
 
@@ -270,8 +281,8 @@ def ref_program(Q, K, V, is_causal, groups=1):
         mask = mask.unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float("-inf"))
     P = F.softmax(scores, dim=-1)
-    O = torch.einsum("bhqk,bkhd->bqhd", P, V_f)
-    return O.to(Q.dtype)
+    out_ref = torch.einsum("bhqk,bkhd->bqhd", P, V_f)
+    return out_ref.to(Q.dtype)
 
 
 def main(
@@ -283,8 +294,10 @@ def main(
     groups: int = 1,
     variant: str = "ss",
 ):
+    """Run GQA backward kernels (fwd + preprocess + bwd + postprocess)."""
+    if groups <= 0 or heads % groups != 0:
+        raise ValueError("groups must be a positive divisor of heads")
     head_kv = heads // groups
-    assert heads % groups == 0
     block_M = 64
     block_N = 64 if dim <= 64 else 32
     bwd_fn = flashattn_bwd_warp if variant == "ts" else flashattn_bwd_pipeline
@@ -305,8 +318,8 @@ def main(
     dK = torch.zeros(batch, seq_len, head_kv, dim, device="cuda", dtype=torch.float32)
     dV = torch.zeros(batch, seq_len, head_kv, dim, device="cuda", dtype=torch.float32)
     kernel_bwd(Q, K, V, dO, lse, Delta, dQ, dK, dV)
-    dQ_out = kernel_post(dQ)
-    print("Blackwell GQA bwd ({}): correctness run OK.".format(variant))
+    _ = kernel_post(dQ)  # dQ_out in output layout; not compared to ref (no backward ref)
+    print("Blackwell GQA bwd ({}): run OK (backward gradients not verified against ref).".format(variant))
 
 
 if __name__ == "__main__":
@@ -318,11 +331,18 @@ if __name__ == "__main__":
     parser.add_argument("--is_causal", action="store_true")
     parser.add_argument("--groups", type=int, default=1, help="head_kv = heads // groups")
     parser.add_argument(
-        "--variant", choices=["ss", "ts"], default="ss",
+        "--variant",
+        choices=["ss", "ts"],
+        default="ss",
         help="ss: pipeline (default); ts: 256 threads",
     )
     args = parser.parse_args()
     main(
-        args.batch, args.heads, args.seq_len, args.dim,
-        args.is_causal, args.groups, args.variant,
+        args.batch,
+        args.heads,
+        args.seq_len,
+        args.dim,
+        args.is_causal,
+        args.groups,
+        args.variant,
     )
