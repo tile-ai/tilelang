@@ -102,7 +102,9 @@ Running the kernel above with `cluster_mask = 0b0011`:
 
 - The compiler lowers `cluster_mask != 0` to
   `cp.async.bulk.tensor.Nd.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster`
-  for the issuing CTA and a standard `cp.async.bulk.tensor` for the rest.
+    for the issuing CTA; CTAs in the mask but not elected as issuer receive
+    passively, and only CTAs outside the mask issue a standard
+    `cp.async.bulk.tensor`.
 - Software-pipelining (`T.Pipelined`) is fully supported; the warp-specialized
   rewriter recognises `tma_load_multicast` as a producer operation.
 - `cluster_mask` is a compile-time constant; dynamic masks are not supported.
