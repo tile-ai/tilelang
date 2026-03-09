@@ -243,6 +243,19 @@ public:
       }
       init_mbarrier_calls_.push_back(Evaluate(tvm::ffi::GetRef<Call>(call)));
       return 0;
+    } else if (call->op.same_as(get_mbarrier())) {
+      // All get_mbarrier(i) calls that reach this branch carry a pipeline
+      // stage index (0, 1, …) emitted by InjectPipeline, InjectTmaBarrier,
+      // or MbarrierRewriter.  Shift by kReservedBarriers so they address
+      // the correct slot in the barrier array, which starts user-managed
+      // barriers after the reserved prefix.
+      //
+      // get_mbarrier calls that live inside create_list_of_mbarrier or
+      // ptx_init_barrier_thread_count are consumed by their own early-return
+      // branches above and never reach this handler, so there is no risk of
+      // double-shifting.
+      return Call(call->dtype, get_mbarrier(),
+                  {call->args[0] + kReservedBarriers});
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }

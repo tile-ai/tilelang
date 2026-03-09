@@ -1208,13 +1208,6 @@ private:
     }
     auto result = FilterByRole(op);
 
-    if (is_dynamic_extent) {
-      Array<PrimExpr> zero_indices = {0};
-      PrimExpr new_prefix = LoadRaggedPrefix() + op->extent;
-      Stmt update = BufferStore(ragged_prefix_buf_, new_prefix, zero_indices);
-      result = SeqStmt({result, update});
-    }
-
     Stmt grouped_for_node;
     if (result.as<ForNode>() && group_anno && !group_info_array.empty() &&
         !is_emitting_producer_) {
@@ -1237,12 +1230,24 @@ private:
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_order");
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_stage");
       }
+      // Choose between the grouped and plain loop before potentially wrapping.
+      Stmt final_node;
       if (is_emitting_producer_ || !group_anno || group_info_array.empty()) {
-        loop_stack_.pop_back();
-        return for_node;
+        final_node = for_node;
+      } else {
+        final_node = grouped_for_node;
       }
       loop_stack_.pop_back();
-      return grouped_for_node;
+      // Append the ragged-prefix update after the fully post-processed loop.
+      // This is deferred to here (rather than applied early before annotation
+      // stripping) so the ForNode remains visible to GroupOpRewriter above.
+      if (is_dynamic_extent) {
+        Array<PrimExpr> zero_indices = {0};
+        PrimExpr new_prefix = LoadRaggedPrefix() + op->extent;
+        Stmt update = BufferStore(ragged_prefix_buf_, new_prefix, zero_indices);
+        return SeqStmt({final_node, update});
+      }
+      return final_node;
     }
     loop_stack_.pop_back();
     return result;
