@@ -17,6 +17,9 @@
 
 #include "warp_specialized_rewriter.h"
 
+#include <algorithm>
+#include <string>
+
 namespace tvm {
 namespace tl {
 
@@ -31,6 +34,7 @@ struct TmaCopyBlockInfo {
   Stmt producer_stmt; // AttrStmt("tl.tma_copy_write_buffer", ...) or IfThenElse
                       // with tma_load
   Stmt wait_stmt;     // Evaluate(mbarrier_wait_parity(...))
+  Optional<Var> write_buffer_data; // shared buffer data var written by TMA
 };
 
 // ---------------------------------------------------------------------------
@@ -81,13 +85,18 @@ public:
         // Check Pattern 1: AttrStmt("tl.tma_copy_write_buffer")
         auto *attr = flat_stmts[i].as<AttrStmtNode>();
         if (attr && attr->attr_key == "tl.tma_copy_write_buffer") {
-          blocks.push_back({flat_stmts[i], flat_stmts[i + 1]});
+          Optional<Var> write_buffer_data = std::nullopt;
+          if (auto *v = attr->node.as<VarNode>()) {
+            write_buffer_data = GetRef<Var>(v);
+          }
+          blocks.push_back(
+              {flat_stmts[i], flat_stmts[i + 1], write_buffer_data});
           i += 2;
           continue;
         }
         // Check Pattern 2: IfThenElse containing tma_load
         if (ContainsTmaLoad(flat_stmts[i])) {
-          blocks.push_back({flat_stmts[i], flat_stmts[i + 1]});
+          blocks.push_back({flat_stmts[i], flat_stmts[i + 1], std::nullopt});
           i += 2;
           continue;
         }
@@ -119,6 +128,7 @@ private:
     });
     return found;
   }
+
 };
 
 // ---------------------------------------------------------------------------
@@ -176,7 +186,8 @@ private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
-        op->op.same_as(tl::tma_store())) {
+        op->op.same_as(tl::tma_store()) ||
+        op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
       has_tma_op_ = true;
     }
     return StmtExprMutator::VisitExpr_(op);
@@ -351,28 +362,37 @@ private:
     consumer_thread_extent_ =
         consumer_thread_extent; // Store for RebuildBlockBody
     PrimExpr producer_thread_extent = IntImm(DataType::Int(32), 128);
+    producer_thread_extent_ = producer_thread_extent;
 
-    // Barrier layout — computed purely from structural information:
+    // Barrier layout:
     //   num_tma_groups = number of TMA copy blocks detected
     //   num_stages     = from pipeline loop annotation
     //
-    // Forward barriers (allocated by LowerBulkCopy):
-    //   Group i → IDs [i*num_stages, (i+1)*num_stages)
-    //   arrive_count = 1 (only TMA hardware arrives)
+    // Forward barriers are already allocated by LowerBulkCopy and can include
+    // non-pipelined copies outside the target loop (e.g. prologue Q load).
+    // We must not assume they start at 0 for this loop.
     //
     // Back-pressure barriers (allocated by this pass):
-    //   Group i → IDs [num_fwd + i*num_stages, num_fwd + (i+1)*num_stages)
+    //   Group i → IDs
+    //     [num_existing + i*num_stages, num_existing + (i+1)*num_stages)
     //   arrive_count = consumer_threads (all consumer threads arrive)
     //
     int num_tma_groups = static_cast<int>(extractor.blocks.size());
     int num_fwd_barriers = num_tma_groups * num_stages;
+    // Reserve one extra slot for non-pipelined barriers (e.g. prologue Q TMA).
+    // In some IR forms these barriers are not reflected in the per-loop
+    // inferred max-id before later lowering/versioning.
+    int min_reserved_non_pipeline = num_fwd_barriers + 1;
+    int num_existing_barriers =
+        std::max(min_reserved_non_pipeline,
+                 InferMinRequiredBarrierCount(orig_block->body));
     int num_bp_barriers = num_tma_groups * num_stages;
-    int total_barriers = num_fwd_barriers + num_bp_barriers;
+    int total_barriers = num_existing_barriers + num_bp_barriers;
 
     std::vector<int> bp_bases;
     bp_bases.reserve(num_tma_groups);
     for (int i = 0; i < num_tma_groups; i++) {
-      bp_bases.push_back(num_fwd_barriers + i * num_stages);
+      bp_bases.push_back(num_existing_barriers + i * num_stages);
     }
 
     Var loop_var = pipeline_loop->loop_var;
@@ -405,20 +425,73 @@ private:
     // --- Build Consumer Body ---
     Array<Stmt> consumer_body_stmts;
 
-    // First: wait on all forward barriers (TMA data ready)
-    for (size_t ti = 0; ti < extractor.blocks.size(); ti++) {
-      consumer_body_stmts.push_back(extractor.blocks[ti].wait_stmt);
+    // Place each forward wait as late as possible: right before the first
+    // compute statement that touches the buffer produced by that TMA copy.
+    //
+    // Place each back-pressure arrive as early as possible: right after the
+    // last compute statement that touches that buffer.
+    //
+    // If dependency is unknown (no write_buffer_data annotation), fall back to
+    // conservative placement: wait at loop head, arrive at loop tail.
+    std::vector<int> wait_insert_pos(extractor.blocks.size(), 0);
+    std::vector<int> arrive_insert_pos(
+        extractor.blocks.size(),
+        static_cast<int>(extractor.compute_stmts.size()));
+    std::vector<bool> arrive_emitted(extractor.blocks.size(), false);
+    for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
+      if (!extractor.blocks[ti].write_buffer_data.defined()) {
+        continue;
+      }
+      auto *target = extractor.blocks[ti].write_buffer_data.value().get();
+      auto uses_target = [target](const VarNode *v) { return v == target; };
+      int first_use = -1;
+      int last_use = -1;
+      for (size_t ci = 0; ci < extractor.compute_stmts.size(); ++ci) {
+        if (UsesVar(extractor.compute_stmts[ci], uses_target)) {
+          if (first_use < 0) {
+            first_use = static_cast<int>(ci);
+          }
+          last_use = static_cast<int>(ci);
+        }
+      }
+      if (first_use >= 0) {
+        wait_insert_pos[ti] = first_use;
+        arrive_insert_pos[ti] = last_use + 1;
+      }
     }
 
-    // Then: execute all compute statements
-    for (const auto &stmt : extractor.compute_stmts) {
-      consumer_body_stmts.push_back(stmt);
+    // Emit waits / compute / arrives according to insertion points.
+    for (size_t ci = 0; ci < extractor.compute_stmts.size(); ++ci) {
+      for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
+        if (wait_insert_pos[ti] == static_cast<int>(ci)) {
+          consumer_body_stmts.push_back(extractor.blocks[ti].wait_stmt);
+        }
+      }
+      consumer_body_stmts.push_back(extractor.compute_stmts[ci]);
+      for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
+        if (arrive_insert_pos[ti] == static_cast<int>(ci + 1)) {
+          PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
+          consumer_body_stmts.push_back(makeArriveBarrier(bp_id));
+          arrive_emitted[ti] = true;
+        }
+      }
     }
 
-    // Finally: arrive on back-pressure barriers (signal buffer reuse OK)
+    // Handle degenerate loops with no compute statements.
+    if (extractor.compute_stmts.empty()) {
+      for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
+        consumer_body_stmts.push_back(extractor.blocks[ti].wait_stmt);
+      }
+    }
+
+    // Emit loop-tail arrives (blocks with unknown deps or tail use).
     for (size_t ti = 0; ti < extractor.blocks.size(); ti++) {
-      PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
-      consumer_body_stmts.push_back(makeArriveBarrier(bp_id));
+      if (!arrive_emitted[ti] &&
+          arrive_insert_pos[ti] ==
+          static_cast<int>(extractor.compute_stmts.size())) {
+        PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
+        consumer_body_stmts.push_back(makeArriveBarrier(bp_id));
+      }
     }
     Stmt consumer_loop_body = SeqStmt(consumer_body_stmts);
 
@@ -465,7 +538,7 @@ private:
     // back-pressure barriers (arrive_count=consumer_threads)
     Array<PrimExpr> barrier_arrive_counts;
     barrier_arrive_counts.reserve(total_barriers);
-    for (int i = 0; i < num_fwd_barriers; i++) {
+    for (int i = 0; i < num_existing_barriers; i++) {
       barrier_arrive_counts.push_back(IntImm(DataType::Int(32), 1));
     }
     for (int i = 0; i < num_bp_barriers; i++) {
@@ -552,14 +625,289 @@ private:
     return nullptr;
   }
 
+  // Infer how many mbarriers are already referenced by this block body.
+  // This prevents assigning back-pressure barriers that alias existing
+  // forward barriers (e.g. prologue TMA copy barriers outside the pipeline).
+  int InferMinRequiredBarrierCount(const Stmt &stmt) {
+    class GetMbarrierMaxIdxCollector : public StmtExprVisitor {
+    public:
+      int max_idx{-1};
+
+    private:
+      void VisitExpr_(const CallNode *op) final {
+        if (op->op.same_as(get_mbarrier()) && op->args.size() == 1) {
+          auto bound = analyzer_.const_int_bound(op->args[0]);
+          if (bound->max_value != arith::ConstIntBound::kPosInf &&
+              bound->max_value != arith::ConstIntBound::kNegInf) {
+            max_idx = std::max(max_idx, static_cast<int>(bound->max_value));
+          }
+        }
+        StmtExprVisitor::VisitExpr_(op);
+      }
+      arith::Analyzer analyzer_;
+    };
+
+    GetMbarrierMaxIdxCollector collector;
+    collector(stmt);
+    return collector.max_idx + 1;
+  }
+
+  bool IsMovableConsumerPrefixStmt(const Stmt &stmt) {
+    bool has_disallowed = false;
+    auto is_shared_scope = [](const String &scope) {
+      std::string s = scope;
+      return s.rfind("shared", 0) == 0;
+    };
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (has_disallowed) {
+        return;
+      }
+      if (auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(create_list_of_mbarrier()) ||
+            call->op.same_as(mbarrier_wait_parity()) ||
+            call->op.same_as(builtin::ptx_arrive_barrier()) ||
+            call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+            call->op.same_as(builtin::ptx_cp_async_barrier()) ||
+            call->op.same_as(tma_load()) ||
+            call->op.same_as(tma_load_im2col()) ||
+            call->op.same_as(tma_store()) ||
+            call->op.same_as(tma_store_arrive()) ||
+            call->op.same_as(tma_store_wait()) ||
+            call->op.same_as(builtin::tvm_storage_sync())) {
+          has_disallowed = true;
+          return;
+        }
+      }
+      if (auto *ld = node.as<BufferLoadNode>()) {
+        if (is_shared_scope(ld->buffer.scope())) {
+          has_disallowed = true;
+          return;
+        }
+      }
+      if (auto *st = node.as<BufferStoreNode>()) {
+        if (is_shared_scope(st->buffer.scope())) {
+          has_disallowed = true;
+          return;
+        }
+      }
+    });
+    return !has_disallowed;
+  }
+
+  Optional<Stmt> TryPrependToConsumerBranch(const Stmt &stmt,
+                                            const Stmt &prepend_stmt) {
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.empty()) {
+        return std::nullopt;
+      }
+      Array<Stmt> new_seq = seq->seq;
+      auto nested = TryPrependToConsumerBranch(new_seq.back(), prepend_stmt);
+      if (nested.defined()) {
+        new_seq.Set(new_seq.size() - 1, nested.value());
+        return SeqStmt(new_seq);
+      }
+      return std::nullopt;
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      auto nested = TryPrependToConsumerBranch(attr->body, prepend_stmt);
+      if (nested.defined()) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value,
+                        nested.value());
+      }
+      return std::nullopt;
+    }
+    if (auto *let_s = stmt.as<LetStmtNode>()) {
+      auto nested = TryPrependToConsumerBranch(let_s->body, prepend_stmt);
+      if (nested.defined()) {
+        return LetStmt(let_s->var, let_s->value, nested.value());
+      }
+      return std::nullopt;
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      auto nested =
+          TryPrependToConsumerBranch(realize->block->body, prepend_stmt);
+      if (nested.defined()) {
+        const Block &orig = realize->block;
+        Block new_block(orig->iter_vars, orig->reads, orig->writes,
+                        orig->name_hint, nested.value(), orig->init,
+                        orig->alloc_buffers, orig->match_buffers,
+                        orig->annotations);
+        return BlockRealize(realize->iter_values, realize->predicate, new_block);
+      }
+      return std::nullopt;
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      auto nested = TryPrependToConsumerBranch(block->body, prepend_stmt);
+      if (nested.defined()) {
+        return Block(block->iter_vars, block->reads, block->writes,
+                     block->name_hint, nested.value(), block->init,
+                     block->alloc_buffers, block->match_buffers,
+                     block->annotations);
+      }
+      return std::nullopt;
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined()) {
+        return std::nullopt;
+      }
+      Stmt new_else =
+          SeqStmt({prepend_stmt, if_stmt->else_case.value()});
+      return IfThenElse(if_stmt->condition, if_stmt->then_case, new_else);
+    }
+    return std::nullopt;
+  }
+
+  Optional<Stmt> TryPrependToProducerBranch(const Stmt &stmt,
+                                            const Stmt &prepend_stmt) {
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.empty()) {
+        return std::nullopt;
+      }
+      Array<Stmt> new_seq = seq->seq;
+      auto nested = TryPrependToProducerBranch(new_seq.back(), prepend_stmt);
+      if (nested.defined()) {
+        new_seq.Set(new_seq.size() - 1, nested.value());
+        return SeqStmt(new_seq);
+      }
+      return std::nullopt;
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      auto nested = TryPrependToProducerBranch(attr->body, prepend_stmt);
+      if (nested.defined()) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value,
+                        nested.value());
+      }
+      return std::nullopt;
+    }
+    if (auto *let_s = stmt.as<LetStmtNode>()) {
+      auto nested = TryPrependToProducerBranch(let_s->body, prepend_stmt);
+      if (nested.defined()) {
+        return LetStmt(let_s->var, let_s->value, nested.value());
+      }
+      return std::nullopt;
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      auto nested =
+          TryPrependToProducerBranch(realize->block->body, prepend_stmt);
+      if (nested.defined()) {
+        const Block &orig = realize->block;
+        Block new_block(orig->iter_vars, orig->reads, orig->writes,
+                        orig->name_hint, nested.value(), orig->init,
+                        orig->alloc_buffers, orig->match_buffers,
+                        orig->annotations);
+        return BlockRealize(realize->iter_values, realize->predicate, new_block);
+      }
+      return std::nullopt;
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      auto nested = TryPrependToProducerBranch(block->body, prepend_stmt);
+      if (nested.defined()) {
+        return Block(block->iter_vars, block->reads, block->writes,
+                     block->name_hint, nested.value(), block->init,
+                     block->alloc_buffers, block->match_buffers,
+                     block->annotations);
+      }
+      return std::nullopt;
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      Stmt new_then = SeqStmt({prepend_stmt, if_stmt->then_case});
+      return IfThenElse(if_stmt->condition, new_then, if_stmt->else_case);
+    }
+    return std::nullopt;
+  }
+
+  Optional<Stmt> TryAppendToConsumerBranch(const Stmt &stmt,
+                                           const Stmt &append_stmt) {
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.empty()) {
+        return std::nullopt;
+      }
+      Array<Stmt> new_seq = seq->seq;
+      auto nested = TryAppendToConsumerBranch(new_seq.back(), append_stmt);
+      if (nested.defined()) {
+        new_seq.Set(new_seq.size() - 1, nested.value());
+        return SeqStmt(new_seq);
+      }
+      return std::nullopt;
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      auto nested = TryAppendToConsumerBranch(attr->body, append_stmt);
+      if (nested.defined()) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value,
+                        nested.value());
+      }
+      return std::nullopt;
+    }
+    if (auto *let_s = stmt.as<LetStmtNode>()) {
+      auto nested = TryAppendToConsumerBranch(let_s->body, append_stmt);
+      if (nested.defined()) {
+        return LetStmt(let_s->var, let_s->value, nested.value());
+      }
+      return std::nullopt;
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      auto nested = TryAppendToConsumerBranch(realize->block->body, append_stmt);
+      if (nested.defined()) {
+        const Block &orig = realize->block;
+        Block new_block(orig->iter_vars, orig->reads, orig->writes,
+                        orig->name_hint, nested.value(), orig->init,
+                        orig->alloc_buffers, orig->match_buffers,
+                        orig->annotations);
+        return BlockRealize(realize->iter_values, realize->predicate, new_block);
+      }
+      return std::nullopt;
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      auto nested = TryAppendToConsumerBranch(block->body, append_stmt);
+      if (nested.defined()) {
+        return Block(block->iter_vars, block->reads, block->writes,
+                     block->name_hint, nested.value(), block->init,
+                     block->alloc_buffers, block->match_buffers,
+                     block->annotations);
+      }
+      return std::nullopt;
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined()) {
+        return std::nullopt;
+      }
+      Stmt new_else =
+          SeqStmt({if_stmt->else_case.value(), append_stmt});
+      return IfThenElse(if_stmt->condition, if_stmt->then_case, new_else);
+    }
+    return std::nullopt;
+  }
+
+  bool IsMbarrierWaitParityStmt(const Stmt &stmt) {
+    if (auto *eval = stmt.as<EvaluateNode>()) {
+      if (auto *call = eval->value.as<CallNode>()) {
+        return call->op.same_as(mbarrier_wait_parity());
+      }
+    }
+    return false;
+  }
+
+  bool ContainsTmaLoadStmt(const Stmt &stmt) {
+    bool found = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(tma_load()) ||
+            call->op.same_as(tma_load_im2col())) {
+          found = true;
+        }
+      }
+    });
+    return found;
+  }
+
   /*!
    * \brief Rebuild the block body, replacing the pipeline loop with
-   *        init_barrier + ws_body, removing old create_list_of_mbarrier,
-   *        and guarding post-loop statements with a consumer thread check.
+   *        init_barrier + ws_body and removing old create_list_of_mbarrier.
    *
-   *  Statements after the pipeline loop (e.g. epilogue, store) must only
-   *  be executed by consumer threads, since producer threads don't compute.
-   *  We wrap them in: if (threadIdx.x < consumer_threads) { ... }
+   *  Statements after the pipeline loop (e.g. epilogue, store) should execute
+   *  only on consumer threads. Prefer appending them into the consumer branch
+   *  of the warp-specialized if/else to keep a single top-level partition.
+   *  If that is not possible, fall back to an explicit consumer-thread guard.
    */
   Stmt RebuildBlockBody(const Stmt &body, const ForNode *target_loop,
                         const Stmt &init_barrier, const Stmt &ws_body) {
@@ -570,8 +918,10 @@ private:
 
     if (auto *seq = body.as<SeqStmtNode>()) {
       Array<Stmt> new_seq;
+      Array<Stmt> pre_loop_stmts;
       Array<Stmt> post_loop_stmts;
       bool found_loop = false;
+      Optional<Stmt> rebuilt_loop = std::nullopt;
 
       for (const auto &s : seq->seq) {
         // Remove existing create_list_of_mbarrier
@@ -580,27 +930,146 @@ private:
 
         if (!found_loop && ContainsLoop(s, target_loop)) {
           // Replace the pipeline loop
-          Stmt rebuilt =
-              RebuildBlockBody(s, target_loop, init_barrier, ws_body);
-          new_seq.push_back(rebuilt);
+          rebuilt_loop = RebuildBlockBody(s, target_loop, init_barrier, ws_body);
           found_loop = true;
         } else if (found_loop) {
           // Collect statements after the pipeline loop
           post_loop_stmts.push_back(s);
         } else {
-          // Statements before the pipeline loop (e.g. C_local clear)
-          new_seq.push_back(s);
+          // Statements before the pipeline loop.
+          pre_loop_stmts.push_back(s);
         }
       }
 
-      // Guard post-loop statements so only consumer threads execute them
-      if (!post_loop_stmts.empty()) {
+      // Move a movable suffix of pre-loop statements into consumer branch
+      // (e.g. fragment initialization), keeping barriers/syncs outside.
+      size_t movable_begin = pre_loop_stmts.size();
+      while (movable_begin > 0 &&
+             IsMovableConsumerPrefixStmt(pre_loop_stmts[movable_begin - 1])) {
+        --movable_begin;
+      }
+
+      // Split non-movable pre-loop statements:
+      //   1) common pre-loop statements (kept outside ws if/else)
+      //   2) TMA issue + wait pairs:
+      //      - issue (tma_load side) -> producer branch
+      //      - wait  (mbarrier_wait) -> consumer branch
+      Array<Stmt> common_pre_stmts;
+      Array<Stmt> producer_prefix_stmts;
+      Array<Stmt> consumer_wait_prefix_stmts;
+      size_t i = 0;
+      while (i < movable_begin) {
+        if (i + 1 < movable_begin && ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
+            IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1])) {
+          producer_prefix_stmts.push_back(pre_loop_stmts[i]);
+          consumer_wait_prefix_stmts.push_back(pre_loop_stmts[i + 1]);
+          i += 2;
+          continue;
+        }
+        common_pre_stmts.push_back(pre_loop_stmts[i]);
+        ++i;
+      }
+      for (const auto &s : common_pre_stmts) {
+        new_seq.push_back(s);
+      }
+
+      auto MakeOptionalStmt = [](const Array<Stmt> &stmts) -> Optional<Stmt> {
+        if (stmts.empty()) {
+          return std::nullopt;
+        }
+        return stmts.size() == 1 ? Optional<Stmt>(stmts[0])
+                                 : Optional<Stmt>(SeqStmt(stmts));
+      };
+
+      Array<Stmt> consumer_prefix_stmts;
+      // Keep pure local init before waits to delay blocking until needed.
+      for (size_t j = movable_begin; j < pre_loop_stmts.size(); ++j) {
+        consumer_prefix_stmts.push_back(pre_loop_stmts[j]);
+      }
+      for (const auto &s : consumer_wait_prefix_stmts) {
+        consumer_prefix_stmts.push_back(s);
+      }
+      Optional<Stmt> consumer_prefix = MakeOptionalStmt(consumer_prefix_stmts);
+      Optional<Stmt> producer_prefix = MakeOptionalStmt(producer_prefix_stmts);
+
+      Optional<Stmt> ws_stmt = rebuilt_loop;
+      Optional<Stmt> producer_guard = std::nullopt;
+      Optional<Stmt> pre_guard = std::nullopt;
+      Optional<Stmt> post_guard = std::nullopt;
+
+      // Merge TMA-issue producer prefix into producer branch.
+      if (producer_prefix.defined()) {
         ICHECK(thread_iv_.defined());
+        Stmt rewritten = PCThreadIdxRewriter::Rewrite(
+            producer_prefix.value(), thread_iv_->var,
+            thread_iv_->var - consumer_thread_extent_, producer_thread_extent_,
+            /*do_shuffle=*/true);
+        if (ws_stmt.defined()) {
+          auto merged = TryPrependToProducerBranch(ws_stmt.value(), rewritten);
+          if (merged.defined()) {
+            ws_stmt = merged.value();
+          } else {
+            producer_guard =
+                IfThenElse(GE(thread_iv_->var, consumer_thread_extent_),
+                           rewritten);
+          }
+        } else {
+          producer_guard =
+              IfThenElse(GE(thread_iv_->var, consumer_thread_extent_), rewritten);
+        }
+      }
+
+      // Merge movable pre-loop suffix into consumer branch when possible.
+      if (consumer_prefix.defined()) {
+        if (ws_stmt.defined()) {
+          auto merged =
+              TryPrependToConsumerBranch(ws_stmt.value(), consumer_prefix.value());
+          if (merged.defined()) {
+            ws_stmt = merged.value();
+          } else {
+            ICHECK(thread_iv_.defined());
+            pre_guard =
+                IfThenElse(LT(thread_iv_->var, consumer_thread_extent_),
+                           consumer_prefix.value());
+          }
+        } else {
+          ICHECK(thread_iv_.defined());
+          pre_guard = IfThenElse(LT(thread_iv_->var, consumer_thread_extent_),
+                                 consumer_prefix.value());
+        }
+      }
+
+      // Keep post-loop statements on consumer threads.
+      if (!post_loop_stmts.empty()) {
         Stmt post_body = post_loop_stmts.size() == 1 ? post_loop_stmts[0]
                                                      : SeqStmt(post_loop_stmts);
-        Stmt guarded =
-            IfThenElse(LT(thread_iv_->var, consumer_thread_extent_), post_body);
-        new_seq.push_back(guarded);
+        bool merged = false;
+        if (ws_stmt.defined()) {
+          auto merged_stmt =
+              TryAppendToConsumerBranch(ws_stmt.value(), post_body);
+          if (merged_stmt.defined()) {
+            ws_stmt = merged_stmt.value();
+            merged = true;
+          }
+        }
+        if (!merged) {
+          ICHECK(thread_iv_.defined());
+          post_guard =
+              IfThenElse(LT(thread_iv_->var, consumer_thread_extent_), post_body);
+        }
+      }
+
+      if (producer_guard.defined()) {
+        new_seq.push_back(producer_guard.value());
+      }
+      if (pre_guard.defined()) {
+        new_seq.push_back(pre_guard.value());
+      }
+      if (ws_stmt.defined()) {
+        new_seq.push_back(ws_stmt.value());
+      }
+      if (post_guard.defined()) {
+        new_seq.push_back(post_guard.value());
       }
 
       if (new_seq.size() == 1)
@@ -664,6 +1133,7 @@ private:
   IterVar thread_iv_;
   PrimExpr
       consumer_thread_extent_; // Original thread extent (consumer warp count)
+  PrimExpr producer_thread_extent_ = IntImm(DataType::Int(32), 128);
   Optional<PrimExpr> updated_thread_extent_;
   bool need_update_thread_extent_ = false;
   bool ws_transformed_ = false;
