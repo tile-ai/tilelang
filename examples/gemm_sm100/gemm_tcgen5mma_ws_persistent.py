@@ -53,8 +53,12 @@ def gemm(
         if tx < 32:  # warp 0: issue tma
             for w in T.unroll(waves):
                 tile_id = sm_num * w + block_id
-                bx = (tile_id // group_size) % m_blocks
-                by = (tile_id % group_size) + (tile_id // group_size) // m_blocks * group_size
+                linear_bx = tile_id // n_blocks
+                linear_by = tile_id % n_blocks
+                group_id = linear_bx // group_size
+                group_offset = linear_bx % group_size
+                by = (linear_by + group_id) % n_blocks
+                bx = linear_bx
 
                 if bx * block_M < M and by * block_N < N:
                     for k in T.serial(k_blocks):
@@ -68,8 +72,12 @@ def gemm(
         elif tx < 64:  # warp 1: issue tcgen5
             for w in T.unroll(waves):
                 tile_id = sm_num * w + block_id
-                bx = (tile_id // group_size) % m_blocks
-                by = (tile_id % group_size) + (tile_id // group_size) // m_blocks * group_size
+                linear_bx = tile_id // n_blocks
+                linear_by = tile_id % n_blocks
+                group_id = linear_bx // group_size
+                group_offset = linear_bx % group_size
+                by = (linear_by + group_id) % n_blocks
+                bx = linear_bx
 
                 if bx * block_M < M and by * block_N < N:
                     T.mbarrier_wait_parity(tmem_empty[w & 1], ((w // 2) & 1) ^ 1)
@@ -102,8 +110,12 @@ def gemm(
         elif 128 <= tx < 256:  # warp 4~7: epilogue
             for w in T.unroll(waves):
                 tile_id = sm_num * w + block_id
-                bx = (tile_id // group_size) % m_blocks
-                by = (tile_id % group_size) + (tile_id // group_size) // m_blocks * group_size
+                linear_bx = tile_id // n_blocks
+                linear_by = tile_id % n_blocks
+                group_id = linear_bx // group_size
+                group_offset = linear_bx % group_size
+                by = (linear_by + group_id) % n_blocks
+                bx = linear_bx
 
                 if bx * block_M < M and by * block_N < N:
                     T.mbarrier_wait_parity(tmem_full[w & 1], (w // 2) & 1)
