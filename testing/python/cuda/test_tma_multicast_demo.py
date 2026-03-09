@@ -39,7 +39,7 @@ def make_tma_multicast_demo_kernel(M, N, block_M, block_N, cluster_mask):
             T.ceildiv(N, block_N),
             T.ceildiv(M, block_M),
             threads=128,
-            cluster_dims=(4,1,1),
+            cluster_dims=(4, 1, 1),
         ) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), "float16")
             T.copy(A[by * block_M, bx * block_N], A_shared, cluster_mask=cluster_mask)

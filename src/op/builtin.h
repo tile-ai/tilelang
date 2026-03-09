@@ -517,7 +517,6 @@ TVM_DLL const Op &warpgroup_fence_operand();
  */
 TVM_DLL const Op &get_cluster_id();
 
-
 /*!
  * \brief Return the number of blocks in the cluster.
  *
