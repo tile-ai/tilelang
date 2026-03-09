@@ -3,7 +3,7 @@
 This page describes two advanced data-movement features that are available on
 NVIDIA Hopper (SM90) and later: **TMA multicast** and **SM-to-SM cluster
 copy**. Both features are exposed through extensions to the existing `T.copy`
-operator and require a kernel launched with `cluster_size > 1`.
+operator and require a kernel launched with thread block cluster, i.e., with `cluster_dims != (1, 1, 1)`.
 
 Requirements:
 - CUDA Compute Capability ≥ 9.0 (Hopper / Blackwell / RTX 5090)
@@ -19,10 +19,10 @@ position inside the cluster), and all CTAs can observe each other's shared
 memory via the `shared::cluster` address space.
 
 ```python
-with T.Kernel(grid_x, grid_y, threads=128, cluster_size=4) as (bx, by):
+with T.Kernel(grid_x, grid_y, threads=128, cluster_dims=(4, 1, 1)) as (bx, by):
     rank  = T.block_rank_in_cluster()   # 0..3 within this cluster
     cid   = T.get_cluster_id()           # which cluster am I in
-    nctas = T.get_cluster_block_nums()   # always equals cluster_size (4)
+    nctas = T.get_cluster_block_nums()
     T.cluster_sync()                     # barrier across all CTAs in cluster
 ```
 
@@ -38,7 +38,7 @@ broadcasts one global tile to every participating CTA simultaneously**, saving
 repeated DRAM traffic when multiple CTAs in a cluster need the same data (e.g.,
 the same K-panel in a split-K GEMM).
 
-```
+```text
 Global memory ──TMA multicast──▶ shared memory (rank 0)
                               └─▶ shared memory (rank 1)   (same tile, no extra DRAM read)
                   TMA load    ──▶ shared memory (rank 2)   (independent tile)
@@ -74,7 +74,7 @@ def make_tma_multicast_kernel(M, N, block_M, block_N, cluster_mask):
             T.ceildiv(N, block_N),
             T.ceildiv(M, block_M),
             threads=128,
-            cluster_size=4,
+            cluster_dims=(4, 1, 1)
         ) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), "float16")
 
@@ -159,7 +159,7 @@ def make_cluster_copy_kernel(N: int):
         A: T.Tensor((N,), "float32"),
         B: T.Tensor((N,), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_size=2) as pid:
+        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src     = T.alloc_shared((N,), "float32")
             s_dst     = T.alloc_shared((N,), "float32")
             s_barrier = T.alloc_shared((1,), "uint64")
@@ -257,7 +257,7 @@ SM-to-SM copy (saving global-memory round trips).
 ```python
 @T.prim_func
 def split_k_gemm(A, B, C):
-    with T.Kernel(grid_x, grid_y, threads=256, cluster_size=4) as (bx, by):
+    with T.Kernel(grid_x, grid_y, threads=256, cluster_dims=(4, 1, 1)) as (bx, by):
         rank    = T.block_rank_in_cluster()
         A_s     = T.alloc_shared((BM, BK), "float16")
         B_s     = T.alloc_shared((BK, BN), "float16")
