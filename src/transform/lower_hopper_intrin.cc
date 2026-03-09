@@ -142,12 +142,14 @@ public:
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
           Array<Stmt> stmt_seq;
-          if (num_managed_barriers_ > 0) {
-            // Size must cover reserved slots [0, kReservedBarriers) plus all
-            // user-managed slots so that IDs never alias.
+          if (num_required_barriers_ > 0) {
+            // num_required_barriers_ already accounts for kReservedBarriers
+            // and covers the highest ID referenced by any barrier init,
+            // whether from create_list_of_mbarrier() or a direct
+            // ptx_init_barrier_thread_count() call.
             auto alloc_mbarrier =
                 Evaluate(Call(DataType::Handle(), builtin::create_barriers(),
-                              {num_managed_barriers_ + kReservedBarriers}));
+                              {num_required_barriers_}));
             stmt_seq.push_back(alloc_mbarrier);
           }
 
@@ -186,6 +188,7 @@ public:
           prefetch_calls_.clear();
           init_mbarrier_calls_.clear();
           num_managed_barriers_ = 0;
+          num_required_barriers_ = 0;
           return AttrStmt(op->node, op->attr_key, op->value, result);
         }
       }
@@ -216,6 +219,9 @@ public:
       // Offset by kReservedBarriers so user IDs begin after the reserved range.
       int barrier_base = num_managed_barriers_ + kReservedBarriers;
       num_managed_barriers_ += num_barriers;
+      // Track the total slots needed: highest assigned ID + 1.
+      num_required_barriers_ =
+          std::max(num_required_barriers_, barrier_base + num_barriers);
       for (int i = 0; i < num_barriers; i++) {
         PrimExpr mbarrier =
             Call(DataType::Handle(), get_mbarrier(), {barrier_base + i});
@@ -225,6 +231,16 @@ public:
       }
       return 0;
     } else if (call->op.same_as(builtin::ptx_init_barrier_thread_count())) {
+      // args[0] is get_mbarrier(id); extract id to size the allocation.
+      if (const auto *mbar_call = call->args[0].as<CallNode>()) {
+        if (mbar_call->op.same_as(get_mbarrier())) {
+          if (const auto *id = mbar_call->args[0].as<IntImmNode>()) {
+            // Slots needed = id + 1 (IDs are 0-based).
+            num_required_barriers_ =
+                std::max(num_required_barriers_, (int)(id->value + 1));
+          }
+        }
+      }
       init_mbarrier_calls_.push_back(Evaluate(tvm::ffi::GetRef<Call>(call)));
       return 0;
     } else {
@@ -259,7 +275,13 @@ public:
 private:
   Array<Stmt> prefetch_calls_;
   Array<Stmt> init_mbarrier_calls_;
+  // Tracks the next free user-barrier slot (offset within the user range).
   int num_managed_barriers_ = 0;
+  // Tracks 1 + the highest barrier ID referenced by any init call, across
+  // both create_list_of_mbarrier() and direct ptx_init_barrier_thread_count()
+  // paths. Used to size create_barriers() so every get_mbarrier(id) has a
+  // backing slot.
+  int num_required_barriers_ = 0;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
