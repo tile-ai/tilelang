@@ -349,9 +349,12 @@ public:
   int expect_tx_count_{0};
   std::vector<bool> expect_;
   std::vector<bool> is_cluster_;
+  std::vector<arith::IntSet> int_sets_;
+  std::vector<int> restore_barrier_ids_;
   bool has_simt_copy_{false};
   int if_depth_{0};
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
+  Map<Var, arith::IntSet> var_int_set_;
 };
 
 class ArriveThreadCountCollector : public IRVisitorWithAnalyzer {
