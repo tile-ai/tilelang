@@ -56,6 +56,8 @@
 #include "./common/attr.h"
 #include "./common/collector.h"
 #include "auto_schedule.h"
+#include "runtime/thread_storage_scope.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -1537,6 +1539,27 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
   LOG(FATAL);
 }
 
+class SimtCopyDetector : public StmtExprVisitor {
+public:
+  static bool Detect(const Stmt &stmt) {
+    SimtCopyDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.has_simt_copy_;
+  }
+
+private:
+  void VisitStmt_(const BufferStoreNode *op) final {
+    auto scope =
+        runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    if (scope.to_string() != "global") {
+      has_simt_copy_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool has_simt_copy_{false};
+};
+
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
 Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
                                           BarrierManager &barrier_manager,
@@ -1932,17 +1955,19 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
   // have statements
   Stmt if_then_else;
   if (wg0_has_stmts && wg1_has_stmts) {
-    // Both warpgroups exist: insert barriers for cross-warpgroup
-    // synchronization
-    // std::vector<Stmt> then_body_with_nreg{
-    //     Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {240, 1})),
-    //     then_body};
-    // std::vector<Stmt> else_body_with_nreg{
-    //     Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {24, 0})),
-    //     else_body};
-    // if_then_else = IfThenElse(condition, SeqStmt(then_body_with_nreg),
-    //                           SeqStmt(else_body_with_nreg));
-    if_then_else = IfThenElse(condition, then_body, else_body);
+    bool has_simt_copy = SimtCopyDetector::Detect(else_body);
+    if (has_simt_copy) {
+      if_then_else = IfThenElse(condition, then_body, else_body);
+    } else {
+      std::vector<Stmt> then_body_with_nreg{
+          Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {240, 1})),
+          then_body};
+      std::vector<Stmt> else_body_with_nreg{
+          Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {24, 0})),
+          else_body};
+      if_then_else = IfThenElse(condition, SeqStmt(then_body_with_nreg),
+                                SeqStmt(else_body_with_nreg));
+    }
   } else if (wg0_has_stmts) {
     // Only warpgroup 0 has statements, execute unconditionally
     if_then_else = then_body;
