@@ -81,9 +81,7 @@ def test_tma_store_cluster():
     expected = A.cpu().numpy()
 
     diff = np.abs(result - expected).max()
-    assert np.allclose(result, expected), (
-        f"tma_store_cluster copy failed: max diff = {diff}"
-    )
+    assert np.allclose(result, expected), f"tma_store_cluster copy failed: max diff = {diff}"
 
 
 if __name__ == "__main__":

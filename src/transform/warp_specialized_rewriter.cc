@@ -369,12 +369,14 @@ private:
         call->op.same_as(tma_load_multicast())) {
       auto mbar = makeGetBarrier(producer_barrier_idx_);
       auto arg0 = call->args[0].as<Call>();
-      // Check if this is a 1D TMA load (raw address, no descriptor, no multicast)
+      // Check if this is a 1D TMA load (raw address, no descriptor, no
+      // multicast)
       auto is_1d_tma_load =
           arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
           call->op.same_as(tma_load());
       if (call->op.same_as(tma_load_multicast())) {
-        // tma_load_multicast layout: [desc, mbar, smem_ptr, mask, coords..., eviction]
+        // tma_load_multicast layout: [desc, mbar, smem_ptr, mask, coords...,
+        // eviction]
         call.CopyOnWrite()->args.Set(1, mbar);
       } else if (is_1d_tma_load) {
         // 1D bulk copy layout: [smem_ptr, global_ptr, mbar, bytes, eviction]
