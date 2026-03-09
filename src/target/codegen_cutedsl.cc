@@ -530,6 +530,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     auto tmem_buffer = PrintExpr_(op->args[0]);
     auto num_cols = PrintExpr_(op->args[1]);
     stream << "tl.tmem_deallocate(" << tmem_buffer << ", " << num_cols << ")\n";
+  } else if (op->op.same_as(tl::ptx_release_allocation_lock())) {
+    ICHECK_EQ(op->args.size(), 0U);
+    PrintIndent();
+    stream << "tl.tmem_release_allocation_lock()\n";
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     // do nothing
   } else if (op->op.same_as(tl::tma_load())) {

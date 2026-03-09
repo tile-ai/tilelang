@@ -183,10 +183,16 @@ private:
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
     new_body.push_back(block->body);
+    Array<Stmt> dealloc_tmem_body;
+    dealloc_tmem_body.push_back(Evaluate(
+        Call(DataType::Handle(), tl::ptx_release_allocation_lock(), {})));
+    for (const auto &s : dealloc_tmem_calls_) {
+      dealloc_tmem_body.push_back(s);
+    }
     new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
-                                  dealloc_tmem_calls_.size() > 1
-                                      ? SeqStmt(dealloc_tmem_calls_)
-                                      : dealloc_tmem_calls_.back(),
+                                  dealloc_tmem_body.size() > 1
+                                      ? SeqStmt(dealloc_tmem_body)
+                                      : dealloc_tmem_body.back(),
                                   Stmt()));
 
     auto block_ptr = block.CopyOnWrite();

@@ -219,6 +219,11 @@ TIR_DEFINE_TL_BUILTIN(ptx_deallocate_tensor_memory)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(ptx_release_allocation_lock)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(ptx_mma_sm70)
     .set_num_inputs(13)
     .set_attr<TCallEffectKind>("TCallEffectKind",

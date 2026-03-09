@@ -1867,6 +1867,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::tmem_allocate");
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
     print_extern_call_stmt("tl::tmem_deallocate");
+  } else if (op->op.same_as(tl::ptx_release_allocation_lock())) {
+    print_extern_call_stmt("tl::tmem_release_allocation_lock");
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
