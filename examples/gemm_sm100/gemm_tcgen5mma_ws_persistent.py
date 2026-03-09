@@ -56,7 +56,6 @@ def gemm(
                 linear_bx = tile_id // n_blocks
                 linear_by = tile_id % n_blocks
                 group_id = linear_bx // group_size
-                group_offset = linear_bx % group_size
                 by = (linear_by + group_id) % n_blocks
                 bx = linear_bx
 
@@ -75,7 +74,6 @@ def gemm(
                 linear_bx = tile_id // n_blocks
                 linear_by = tile_id % n_blocks
                 group_id = linear_bx // group_size
-                group_offset = linear_bx % group_size
                 by = (linear_by + group_id) % n_blocks
                 bx = linear_bx
 
@@ -113,7 +111,6 @@ def gemm(
                 linear_bx = tile_id // n_blocks
                 linear_by = tile_id % n_blocks
                 group_id = linear_bx // group_size
-                group_offset = linear_bx % group_size
                 by = (linear_by + group_id) % n_blocks
                 bx = linear_bx
 

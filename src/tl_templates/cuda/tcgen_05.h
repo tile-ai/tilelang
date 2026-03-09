@@ -27,7 +27,8 @@ TL_DEVICE void tmem_deallocate(uint32_t *tmem_ptr, int num_columns) {
 }
 
 TL_DEVICE void tmem_release_allocation_lock() {
-  asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned; " ::);
+  asm volatile(
+      "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned; " ::);
 }
 
 inline void __device__ fence_view_async_tmem_load() {
