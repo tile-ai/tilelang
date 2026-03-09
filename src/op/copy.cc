@@ -932,6 +932,9 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                T.layout_map, analyzer, /*buffer_oob=*/false,
                                /*in_pipeline=*/T.in_pipeline);
   if (dst_block.defined()) {
+    ICHECK(TargetHasBulkCopy(target))
+        << "T.copy with dst_block requires cluster-copy support (CUDA SM90+). "
+        << "Got target=" << target;
     return LowerClusterCopy(T, analyzer);
   }
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
