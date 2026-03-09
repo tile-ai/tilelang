@@ -115,7 +115,8 @@ class TensorCoreIntrinEmitter:
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        self.k_dim = 256 // a_dtype.bits
+        # MMA k_dim caps at 32 (m16n8k32 is the widest K for FP8/FP4)
+        self.k_dim = min(256 // a_dtype.bits, 32)
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size

@@ -49,7 +49,7 @@ def get_ldmatrix_offset(
         else:
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
             return new_row_idx * stride + new_col_idx
-    elif dtype_bits == 8:
+    elif dtype_bits == 8 or dtype_bits == 4:
         if matrix == "B" and transposed:
             transform_func = ldmatrix_32x16_to_shared_16x32_layout_b
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
@@ -59,7 +59,7 @@ def get_ldmatrix_offset(
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
             return new_row_idx * stride + new_col_idx
         else:
-            raise ValueError("ldmatrix only supports B transposed and A non-transposed for int8")
+            raise ValueError("ldmatrix only supports B transposed and A non-transposed for int8/fp4")
     else:
         raise ValueError(f"Unsupported dtype {dtype}")
 
