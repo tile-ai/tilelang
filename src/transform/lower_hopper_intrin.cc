@@ -145,9 +145,9 @@ public:
           if (num_managed_barriers_ > 0) {
             // Size must cover reserved slots [0, kReservedBarriers) plus all
             // user-managed slots so that IDs never alias.
-            auto alloc_mbarrier = Evaluate(
-                Call(DataType::Handle(), builtin::create_barriers(),
-                     {num_managed_barriers_ + kReservedBarriers}));
+            auto alloc_mbarrier =
+                Evaluate(Call(DataType::Handle(), builtin::create_barriers(),
+                              {num_managed_barriers_ + kReservedBarriers}));
             stmt_seq.push_back(alloc_mbarrier);
           }
 

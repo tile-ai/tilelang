@@ -931,6 +931,21 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
                                T.layout_map, analyzer, /*buffer_oob=*/false,
                                /*in_pipeline=*/T.in_pipeline);
+  // cluster_mask is only honored in the descriptor-based TMA path (kBulkLoad).
+  // Any other instruction type silently drops the multicast semantics and
+  // causes masked CTAs to fall back to per-CTA loads, potentially changing
+  // results when different ranks require different source coordinates.
+  {
+    int64_t cluster_mask = GetClusterMask();
+    ICHECK(cluster_mask == 0 || copy_inst == CopyInst::kBulkLoad)
+        << "cluster_mask=0x" << std::hex << cluster_mask
+        << " requires descriptor-based TMA (kBulkLoad), but this copy was "
+           "routed to copy_inst="
+        << static_cast<int>(copy_inst)
+        << ". Ensure the copy meets TMA bulk-load constraints. src="
+        << src->name << " (scope=" << src.scope() << "), dst=" << dst->name
+        << " (scope=" << dst.scope() << ").";
+  }
   if (dst_block.defined()) {
     ICHECK(TargetHasBulkCopy(target))
         << "T.copy with dst_block requires cluster-copy support (CUDA SM90+). "
@@ -1995,6 +2010,18 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
                                CopyInst copy_inst) const {
   ICHECK(copy_inst == CopyInst::kBulkLoad1D ||
          copy_inst == CopyInst::kBulkStore1D);
+
+  // 1D TMA uses cp.async.bulk which has no multicast variant; a descriptor-
+  // based bulk load (kBulkLoad) is required instead.
+  {
+    int64_t cluster_mask = GetClusterMask();
+    ICHECK(cluster_mask == 0)
+        << "cluster_mask=0x" << std::hex << cluster_mask
+        << " requires descriptor-based TMA (kBulkLoad); the 1D bulk-copy path "
+           "(kBulkLoad1D) does not support multicast. src="
+        << src->name << " (scope=" << src.scope() << "), dst=" << dst->name
+        << " (scope=" << dst.scope() << ").";
+  }
 
   // Add 1D TMA copy when the global and shared memory is contiguous
   // Check if shared_tensor->name is present in T.buffer_var_gemm
