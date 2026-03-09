@@ -1124,53 +1124,19 @@ private:
 
     auto root = tvm::ffi::GetRef<For>(op);
 
-    // Check if the loop stores into local buffers.
-    // For example:
-    //   for i in T.Parallel(1024):
-    //     A_local[i] = A_global[i]
-    // Here, A_local is a register-local buffer held independently by each
-    // thread, so explicit thread binding is not required.
-    bool store_into_local = false;
-    PostOrderVisit(root, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (IsLocalBuffer(store->buffer)) {
-          store_into_local = true;
-        }
-      }
-    });
-
-    // Check if the loop only manipulates "local" buffers.
-    // for i in T.Parallel(1024):
-    //     A_local[i] = B_local[i]
-    // This indicates register usage and justifies skipping thread binding.
-    bool local_register_only = true;
+    // Check if ALL BufferStore targets in this loop are local buffers.
+    // If so, skip thread partitioning (each thread runs the full loop independently).
+    // Otherwise, the loop needs thread partitioning.
+    bool all_stores_local = true;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
         if (!IsLocalBuffer(store->buffer)) {
-          local_register_only = false;
-        }
-      } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (!IsLocalBuffer(load->buffer)) {
-          local_register_only = false;
-        }
-      } else if (const auto *call = obj.as<CallNode>()) {
-        if (call->op.same_as(builtin::tvm_access_ptr())) {
-          // tvm_access_ptr format: (dtype, data, offset, extent, rw_mask)
-          auto buffer_var = call->args[1].as<VarNode>();
-          if (buffer_var) {
-            Var var = tvm::ffi::GetRef<Var>(buffer_var);
-            auto it = buffer_map_.find(var);
-            if (it != buffer_map_.end() && !IsLocalBuffer(it->second)) {
-              local_register_only = false;
-            }
-          }
+          all_stores_local = false;
         }
       }
     });
 
-    // Determine if this is a true parallel loop requiring thread partitioning.
-    // Skip partitioning for loops that only operate on local/register buffers.
-    bool parallel_loop = !local_register_only && !store_into_local;
+    bool parallel_loop = !all_stores_local;
 
     // Check if there are non-local buffer accesses (for vectorization decision)
     bool has_non_local = false;
