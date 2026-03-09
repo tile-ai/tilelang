@@ -101,15 +101,42 @@ private:
     loop_extents = old_loop_evtents;
   }
 
-  // For if/else branches (mutually exclusive), count only the then branch.
-  // Both branches always transfer the same number of bytes (same tile size),
-  // so counting either one gives the correct mbarrier expect_tx byte count.
+  // IfThenElse branches are mutually exclusive: exactly one executes at
+  // runtime, so the single unconditional mbarrier_expect_tx that the rewriter
+  // injects must match the byte count for *whichever* branch runs.  When an
+  // else branch is present, collect both sides independently (preserving the
+  // loop_extents context), verify they carry the same byte count, and advance
+  // the running total by that count.  Asymmetric arms (e.g. a tail partition
+  // or a passive multicast receiver that moves a different number of bytes)
+  // cannot be represented by a single expect_tx and will fail the check below.
   void VisitStmt_(const IfThenElseNode *op) final {
-    if (op->else_case.defined()) {
-      StmtExprVisitor::VisitStmt(op->then_case);
-    } else {
+    if (!op->else_case.defined()) {
+      // No else arm: standard traversal visits only the then branch.
       StmtExprVisitor::VisitStmt_(op);
+      return;
     }
+
+    // Save the running total accumulated by outer context.
+    PrimExpr base = bulk_copy_bytes;
+
+    // Collect then branch.
+    bulk_copy_bytes = 0;
+    StmtExprVisitor::VisitStmt(op->then_case);
+    PrimExpr then_bytes = bulk_copy_bytes;
+
+    // Collect else branch.
+    bulk_copy_bytes = 0;
+    StmtExprVisitor::VisitStmt(op->else_case.value());
+    PrimExpr else_bytes = bulk_copy_bytes;
+
+    ICHECK(StructuralEqual()(then_bytes, else_bytes))
+        << "IfThenElse branches carry different TMA byte counts: "
+        << "then=" << then_bytes << " else=" << else_bytes
+        << ".  A single unconditional mbarrier_expect_tx cannot represent both "
+           "paths.  Ensure both arms of this branch transfer the same tile or "
+           "restructure so expect_tx is issued per-branch.";
+
+    bulk_copy_bytes = base + then_bytes;
   }
 
   PrimExpr bulk_copy_bytes = 0;
