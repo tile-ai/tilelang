@@ -326,12 +326,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # LowerHopperIntrin).  Target-level TMA availability alone is not
     # sufficient: non-TMA kernels on Hopper would otherwise pick up
     # unnecessary padding, inflating SMEM usage and reducing occupancy.
-    shared_align_bytes = (
-        128
-        if allow_tma_lower(pass_ctx=pass_ctx, target=target)
-        and _mod_uses_tma_barriers(mod)
-        else 16
-    )
+    shared_align_bytes = 128 if allow_tma_lower(pass_ctx=pass_ctx, target=target) and _mod_uses_tma_barriers(mod) else 16
 
     mod = tilelang.transform.MergeSharedMemoryAllocations(
         enable_aggressive_merge=enable_aggressive_merge,
