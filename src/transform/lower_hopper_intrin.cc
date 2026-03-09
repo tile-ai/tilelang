@@ -206,9 +206,11 @@ public:
     } else if (call->op.same_as(create_list_of_mbarrier())) {
       // ICHECK(init_mbarrier_calls_.empty());
       int num_barriers = static_cast<int>(call->args.size());
+      int barrier_base = num_managed_barriers_;
       num_managed_barriers_ += num_barriers;
       for (int i = 0; i < num_barriers; i++) {
-        PrimExpr mbarrier = Call(DataType::Handle(), get_mbarrier(), {i});
+        PrimExpr mbarrier =
+            Call(DataType::Handle(), get_mbarrier(), {barrier_base + i});
         init_mbarrier_calls_.push_back(Evaluate(
             Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
                  {mbarrier, call->args[i]})));

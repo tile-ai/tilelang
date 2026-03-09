@@ -23,6 +23,7 @@
  */
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/pattern.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -160,18 +161,33 @@ private:
     if (op->condition.as<CallNode>()) {
       flag = op->condition.as<CallNode>()->op.same_as(tl_shuffle_elect());
     }
-    // Only trigger for EQ conditions that involve the thread variable
-    // (directly or offset like threadIdx.x - 128 == 0 after warp-spec
-    // remapping). Runtime function-call conditions such as
-    // block_rank_in_cluster() == min_rank must NOT trigger byte injection:
-    // they don't involve any thread variable.
+    // Only trigger for EQ conditions that select exactly one threadIdx.x
+    // value. The condition must be of the form (threadIdx.x - c == 0), i.e.,
+    // linear in threadIdx.x with coefficient ±1.
+    //
+    // Predicates like (threadIdx.x % 32) == 0 or (threadIdx.x & 31) == 0
+    // also contain threadIdx.x inside an EQNode but are satisfied by multiple
+    // threads. Injecting mbarrier_expect_tx under such guards overcounts
+    // expected transactions and deadlocks the corresponding mbarrier_wait.
+    //
+    // Runtime conditions such as get_cluster_block_rank() == min_rank do not
+    // involve the thread variable at all and must also be excluded.
     bool is_thread_eq = false;
     if (auto eq = op->condition.as<EQNode>()) {
       if (thread_var_.defined()) {
-        auto f_uses_thread = [this](const VarNode *v) {
-          return v == thread_var_->var.get();
-        };
-        is_thread_eq = UsesVar(op->condition, f_uses_thread);
+        // Compute lhs - rhs and check if it is affine in threadIdx.x with
+        // coefficient exactly ±1. DetectLinearEquation returns [coef, offset]
+        // when the expression equals coef*var + offset; an empty array means
+        // the expression is not linear in the variable (e.g. involves mod or
+        // bitwise ops).
+        PrimExpr diff = eq->a - eq->b;
+        Array<PrimExpr> coefs =
+            arith::DetectLinearEquation(diff, {thread_var_->var});
+        if (coefs.size() == 2) {
+          if (auto imm = coefs[0].as<IntImmNode>()) {
+            is_thread_eq = (imm->value == 1 || imm->value == -1);
+          }
+        }
       }
     }
     if (is_thread_eq || flag) {

@@ -661,14 +661,10 @@ private:
       return call;
     }
     if (op->op.same_as(tl::tma_store_cluster())) {
-      // SM-to-SM bulk async copy: only suppress swizzle transformation on the
-      // access pointers (in_tma_context_), but do NOT set has_tma_ because
-      // this operation does not use the TMA hardware engine and must not
-      // trigger warp specialization.
-      in_tma_context_ = true;
-      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
-      in_tma_context_ = false;
-      return call;
+      // SM-to-SM bulk async copy does not use a tensor-map descriptor, so
+      // shared-memory swizzle must still be reflected in pointer/index
+      // remapping.
+      return Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
 
     if (is_ptx_) {
