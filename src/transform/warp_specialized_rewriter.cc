@@ -365,14 +365,17 @@ public:
 private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+        call->op.same_as(tma_load_multicast())) {
       auto mbar = makeGetBarrier(producer_barrier_idx_);
       auto arg0 = call->args[0].as<Call>();
       // Check if this is a 1D TMA load
       auto is_1d_tma_load =
           arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
           call->op.same_as(tma_load());
-      if (is_1d_tma_load) {
+      if (call->op.same_as(tma_load_multicast())) {
+        call.CopyOnWrite()->args.Set(1, mbar);
+      } else if (is_1d_tma_load) {
         call.CopyOnWrite()->args.Set(2, mbar);
       } else {
         Call access_ptr = Downcast<Call>(call->args[2]);
