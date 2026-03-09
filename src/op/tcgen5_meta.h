@@ -147,6 +147,8 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
       return static_cast<uint32_t>(0);
     } else if (dtype.is_float8_e5m2fnuz() || dtype.is_float8_e5m2()) {
       return static_cast<uint32_t>(1);
+    } else if (dtype.is_float4_e2m1fn()) {
+      return static_cast<uint32_t>(2);
     } else if (dtype.is_int() && dtype.bits() == 8) {
       return static_cast<uint32_t>(1);
     } else if (dtype.is_uint() && dtype.bits() == 8) {

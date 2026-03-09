@@ -142,6 +142,16 @@ TL_DEVICE void tcgen05mma_ts<DataType::kFloat8_e5m2>(
                                         desc_val, mask0, mask1, mask2, mask3);
 }
 
+// FP4 (e2m1) uses same f8f6f4 instruction kind as FP8
+template <>
+TL_DEVICE void tcgen05mma_ts<DataType::kFloat4_e2m1fn>(
+    uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ts<DataType::kFloat8_e4m3>(tmem_a, desc_b, tmem_c, scalec,
+                                        desc_val, mask0, mask1, mask2, mask3);
+}
+
 // F16/BF16 instruction kind (maps to kind::f16)
 template <>
 TL_DEVICE void tcgen05mma_ss<DataType::kFloat16>(
@@ -243,6 +253,16 @@ TL_DEVICE void tcgen05mma_ss<DataType::kFloat8_e4m3>(
 
 template <>
 TL_DEVICE void tcgen05mma_ss<DataType::kFloat8_e5m2>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ss<DataType::kFloat8_e4m3>(desc_a, desc_b, tmem_c, scalec,
+                                        desc_val, mask0, mask1, mask2, mask3);
+}
+
+// FP4 (e2m1) uses same f8f6f4 instruction kind as FP8
+template <>
+TL_DEVICE void tcgen05mma_ss<DataType::kFloat4_e2m1fn>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
@@ -357,6 +377,16 @@ TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat8_e4m3>(
 
 template <>
 TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat8_e5m2>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ws_ss<DataType::kFloat8_e4m3>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+// FP4 (e2m1) ws, same f8f6f4 instruction kind
+template <>
+TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat4_e2m1fn>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
