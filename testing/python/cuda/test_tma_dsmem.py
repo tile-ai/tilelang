@@ -30,15 +30,10 @@ def make_store_cluster_kernel(N: int):
         with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((N,), "float32")
             s_dst = T.alloc_shared((N,), "float32")
-            s_barrier = T.alloc_shared((1,), "uint64")
+            s_barrier = T.alloc_cluster_barrier([1])
 
             T.fill(s_src, 0.0)
             T.fill(s_dst, 0.0)
-
-            # Every CTA initialises its own barrier: expect 1 arrival
-            # carrying N*4 bytes (the cp.async.bulk signals on completion).
-            if T.get_thread_binding() == 0:
-                T.mbarrier_init(s_barrier[0], 1)
 
             T.cluster_sync()
 

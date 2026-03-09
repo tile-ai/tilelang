@@ -162,14 +162,10 @@ def make_cluster_copy_kernel(N: int):
         with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src     = T.alloc_shared((N,), "float32")
             s_dst     = T.alloc_shared((N,), "float32")
-            s_barrier = T.alloc_shared((1,), "uint64")
+            s_barrier = T.alloc_cluster_barrier([1])
 
             T.fill(s_src, 0.0)
             T.fill(s_dst, 0.0)
-
-            # Each CTA initialises its own barrier: 1 expected arrival.
-            if T.get_thread_binding() == 0:
-                T.mbarrier_init(s_barrier[0], 1)
 
             T.cluster_sync()
 
@@ -226,8 +222,7 @@ overhead.
 ### Notes
 
 - Both paths require `src` and `dst` to be in `shared` or `shared.dyn` scope.
-- The mbarrier must be allocated with `T.alloc_shared((count,), "uint64")` and
-  initialised with `T.mbarrier_init` before use.
+- The mbarrier must be allocated with `T.alloc_cluster_barrier([arrive_count])`.
 - `T.cluster_sync()` after allocation but before the copy is required to ensure
   all CTAs have reached the barrier-init barrier before any data is pushed.
 - `dst_block` may be a compile-time integer or a runtime `tir.PrimExpr`.
@@ -242,7 +237,7 @@ overhead.
 | `T.block_rank_in_cluster()` | `int32` | Block rank (0-indexed) within the cluster |
 | `T.get_cluster_block_nums()` | `int32` | Total number of CTAs in the cluster |
 | `T.cluster_sync()` | — | Barrier synchronisation across all cluster CTAs |
-| `T.mbarrier_init(bar, count)` | — | Initialise an mbarrier for `count` arrivals |
+| `T.alloc_cluster_barrier([count])` | `Buffer` | Allocate and initialise an mbarrier for `count` arrivals |
 | `T.mbarrier_arrive(bar)` | — | Signal one arrival on an mbarrier |
 | `T.mbarrier_wait_parity(bar, parity)` | — | Wait until `bar` flips to `parity` |
 
@@ -263,7 +258,7 @@ def split_k_gemm(A, B, C):
         B_s     = T.alloc_shared((BK, BN), "float16")
         C_f     = T.alloc_fragment((BM, BN), "float32")
         C_s     = T.alloc_shared((BM, BN), "float32")
-        barrier = T.alloc_shared((1,), "uint64")
+        barrier = T.alloc_cluster_barrier([3])
         T.clear(C_f)
 
         # Phase 1: each CTA loads its K-slice; A is multicast to rank 0 and 1.
@@ -285,10 +280,6 @@ def split_k_gemm(A, B, C):
         C_parts = T.alloc_shared((4, BM, BN), "float32")  # one slot per rank
         T.copy(C_f, C_parts[rank])
 
-        # Only rank 0 needs its barrier initialised (it is the sole consumer).
-        # Arrival count = 3: ranks 1, 2, and 3 each signal exactly once.
-        if T.get_thread_binding() == 0 and rank == 0:
-            T.mbarrier_init(barrier[0], 3)
         T.cluster_sync()
 
         if rank != 0:

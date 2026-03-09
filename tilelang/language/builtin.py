@@ -424,25 +424,6 @@ def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_init(mbarrier: int | PrimExpr | tir.Call, arrive_count: int | PrimExpr):
-    """Initialize a memory barrier.
-
-    Args:
-        mbarrier: The memory barrier to initialize
-        arrive_count: The expected arrival count
-    """
-    if isinstance(mbarrier, (tir.Call, tir.BufferLoad)):
-        mbarrier = mbarrier
-    elif isinstance(mbarrier, (tir.PrimExpr, int)):
-        mbarrier = _get_mbarrier(mbarrier)
-    elif isinstance(mbarrier, tir.Buffer):
-        mbarrier = tir.BufferLoad(mbarrier, [0])
-    else:
-        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
-
-    return tir.call_intrin("handle", tir.op.Op.get("tir.ptx_init_barrier_thread_count"), mbarrier, arrive_count)
-
-
 def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
     """Arrive at memory barrier.
 
