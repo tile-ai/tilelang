@@ -39,9 +39,11 @@ TL_DEVICE void tma_load_multicast(void *smem_ptr, void *gmem_ptr,
 }
 
 // Generic SM-to-SM async bulk copy via cp.async.bulk.shared::cluster
+template <typename BarrierType = uint64_t>
 TL_DEVICE void tma_store_cluster(void *dst, void *src, int dst_cta,
-                                 uint32_t size_bytes, uint64_t &bar) {
-  uint32_t mbarrier_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&bar));
+                                 uint32_t size_bytes, BarrierType &bar) {
+  uint32_t mbarrier_ptr = static_cast<uint32_t>(
+      __cvta_generic_to_shared(reinterpret_cast<uint64_t *>(&bar)));
   uint32_t src_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(src));
   uint32_t dst_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
 

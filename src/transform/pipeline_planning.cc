@@ -369,11 +369,6 @@ private:
         this->VisitExpr(op->args[i]);
       }
     } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
-      // mbarrier_wait_parity may take either a BufferLoad (preferred, allows
-      // linking to associated async dependencies) or a target-specific handle
-      // expression (e.g. tl.get_mbarrier(id)). For the latter case, we cannot
-      // associate the barrier with a concrete Buffer, so we conservatively
-      // fall back to normal traversal.
       if (const auto *load = args[0].as<BufferLoadNode>()) {
         Buffer mbar_buf = load->buffer;
         auto buffer_reads =
@@ -385,13 +380,19 @@ private:
                         buffer_reads->second.end());
         }
         if (buffer_writes != chain_builder_.mbar_to_buffer_writes_.end()) {
-          writes_.insert(
-              writes_.end(),
-              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).begin(),
-              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).end());
+          writes_.insert(writes_.end(), buffer_writes->second.begin(),
+                         buffer_writes->second.end());
         }
       } else {
-        StmtExprVisitor::VisitExpr_(op);
+        // Handle-based mbarrier (e.g. get_mbarrier(id)): cannot resolve to a
+        // concrete Buffer.  Conservatively attach all known async buffer
+        // dependencies so the wait is not treated as dependency-free.
+        for (const auto &[_, regions] : chain_builder_.mbar_to_buffer_reads_) {
+          reads_.insert(reads_.end(), regions.begin(), regions.end());
+        }
+        for (const auto &[_, regions] : chain_builder_.mbar_to_buffer_writes_) {
+          writes_.insert(writes_.end(), regions.begin(), regions.end());
+        }
       }
     } else {
       StmtExprVisitor::VisitExpr_(op);
