@@ -56,6 +56,9 @@ struct LowerArgs {
   // Map from LetStmt variable to its bound expression, for resolving
   // fragment buffer accesses through let bindings
   Map<Var, PrimExpr> let_var_to_expr;
+  // Whether the current TileOp is nested inside a pipelined loop
+  // (i.e. a surrounding loop annotated with num_stages > 0).
+  bool in_pipeline = false;
 };
 
 struct LayoutInferArgs {
@@ -68,6 +71,9 @@ struct LayoutInferArgs {
   // Map from LetStmt variable to its bound expression, for resolving
   // fragment buffer accesses through let bindings
   Map<Var, PrimExpr> let_var_to_expr;
+  // Whether the current TileOp is nested inside a pipelined loop
+  // (i.e. a surrounding loop annotated with num_stages > 0).
+  bool in_pipeline = false;
 };
 
 class TileOperator;

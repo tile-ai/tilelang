@@ -32,6 +32,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <unordered_map>
 #include <utility>
 
 #include "../op/builtin.h"
@@ -223,6 +224,21 @@ private:
             const_int_bound->max_value - const_int_bound->min_value + 1;
         UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
         pending_tma_ops_.clear();
+      } else if (call->op.same_as(builtin::ptx_cp_async_barrier()) ||
+                 call->op.same_as(tl::ptx_cp_async_barrier_noinc())) {
+        // Under warp specialization, the producer→consumer dependency may be
+        // released with cp.async.mbarrier.arrive instead of mbarrier.arrive.
+        // Treat this as a barrier release point for preceding TMA ops so we
+        // can correctly associate tma_load/expect_tx with the right barrier.
+        PrimExpr barrier_id = call->args[0];
+        for (const auto &tma_call : pending_tma_ops_) {
+          tma_op_to_barrier_id_.Set(tma_call, barrier_id);
+        }
+        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+        auto extent =
+            const_int_bound->max_value - const_int_bound->min_value + 1;
+        UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
+        pending_tma_ops_.clear();
       } else if (call->op.same_as(builtin::ptx_wait_barrier())) {
         PrimExpr barrier_id = call->args[0];
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
@@ -260,7 +276,6 @@ public:
     std::vector<bool> clear_zero_list(expect_tx_count_, false);
     int zero_idx = -1;
     int zero_count = 0;
-
     for (auto v : sequence) {
       if (v == 0) {
         zero_count += 1;
@@ -268,21 +283,6 @@ public:
       } else {
         if (zero_count == 1) {
           clear_zero_list[zero_idx] = expect_[zero_idx] && !has_simt_copy_;
-          if (clear_zero_list[zero_idx] == false) {
-            int begin = int_sets_[zero_idx].min().as<IntImmNode>()->value;
-            int end = int_sets_[zero_idx].max().as<IntImmNode>()->value;
-            for (int i = begin; i <= end; ++i) {
-              restore_barrier_ids_.push_back(i);
-            }
-          }
-        } else {
-          for (int i{zero_idx}; i > zero_idx - zero_count; --i) {
-            int begin = int_sets_[i].min().as<IntImmNode>()->value;
-            int end = int_sets_[i].max().as<IntImmNode>()->value;
-            for (int i = begin; i <= end; ++i) {
-              restore_barrier_ids_.push_back(i);
-            }
-          }
         }
         zero_count = 0;
       }
@@ -291,23 +291,12 @@ public:
     return clear_zero_list;
   }
 
-  std::vector<int> GetRestoreBarrierIds() { return restore_barrier_ids_; }
-
-  void VisitStmt_(const ForNode *op) final {
-    var_int_set_.Set(op->loop_var,
-                     arith::IntSet::FromMinExtent(op->min, op->extent));
-    IRVisitorWithAnalyzer::VisitStmt_(op);
-  }
-
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(mbarrier_expect_tx())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (tma_op_to_barrier_id_.count(call_ref)) {
-        PrimExpr e = tma_op_to_barrier_id_[call_ref].as<CallNode>()->args[0];
-        auto int_set = arith::EvalSet(e, var_int_set_);
         expect_.push_back(if_depth_ == 1);
         sequence.push_back(0);
-        int_sets_.push_back(int_set);
         expect_tx_count_ += 1;
       }
     } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
@@ -333,22 +322,131 @@ public:
   int expect_tx_count_{0};
   std::vector<bool> expect_;
   bool has_simt_copy_{false};
-  std::vector<int> restore_barrier_ids_;
   int if_depth_{0};
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
-  arith::Analyzer *analyzer_{};
+};
+
+class ArriveThreadCountCollector : public IRVisitorWithAnalyzer {
+public:
+  ArriveThreadCountCollector() = default;
+
+  const std::unordered_map<int, int> &barrier_thread_counts() const {
+    return barrier_thread_counts_;
+  }
+
+private:
+  PrimExpr NormalizeBarrierExpr(const PrimExpr &barrier_expr) const {
+    if (const auto *call = barrier_expr.as<CallNode>()) {
+      if (call->op.same_as(get_mbarrier())) {
+        ICHECK_EQ(call->args.size(), 1);
+        return call->args[0];
+      }
+    }
+    return barrier_expr;
+  }
+
+  int GetCurrentThreadCount() {
+    if (inside_elect_if_) {
+      return 1;
+    }
+    if (!thread_var_.defined()) {
+      return 1;
+    }
+    auto bound = analyzer_.const_int_bound(thread_var_);
+    int64_t extent = bound->max_value - bound->min_value + 1;
+    return static_cast<int>(std::max<int64_t>(extent, 1));
+  }
+
+  void UpdateBarrierThreadCount(const PrimExpr &barrier_expr,
+                                int thread_count) {
+    PrimExpr normalized_barrier_expr = NormalizeBarrierExpr(barrier_expr);
+
+    if (const auto *imm = normalized_barrier_expr.as<IntImmNode>()) {
+      int id = static_cast<int>(imm->value);
+      auto it = barrier_thread_counts_.find(id);
+      if (it == barrier_thread_counts_.end()) {
+        barrier_thread_counts_[id] = thread_count;
+      } else {
+        it->second = std::max(it->second, thread_count);
+      }
+      return;
+    }
+
+    auto int_set = arith::EvalSet(normalized_barrier_expr, var_int_set_);
+    const auto *min_imm = int_set.min().as<IntImmNode>();
+    const auto *max_imm = int_set.max().as<IntImmNode>();
+    if (!min_imm || !max_imm) {
+      return;
+    }
+    int begin = static_cast<int>(min_imm->value);
+    int end = static_cast<int>(max_imm->value);
+    for (int id = begin; id <= end; ++id) {
+      auto it = barrier_thread_counts_.find(id);
+      if (it == barrier_thread_counts_.end()) {
+        barrier_thread_counts_[id] = thread_count;
+      } else {
+        it->second = std::max(it->second, thread_count);
+      }
+    }
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "threadIdx.x") {
+        thread_var_ = iv;
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    var_int_set_.Set(op->loop_var,
+                     arith::IntSet::FromMinExtent(op->min, op->extent));
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    bool is_elect_if = false;
+    if (const auto *call = op->condition.as<CallNode>()) {
+      is_elect_if = call->op.same_as(tl_shuffle_elect());
+    }
+    if (is_elect_if) {
+      bool old_inside = inside_elect_if_;
+      inside_elect_if_ = true;
+      IRVisitorWithAnalyzer::VisitStmt(op->then_case);
+      inside_elect_if_ = old_inside;
+      if (op->else_case.defined()) {
+        IRVisitorWithAnalyzer::VisitStmt(op->else_case.value());
+      }
+      return;
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::ptx_arrive_barrier()) ||
+        op->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+        op->op.same_as(builtin::ptx_cp_async_barrier()) ||
+        op->op.same_as(tl::ptx_cp_async_barrier_noinc())) {
+      ICHECK_GE(op->args.size(), 1);
+      UpdateBarrierThreadCount(op->args[0], GetCurrentThreadCount());
+    }
+    IRVisitorWithAnalyzer::VisitExpr_(op);
+  }
+
+  IterVar thread_var_;
+  bool inside_elect_if_{false};
   Map<Var, arith::IntSet> var_int_set_;
-  std::vector<arith::IntSet> int_sets_;
+  std::unordered_map<int, int> barrier_thread_counts_;
 };
 
 class BarrierCreationRewriter : public StmtExprMutator {
 public:
-  BarrierCreationRewriter(std::vector<int> restore_barrier_ids,
-                          PrimExpr producer_thread_extent,
+  BarrierCreationRewriter(std::unordered_map<int, int> barrier_thread_counts,
                           int ensure_min_count = 0,
                           PrimExpr default_barrier_thread_count = 1)
-      : restore_barrier_ids_(std::move(restore_barrier_ids)),
-        producer_thread_extent_(std::move(producer_thread_extent)),
+      : barrier_thread_counts_(std::move(barrier_thread_counts)),
         ensure_min_count_(ensure_min_count),
         default_barrier_thread_count_(std::move(default_barrier_thread_count)) {
   }
@@ -359,35 +457,27 @@ public:
       size_t need_n =
           std::max<size_t>(cur_n, static_cast<size_t>(ensure_min_count_));
 
-      // Mark barriers to restore across the full needed length, not just the
-      // original length, so newly appended entries can be restored as well.
-      std::vector<bool> replace(need_n, false);
-      for (auto &id : restore_barrier_ids_) {
-        if (id >= 0 && static_cast<size_t>(id) < replace.size()) {
-          replace[id] = true;
-        }
-      }
-
       Array<PrimExpr> new_args;
       new_args.reserve(need_n);
 
-      // Preserve/override existing entries
+      // Preserve existing entries unless we have explicit arrive-domain counts.
       for (size_t i{0}; i < cur_n; ++i) {
-        if (replace[i]) {
-          new_args.push_back(producer_thread_extent_);
+        auto it = barrier_thread_counts_.find(static_cast<int>(i));
+        if (it != barrier_thread_counts_.end()) {
+          new_args.push_back(Integer(it->second));
         } else {
           new_args.push_back(op->args[i]);
         }
       }
-      // Append additional barriers if required
+      // Append additional barriers if required.
       for (size_t i = cur_n; i < need_n; ++i) {
-        if (replace[i]) {
-          new_args.push_back(producer_thread_extent_);
+        auto it = barrier_thread_counts_.find(static_cast<int>(i));
+        if (it != barrier_thread_counts_.end()) {
+          new_args.push_back(Integer(it->second));
         } else {
           new_args.push_back(default_barrier_thread_count_);
         }
       }
-
       return Call(op->dtype, op->op, new_args, op->annotations);
     } else {
       return StmtExprMutator::VisitExpr_(op);
@@ -395,8 +485,7 @@ public:
   }
 
 private:
-  std::vector<int> restore_barrier_ids_;
-  PrimExpr producer_thread_extent_;
+  std::unordered_map<int, int> barrier_thread_counts_;
   int ensure_min_count_{0};
   PrimExpr default_barrier_thread_count_{1};
 };
@@ -455,11 +544,14 @@ public:
     max_idx_collector(f->body);
     int ensure_min_count = max_idx_collector.max_idx + 1; // 0-based -> count
 
-    // For simple TMA-only producers, default barrier arrive count should be 1
-    // (only the elected leader performs the TMA arrive/expect).
+    ArriveThreadCountCollector arrive_thread_count_collector;
+    arrive_thread_count_collector(f->body);
+
+    // Default appended barriers to leader-only (=1), but prefer explicit
+    // arrive-domain counts collected from actual arrive sites.
     auto barrier_creation_rewriter = BarrierCreationRewriter(
-        rewriter.restore_barrier_ids_, rewriter.producer_thread_extent_,
-        ensure_min_count, Integer(1));
+        arrive_thread_count_collector.barrier_thread_counts(), ensure_min_count,
+        Integer(1));
     f.CopyOnWrite()->body = barrier_creation_rewriter(f->body);
     return f;
   }
@@ -476,14 +568,9 @@ private:
 
   Stmt VisitStmt_(const IfThenElseNode *op) {
     if (first_if) {
-      if (op->condition.as<GENode>()) {
-        producer_thread_extent_ =
-            thread_var_->dom->extent - op->condition.as<GENode>()->b;
-      }
       TmaSequenceCollector collector(tma_op_to_barrier_id_);
       collector(op->then_case);
       clear_expect_list_ = collector.GetSequence();
-      restore_barrier_ids_ = collector.GetRestoreBarrierIds();
       first_if = false;
 
       is_producer_ = true;
@@ -583,8 +670,6 @@ private:
   IterVar thread_var_;
   int tma_expect_tx_{0}, cur_expect_idx_{0};
   std::vector<bool> clear_expect_list_;
-  std::vector<int> restore_barrier_ids_;
-  PrimExpr producer_thread_extent_;
 };
 
 tvm::transform::Pass InjectTmaBarrier() {

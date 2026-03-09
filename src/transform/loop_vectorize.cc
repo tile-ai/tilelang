@@ -424,6 +424,26 @@ private:
 
       buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    } else if (node->op.same_as(builtin::ptx_cp_async()) ||
+               node->op.same_as(tl::ptx_cp_async())) {
+      // cp.async supports byte sizes 4/8/16. For element-wise calls with small
+      // byte width (e.g., fp16 => 2 bytes), we rely on vectorization to fold
+      // multiple calls into one wider cp.async call.
+      int vectorize_length = 1;
+      ICHECK_GE(node->args.size(), 3U)
+          << "cp.async expects at least 3 arguments, but got " << node->args;
+      const auto *bytes_imm = node->args[2].as<IntImmNode>();
+      ICHECK(bytes_imm) << "cp.async byte count must be IntImm, but got "
+                        << node->args[2];
+      int bytes = static_cast<int>(bytes_imm->value);
+      for (int lanes : {16, 8, 4, 2, 1}) {
+        if (IsValidCPAsyncTransferBytes(bytes * lanes)) {
+          vectorize_length = lanes;
+          break;
+        }
+      }
+      buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == builtin::address_of() ||
                node->op == tl::access_ptr()) {
       // address_of and tl.access_ptr have buffer load value so we should

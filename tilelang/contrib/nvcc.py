@@ -8,7 +8,7 @@ import os
 import subprocess
 import warnings
 import contextlib
-from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
+from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 import shutil
 import tempfile
 import tvm_ffi
@@ -55,7 +55,7 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         target_arch = get_target_arch(compute_version)
         arch = ["-gencode", f"arch=compute_{target_arch},code=sm_{target_arch}"]
 
-    temp = utils.tempdir()
+    temp = utils.tempdir(keep_for_debug=not env.should_cleanup_temp_files())
     file_name = "tvm_kernels"
     if target_format not in ["cubin", "ptx", "fatbin"]:
         raise ValueError("target_format must be in cubin, ptx, fatbin")

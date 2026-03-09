@@ -235,27 +235,6 @@ def test_predicated_disabled():
     # This just verifies the configuration works
 
 
-def test_skip_async_scope():
-    """Test that loads in async scope are not lowered (will be cp.async)."""
-
-    @T.prim_func
-    def func(
-        A: T.Buffer((128,), "float32"),
-        B: T.Buffer((128,), "float32", scope="shared"),
-    ):
-        for i in T.thread_binding(32, "threadIdx.x"):
-            with T.attr(0, "async_scope", 1):
-                for j in T.vectorized(4):
-                    B[i * 4 + j] = A[i * 4 + j]
-
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod, enable_non_predicated=True)
-    print("=== test_skip_async_scope ===")
-    print(mod)
-    # The load should NOT be lowered to ldg because it's in async scope
-    assert not _check_has_intrinsic(mod, "ldg"), "Loads in async scope should NOT be lowered to ldg"
-
-
 def test_non_cuda_target_skip():
     """Test that the pass is skipped for non-CUDA targets."""
 

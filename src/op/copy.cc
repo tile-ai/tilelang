@@ -27,6 +27,141 @@ namespace tl {
 
 using namespace tir;
 
+namespace {
+
+// Rewrite scalar global->shared stores into ptx_cp_async calls.
+// This rewriter is applied before the global vectorize pass, so each generated
+// cp.async call starts with element-wise bytes and can be widened later.
+class CPAsyncStoreRewriter : public StmtMutator {
+public:
+  Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
+
+  bool RewriteSuccess() const { return successfully_rewritten_; }
+
+private:
+  static bool IsZeroValue(const PrimExpr &e) {
+    if (auto *b = e.as<BroadcastNode>()) {
+      return IsZeroValue(b->value);
+    }
+    if (auto *f = e.as<FloatImmNode>()) {
+      return f->value == 0.0f;
+    }
+    if (auto *i = e.as<IntImmNode>()) {
+      return i->value == 0;
+    }
+    return false;
+  }
+
+  static const BufferLoadNode *
+  MatchZeroFillBufferLoad(const PrimExpr &value,
+                          Optional<PrimExpr> *predicate) {
+    if (const auto *load = value.as<BufferLoadNode>()) {
+      return load;
+    }
+
+    const auto *call = value.as<CallNode>();
+    if (!call || !call->op.same_as(builtin::if_then_else()) ||
+        !IsZeroValue(call->args[2])) {
+      return nullptr;
+    }
+
+    const BufferLoadNode *load =
+        MatchZeroFillBufferLoad(call->args[1], predicate);
+    if (load == nullptr) {
+      return nullptr;
+    }
+
+    // Nested zero-fill guards only permit issuing cp.async when every guard
+    // on the path to the load is true.
+    *predicate =
+        predicate->defined()
+            ? Optional<PrimExpr>(And(call->args[0], predicate->value()))
+            : Optional<PrimExpr>(call->args[0]);
+    return load;
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    if (!IsSharedBuffer(op->buffer)) {
+      successfully_rewritten_ = false;
+      return StmtMutator::VisitStmt_(op);
+    }
+
+    Optional<PrimExpr> predicate = std::nullopt;
+    // Accept either a direct load or a nested zero-fill guard chain:
+    // if_then_else(p1, if_then_else(p2, load, 0), 0). Nested predicates are
+    // combined so the generated cp.async is only issued when all guards hold.
+    const BufferLoadNode *load = MatchZeroFillBufferLoad(op->value, &predicate);
+    if (load == nullptr) {
+      successfully_rewritten_ = false;
+      return StmtMutator::VisitStmt_(op);
+    }
+
+    if (!IsGlobalBuffer(load->buffer)) {
+      successfully_rewritten_ = false;
+      return StmtMutator::VisitStmt_(op);
+    }
+    int bytes = op->value.dtype().bytes();
+    int vectorized_lanes = current_vectorized_lanes_;
+
+    if (!IsValidCPAsyncTransferBytes(bytes * vectorized_lanes)) {
+      successfully_rewritten_ = false;
+      return StmtMutator::VisitStmt_(op);
+    }
+
+    // Keep pointer metadata in tl.access_ptr form for downstream analysis;
+    // LowerAccessPtr will translate it to tvm_access_ptr later.
+    PrimExpr dst_access_ptr =
+        Call(DataType::Handle(), tvm::tl::access_ptr(),
+             {
+                 BufferLoad(op->buffer, op->indices),
+                 IntImm(DataType::Int(32), 1), // extent
+                 IntImm(DataType::Int(32), 2)  // rw_mask: write
+             });
+    PrimExpr src_access_ptr =
+        Call(DataType::Handle(), tvm::tl::access_ptr(),
+             {
+                 BufferLoad(load->buffer, load->indices),
+                 IntImm(DataType::Int(32), 1), // extent
+                 IntImm(DataType::Int(32), 1)  // rw_mask: read
+             });
+
+    Array<PrimExpr> args{dst_access_ptr, src_access_ptr, PrimExpr(bytes)};
+    if (predicate.defined()) {
+      args.push_back(predicate.value());
+    }
+    successfully_rewritten_ = true;
+    return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(), args));
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    int previous_vectorized_lanes = current_vectorized_lanes_;
+    if (op->kind == ForKind::kVectorized) {
+      // Assume vectorized access pattern is contiguous on the vectorized iter.
+      // This is guaranteed by tl.VectorizeLoop: if an access pattern is not
+      // vectorizable/contiguous for the chosen iter, it is scalarized instead
+      // of staying as ForKind::kVectorized.
+      const auto *extent_imm = op->extent.as<IntImmNode>();
+      ICHECK(extent_imm)
+          << "Vectorized loops must have constant extent, but got "
+          << op->extent;
+      int lanes = static_cast<int>(extent_imm->value);
+      if (lanes > 1 && current_vectorized_lanes_ <=
+                           std::numeric_limits<int>::max() / lanes) {
+        current_vectorized_lanes_ *= lanes;
+      }
+    }
+
+    Stmt stmt = StmtMutator::VisitStmt_(op);
+    current_vectorized_lanes_ = previous_vectorized_lanes;
+    return stmt;
+  }
+
+  bool successfully_rewritten_ = true;
+  int current_vectorized_lanes_ = 1;
+};
+
+} // namespace
+
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
 // annotations: Map containing coalesced_width, disable_tma, eviction_policy,
@@ -292,14 +427,39 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
-                               T.layout_map, T.analyzer, T.buffer_oob);
+  CopyInst copy_inst;
+  if (GetIsAsyncCopy()) {
+    // Layout inference does not require a full cp.async legality proof (which
+    // depends on final vectorization decisions). Keep the op as CPAsync for
+    // inference, and enforce legality during lowering.
+    if (!TargetHasAsyncCopy(target)) {
+      LOG(FATAL) << "T.async_copy is only supported on targets with cp.async "
+                    "support (SM80+). Got target="
+                 << target;
+    }
+    if (!IsGlobalBuffer(src) || !IsSharedBuffer(dst)) {
+      LOG(FATAL)
+          << "T.async_copy only supports global->shared/shared.dyn copies. "
+          << "Got src=" << src->name << " (scope=" << src.scope()
+          << "), dst=" << dst->name << " (scope=" << dst.scope() << ").";
+    }
+    if (src->dtype != dst->dtype) {
+      LOG(FATAL) << "T.async_copy requires equal byte-addressable dtypes. "
+                 << "Got src dtype=" << src->dtype
+                 << ", dst dtype=" << dst->dtype << ".";
+    }
+    copy_inst = CopyInst::kCPAsync;
+  } else {
+    copy_inst =
+        GetCopyInst(target, disable_tma_lower || GetDisableTMA(), T.layout_map,
+                    T.analyzer, T.buffer_oob, T.in_pipeline);
+  }
 
   // If user annotated a loop layout on T.copy, enforce SIMT (normal) copy.
   // Parallel-loop layout only applies to SIMT-style loops we generate here;
   // other copy instructions (TMA/LDSM/STSM/TMem) are incompatible.
   if (annotations.count(attr::kParallelLoopLayout)) {
-    if (copy_inst != CopyInst::kNormal) {
+    if (copy_inst != CopyInst::kNormal && copy_inst != CopyInst::kCPAsync) {
       std::ostringstream oss;
       oss << "T.copy loop layout annotation requires SIMT copy; got "
           << CopyInstToString(copy_inst) << " for src=" << src->name
@@ -637,19 +797,55 @@ bool CopyNode::CheckTMemStore(Target target) const {
          dst.scope() == "shared.tmem";
 }
 
+// Checks if copy can use cp.async global->shared path.
+// Requirements:
+// - target has async copy capability
+// - source is global and destination is shared/shared.dyn
+// - source/destination dtypes match
+// - vectorized copy width (bytes) is one of {4, 8, 16}
+// - if OOB guards are required, only a *uniform* (scalar) source predicate
+//   is supported (dst must be in-bounds)
+bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
+                                arith::Analyzer *analyzer) const {
+  if (!TargetHasAsyncCopy(target)) {
+    return false;
+  }
+  if (!IsGlobalBuffer(src) || !IsSharedBuffer(dst)) {
+    return false;
+  }
+  if (src->dtype != dst->dtype) {
+    return false;
+  }
+  // Skip vectorize size check here because, during the Infer Layout stage,
+  // the layout is not stable and the vectorized size cannot be determined.
+  return true;
+}
+
 // Selects the most specific copy instruction for the given target and buffers.
-// Priority: BulkLoad1D, BulkStore1D, BulkLoad, BulkStore, LDSM, STSM, TMemLoad,
-// TMemStore, Normal.
+// Priority: BulkLoad1D, BulkStore1D, BulkLoad, BulkStore, LDSM, STSM,
+// TMemLoad, TMemStore, CPAsync, Normal.
 CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
                                const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer,
-                               bool buffer_oob = false) const {
+                               arith::Analyzer *analyzer, bool buffer_oob,
+                               bool in_pipeline) const {
   // disable_tma_lower is from pass_configs
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
   // we will not use tma for bulk load/store
 
   // Check if target is CuTeDSL backend
   bool is_cutedsl = TargetIsCuTeDSL(target);
+  bool is_async_copy = GetIsAsyncCopy();
+
+  if (is_async_copy) {
+    bool cp_async_supported = CheckCPAsyncCopy(target, layout_map, analyzer);
+    ICHECK(cp_async_supported)
+        << "T.async_copy must lower to cp.async, but constraints were not "
+           "satisfied. Got src="
+        << src->name << " (scope=" << src.scope() << ", dtype=" << src->dtype
+        << "), dst=" << dst->name << " (scope=" << dst.scope()
+        << ", dtype=" << dst->dtype << ").";
+    return CopyInst::kCPAsync;
+  }
 
   // Check tensor memory operations first (highest priority for SM100/Blackwell)
   // 1d tma access can not support out of bound access
@@ -675,6 +871,15 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
     return CopyInst::kTMemLoad;
   } else if (CheckTMemStore(target)) {
     return CopyInst::kTMemStore;
+  } else if (in_pipeline) {
+    using namespace tvm::transform;
+    PassContext pass_ctx = PassContext::Current();
+    bool enable_async_copy =
+        pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
+    if (enable_async_copy && CheckCPAsyncCopy(target, layout_map, analyzer)) {
+      return CopyInst::kCPAsync;
+    }
+    return CopyInst::kNormal;
   } else {
     return CopyInst::kNormal;
   }
@@ -690,7 +895,8 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   bool disable_tma_lower =
       pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || GetDisableTMA(),
-                               T.layout_map, analyzer);
+                               T.layout_map, analyzer, /*buffer_oob=*/false,
+                               /*in_pipeline=*/T.in_pipeline);
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
     auto tmem_copy = LowerTmemCopy(T, analyzer);
     ICHECK(tmem_copy.defined()) << "Failed to lower tensor memory copy";
@@ -709,11 +915,71 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto ldsm_copy = LowerLDSMCopy(T, analyzer, copy_inst);
     ICHECK(ldsm_copy.defined()) << "Failed to lower ptx matrix copy";
     return ldsm_copy;
+  } else if (copy_inst == CopyInst::kCPAsync) {
+    auto cp_async_copy = LowerCPAsyncCopy(T, analyzer);
+    ICHECK(cp_async_copy.defined()) << "Failed to lower cp.async copy";
+    return cp_async_copy;
   } else if (copy_inst == CopyInst::kNormal) {
     return LowerNormalCopy(T, analyzer);
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
   }
+}
+
+// Lowers copy to cp.async global->shared transfers.
+// - T.copy (auto cp.async) keeps synchronous semantics by committing and
+//   waiting after the loop.
+// - T.async_copy commits but does not wait (explicit async semantics).
+Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
+                                arith::Analyzer *analyzer) const {
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  bool enable_async_copy =
+      pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
+  if ((!enable_async_copy || !T.in_pipeline) && !GetIsAsyncCopy()) {
+    return LowerNormalCopy(T, analyzer);
+  }
+
+  auto simt_loop = MakeSIMTLoop(analyzer);
+  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+  auto par_op = ParallelOp(fused_loop);
+
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  for (auto level : levels) {
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
+                        level);
+  }
+  auto loop_layout = par_op->GetLoopLayout();
+  Stmt lowered_loop =
+      LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var, analyzer,
+                        T.layout_map, par_op->GetPredicate(T.thread_var));
+
+  CPAsyncStoreRewriter cp_async_rewriter;
+  Stmt cp_async_loop = cp_async_rewriter.Rewrite(lowered_loop);
+  if (!cp_async_rewriter.RewriteSuccess()) {
+    if (GetIsAsyncCopy()) {
+      LOG(FATAL) << "T.async_copy cannot be lowered to cp.async: no eligible "
+                    "global->shared store was rewritten.";
+    }
+    LOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
+                    "no eligible global->shared store.";
+    return LowerNormalCopy(T, analyzer);
+  }
+  Stmt commit_group =
+      Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
+  if (GetIsAsyncCopy()) {
+    return SeqStmt({cp_async_loop, commit_group});
+  }
+  Stmt wait_group = Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
+                                  {IntImm(DataType::Int(32), 0)}));
+  return SeqStmt({cp_async_loop, commit_group, wait_group});
 }
 
 // Lowers the copy using standard load/store with loop transformations.
@@ -1771,6 +2037,20 @@ void CopyNode::CollectFragmentLayouts(const PrimExpr &expr,
 // eviction_policy
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.tileop.async_copy")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "async_copy")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_async_copy",
+                                       IntImm(DataType::Int(32), 1));
+                               return Copy(args, ann);
+                             })
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

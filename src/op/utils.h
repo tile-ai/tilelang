@@ -89,6 +89,10 @@ inline bool IsGlobalBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "global";
 }
 
+inline bool IsValidCPAsyncTransferBytes(int bytes) {
+  return bytes == 4 || bytes == 8 || bytes == 16;
+}
+
 inline bool IsLocalBuffer(const Buffer &buffer, bool allow_var = false) {
   if (allow_var) {
     return buffer.defined() &&

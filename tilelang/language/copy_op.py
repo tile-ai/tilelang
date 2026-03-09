@@ -11,6 +11,43 @@ from tilelang.language.utils import get_extent
 from tvm import ir, tir
 
 
+def _normalize_copy_regions(
+    src: BufferLikeType, dst: BufferLikeType
+) -> tuple[
+    tir.BufferRegion | tir.BufferLoad | tir.Buffer,
+    tir.BufferRegion | tir.BufferLoad | tir.Buffer,
+]:
+    # If both side are buffers, we should make sure their shapes are equal
+    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
+        ir.assert_structural_equal(src.shape, dst.shape)
+
+    src_extent = get_extent(src)
+    dst_extent = get_extent(dst)
+
+    src_is_scalar_load = src_extent is None and isinstance(src, tir.BufferLoad)
+    dst_is_scalar_load = dst_extent is None and isinstance(dst, tir.BufferLoad)
+
+    # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
+    # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
+    if src_is_scalar_load and dst_is_scalar_load:
+        return src, dst
+
+    assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
+    # Treat missing extent as length-matched ones for convenience. This provides limited
+    # broadcasting-like syntactic sugar, but does not implement general broadcasting support.
+    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
+    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
+
+    # Align and broadcast extents from the right (tail) side.
+    # This is majorly for supporting some syntactic sugar, not the whole broadcasting ability of copy op.
+    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
+
+    # Use legalized extents for src and dst respectively.
+    src = to_buffer_region(src, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
+    return src, dst
+
+
 def copy(
     src: BufferLikeType,
     dst: BufferLikeType,
@@ -60,36 +97,9 @@ def copy(
       and passed through to the backend; low-level loop construction and any
       scope-specific decisions happen during lowering.
     """
-    # If both side are buffers, we should make sure their shapes are equal
-    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
-        ir.assert_structural_equal(src.shape, dst.shape)
-
-    src_extent = get_extent(src)
-    dst_extent = get_extent(dst)
-
-    src_is_scalar_load = src_extent is None and isinstance(src, tir.BufferLoad)
-    dst_is_scalar_load = dst_extent is None and isinstance(dst, tir.BufferLoad)
-
-    # Combine the nested if statements into a single if statement as suggested by SIM102
-    if src_is_scalar_load and dst_is_scalar_load:
-        # check if the case is like this:
-        # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
-        # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
+    src, dst = _normalize_copy_regions(src, dst)
+    if isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
         return tir.BufferStore(dst.buffer, src, dst.indices)
-
-    assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
-    # Treat missing extent as length-matched ones for convenience. This provides limited
-    # broadcasting-like syntactic sugar, but does not implement general broadcasting support.
-    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
-    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-
-    # Align and broadcast extents from the right (tail) side.
-    # This is majorly for supporting some syntactic sugar, not the whole broadcasting ability of copy op.
-    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
-
-    # Use legalized extents for src and dst respectively.
-    src = to_buffer_region(src, access_type="r", extents=src_extent)
-    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     # Build annotations dict
     ann = annotations.copy() if annotations else {}
@@ -108,6 +118,50 @@ def copy(
         ann["parallel_loop_layout"] = loop_layout
 
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
+
+
+def async_copy(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+    *,
+    coalesced_width: int | None = None,
+    annotations: dict | None = None,
+    loop_layout: Any | None = None,
+) -> tir.PrimExpr | tir.Stmt:
+    """Asynchronous copy primitive lowered through cp.async.
+
+    This operator is intended for explicitly asynchronous global->shared copy.
+    The backend enforces cp.async constraints and emits:
+      `ptx_cp_async(...)` + `ptx_commit_group()`.
+    No wait is auto-inserted for `T.async_copy`; synchronization is explicit.
+
+    Args:
+        src (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Source memory region
+        dst (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Destination memory region
+        coalesced_width (Optional[int], keyword-only): Width for coalesced memory access. Defaults to None.
+        annotations (Optional[dict], keyword-only): Additional annotations dict.
+        loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy loop.
+
+    Returns:
+        tir.Call: A handle to the async copy operation
+    """
+    src, dst = _normalize_copy_regions(src, dst)
+    if isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
+        return tir.BufferStore(dst.buffer, src, dst.indices)
+
+    ann = annotations.copy() if annotations else {}
+    if "coalesced_width" not in ann and coalesced_width is not None:
+        ann["coalesced_width"] = coalesced_width
+    if loop_layout is not None and "parallel_loop_layout" not in ann:
+        ann["parallel_loop_layout"] = loop_layout
+
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.async_copy"),
+        src,
+        dst,
+        annotations=ann if ann else None,
+    )
 
 
 def c2d_im2col(

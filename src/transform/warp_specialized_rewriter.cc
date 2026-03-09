@@ -157,8 +157,16 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+      bool is_bulk_copy = call->op.same_as(tma_load()) ||
+                          call->op.same_as(tma_load_im2col()) ||
+                          call->op.same_as(tl::ptx_cp_async()) ||
+                          call->op.same_as(builtin::ptx_cp_async());
+      bool is_cp_async_sync = call->op.same_as(builtin::ptx_commit_group()) ||
+                              call->op.same_as(builtin::ptx_wait_group());
+      if (is_bulk_copy || is_cp_async_sync) {
         role = Role::kProducer;
+      }
+      if (is_bulk_copy) {
         has_bulk_copy_ = true;
       }
       if (call->op.same_as(loop_break())) {
@@ -276,8 +284,8 @@ static Stmt makeArriveBarrier(PrimExpr barrier_id, int cta_id = -1,
       Call(DataType::Handle(), builtin::ptx_arrive_barrier(), args));
 }
 
-static Stmt makeCpAsyncBarrier(PrimExpr barrier_id) {
-  auto call = Call(DataType::Handle(), builtin::ptx_cp_async_barrier(),
+static Stmt makeCpAsyncBarrierNoInc(PrimExpr barrier_id) {
+  auto call = Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
                    {makeGetBarrier(std::move(barrier_id))});
   return Evaluate(call);
 }
@@ -299,6 +307,16 @@ public:
   bool HasSimtCopy() { return has_simt_copy; }
 
 private:
+  void VisitExpr_(const CallNode *op) final {
+    bool old_in_cp_async = in_cp_async_;
+    if (op->op.same_as(tl::ptx_cp_async()) ||
+        op->op.same_as(builtin::ptx_cp_async())) {
+      in_cp_async_ = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+    in_cp_async_ = old_in_cp_async;
+  }
+
   void VisitStmt_(const IfThenElseNode *op) final {
     bool old_in_if_cond = in_if_cond_;
     in_if_cond_ = true;
@@ -312,7 +330,7 @@ private:
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
-    if (!in_if_cond_) {
+    if (!in_if_cond_ && !in_cp_async_) {
       has_simt_copy = true;
     }
     StmtExprVisitor::VisitExpr_(op);
@@ -320,6 +338,7 @@ private:
 
   bool has_simt_copy{};
   bool in_if_cond_ = false;
+  bool in_cp_async_ = false;
 };
 
 // Rewrite the producer Stmt to use the correct barrier index
@@ -627,18 +646,181 @@ public:
         marker_(marker), thread_var_(thread_iv->var),
         mbarrier_only_(mbarrier_only) {}
 
-  /**
-   * @brief Whether a SIMT-style bulk copy was detected.
-   *
-   * Returns true when a simulated SIMT (thread-parallel) copy pattern was
-   * observed during analysis/emission, which can affect barrier insertion and
-   * copy emission.
-   *
-   * @return true if a SIMT copy was detected; false otherwise.
-   */
-  bool hasSimtCopy() const { return has_simt_copy_; }
+  bool ReleaseRequiresFullProducerParticipation(int barrier_id) const {
+    return released_barrier_full_participation_.count(barrier_id) != 0;
+  }
 
 private:
+  void MarkReleasedBarrier(int pattern_idx, bool require_full_participation) {
+    for (int s = 0; s < num_stages_; s++) {
+      int barrier_id = s + num_barriers_ + num_stages_ * pattern_idx;
+      released_barrier_.insert(barrier_id);
+      if (require_full_participation) {
+        released_barrier_full_participation_.insert(barrier_id);
+      }
+    }
+  }
+
+  struct CpAsyncSyncPlan {
+    std::vector<bool> release_uses_cp_async_barrier;
+    std::vector<bool> drop_wait_group;
+  };
+
+  static bool ContainsPtxCpAsync(const Stmt &stmt) {
+    bool has_cp_async = false;
+    PostOrderVisit(stmt, [&has_cp_async](const ObjectRef &node) {
+      if (has_cp_async) {
+        return;
+      }
+      const auto *call = node.as<CallNode>();
+      if (!call) {
+        return;
+      }
+      if (call->op.same_as(tl::ptx_cp_async()) ||
+          call->op.same_as(builtin::ptx_cp_async())) {
+        has_cp_async = true;
+      }
+    });
+    return has_cp_async;
+  }
+
+  static bool IsPtxCommitGroup(const Stmt &stmt) {
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    return call && call->op.same_as(builtin::ptx_commit_group());
+  }
+
+  static bool IsPtxWaitGroup(const Stmt &stmt) {
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    return call && call->op.same_as(builtin::ptx_wait_group());
+  }
+
+  static bool IsPtxWaitGroupZero(const Stmt &stmt) {
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    if (!call || !call->op.same_as(builtin::ptx_wait_group())) {
+      return false;
+    }
+    ICHECK_EQ(call->args.size(), 1U)
+        << "ptx_wait_group expects 1 argument, but got " << call->args;
+    const auto *imm = call->args[0].as<IntImmNode>();
+    ICHECK(imm) << "ptx_wait_group argument must be IntImm, but got "
+                << call->args[0];
+    return imm->value == 0;
+  }
+
+  struct SyncPatternMap;
+
+  CpAsyncSyncPlan PlanCpAsyncSync(const Array<Stmt> &seq,
+                                  SyncPatternMap *map) const {
+    CpAsyncSyncPlan plan;
+    const int n = static_cast<int>(seq.size());
+    plan.release_uses_cp_async_barrier.assign(n, false);
+    plan.drop_wait_group.assign(n, false);
+
+    // Only rewrite cp.async synchronization when we are actually emitting a
+    // warp-specialized producer branch. In mbarrier-only mode, the original
+    // cp.async wait/commit semantics must be preserved.
+    if (mbarrier_only_ || !is_emitting_producer_) {
+      return plan;
+    }
+
+    std::vector<bool> has_cp_async;
+    std::vector<bool> is_commit;
+    std::vector<bool> is_wait;
+    has_cp_async.reserve(n);
+    is_commit.reserve(n);
+    is_wait.reserve(n);
+    for (int i = 0; i < n; ++i) {
+      has_cp_async.push_back(ContainsPtxCpAsync(seq[i]));
+      is_commit.push_back(IsPtxCommitGroup(seq[i]));
+      is_wait.push_back(IsPtxWaitGroup(seq[i]));
+    }
+
+    for (int i = 0; i < n; ++i) {
+      if (!has_cp_async[i]) {
+        continue;
+      }
+      if (map->release[i].empty()) {
+        continue;
+      }
+
+      int target_commit = -1;
+      int target_wait = -1;
+      for (int j = i + 1; j < n; ++j) {
+        if (marker_.GetRole(seq[j]) != Role::kProducer) {
+          break;
+        }
+        if (is_commit[j]) {
+          target_commit = j;
+          break;
+        }
+        if (target_wait == -1 && is_wait[j]) {
+          target_wait = j;
+        }
+      }
+
+      int target = target_commit != -1 ? target_commit : target_wait;
+      if (target == -1) {
+        continue;
+      }
+
+      // Move only direct releases (release_after=true) from cp.async enqueue
+      // to commit/wait so the barrier is released when async copies are
+      // synchronized, not when they are issued.
+      // Inherited releases (release_after=false) belong to later producer ops
+      // and must not be migrated.
+      std::vector<int> kept_release;
+      std::vector<bool> kept_release_after;
+      kept_release.reserve(map->release[i].size());
+      kept_release_after.reserve(map->release_after[i].size());
+
+      bool moved_any = false;
+      for (size_t k = 0; k < map->release[i].size(); ++k) {
+        if (map->release_after[i][k]) {
+          map->release[target].push_back(map->release[i][k]);
+          map->release_after[target].push_back(true);
+          moved_any = true;
+        } else {
+          kept_release.push_back(map->release[i][k]);
+          kept_release_after.push_back(false);
+        }
+      }
+      map->release[i] = std::move(kept_release);
+      map->release_after[i] = std::move(kept_release_after);
+
+      if (moved_any) {
+        plan.release_uses_cp_async_barrier[target] = true;
+      }
+
+      // The subsequent wait_group is redundant for producer/consumer
+      // synchronization under warp specialization and hurts overlap.
+      if (target_commit != -1 && moved_any) {
+        for (int j = target_commit + 1; j < n; ++j) {
+          if (marker_.GetRole(seq[j]) != Role::kProducer) {
+            break;
+          }
+          if (IsPtxWaitGroupZero(seq[j])) {
+            plan.drop_wait_group[j] = true;
+            break;
+          }
+        }
+      }
+    }
+
+    return plan;
+  }
+
   template <
       typename NodeType> /**
                           * @brief Filter a statement by its producer/consumer
@@ -696,6 +878,7 @@ private:
         op->seq.Map([&](const Stmt &stmt) { return VisitStmt(stmt); });
 
     auto map = ExtractSyncPattern(op->seq);
+    auto cp_async_plan = PlanCpAsyncSync(op->seq, &map);
 
     /*
       std::cout << "Print ExtractSyncPattern" << std::endl;
@@ -718,11 +901,17 @@ private:
     if (is_emitting_producer_) { // producer case
       ProducerTraitsCollector collector;
       for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
-        Array<Stmt> block_stmt = {};
+        if (cp_async_plan.drop_wait_group[i]) {
+          continue;
+        }
+
+        Array<Stmt> block_stmt;
         if (!mbarrier_only_) {
-          if (marker_.GetRole(op->seq[i]) == Role::kConsumer)
+          Role role = marker_.GetRole(op->seq[i]);
+          if (role == Role::kConsumer) {
             continue;
-          if (marker_.GetRole(op->seq[i]) == Role::kBoth) {
+          }
+          if (role == Role::kBoth) {
             block_stmt.push_back(seq_transformed[i]);
             new_body.push_back(
                 MakeGroupBlock(block_stmt.size() == 1
@@ -742,14 +931,18 @@ private:
                                 : parity_;
           block_stmt.push_back(makeParityWait(acquire_barrier_id, parity));
         }
+
         // It is possible that a producer does not participate in any
         // producer-consumer dependency that requires synchronization.
         // In that case, there will be no associated release pattern.
         // We should still emit the (optionally guarded) statement without
         // inserting any mbarrier for it instead of failing.
         if (map.release[i].empty()) {
-          LOG(WARNING) << "Producer doesn't have corresponding consumer: "
-                       << seq_transformed[i];
+          if (!ContainsPtxCpAsync(op->seq[i]) &&
+              !IsPtxCommitGroup(op->seq[i]) && !IsPtxWaitGroup(op->seq[i])) {
+            LOG(WARNING) << "Producer doesn't have corresponding consumer: "
+                         << seq_transformed[i];
+          }
           block_stmt.push_back(seq_transformed[i]);
           new_body.push_back(
               MakeGroupBlock(block_stmt.size() == 1
@@ -759,6 +952,25 @@ private:
                              annotations));
           continue;
         }
+
+        bool has_real_release_after = false;
+        for (bool release_after : map.release_after[i]) {
+          if (release_after) {
+            has_real_release_after = true;
+            break;
+          }
+        }
+        if (!has_real_release_after) {
+          block_stmt.push_back(seq_transformed[i]);
+          new_body.push_back(
+              MakeGroupBlock(block_stmt.size() == 1
+                                 ? block_stmt[0]
+                                 // NOLINTNEXTLINE(performance-move-const-arg)
+                                 : SeqStmt(std::move(block_stmt)),
+                             annotations));
+          continue;
+        }
+
         for (size_t j = 0; j < map.release[i].size(); j++) {
           int pattern_idx = map.release[i][j];
           PrimExpr release_barrier_id =
@@ -767,17 +979,37 @@ private:
               MbarrierRewriter::Rewrite(seq_transformed[i], release_barrier_id);
           collector.Collect(stmt);
           block_stmt.push_back(stmt);
-          if (collector.HasSimtCopy()) {
-            block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
-            has_simt_copy_ = true;
-          }
+
+          bool use_cp_async_barrier =
+              cp_async_plan.release_uses_cp_async_barrier[i];
+
           if (map.release_after[i][j]) {
-            block_stmt.push_back(makeArriveBarrier(release_barrier_id));
-            for (int s = 0; s < num_stages_; s++) {
-              released_barrier_.insert(s + num_barriers_ +
-                                       num_stages_ * pattern_idx);
+            bool require_full_participation =
+                use_cp_async_barrier || collector.HasSimtCopy();
+            if (use_cp_async_barrier) {
+              // For cp.async, the enqueue does not make the destination shared
+              // memory visible to the consumer. Release the barrier with
+              // cp.async.mbarrier.arrive so the consumer waits for completion
+              // of in-flight cp.async ops issued by each producer thread.
+              // Use the `.noinc` variant so we don't implicitly update the
+              // mbarrier transaction counter, which is managed separately by
+              // TMA expect_tx/complete_tx when present.
+              block_stmt.push_back(makeCpAsyncBarrierNoInc(release_barrier_id));
+            } else {
+              Stmt arrive = makeArriveBarrier(release_barrier_id);
+              if (!require_full_participation) {
+                // Single-thread producer (e.g. TMA-only): match
+                // mbarrier.init(1) by ensuring only one producer thread arrives
+                // per stage.
+                arrive =
+                    IfThenElse(EQ(thread_var_, IntImm(thread_var_.dtype(), 0)),
+                               arrive, std::nullopt);
+              }
+              block_stmt.push_back(arrive);
             }
+            MarkReleasedBarrier(pattern_idx, require_full_participation);
           }
+
           collector.Clear();
           new_body.push_back(
               MakeGroupBlock(block_stmt.size() == 1
@@ -1039,7 +1271,8 @@ private:
 
   static std::vector<SyncPattern>
   RemoveUnusedSyncPatterns(const std::vector<SyncPattern> &sync_patterns,
-                           const std::vector<bool> &is_producer) {
+                           const std::vector<bool> &is_producer,
+                           const Array<Stmt> &seq_stmt) {
     /*
       Simplify multiple release-acquire pairs into one
       ------------------
@@ -1060,6 +1293,12 @@ private:
     int M = sync_patterns.size();
     std::vector<bool> removed(M, false);
     for (int i = 0; i < M; i++) {
+      // Do not remove cp.async producer->consumer dependencies here.
+      // cp.async enqueue completion is asynchronous and needs explicit
+      // synchronization (later converted to mbarrier cp.async arrive).
+      if (ContainsPtxCpAsync(seq_stmt[sync_patterns[i].release_idx])) {
+        continue;
+      }
       for (int j = 0; j < M; j++) {
         if (is_producer[sync_patterns[i].acquire_idx] ==
                 is_producer[sync_patterns[j].acquire_idx] &&
@@ -1088,7 +1327,7 @@ private:
 
     auto sync_patterns_base = CreateBaseSyncPairs(seq_stmt, is_producer);
     auto sync_patterns =
-        RemoveUnusedSyncPatterns(sync_patterns_base, is_producer);
+        RemoveUnusedSyncPatterns(sync_patterns_base, is_producer, seq_stmt);
 
     // for (auto pattern : sync_patterns) {
     //   std::cout << pattern.release_idx << " " << pattern.acquire_idx <<
@@ -1151,7 +1390,7 @@ private:
   bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
   friend class WarpSpecializedRewriter;
-  bool has_simt_copy_ = false;
+  std::unordered_set<int> released_barrier_full_participation_;
 };
 
 class WarpSpecializedRewriter : public StmtExprMutator {
@@ -1281,7 +1520,9 @@ private:
     for (int i = 0; i < num_barriers; i++) {
       PrimExpr arrive_thread_count =
           producer.released_barrier_.count(i)
-              ? (producer.hasSimtCopy() ? producer_thread_extent : 1)
+              ? (producer.ReleaseRequiresFullProducerParticipation(i)
+                     ? producer_thread_extent
+                     : 1)
               : consumer_thread_extent;
       barrier_num_threads.push_back(arrive_thread_count);
     }

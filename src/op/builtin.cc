@@ -29,6 +29,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kEnableFastMath, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kPtxasRegisterUsageLevel, Integer);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnablePTXASVerboseOutput, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableVectorize256, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAsyncCopy, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableVectorizePlannerVerbose, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWGMMA, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableShuffleElect, Bool);
@@ -44,6 +45,8 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kDisableLoopUnswitching, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kLoopUnswitchingAllowNonTrivialElse, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableOutOfBoundWarning, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoSchedule, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableDumpIR, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDumpIRDir, ffi::String);
 
 DataType cuTensorMapType() { return DataType::UInt(8, 128); }
 
