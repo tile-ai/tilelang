@@ -134,7 +134,7 @@ def copy(
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    if dst_block is not None:
+    if "dst_block" not in ann and dst_block is not None:
         ann["dst_block"] = dst_block
 
     if "cluster_mask" not in ann and cluster_mask is not None:
