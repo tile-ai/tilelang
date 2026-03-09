@@ -196,7 +196,9 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     if allow_autoschedule():
         # Auto schedule for high-level operations
+        mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
+        mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory

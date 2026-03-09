@@ -41,6 +41,18 @@ public:
     operator()(stmt);
   }
 
+  void Analyze(const PrimExpr &expr) {
+    read_buffers_.clear();
+    write_buffers_.clear();
+    read_regions_.clear();
+    write_regions_.clear();
+    dom_map_.clear();
+    hint_map_.clear();
+    pending_conditions_.clear();
+    let_bindings_.clear();
+    operator()(expr);
+  }
+
   // Return collected read regions
   std::vector<BufferRegion> GetReadRegions() const {
     return CollectRegions(read_buffers_, read_regions_);
@@ -192,8 +204,6 @@ private:
     }
     return arith::EvalSet(arith::IntSet::Vector(current), dom_map_);
   }
-
-  void operator()(const Stmt &stmt) { StmtExprVisitor::operator()(stmt); }
 
   void VisitStmt_(const ForNode *op) override {
     Range range = Range::FromMinExtent(op->min, op->extent);

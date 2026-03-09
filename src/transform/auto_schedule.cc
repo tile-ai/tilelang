@@ -1090,6 +1090,8 @@ protected:
     auto task_node = std::make_unique<TaskNode>();
     task_node->stmts.push_back(GetRef<Stmt>(op));
 
+    AnalyzeMemoryExpr(op->condition, task_node.get());
+
     // Analyze both branches for resource usage
     AnalyzeResourceUsage(op->then_case, task_node.get());
     if (op->else_case) {
@@ -1289,6 +1291,28 @@ private:
     // Analyze memory access regions
     MemoryAccessDetector memory_detector;
     memory_detector.Analyze(stmt);
+    std::vector<BufferRegion> read_regions = memory_detector.GetReadRegions();
+    std::vector<BufferRegion> write_regions = memory_detector.GetWriteRegions();
+
+    // Merge with existing regions (avoid duplicates)
+    for (const auto &region : read_regions) {
+      task_node->AddReadRegion(region);
+    }
+
+    for (const auto &region : write_regions) {
+      task_node->AddWriteRegion(region);
+    }
+
+    // Estimate latency and initiation interval for this task
+    LatencyEstimator latency_estimator;
+    latency_estimator.SetThreadCount(thread_count_);
+    latency_estimator.Estimate(task_node);
+  }
+
+  void AnalyzeMemoryExpr(const PrimExpr &expr, TaskNode *task_node) {
+    // Analyze memory access regions
+    MemoryAccessDetector memory_detector;
+    memory_detector.Analyze(expr);
     std::vector<BufferRegion> read_regions = memory_detector.GetReadRegions();
     std::vector<BufferRegion> write_regions = memory_detector.GetWriteRegions();
 
@@ -1856,7 +1880,15 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
         }
       }
       return new_seq;
-    } else if (node->IsControl() || node->IsWrapper()) {
+    } else if (node->IsWrapper()) {
+      auto wrapper = static_cast<WrapperNode *>(node);
+      auto new_wrapper = std::make_unique<WrapperNode>();
+      new_wrapper->child = clone_neutral_filter(wrapper->child.get());
+      if (new_wrapper->child) {
+        return new_wrapper;
+      }
+      return nullptr;
+    } else if (node->IsControl()) {
       return nullptr;
     }
     LOG(FATAL);
@@ -1902,14 +1934,15 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
   if (wg0_has_stmts && wg1_has_stmts) {
     // Both warpgroups exist: insert barriers for cross-warpgroup
     // synchronization
-    std::vector<Stmt> then_body_with_nreg{
-        Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {240, 1})),
-        then_body};
-    std::vector<Stmt> else_body_with_nreg{
-        Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {24, 0})),
-        else_body};
-    if_then_else = IfThenElse(condition, SeqStmt(then_body_with_nreg),
-                              SeqStmt(else_body_with_nreg));
+    // std::vector<Stmt> then_body_with_nreg{
+    //     Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {240, 1})),
+    //     then_body};
+    // std::vector<Stmt> else_body_with_nreg{
+    //     Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {24, 0})),
+    //     else_body};
+    // if_then_else = IfThenElse(condition, SeqStmt(then_body_with_nreg),
+    //                           SeqStmt(else_body_with_nreg));
+    if_then_else = IfThenElse(condition, then_body, else_body);
   } else if (wg0_has_stmts) {
     // Only warpgroup 0 has statements, execute unconditionally
     if_then_else = then_body;
