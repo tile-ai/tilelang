@@ -19,6 +19,11 @@ namespace tl {
 using namespace tir;
 
 #if (CUDA_MAJOR_VERSION >= 12)
+// Barrier IDs 0–2 are reserved: 0 by InjectTmaBarrier (descriptor-based TMA
+// loads) and 1–2 by the backend for internal synchronization (e.g. AllReduce).
+// User-managed barriers must start after this reserved range.
+static constexpr int kReservedBarriers = 3;
+
 class LowerHopperIntrin : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
@@ -138,9 +143,11 @@ public:
         } else {
           Array<Stmt> stmt_seq;
           if (num_managed_barriers_ > 0) {
-            auto alloc_mbarrier =
-                Evaluate(Call(DataType::Handle(), builtin::create_barriers(),
-                              {num_managed_barriers_}));
+            // Size must cover reserved slots [0, kReservedBarriers) plus all
+            // user-managed slots so that IDs never alias.
+            auto alloc_mbarrier = Evaluate(
+                Call(DataType::Handle(), builtin::create_barriers(),
+                     {num_managed_barriers_ + kReservedBarriers}));
             stmt_seq.push_back(alloc_mbarrier);
           }
 
@@ -206,7 +213,8 @@ public:
     } else if (call->op.same_as(create_list_of_mbarrier())) {
       // ICHECK(init_mbarrier_calls_.empty());
       int num_barriers = static_cast<int>(call->args.size());
-      int barrier_base = num_managed_barriers_;
+      // Offset by kReservedBarriers so user IDs begin after the reserved range.
+      int barrier_base = num_managed_barriers_ + kReservedBarriers;
       num_managed_barriers_ += num_barriers;
       for (int i = 0; i < num_barriers; i++) {
         PrimExpr mbarrier =
