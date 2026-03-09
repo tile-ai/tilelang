@@ -273,18 +273,35 @@ def split_k_gemm(A, B, C):
             T.copy(B[k_off, bx * BN], B_s)
             T.gemm(A_s, B_s, C_f)
 
-        # Phase 2: push partial sums to rank 0 via SM-to-SM copy.
-        T.copy(C_f, C_s)
-        if T.get_thread_binding() == 0:
-            T.mbarrier_init(barrier[0], 1)
+        # Phase 2: push each rank's partial sums to rank 0 for accumulation.
+        #
+        # Use a per-rank staging slot so every non-zero rank writes to a
+        # distinct destination region — avoiding both a destination race and
+        # an arrival-count mismatch.  Each CTA stores its own partial into
+        # C_parts[rank]; non-zero ranks then push that slot to the matching
+        # slot in rank 0's shared memory.
+        #
+        # Arrival count must equal the number of producers: cluster_size - 1.
+        C_parts = T.alloc_shared((4, BM, BN), "float32")  # one slot per rank
+        T.copy(C_f, C_parts[rank])
+
+        # Only rank 0 needs its barrier initialised (it is the sole consumer).
+        # Arrival count = 3: ranks 1, 2, and 3 each signal exactly once.
+        if T.get_thread_binding() == 0 and rank == 0:
+            T.mbarrier_init(barrier[0], 3)
         T.cluster_sync()
 
         if rank != 0:
-            T.copy(C_s, C_s, dst_block=0, remote_barrier=barrier[0])
+            # Push this rank's slot to the *same* slot index in rank 0's
+            # C_parts — different offsets, so no destination race.
+            T.copy(C_parts[rank], C_parts[rank],
+                   dst_block=0, remote_barrier=barrier[0])
+
         if rank == 0:
-            T.mbarrier_wait_parity(barrier[0], 0)
+            T.mbarrier_wait_parity(barrier[0], 0)  # wakes after all 3 arrivals
+            # C_parts[0..3] in rank 0's smem now hold all four partial sums.
             # accumulate and store ...
-            T.copy(C_s, C[by * BM, bx * BN])
+            T.copy(C_parts[0], C[by * BM, bx * BN])
 ```
 
 ---
