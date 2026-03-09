@@ -1125,8 +1125,8 @@ private:
     auto root = tvm::ffi::GetRef<For>(op);
 
     // Check if ALL BufferStore targets in this loop are local buffers.
-    // If so, skip thread partitioning (each thread runs the full loop independently).
-    // Otherwise, the loop needs thread partitioning.
+    // If so, skip thread partitioning (each thread runs the full loop
+    // independently). Otherwise, the loop needs thread partitioning.
     bool all_stores_local = true;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
