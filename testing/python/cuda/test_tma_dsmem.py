@@ -20,7 +20,6 @@ import tilelang.language as T
 import numpy as np
 
 
-@tilelang.jit(verbose=True, execution_backend="cython")
 def make_store_cluster_kernel(N: int):
     @T.prim_func
     def kernel(
@@ -71,11 +70,23 @@ def test_tma_store_cluster():
         pytest.skip(f"requires Compute Capability 9.0+, found {major}.{minor}")
 
     N = 128
-    A = torch.arange(N, dtype=torch.float32, device="cuda")
-    B = torch.zeros(N, dtype=torch.float32, device="cuda")
+    prim_func = make_store_cluster_kernel(N)
+    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
 
-    kernel = make_store_cluster_kernel(N)
-    kernel(A, B)
+    # Assert that the lowering actually produced tl::tma_store_cluster.
+    # The SIMT fallback (map_shared_rank + scalar stores) also copies data
+    # correctly, so a pure numerical check would miss a regression where
+    # T.copy(dst_block=..., remote_barrier=...) stops emitting the bulk-async
+    # cluster intrinsic.
+    src = mod.get_kernel_source()
+    assert "tl::tma_store_cluster" in src, (
+        "Expected tl::tma_store_cluster in generated kernel source; "
+        "T.copy(dst_block=..., remote_barrier=...) may have regressed to the "
+        f"SIMT fallback.\nKernel source:\n{src}"
+    )
+
+    A = torch.arange(N, dtype=torch.float32, device="cuda")
+    B = mod(A)
 
     result = B.cpu().numpy()
     expected = A.cpu().numpy()
