@@ -13,6 +13,7 @@ Expected generated producer code (block 0):
 Block 1 waits on its own s_barrier and then reads the result.
 """
 
+import pytest
 import torch
 import tilelang
 import tilelang.language as T
@@ -62,11 +63,12 @@ def make_store_cluster_kernel(N: int):
     return kernel
 
 
-def main():
+def test_tma_store_cluster():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
     major, minor = torch.cuda.get_device_capability()
     if major < 9:
-        print(f"Skipping: requires Compute Capability 9.0+, found {major}.{minor}")
-        return
+        pytest.skip(f"requires Compute Capability 9.0+, found {major}.{minor}")
 
     N = 128
     A = torch.arange(N, dtype=torch.float32, device="cuda")
@@ -78,15 +80,11 @@ def main():
     result = B.cpu().numpy()
     expected = A.cpu().numpy()
 
-    print("Result  (first 8):", result[:8])
-    print("Expected(first 8):", expected[:8])
-
-    if np.allclose(result, expected):
-        print("PASS: tma_store_cluster copy successful")
-    else:
-        diff = np.abs(result - expected).max()
-        print(f"FAIL: max diff = {diff}")
+    diff = np.abs(result - expected).max()
+    assert np.allclose(result, expected), (
+        f"tma_store_cluster copy failed: max diff = {diff}"
+    )
 
 
 if __name__ == "__main__":
-    main()
+    test_tma_store_cluster()
