@@ -1491,12 +1491,17 @@ public:
   std::vector<Stmt> init_stmts;
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    if (IsOnlyInit(op->then_case)) {
+    if (!op->else_case.defined() && IsOnlyInit(op->then_case)) {
       init_stmts.push_back(GetRef<Stmt>(op));
       return Evaluate(0);
     }
     return StmtMutator::VisitStmt_(op);
   }
+
+  // Don't descend into scope-creating nodes; extracting an init from inside
+  // an Allocate/LetStmt would hoist it out of the variable's scope.
+  Stmt VisitStmt_(const AllocateNode *op) final { return GetRef<Stmt>(op); }
+  Stmt VisitStmt_(const LetStmtNode *op) final { return GetRef<Stmt>(op); }
 
   bool IsOnlyInit(const Stmt &stmt) {
     if (const auto *eval = stmt.as<EvaluateNode>()) {
