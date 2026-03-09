@@ -438,6 +438,13 @@ private:
         extractor.blocks.size(),
         static_cast<int>(extractor.compute_stmts.size()));
     std::vector<bool> arrive_emitted(extractor.blocks.size(), false);
+    std::vector<Stmt> normalized_waits;
+    normalized_waits.reserve(extractor.blocks.size());
+    for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
+      normalized_waits.push_back(
+          NormalizeForwardWaitParity(extractor.blocks[ti].wait_stmt,
+                                     parity_expr));
+    }
     for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
       if (!extractor.blocks[ti].write_buffer_data.defined()) {
         continue;
@@ -464,7 +471,7 @@ private:
     for (size_t ci = 0; ci < extractor.compute_stmts.size(); ++ci) {
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
         if (wait_insert_pos[ti] == static_cast<int>(ci)) {
-          consumer_body_stmts.push_back(extractor.blocks[ti].wait_stmt);
+          consumer_body_stmts.push_back(normalized_waits[ti]);
         }
       }
       consumer_body_stmts.push_back(extractor.compute_stmts[ci]);
@@ -480,7 +487,7 @@ private:
     // Handle degenerate loops with no compute statements.
     if (extractor.compute_stmts.empty()) {
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-        consumer_body_stmts.push_back(extractor.blocks[ti].wait_stmt);
+        consumer_body_stmts.push_back(normalized_waits[ti]);
       }
     }
 
@@ -885,6 +892,30 @@ private:
       }
     }
     return false;
+  }
+
+  Optional<PrimExpr> ExtractWaitBarrierId(const Stmt &stmt) {
+    if (auto *eval = stmt.as<EvaluateNode>()) {
+      if (auto *call = eval->value.as<CallNode>()) {
+        if (call->op.same_as(mbarrier_wait_parity()) && call->args.size() == 2) {
+          if (auto *get = call->args[0].as<CallNode>()) {
+            if (get->op.same_as(get_mbarrier()) && get->args.size() == 1) {
+              return get->args[0];
+            }
+          }
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  Stmt NormalizeForwardWaitParity(const Stmt &wait_stmt,
+                                  const PrimExpr &normalized_parity) {
+    auto barrier_id = ExtractWaitBarrierId(wait_stmt);
+    if (!barrier_id.defined()) {
+      return wait_stmt;
+    }
+    return makeParityWait(barrier_id.value(), normalized_parity);
   }
 
   bool ContainsTmaLoadStmt(const Stmt &stmt) {
