@@ -234,7 +234,7 @@ def main(
             threads=threads,
             dtype=dtype,
         )
-        print(kernel.get_kernel_source())
+
         Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, dtype=torch_dtype)
 
         torch.testing.assert_close(

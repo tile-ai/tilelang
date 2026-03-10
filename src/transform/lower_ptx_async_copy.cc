@@ -512,14 +512,9 @@ private:
     return Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
   }
 
-  static Stmt MakeWaitGroupStmt(int n, bool keep_wait_zero) {
-    Stmt wait = Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
-                              {IntImm(DataType::Int(32), n)}));
-    if (keep_wait_zero && n == 0) {
-      return AttrStmt(Integer(0), attr::kKeepAutoAsyncWaitZero,
-                      IntImm(DataType::Int(32), 1), wait);
-    }
-    return wait;
+  static Stmt MakeWaitGroupStmt(int n) {
+    return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
+                         {IntImm(DataType::Int(32), n)}));
   }
 
   // ---- Vectorized-offset contiguity helpers ----
@@ -685,8 +680,7 @@ private:
     if (include_commit) {
       seq->push_back(MakeCommitGroupStmt());
     }
-    seq->push_back(MakeWaitGroupStmt(
-        0, /*keep_wait_zero=*/!async_without_async_commit_wait_));
+    seq->push_back(MakeWaitGroupStmt(0));
   }
 
   // Note: AnalyzeCopyRegion replaces both the old `IsPureCopyRegion` and

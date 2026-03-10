@@ -342,7 +342,6 @@ class _attention(torch.autograd.Function):
         dtype = T.float16 if q.dtype == torch.float16 else T.bfloat16
         kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size, dtype=dtype)
         o, lse = kernel(q, k, v, sinks)
-        torch.cuda.synchronize()
         ctx.save_for_backward(q, k, v, sinks, o, lse)
         ctx.window_size = window_size
         ctx.groups = groups
