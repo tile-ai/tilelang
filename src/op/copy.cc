@@ -1698,8 +1698,27 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
     dst_layout = T.layout_map[dst];
   }
 
-  return ClusterCopyReplacer(dst, dst_block.value(), target_dst,
-                             dst_layout)(vectorized_thread_loop);
+  Stmt simt_copy = ClusterCopyReplacer(dst, dst_block.value(), target_dst,
+                                       dst_layout)(vectorized_thread_loop);
+
+  // When a remote_barrier is supplied but the fast path (tma_store_cluster) is
+  // unavailable (e.g. non-contiguous layout), the SIMT stores are not tracked
+  // by any hardware completion mechanism.  Auto-generate:
+  //   __syncthreads();
+  //   if (threadIdx.x == 0) { s_barrier[0].arrive(<dst_block>u); }
+  // so the destination CTA can still wait on the barrier as usual, without
+  // requiring the caller to insert these statements manually.
+  if (auto barrier_opt = GetBarrier()) {
+    Stmt sync = Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
+                              {StringImm("shared")}));
+    Stmt arrive =
+        Evaluate(Call(DataType::Handle(), ptx_arrive_cluster_barrier(),
+                      {barrier_opt.value(), dst_block.value()}));
+    Stmt guarded_arrive =
+        IfThenElse(EQ(T.thread_var, T.thread_bounds->min), arrive);
+    return SeqStmt({simt_copy, sync, guarded_arrive});
+  }
+  return simt_copy;
 }
 
 // Lowers copy to a bulk TMA (Tensor Memory Accelerator) transfer.
