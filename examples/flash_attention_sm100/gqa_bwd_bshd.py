@@ -187,6 +187,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
             dsT = T.alloc_fragment([block_M, block_N], accum_dtype)
             qkT_cast = T.alloc_fragment([block_M, block_N], dtype)
             dsT_cast = T.alloc_fragment([block_M, block_N], dtype)
+            qkT_shared = T.alloc_shared([block_M, block_N], dtype)
             lse_shared = T.alloc_shared([block_N], accum_dtype)
             delta = T.alloc_shared([block_N], accum_dtype)
             do = T.alloc_shared([block_N, dim], dtype)
@@ -217,14 +218,14 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
                 T.clear(dsT)
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(qkT, qkT_cast)
-                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
+                T.copy(qkT_cast, qkT_shared)
+                T.gemm(qkT_shared, do, dv, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(Delta[bz, bx, k * block_N : (k + 1) * block_N], delta)
                 for i, j in T.Parallel(block_M, block_N):
                     dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
-                T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow)
-
                 T.copy(dsT_cast, dsT_shared)
+                T.gemm(dsT_shared, q, dk, policy=T.GemmWarpPolicy.FullRow)
                 T.clear(dq)
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
                 for i, j in T.Parallel(block_N, dim):

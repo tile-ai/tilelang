@@ -1,8 +1,8 @@
 """Blackwell (SM100) GQA forward, BSHD layout.
 
 Q: [batch, seq_len, heads, dim], K/V: [batch, seq_len, head_kv, dim], head_kv = heads // groups.
-Pipeline (default): --variant ss.
-ts (optional): --variant ts (256 threads, single-path ts).
+variant='ss': mma_ss for both GEMMs (128 threads, P via shared memory).
+variant='ts': mma_ts for GEMM 2 (256 threads, P via tensor memory).
 """
 
 import torch
@@ -21,7 +21,7 @@ PASS_CFG = {
 
 
 @tilelang.jit(out_idx=[3], pass_configs=PASS_CFG)
-def flashattn_ss(
+def flashattn(
     batch,
     heads,
     seq_len,
@@ -30,12 +30,14 @@ def flashattn_ss(
     groups=1,
     block_M=128,
     block_N=128,
-    threads=128,
+    variant="ss",
 ):
-    """GQA forward, pipeline (ss): both GEMMs mma_ss. K/V indexed by head_kv = by // groups."""
+    """GQA forward. variant='ss': mma_ss (128t, P via shared); 'ts': mma_ts (256t, P via TMEM)."""
     if groups <= 0 or heads % groups != 0:
         raise ValueError("groups must be a positive divisor of heads")
     head_kv = heads // groups
+    use_ts = variant == "ts"
+    threads = 256 if use_ts else 128
     scale = (1.0 / dim) ** 0.5 * 1.44269504
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
@@ -53,13 +55,17 @@ def flashattn_ss(
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
-            P_shared = T.alloc_shared([block_M, block_N], dtype)
             O_shared = T.alloc_shared([block_M, dim], dtype)
 
             S_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
             D_tmem = T.alloc_tmem([block_M, dim], accum_dtype)
             mbar_s = T.alloc_barrier(1)
             mbar_d = T.alloc_barrier(1)
+
+            if use_ts:
+                P_tmem = T.alloc_tmem([block_M, block_N], dtype)
+            else:
+                P_shared = T.alloc_shared([block_M, block_N], dtype)
 
             S_reg = T.alloc_fragment([block_M, block_N], accum_dtype)
             P_cast = T.alloc_fragment([block_M, block_N], dtype)
@@ -134,155 +140,17 @@ def flashattn_ss(
                     O_reg[i, j] *= scores_scale[i]
 
                 T.copy(S_reg, P_cast)
-                T.copy(P_cast, P_shared)
-
-                T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared)
-
-                T.gemm(
-                    P_shared,
-                    V_shared,
-                    D_tmem,
-                    mbar=mbar_d,
-                    wg_wait=-1,
-                    clear_accum=True,
-                )
-                T.mbarrier_wait_parity(mbar_d, k % 2)
-
-                T.copy(D_tmem, D_reg)
-                for i, j in T.Parallel(block_M, dim):
-                    O_reg[i, j] += D_reg[i, j]
-
-            for i, j in T.Parallel(block_M, dim):
-                O_reg[i, j] /= logsum[i]
-            T.copy(O_reg, O_shared)
-            T.copy(
-                O_shared,
-                Output[bz, bx * block_M : (bx + 1) * block_M, by, :],
-            )
-
-    return main
-
-
-@tilelang.jit(out_idx=[3], pass_configs=PASS_CFG)
-def flashattn_ts(
-    batch,
-    heads,
-    seq_len,
-    dim,
-    is_causal,
-    groups=1,
-    block_M=128,
-    block_N=128,
-    threads=256,
-):
-    """GQA forward, warp (ts): GEMM 2 uses mma_ts. K/V indexed by by // groups."""
-    if groups <= 0 or heads % groups != 0:
-        raise ValueError("groups must be a positive divisor of heads")
-    head_kv = heads // groups
-    scale = (1.0 / dim) ** 0.5 * 1.44269504
-    q_shape = [batch, seq_len, heads, dim]
-    kv_shape = [batch, seq_len, head_kv, dim]
-    dtype = T.bfloat16
-    accum_dtype = T.float32
-
-    @T.prim_func
-    def main(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
-        Output: T.Tensor(q_shape, dtype),
-    ):
-        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
-            Q_shared = T.alloc_shared([block_M, dim], dtype)
-            K_shared = T.alloc_shared([block_N, dim], dtype)
-            V_shared = T.alloc_shared([block_N, dim], dtype)
-            O_shared = T.alloc_shared([block_M, dim], dtype)
-
-            S_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
-            P_tmem = T.alloc_tmem([block_M, block_N], dtype)
-            D_tmem = T.alloc_tmem([block_M, dim], accum_dtype)
-            mbar_s = T.alloc_barrier(1)
-            mbar_d = T.alloc_barrier(1)
-
-            S_reg = T.alloc_fragment([block_M, block_N], accum_dtype)
-            P_cast = T.alloc_fragment([block_M, block_N], dtype)
-            O_reg = T.alloc_fragment([block_M, dim], accum_dtype)
-            D_reg = T.alloc_fragment([block_M, dim], accum_dtype)
-
-            scores_max = T.alloc_fragment([block_M], accum_dtype)
-            scores_max_prev = T.alloc_fragment([block_M], accum_dtype)
-            scores_scale = T.alloc_fragment([block_M], accum_dtype)
-            scores_sum = T.alloc_fragment([block_M], accum_dtype)
-            logsum = T.alloc_fragment([block_M], accum_dtype)
-
-            T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
-            T.fill(O_reg, 0)
-            T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
-
-            loop_range = (
-                T.min(
-                    T.ceildiv(seq_len, block_N),
-                    T.ceildiv((bx + 1) * block_M, block_N),
-                )
-                if is_causal
-                else T.ceildiv(seq_len, block_N)
-            )
-
-            for k in T.Pipelined(loop_range, num_stages=1):
-                T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared)
-
-                T.gemm(
-                    Q_shared,
-                    K_shared,
-                    S_tmem,
-                    transpose_B=True,
-                    mbar=mbar_s,
-                    wg_wait=-1,
-                    clear_accum=True,
-                )
-                T.mbarrier_wait_parity(mbar_s, k % 2)
-
-                T.copy(S_tmem, S_reg)
-
-                if is_causal:
-                    for i, j in T.Parallel(block_M, block_N):
-                        S_reg[i, j] = T.if_then_else(
-                            bx * block_M + i >= k * block_N + j,
-                            S_reg[i, j],
-                            -T.infinity(accum_dtype),
-                        )
+                if use_ts:
+                    T.copy(P_cast, P_tmem)
+                    P_operand = P_tmem
                 else:
-                    for i, j in T.Parallel(block_M, block_N):
-                        S_reg[i, j] = T.if_then_else(
-                            k * block_N + j >= seq_len,
-                            -T.infinity(accum_dtype),
-                            S_reg[i, j],
-                        )
-
-                T.copy(scores_max, scores_max_prev)
-                T.fill(scores_max, -T.infinity(accum_dtype))
-                T.reduce_max(S_reg, scores_max, dim=1, clear=False)
-                for i in T.Parallel(block_M):
-                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
-                for i in T.Parallel(block_M):
-                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-                for i, j in T.Parallel(block_M, block_N):
-                    S_reg[i, j] = T.exp2(S_reg[i, j] * scale - scores_max[i] * scale)
-                T.reduce_sum(S_reg, scores_sum, dim=1)
-                for i in T.Parallel(block_M):
-                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-
-                for i, j in T.Parallel(block_M, dim):
-                    O_reg[i, j] *= scores_scale[i]
-
-                T.copy(S_reg, P_cast)
-                T.copy(P_cast, P_tmem)
+                    T.copy(P_cast, P_shared)
+                    P_operand = P_shared
 
                 T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared)
 
                 T.gemm(
-                    P_tmem,
+                    P_operand,
                     V_shared,
                     D_tmem,
                     mbar=mbar_d,
@@ -306,7 +174,9 @@ def flashattn_ts(
     return main
 
 
-flashattn_warp = flashattn_ts
+flashattn_ss = flashattn
+flashattn_ts = flashattn
+flashattn_warp = flashattn
 
 
 def ref_program(Q, K, V, is_causal, groups=1):
@@ -349,9 +219,7 @@ def main(
     print(f"=== Blackwell GQA Forward ({variant.upper()}) ===")
     print(f"batch={batch}, heads={heads}, head_kv={head_kv}, groups={groups}, seq_len={seq_len}, dim={dim}, causal={is_causal}")
 
-    fn = flashattn_ss if variant == "ss" else flashattn_ts
-    threads = 128 if variant == "ss" else 256  # ts: 256
-    kernel = fn(
+    kernel = flashattn(
         batch,
         heads,
         seq_len,
@@ -360,7 +228,7 @@ def main(
         groups=groups,
         block_M=128,
         block_N=128,
-        threads=threads,
+        variant=variant,
     )
 
     Q = torch.randn(batch, seq_len, heads, dim, device="cuda", dtype=torch.bfloat16)
