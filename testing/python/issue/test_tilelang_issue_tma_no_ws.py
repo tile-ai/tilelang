@@ -53,13 +53,14 @@ def test_tma_lower_no_warp_specialized_injects_mbarrier():
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     }
-
+    tilelang.disable_cache()
     kernel = _compile_tvm_ffi(tma_copy, pass_configs)
 
     src = kernel.get_kernel_source()
+    print(src)
     assert "tl::tma_load" in src
     assert "mbarrier_mem" in src
-    assert "expect_transaction" in src
+    assert "arrive_and_expect_tx" in src
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     kernel(x)
@@ -114,4 +115,5 @@ def test_tma_lower_no_warp_specialized_2d_descriptor_uses_args1_barrier():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_tma_lower_no_warp_specialized_injects_mbarrier()

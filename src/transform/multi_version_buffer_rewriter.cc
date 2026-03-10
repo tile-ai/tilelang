@@ -3,6 +3,7 @@
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -463,8 +464,14 @@ private:
     version_index_ = FloorMod(linear_index, num_stages);
     // Parity cycles every num_stages iterations for mbarrier phase tracking.
     parity_cycle_ = FloorMod(FloorDiv(linear_index, num_stages), 2);
+    // Store the pipelined loop variable and its min value so we can compute
+    // the initial-phase offset of each mbarrier_wait_parity expression.
+    pipeline_loop_var_ = op->loop_var;
+    pipeline_loop_min_ = op->min;
     auto for_node = StmtExprMutator::VisitStmt_(op);
     parity_cycle_ = PrimExpr(); // reset
+    pipeline_loop_var_ = Var();
+    pipeline_loop_min_ = PrimExpr();
     loop_stack_.pop_back();
     stmt_stack_.pop_back();
 
@@ -514,14 +521,38 @@ private:
       return RewriteBufferAccess(call, {1});
     }
     // Rewrite parity for mbarrier_wait_parity on versioned barrier buffers.
-    // The user writes single-barrier parity (k % 2). After multi-versioning,
-    // each barrier is reused every num_stages iterations, so the correct
-    // parity becomes (k // num_stages) % 2. Replace entirely.
+    // The user writes single-barrier parity (e.g. k % 2 or (k+1) % 2).
+    // After multi-versioning, each barrier is reused every num_stages
+    // iterations, so the base parity becomes (k // num_stages) % 2.
+    // However, different barriers may have different initial-phase offsets
+    // (e.g. back-pressure barriers use (k+1)%2 so the first iteration
+    // passes immediately). We detect this offset by evaluating the original
+    // parity at the loop's initial value and preserving it.
     if (call->op.same_as(mbarrier_wait_parity()) && parity_cycle_.defined()) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         if (load->buffer.scope() == "shared.barrier") {
+          PrimExpr new_parity = parity_cycle_;
+          if (pipeline_loop_var_.defined()) {
+            arith::Analyzer analyzer;
+            auto subst = [&](const Var &v) -> Optional<PrimExpr> {
+              if (v.same_as(pipeline_loop_var_))
+                return pipeline_loop_min_;
+              return Optional<PrimExpr>();
+            };
+            PrimExpr init_orig =
+                analyzer.Simplify(tir::Substitute(call->args[1], subst));
+            PrimExpr init_cycle =
+                analyzer.Simplify(tir::Substitute(parity_cycle_, subst));
+            PrimExpr offset =
+                analyzer.Simplify(FloorMod(init_orig - init_cycle, 2));
+            if (auto *imm = offset.as<IntImmNode>()) {
+              if (imm->value % 2 != 0) {
+                new_parity = FloorMod(parity_cycle_ + 1, 2);
+              }
+            }
+          }
           Array<PrimExpr> new_args = call->args;
-          new_args.Set(1, parity_cycle_);
+          new_args.Set(1, new_parity);
           return Call(call->dtype, call->op, new_args, call->annotations);
         }
       }
@@ -563,6 +594,8 @@ private:
 
   PrimExpr version_index_;
   PrimExpr parity_cycle_; // (k / num_stages) % 2 for mbarrier parity rewriting
+  Var pipeline_loop_var_; // loop variable of the pipelined loop
+  PrimExpr pipeline_loop_min_; // min value of the pipelined loop
   std::vector<std::pair<Var, PrimExpr>> loop_stack_;
   // Track ancestor statements to query whether an LCA is inside the current
   // loop.

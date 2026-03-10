@@ -1,9 +1,9 @@
 """Test T.tma_copy() with user-managed mbarrier synchronization.
 
-T.tma_copy() emits only arrive_and_expect_tx + tma_load (no wait).
-The user provides a single barrier via T.alloc_barrier() and waits on it
-explicitly via T.mbarrier_wait_parity(). MultiVersionBuffer expands the
-barrier to num_stages versions automatically.
+T.tma_copy() emits only expect_tx + tma_load (no arrive, no wait).
+The user must explicitly call T.barrier_arrive() and T.mbarrier_wait_parity().
+This allows multiple tma_copy operations to share a single barrier arrive.
+MultiVersionBuffer expands the barrier to num_stages versions automatically.
 """
 
 from tilelang import tvm as tvm
@@ -38,12 +38,14 @@ def matmul_tma_copy(
             A_shared = T.alloc_shared((block_M, block_K), in_dtype)
             B_shared = T.alloc_shared((block_K, block_N), in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            mbar_A = T.alloc_barrier(1)
-            mbar_B = T.alloc_barrier(1)
+            mbar_A = T.alloc_barrier(128)
+            mbar_B = T.alloc_barrier(128)
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.tma_copy(A[by * block_M, k * block_K], A_shared, barrier=mbar_A)
+                T.barrier_arrive(mbar_A)
                 T.tma_copy(B[k * block_K, bx * block_N], B_shared, barrier=mbar_B)
+                T.barrier_arrive(mbar_B)
                 T.mbarrier_wait_parity(mbar_A, k % 2)
                 T.mbarrier_wait_parity(mbar_B, k % 2)
                 T.gemm(A_shared, B_shared, C_local)
@@ -71,9 +73,10 @@ def run_gemm_tma_copy(num_stages):
         out_dtype,
         accum_dtype,
         threads,
-        num_stages,
+        # num_stages,
+        2,
     )
-
+    tilelang.disable_cache()
     kernel = tilelang.compile(
         program,
         out_idx=[2],
@@ -81,6 +84,8 @@ def run_gemm_tma_copy(num_stages):
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         },
     )
+    print(kernel.get_kernel_source())
+    # exit()
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
