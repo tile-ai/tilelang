@@ -39,11 +39,12 @@ public:
                       "specialization is manually enabled";
       return true;
     }
-    // When mbarrier ops coexist with TMA loads but tma_store_cluster is also
-    // present, the barriers are for SM-to-SM cluster copy synchronisation and
-    // should not block auto warp specialisation.
-    if (detector.has_tma_op_ && detector.has_mbarrier_op_ &&
-        !detector.has_cluster_copy_) {
+    // TMA loads with mbarrier ops indicate a user-managed pipeline that is
+    // incompatible with auto warp specialisation.  The cluster-copy exemption
+    // only applies when mbarrier ops exist *without* any regular TMA-load
+    // path (i.e. barriers are solely for SM-to-SM cluster copy sync), which
+    // naturally falls through here because has_tma_op_ is false in that case.
+    if (detector.has_tma_op_ && detector.has_mbarrier_op_) {
       LOG(WARNING) << "Auto warp specialization will be disabled because TMA "
                       "and mbarrier are both present";
       return true;
@@ -55,7 +56,6 @@ public:
     has_tma_op_ = false;
     has_mbarrier_op_ = false;
     has_warp_specialization_ = false;
-    has_cluster_copy_ = false;
   }
 
 private:
@@ -77,9 +77,6 @@ private:
         op->op.same_as(tma_load_multicast()) ||
         op->op.same_as(set_max_nreg())) {
       has_tma_op_ = true;
-    }
-    if (op->op.same_as(tma_store_cluster())) {
-      has_cluster_copy_ = true;
     }
     IRVisitorWithAnalyzer::VisitExpr_(op);
   }
@@ -103,7 +100,6 @@ private:
   IterVar thread_var_;
   bool has_mbarrier_op_{false};
   bool has_warp_specialization_{false};
-  bool has_cluster_copy_{false};
 };
 
 } // namespace tl

@@ -13,13 +13,13 @@ Expected generated producer code (block 0):
 Block 1 waits on its own s_barrier and then reads the result.
 """
 
+import pytest
 import torch
 import tilelang
 import tilelang.language as T
 import numpy as np
 
 
-@tilelang.jit(verbose=True, execution_backend="cython")
 def make_store_cluster_kernel(N: int):
     @T.prim_func
     def kernel(
@@ -30,15 +30,10 @@ def make_store_cluster_kernel(N: int):
         with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((N,), "float32")
             s_dst = T.alloc_shared((N,), "float32")
-            s_barrier = T.alloc_shared((1,), "uint64")
+            s_barrier = T.alloc_cluster_barrier([1])
 
             T.fill(s_src, 0.0)
             T.fill(s_dst, 0.0)
-
-            # Every CTA initialises its own barrier: expect 1 arrival
-            # carrying N*4 bytes (the cp.async.bulk signals on completion).
-            if T.get_thread_binding() == 0:
-                T.mbarrier_init(s_barrier[0], 1)
 
             T.cluster_sync()
 
@@ -62,31 +57,38 @@ def make_store_cluster_kernel(N: int):
     return kernel
 
 
-def main():
+def test_tma_store_cluster():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
     major, minor = torch.cuda.get_device_capability()
     if major < 9:
-        print(f"Skipping: requires Compute Capability 9.0+, found {major}.{minor}")
-        return
+        pytest.skip(f"requires Compute Capability 9.0+, found {major}.{minor}")
 
     N = 128
-    A = torch.arange(N, dtype=torch.float32, device="cuda")
-    B = torch.zeros(N, dtype=torch.float32, device="cuda")
+    prim_func = make_store_cluster_kernel(N)
+    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
 
-    kernel = make_store_cluster_kernel(N)
-    kernel(A, B)
+    # Assert that the lowering actually produced tl::tma_store_cluster.
+    # The SIMT fallback (map_shared_rank + scalar stores) also copies data
+    # correctly, so a pure numerical check would miss a regression where
+    # T.copy(dst_block=..., remote_barrier=...) stops emitting the bulk-async
+    # cluster intrinsic.
+    src = mod.get_kernel_source()
+    assert "tl::tma_store_cluster" in src, (
+        "Expected tl::tma_store_cluster in generated kernel source; "
+        "T.copy(dst_block=..., remote_barrier=...) may have regressed to the "
+        f"SIMT fallback.\nKernel source:\n{src}"
+    )
+
+    A = torch.arange(N, dtype=torch.float32, device="cuda")
+    B = mod(A)
 
     result = B.cpu().numpy()
     expected = A.cpu().numpy()
 
-    print("Result  (first 8):", result[:8])
-    print("Expected(first 8):", expected[:8])
-
-    if np.allclose(result, expected):
-        print("PASS: tma_store_cluster copy successful")
-    else:
-        diff = np.abs(result - expected).max()
-        print(f"FAIL: max diff = {diff}")
+    diff = np.abs(result - expected).max()
+    assert np.allclose(result, expected), f"tma_store_cluster copy failed: max diff = {diff}"
 
 
 if __name__ == "__main__":
-    main()
+    test_tma_store_cluster()

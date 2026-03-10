@@ -78,10 +78,18 @@ def copy(
 
         dst_block (Optional[Union[int, tir.PrimExpr]], optional): Destination block index for cluster copy. Defaults to None.
         cluster_mask (Optional[int], keyword-only): Bitmask specifying which CTAs in the cluster
-            receive the TMA multicast broadcast. When set, the CTA whose rank equals the lowest
-            set bit in the mask issues ``tma_load_multicast`` (sending data to *all* masked CTAs
-            simultaneously); every other CTA falls back to a regular ``tma_load`` for its own
-            shared memory. A value of ``None`` (default) disables multicast and always uses a
+            participate in a TMA multicast broadcast.  The hardware delivers the data to every
+            masked CTA's shared memory in a single transfer.  At runtime the kernel splits into
+            three cases based on each CTA's rank within the cluster:
+
+            * **Leader** (rank == lowest set bit in mask): issues ``tma_load_multicast``, which
+              fills the shared memory of *all* masked CTAs simultaneously.
+            * **Masked peer** (rank is set in mask, but not the lowest): does *nothing* — its
+              shared memory is written passively by the leader's multicast.
+            * **Unmasked CTA** (rank is not set in mask): issues a regular ``tma_load`` for its
+              own shared memory independently.
+
+            A value of ``None`` (default) disables multicast and every CTA issues its own
             regular TMA load.
         remote_barrier (Optional[tir.BufferLoad], keyword-only): Shared-memory mbarrier element used for
             SM-to-SM cluster copy (``dst_block`` must also be set).  When provided, the copy is
@@ -134,7 +142,7 @@ def copy(
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    if dst_block is not None:
+    if "dst_block" not in ann and dst_block is not None:
         ann["dst_block"] = dst_block
 
     if "cluster_mask" not in ann and cluster_mask is not None:

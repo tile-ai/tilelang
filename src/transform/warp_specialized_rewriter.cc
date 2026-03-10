@@ -365,17 +365,20 @@ public:
 private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-        call->op.same_as(tma_load_multicast())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       auto mbar = makeGetBarrier(producer_barrier_idx_);
       auto arg0 = call->args[0].as<Call>();
-      // Check if this is a 1D TMA load
+      // Check if this is a 1D TMA load (raw address, no descriptor, no
+      // multicast)
       auto is_1d_tma_load =
           arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
           call->op.same_as(tma_load());
       if (call->op.same_as(tma_load_multicast())) {
+        // tma_load_multicast layout: [desc, mbar, smem_ptr, mask, coords...,
+        // eviction]
         call.CopyOnWrite()->args.Set(1, mbar);
       } else if (is_1d_tma_load) {
+        // 1D bulk copy layout: [smem_ptr, global_ptr, mbar, bytes, eviction]
         call.CopyOnWrite()->args.Set(2, mbar);
       } else {
         Call access_ptr = Downcast<Call>(call->args[2]);
@@ -1204,13 +1207,6 @@ private:
     }
     auto result = FilterByRole(op);
 
-    if (is_dynamic_extent) {
-      Array<PrimExpr> zero_indices = {0};
-      PrimExpr new_prefix = LoadRaggedPrefix() + op->extent;
-      Stmt update = BufferStore(ragged_prefix_buf_, new_prefix, zero_indices);
-      result = SeqStmt({result, update});
-    }
-
     Stmt grouped_for_node;
     if (result.as<ForNode>() && group_anno && !group_info_array.empty() &&
         !is_emitting_producer_) {
@@ -1233,12 +1229,24 @@ private:
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_order");
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_stage");
       }
+      // Choose between the grouped and plain loop before potentially wrapping.
+      Stmt final_node;
       if (is_emitting_producer_ || !group_anno || group_info_array.empty()) {
-        loop_stack_.pop_back();
-        return for_node;
+        final_node = for_node;
+      } else {
+        final_node = grouped_for_node;
       }
       loop_stack_.pop_back();
-      return grouped_for_node;
+      // Append the ragged-prefix update after the fully post-processed loop.
+      // This is deferred to here (rather than applied early before annotation
+      // stripping) so the ForNode remains visible to GroupOpRewriter above.
+      if (is_dynamic_extent) {
+        Array<PrimExpr> zero_indices = {0};
+        PrimExpr new_prefix = LoadRaggedPrefix() + op->extent;
+        Stmt update = BufferStore(ragged_prefix_buf_, new_prefix, zero_indices);
+        return SeqStmt({final_node, update});
+      }
+      return final_node;
     }
     loop_stack_.pop_back();
     return result;
@@ -1482,12 +1490,17 @@ public:
   std::vector<Stmt> init_stmts;
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    if (IsOnlyInit(op->then_case)) {
+    if (!op->else_case.defined() && IsOnlyInit(op->then_case)) {
       init_stmts.push_back(GetRef<Stmt>(op));
       return Evaluate(0);
     }
     return StmtMutator::VisitStmt_(op);
   }
+
+  // Don't descend into scope-creating nodes; extracting an init from inside
+  // an Allocate/LetStmt would hoist it out of the variable's scope.
+  Stmt VisitStmt_(const AllocateNode *op) final { return GetRef<Stmt>(op); }
+  Stmt VisitStmt_(const LetStmtNode *op) final { return GetRef<Stmt>(op); }
 
   bool IsOnlyInit(const Stmt &stmt) {
     if (const auto *eval = stmt.as<EvaluateNode>()) {

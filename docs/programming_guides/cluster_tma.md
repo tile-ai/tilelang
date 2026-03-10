@@ -3,7 +3,7 @@
 This page describes two advanced data-movement features that are available on
 NVIDIA Hopper (SM90) and later: **TMA multicast** and **SM-to-SM cluster
 copy**. Both features are exposed through extensions to the existing `T.copy`
-operator and require a kernel launched with `cluster_size > 1`.
+operator and require a kernel launched with thread block cluster, i.e., with `cluster_dims != (1, 1, 1)`.
 
 Requirements:
 - CUDA Compute Capability ≥ 9.0 (Hopper / Blackwell / RTX 5090)
@@ -19,10 +19,10 @@ position inside the cluster), and all CTAs can observe each other's shared
 memory via the `shared::cluster` address space.
 
 ```python
-with T.Kernel(grid_x, grid_y, threads=128, cluster_size=4) as (bx, by):
+with T.Kernel(grid_x, grid_y, threads=128, cluster_dims=(4, 1, 1)) as (bx, by):
     rank  = T.block_rank_in_cluster()   # 0..3 within this cluster
     cid   = T.get_cluster_id()           # which cluster am I in
-    nctas = T.get_cluster_block_nums()   # always equals cluster_size (4)
+    nctas = T.get_cluster_block_nums()
     T.cluster_sync()                     # barrier across all CTAs in cluster
 ```
 
@@ -38,7 +38,7 @@ broadcasts one global tile to every participating CTA simultaneously**, saving
 repeated DRAM traffic when multiple CTAs in a cluster need the same data (e.g.,
 the same K-panel in a split-K GEMM).
 
-```
+```text
 Global memory ──TMA multicast──▶ shared memory (rank 0)
                               └─▶ shared memory (rank 1)   (same tile, no extra DRAM read)
                   TMA load    ──▶ shared memory (rank 2)   (independent tile)
@@ -74,7 +74,7 @@ def make_tma_multicast_kernel(M, N, block_M, block_N, cluster_mask):
             T.ceildiv(N, block_N),
             T.ceildiv(M, block_M),
             threads=128,
-            cluster_size=4,
+            cluster_dims=(4, 1, 1)
         ) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), "float16")
 
@@ -159,17 +159,13 @@ def make_cluster_copy_kernel(N: int):
         A: T.Tensor((N,), "float32"),
         B: T.Tensor((N,), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_size=2) as pid:
+        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src     = T.alloc_shared((N,), "float32")
             s_dst     = T.alloc_shared((N,), "float32")
-            s_barrier = T.alloc_shared((1,), "uint64")
+            s_barrier = T.alloc_cluster_barrier([1])
 
             T.fill(s_src, 0.0)
             T.fill(s_dst, 0.0)
-
-            # Each CTA initialises its own barrier: 1 expected arrival.
-            if T.get_thread_binding() == 0:
-                T.mbarrier_init(s_barrier[0], 1)
 
             T.cluster_sync()
 
@@ -226,8 +222,7 @@ overhead.
 ### Notes
 
 - Both paths require `src` and `dst` to be in `shared` or `shared.dyn` scope.
-- The mbarrier must be allocated with `T.alloc_shared((count,), "uint64")` and
-  initialised with `T.mbarrier_init` before use.
+- The mbarrier must be allocated with `T.alloc_cluster_barrier([arrive_count])`.
 - `T.cluster_sync()` after allocation but before the copy is required to ensure
   all CTAs have reached the barrier-init barrier before any data is pushed.
 - `dst_block` may be a compile-time integer or a runtime `tir.PrimExpr`.
@@ -242,7 +237,7 @@ overhead.
 | `T.block_rank_in_cluster()` | `int32` | Block rank (0-indexed) within the cluster |
 | `T.get_cluster_block_nums()` | `int32` | Total number of CTAs in the cluster |
 | `T.cluster_sync()` | — | Barrier synchronisation across all cluster CTAs |
-| `T.mbarrier_init(bar, count)` | — | Initialise an mbarrier for `count` arrivals |
+| `T.alloc_cluster_barrier([count])` | `Buffer` | Allocate and initialise an mbarrier for `count` arrivals |
 | `T.mbarrier_arrive(bar)` | — | Signal one arrival on an mbarrier |
 | `T.mbarrier_wait_parity(bar, parity)` | — | Wait until `bar` flips to `parity` |
 
@@ -257,13 +252,13 @@ SM-to-SM copy (saving global-memory round trips).
 ```python
 @T.prim_func
 def split_k_gemm(A, B, C):
-    with T.Kernel(grid_x, grid_y, threads=256, cluster_size=4) as (bx, by):
+    with T.Kernel(grid_x, grid_y, threads=256, cluster_dims=(4, 1, 1)) as (bx, by):
         rank    = T.block_rank_in_cluster()
         A_s     = T.alloc_shared((BM, BK), "float16")
         B_s     = T.alloc_shared((BK, BN), "float16")
         C_f     = T.alloc_fragment((BM, BN), "float32")
         C_s     = T.alloc_shared((BM, BN), "float32")
-        barrier = T.alloc_shared((1,), "uint64")
+        barrier = T.alloc_cluster_barrier([3])
         T.clear(C_f)
 
         # Phase 1: each CTA loads its K-slice; A is multicast to rank 0 and 1.
@@ -273,18 +268,31 @@ def split_k_gemm(A, B, C):
             T.copy(B[k_off, bx * BN], B_s)
             T.gemm(A_s, B_s, C_f)
 
-        # Phase 2: push partial sums to rank 0 via SM-to-SM copy.
-        T.copy(C_f, C_s)
-        if T.get_thread_binding() == 0:
-            T.mbarrier_init(barrier[0], 1)
+        # Phase 2: push each rank's partial sums to rank 0 for accumulation.
+        #
+        # Use a per-rank staging slot so every non-zero rank writes to a
+        # distinct destination region — avoiding both a destination race and
+        # an arrival-count mismatch.  Each CTA stores its own partial into
+        # C_parts[rank]; non-zero ranks then push that slot to the matching
+        # slot in rank 0's shared memory.
+        #
+        # Arrival count must equal the number of producers: cluster_size - 1.
+        C_parts = T.alloc_shared((4, BM, BN), "float32")  # one slot per rank
+        T.copy(C_f, C_parts[rank])
+
         T.cluster_sync()
 
         if rank != 0:
-            T.copy(C_s, C_s, dst_block=0, remote_barrier=barrier[0])
+            # Push this rank's slot to the *same* slot index in rank 0's
+            # C_parts — different offsets, so no destination race.
+            T.copy(C_parts[rank], C_parts[rank],
+                   dst_block=0, remote_barrier=barrier[0])
+
         if rank == 0:
-            T.mbarrier_wait_parity(barrier[0], 0)
+            T.mbarrier_wait_parity(barrier[0], 0)  # wakes after all 3 arrivals
+            # C_parts[0..3] in rank 0's smem now hold all four partial sums.
             # accumulate and store ...
-            T.copy(C_s, C[by * BM, bx * BN])
+            T.copy(C_parts[0], C[by * BM, bx * BN])
 ```
 
 ---

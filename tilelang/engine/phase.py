@@ -1,9 +1,38 @@
 from __future__ import annotations
 from tvm import tir, IRModule
 from tvm.target import Target
+import tvm
 import tilelang
 from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma, is_hopper, have_pdl
+
+
+def _mod_uses_tma_barriers(mod: IRModule) -> bool:
+    """Return True if any PrimFunc in *mod* contains a ``create_barriers`` call.
+
+    ``LowerHopperIntrin`` emits ``create_barriers`` into every device function
+    that uses TMA/mbarrier and nowhere else.  Checking for that call after
+    lowering therefore tells us whether a given kernel actually needs the
+    128-byte shared-memory alignment that TMA descriptors require, without
+    forcing the alignment on every kernel that merely runs on a Hopper GPU.
+    """
+    found = [False]
+
+    def _visit(node):
+        if found[0]:
+            return
+        if isinstance(node, tir.Call):
+            op = getattr(node, "op", None)
+            if op is not None and getattr(op, "name", "").endswith("create_barriers"):
+                found[0] = True
+
+    for func in mod.functions.values():
+        if found[0]:
+            break
+        if isinstance(func, tir.PrimFunc):
+            tvm.tir.stmt_functor.post_order_visit(func.body, _visit)
+
+    return found[0]
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -292,7 +321,12 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
-    shared_align_bytes = 128 if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target) else 16
+    # Use 128-byte alignment only when the lowered IR actually contains TMA/
+    # mbarrier usage (signalled by a create_barriers call injected by
+    # LowerHopperIntrin).  Target-level TMA availability alone is not
+    # sufficient: non-TMA kernels on Hopper would otherwise pick up
+    # unnecessary padding, inflating SMEM usage and reducing occupancy.
+    shared_align_bytes = 128 if allow_tma_lower(pass_ctx=pass_ctx, target=target) and _mod_uses_tma_barriers(mod) else 16
 
     mod = tilelang.transform.MergeSharedMemoryAllocations(
         enable_aggressive_merge=enable_aggressive_merge,
