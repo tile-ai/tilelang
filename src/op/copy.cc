@@ -1570,8 +1570,9 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
   class ClusterCopyReplacer : public StmtExprMutator {
   public:
     ClusterCopyReplacer(const Buffer &dst, PrimExpr dst_block,
-                        const Buffer &target_dst)
-        : dst_(dst), dst_block_(dst_block), target_dst_(target_dst) {}
+                        const Buffer &target_dst, Optional<Layout> dst_layout)
+        : dst_(dst), dst_block_(dst_block), target_dst_(target_dst),
+          dst_layout_(dst_layout) {}
 
     Stmt VisitStmt_(const BufferStoreNode *op) final {
       if (op->buffer.same_as(dst_)) {
@@ -1580,15 +1581,23 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
         args.push_back(op->value);                 // The value to store
         args.push_back(dst_block_); // The destination block index
 
-        // linearize the index.
-        PrimExpr linearized_index = op->indices[0];
-        if (op->indices.size() > 1) {
+        // Compute the physical linear index in the target buffer.
+        // When dst is remapped to a layout-transformed shared buffer, we must
+        // forward logical indices through that layout before flattening.
+        Array<PrimExpr> physical_indices = op->indices;
+        if (!target_dst_.same_as(dst_) && dst_layout_.defined()) {
+          physical_indices = dst_layout_.value()->Forward(op->indices);
+        }
+
+        PrimExpr linearized_index = physical_indices[0];
+        if (physical_indices.size() > 1) {
           PrimExpr multiplier = 1;
           linearized_index = 0;
-          for (int i = op->indices.size() - 1; i >= 0; --i) {
-            linearized_index = linearized_index + op->indices[i] * multiplier;
+          for (int i = physical_indices.size() - 1; i >= 0; --i) {
+            linearized_index =
+                linearized_index + physical_indices[i] * multiplier;
             if (i > 0) {
-              multiplier = multiplier * op->buffer->shape[i];
+              multiplier = multiplier * target_dst_->shape[i];
             }
           }
         }
@@ -1620,6 +1629,7 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
     const Buffer &dst_;
     PrimExpr dst_block_;
     const Buffer &target_dst_;
+    Optional<Layout> dst_layout_;
   };
 
   Buffer target_dst = dst;
@@ -1627,8 +1637,13 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
     target_dst = T.buffer_remap[dst];
   }
 
-  return ClusterCopyReplacer(dst, dst_block.value(),
-                             target_dst)(vectorized_thread_loop);
+  Optional<Layout> dst_layout = std::nullopt;
+  if (T.layout_map.count(dst)) {
+    dst_layout = T.layout_map[dst];
+  }
+
+  return ClusterCopyReplacer(dst, dst_block.value(), target_dst,
+                             dst_layout)(vectorized_thread_loop);
 }
 
 // Lowers copy to a bulk TMA (Tensor Memory Accelerator) transfer.
