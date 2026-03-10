@@ -4,6 +4,8 @@ from tvm.tir import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLo
 from tvm.tir.transform import prim_func_pass
 from tvm.tir.stmt_functor import post_order_visit
 
+from tilelang.utils.language import is_fragment
+
 
 @tir.functor.visitor
 class _LoopVarUseAnalyzer(PyStmtExprVisitor):
@@ -34,7 +36,7 @@ def collect_fragment_accesses(statement) -> list[BufferLoad | BufferStore]:
     buffer_accesses = []
 
     def visit_buffer_access(node):
-        if isinstance(node, (BufferLoad, BufferStore)) and node.buffer.scope() == "local.fragment":
+        if isinstance(node, (BufferLoad, BufferStore)) and is_fragment(node.buffer):
             buffer_accesses.append(node)
 
     post_order_visit(statement, visit_buffer_access)
