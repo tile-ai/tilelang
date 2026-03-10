@@ -1,6 +1,6 @@
 from __future__ import annotations
 from tvm import tir
-from tvm.tir import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm
+from tvm.tir import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm, ForKind
 from tvm.tir.transform import prim_func_pass
 from tvm.tir.stmt_functor import post_order_visit
 
@@ -72,7 +72,7 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
 
             for loop in self.loop_stack:
                 # symbolic
-                if not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
+                if loop.kind == ForKind.PARALLEL and not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
                     loops_with_symbolic_ranges.append(loop)
 
             for buffer_access in buffer_accesses:
