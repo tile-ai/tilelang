@@ -99,6 +99,21 @@ def get_available_cpu_count() -> int:
     return cpu_count or 1
 
 
+def _normalize_value(value, sort_dict_items: bool = False):
+    if isinstance(value, torch.Tensor):
+        return ("tensor", str(value.dtype), tuple(value.shape), value.stride())
+    if isinstance(value, Var):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_value(v, sort_dict_items=sort_dict_items) for v in value)
+    if isinstance(value, dict):
+        items = ((str(k), _normalize_value(v, sort_dict_items=sort_dict_items)) for k, v in value.items())
+        if sort_dict_items:
+            return tuple(sorted(items))
+        return {k: v for k, v in items}
+    return value
+
+
 class AutoTuner:
     """Auto-tuner for tilelang programs.
 
@@ -113,7 +128,7 @@ class AutoTuner:
     compile_args = CompileArgs()
     profile_args = ProfileArgs()
 
-    _kernel_parameters: tuple[str, ...] | None = None
+    _kernel_parameters: tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]] | None = None
     _function_parameters: dict[str, Any] | None = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
@@ -259,22 +274,13 @@ class AutoTuner:
 
         return self
 
-    def set_kernel_parameters(self, k_parameters: tuple[str, ...], f_parameters: dict[str, Any]):
+    def set_kernel_parameters(self, k_parameters: tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]], f_parameters: dict[str, Any]):
         # for cache key generation
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
     def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process."""
-
-        def _normalize_param(value):
-            if isinstance(value, Var):
-                return str(value)
-            if isinstance(value, (list, tuple)):
-                return [_normalize_param(v) for v in value]
-            if isinstance(value, dict):
-                return {str(k): _normalize_param(v) for k, v in value.items()}
-            return value
 
         # extract parameters from the function signature
         op_parameters = []
@@ -283,7 +289,7 @@ class AutoTuner:
                 op_parameters.append(default_value.default)
 
         if self._kernel_parameters is not None:
-            op_parameters += _normalize_param(self._kernel_parameters)
+            op_parameters += _normalize_value(self._kernel_parameters)
 
         func_source = inspect.getsource(self.fn)
         key_data = {
@@ -687,19 +693,8 @@ class AutoTuneImpl(Generic[_P, _T]):
 
         mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
 
-        def _normalize_for_key(x):
-            import torch
-
-            if isinstance(x, torch.Tensor):
-                return ("tensor", str(x.dtype), tuple(x.shape))
-            if isinstance(x, (list, tuple)):
-                return tuple(_normalize_for_key(v) for v in x)
-            if isinstance(x, dict):
-                return tuple(sorted((k, _normalize_for_key(v)) for k, v in x.items()))
-            return x
-
-        norm_args = _normalize_for_key(args)
-        norm_kwargs = tuple(sorted((k, _normalize_for_key(v)) for k, v in kwargs.items()))
+        norm_args = _normalize_value(args, sort_dict_items=True)
+        norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
         key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache:
             if mode == "lazy":
@@ -709,8 +704,7 @@ class AutoTuneImpl(Generic[_P, _T]):
 
                 autotuner = self.get_tunner()
                 autotuner.jit_compile = jit_compile
-                raw_key = (args, tuple(sorted(kwargs.items())))
-                autotuner.set_kernel_parameters(raw_key, self.jit_impl.signature.parameters)
+                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
             else:
 
                 def jit_compile(**config_arg):
