@@ -747,7 +747,6 @@ private:
         Call(call->dtype, call->op, args, call->annotations, call->span));
   }
 
-
   Stmt RewriteWaitStaticInSimpleWrapper(const Stmt &stmt, int new_wait_n,
                                         bool *changed) const {
     ClassifiedStmt cls = ClassifySimpleAsyncStmt(stmt);
