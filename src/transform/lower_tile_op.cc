@@ -1124,19 +1124,41 @@ private:
 
     auto root = tvm::ffi::GetRef<For>(op);
 
-    // Check if ALL BufferStore targets in this loop are local buffers.
-    // If so, skip thread partitioning (each thread runs the full loop
-    // independently). Otherwise, the loop needs thread partitioning.
-    bool all_stores_local = true;
+    // Check if the loop writes to any non-local buffer.
+    // Only T.copy(global/shared/local, local) produces parallel loops where
+    // all stores target local buffers and no call writes to non-local
+    // buffers — these do not need thread partitioning.
+    // Element-level intrinsics (e.g. atomic_add) pass non-local buffer
+    // pointers via tvm_access_ptr / tl::access_ptr inside CallNodes.
+    bool has_non_local_store = false;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
         if (!IsLocalBuffer(store->buffer)) {
-          all_stores_local = false;
+          has_non_local_store = true;
+        }
+      } else if (const auto *call = obj.as<CallNode>()) {
+        if (call->op.same_as(builtin::tvm_access_ptr())) {
+          // tvm_access_ptr format: (dtype, data, offset, extent, rw_mask)
+          auto buffer_var = call->args[1].as<VarNode>();
+          if (buffer_var) {
+            Var var = tvm::ffi::GetRef<Var>(buffer_var);
+            auto it = buffer_map_.find(var);
+            if (it != buffer_map_.end() && !IsLocalBuffer(it->second)) {
+              has_non_local_store = true;
+            }
+          }
+        } else if (call->op.same_as(tl::access_ptr())) {
+          // tl::access_ptr format: (BufferLoad, extent, rw_mask)
+          if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+            if (!IsLocalBuffer(load->buffer)) {
+              has_non_local_store = true;
+            }
+          }
         }
       }
     });
 
-    bool parallel_loop = !all_stores_local;
+    bool parallel_loop = has_non_local_store;
 
     // Check if there are non-local buffer accesses (for vectorization decision)
     bool has_non_local = false;
