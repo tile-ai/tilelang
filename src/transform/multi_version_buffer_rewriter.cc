@@ -455,6 +455,11 @@ private:
       Var buffer_var = buffer->data;
       Buffer new_buffer = RewriteAllocBuffer(buffer, num_stages);
       buffer_remap_.Set(buffer, new_buffer);
+      // Ensure the data var is discoverable so the barrier_init annotation
+      // update in VisitStmt_(BlockRealizeNode*) can find the remapped buffer.
+      if (!buffer_data_to_buffer_.count(buffer_var)) {
+        buffer_data_to_buffer_.Set(buffer_var, buffer);
+      }
     }
     PrimExpr linear_index = loop_stack_[0].first;
     for (size_t i = 1; i < loop_stack_.size(); ++i) {
