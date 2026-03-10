@@ -34,6 +34,10 @@ static constexpr const char *kLoopPreferAsync = "parallel_prefer_async";
 // for injected cp.async in this parallel loop subtree. Value should be Bool.
 static constexpr const char *kParallelAsyncWithoutAsyncCommitWait =
     "parallel_async_without_async_commit_wait";
+// Statement annotation key marking an auto-injected wait_group(0) that should
+// not be relaxed by OptimizeCPAsyncSync.
+static constexpr const char *kKeepAutoAsyncWaitZero =
+    "tl.keep_auto_async_wait_zero";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.

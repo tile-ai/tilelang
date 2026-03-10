@@ -479,7 +479,7 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
             threads=threads,
             split=split,
         )
-
+    print(kernel.get_kernel_source())
     output = kernel(
         A,
         qB,
@@ -568,5 +568,5 @@ if __name__ == "__main__":
     parser.add_argument("--E", type=int, default=32, help="E")  # number of experts
     parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
-
+    tilelang.disable_cache()
     main(args.M, args.N, args.K, args.scale_size, topk=args.topk, E=args.E, fast_dequant=True, with_bias=True, tune=args.tune)

@@ -342,6 +342,8 @@ class _attention(torch.autograd.Function):
         dtype = T.float16 if q.dtype == torch.float16 else T.bfloat16
         kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size, dtype=dtype)
         o, lse = kernel(q, k, v, sinks)
+        print(kernel.get_kernel_source())
+        torch.cuda.synchronize()
         ctx.save_for_backward(q, k, v, sinks, o, lse)
         ctx.window_size = window_size
         ctx.groups = groups
@@ -542,7 +544,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_ctx", type=int, default=4096, help="Context size")
     parser.add_argument("--d_head", type=int, default=128, help="Head dimension")
     parser.add_argument("--groups", type=int, default=8, help="Groups")
-    parser.add_argument("--window_size", type=int, default=None, help="window size (default: None, which means full attention)")
+    parser.add_argument("--window_size", type=int, default=128, help="window size (default: None, which means full attention)")
     parser.add_argument("--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
     args = parser.parse_args()
     main(args.batch, args.h, args.n_ctx, args.d_head, args.groups, args.window_size, args.dtype)

@@ -57,6 +57,7 @@ public:
       }
 
       ClassifiedStmt cls = ClassifySimpleAsyncStmt(current);
+      bool protected_wait_zero = IsProtectedWaitZeroStmt(current);
       switch (cls.kind) {
       case AsyncStmtKind::kCPAsync:
         uncommitted_state = UncommittedState::kNonZero;
@@ -91,6 +92,18 @@ public:
         break;
       }
       case AsyncStmtKind::kWaitStatic:
+        if (protected_wait_zero) {
+          simplified.push_back(current);
+          last_wait_n = cls.wait_n;
+          last_wait_dynamic = false;
+          if (outstanding_committed_groups_exact.has_value()) {
+            outstanding_committed_groups_exact =
+                std::min(*outstanding_committed_groups_exact, cls.wait_n);
+          }
+          outstanding_committed_groups_lb =
+              std::min(outstanding_committed_groups_lb, cls.wait_n);
+          break;
+        }
         if (!last_wait_dynamic && last_wait_n.has_value() &&
             cls.wait_n >= *last_wait_n) {
           // A weaker (or equal) wait is redundant when no commit happened in
@@ -613,6 +626,9 @@ private:
       if (cls.kind != AsyncStmtKind::kWaitStatic || cls.wait_n != 0) {
         continue;
       }
+      if (IsProtectedWaitZeroStmt(seq[i])) {
+        continue;
+      }
 
       const auto *loop = seq[i - 1].as<ForNode>();
       if (!loop) {
@@ -747,8 +763,39 @@ private:
         Call(call->dtype, call->op, args, call->annotations, call->span));
   }
 
+  bool IsProtectedWaitZeroStmt(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return IsProtectedWaitZeroStmt(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (attr->attr_key == attr::kKeepAutoAsyncWaitZero) {
+        return true;
+      }
+      return IsProtectedWaitZeroStmt(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return IsProtectedWaitZeroStmt(seq->seq[0]);
+      }
+      return false;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return IsProtectedWaitZeroStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return IsProtectedWaitZeroStmt(realize->block->body);
+      }
+      return false;
+    }
+    return false;
+  }
+
   Stmt RewriteWaitStaticInSimpleWrapper(const Stmt &stmt, int new_wait_n,
                                         bool *changed) const {
+    if (IsProtectedWaitZeroStmt(stmt)) {
+      return stmt;
+    }
     ClassifiedStmt cls = ClassifySimpleAsyncStmt(stmt);
     if (cls.kind != AsyncStmtKind::kWaitStatic) {
       return stmt;
@@ -928,6 +975,9 @@ private:
           cls.wait_n != 0) {
         return loop;
       }
+      if (IsProtectedWaitZeroStmt(seq->seq[i])) {
+        return loop;
+      }
       if (wait_stmt_idx >= 0) {
         return loop;
       }
@@ -1014,6 +1064,12 @@ private:
       }
       if (cls.kind == AsyncStmtKind::kWaitStatic) {
         int effective_wait_n = cls.wait_n;
+        if (IsProtectedWaitZeroStmt(body[i])) {
+          seen_wait_boundary = true;
+          outstanding_lb = std::min(outstanding_lb, effective_wait_n);
+          groups_since_wait_lb = 0;
+          continue;
+        }
         if (cls.wait_n == 0) {
           int groups_after_wait_lb =
               GuaranteedNewGroupsBeforeNextWait(body, i + 1);
