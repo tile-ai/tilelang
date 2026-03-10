@@ -67,14 +67,10 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
             buffer_accesses = collect_fragment_accesses(child)
 
             loops_with_symbolic_ranges = []
-            non_parallel_loops = []
 
             for loop in self.loop_stack:
-                # Vectorized is also allowed
-                if loop.kind != tir.ForKind.PARALLEL and loop.kind != tir.ForKind.VECTORIZED:
-                    non_parallel_loops.append(loop)
                 # symbolic
-                elif not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
+                if not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
                     loops_with_symbolic_ranges.append(loop)
 
             for buffer_access in buffer_accesses:
@@ -90,17 +86,6 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
                             f"Loop variable {loop.loop_var} in a T.Parallel loop with symbolic range (min={loop.min}, extent={loop.extent}) is used to index "
                             "a fragment buffer, which is not allowed in Tilelang."
                         )
-                # Check 2
-                for loop in non_parallel_loops:
-                    analyzer = _LoopVarUseAnalyzer(loop.loop_var)
-                    for index in indices:
-                        analyzer.visit_expr(index)
-                    if analyzer.used:
-                        raise ValueError(
-                            "[Tilelang Semantic Check] "
-                            f"A non-parallel loop iterator {loop.loop_var} is used to index "
-                            "a fragment buffer, which is not allowed in Tilelang."
-                        )
 
         self.visit_stmt(op.body)
         self.loop_stack.pop()
@@ -112,7 +97,6 @@ def FragmentLoopChecker():
     to ensure that the parallelization is valid.
 
     1. The range of loop can not be symbolic.
-    2. Any access/indexing of the fragment buffer should not contain other types of iterators (like loop variables from T.Serial).
 
     Returns:
         A prim_func_pass that applies the transformation
