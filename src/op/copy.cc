@@ -1492,45 +1492,101 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
   // the destination CTA waits on its local copy of the same mbarrier.
   // ---------------------------------------------------------------------------
   if (auto barrier_opt = GetBarrier()) {
-    PrimExpr barrier_load = barrier_opt.value();
+    // Bulk cluster copy issues a single flat byte-span transfer. This is only
+    // correct when both src/dst regions are contiguous in row-major storage.
+    auto is_contiguous_region = [&](const Buffer &buf,
+                                    const Array<Range> &ranges) -> bool {
+      ICHECK_EQ(buf->shape.size(), ranges.size())
+          << "Buffer/range rank mismatch for " << buf->name;
 
-    // Compute linear offsets from the copy ranges (one offset per buffer).
-    auto compute_linear_offset = [](const Buffer &buf,
-                                    const Array<Range> &ranges) -> PrimExpr {
-      PrimExpr offset = 0;
-      PrimExpr stride = 1;
-      for (int i = static_cast<int>(ranges.size()) - 1; i >= 0; --i) {
-        offset = offset + ranges[i]->min * stride;
-        if (i > 0)
-          stride = stride * buf->shape[i];
+      int pivot = -1;
+      for (int i = 0; i < static_cast<int>(ranges.size()); ++i) {
+        if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
+          pivot = i;
+          break;
+        }
       }
-      return offset;
+      // Scalar region is contiguous.
+      if (pivot == -1) {
+        return true;
+      }
+
+      // Outer dimensions must be fixed (extent == 1).
+      for (int i = 0; i < pivot; ++i) {
+        if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
+          return false;
+        }
+      }
+
+      // Inner dimensions must be full-span [0, shape[i]) to avoid strides.
+      for (int i = pivot + 1; i < static_cast<int>(ranges.size()); ++i) {
+        if (!analyzer->CanProveEqual(ranges[i]->min, 0) ||
+            !analyzer->CanProveEqual(ranges[i]->extent, buf->shape[i])) {
+          return false;
+        }
+      }
+      return true;
     };
 
-    PrimExpr dst_offset = compute_linear_offset(dst, dst_range);
-    PrimExpr src_offset = compute_linear_offset(src, src_range);
+    bool src_contiguous = is_contiguous_region(src, src_range);
+    bool dst_contiguous = is_contiguous_region(dst, dst_range);
 
-    // Total number of elements to transfer.
-    PrimExpr total_elements = 1;
+    PrimExpr src_elements = 1;
     for (auto r : src_range)
-      total_elements = total_elements * r->extent;
-    PrimExpr size_bytes =
-        cast(DataType::UInt(32), total_elements * src->dtype.bytes());
+      src_elements = src_elements * r->extent;
+    PrimExpr dst_elements = 1;
+    for (auto r : dst_range)
+      dst_elements = dst_elements * r->extent;
+    bool element_match = analyzer->CanProveEqual(src_elements, dst_elements);
 
-    // Build tvm_access_ptr arguments.  These are processed by LowerTileOp's
-    // HandleAccessPtrAndOffset which, for TMA ops (in_tma_context_=true),
-    // keeps the raw linear offset without applying any swizzle transformation.
-    PrimExpr dst_ptr =
-        dst.access_ptr(2, DataType::Handle(), 1, dst_offset, total_elements);
-    PrimExpr src_ptr =
-        src.access_ptr(1, DataType::Handle(), 1, src_offset, total_elements);
+    if (!(src_contiguous && dst_contiguous && element_match)) {
+      LOG(WARNING)
+          << "Falling back to element-wise cluster copy: bulk cluster fast "
+             "path requires contiguous src/dst regions with matching element "
+             "counts. src="
+          << src->name << ", dst=" << dst->name;
+    } else {
+      PrimExpr barrier_load = barrier_opt.value();
 
-    Stmt bulk_copy = Evaluate(
-        Call(DataType::Handle(), tma_store_cluster(),
-             {dst_ptr, src_ptr, dst_block.value(), size_bytes, barrier_load}));
+      // Compute linear offsets from the copy ranges (one offset per buffer).
+      auto compute_linear_offset = [](const Buffer &buf,
+                                      const Array<Range> &ranges) -> PrimExpr {
+        PrimExpr offset = 0;
+        PrimExpr stride = 1;
+        for (int i = static_cast<int>(ranges.size()) - 1; i >= 0; --i) {
+          offset = offset + ranges[i]->min * stride;
+          if (i > 0)
+            stride = stride * buf->shape[i];
+        }
+        return offset;
+      };
 
-    // Single-thread guard: only thread_bounds->min issues the instruction.
-    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), bulk_copy);
+      PrimExpr dst_offset = compute_linear_offset(dst, dst_range);
+      PrimExpr src_offset = compute_linear_offset(src, src_range);
+
+      // Total number of elements to transfer.
+      PrimExpr total_elements = 1;
+      for (auto r : src_range)
+        total_elements = total_elements * r->extent;
+      PrimExpr size_bytes =
+          cast(DataType::UInt(32), total_elements * src->dtype.bytes());
+
+      // Build tvm_access_ptr arguments.  These are processed by LowerTileOp's
+      // HandleAccessPtrAndOffset which, for TMA ops (in_tma_context_=true),
+      // keeps the raw linear offset without applying any swizzle
+      // transformation.
+      PrimExpr dst_ptr =
+          dst.access_ptr(2, DataType::Handle(), 1, dst_offset, total_elements);
+      PrimExpr src_ptr =
+          src.access_ptr(1, DataType::Handle(), 1, src_offset, total_elements);
+
+      Stmt bulk_copy = Evaluate(Call(
+          DataType::Handle(), tma_store_cluster(),
+          {dst_ptr, src_ptr, dst_block.value(), size_bytes, barrier_load}));
+
+      // Single-thread guard: only thread_bounds->min issues the instruction.
+      return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), bulk_copy);
+    }
   }
 
   // ---------------------------------------------------------------------------
