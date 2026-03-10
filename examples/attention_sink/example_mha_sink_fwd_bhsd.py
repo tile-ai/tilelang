@@ -283,9 +283,4 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default=T.float16, help="dtype, can be float16 or bfloat16")
     parser.add_argument("--tune", action="store_true", help="tune")
     args = parser.parse_args()
-    tilelang.disable_cache()
-    # def post_proc(source, _):
-    #     with open("/weka-hg/prod/deepseek/permanent/wanglei/tilelang/debug/kernel.cu", "r") as f:
-    #         return f.read()
-    # tilelang.register_cuda_postproc(post_proc)
     main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.dtype, args.tune)
