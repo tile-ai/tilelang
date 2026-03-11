@@ -365,8 +365,7 @@ public:
 private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-        call->op.same_as(tma_load_multicast())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       auto mbar = makeGetBarrier(producer_barrier_idx_);
       auto arg0 = call->args[0].as<Call>();
       // Check if this is a 1D TMA load (raw address, no descriptor, no
@@ -1491,12 +1490,17 @@ public:
   std::vector<Stmt> init_stmts;
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    if (IsOnlyInit(op->then_case)) {
+    if (!op->else_case.defined() && IsOnlyInit(op->then_case)) {
       init_stmts.push_back(GetRef<Stmt>(op));
       return Evaluate(0);
     }
     return StmtMutator::VisitStmt_(op);
   }
+
+  // Don't descend into scope-creating nodes; extracting an init from inside
+  // an Allocate/LetStmt would hoist it out of the variable's scope.
+  Stmt VisitStmt_(const AllocateNode *op) final { return GetRef<Stmt>(op); }
+  Stmt VisitStmt_(const LetStmtNode *op) final { return GetRef<Stmt>(op); }
 
   bool IsOnlyInit(const Stmt &stmt) {
     if (const auto *eval = stmt.as<EvaluateNode>()) {

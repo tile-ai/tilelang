@@ -427,7 +427,23 @@ private:
       return 1;
     }
     auto bound = analyzer_.const_int_bound(thread_var_);
-    int64_t extent = bound->max_value - bound->min_value + 1;
+    int64_t min_val = bound->min_value;
+    int64_t max_val = bound->max_value;
+
+    // TVM's const_int_bound does not tighten the upper bound under equality
+    // constraints (e.g., "tx - 128 == 0" leaves the range as [128, 255]).
+    // Use CanProve to detect when the thread variable is provably pinned to
+    // a single value, which indicates a single-thread arrive guard.
+    if (min_val != arith::ConstIntBound::kNegInf && min_val < max_val) {
+      PrimExpr thread_expr =
+          thread_var_; // IterVar -> Var via operator PrimExpr()
+      if (analyzer_.CanProve(thread_expr <=
+                             IntImm(thread_expr.dtype(), min_val))) {
+        return 1;
+      }
+    }
+
+    int64_t extent = max_val - min_val + 1;
     return static_cast<int>(std::max<int64_t>(extent, 1));
   }
 
