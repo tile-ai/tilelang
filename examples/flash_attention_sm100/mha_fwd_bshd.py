@@ -191,8 +191,8 @@ def flashattn_wasp(
     threads=256,
     num_stages=2,
 ):
-    """Warp-specialized pipeline: softmax/DMA/BMM warps; GEMM 2 mma_ts. Fallback to ts if layout inference fails."""
-    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+    """Warp-specialized pipeline: softmax(0-127)/DMA(128-159)/BMM(160-191); GEMM2 mma_ts."""
+    scale = (1.0 / dim) ** 0.5 * 1.44269504
     shape = [batch, seq_len, heads, dim]
     dtype = T.bfloat16
     accum_dtype = T.float32
@@ -206,7 +206,6 @@ def flashattn_wasp(
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
-            # Double-buffer as two 2D buffers (tcgen05 swizzle does not support 3D)
             K_shared_0 = T.alloc_shared([block_N, dim], dtype)
             K_shared_1 = T.alloc_shared([block_N, dim], dtype)
             V_shared_0 = T.alloc_shared([block_N, dim], dtype)
@@ -219,27 +218,16 @@ def flashattn_wasp(
 
             mbar_dma1_empty = T.alloc_barrier([32] * num_stages)
             mbar_dma1_full = T.alloc_barrier([32] * num_stages)
-            mbar_bmm1_empty = T.alloc_barrier([32] * num_stages)
-            mbar_bmm1_full = T.alloc_barrier([32] * num_stages)
+            mbar_bmm1_empty = T.alloc_barrier([128] * num_stages)
+            mbar_bmm1_full = T.alloc_barrier([1] * num_stages)
             mbar_dma2_empty = T.alloc_barrier([32] * num_stages)
             mbar_dma2_full = T.alloc_barrier([32] * num_stages)
-            mbar_bmm2_full = T.alloc_barrier([32] * num_stages)
+            mbar_bmm2_full = T.alloc_barrier([1] * num_stages)
             mbar_softmax_empty = T.alloc_barrier([32] * num_stages)
             mbar_softmax_full = T.alloc_barrier([128] * num_stages)
             mbar_correction_full = T.alloc_barrier([32] * num_stages)
 
             tid = T.get_thread_binding()
-            is_dma_warp = False
-            is_bmm_warp = False
-            is_softmax_warp = False
-
-            # 256 threads: softmax 0-127 (warp group for tcgen05), DMA1 128-159, BMM1 160-191
-            if tid < 128:
-                is_softmax_warp = True
-            elif tid < 160:
-                is_dma_warp = True
-            elif tid < 192:
-                is_bmm_warp = True
 
             S_reg = T.alloc_fragment([block_M, block_N], accum_dtype)
             P_cast = T.alloc_fragment([block_M, block_N], dtype)
@@ -251,19 +239,11 @@ def flashattn_wasp(
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.fill(O_reg, 0)
-            T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
-
-            if is_softmax_warp:
+            if tid < 128:
+                T.fill(O_reg, 0)
+                T.fill(logsum, 0)
+                T.fill(scores_max, -T.infinity(accum_dtype))
                 T.copy(O_reg, O_tmem)
-
-            # Prime empty barriers so first iteration can proceed (phase 1 for parity_inv=1 at k=0)
-            if is_bmm_warp:
-                T.mbarrier_arrive(mbar_dma1_empty[0])
-                T.mbarrier_arrive(mbar_dma2_empty[0])
-                T.mbarrier_arrive(mbar_bmm1_empty[0])
-                T.mbarrier_arrive(mbar_softmax_empty[0])
 
             loop_range = (
                 T.min(
@@ -275,13 +255,12 @@ def flashattn_wasp(
             )
 
             for k in T.serial(loop_range):
-                parity_inv = ((k // num_stages) & 1) ^ 1
-                parity = parity_inv ^ 1
+                parity = (k // num_stages) & 1
+                parity_inv = parity ^ 1
                 stage_id = k % num_stages
                 is_clear_accum = k == 0
 
-                if is_dma_warp:
-                    # DMA1
+                if tid >= 128 and tid < 160:
                     T.mbarrier_wait_parity(mbar_dma1_empty[stage_id], parity_inv)
 
                     if k == 0:
@@ -293,7 +272,6 @@ def flashattn_wasp(
                         T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_1)
                     T.mbarrier_arrive(mbar_dma1_full[stage_id])
 
-                    # DMA2
                     T.mbarrier_wait_parity(mbar_dma2_empty[stage_id], parity_inv)
 
                     if stage_id == 0:
@@ -301,10 +279,9 @@ def flashattn_wasp(
                     else:
                         T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_1)
 
-                    T.mbarrier_arrive(mbar_dma2_full[stage_id])  # notify consomer
+                    T.mbarrier_arrive(mbar_dma2_full[stage_id])
 
-                elif is_bmm_warp:
-                    # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)
+                elif tid >= 160 and tid < 192:
                     T.mbarrier_wait_parity(mbar_dma1_full[stage_id], parity)
                     T.mbarrier_wait_parity(mbar_bmm1_empty[stage_id], parity_inv)
 
@@ -330,7 +307,6 @@ def flashattn_wasp(
                         )
                     T.mbarrier_arrive(mbar_dma1_empty[stage_id])
 
-                    # GEMM 2: O = P_tmem @ V -> O_tmem (tcgen05mma_ts)
                     T.mbarrier_wait_parity(mbar_softmax_full[stage_id], parity)
                     T.mbarrier_wait_parity(mbar_dma2_full[stage_id], parity)
 
@@ -353,22 +329,20 @@ def flashattn_wasp(
                             clear_accum=is_clear_accum,
                         )
 
-                    T.mbarrier_arrive(mbar_softmax_empty[stage_id])  # notify producer
-                    T.mbarrier_arrive(mbar_dma2_empty[stage_id])  # notify producer
+                    T.mbarrier_arrive(mbar_softmax_empty[stage_id])
+                    T.mbarrier_arrive(mbar_dma2_empty[stage_id])
 
                     if k == loop_range - 1:
-                        T.mbarrier_arrive(mbar_correction_full[0])  # notify consomer
+                        T.mbarrier_arrive(mbar_correction_full[0])
 
-                elif is_softmax_warp:
+                elif tid < 128:
                     T.mbarrier_wait_parity(mbar_softmax_empty[stage_id], parity_inv)
                     T.mbarrier_wait_parity(mbar_bmm1_full[stage_id], parity)
-                    # Wait for GEMM2 of previous iteration to finish before reading O_tmem
                     if k > 0:
                         prev_stage = (k - 1) % num_stages
                         prev_parity = ((k - 1) // num_stages) & 1
                         T.mbarrier_wait_parity(mbar_bmm2_full[prev_stage], prev_parity)
 
-                    # Load accumulated O from previous iteration (BMM2 wrote O_tmem)
                     T.copy(O_tmem, O_reg)
                     T.copy(S_tmem, S_reg)
 
@@ -387,7 +361,6 @@ def flashattn_wasp(
                                 S_reg[i, j],
                             )
 
-                    # Online softmax
                     T.copy(scores_max, scores_max_prev)
                     T.fill(scores_max, -T.infinity(accum_dtype))
                     T.reduce_max(S_reg, scores_max, dim=1, clear=False)
@@ -398,7 +371,6 @@ def flashattn_wasp(
                     for i, j in T.Parallel(block_M, block_N):
                         S_reg[i, j] = T.exp2(S_reg[i, j] * scale - scores_max[i] * scale)
 
-                    # Online correction
                     T.reduce_sum(S_reg, scores_sum, dim=1)
                     for i in T.Parallel(block_M):
                         logsum[i] = logsum[i] * scores_rescale[i] + scores_sum[i]
@@ -406,16 +378,13 @@ def flashattn_wasp(
                     for i, j in T.Parallel(block_M, dim):
                         O_reg[i, j] *= scores_rescale[i]
 
-                    # tcgen05.st: P_cast -> P_tmem (register -> TMEM, no shared needed)
                     T.copy(S_reg, P_cast)
                     T.copy(P_cast, P_tmem)
                     T.copy(O_reg, O_tmem)
 
-                    T.mbarrier_arrive(mbar_softmax_full[stage_id])  # notify consomer
-                    T.mbarrier_arrive(mbar_bmm1_empty[stage_id])  # notify producer
+                    T.mbarrier_arrive(mbar_softmax_full[stage_id])
+                    T.mbarrier_arrive(mbar_bmm1_empty[stage_id])
 
-                    # Epilogue inside loop (when last k) so logsum use is in same control flow
-                    # as its def -> avoids "layout for fragment logsum can not be inferred"
                     if k == loop_range - 1:
                         T.mbarrier_wait_parity(mbar_correction_full[0], 0)
                         T.mbarrier_wait_parity(mbar_bmm2_full[stage_id], parity)
@@ -431,7 +400,6 @@ def flashattn_wasp(
     return main
 
 
-# Alias
 flashattn_warp = flashattn_wasp
 
 
@@ -470,49 +438,29 @@ def main(
     print(f"=== Blackwell Flash Attention ({variant.upper()}) ===")
     print(f"batch={batch}, heads={heads}, seq_len={seq_len}, dim={dim}, causal={is_causal}")
 
-    use_wasp = variant == "wasp"
-    try:
-        if variant in ("ss", "ts"):
-            kernel = flashattn(
-                batch,
-                heads,
-                seq_len,
-                dim,
-                is_causal,
-                block_M=128,
-                block_N=128,
-                variant=variant,
-            )
-        else:  # wasp
-            kernel = flashattn_wasp(
-                batch,
-                heads,
-                seq_len,
-                dim,
-                is_causal,
-                block_M=128,
-                block_N=128,
-                threads=256,
-                num_stages=2,
-            )
-    except Exception as e:
-        if variant == "wasp" and ("layout" in str(e).lower() or "infer" in str(e).lower()):
-            use_wasp = False
-            print("(wasp hit layout inference bug; fallback to ts.)")
-            kernel = flashattn(
-                batch,
-                heads,
-                seq_len,
-                dim,
-                is_causal,
-                block_M=128,
-                block_N=128,
-                variant="ts",
-            )
-        else:
-            raise
-    if use_wasp or variant == "wasp":
-        print(kernel.get_kernel_source())
+    if variant in ("ss", "ts"):
+        kernel = flashattn(
+            batch,
+            heads,
+            seq_len,
+            dim,
+            is_causal,
+            block_M=128,
+            block_N=128,
+            variant=variant,
+        )
+    else:
+        kernel = flashattn_wasp(
+            batch,
+            heads,
+            seq_len,
+            dim,
+            is_causal,
+            block_M=128,
+            block_N=128,
+            threads=256,
+            num_stages=2,
+        )
 
     Q = torch.randn(batch, seq_len, heads, dim, device="cuda", dtype=torch.bfloat16)
     K = torch.randn_like(Q)
