@@ -622,10 +622,6 @@ def cluster_block_nums() -> PrimExpr:
     return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_block_nums"))
 
 
-def cluster_sync():
-    return tir.call_intrin("handle", tir.op.Op.get("tl.cluster_sync"))
-
-
 def shuffle_elect(thread_extent: int) -> PrimExpr:
     """Elect exactly one lane within a logical thread group.
 
