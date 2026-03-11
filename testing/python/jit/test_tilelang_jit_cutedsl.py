@@ -391,10 +391,14 @@ def run_cutedsl_barrier(
         num_stages,
         threads,
     )
-    matmul_kernel = tilelang.compile(program, target="cutedsl", pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    })
+    matmul_kernel = tilelang.compile(
+        program,
+        target="cutedsl",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        },
+    )
 
     source = matmul_kernel.get_kernel_source()
     assert f"barriers = tl.alloc_smem(cutlass.Uint64, size_in_elems={len(mbars)})" in source
@@ -417,4 +421,4 @@ def check_hopper():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
+    tilelang.testing.main()
