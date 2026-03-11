@@ -3138,13 +3138,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   } else if (op->op.same_as(tl::get_cluster_id())) {
     ICHECK_EQ(op->args.size(), 0) << "tl.get_cluster_id expects no arguments.";
-    this->need_cooperative_groups_ = true;
-    os << "cooperative_groups::this_grid().cluster_rank()";
+    need_cluster_h_ = true;
+    os << "tl::block_rank_in_cluster()";
   } else if (op->op.same_as(tl::get_cluster_block_nums())) {
     ICHECK_EQ(op->args.size(), 0)
         << "tl.get_cluster_block_nums expects no arguments.";
-    this->need_cooperative_groups_ = true;
-    os << "cooperative_groups::this_cluster().num_blocks()";
+    need_cluster_h_ = true;
+    os << "([]{auto s=tl::cluster_shape();return (int)(s.x*s.y*s.z);}())";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else if (op->op.same_as(tl::initialize_wgmma_descriptor())) {

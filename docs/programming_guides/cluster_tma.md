@@ -21,8 +21,7 @@ memory via the `shared::cluster` address space.
 ```python
 with T.Kernel(grid_x, grid_y, threads=128, cluster_dims=(4, 1, 1)) as (bx, by):
     rank  = T.block_rank_in_cluster()   # 0..3 within this cluster
-    cid   = T.get_cluster_id()           # which cluster am I in
-    nctas = T.get_cluster_block_nums()
+    nctas = T.get_cluster_block_nums()   # total CTAs in this cluster
     T.cluster_sync()                     # barrier across all CTAs in cluster
 ```
 
@@ -233,7 +232,6 @@ overhead.
 
 | Builtin | Return | Description |
 |---------|--------|-------------|
-| `T.get_cluster_id()` | `int32` | Index of this cluster in the grid |
 | `T.block_rank_in_cluster()` | `int32` | Block rank (0-indexed) within the cluster |
 | `T.get_cluster_block_nums()` | `int32` | Total number of CTAs in the cluster |
 | `T.cluster_sync()` | — | Barrier synchronisation across all cluster CTAs |
