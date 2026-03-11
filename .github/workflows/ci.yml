@@ -196,7 +196,6 @@ jobs:
           fi
           export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
           export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_ROCM=ON"
-          export TORCH_BLAS_PREFER_HIPBLASLT=0
 
           echo "USE_ROCM=ON" | tee -a "${GITHUB_ENV}"
           echo "ROCM_VERSION=${ROCM_VERSION}" | tee -a "${GITHUB_ENV}"
@@ -205,7 +204,6 @@ jobs:
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
-          echo "TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT}" | tee -a "${GITHUB_ENV}"
 
           if [[ ! -x "$(command -v hipcc)" ]]; then
             export PATH="/opt/rocm/bin:${PATH}"
