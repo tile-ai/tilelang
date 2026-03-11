@@ -2159,14 +2159,14 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
 
   if (barrier_base_id >= 0) {
     // Total bytes transferred by im2col TMA copy
-    PrimExpr total_bytes = IntImm(DataType::Int(32),
-                                  desc.smem_box_pixel * desc.smem_box_channel *
+    PrimExpr total_bytes =
+        IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel *
                                       dst_->dtype.bytes());
 
     // arrive_expect_tx before tma_load inside the thread guard
-    Stmt barrier_op_stmt = Evaluate(Call(DataType::Handle(),
-                                        builtin::ptx_arrive_barrier_expect_tx(),
-                                        {mbar_handle, total_bytes}));
+    Stmt barrier_op_stmt = Evaluate(
+        Call(DataType::Handle(), builtin::ptx_arrive_barrier_expect_tx(),
+             {mbar_handle, total_bytes}));
 
     // Thread-gated block: barrier_op + tma_load_im2col
     Stmt producer = IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
