@@ -1819,8 +1819,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
     auto cta_id = this->PrintExpr(op->args[1]);
     auto pred = this->PrintExpr(op->args[2]);
-    this->stream << "tl::mbarrier_arrive(" << mbarrier_obj << ", " << cta_id
-                 << ", " << pred << ");\n";
+    this->stream << mbarrier_obj << ".arrive(" << cta_id << ", " << pred
+                 << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();
@@ -1840,14 +1840,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto arrive_count = this->PrintExpr(op->args[1]);
-    this->stream << "tl::mbarrier_init(" << mbarrier_obj << ", " << arrive_count
-                 << ");\n";
+    this->stream << mbarrier_obj << ".init(" << arrive_count << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
     if (op->args.size() == 2) {
       this->PrintIndent();
       auto mbarrier_obj = this->PrintExpr(op->args[0]);
       auto transaction_bytes = this->PrintExpr(op->args[1]);
-      this->stream << "tl::mbarrier_arrive_expect_tx(" << mbarrier_obj << ", "
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx("
                    << transaction_bytes << ");\n";
     } else if (op->args.size() == 4) {
       this->PrintIndent();
@@ -1855,7 +1854,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto transaction_bytes = this->PrintExpr(op->args[1]);
       auto cta_id = this->PrintExpr(op->args[2]);
       auto pred = this->PrintExpr(op->args[3]);
-      this->stream << "tl::mbarrier_arrive_expect_tx(" << mbarrier_obj << ", "
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx("
                    << transaction_bytes << ", " << cta_id << ", " << pred
                    << ");\n";
     } else {
@@ -1873,15 +1872,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto transaction_bytes = this->PrintExpr(op->args[1]);
-    this->stream << "tl::mbarrier_expect_tx(" << mbarrier_obj << ", "
-                 << transaction_bytes << ");\n";
+    this->stream << mbarrier_obj << ".expect_transaction(" << transaction_bytes
+                 << ");\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
     auto mbarrier_obj = this->PrintExpr(op->args[0]);
     auto phase = this->PrintExpr(op->args[1]);
-    this->stream << "tl::mbarrier_wait(" << mbarrier_obj << ", " << phase
-                 << ");\n";
+    this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
     print_extern_call_stmt("tl::tmem_allocate");
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {

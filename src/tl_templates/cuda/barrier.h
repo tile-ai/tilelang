@@ -8,10 +8,6 @@ using Barrier = cutlass::arch::ClusterTransactionBarrier;
 
 namespace tl {
 
-TL_DEVICE void mbarrier_init(Barrier &barrier, uint32_t arrive_count) {
-  barrier.init(arrive_count);
-}
-
 TL_DEVICE void mbarrier_init(uint64_t &smem_barrier, uint32_t arrive_count) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
   asm volatile("mbarrier.init.shared.b64 [%1], %0;"
@@ -33,10 +29,6 @@ TL_DEVICE uint32_t mbarrier_try_wait(uint64_t &smem_barrier, int phase_bit) {
                : "r"(smem_int_ptr), "r"(phase_bit));
 
   return waitComplete;
-}
-
-TL_DEVICE void mbarrier_wait(Barrier &barrier, int phase_bit) {
-  barrier.wait(phase_bit);
 }
 
 TL_DEVICE void mbarrier_wait(uint64_t &smem_barrier, int phase_bit) {
@@ -73,15 +65,9 @@ TL_DEVICE void mbarrier_test_wait(uint64_t &smem_barrier, int phase_bit) {
       "r"(phase_bit));
 }
 
-TL_DEVICE void mbarrier_arrive(Barrier &barrier) { barrier.arrive(); }
-
 TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
   asm volatile("mbarrier.arrive.shared.b64 _, [%0];" : : "r"(smem_int_ptr));
-}
-
-TL_DEVICE void mbarrier_arrive(Barrier &barrier, int cta_id, uint32_t pred) {
-  barrier.arrive(cta_id, pred);
 }
 
 TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier, int cta_id,
@@ -98,28 +84,12 @@ TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier, int cta_id,
   }
 }
 
-TL_DEVICE void mbarrier_expect_tx(Barrier &barrier,
-                                  uint32_t transaction_bytes) {
-  barrier.expect_transaction(transaction_bytes);
-}
-
 TL_DEVICE void mbarrier_expect_tx(uint64_t &smem_barrier,
                                   uint32_t transaction_bytes) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
   asm volatile("mbarrier.expect_tx.shared.b64 [%1], %0;"
                :
                : "r"(transaction_bytes), "r"(smem_int_ptr));
-}
-
-TL_DEVICE void mbarrier_arrive_expect_tx(Barrier &barrier,
-                                         uint32_t transaction_bytes) {
-  barrier.arrive_and_expect_tx(transaction_bytes);
-}
-
-TL_DEVICE void mbarrier_arrive_expect_tx(Barrier &barrier,
-                                         uint32_t transaction_bytes, int cta_id,
-                                         uint32_t pred) {
-  barrier.arrive_and_expect_tx(transaction_bytes, cta_id, pred);
 }
 
 TL_DEVICE void mbarrier_arrive_expect_tx(uint64_t &smem_barrier,
