@@ -109,19 +109,26 @@ def make_wgmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k
 
 # for TCGEN05MMA Intrinsics
 def make_tcgen05mma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
-    _, shape, _ = _get_buffer_info(buffer)
+    buf, shape, _ = _get_buffer_info(buffer)
     stride, continuous = _get_stride_continuous(buffer)
     element_size = _get_element_size(buffer)
     if continuity is None:
         continuity = continuous
-    base = _ffi_api.make_tcgen05mma_swizzled_layout(
-        stride,
-        continuous,
-        continuity,
-        element_size,
-        k_major,
-    )
-    return base.reshape(shape)
+    try:
+        base = _ffi_api.make_tcgen05mma_swizzled_layout(
+            stride,
+            continuous,
+            continuity,
+            element_size,
+            k_major,
+        )
+        return base.reshape(shape)
+    except TypeError as err:
+        # Keep Python sources compatible with older built libs that still expose
+        # the legacy FFI signature: (buffer, continuity, k_major).
+        if "Mismatched number of arguments" not in str(err):
+            raise
+        return _ffi_api.make_tcgen05mma_swizzled_layout(buf, continuity, k_major)
 
 
 # swizzle 128B
