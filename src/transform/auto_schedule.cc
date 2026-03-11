@@ -70,11 +70,10 @@ using namespace tir;
 using ffi::GetRef;
 
 // Forward declaration
-Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
-                                          BarrierManager &barrier_manager,
-                                          const bool enable_epi,
-                                          PrimExpr thread_count[2],
-                                          bool producer_consumer);
+Stmt ApplyWarpgroupPartitionToIRStructure(
+    IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
+    Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi,
+    PrimExpr thread_count[2], bool producer_consumer);
 
 // Helper function to collect all prefix tasks (consecutive tasks without
 // register region at the beginning of sequences)
@@ -1453,15 +1452,17 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
 
     // Analyze buffer dependencies and insert barriers before warpgroup
     // partition
-    // Create barrier manager
-    BarrierManager barrier_manager;
+    int next_barrier_id = 1;
+    std::vector<Buffer> barrier_buffers;
+    Map<ObjectRef, ObjectRef> barrier_map;
     // Determine thread count for barrier arrive_count calculations
     PrimExpr thread_count[2] = {thread_var->dom->extent,
                                 double_thread ? thread_var->dom->extent
                                               : IntImm(DataType::Int(32), 128)};
     LoopNestingInfo loop_info;
     std::vector<MultiVersionBufferInfo> buffer_infos;
-    AnalyzeAndInsertBarriers(ir_structure.get(), barrier_manager, thread_count,
+    AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id,
+                             barrier_buffers, barrier_map, thread_count,
                              loop_info, buffer_infos);
 
     // Print the modified summary view
@@ -1469,8 +1470,8 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
 
     // Apply warpgroup partition to entire IRStructure
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
-        ir_structure.get(), thread_var, barrier_manager, enable_epi,
-        thread_count, double_thread);
+        ir_structure.get(), thread_var, barrier_buffers, barrier_map,
+        enable_epi, thread_count, double_thread);
 
     if (double_thread) {
       updated_thread_extent = thread_var->dom->extent * 2;
@@ -1486,37 +1487,40 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     // Apply thread extent update if warpgroup partition was applied
     ThreadExtentUpdater extent_updater(updated_thread_extent);
     final_body = extent_updater(final_body);
-    // Add create_list_of_mbarrier statement and barrier annotations
-    if (barrier_manager.HasBarriers()) {
-      // First, insert create_list_of_mbarrier statement at the beginning of the
-      // body
-      Stmt create_mbarrier_stmt = CreateListOfMBarrierStmt(barrier_manager);
-      // Get barrier map for annotations
-      Map<ObjectRef, ObjectRef> barrier_map =
-          BarrierManagerToMap(barrier_manager);
-      // Create a new mutator to add the statement and annotations
-      class BarrierInserter : public StmtMutator {
+    // Add barrier buffers to tilelang_root block's alloc_buffers
+    if (!barrier_buffers.empty()) {
+      class TilelangRootAllocBufferAdder : public StmtMutator {
       public:
-        BarrierInserter(Stmt barrier_stmt) : barrier_stmt_(barrier_stmt) {}
+        explicit TilelangRootAllocBufferAdder(
+            const std::vector<Buffer> &buffers_to_add,
+            Map<ObjectRef, ObjectRef> &barrier_map)
+            : buffers_to_add_(buffers_to_add), barrier_map_(barrier_map) {}
 
         Stmt VisitStmt_(const BlockNode *op) override {
           auto block = GetRef<Block>(op);
           if (op->name_hint == "tilelang_root") {
-            // Insert barrier statement at the beginning of the block body
-            Stmt new_body = SeqStmt({barrier_stmt_, op->body});
+            // Combine existing alloc_buffers with new buffers
+            Array<Buffer> new_alloc_buffers = op->alloc_buffers;
+            for (const auto &buffer : buffers_to_add_) {
+              new_alloc_buffers.push_back(buffer);
+            }
+            auto new_annotations = op->annotations;
+            new_annotations.Set("barrier_init", barrier_map_);
+            // Create new block with updated alloc_buffers
             return Block(op->iter_vars, op->reads, op->writes, op->name_hint,
-                         new_body, op->init, op->alloc_buffers,
-                         op->match_buffers, op->annotations);
+                         op->body, op->init, new_alloc_buffers,
+                         op->match_buffers, new_annotations);
           }
           return StmtMutator::VisitStmt_(op);
         }
 
       private:
-        Stmt barrier_stmt_;
+        std::vector<Buffer> buffers_to_add_;
+        Map<ObjectRef, ObjectRef> &barrier_map_;
       };
 
-      BarrierInserter inserter(create_mbarrier_stmt);
-      final_body = inserter(final_body);
+      TilelangRootAllocBufferAdder adder(barrier_buffers, barrier_map);
+      final_body = adder(final_body);
     }
 
     // Apply multi-version alloc_buffer rewrite if needed
@@ -1603,11 +1607,10 @@ private:
 };
 
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
-Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
-                                          BarrierManager &barrier_manager,
-                                          const bool outer_enable_epi,
-                                          PrimExpr thread_count[2],
-                                          bool producer_consumer) {
+Stmt ApplyWarpgroupPartitionToIRStructure(
+    IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
+    Map<ObjectRef, ObjectRef> &barrier_map, const bool outer_enable_epi,
+    PrimExpr thread_count[2], bool producer_consumer) {
   if (!root)
     return Evaluate(0);
 
@@ -1616,8 +1619,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
     Stmt body = Evaluate(0);
     if (wrapper->child) {
       body = ApplyWarpgroupPartitionToIRStructure(
-          wrapper->child.get(), thread_var, barrier_manager, outer_enable_epi,
-          thread_count, producer_consumer);
+          wrapper->child.get(), thread_var, barrier_buffers, barrier_map,
+          outer_enable_epi, thread_count, producer_consumer);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -2029,8 +2032,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(IRStructure *root, IterVar thread_var,
     if (!IsEvaluateZero(if_then_else) && !IsEvaluateZero(neutral_body)) {
       // Both have statements: insert barriers for neutral-to-warpgroup
       // synchronization
-      combined_stmt = InsertBarriersForNeutralSync(
-          neutral_body, if_then_else, barrier_manager, thread_count);
+      combined_stmt = InsertBarriersForNeutralSync(neutral_body, if_then_else,
+                                                   barrier_buffers, barrier_map,
+                                                   thread_count);
     } else if (!IsEvaluateZero(if_then_else) || !IsEvaluateZero(neutral_body)) {
       // Only one has actual statements
       std::vector<Stmt> stmts;
