@@ -29,13 +29,6 @@ def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
     raise TypeError(f"Expect warp sizing argument to be int or PrimExpr, but got {type(value)}.")
 
 
-def _get_mbarrier(barrier_id: int | PrimExpr):
-    """Create an intermediate mbarrier handle from barrier id for internal lowering only."""
-    raise NotImplementedError(
-        "Direct mbarrier handle creation from id is not supported in the frontend. Use T.alloc_barrier to create mbarriers instead."
-    )
-
-
 def _mbar_to_buffer_load(mbar: BarrierType) -> BufferLoad:
     """Convert a memory barrier to a buffer load.
 
