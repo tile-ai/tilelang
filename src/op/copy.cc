@@ -2127,10 +2127,25 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   global_coords.push_back(
       FloorDiv(nhw_step_ * desc.smem_box_pixel, w_dim * h_dim));
 
+  // Allocate mbarrier(s) for TMA im2col load synchronization,
+  // matching the protocol used by regular TMA loads.
+  int barrier_base_id = -1;
+  PrimExpr mbar_handle;
+  if (T.AllocMBarrier) {
+    int num_barriers = T.pipeline_num_stages;
+    barrier_base_id = T.AllocMBarrier(1);
+    for (int i = 1; i < num_barriers; i++) {
+      T.AllocMBarrier(1);
+    }
+    PrimExpr mbar_idx =
+        IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
+    mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+  }
+
   Array<PrimExpr> args;
   args.reserve(desc.rank * 2 + 2);
   args.push_back(create_desc);
-  args.push_back(0); // mbar placeholder
+  args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
   auto dst_buffer = T.buffer_remap.count(dst_) ? T.buffer_remap[dst_] : dst_;
   auto shared_addr = dst_buffer.access_ptr(2);
   args.push_back(shared_addr);
@@ -2139,9 +2154,38 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   for (auto offset : image_offset)
     args.push_back(offset);
   args.push_back(this->eviction_policy_);
+  Stmt tma_copy_stmt =
+      Evaluate(Call(DataType::Handle(), tma_load_im2col(), args));
+
+  if (barrier_base_id >= 0) {
+    // Total bytes transferred by im2col TMA copy
+    PrimExpr total_bytes = IntImm(DataType::Int(32),
+                                  desc.smem_box_pixel * desc.smem_box_channel *
+                                      dst_->dtype.bytes());
+
+    // arrive_expect_tx before tma_load inside the thread guard
+    Stmt barrier_op_stmt = Evaluate(Call(DataType::Handle(),
+                                        builtin::ptx_arrive_barrier_expect_tx(),
+                                        {mbar_handle, total_bytes}));
+
+    // Thread-gated block: barrier_op + tma_load_im2col
+    Stmt producer = IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+                               SeqStmt({barrier_op_stmt, tma_copy_stmt}));
+
+    // Annotate the producer with the shared buffer it writes to.
+    // PipelinePlanning uses this to identify TMA copy stages.
+    producer = AttrStmt(dst_buffer->data, "tl.tma_copy_write_buffer",
+                        IntImm(DataType::Int(32), 1), producer);
+
+    // Emit producer + wait pair for pipeline/WS passes.
+    Stmt wait_stmt = Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
+                                   {mbar_handle, T.mbar_phase_expr}));
+
+    return SeqStmt({producer, wait_stmt});
+  }
+
   Stmt tma_copy =
-      IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
-                 Evaluate(Call(DataType::Handle(), tma_load_im2col(), args)));
+      IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy_stmt);
   return tma_copy;
 }
 
