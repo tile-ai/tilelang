@@ -428,6 +428,48 @@ static void RewriteTaskNodeBuffers(
   }
 }
 
+// Rewrite the gemm call's mbar argument (arg[16]) in a TaskNode to use the
+// allocated barrier expression from BarrierManager.
+// This is used for TCGEN05MMA where the gemm needs to reference the correct
+// mbarrier for synchronization.
+static void RewriteGemmMbar(TaskNode *task, PrimExpr mbar_expr) {
+  static const auto gemm_py_op = Op::Get("tl.tileop.gemm_py");
+  static const auto gemm_op = Op::Get("tl.tileop.gemm");
+
+  class GemmMbarRewriter : public StmtExprMutator {
+  public:
+    GemmMbarRewriter(PrimExpr mbar_expr) : mbar_expr_(std::move(mbar_expr)) {}
+
+  private:
+    PrimExpr VisitExpr_(const CallNode *op) override {
+      static const auto gemm_py_op = Op::Get("tl.tileop.gemm_py");
+      static const auto gemm_op = Op::Get("tl.tileop.gemm");
+
+      if ((op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op)) &&
+          op->args.size() > 16) {
+        Array<PrimExpr> new_args;
+        for (size_t i = 0; i < op->args.size(); ++i) {
+          if (i == 16) {
+            // Replace mbar argument with the barrier expression
+            new_args.push_back(mbar_expr_);
+          } else {
+            new_args.push_back(VisitExpr(op->args[i]));
+          }
+        }
+        return Call(op->dtype, op->op, new_args, op->annotations, op->span);
+      }
+      return StmtExprMutator::VisitExpr_(op);
+    }
+
+    PrimExpr mbar_expr_;
+  };
+
+  GemmMbarRewriter rewriter(mbar_expr);
+  for (auto &stmt : task->stmts) {
+    stmt = rewriter(stmt);
+  }
+}
+
 // Helper function to insert a statement into ScheduleUnit's stmts
 static void InsertStatementIntoScheduleUnit(ScheduleUnit *task,
                                             const Stmt &stmt, bool at_beginning,
@@ -494,6 +536,20 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, BarrierManager &barrier_manager,
       // If child is SequenceNode or ControlNode, recursively analyze it
       AnalyzeAndInsertBarriers(task->child.get(), barrier_manager, thread_count,
                                loop_info, buffer_infos);
+    }
+
+    // Allocate barrier for TCGEN05MMA and rewrite gemm mbar argument
+    if (task->isInnerTask() && task->UsesTensorCore()) {
+      auto child = static_cast<TaskNode *>(task->child.get());
+      if (child->is_TCGEN05()) {
+        int wg_id = child->GetWarpgroupId();
+        int barrier_id =
+            AddBarrierToManager(barrier_manager, thread_count[wg_id]);
+        barrier_unit_map[task] = barrier_id;
+
+        PrimExpr barrier_expr = GetMBarrierExpr(barrier_manager, barrier_id);
+        RewriteGemmMbar(child, barrier_expr);
+      }
     }
 
     // Check regions for dependencies
@@ -607,7 +663,9 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, BarrierManager &barrier_manager,
         continue;
       auto &region = region_access.region;
       if (IsRegisterRegion(region)) {
-        if (!task->UsesTensorCore())
+        if (!task->UsesTensorCore() || !region_access.is_write)
+          continue;
+        if (!task->isInnerTask())
           continue;
         Buffer buffer = region->buffer;
         if (!found_wgmma) {
@@ -745,6 +803,24 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, BarrierManager &barrier_manager,
       for (ScheduleUnit *task : ordered_tasks) {
         bool is_promoted = task->GetPromote();
         bool is_async = task->UsesTensorCore() || task->UsesTMACore();
+
+        if (iter == 0 && task->isInnerTask() && task->UsesTensorCore()) {
+          auto child = static_cast<TaskNode *>(task->child.get());
+          if (child->is_TCGEN05()) {
+            int wg_id = child->GetWarpgroupId();
+            int barrier_id = AddBarrierToManager(
+                barrier_manager, thread_count[wg_id], num_stages);
+            PrimExpr barrier = IntImm(DataType::Int(32), barrier_id);
+            barrier = barrier +
+                      indexmod(loop_info.CalculateIterationCount(), num_stages);
+            barrier_unit_map[task] = barrier;
+
+            // Rewrite the gemm call's mbar argument (arg[16]) to use the
+            // allocated barrier from BarrierManager
+            PrimExpr mbar_expr = GetMBarrierExpr(barrier_manager, barrier);
+            RewriteGemmMbar(child, mbar_expr);
+          }
+        }
 
         // Check regions for dependencies
         for (const auto &region_access : task->GetReadWriteRegions()) {
@@ -893,7 +969,7 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, BarrierManager &barrier_manager,
 
         if (iter == 0) {
           // Update regions
-          bool found_wgmmap = false;
+          bool found_wgmma = false;
           for (const auto &region_access : task->GetReadWriteRegions()) {
             int wg_id = region_access.warpgroup_id;
             if (wg_id == -1)
@@ -902,9 +978,11 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, BarrierManager &barrier_manager,
             if (IsRegisterRegion(region)) {
               if (!task->UsesTensorCore() || !region_access.is_write)
                 continue;
+              if (!task->isInnerTask())
+                continue;
               Buffer buffer = region->buffer;
-              if (!found_wgmmap) {
-                found_wgmmap = true;
+              if (!found_wgmma) {
+                found_wgmma = true;
                 ++total_wgmma[wg_id];
               }
               last_wgmma_map[wg_id][buffer] =

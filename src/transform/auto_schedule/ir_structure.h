@@ -7,6 +7,8 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt.h>
 
+#include "../../op/gemm.h"
+
 #include <functional>
 #include <memory>
 #include <optional>
@@ -191,6 +193,32 @@ public:
   }
   bool HasTensorCoreShape() const { return !tensor_core_shapes_.empty(); }
 
+  // GemmInst: the final tensor core instruction for this task.
+  // All gemm operations within a single task must use the same instruction.
+  void SetGemmInst(GemmInst inst) {
+    ICHECK(!has_gemm_inst_ || gemm_inst_ == inst)
+        << "All gemm operations in a task must use the same GemmInst, "
+        << "but got " << GemmInstToString(gemm_inst_) << " and "
+        << GemmInstToString(inst);
+    gemm_inst_ = inst;
+    has_gemm_inst_ = true;
+  }
+  bool HasGemmInst() const { return has_gemm_inst_; }
+  GemmInst GetGemmInst() const {
+    ICHECK(has_gemm_inst_) << "GemmInst not set";
+    return gemm_inst_;
+  }
+
+  // Check if this task uses WGMMA instruction
+  bool is_WGMMA() const {
+    return has_gemm_inst_ && gemm_inst_ == GemmInst::kWGMMA;
+  }
+
+  // Check if this task uses TCGEN5MMA instruction
+  bool is_TCGEN05() const {
+    return has_gemm_inst_ && gemm_inst_ == GemmInst::kTCGEN5MMA;
+  }
+
   // Get aggregated shape information for II estimation
   int64_t GetTotalTensorCoreOps() const {
     int64_t total_ops = 0;
@@ -266,6 +294,11 @@ private:
   // Tensor Core shape information (M, N, K dimensions)
   // A task may contain multiple Tensor Core operations with different shapes
   std::vector<TensorCoreShape> tensor_core_shapes_;
+
+  // GemmInst: the final tensor core instruction for this task.
+  // All gemm operations within a single task must use the same instruction.
+  GemmInst gemm_inst_{GemmInst::kMMA};
+  bool has_gemm_inst_{false};
 
   // Cached flag for loop_break detection
   mutable std::optional<bool> contains_loop_break_cache_;

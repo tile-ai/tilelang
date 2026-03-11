@@ -26,8 +26,10 @@
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/function.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/runtime/packed_func.h>
+#include <tvm/target/target.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/builtin.h>
@@ -53,6 +55,8 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../op/gemm_py.h"
+#include "../target/utils.h"
 #include "./common/attr.h"
 #include "./common/collector.h"
 #include "auto_schedule.h"
@@ -1020,9 +1024,10 @@ private:
 // Visitor to build IRStructure from TIR statements
 class IRStructureBuilder : public StmtVisitor {
 public:
-  std::unique_ptr<IRStructure> Build(const Stmt &stmt,
-                                     int64_t thread_count = 1) {
+  std::unique_ptr<IRStructure> Build(const Stmt &stmt, int64_t thread_count = 1,
+                                     Target target = Target()) {
     thread_count_ = thread_count;
+    target_ = target;
     VisitStmt(stmt);
     if (!root_) {
       LOG(WARNING)
@@ -1157,6 +1162,7 @@ protected:
 private:
   std::unique_ptr<IRStructure> root_;
   int64_t thread_count_ = 1;
+  Target target_;
 
   void AnalyzeResourceUsage(const Stmt &stmt, TaskNode *task_node) {
     // Recursively analyze statements to determine resource usage
@@ -1176,7 +1182,18 @@ private:
       };
       std::vector<TensorCoreShape> tensor_core_shapes;
 
-      ResourceAnalyzer(TaskNode *node) : task_node(node) {}
+      // GemmInst: the resolved tensor core instruction (single, asserted
+      // unique)
+      GemmInst gemm_inst{GemmInst::kMMA};
+      bool has_gemm_inst{false};
+
+      // Target and block_size for GemmInst determination
+      Target target;
+      int64_t block_size;
+
+      ResourceAnalyzer(TaskNode *node, Target target = Target(),
+                       int64_t block_size = 128)
+          : task_node(node), target(target), block_size(block_size) {}
 
       void VisitExpr_(const CallNode *op) override {
         // Check for specific TileLang operations
@@ -1216,6 +1233,19 @@ private:
           int64_t n = op->args[6].as<IntImmNode>()->value;
           int64_t k = op->args[7].as<IntImmNode>()->value;
           tensor_core_shapes.emplace_back(m, n, k);
+
+          // Determine the final GemmInst using GemmPyNode::getGemmInst
+          if (target.defined()) {
+            GemmPy gemm_py(op->args);
+            GemmInst inst =
+                gemm_py->getGemmInst(static_cast<int>(block_size), target);
+            ICHECK(!has_gemm_inst || gemm_inst == inst)
+                << "All gemm operations in a task must use the same GemmInst, "
+                << "but got " << GemmInstToString(gemm_inst) << " and "
+                << GemmInstToString(inst);
+            gemm_inst = inst;
+            has_gemm_inst = true;
+          }
         } else if (op->op.same_as(reduce_op) || op->op.same_as(fill_op)) {
           // Reduce and fill operations use CUDA core
           found_cuda = true;
@@ -1268,7 +1298,7 @@ private:
       }
     };
 
-    ResourceAnalyzer analyzer(task_node);
+    ResourceAnalyzer analyzer(task_node, target_, thread_count_);
     analyzer(stmt);
 
     // Set task node flags based on what was found
@@ -1282,6 +1312,10 @@ private:
         if (shape.m > 0 && shape.n > 0 && shape.k > 0) {
           task_node->AddTensorCoreShape(shape.m, shape.n, shape.k);
         }
+      }
+      // Set GemmInst information
+      if (analyzer.has_gemm_inst) {
+        task_node->SetGemmInst(analyzer.gemm_inst);
       }
     }
     // If neither TMA nor Tensor core was used, and CUDA operations were found,
@@ -1340,6 +1374,13 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
   auto pass_func =
       [enable_epi](PrimFunc func, const IRModule &mod,
                    const tvm::transform::PassContext &ctx) -> PrimFunc {
+    // Get target from PrimFunc attribute for GemmInst determination
+    auto target_opt = func->GetAttr<Target>(tvm::attr::kTarget);
+    Target target;
+    if (target_opt.defined()) {
+      target = target_opt.value();
+    }
+
     // Extract the body of tilelang_root block if it exists
     TilelangRootBodyExtractor extractor;
     extractor(func->body);
@@ -1378,7 +1419,8 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
 
     // Build IRStructure from the body to schedule
     IRStructureBuilder builder;
-    auto ir_structure = builder.Build(body_to_schedule, latency_thread_count);
+    auto ir_structure =
+        builder.Build(body_to_schedule, latency_thread_count, target);
 
     // Print the built IRStructure with all statements
     ICHECK(ir_structure) << "IRStructure is null (empty body?)";
