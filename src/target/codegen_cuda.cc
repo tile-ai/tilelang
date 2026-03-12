@@ -3390,8 +3390,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
         auto vid_packed = vid + "_packed";
         stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
                << "];\n";
-        // Record mapping from original buffer to packed buffer name
         fp4_packed_buffers_[op->buffer_var.get()] = vid_packed;
+        var_idmap_[op->buffer_var.get()] = vid_packed;
       } else {
         stream << ' ' << vid << '[' << constant_size << "];\n";
       }
