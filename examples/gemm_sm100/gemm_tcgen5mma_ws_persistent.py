@@ -127,7 +127,6 @@ def gemm_persistent(
     return C
 
 
-
 @tilelang.jit
 def gemm_persistent_2cta(
     A,
@@ -193,8 +192,8 @@ def gemm_persistent_2cta(
                             A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[phase % num_stages, :, :]
                         )  # cannot use BufferLoad here
                         T.copy(
-                            B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * block_N // 2 : (by * 2 + cta_id + 1) * block_N // 2], 
-                            B_shared[phase % num_stages, :, :]
+                            B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * block_N // 2 : (by * 2 + cta_id + 1) * block_N // 2],
+                            B_shared[phase % num_stages, :, :],
                         )
                         T.mbarrier_arrive(loaded[phase % num_stages], 0)
 
@@ -256,7 +255,7 @@ def gemm_persistent_2cta(
                             T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
                     else:
                         T.copy(C_local, C_local_cast)
-                        T.copy(C_local_cast, C[bx * block_M, by * block_N])       
+                        T.copy(C_local_cast, C[bx * block_M, by * block_N])
 
     return C
 
