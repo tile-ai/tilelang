@@ -13,10 +13,10 @@ Expected generated producer code (block 0):
 Block 1 waits on its own s_barrier and then reads the result.
 """
 
-import pytest
 import torch
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 import numpy as np
 
 
@@ -57,12 +57,9 @@ def make_store_cluster_kernel(N: int):
     return kernel
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_store_cluster():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required")
-    major, minor = torch.cuda.get_device_capability()
-    if major < 9:
-        pytest.skip(f"requires Compute Capability 9.0+, found {major}.{minor}")
 
     N = 128
     prim_func = make_store_cluster_kernel(N)
@@ -91,4 +88,4 @@ def test_tma_store_cluster():
 
 
 if __name__ == "__main__":
-    test_tma_store_cluster()
+    tilelang.testing.main()

@@ -15,10 +15,10 @@ Therefore within the same cluster:
 The test verifies multicast by checking that rank 1's B region equals rank 0's A region.
 """
 
-import pytest
 import torch
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 
 
 def make_tma_multicast_demo_kernel(M, N, block_M, block_N, cluster_mask):
@@ -49,13 +49,10 @@ def make_tma_multicast_demo_kernel(M, N, block_M, block_N, cluster_mask):
     return kernel
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_multicast_demo():
     """Verify TMA multicast: rank 1's B region should equal rank 0's A region within the same cluster."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required")
-    major, minor = torch.cuda.get_device_capability()
-    if major < 9:
-        pytest.skip(f"requires Compute Capability 9.0+, found {major}.{minor}")
     M, N = 1024, 1024
     block_M, block_N = 128, 64
     # mask=0b0011: rank 0 multicasts, rank 1 receives, ranks 2/3 each do regular tma_load
@@ -106,4 +103,4 @@ def test_tma_multicast_demo():
 
 
 if __name__ == "__main__":
-    test_tma_multicast_demo()
+    tilelang.testing.main()
