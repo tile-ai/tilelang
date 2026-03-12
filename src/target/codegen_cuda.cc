@@ -2479,14 +2479,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
     std::string ab_type_str = tl::codegen::ptx::DTypeEnumToString(dtype_enum);
-
-    // Currently tcgen05mma_ss<Float16|BFloat16> has use_2cta template param;
-    // others don't. tcgen05mma_ws_ss has no use_2cta.
-    std::string use_2cta_suffix;
-    if (!enable_ws && (dtype_enum == tl::codegen::ptx::DataType::kFloat16 ||
-                       dtype_enum == tl::codegen::ptx::DataType::kBFloat16)) {
-      use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
-    }
+    std::string use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
@@ -2518,7 +2511,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << tcgen05_call;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
     // TS: A from TMEM, B from SMEM (desc)
-    ICHECK_EQ(op->args.size(), 13U)
+    ICHECK_EQ(op->args.size(), 14U)
         << "ptx_tcgen05_mma_ts args is " << op->args;
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_ref = this->PrintExpr(op->args[1]);
@@ -2533,13 +2526,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask1 = this->PrintExpr(op->args[10]);
     std::string mask2 = this->PrintExpr(op->args[11]);
     std::string mask3 = this->PrintExpr(op->args[12]);
+    bool enable_2cta = Downcast<Bool>(op->args[13])->value;
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
+    std::string use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::tcgen05mma_ts<(ABType)>( (*reinterpret_cast<uint32_t*>((A))) + "
+        "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( (*reinterpret_cast<uint32_t*>((A))) + "
         "(A_offset), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
@@ -2548,6 +2543,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     tl::codegen::Replacer replacer;
     replacer.register_rule("(ABType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_enum));
+    replacer.register_rule("(USE_2CTA_SUFFIX)", use_2cta_suffix);
     replacer.register_rule("(A)", a_ref);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
