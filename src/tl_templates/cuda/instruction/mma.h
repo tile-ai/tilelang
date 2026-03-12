@@ -3,6 +3,7 @@
 #include "../common.h"
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
+#include <cute/arch/mma_sm120.hpp>
 
 #ifndef __CUDACC_RTC__
 #include <type_traits>
@@ -141,6 +142,11 @@ TL_DEFINE_MMA_DISPATCHER(kTensorFloat32, kTensorFloat32, kFloat32, 16, 8, 8,
 // FP64 inputs (DMMA: m8n8k4, TN layout)
 TL_DEFINE_MMA_DISPATCHER(kFloat64, kFloat64, kFloat64, 8, 8, 4, false, true,
                          false, cute::SM80_8x8x4_F64F64F64F64_TN)
+
+// FP4 inputs (k32, SM120 kind::f8f6f4)
+using SM120_FP4_FP4_F32_TN = cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e2m1_t, float>;
+TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
+                         false, true, false, SM120_FP4_FP4_F32_TN)
 
 #undef TL_DEFINE_MMA_DISPATCHER
 

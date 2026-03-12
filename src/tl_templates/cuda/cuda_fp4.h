@@ -27,11 +27,11 @@ public:
   }
 
   // Set low 4 bits (first fp4)
-  TL_DEVICE void set_x(fp4_e2_t val) { __x = (__x & 0xF0) | (val.__x & 0x0F); }
+  TL_DEVICE void set_x(fp4_e2_t val) { __x = (__x & 0xF0) | (val.raw() & 0x0F); }
 
   // Set high 4 bits (second fp4)
   TL_DEVICE void set_y(fp4_e2_t val) {
-    __x = (__x & 0x0F) | ((val.__x & 0x0F) << 4);
+    __x = (__x & 0x0F) | ((val.raw() & 0x0F) << 4);
   }
 };
 
@@ -70,7 +70,7 @@ struct __CUDA_ALIGN__(32) fp4_e2_64_t {
 
 // Pack two fp4_e2_t values.
 TL_DEVICE fp4_e2_2_t make_fp4_e2_2_t(fp4_e2_t x, fp4_e2_t y) {
-  __nv_fp4x2_storage_t packed = (x.__x & 0x0F) | ((y.__x & 0x0F) << 4);
+  __nv_fp4x2_storage_t packed = (x.raw() & 0x0F) | ((y.raw() & 0x0F) << 4);
   fp4_e2_2_t result;
   result.__x = packed;
   return result;
