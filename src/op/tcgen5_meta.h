@@ -24,6 +24,7 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
 // NOTE: In case that other tcgen5mma in the same kernel must use 1-cta,
 // we should disable 2cta for the current tcgen5mma.
+// TODO(wt): Add more 2cta-preferred shapes
 #define FAIL                                                                   \
   return {                                                                     \
     false, TCGEN5MMAMeta { 0, 0, 0, false, false }                             \
@@ -37,14 +38,19 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
       (c_dtype.is_float() && c_dtype.bits() == 32)) {
     if (K % 16 != 0)
       FAIL;
-    if (M == 128 && !disable_2cta) {
-      // todo(wt): Add more 2cta-preferred shapes
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(256, atom_n, 16, false, true);
+    if (!disable_2cta) {
+      if (M % 128 == 0) {
+        for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+          if (N % atom_n == 0)
+            SUCCESS(256, atom_n, 16, false, true);
+      } else if (M % 64 == 0) {
+        for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+          if (N % atom_n == 0)
+            SUCCESS(128, atom_n, 16, false, true);
+      }
     }
     if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+      for (int atom_n = 256; atom_n >= 8; atom_n -= 8)
         if (N % atom_n == 0)
           SUCCESS(128, atom_n, 16, false, false);
       FAIL;
@@ -67,13 +73,21 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
               (c_dtype.is_float16() && c_dtype.bits() == 16))) {
     if (K % 32 != 0)
       FAIL;
+    if (!disable_2cta) {
+      if (M % 128 == 0) {
+        for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+          if (N % atom_n == 0)
+            SUCCESS(256, atom_n, 32, false, true);
+      } else if (M % 64 == 0) {
+        for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+          if (N % atom_n == 0)
+            SUCCESS(128, atom_n, 32, false, true);
+      }
+    }
     if (M % 128 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
           SUCCESS(128, atom_n, 32, true, false);
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32, false, true);
       for (int atom_n = 256; atom_n >= 8; atom_n -= 8)
         if (N % atom_n == 0)
           SUCCESS(128, atom_n, 32, false, false);
@@ -98,13 +112,21 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
              ab_dtype.bits() == 8 && c_dtype.is_int() && c_dtype.bits() == 32) {
     if (K % 32 != 0)
       FAIL;
+    if (!disable_2cta) {
+      if (M % 128 == 0) {
+        for (int atom_n = 256; atom_n >= 32; atom_n -= 32)
+          if (N % atom_n == 0)
+            SUCCESS(256, atom_n, 32, false, true);
+      } else if (M % 64 == 0) {
+        for (int atom_n = 256; atom_n >= 32; atom_n -= 32)
+          if (N % atom_n == 0)
+            SUCCESS(128, atom_n, 32, false, true);
+      }
+    }
     if (M % 128 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
           SUCCESS(128, atom_n, 32, true, false);
-      for (int atom_n = 256; atom_n >= 32; atom_n -= 32)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32, false, true);
       for (int atom_n = 256; atom_n >= 8; atom_n -= (atom_n > 32 ? 16 : 8))
         // steps of 16 after N > 32
         if (N % atom_n == 0)
