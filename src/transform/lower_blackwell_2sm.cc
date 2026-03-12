@@ -36,6 +36,32 @@ constexpr const char *kUse2Cta = "use_2cta";
 } // namespace attr
 
 /**
+ * \brief Check if any block in the body has cluster_dims (2,1,1) or (1,2,1).
+ * enable_2cta is only allowed when cluster_dims matches one of these.
+ */
+static bool HasValidClusterDimsFor2Cta(const Stmt &body) {
+  bool found = false;
+  PostOrderVisit(body, [&](const ObjectRef &node) {
+    if (found)
+      return;
+    if (const auto *block = node.as<BlockNode>()) {
+      if (block->annotations.count("cluster_dims")) {
+        if (auto arr = block->annotations.Get("cluster_dims")
+                           ->try_cast<Array<Integer>>()) {
+          if (arr.value().size() >= 3) {
+            int64_t x = arr.value()[0]->value;
+            int64_t y = arr.value()[1]->value;
+            int64_t z = arr.value()[2]->value;
+            found = (x == 2 && y == 1 && z == 1) || (x == 1 && y == 2 && z == 1);
+          }
+        }
+      }
+    }
+  });
+  return found;
+}
+
+/**
  * \brief Detect 2SM TCGEN5MMA in the kernel (before LowerTileOp).
  * Looks for T.gemm (tl_gemm() Call); if it will be lowered to TCGEN5MMA with
  * use_2cta, sets the flag for the mutator to add block attr.
@@ -43,7 +69,8 @@ constexpr const char *kUse2Cta = "use_2cta";
  */
 class Tcgen5_2SmLower : public StmtExprMutator {
 public:
-  explicit Tcgen5_2SmLower(Target target) : target_(std::move(target)) {}
+  Tcgen5_2SmLower(Target target, bool cluster_dims_valid)
+      : target_(std::move(target)), cluster_dims_valid_(cluster_dims_valid) {}
   bool has_2sm_tcgen5mma() const { return has_2sm_tcgen5mma_; }
 
 private:
@@ -61,6 +88,10 @@ private:
                   GetTCGEN5MMAMeta(node->m_, node->n_, node->k_,
                                    node->a_->dtype, node->c_->dtype);
               if (ok && meta.enable_2cta) {
+                if (!cluster_dims_valid_) {
+                  LOG(WARNING) << "Invalid cluster_dims disables 2CTA TCGEN5MMA, use 1CTA variant instead.";
+                  return StmtExprMutator::VisitStmt_(op);
+                }
                 // LOG(INFO) << "Found 2SM TCGEN5MMA!";
                 has_2sm_tcgen5mma_ = true;
                 // NOTE(wt): Currently this only act as a detector of tcgen05
@@ -75,6 +106,7 @@ private:
   }
 
   Target target_;
+  bool cluster_dims_valid_;
   bool has_2sm_tcgen5mma_ = false;
 };
 
@@ -116,7 +148,8 @@ tvm::transform::Pass LowerBlackwell2SM() {
       return f;
     }
     Stmt body = f->body;
-    Tcgen5_2SmLower lower(opt_target.value());
+    bool cluster_dims_valid = HasValidClusterDimsFor2Cta(body);
+    Tcgen5_2SmLower lower(opt_target.value(), cluster_dims_valid);
     body = lower(std::move(body));
     if (lower.has_2sm_tcgen5mma()) {
       // Annotate block attr for using 2cta tcgen5
