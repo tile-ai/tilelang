@@ -61,7 +61,7 @@ private:
                   GetTCGEN5MMAMeta(node->m_, node->n_, node->k_,
                                    node->a_->dtype, node->c_->dtype);
               if (ok && meta.enable_2cta) {
-                LOG(INFO) << "Found 2SM TCGEN5MMA!";
+                // LOG(INFO) << "Found 2SM TCGEN5MMA!";
                 has_2sm_tcgen5mma_ = true;
                 // NOTE(wt): Currently this only act as a detector of tcgen05
                 // 2sm, while we may add the lower logic here in the future.
