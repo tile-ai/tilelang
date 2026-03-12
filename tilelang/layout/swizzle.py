@@ -110,21 +110,25 @@ def make_wgmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k
 # for TCGEN05MMA Intrinsics
 def make_tcgen05mma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
     buf, shape, _ = _get_buffer_info(buffer)
-    # Use only the last two dims, matching C++ GetSwizzleShapeInfoChecked (uses shape[-2] as stride).
-    # Use buffer-based functions (make_full/half/quarter_bank_swizzled_layout) which call
-    # base.Expand(leading_dims) instead of reshape, correctly handling staged (3D+) buffers.
-    continuous = int(shape[-1])
+    stride, continuous = _get_stride_continuous(buffer)
     element_size = _get_element_size(buffer)
-    vector_size = 128 // element_size
-    stride = int(shape[-2])
-    if stride % 8 == 0:
-        if continuous % (vector_size * 8) == 0:
-            return _ffi_api.make_full_bank_swizzled_layout(buf)
-        elif continuous % (vector_size * 4) == 0:
-            return _ffi_api.make_half_bank_swizzled_layout(buf)
-        elif continuous % (vector_size * 2) == 0:
-            return _ffi_api.make_quarter_bank_swizzled_layout(buf)
-    return make_linear_layout(buffer)
+    if continuity is None:
+        continuity = continuous
+    try:
+        base = _ffi_api.make_tcgen05mma_swizzled_layout(
+            stride,
+            continuous,
+            continuity,
+            element_size,
+            k_major,
+        )
+        return base.reshape(shape)
+    except TypeError as err:
+        # Keep Python sources compatible with older built libs that still expose
+        # the legacy FFI signature: (buffer, continuity, k_major).
+        if "Mismatched number of arguments" not in str(err):
+            raise
+        return _ffi_api.make_tcgen05mma_swizzled_layout(buf, continuity, k_major)
 
 
 # swizzle 128B
