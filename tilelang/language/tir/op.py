@@ -1160,7 +1160,7 @@ def ptx_tcgen05_mma_ss(
     warp_specialized=None,
     variant=None,
 ):
-    """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
+    """TVM intrinsic for tcgen05.mma shared-memory x shared-memory instructions.
 
     Expects 14 or 15 positional arguments:
     (kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
@@ -1223,8 +1223,9 @@ def ptx_tcgen05_mma_ts(
     mask1,
     mask2,
     mask3,
+    enable_2cta=False,
 ):
-    """TVM intrinsic for tcgen05.mma tensor-memory × shared-memory instructions.
+    """TVM intrinsic for tcgen05.mma tensor-memory x shared-memory instructions.
 
     Expects 13 positional arguments:
     (kind_dtype, A_ptr, A_offset, desc_b, B_offset, C_ptr, C_offset,
@@ -1248,6 +1249,7 @@ def ptx_tcgen05_mma_ts(
         mask1,
         mask2,
         mask3,
+        enable_2cta,
     )
 
 

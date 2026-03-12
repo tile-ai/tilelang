@@ -161,17 +161,17 @@ class GemmTCGEN5(GemmBase):
         cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0
 
         @T.prim_func
-        def _gemm_ss_elect_one_thread() -> None:
+        def _gemm_elect_one_thread() -> None:
             if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
         @T.prim_func
-        def _gemm_ss() -> None:
+        def _gemm() -> None:
             if cluster_cond:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
         return (
-            _Simplify(_gemm_ss, inline_let=True)
+            _Simplify(_gemm, inline_let=True)
             if analyzer.can_prove(thread_bounds.extent == warp_size)
-            else _Simplify(_gemm_ss_elect_one_thread, inline_let=True)
+            else _Simplify(_gemm_elect_one_thread, inline_let=True)
         )
