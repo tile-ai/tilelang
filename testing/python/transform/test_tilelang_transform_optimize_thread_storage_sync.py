@@ -1,3 +1,4 @@
+# ruff: noqa
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -26,11 +27,7 @@ def _count_waits(func) -> int:
 
     def _visit(node):
         nonlocal count
-        if (
-            isinstance(node, tvm.tir.Call)
-            and isinstance(node.op, tvm.ir.Op)
-            and str(node.op.name) == "tir.ptx_wait_group"
-        ):
+        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name) == "tir.ptx_wait_group":
             count += 1
 
     post_order_visit(func.body, _visit)
