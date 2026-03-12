@@ -1124,34 +1124,17 @@ private:
 
     auto root = tvm::ffi::GetRef<For>(op);
 
-    // Check if the loop stores into local buffers.
-    // For example:
-    //   for i in T.Parallel(1024):
-    //     A_local[i] = A_global[i]
-    // Here, A_local is a register-local buffer held independently by each
-    // thread, so explicit thread binding is not required.
-    bool store_into_local = false;
-    PostOrderVisit(root, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (IsLocalBuffer(store->buffer)) {
-          store_into_local = true;
-        }
-      }
-    });
-
-    // Check if the loop only manipulates "local" buffers.
-    // for i in T.Parallel(1024):
-    //     A_local[i] = B_local[i]
-    // This indicates register usage and justifies skipping thread binding.
-    bool local_register_only = true;
+    // Check if the loop writes to any non-local buffer.
+    // Only T.copy(global/shared/local, local) produces parallel loops where
+    // all stores target local buffers and no call writes to non-local
+    // buffers — these do not need thread partitioning.
+    // Element-level intrinsics (e.g. atomic_add) pass non-local buffer
+    // pointers via tvm_access_ptr / tl::access_ptr inside CallNodes.
+    bool has_non_local_store = false;
     PostOrderVisit(root, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
         if (!IsLocalBuffer(store->buffer)) {
-          local_register_only = false;
-        }
-      } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (!IsLocalBuffer(load->buffer)) {
-          local_register_only = false;
+          has_non_local_store = true;
         }
       } else if (const auto *call = obj.as<CallNode>()) {
         if (call->op.same_as(builtin::tvm_access_ptr())) {
@@ -1161,16 +1144,21 @@ private:
             Var var = tvm::ffi::GetRef<Var>(buffer_var);
             auto it = buffer_map_.find(var);
             if (it != buffer_map_.end() && !IsLocalBuffer(it->second)) {
-              local_register_only = false;
+              has_non_local_store = true;
+            }
+          }
+        } else if (call->op.same_as(tl::access_ptr())) {
+          // tl::access_ptr format: (BufferLoad, extent, rw_mask)
+          if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+            if (!IsLocalBuffer(load->buffer)) {
+              has_non_local_store = true;
             }
           }
         }
       }
     });
 
-    // Determine if this is a true parallel loop requiring thread partitioning.
-    // Skip partitioning for loops that only operate on local/register buffers.
-    bool parallel_loop = !local_register_only && !store_into_local;
+    bool parallel_loop = has_non_local_store;
 
     // Check if there are non-local buffer accesses (for vectorization decision)
     bool has_non_local = false;
