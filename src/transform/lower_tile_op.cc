@@ -1125,9 +1125,18 @@ private:
     auto root = tvm::ffi::GetRef<For>(op);
 
     // Check if the loop writes to any non-local buffer.
-    // Only T.copy(global/shared/local, local) produces parallel loops where
-    // all stores target local buffers and no call writes to non-local
-    // buffers — these do not need thread partitioning.
+    // Thread partitioning is unnecessary when all stores target local buffers.
+    // For example:
+    //   for i in T.Parallel(1024):
+    //     A_local[i] = A_global[i]
+    // Here, A_local is a register-local buffer held independently by each
+    // thread, so explicit thread binding is not required.
+
+    // NOTE: For cases when stores to both local and non-local buffers exist
+    // (mixed case), we still conservatively assume that thread partitioning is
+    // needed. In such case, the programmer should carefully consider the
+    // access patterns of the mixed accesses to ensure correctness.
+
     // Element-level intrinsics (e.g. atomic_add) pass non-local buffer
     // pointers via tvm_access_ptr / tl::access_ptr inside CallNodes.
     bool has_non_local_store = false;
@@ -1158,6 +1167,9 @@ private:
       }
     });
 
+    // Determine if this is a true parallel loop requiring thread
+    // partitioning: parallel_loop = True if we need to partition the loop.
+    // Skip partitioning for loops that only have local stores.
     bool parallel_loop = has_non_local_store;
 
     // Check if there are non-local buffer accesses (for vectorization decision)
