@@ -219,6 +219,7 @@ def test_pointer_table_annotation_lowers_to_int64_buffer():
     assert src_ptrs.dtype == "int64"
     assert [int(dim) for dim in src_ptrs.shape] == [4]
 
+
 def test_pointer_table_copy():
     run_pointer_table_copy(256)
 
