@@ -252,6 +252,17 @@ public:
 
   void VisitStmt_(const AllocateNode *op) final {
     StmtVisitor::VisitStmt_(op);
+    auto it = buffer_data_to_buffer_.find(op->buffer_var);
+    if (it != buffer_data_to_buffer_.end()) {
+      const Buffer &buf = (*it).second;
+      // Ragged-prefix bookkeeping buffers are referenced by both producer and
+      // consumer rewrites. Keep their allocation in both paths.
+      if (buf->name == "tl_mvb_ragged_prefix" ||
+          buf->name == "tl_ws_ragged_prefix") {
+        SetRole(op, Role::kBoth);
+        return;
+      }
+    }
     Role role = Role::kConsumer;
     SetRole(op, role);
   }

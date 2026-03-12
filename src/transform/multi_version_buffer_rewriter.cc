@@ -134,7 +134,9 @@ public:
       Var buffer_var = buffer->data;
       rewriter.buffer_data_to_buffer_.Set(buffer_var, buffer);
     }
-    f.CopyOnWrite()->body = rewriter(f->body);
+    Stmt rewritten = rewriter(f->body);
+    rewritten = rewriter.FinalizeRaggedPrefixAllocation(std::move(rewritten));
+    f.CopyOnWrite()->body = std::move(rewritten);
     return f;
   }
 
@@ -154,6 +156,21 @@ private:
     EnsureRaggedPrefixBuffer();
     Array<PrimExpr> zero_indices = {0};
     return BufferLoad(ragged_prefix_buf_, zero_indices);
+  }
+
+  Stmt FinalizeRaggedPrefixAllocation(Stmt body) {
+    if (!needs_ragged_prefix_ || inserted_ragged_prefix_) {
+      return body;
+    }
+    EnsureRaggedPrefixBuffer();
+    Array<PrimExpr> zero_indices = {0};
+    Stmt init = BufferStore(ragged_prefix_buf_, IntImm(DataType::Int(32), 0),
+                            zero_indices);
+    Stmt seq = SeqStmt({init, body});
+    seq = DeclBuffer(ragged_prefix_buf_, seq);
+    inserted_ragged_prefix_ = true;
+    return Allocate(ragged_prefix_buf_->data, ragged_prefix_buf_->dtype,
+                    ragged_prefix_buf_->shape, const_true(), seq);
   }
 
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
@@ -351,6 +368,15 @@ private:
 
     ICHECK(num_stages_anno->as<IntImmNode>());
     int num_stages = static_cast<int>(num_stages_anno->as<IntImmNode>()->value);
+
+    // A single-stage software pipeline does not require multi-versioned
+    // buffers or ragged-prefix bookkeeping; keep the loop unchanged.
+    if (num_stages <= 1) {
+      auto for_node = StmtExprMutator::VisitStmt_(op);
+      loop_stack_.pop_back();
+      stmt_stack_.pop_back();
+      return for_node;
+    }
 
     Stmt pipeline_body_root{nullptr};
     if (const auto *realize = op->body.as<BlockRealizeNode>()) {
