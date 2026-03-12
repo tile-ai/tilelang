@@ -58,6 +58,7 @@ def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=
     torch.testing.assert_close(cython_c, ffi_c, atol=1e-2, rtol=1e-2)
 
 
+@tilelang.testing.requires_cuda
 def test_matmul():
     run_matmul(1024, 1024, 1024, 128, 128, 32)
 
