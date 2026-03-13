@@ -52,7 +52,8 @@ static bool HasValidClusterDimsFor2Cta(const Stmt &body) {
             int64_t x = arr.value()[0]->value;
             int64_t y = arr.value()[1]->value;
             int64_t z = arr.value()[2]->value;
-            found = (x == 2 && y == 1 && z == 1) || (x == 1 && y == 2 && z == 1);
+            found =
+                (x == 2 && y == 1 && z == 1) || (x == 1 && y == 2 && z == 1);
           }
         }
       }
@@ -89,7 +90,8 @@ private:
                                    node->a_->dtype, node->c_->dtype);
               if (ok && meta.enable_2cta) {
                 if (!cluster_dims_valid_) {
-                  LOG(WARNING) << "Invalid cluster_dims disables 2CTA TCGEN5MMA, use 1CTA variant instead.";
+                  LOG(WARNING) << "Invalid cluster_dims disables 2CTA "
+                                  "TCGEN5MMA, use 1CTA variant instead.";
                   return StmtExprMutator::VisitStmt_(op);
                 }
                 // LOG(INFO) << "Found 2SM TCGEN5MMA!";
