@@ -1361,14 +1361,6 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
       }
 
       // All checks passed, we can use this instruction
-      PrimExpr relative_wg_idx =
-          FloorDiv(Sub(T.thread_var, T.thread_bounds->min), WARPGROUP_SIZE);
-      PrimExpr col_offset =
-          num_useful_threads == WARPGROUP_SIZE
-              ? PrimExpr(0)
-              : relative_wg_idx * (num_chunks_each_wg * meta.width);
-      have_succeeded = true;
-      Array<PrimExpr> args;
       // For tcgen05_st, bf16 data should be stored packed (without
       // unpack::16b) so MMA TS reads correctly packed bf16 from TMEM columns.
       // For tcgen05_ld, pack::16b is still needed when reading unpacked data.
@@ -1376,6 +1368,14 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
       const char *bool_str = use_pack_unpack_modifier ? "true" : "false";
       int effective_chunks =
           needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
+      PrimExpr relative_wg_idx =
+          FloorDiv(Sub(T.thread_var, T.thread_bounds->min), WARPGROUP_SIZE);
+      PrimExpr col_offset =
+          num_useful_threads == WARPGROUP_SIZE
+              ? PrimExpr(0)
+              : relative_wg_idx * (effective_chunks * meta.width);
+      have_succeeded = true;
+      Array<PrimExpr> args;
       args.push_back(StringImm(meta.intrinsics_name + "<" +
                                std::to_string(effective_chunks) + ", " +
                                bool_str + ">"));
