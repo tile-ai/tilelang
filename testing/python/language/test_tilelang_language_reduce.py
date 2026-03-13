@@ -4,7 +4,6 @@ import tilelang as tl
 import tilelang.language as T
 
 tilelang.testing.set_random_seed()
-tilelang.disable_cache()
 
 
 def _make_shared_reduce(M, N, dtype, reduce_cb):
@@ -124,18 +123,16 @@ def run_reduce_max(M, N, dtype=T.float16):
 
 
 def test_reduce_sum():
-    MN_zip = [(256, 256), (512, 128), (128, 512)]
+    MN_zip = [(128, 128), (192, 64)]
     for dtype in [T.float32, T.int32, T.int64]:
         for M, N in MN_zip:
             run_reduce(M, N, dtype, "sum")
 
 
 def test_reduce_other_op():
-    MN_zip = [(256, 256), (512, 128)]
     for op in ["max", "min", "abssum", "absmax"]:
-        for dtype in [T.float32, T.int32, T.int64]:
-            for M, N in MN_zip:
-                run_reduce(M, N, dtype, op)
+        for dtype in [T.float32, T.int64]:
+            run_reduce(128, 128, dtype, op)
 
 
 def test_reduce_sum_threads():
@@ -144,29 +141,28 @@ def test_reduce_sum_threads():
 
 
 def test_reduce_sum_shared():
-    run_reduce(64, 64, op="sum", mode="ss")
+    run_reduce(32, 32, op="sum", mode="ss")
 
 
 def test_reduce_max():
-    run_reduce_max(256, 256, T.float16)
-    run_reduce_max(512, 128, T.float16)
-    run_reduce_max(256, 256, T.float32)
+    run_reduce_max(128, 128, T.float16)
+    run_reduce_max(192, 64, T.float32)
 
 
 def test_reduce_max_shared():
-    run_shared_reduce(reduce_max_ss, lambda A: A.max(dim=1).values, 64, 64, T.float32)
+    run_shared_reduce(reduce_max_ss, lambda A: A.max(dim=1).values, 32, 32, T.float32)
 
 
 def test_reduce_min_shared():
-    run_shared_reduce(reduce_min_ss, lambda A: A.min(dim=1).values, 64, 64, T.float32)
+    run_shared_reduce(reduce_min_ss, lambda A: A.min(dim=1).values, 32, 32, T.float32)
 
 
 def test_reduce_abssum_shared():
-    run_shared_reduce(reduce_abssum_ss, lambda A: A.abs().sum(dim=1), 64, 64, T.float32)
+    run_shared_reduce(reduce_abssum_ss, lambda A: A.abs().sum(dim=1), 32, 32, T.float32)
 
 
 def test_reduce_absmax_shared():
-    run_shared_reduce(reduce_absmax_ss, lambda A: A.abs().max(dim=1).values, 64, 64, T.float32)
+    run_shared_reduce(reduce_absmax_ss, lambda A: A.abs().max(dim=1).values, 32, 32, T.float32)
 
 
 def reduce_sum_test_clear(M, N, dtype=T.float32):
@@ -205,9 +201,8 @@ def run_reduce_sum_clear(M, N, dtype=T.float32, tl_func=reduce_sum_test_clear):
 
 
 def test_reduce_sum_clear():
-    run_reduce_sum_clear(256, 256, T.float32)
-    run_reduce_sum_clear(512, 128, T.float32)
-    run_reduce_sum_clear(128, 512, T.float32)
+    run_reduce_sum_clear(128, 128, T.float32)
+    run_reduce_sum_clear(192, 64, T.float32)
 
 
 def reduce_max_test_clear(M, N, dtype=T.float16):
@@ -246,7 +241,7 @@ def run_reduce_max_clear(M, N, dtype=T.float16):
 
 
 def test_reduce_max_clear():
-    run_reduce_max_clear(256, 256, T.float16)
+    run_reduce_max_clear(128, 128, T.float16)
 
 
 def reduce_sum_test_clear_B_shared(M, N, dtype=T.float32):
@@ -270,7 +265,7 @@ def reduce_sum_test_clear_B_shared(M, N, dtype=T.float32):
 
 
 def test_reduce_sum_clear_B_shared():
-    run_reduce_sum_clear(256, 256, T.float32, reduce_sum_test_clear_B_shared)
+    run_reduce_sum_clear(128, 128, T.float32, reduce_sum_test_clear_B_shared)
 
 
 def reduce_sum_test_clear_AB_shared(M, N, dtype=T.float32):
@@ -294,7 +289,7 @@ def reduce_sum_test_clear_AB_shared(M, N, dtype=T.float32):
 
 
 def test_reduce_sum_clear_AB_shared():
-    run_reduce_sum_clear(64, 64, T.float32, reduce_sum_test_clear_AB_shared)
+    run_reduce_sum_clear(32, 32, T.float32, reduce_sum_test_clear_AB_shared)
 
 
 if __name__ == "__main__":

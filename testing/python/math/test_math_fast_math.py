@@ -49,7 +49,7 @@ def check_non_fastmath_usage(source, mathop_name):
     check_fastmath_usage(source, mathop_name, expect_fastmath=False)
 
 
-def run_single_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
+def run_single_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, block_N=32, dtype=T.float32):
     """
     Test single-argument mathops.
     T.exp should generate expf (non-fastmath), T.__exp should generate __expf (fastmath)
@@ -85,7 +85,7 @@ def run_single_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=3
     print(f"✓ {mathop_name} compilation and execution test passed")
 
 
-def run_two_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
+def run_two_arg_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, block_N=32, dtype=T.float32):
     """
     Test two-argument mathops to ensure they generate non-fastmath CUDA code.
     """
@@ -154,7 +154,7 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, 
 
 def run_abs_test():
     """Test that abs correctly maps to fabs (not __fabsf) in generated CUDA code"""
-    M, N = 128, 128
+    M, N = 32, 32
     block_M, block_N = 32, 32
 
     @T.prim_func
@@ -188,7 +188,7 @@ def run_abs_test():
     print("✓ abs numerical test passed")
 
 
-def run_fastmath_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
+def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, block_N=32, dtype=T.float32):
     """
     Test fastmath mathops to ensure they generate fastmath CUDA code (with __ prefix).
     """

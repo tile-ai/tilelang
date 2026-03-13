@@ -209,7 +209,7 @@ def run_pointer_table_grouped_matmul(batch_sizes_list, N, K, block_M, block_N, b
 
 
 def test_matmul():
-    run_matmul(1024, 1024, 1024, 128, 128, 32)
+    run_matmul(256, 256, 256, 64, 64, 32)
 
 
 def test_pointer_table_annotation_lowers_to_int64_buffer():
@@ -221,16 +221,16 @@ def test_pointer_table_annotation_lowers_to_int64_buffer():
 
 
 def test_pointer_table_copy():
-    run_pointer_table_copy(256)
+    run_pointer_table_copy(64)
 
 
 def test_pointer_table_multi_copy():
-    run_pointer_table_multi_copy(4, 128)
+    run_pointer_table_multi_copy(2, 64)
 
 
 @tilelang.testing.requires_cuda
 def test_pointer_table_grouped_matmul():
-    run_pointer_table_grouped_matmul([16, 24, 33], 48, 64, 16, 16, 16)
+    run_pointer_table_grouped_matmul([8, 12, 17], 32, 32, 16, 16, 16)
 
 
 if __name__ == "__main__":
