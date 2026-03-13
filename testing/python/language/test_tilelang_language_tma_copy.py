@@ -97,14 +97,17 @@ def run_gemm_tma_copy(num_stages):
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_copy_pipeline_2_stages():
     run_gemm_tma_copy(num_stages=2)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_copy_pipeline_3_stages():
     run_gemm_tma_copy(num_stages=3)
 
 
 if __name__ == "__main__":
-    test_tma_copy_pipeline_2_stages()
-    test_tma_copy_pipeline_3_stages()
+    tilelang.testing.main()
