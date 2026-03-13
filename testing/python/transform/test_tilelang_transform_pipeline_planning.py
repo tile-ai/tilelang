@@ -246,5 +246,69 @@ def test_pipeline_planning_prioritizes_groups_by_consumer_and_rebinds_wait0():
     )
 
 
+def test_pipeline_planning_orders_cp_async_groups_by_group_last_use():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.uint8),
+        B: T.Tensor((64,), T.uint8),
+        C: T.Tensor((64,), T.uint8),
+        D: T.Tensor((64,), T.uint8),
+    ):
+        SA = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+        SB = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
+        for i in T.Pipelined(4, num_stages=2):
+            with T.block():
+                T.ptx_cp_async(
+                    T.access_ptr(SA[(i + 1) * 4], "w", 4),
+                    T.access_ptr(A[(i + 1) * 4], "r", 4),
+                    4,
+                )
+            with T.block():
+                T.ptx_commit_group()
+            with T.block():
+                T.ptx_wait_group(0)
+            with T.block():
+                T.ptx_cp_async(
+                    T.access_ptr(SB[(i + 1) * 4], "w", 4),
+                    T.access_ptr(B[(i + 1) * 4], "r", 4),
+                    4,
+                )
+            with T.block():
+                T.ptx_commit_group()
+            with T.block():
+                T.ptx_wait_group(0)
+            # SA is consumed earlier, but it is also consumed again later.
+            with T.block():
+                C[i * 4] = SA[i * 4]
+            # SB is only consumed once, between the two SA consumers.
+            with T.block():
+                C[i * 4 + 1] = SB[i * 4]
+            with T.block():
+                D[i * 4] = SA[i * 4 + 1]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+    assert len(stages) == 9, f"Expected 9 pipeline statements, got {len(stages)}"
+
+    # Statements:
+    #   0 cpA, 1 commitA, 2 waitA, 3 cpB, 4 commitB, 5 waitB,
+    #   6 consumeA(early), 7 consumeB, 8 consumeA(late)
+    #
+    # Group A has earlier first-consumer (stmt 6) but later last-use (stmt 8).
+    # Group B has later first-consumer (stmt 7) but earlier last-use (stmt 7).
+    # PipelinePlanning should keep the synthetic cp.async producer groups
+    # ordered by group placement/last-use, so B is scheduled ahead of A.
+    assert orders[3] < orders[0], f"Expected cp_async(B) before cp_async(A), got orders={orders}"
+    assert orders[4] < orders[1], f"Expected commit(B) before commit(A), got orders={orders}"
+    assert stages[0] == stages[1] == stages[3] == stages[4], (
+        f"Expected both cp.async groups and their commits to stay in the same producer stage, got stages={stages}"
+    )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

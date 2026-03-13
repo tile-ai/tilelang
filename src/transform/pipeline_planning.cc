@@ -706,6 +706,7 @@ private:
       std::vector<int> cp_async_stmt_indices;
       std::vector<int> commit_stmt_indices;
       std::unordered_set<const BufferNode *> written_buffers;
+      int last_use_stmt_index = -1;
     };
     struct WaitDependencyInfo {
       int wait_stmt_index = -1;
@@ -789,21 +790,12 @@ private:
       return false;
     };
 
-    // Record earliest consumers for each cp.async group, and track all
-    // cp.async-written buffers for wait remapping.
+    // Track all cp.async-written buffers for wait remapping.
     std::unordered_set<const BufferNode *> async_written_buffers;
-    std::vector<int> cp_async_group_first_consumer(
-        cp_async_groups.size(), std::numeric_limits<int>::max());
     for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
       const auto &group = cp_async_groups[group_id];
       async_written_buffers.insert(group.written_buffers.begin(),
                                    group.written_buffers.end());
-      for (int stmt_idx = 0; stmt_idx < pipeline_stmt_count; ++stmt_idx) {
-        if (stmt_reads_buffer_set(stmt_idx, group.written_buffers)) {
-          cp_async_group_first_consumer[group_id] = stmt_idx;
-          break;
-        }
-      }
     }
 
     // Heuristic for wait_group(0): bind each wait to the first unmatched
@@ -857,25 +849,6 @@ private:
       wait_dep.required_group_ids = std::move(required_groups_for_consumer);
       last_bound_consumer_stmt = consumer_stmt_idx;
     }
-
-    // Prioritize cp.async groups with earlier consumers when enforcing group
-    // boundary ordering. This helps place prefetches for near-term consumers
-    // earlier in the stage-0 schedule.
-    std::vector<int> cp_async_group_schedule_order;
-    cp_async_group_schedule_order.reserve(cp_async_groups.size());
-    for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
-      cp_async_group_schedule_order.push_back(static_cast<int>(group_id));
-    }
-    std::stable_sort(
-        cp_async_group_schedule_order.begin(),
-        cp_async_group_schedule_order.end(), [&](int lhs_group, int rhs_group) {
-          int lhs_first_consumer = cp_async_group_first_consumer[lhs_group];
-          int rhs_first_consumer = cp_async_group_first_consumer[rhs_group];
-          if (lhs_first_consumer != rhs_first_consumer) {
-            return lhs_first_consumer < rhs_first_consumer;
-          }
-          return lhs_group < rhs_group;
-        });
 
     // For every copy stage, mark all its dependency stages as producer_for_copy
     // Helper struct to manage copy stage dependency reads
@@ -1026,16 +999,12 @@ private:
       }
     }
 
-    // CPAsync commit statements are pure sync ops without explicit buffer
-    // accesses, but they must be kept with their corresponding cp.async group.
-    // Otherwise pipeline planning may schedule commit early (since it has no
-    // data deps), and then later force stage(commit)=stage(cp_async), causing
-    // illegal order like "commit; cp_async" in the generated prologue/body.
-    //
-    // We treat commit-only statements as "first-stage" scheduling candidates
-    // and reuse the group's last_use to place them right after the group's
-    // cp.async calls (in original statement order).
-    for (const auto &group : cp_async_groups) {
+    // Treat each explicit `cp_async* ; commit` producer group as a synthetic
+    // copy stage for scheduling. All statements in the group share the same
+    // last-use anchor, so stage assignment keeps the producer group together
+    // instead of scheduling individual cp.async members near different
+    // consumers.
+    for (auto &group : cp_async_groups) {
       if (group.anchor_cp_async_stmt < 0) {
         continue;
       }
@@ -1053,15 +1022,20 @@ private:
         // (rare, but keep local ordering correct).
         group_last_use = group_last_cp_async_stmt;
       }
+      group.last_use_stmt_index = group_last_use;
+      for (int cp_async_stmt_idx : group.cp_async_stmt_indices) {
+        pipeline_stage_infos[cp_async_stmt_idx].last_use_stmt_index =
+            group_last_use;
+      }
       for (int commit_stmt_idx : group.commit_stmt_indices) {
         auto &commit_info = pipeline_stage_infos[commit_stmt_idx];
+        commit_info.last_use_stmt_index = group_last_use;
         // Only mark commit-only statements. If commit is already fused with
         // cp.async calls in the same statement, its local ordering is
-        // preserved.
+        // preserved by the statement itself.
         if (commit_info.has_cp_async_commit() &&
             !commit_info.has_cp_async_call()) {
           commit_info.cp_async_commit_stage = true;
-          commit_info.last_use_stmt_index = group_last_use;
         }
       }
     }
@@ -1290,6 +1264,40 @@ private:
           indeg[v] += 1;
         }
       };
+
+      auto group_schedule_key = [&](const CPAsyncGroupInfo &group) {
+        int key = std::numeric_limits<int>::max();
+        for (int cp_stmt_idx : group.cp_async_stmt_indices) {
+          key = std::min(key, pipeline_stage_infos[cp_stmt_idx].order);
+        }
+        for (int commit_stmt_idx : group.commit_stmt_indices) {
+          key = std::min(key, pipeline_stage_infos[commit_stmt_idx].order);
+        }
+        if (key == std::numeric_limits<int>::max()) {
+          key = group.anchor_cp_async_stmt;
+        }
+        return key;
+      };
+
+      // Respect the synthetic producer-group order computed above. The control
+      // dependencies below only preserve cp.async group boundaries; they must
+      // not re-prioritize groups using a different heuristic.
+      std::vector<int> cp_async_group_schedule_order;
+      cp_async_group_schedule_order.reserve(cp_async_groups.size());
+      for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
+        cp_async_group_schedule_order.push_back(static_cast<int>(group_id));
+      }
+      std::stable_sort(
+          cp_async_group_schedule_order.begin(),
+          cp_async_group_schedule_order.end(), [&](int lhs_group, int rhs_group) {
+            int lhs_key = group_schedule_key(cp_async_groups[lhs_group]);
+            int rhs_key = group_schedule_key(cp_async_groups[rhs_group]);
+            if (lhs_key != rhs_key) {
+              return lhs_key < rhs_key;
+            }
+            return cp_async_groups[lhs_group].anchor_cp_async_stmt <
+                   cp_async_groups[rhs_group].anchor_cp_async_stmt;
+          });
 
       // (1) cp.async group semantics:
       //   group := cp_async* ; commit
