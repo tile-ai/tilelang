@@ -11,10 +11,10 @@
 #include <unordered_set>
 #include <utility>
 
+#include "common/tma_copy_utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
 #include "tir/transforms/ir_utils.h"
-#include "common/tma_copy_utils.h"
 
 namespace tvm {
 namespace tl {

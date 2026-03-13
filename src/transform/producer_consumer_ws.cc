@@ -20,8 +20,8 @@
  *   expect_transaction -> tma_load -> arrive
  */
 
-#include "warp_specialized_rewriter.h"
 #include "common/tma_copy_utils.h"
+#include "warp_specialized_rewriter.h"
 
 #include <algorithm>
 #include <string>
@@ -606,8 +606,7 @@ private:
         if (guard_a.defined() != guard_b.defined()) {
           return false;
         }
-        return !guard_a.defined() ||
-               equal(guard_a.value(), guard_b.value());
+        return !guard_a.defined() || equal(guard_a.value(), guard_b.value());
       };
       int next_group = 0;
       block_group[0] = next_group++;
@@ -618,8 +617,7 @@ private:
             wait_insert_pos[i] == wait_insert_pos[i - 1] &&
             arrive_insert_pos[i] == arrive_insert_pos[i - 1] &&
             same_guard(i - 1, i);
-        block_group[i] =
-            merge_with_prev ? block_group[i - 1] : next_group++;
+        block_group[i] = merge_with_prev ? block_group[i - 1] : next_group++;
       }
       num_block_groups = next_group;
       num_existing_tma_fwd_barriers = num_block_groups;
@@ -630,8 +628,9 @@ private:
     int num_existing_barriers = 0;
     int num_preloop_fwd_barriers = 0;
     if (remap_pure_tma_barriers_) {
-      num_preloop_fwd_barriers = std::max(
-          1, inferred_existing_required - original_num_existing_loop_fwd_barriers);
+      num_preloop_fwd_barriers =
+          std::max(1, inferred_existing_required -
+                          original_num_existing_loop_fwd_barriers);
       num_existing_barriers =
           num_existing_loop_fwd_barriers + num_preloop_fwd_barriers;
     } else {
@@ -734,12 +733,11 @@ private:
     Array<Stmt> producer_body_stmts;
     for (size_t ti = 0; ti < extractor.blocks.size(); ti++) {
       const auto &tma = extractor.blocks[ti];
-      bool is_first_in_group =
-          ti == 0 || !remap_pure_tma_barriers_ ||
-          block_group[ti] != block_group[ti - 1];
-      bool is_last_in_group =
-          ti + 1 == extractor.blocks.size() || !remap_pure_tma_barriers_ ||
-          block_group[ti] != block_group[ti + 1];
+      bool is_first_in_group = ti == 0 || !remap_pure_tma_barriers_ ||
+                               block_group[ti] != block_group[ti - 1];
+      bool is_last_in_group = ti + 1 == extractor.blocks.size() ||
+                              !remap_pure_tma_barriers_ ||
+                              block_group[ti] != block_group[ti + 1];
       PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
 
       // Back-pressure wait: producer cannot reuse the stage buffer until the
@@ -757,9 +755,8 @@ private:
         ICHECK_GE(tma_fwd_bases[ti], 0);
         PrimExpr barrier_id =
             IntImm(DataType::Int(32), tma_fwd_bases[ti]) + stage_expr;
-        producer_stmt =
-            RewriteTmaForwardProducerStmt(producer_stmt, barrier_id,
-                                          is_last_in_group);
+        producer_stmt = RewriteTmaForwardProducerStmt(producer_stmt, barrier_id,
+                                                      is_last_in_group);
       }
       if (tma.kind == AsyncProducerKind::kTma) {
         // Keep expect/load under the same elected lane when lowering has
@@ -809,19 +806,17 @@ private:
     // Emit waits / compute / arrives according to insertion points.
     for (size_t ci = 0; ci < extractor.compute_stmts.size(); ++ci) {
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-        bool is_first_in_group =
-            ti == 0 || !remap_pure_tma_barriers_ ||
-            block_group[ti] != block_group[ti - 1];
-        if (is_first_in_group &&
-            wait_insert_pos[ti] == static_cast<int>(ci)) {
+        bool is_first_in_group = ti == 0 || !remap_pure_tma_barriers_ ||
+                                 block_group[ti] != block_group[ti - 1];
+        if (is_first_in_group && wait_insert_pos[ti] == static_cast<int>(ci)) {
           consumer_body_stmts.push_back(normalized_waits[ti]);
         }
       }
       consumer_body_stmts.push_back(extractor.compute_stmts[ci]);
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-        bool is_last_in_group =
-            ti + 1 == extractor.blocks.size() || !remap_pure_tma_barriers_ ||
-            block_group[ti] != block_group[ti + 1];
+        bool is_last_in_group = ti + 1 == extractor.blocks.size() ||
+                                !remap_pure_tma_barriers_ ||
+                                block_group[ti] != block_group[ti + 1];
         if (is_last_in_group &&
             arrive_insert_pos[ti] == static_cast<int>(ci + 1)) {
           PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
@@ -834,9 +829,8 @@ private:
     // Handle degenerate loops with no compute statements.
     if (extractor.compute_stmts.empty()) {
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-        bool is_first_in_group =
-            ti == 0 || !remap_pure_tma_barriers_ ||
-            block_group[ti] != block_group[ti - 1];
+        bool is_first_in_group = ti == 0 || !remap_pure_tma_barriers_ ||
+                                 block_group[ti] != block_group[ti - 1];
         if (is_first_in_group) {
           consumer_body_stmts.push_back(normalized_waits[ti]);
         }
@@ -845,9 +839,9 @@ private:
 
     // Emit loop-tail arrives (blocks with unknown deps or tail use).
     for (size_t ti = 0; ti < extractor.blocks.size(); ti++) {
-      bool is_last_in_group =
-          ti + 1 == extractor.blocks.size() || !remap_pure_tma_barriers_ ||
-          block_group[ti] != block_group[ti + 1];
+      bool is_last_in_group = ti + 1 == extractor.blocks.size() ||
+                              !remap_pure_tma_barriers_ ||
+                              block_group[ti] != block_group[ti + 1];
       if (is_last_in_group && !arrive_emitted[ti] &&
           arrive_insert_pos[ti] ==
               static_cast<int>(extractor.compute_stmts.size())) {
@@ -1561,12 +1555,10 @@ private:
           if (then_stmts.size() == 1) {
             merged.push_back(seq->seq[i]);
           } else {
-            Stmt merged_then =
-                MergeAdjacentEquivalentIfs(then_stmts.size() == 1
-                                               ? then_stmts[0]
-                                               : SeqStmt(then_stmts));
-            merged.push_back(IfThenElse(
-                if0->condition, merged_then, std::nullopt, if0->span));
+            Stmt merged_then = MergeAdjacentEquivalentIfs(
+                then_stmts.size() == 1 ? then_stmts[0] : SeqStmt(then_stmts));
+            merged.push_back(IfThenElse(if0->condition, merged_then,
+                                        std::nullopt, if0->span));
           }
           i = j;
           continue;
