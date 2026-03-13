@@ -1,6 +1,8 @@
 #pragma once
 
 #ifndef __CUDACC_RTC__
+#include <cstdio>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #endif
 
@@ -56,6 +58,25 @@ using int4_t = int4;
       return -1;                                                               \
     }                                                                          \
   } while (0)
+
+#if defined(__CUDA_ARCH__)
+#define TILELANG_UNREACHABLE(msg)                                              \
+  do {                                                                         \
+    printf("%s, %s:%d\n", msg, __FILE__, __LINE__);                            \
+    __trap();                                                                  \
+  } while (0)
+#elif defined(__CUDACC_RTC__)
+#define TILELANG_UNREACHABLE(msg)                                              \
+  do {                                                                         \
+    __builtin_trap();                                                          \
+  } while (0)
+#else
+#define TILELANG_UNREACHABLE(msg)                                              \
+  do {                                                                         \
+    fprintf(stderr, "%s, %s:%d\n", msg, __FILE__, __LINE__);                   \
+    abort();                                                                   \
+  } while (0)
+#endif
 
 // using cutlass abs function for half_t
 TL_PATCH TL_DEVICE half_t __habs(const half_t x) {

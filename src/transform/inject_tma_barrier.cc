@@ -195,6 +195,9 @@ public:
     return tma_op_to_barrier_id_;
   }
   Map<PrimExpr, IntImm> barrier_id_to_range() { return barrier_id_to_range_; }
+  Map<PrimExpr, IntImm> cluster_barrier_cta_ids() {
+    return cluster_barrier_cta_ids_;
+  }
 
 private:
   void UpdateBarrierRange(const PrimExpr &barrier_id, const IntImm &extent) {
@@ -214,25 +217,18 @@ private:
         pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
       } else if (call->op.same_as(mbarrier_expect_tx())) {
         pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
-      } else if (call->op.same_as(builtin::ptx_arrive_barrier())) {
+      } else if (call->op.same_as(builtin::ptx_arrive_barrier()) ||
+                 call->op.same_as(tl::ptx_arrive_cluster_barrier())) {
         PrimExpr barrier_id = call->args[0];
         for (const auto &tma_call : pending_tma_ops_) {
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto extent =
-            const_int_bound->max_value - const_int_bound->min_value + 1;
-        UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
-        pending_tma_ops_.clear();
-      } else if (call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-                 call->op.same_as(tl::ptx_cp_async_barrier_noinc())) {
-        // Under warp specialization, the producer→consumer dependency may be
-        // released with cp.async.mbarrier.arrive instead of mbarrier.arrive.
-        // Treat this as a barrier release point for preceding TMA ops so we
-        // can correctly associate tma_load/expect_tx with the right barrier.
-        PrimExpr barrier_id = call->args[0];
-        for (const auto &tma_call : pending_tma_ops_) {
-          tma_op_to_barrier_id_.Set(tma_call, barrier_id);
+        // Track cluster barriers and their leader cta_id
+        if (call->op.same_as(tl::ptx_arrive_cluster_barrier())) {
+          if (const auto *imm = call->args[1].as<IntImmNode>()) {
+            cluster_barrier_cta_ids_.Set(barrier_id,
+                                         IntImm(DataType::Int(32), imm->value));
+          }
         }
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
         auto extent =
@@ -264,6 +260,7 @@ private:
   std::vector<Call> pending_tma_ops_;
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
+  Map<PrimExpr, IntImm> cluster_barrier_cta_ids_;
   Map<Var, Buffer> buffer_data_to_buffer_;
 };
 
@@ -283,6 +280,23 @@ public:
       } else {
         if (zero_count == 1) {
           clear_zero_list[zero_idx] = expect_[zero_idx] && !has_simt_copy_;
+          if (clear_zero_list[zero_idx] == false && !is_cluster_[zero_idx]) {
+            int begin = int_sets_[zero_idx].min().as<IntImmNode>()->value;
+            int end = int_sets_[zero_idx].max().as<IntImmNode>()->value;
+            for (int i = begin; i <= end; ++i) {
+              restore_barrier_ids_.push_back(i);
+            }
+          }
+        } else {
+          for (int i{zero_idx}; i > zero_idx - zero_count; --i) {
+            if (!is_cluster_[i]) {
+              int begin = int_sets_[i].min().as<IntImmNode>()->value;
+              int end = int_sets_[i].max().as<IntImmNode>()->value;
+              for (int j = begin; j <= end; ++j) {
+                restore_barrier_ids_.push_back(j);
+              }
+            }
+          }
         }
         zero_count = 0;
       }
@@ -295,11 +309,24 @@ public:
     if (op->op.same_as(mbarrier_expect_tx())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (tma_op_to_barrier_id_.count(call_ref)) {
+        PrimExpr barrier_id = tma_op_to_barrier_id_[call_ref];
+        // Cluster barriers have a BufferLoad as barrier_id (not get_mbarrier).
+        // Skip int_set computation for them — they don't need
+        // restore_barrier_ids_.
+        bool is_cluster = (barrier_id.as<CallNode>() == nullptr);
+        arith::IntSet int_set = arith::IntSet::Nothing();
+        if (!is_cluster) {
+          PrimExpr e = barrier_id.as<CallNode>()->args[0];
+          int_set = arith::EvalSet(e, var_int_set_);
+        }
         expect_.push_back(if_depth_ == 1);
         sequence.push_back(0);
+        int_sets_.push_back(int_set);
+        is_cluster_.push_back(is_cluster);
         expect_tx_count_ += 1;
       }
-    } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
+    } else if (op->op.same_as(builtin::ptx_arrive_barrier()) ||
+               op->op.same_as(tl::ptx_arrive_cluster_barrier())) {
       sequence.push_back(1);
     } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
       has_simt_copy_ = true;
@@ -321,9 +348,13 @@ public:
   std::vector<int> sequence;
   int expect_tx_count_{0};
   std::vector<bool> expect_;
+  std::vector<bool> is_cluster_;
+  std::vector<arith::IntSet> int_sets_;
+  std::vector<int> restore_barrier_ids_;
   bool has_simt_copy_{false};
   int if_depth_{0};
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
+  Map<Var, arith::IntSet> var_int_set_;
 };
 
 class ArriveThreadCountCollector : public IRVisitorWithAnalyzer {
@@ -496,11 +527,14 @@ public:
   TmaBarrierRewriter(arith::Analyzer *analyzer,
                      Map<ObjectRef, PrimExpr> tma_op_to_barrier_id,
                      Map<PrimExpr, IntImm> barrier_id_to_range,
-                     bool has_create_list_of_mbarrier)
+                     Map<PrimExpr, IntImm> cluster_barrier_cta_ids,
+                     bool has_create_list_of_mbarrier, int cluster_size)
       : IRMutatorWithAnalyzer(analyzer),
         tma_op_to_barrier_id_(std::move(tma_op_to_barrier_id)),
         barrier_id_to_range_(std::move(barrier_id_to_range)),
-        has_create_list_of_mbarrier_(has_create_list_of_mbarrier) {}
+        cluster_barrier_cta_ids_(std::move(cluster_barrier_cta_ids)),
+        has_create_list_of_mbarrier_(has_create_list_of_mbarrier),
+        cluster_size_(cluster_size) {}
 
   static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
     auto buffer_lca = DetectBufferAccessLCA(f);
@@ -520,9 +554,25 @@ public:
         }
       }
     });
+    // Compute total cluster size from the "cluster_dims" block annotation
+    int cluster_size = 1;
+    PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      if (const auto *block = node.as<BlockNode>()) {
+        if (block->annotations.count("cluster_dims")) {
+          if (auto arr = block->annotations.Get("cluster_dims")
+                             ->try_cast<Array<Integer>>()) {
+            int sz = 1;
+            for (auto d : arr.value())
+              sz *= static_cast<int>(d->value);
+            cluster_size = sz;
+          }
+        }
+      }
+    });
     TmaBarrierRewriter rewriter(analyzer, collector.tma_op_to_barrier_id(),
                                 collector.barrier_id_to_range(),
-                                has_create_list_of_mbarrier);
+                                collector.cluster_barrier_cta_ids(),
+                                has_create_list_of_mbarrier, cluster_size);
     f.CopyOnWrite()->body = rewriter(f->body);
     // Compute the minimum number of barriers actually referenced in the body
     // after TMA barrier rewrites (e.g., get_mbarrier(0) inserted for TMA).
@@ -598,6 +648,41 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
+  // Intercept mbarrier_expect_tx for cluster barriers: multiply bytes by
+  // cluster_size and wrap the call in `if (block_rank_in_cluster() == cta_id)`
+  // so only the leader CTA issues the full expect_transaction.
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(mbarrier_expect_tx())) {
+        auto call_ref = tvm::ffi::GetRef<Call>(call);
+        if (tma_op_to_barrier_id_.count(call_ref)) {
+          auto barrier_id = tma_op_to_barrier_id_[call_ref];
+          if (cluster_barrier_cta_ids_.count(barrier_id)) {
+            auto cta_id = cluster_barrier_cta_ids_[barrier_id];
+            // Keep cur_expect_idx_ consistent with VisitExpr_ expectations
+            if (has_warp_specialization_) {
+              clear_arrive_ = clear_expect_list_[cur_expect_idx_++];
+            }
+            clear_arrive_ = false;
+            // Rewrite barrier arg and multiply bytes by cluster_size
+            Array<PrimExpr> new_args = call->args;
+            new_args.Set(0, barrier_id);
+            new_args.Set(1, call->args[1] *
+                                IntImm(DataType::Int(32), cluster_size_));
+            auto new_call =
+                Call(call->dtype, call->op, new_args, call->annotations);
+            // Wrap in `if (block_rank_in_cluster() == cta_id)`
+            PrimExpr rank =
+                Call(DataType::Int(32), tl::block_rank_in_cluster(), {});
+            PrimExpr cond = EQ(rank, IntImm(DataType::Int(32), cta_id->value));
+            return IfThenElse(cond, Evaluate(new_call), Stmt());
+          }
+        }
+      }
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
@@ -633,7 +718,12 @@ private:
       } else {
         new_args.Set(1, barrier_id);
       }
-      return Call(op->dtype, op->op, new_args, op->annotations);
+      // For cluster barriers, add use_2cta annotation → emits tma_load_2sm
+      Map<String, ObjectRef> new_annotations = op->annotations;
+      if (cluster_barrier_cta_ids_.count(barrier_id)) {
+        new_annotations.Set("use_2cta", Bool(true));
+      }
+      return Call(op->dtype, op->op, new_args, new_annotations);
     } else if (op->op.same_as(mbarrier_expect_tx())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (!tma_op_to_barrier_id_.count(call_ref)) {
@@ -651,7 +741,8 @@ private:
                     new_args, op->annotations);
       }
       return Call(op->dtype, op->op, new_args, op->annotations);
-    } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
+    } else if (op->op.same_as(builtin::ptx_arrive_barrier()) ||
+               op->op.same_as(tl::ptx_arrive_cluster_barrier())) {
       if (clear_arrive_) {
         clear_arrive_ = false;
         return 0;
@@ -664,11 +755,13 @@ private:
   }
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
+  Map<PrimExpr, IntImm> cluster_barrier_cta_ids_;
   bool has_create_list_of_mbarrier_;
   bool clear_arrive_{false};
   bool first_if{false}, has_warp_specialization_{false}, is_producer_{false};
   IterVar thread_var_;
   int tma_expect_tx_{0}, cur_expect_idx_{0};
+  int cluster_size_{1};
   std::vector<bool> clear_expect_list_;
 };
 
