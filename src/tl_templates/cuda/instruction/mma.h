@@ -165,7 +165,21 @@ TL_DEVICE void mma_sync(
                                            TransB, Saturate>;
   static_assert(!std::is_void_v<typename Dispatcher::CRegType>,
                 "tl::mma_sync: unsupported configuration");
-  Dispatcher::exec(c, a, b, c);
+  if constexpr (AType == DataType::kFloat4_e2m1fn ||
+                BType == DataType::kFloat4_e2m1fn) {
+    using AReg = typename Dispatcher::ARegType;
+    using BReg = typename Dispatcher::BRegType;
+    constexpr int nA = detail::MmaImplTraits<typename Dispatcher::Impl>::kARegs;
+    constexpr int nB = detail::MmaImplTraits<typename Dispatcher::Impl>::kBRegs;
+    AReg as[nA]; BReg bs[nB];
+    #pragma unroll
+    for (int i = 0; i < nA; ++i) as[i] = a[i] << 2;
+    #pragma unroll
+    for (int i = 0; i < nB; ++i) bs[i] = b[i] << 2;
+    Dispatcher::exec(c, as, bs, c);
+  } else {
+    Dispatcher::exec(c, a, b, c);
+  }
 }
 
 } // namespace tl

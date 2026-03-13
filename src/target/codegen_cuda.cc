@@ -3352,15 +3352,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    // For FP4 scalar local buffers, we use packed storage type,
-    // so skip type declaration here (will be handled in the local scope section
-    // below)
-    bool is_fp4_scalar_local = op->dtype.is_float4() && op->dtype.is_scalar() &&
-                               (scope == "local" || scope.empty());
-    if (!is_fp4_scalar_local) {
-      PrintStorageScope(scope, stream);
-      PrintType(op->dtype, stream);
-    }
+    PrintStorageScope(scope, stream);
+    PrintType(op->dtype, stream);
   }
 
   if (scope == "shared.dyn") {
@@ -3387,19 +3380,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
       stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
              << "*>(" << v_id_mem << ");\n";
     } else if (scope == "local") {
-      // For FP4 types, use packed storage type to avoid wasting registers.
-      // fp4_e2_t uses int8 as storage but only needs 4 bits per element.
-      // By using fp4_e2_2_t (which stores 2 fp4 values in 1 byte), we halve the
-      // storage.
-      if (op->dtype.is_float4() && op->dtype.is_scalar()) {
-        auto vid_packed = vid + "_packed";
-        stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
-               << "];\n";
-        fp4_packed_buffers_[op->buffer_var.get()] = vid_packed;
-        var_idmap_[op->buffer_var.get()] = vid_packed;
-      } else {
-        stream << ' ' << vid << '[' << constant_size << "];\n";
-      }
+      // For FP4 local fragment buffers (MMA operands), do NOT pack into
+      // fp4_e2_2_t. ldmatrix loads raw bytes regardless of element type, so
+      // the buffer needs the full byte count (1 byte per fp4_e2_t element).
+      // Packing would halve the buffer and cause stack overflow.
+      stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "local.var") {
       PrimExpr init = tir::make_const(op->dtype, 0);
       auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
