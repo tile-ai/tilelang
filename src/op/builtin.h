@@ -366,6 +366,14 @@ TVM_DLL const Op &ptx_init_tensor_memory();
 TVM_DLL const Op &ptx_deallocate_tensor_memory();
 
 /*!
+ * \brief tvm intrinsics for releasing the allocation lock for tensor memory
+ *
+ * tmem_release_allocation_lock()
+ *
+ */
+TVM_DLL const Op &ptx_release_allocation_lock();
+
+/*!
  * \brief tvm intrinsic for ptx tensor core mma instructions on SM70.
  *
  *  void ptx_mma_sm70(StringImm shape, StringImm A_layout, StringImm B_layout,

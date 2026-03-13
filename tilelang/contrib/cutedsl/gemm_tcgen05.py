@@ -18,6 +18,7 @@ __all__ = [
     "tcgen05_mma_arrive",
     "tmem_allocate",
     "tmem_deallocate",
+    "tmem_release_allocation_lock",
     "tcgen05_ld_32dp32bNx",
     "tcgen05_ld_32dp64bNx",
     "tcgen05_ld_32dp128bNx",
@@ -406,6 +407,17 @@ def tmem_deallocate(tmem_ptr: cute.Pointer, num_cols: int):
         )
 
     _do_dealloc(cutlass.Int32(tmem_addr), cutlass.Int32(num_cols))
+
+
+@cute.jit
+def tmem_release_allocation_lock():
+    """tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;"""
+    llvm.inline_asm(
+        None,
+        [],
+        "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;",
+        "",
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
