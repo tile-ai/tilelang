@@ -1289,7 +1289,8 @@ private:
       }
       std::stable_sort(
           cp_async_group_schedule_order.begin(),
-          cp_async_group_schedule_order.end(), [&](int lhs_group, int rhs_group) {
+          cp_async_group_schedule_order.end(),
+          [&](int lhs_group, int rhs_group) {
             int lhs_key = group_schedule_key(cp_async_groups[lhs_group]);
             int rhs_key = group_schedule_key(cp_async_groups[rhs_group]);
             if (lhs_key != rhs_key) {
