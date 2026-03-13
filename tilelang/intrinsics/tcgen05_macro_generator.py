@@ -622,12 +622,19 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     aj + atom_idx * atom_n,
                 ]
             if atom_m == 128:
-                # Layout D
-                print(f"Layout D: ai={ai}, aj={aj}, atom_idx={atom_idx}")
-                return [
-                    ai,
-                    aj + atom_idx * atom_n,
-                ]
+                if enable_2cta:
+                    # Layout B
+                    half_atom_n = atom_n // 2
+                    return [
+                        ai + (aj // half_atom_n) * 64,
+                        (aj % half_atom_n) + atom_idx * half_atom_n,
+                    ]
+                else:
+                    # Layout D
+                    return [
+                        ai,
+                        aj + atom_idx * atom_n,
+                    ]
             if atom_m == 64:
                 # Layout E (.ws variant)
                 half_atom_n = atom_n // 2
