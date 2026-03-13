@@ -1,6 +1,5 @@
 from __future__ import annotations
 from enum import IntEnum
-import tilelang
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
@@ -157,7 +156,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         if is_tensor_memory(A_buf):
             return self.tcgen05mma_ts(A_buf, B_buf, C_local_buf, mbar, clear_accum)
         return self.tcgen05mma_ss(A_buf, B_buf, C_local_buf, mbar, clear_accum)
-
 
     def tcgen05mma_ss(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
         """Emit the SS (Shared-Shared) variant of TCGEN5MMA.
@@ -539,7 +537,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             + j * atom_n * b_swizzle_atom_elems
                             if b_is_k_major
                             else (
-                                ki * b_swizzle_atom_elems * micro_size_k + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+                                ki * b_swizzle_atom_elems * micro_size_k
+                                + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
                             )
                         )
                         B_byte_offset = B_elem_offset * elems_in_bytes
@@ -656,7 +655,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def get_tcgen5_mma_meta(self, m: int, n: int, k: int, disable_2cta: bool):
         """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta), and record them in `self.meta`."""
-        self.meta = _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype), bool(disable_2cta))
+        self.meta = _ffi_api.get_tcgen5_mma_meta(
+            int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype), bool(disable_2cta)
+        )
 
     def get_tcgen5_instr_desc(
         self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool, b_is_k_major: bool, scale_in_a: int, scale_in_b: int

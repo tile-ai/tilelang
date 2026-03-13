@@ -2479,7 +2479,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     std::string use_2cta_suffix;
     if (enable_ws) {
-      ICHECK(!enable_2cta) << "enable_ws and enable_2cta cannot be true at the same time";
+      ICHECK(!enable_2cta)
+          << "enable_ws and enable_2cta cannot be true at the same time";
     } else {
       use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
     }
@@ -2534,12 +2535,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     bool enable_2cta = Downcast<Bool>(op->args[13])->value;
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
-    std::string use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
+    std::string use_2cta_suffix =
+        std::string(", ") + (enable_2cta ? "true" : "false");
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( (*reinterpret_cast<uint32_t*>((A))) + "
+        "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
+        "(*reinterpret_cast<uint32_t*>((A))) + "
         "(A_offset), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "

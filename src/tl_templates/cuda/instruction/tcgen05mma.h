@@ -62,17 +62,17 @@ TL_DEVICE void tcgen05mma_ts<DataType::kFloat16, true>(
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
   // NOTE(wt): 2cta tcgen05mma requires 8 masks.
-  // To keep API compatible, we still pass 4 masks as 1cta for now, but don't use them in PTX.
-  // We shall refactor this in the future.
+  // To keep API compatible, we still pass 4 masks as 1cta for now, but don't
+  // use them in PTX. We shall refactor this in the future.
   if (cute::elect_one_sync()) {
-    asm volatile("{\n\t"
-                 ".reg .pred p;\n\t"
-                 "setp.ne.b32 p, %4, 0;\n\t"
-                 "tcgen05.mma.cta_group::2.kind::f16 [%0], [%1], %2, %3, p; \n\t"
-                 "}\n"
-                 :
-                 : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(desc_val),
-                   "r"(scalec));
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::f16 [%0], [%1], %2, %3, p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(desc_val), "r"(scalec));
   }
 }
 
@@ -82,8 +82,8 @@ TL_DEVICE void tcgen05mma_ts<DataType::kBFloat16, false>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ts<DataType::kFloat16, false>(tmem_a, desc_b, tmem_c, scalec, desc_val,
-                                    mask0, mask1, mask2, mask3);
+  tcgen05mma_ts<DataType::kFloat16, false>(
+      tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
 template <>
@@ -91,7 +91,8 @@ TL_DEVICE void tcgen05mma_ts<DataType::kBFloat16, true>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ts<DataType::kFloat16, true>(tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+  tcgen05mma_ts<DataType::kFloat16, true>(tmem_a, desc_b, tmem_c, scalec,
+                                          desc_val, mask0, mask1, mask2, mask3);
 }
 
 // TF32 instruction kind (2cta not supported currently)
@@ -155,8 +156,8 @@ TL_DEVICE void tcgen05mma_ts<DataType::kUInt8, false>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ts<DataType::kInt8, false>(tmem_a, desc_b, tmem_c, scalec, desc_val,
-                                 mask0, mask1, mask2, mask3);
+  tcgen05mma_ts<DataType::kInt8, false>(tmem_a, desc_b, tmem_c, scalec,
+                                        desc_val, mask0, mask1, mask2, mask3);
 }
 
 template <>
@@ -164,7 +165,8 @@ TL_DEVICE void tcgen05mma_ts<DataType::kUInt8, true>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ts<DataType::kInt8, true>(tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+  tcgen05mma_ts<DataType::kInt8, true>(tmem_a, desc_b, tmem_c, scalec, desc_val,
+                                       mask0, mask1, mask2, mask3);
 }
 
 // FP8 family instruction kind (maps to f8f6f4)
@@ -192,14 +194,14 @@ TL_DEVICE void tcgen05mma_ts<DataType::kFloat8_e4m3, true>(
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
   if (cute::elect_one_sync()) {
-    asm volatile("{\n\t"
-                 ".reg .pred p;\n\t"
-                 "setp.ne.b32 p, %4, 0;\n\t"
-                 "tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], [%1], %2, %3, p; \n\t"
-                 "}\n"
-                 :
-                 : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(desc_val),
-                   "r"(scalec));
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], [%1], %2, %3, p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(desc_val), "r"(scalec));
   }
 }
 
@@ -208,8 +210,8 @@ TL_DEVICE void tcgen05mma_ts<DataType::kFloat8_e5m2, false>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ts<DataType::kFloat8_e4m3, false>(tmem_a, desc_b, tmem_c, scalec,
-                                        desc_val, mask0, mask1, mask2, mask3);
+  tcgen05mma_ts<DataType::kFloat8_e4m3, false>(
+      tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
 template <>
@@ -217,7 +219,8 @@ TL_DEVICE void tcgen05mma_ts<DataType::kFloat8_e5m2, true>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ts<DataType::kFloat8_e4m3, true>(tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+  tcgen05mma_ts<DataType::kFloat8_e4m3, true>(
+      tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
 // F16/BF16 instruction kind (maps to kind::f16)
@@ -342,8 +345,8 @@ TL_DEVICE void tcgen05mma_ss<DataType::kUInt8, false>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ss<DataType::kInt8, false>(desc_a, desc_b, tmem_c, scalec, desc_val,
-                                        mask0, mask1, mask2, mask3);
+  tcgen05mma_ss<DataType::kInt8, false>(desc_a, desc_b, tmem_c, scalec,
+                                        desc_val, mask0, mask1, mask2, mask3);
 }
 
 template <>
@@ -352,7 +355,7 @@ TL_DEVICE void tcgen05mma_ss<DataType::kUInt8, true>(
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
   tcgen05mma_ss<DataType::kInt8, true>(desc_a, desc_b, tmem_c, scalec, desc_val,
-                                        mask0, mask1, mask2, mask3);
+                                       mask0, mask1, mask2, mask3);
 }
 
 // FP8 family instruction kind (maps to f8f6f4)
@@ -380,14 +383,14 @@ TL_DEVICE void tcgen05mma_ss<DataType::kFloat8_e4m3, true>(
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
   if (cute::elect_one_sync()) {
-    asm volatile("{\n\t"
-                 ".reg .pred p;\n\t"
-                 "setp.ne.b32 p, %4, 0;\n\t"
-                 "tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], %1, %2, %3, p; \n\t"
-                 "}\n"
-                 :
-                 : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val),
-                   "r"(scalec));
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::2.kind::f8f6f4 [%0], %1, %2, %3, p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec));
   }
 }
 
@@ -396,8 +399,8 @@ TL_DEVICE void tcgen05mma_ss<DataType::kFloat8_e5m2, false>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ss<DataType::kFloat8_e4m3, false>(desc_a, desc_b, tmem_c, scalec,
-                                               desc_val, mask0, mask1, mask2, mask3);
+  tcgen05mma_ss<DataType::kFloat8_e4m3, false>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
 template <>
@@ -405,8 +408,8 @@ TL_DEVICE void tcgen05mma_ss<DataType::kFloat8_e5m2, true>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
-  tcgen05mma_ss<DataType::kFloat8_e4m3, true>(desc_a, desc_b, tmem_c, scalec,
-                                              desc_val, mask0, mask1, mask2, mask3);
+  tcgen05mma_ss<DataType::kFloat8_e4m3, true>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
 // WS variants: tcgen05.mma.ws.cta_group::1.kind::xxx

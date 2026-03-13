@@ -4,7 +4,9 @@ from tilelang import tvm as tvm
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+
 tilelang.disable_cache()
+
 
 def matmul_2cta(
     M,
@@ -44,12 +46,11 @@ def matmul_2cta(
                 for k in T.serial(T.ceildiv(K, block_K)):
                     T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
                     T.copy(
-                        A[bx * block_M:(bx + 1) * block_M, k * block_K:(k + 1) * block_K],
+                        A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
                         A_shared[k % num_stages, :, :],
                     )
                     T.copy(
-                        B[k * block_K:(k + 1) * block_K,
-                          (by * 2 + cta_id) * (block_N // 2):(by * 2 + cta_id + 1) * (block_N // 2)],
+                        B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * (block_N // 2) : (by * 2 + cta_id + 1) * (block_N // 2)],
                         B_shared[k % num_stages, :, :],
                     )
                     T.mbarrier_arrive(loaded[k % num_stages], 0)  # arrive on leader CTA's barrier
@@ -75,7 +76,7 @@ def matmul_2cta(
 
 
 def _compile_and_check(program, out_dtype):
-    kernel = tilelang.compile(program, out_idx=[2], execution_backend='cython')
+    kernel = tilelang.compile(program, out_idx=[2])
 
     print(kernel.get_kernel_source())
 
@@ -126,22 +127,13 @@ K_VALUES_16 = [16, 32, 64, 128]
 K_VALUES_32 = [32, 64, 128]
 
 # Dtype cases: (block_K, in_dtype, out_dtype, accum_dtype)
-FP16_CASES = [
-    pytest.param(k, T.float16, T.float32, T.float32, id=f"K{k}-fp16-fp32-fp32")
-    for k in K_VALUES_16
-]
+FP16_CASES = [pytest.param(k, T.float16, T.float32, T.float32, id=f"K{k}-fp16-fp32-fp32") for k in K_VALUES_16]
 
-FP8_E5M2_CASES = [
-    pytest.param(k, T.float8_e5m2, T.float32, T.float32, id=f"K{k}-fp8e5m2-fp32-fp32")
-    for k in K_VALUES_32
-]
+FP8_E5M2_CASES = [pytest.param(k, T.float8_e5m2, T.float32, T.float32, id=f"K{k}-fp8e5m2-fp32-fp32") for k in K_VALUES_32]
 
-INT8_CASES = [
-    pytest.param(k, T.int8, T.int32, T.int32, id=f"K{k}-int8-int32-int32")
-    for k in K_VALUES_32
-]
+INT8_CASES = [pytest.param(k, T.int8, T.int32, T.int32, id=f"K{k}-int8-int32-int32") for k in K_VALUES_32]
 
-ALL_DTYPE_CASES = FP16_CASES + FP8_E5M2_CASES  + INT8_CASES
+ALL_DTYPE_CASES = FP16_CASES + FP8_E5M2_CASES + INT8_CASES
 
 
 @pytest.mark.parametrize("m", M_VALUES, ids=lambda v: f"M{v}")
