@@ -142,7 +142,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Capture thunks that reflect Torch's current stream and device.
         # These are evaluated at call time to align TVM execution with the
         # caller's active PyTorch stream/device.
-        # current_stream_functor = self.get_current_stream_functor()
+        current_stream_functor = self.get_current_stream_functor()
         current_device_functor = self.get_current_device_functor()
 
         # Convert TVM types to native Python types during initialization
@@ -198,20 +198,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             if len(inputs) != expected_inputs:
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
 
-            # Resolve the execution device up front. This matters for kernels that do not
-            # take any tensor arguments because TVM still needs a valid current CUDA
-            # context before it can load or launch the module.
-            exec_device: torch.device | None = None
-            for arg in inputs:
-                if isinstance(arg, torch.Tensor):
-                    exec_device = arg.device
-                    break
-            if exec_device is None and self.target.kind.name == "cuda" and torch.cuda.is_available():
-                exec_device = current_device_functor()
-
-            # Reuse the execution device for outputs unless an output-specific device is
-            # discovered later.
-            out_device = exec_device
+            # Resolve the device used for outputs. Prefer the first tensor input's device
+            # if available, otherwise use PyTorch's current device.
+            out_device: torch.device | None = None
 
             # Stitch the full positional argument list expected by the TVM executable
             ins_idx: int = 0
@@ -252,13 +241,16 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
-            if exec_device is not None and exec_device.type == "cuda":
-                # Make sure PyTorch's primary context is created and current before TVM
-                # tries to load/launch a CUDA module. This is required for standalone
-                # zero-argument kernels such as manual device-assert tests.
-                torch.cuda._lazy_init()
+            if (
+                self.target.kind.name == "cuda"
+                and torch.cuda.is_available()
+                and not any(isinstance(arg, torch.Tensor) for arg in tensor_list)
+            ):
+                # Zero-buffer launches never go through the DLPack tensor exchange path,
+                # so tvm_ffi does not inherit PyTorch's CUDA stream/context implicitly.
+                exec_device = current_device_functor()
                 torch.cuda.set_device(exec_device)
-                torch.cuda.current_stream(exec_device)
+                current_stream_functor()
 
             executable(*tensor_list)
 
