@@ -601,8 +601,8 @@ private:
     if (remap_pure_tma_barriers_ && !extractor.blocks.empty()) {
       StructuralEqual equal;
       auto same_guard = [&](size_t lhs, size_t rhs) {
-        Optional<PrimExpr> guard_a = producer_guards[lhs];
-        Optional<PrimExpr> guard_b = producer_guards[rhs];
+        const Optional<PrimExpr>& guard_a = producer_guards[lhs];
+        const Optional<PrimExpr>& guard_b = producer_guards[rhs];
         if (guard_a.defined() != guard_b.defined()) {
           return false;
         }
