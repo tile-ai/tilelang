@@ -73,7 +73,10 @@ using ffi::GetRef;
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi,
-    PrimExpr thread_count[2], bool producer_consumer);
+    PrimExpr thread_count[2], bool producer_consumer,
+    const WarpSpecializeConfig &config);
+
+Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi);
 
 // Helper function to collect all prefix tasks (consecutive tasks without
 // register region at the beginning of sequences)
@@ -112,12 +115,113 @@ void CollectPrefixTasks(IRStructure *node,
   }
 }
 
+void CollectSuffixTaskCandidates(IRStructure *node,
+                                 std::vector<TaskNode *> &suffix_candidates,
+                                 bool &suffix_valid) {
+  if (!node)
+    return;
+
+  if (!suffix_valid)
+    return;
+
+  if (node->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(node);
+    for (auto it = seq->children.rbegin(); it != seq->children.rend(); ++it) {
+      CollectSuffixTaskCandidates(it->get(), suffix_candidates, suffix_valid);
+    }
+  } else if (node->IsControl()) {
+    auto ctrl = static_cast<ControlNode *>(node);
+    suffix_valid = false;
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<WrapperNode *>(node);
+    CollectSuffixTaskCandidates(wrapper->child.get(), suffix_candidates,
+                                suffix_valid);
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<ScheduleUnit *>(node);
+    CollectSuffixTaskCandidates(unit->child.get(), suffix_candidates,
+                                suffix_valid);
+  } else if (node->IsTask()) {
+    auto task = static_cast<TaskNode *>(node);
+    suffix_candidates.push_back(task);
+  } else {
+    LOG(FATAL);
+  }
+}
+
+void CollectSuffixTaskCandidates(IRStructure *node,
+                                 std::vector<TaskNode *> &suffix_candidates) {
+  bool suffix_valid = true;
+  CollectSuffixTaskCandidates(node, suffix_candidates, suffix_valid);
+}
+
+void CollectSuffixTasks(IRStructure *root,
+                        const std::vector<TaskNodeWithContext> &all_tasks,
+                        const TaskUnionFind &uf,
+                        std::unordered_set<TaskNode *> &suffix_tasks) {
+  std::vector<TaskNode *> suffix_candidates;
+  CollectSuffixTaskCandidates(root, suffix_candidates);
+
+  std::unordered_set<TaskNode *> candidate_set(suffix_candidates.begin(),
+                                               suffix_candidates.end());
+
+  std::unordered_map<TaskNode *, int> task_to_index;
+  task_to_index.reserve(all_tasks.size());
+  for (int i = 0; i < static_cast<int>(all_tasks.size()); ++i) {
+    task_to_index[all_tasks[i].task] = i;
+  }
+
+  std::unordered_map<int, std::vector<TaskNode *>> component_tasks;
+  component_tasks.reserve(all_tasks.size());
+  for (int i = 0; i < static_cast<int>(all_tasks.size()); ++i) {
+    int root_idx = uf.find(i);
+    component_tasks[root_idx].push_back(all_tasks[i].task);
+  }
+
+  for (int i = 0; i < static_cast<int>(suffix_candidates.size()); ++i) {
+    TaskNode *task = suffix_candidates[i];
+    if (suffix_tasks.count(task)) {
+      continue; // Already added via component
+    }
+    if (CountRegisterRegions(task) == 0) {
+      suffix_tasks.insert(task);
+      continue;
+    }
+
+    auto it = task_to_index.find(task);
+    if (it == task_to_index.end()) {
+      continue;
+    }
+    int component_root = uf.find(it->second);
+
+    auto comp_it = component_tasks.find(component_root);
+    if (comp_it == component_tasks.end()) {
+      continue;
+    }
+
+    bool all_in_candidates = true;
+    for (TaskNode *component_task : comp_it->second) {
+      if (candidate_set.find(component_task) == candidate_set.end()) {
+        all_in_candidates = false;
+        break;
+      }
+    }
+
+    if (!all_in_candidates) {
+      break;
+    }
+
+    for (TaskNode *component_task : comp_it->second) {
+      suffix_tasks.insert(component_task);
+    }
+  }
+}
+
 // Global warpgroup id assignment - should be called from the top level
 // Tasks that use the same register region must have the same warpgroup id
 // Goal: balance weighted latency between two warpgroups (0 and 1)
 // Weighted latency = latency * tripcount (tripcount = 100 for non-constant loop
 // extent)
-bool AssignWarpgroupIdsGlobal(IRStructure *root) {
+bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition) {
   if (!root) {
     LOG(FATAL) << "Empty root";
   }
@@ -133,12 +237,6 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
 
   int n = all_tasks.size();
 
-  // Collect all prefix tasks (consecutive tasks without register region at the
-  // beginning of sequences)
-  std::unordered_set<TaskNode *> prefix_tasks;
-  bool prefix_valid = true;
-  CollectPrefixTasks(root, prefix_tasks, prefix_valid);
-
   // Step 2: Initialize all warpgroup ids to -1 (unassigned)
   for (auto &task_ctx : all_tasks) {
     task_ctx.task->SetWarpgroupId(-1);
@@ -152,6 +250,17 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
         uf.unite(i, j);
       }
     }
+  }
+
+  // Collect all prefix tasks (consecutive tasks without register region at the
+  // beginning of sequences)
+  std::unordered_set<TaskNode *> prefix_tasks;
+  bool prefix_valid = true;
+  CollectPrefixTasks(root, prefix_tasks, prefix_valid);
+
+  std::unordered_set<TaskNode *> suffix_tasks;
+  if (enable_warp_partition) {
+    CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
   }
 
   // Step 4: Group tasks by connected component
@@ -184,6 +293,9 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root) {
       if (prefix_tasks.find(task) != prefix_tasks.end()) {
         // This is a prefix task, skip it (it won't participate in warpgroup
         // specialize)
+        continue;
+      }
+      if (suffix_tasks.find(task) != suffix_tasks.end()) {
         continue;
       }
       if (task->ContainsLoopBreak()) {
@@ -294,7 +406,7 @@ public:
     ScheduleRecursive(root);
 
     // Global warpgroup id assignment from the top level
-    return AssignWarpgroupIdsGlobal(root);
+    return AssignWarpgroupIdsGlobal(root, enable_warp_partition_);
   }
 
   // New recursive scheduling function that replaces Collect method
@@ -703,8 +815,12 @@ public:
   // Set thread index variable for warpgroup partition
   void SetThreadVar(IterVar thread_var) { thread_var_ = thread_var; }
 
+  // Set enable_warp_partition flag
+  void SetEnableWarpPartition(bool enable) { enable_warp_partition_ = enable; }
+
 private:
   IterVar thread_var_; // Thread index variable for warpgroup partition
+  bool enable_warp_partition_ = false;
 
   // Check if two regions refer to the same buffer
   bool SameBuffer(const BufferRegion &a, const BufferRegion &b) const {
@@ -1379,6 +1495,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     if (target_opt.defined()) {
       target = target_opt.value();
     }
+    auto config = GetWarpSpecializeConfig(target);
 
     // Extract the body of tilelang_root block if it exists
     TilelangRootBodyExtractor extractor;
@@ -1445,7 +1562,22 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       LOG(FATAL) << "Could not find thread index variable, warpgroup "
                     "partition will use default";
     }
+    unit_builder.SetEnableWarpPartition(config.enable_warp_partition);
     bool double_thread = unit_builder.Build(ir_structure.get());
+
+    if (!config.enable_warpgroup_partition) {
+      Stmt new_body = ConvertIRStructureToStmt(ir_structure.get(), enable_epi);
+
+      // If we extracted from tilelang_root block, replace the body
+      Stmt final_body;
+      TilelangRootBodyReplacer replacer(new_body);
+      final_body = replacer(func->body);
+
+      // Create a new PrimFunc with the updated body
+      auto new_func = PrimFunc(func->params, final_body, func->ret_type,
+                               func->buffer_map, func->attrs);
+      return new_func;
+    }
 
     // Print the modified summary view
     // PrintIRStructure(ir_structure.get());
@@ -1456,9 +1588,19 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     std::vector<Buffer> barrier_buffers;
     Map<ObjectRef, ObjectRef> barrier_map;
     // Determine thread count for barrier arrive_count calculations
-    PrimExpr thread_count[2] = {thread_var->dom->extent,
-                                double_thread ? thread_var->dom->extent
-                                              : IntImm(DataType::Int(32), 128)};
+    PrimExpr thread_count[2];
+    if (!config.enable_thread_extend) {
+      ICHECK(config.enable_warp_partition);
+      // sm_100: use fixed warp size (32) for both partitions
+      thread_count[0] = IntImm(DataType::Int(32), 32);
+      thread_count[1] = IntImm(DataType::Int(32), 32);
+    } else {
+      // sm_90: original behavior
+      thread_count[0] = thread_var->dom->extent;
+      thread_count[1] = double_thread ? thread_var->dom->extent
+                                      : IntImm(DataType::Int(32),
+                                               config.producer_thread_count);
+    }
     LoopNestingInfo loop_info;
     std::vector<MultiVersionBufferInfo> buffer_infos;
     AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id,
@@ -1471,22 +1613,29 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     // Apply warpgroup partition to entire IRStructure
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
         ir_structure.get(), thread_var, barrier_buffers, barrier_map,
-        enable_epi, thread_count, double_thread);
+        enable_epi, thread_count, double_thread, config);
 
-    if (double_thread) {
-      updated_thread_extent = thread_var->dom->extent * 2;
-    } else {
-      updated_thread_extent =
-          thread_var->dom->extent + IntImm(DataType::Int(32), 128);
+    if (config.enable_thread_extend) {
+      // sm_90: may need to update thread extent
+      if (double_thread) {
+        updated_thread_extent = thread_var->dom->extent * 2;
+      } else {
+        updated_thread_extent =
+            thread_var->dom->extent +
+            IntImm(DataType::Int(32), config.producer_thread_count);
+      }
     }
 
     // If we extracted from tilelang_root block, replace the body
     Stmt final_body;
     TilelangRootBodyReplacer replacer(new_body);
     final_body = replacer(func->body);
-    // Apply thread extent update if warpgroup partition was applied
-    ThreadExtentUpdater extent_updater(updated_thread_extent);
-    final_body = extent_updater(final_body);
+    // Apply thread extent update if warpgroup partition was applied (sm_90
+    // only)
+    if (config.enable_thread_extend) {
+      ThreadExtentUpdater extent_updater(updated_thread_extent);
+      final_body = extent_updater(final_body);
+    }
     // Add barrier buffers to tilelang_root block's alloc_buffers
     if (!barrier_buffers.empty()) {
       class TilelangRootAllocBufferAdder : public StmtMutator {
@@ -1606,11 +1755,276 @@ private:
   bool has_simt_copy_{false};
 };
 
+Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
+  std::function<Stmt(IRStructure *)> irstructure_to_stmt;
+  irstructure_to_stmt = [&irstructure_to_stmt,
+                         outer_enable_epi](IRStructure *structure) -> Stmt {
+    if (!structure) {
+      return Evaluate(0);
+    }
+
+    if (structure->IsTask()) {
+      auto task = static_cast<TaskNode *>(structure);
+      if (task->stmts.empty()) {
+        return Evaluate(0);
+      } else if (task->stmts.size() == 1) {
+        return task->stmts[0];
+      } else {
+        return SeqStmt(task->stmts);
+      }
+    } else if (structure->IsSequence()) {
+      auto seq = static_cast<SequenceNode *>(structure);
+      std::vector<Stmt> stmts;
+      for (const auto &child : seq->children) {
+        auto unit = static_cast<ScheduleUnit *>(child.get());
+        for (auto &before : unit->before) {
+          for (auto &stmt : before) {
+            stmts.push_back(stmt);
+          }
+        }
+        Stmt child_stmt = irstructure_to_stmt(unit->child.get());
+        stmts.push_back(child_stmt);
+        for (auto &after : unit->after) {
+          for (auto &stmt : after) {
+            stmts.push_back(stmt);
+          }
+        }
+      }
+      auto flattened = SeqStmt::Flatten(stmts);
+      return flattened;
+    } else if (structure->IsControl()) {
+      auto ctrl = static_cast<ControlNode *>(structure);
+      Var loop_var = ctrl->control->loop_var;
+      PrimExpr loop_start = ctrl->control->min;
+      PrimExpr loop_extent = ctrl->control->extent;
+      PrimExpr loop_step = ctrl->control->step.has_value()
+                               ? ctrl->control->step.value()
+                               : IntImm(DataType::Int(32), 1);
+      int min_stages = 100, max_stages = -1;
+      if (ctrl->child->IsSequence()) {
+        auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+        for (auto &child : seq->children) {
+          auto unit = static_cast<ScheduleUnit *>(child.get());
+          min_stages = std::min(min_stages, unit->stage);
+          max_stages = std::max(max_stages, unit->stage);
+        }
+      }
+      if (!ctrl->hasPromote() || !ctrl->child->IsSequence() ||
+          min_stages == max_stages) {
+        std::vector<Stmt> stmts;
+        if (ctrl->child->IsScheduleUnit()) {
+          auto unit = static_cast<ScheduleUnit *>(ctrl->child.get());
+          for (auto &before : unit->before) {
+            for (auto &stmt : before) {
+              stmts.push_back(stmt);
+            }
+          }
+          stmts.push_back(irstructure_to_stmt(unit->child.get()));
+          for (auto &after : unit->after) {
+            for (auto &stmt : after) {
+              stmts.push_back(stmt);
+            }
+          }
+        } else if (ctrl->child->IsSequence()) {
+          auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+          for (auto &child : seq->children) {
+            ICHECK(child->IsScheduleUnit());
+            auto unit = static_cast<ScheduleUnit *>(child.get());
+            for (auto &before : unit->before) {
+              for (auto &stmt : before) {
+                stmts.push_back(stmt);
+              }
+            }
+            stmts.push_back(irstructure_to_stmt(unit->child.get()));
+            for (auto &after : unit->after) {
+              for (auto &stmt : after) {
+                stmts.push_back(stmt);
+              }
+            }
+          }
+        } else {
+          LOG(FATAL);
+        }
+        Stmt body = SeqStmt::Flatten(stmts);
+        // Filter out "num_stages" annotation
+        Map<String, Any> filtered_annotations = ctrl->control->annotations;
+        filtered_annotations.erase("num_stages");
+        return For(loop_var, loop_start, loop_extent, ctrl->control->kind, body,
+                   ctrl->control->thread_binding, filtered_annotations);
+      }
+      auto seq = static_cast<SequenceNode *>(ctrl->child.get());
+      Stmt body = Evaluate(0);
+      std::vector<std::vector<Stmt>> unit_stages;
+      unit_stages.resize(max_stages - min_stages + 1);
+      for (auto &child : seq->children) {
+        auto unit = static_cast<ScheduleUnit *>(child.get());
+        std::vector<Stmt> stmts;
+        for (auto &before : unit->before) {
+          for (auto &stmt : before) {
+            stmts.push_back(stmt);
+          }
+        }
+        stmts.push_back(irstructure_to_stmt(unit->child.get()));
+        for (auto &after : unit->after) {
+          for (auto &stmt : after) {
+            stmts.push_back(stmt);
+          }
+        }
+        unit_stages[unit->stage - min_stages].push_back(
+            SeqStmt::Flatten(stmts));
+      }
+      // Check if any task in this control node contains loop_break
+      // If any task contains loop_break, disable prologue
+      std::function<bool(IRStructure *)> check_contains_loop_break;
+      check_contains_loop_break =
+          [&check_contains_loop_break](IRStructure *structure) -> bool {
+        if (!structure)
+          return false;
+
+        if (structure->IsTask()) {
+          auto task = static_cast<TaskNode *>(structure);
+          return task->ContainsLoopBreak();
+        } else if (structure->IsSequence()) {
+          auto seq = static_cast<SequenceNode *>(structure);
+          for (const auto &child : seq->children) {
+            auto unit = static_cast<ScheduleUnit *>(child.get());
+            if (check_contains_loop_break(unit->child.get())) {
+              return true;
+            }
+          }
+          return false;
+        } else if (structure->IsScheduleUnit()) {
+          auto unit = static_cast<ScheduleUnit *>(structure);
+          return check_contains_loop_break(unit->child.get());
+        } else if (structure->IsControl()) {
+          auto ctrl = static_cast<ControlNode *>(structure);
+          return check_contains_loop_break(ctrl->child.get());
+        } else if (structure->IsWrapper()) {
+          auto wrapper = static_cast<WrapperNode *>(structure);
+          return check_contains_loop_break(wrapper->child.get());
+        }
+        return false;
+      };
+
+      // Set enable_pro to true only if:
+      // 1. No task contains loop_break
+      // 2. Loop boundaries (min and extent) are constants
+      bool enable_pro = !check_contains_loop_break(ctrl->child.get());
+
+      // Check if loop boundaries are constants
+      bool loop_min_is_const = tir::is_const_int(loop_start);
+      bool loop_extent_is_const = tir::is_const_int(loop_extent);
+
+      if (!loop_min_is_const || !loop_extent_is_const) {
+        enable_pro = false;
+      }
+
+      bool enable_epi = outer_enable_epi && enable_pro;
+      std::vector<Stmt> steady;
+
+      for (auto &child : seq->children) {
+        auto unit = static_cast<ScheduleUnit *>(child.get());
+        std::vector<Stmt> stmts;
+        for (auto &before : unit->before) {
+          for (auto &stmt : before) {
+            stmts.push_back(stmt);
+          }
+        }
+        stmts.push_back(irstructure_to_stmt(unit->child.get()));
+        for (auto &after : unit->after) {
+          for (auto &stmt : after) {
+            stmts.push_back(stmt);
+          }
+        }
+        Map<Var, PrimExpr> substitution;
+        PrimExpr condition =
+            And(loop_var < loop_extent, loop_var >= loop_start);
+        if (unit->stage == min_stages) {
+          condition = loop_var >= loop_start;
+        }
+        if (unit->stage == max_stages) {
+          condition = loop_var < loop_extent;
+        }
+        Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+        substitution.Set(loop_var,
+                         loop_var - loop_step * (max_stages - unit->stage));
+        steady.push_back(Substitute(stmt, substitution));
+      }
+      Stmt new_body = SeqStmt::Flatten(steady);
+      auto new_var = loop_var.copy_with_suffix("");
+      // Filter out "num_stages" annotation
+      Map<String, Any> filtered_annotations = ctrl->control->annotations;
+      filtered_annotations.erase("num_stages");
+      Map<Var, PrimExpr> substitution;
+      substitution.Set(loop_var, new_var);
+      For for_op =
+          For(new_var, loop_start,
+              ctrl->control->extent + loop_step * (max_stages - min_stages),
+              ctrl->control->kind, Substitute(new_body, substitution),
+              ctrl->control->thread_binding, filtered_annotations);
+
+      Stmt prologue = Evaluate(0);
+      if (enable_pro) {
+        Map<Var, PrimExpr> sub;
+        For new_for = for_op;
+        auto pro = loop_var.copy_with_suffix("_prologue");
+        sub.Set(new_var, pro);
+        new_for.CopyOnWrite()->loop_var = pro;
+        new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
+        new_for.CopyOnWrite()->extent =
+            min(max_stages - min_stages, for_op.get()->extent);
+        for_op.CopyOnWrite()->min += loop_step * (max_stages - min_stages);
+        for_op.CopyOnWrite()->extent =
+            max(0, for_op.get()->extent - (max_stages - min_stages));
+        prologue = Substitute(new_for, sub);
+      }
+      Stmt epilogue = Evaluate(0);
+      if (enable_epi) {
+        Map<Var, PrimExpr> sub;
+        For new_for = for_op;
+        auto epi = loop_var.copy_with_suffix("_epilogue");
+        sub.Set(new_var, epi);
+        new_for.CopyOnWrite()->loop_var = epi;
+        new_for.CopyOnWrite()->kind = ForKind::kUnrolled;
+        new_for.CopyOnWrite()->min =
+            for_op.get()->min +
+            loop_step * (for_op.get()->extent - (max_stages - min_stages));
+        new_for.CopyOnWrite()->extent =
+            min(max_stages - min_stages, for_op.get()->extent);
+        for_op.CopyOnWrite()->extent =
+            max(0, for_op.get()->extent - (max_stages - min_stages));
+        epilogue = Substitute(new_for, sub);
+      }
+      return SeqStmt({prologue, for_op, epilogue});
+    } else if (structure->IsWrapper()) {
+      auto wrapper = static_cast<const WrapperNode *>(structure);
+      Stmt body = Evaluate(0);
+      if (wrapper->child) {
+        body = irstructure_to_stmt(wrapper->child.get());
+      }
+      if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
+        return LetStmt(let->var, let->value, body);
+      } else if (const auto *attr = wrapper->wrapper.as<AttrStmtNode>()) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value, body);
+      } else {
+        LOG(FATAL);
+      }
+    }
+
+    LOG(FATAL)
+        << "Failed to convert IRStructure to Stmt, returning empty statement";
+    return Evaluate(0);
+  };
+
+  return irstructure_to_stmt(root);
+}
+
 // Apply warpgroup partition to entire IRStructure (top-level IfThenElse)
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map, const bool outer_enable_epi,
-    PrimExpr thread_count[2], bool producer_consumer) {
+    PrimExpr thread_count[2], bool producer_consumer,
+    const WarpSpecializeConfig &config) {
   if (!root)
     return Evaluate(0);
 
@@ -1620,7 +2034,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     if (wrapper->child) {
       body = ApplyWarpgroupPartitionToIRStructure(
           wrapper->child.get(), thread_var, barrier_buffers, barrier_map,
-          outer_enable_epi, thread_count, producer_consumer);
+          outer_enable_epi, thread_count, producer_consumer, config);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -1962,13 +2376,6 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     LOG(FATAL);
   };
 
-  // Clone IRStructure for warpgroup neutral, 0 and 1
-  auto wg_neutral_structure =
-      has_warpgroup_neutral ? clone_neutral_filter(root) : nullptr;
-  auto wg0_structure = CloneIRStructureWithWarpgroupFilter(root, 0);
-  auto wg1_structure = CloneIRStructureWithWarpgroupFilter(root, 1);
-
-  // Check if both clones have actual statements
   auto has_actual_statements = [](IRStructure *node) -> bool {
     std::vector<TaskNodeWithContext> tasks;
     CollectAllTaskNodesWithContext(node, tasks);
@@ -1980,38 +2387,147 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     return false;
   };
 
-  bool wg_neutral_has_stmts =
-      wg_neutral_structure ? has_actual_statements(wg_neutral_structure.get())
-                           : false;
+  std::function<std::unique_ptr<IRStructure>(
+      IRStructure *, const std::function<bool(int)> &, int)>
+      clone_neutral_filter_with_top_level;
+  clone_neutral_filter_with_top_level =
+      [&clone_neutral_filter_with_top_level, &clone_neutral_filter](
+          IRStructure *node, const std::function<bool(int)> &include_top_level,
+          int top_level_index) -> std::unique_ptr<IRStructure> {
+    if (!node)
+      return nullptr;
+
+    if (node->IsTask()) {
+      if (include_top_level(top_level_index)) {
+        return clone_neutral_filter(node);
+      } else {
+        auto new_task = std::make_unique<TaskNode>();
+        // Empty statements
+        return new_task;
+      }
+    } else if (node->IsSequence()) {
+      auto seq = static_cast<SequenceNode *>(node);
+      auto new_seq = std::make_unique<SequenceNode>();
+      int child_index = 0;
+      for (const auto &child : seq->children) {
+        if (child) {
+          auto schedule_unit = static_cast<ScheduleUnit *>(child.get());
+          int next_top_level_index =
+              top_level_index == -1 ? child_index : top_level_index;
+          auto new_node = clone_neutral_filter_with_top_level(
+              schedule_unit->child.get(), include_top_level,
+              next_top_level_index);
+          if (new_node) {
+            auto new_unit = std::make_unique<ScheduleUnit>();
+            new_unit->child = std::move(new_node);
+            new_seq->children.push_back(std::move(new_unit));
+          }
+        }
+        child_index++;
+      }
+      return new_seq;
+    } else if (node->IsWrapper()) {
+      auto wrapper = static_cast<WrapperNode *>(node);
+      auto new_wrapper = std::make_unique<WrapperNode>();
+      new_wrapper->child = clone_neutral_filter_with_top_level(
+          wrapper->child.get(), include_top_level, top_level_index);
+      if (new_wrapper->child) {
+        return new_wrapper;
+      }
+      return nullptr;
+    } else if (node->IsControl()) {
+      return nullptr;
+    }
+    LOG(FATAL);
+  };
+
+  int last_warpgroup_task_top_level_index = -1;
+  if (root->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(root);
+    for (size_t i = 0; i < seq->children.size(); ++i) {
+      const auto &child = seq->children[i];
+      if (!child) {
+        continue;
+      }
+      auto unit = static_cast<ScheduleUnit *>(child.get());
+      std::vector<TaskNodeWithContext> child_tasks;
+      CollectAllTaskNodesWithContext(unit->child.get(), child_tasks);
+      for (const auto &task : child_tasks) {
+        if (task.task->GetWarpgroupId() >= 0) {
+          last_warpgroup_task_top_level_index = static_cast<int>(i);
+        }
+      }
+    }
+  }
+
+  auto is_epi_top_level_index =
+      [last_warpgroup_task_top_level_index](int top_level_index) {
+        return last_warpgroup_task_top_level_index >= 0 &&
+               top_level_index > last_warpgroup_task_top_level_index;
+      };
+  auto is_pro_top_level_index = [is_epi_top_level_index](int top_level_index) {
+    return !is_epi_top_level_index(top_level_index);
+  };
+
+  auto wg_pro_neutral_structure = has_warpgroup_neutral
+                                      ? clone_neutral_filter_with_top_level(
+                                            root, is_pro_top_level_index, -1)
+                                      : nullptr;
+  auto wg_epi_neutral_structure = has_warpgroup_neutral
+                                      ? clone_neutral_filter_with_top_level(
+                                            root, is_epi_top_level_index, -1)
+                                      : nullptr;
+
+  auto wg0_structure = CloneIRStructureWithWarpgroupFilter(root, 0);
+  auto wg1_structure = CloneIRStructureWithWarpgroupFilter(root, 1);
+
+  bool wg_pro_neutral_has_stmts =
+      wg_pro_neutral_structure
+          ? has_actual_statements(wg_pro_neutral_structure.get())
+          : false;
+  bool wg_epi_neutral_has_stmts =
+      wg_epi_neutral_structure
+          ? has_actual_statements(wg_epi_neutral_structure.get())
+          : false;
   bool wg0_has_stmts = has_actual_statements(wg0_structure.get());
   bool wg1_has_stmts = has_actual_statements(wg1_structure.get());
 
   PrimExpr condition = thread_var->var < thread_count[0];
+  PrimExpr wg1_condition =
+      thread_var->var < (thread_count[0] + thread_count[1]);
 
-  Stmt neutral_body = wg_neutral_has_stmts
-                          ? irstructure_to_stmt(wg_neutral_structure.get())
-                          : Evaluate(0);
+  Stmt pro_neutral_body =
+      wg_pro_neutral_has_stmts
+          ? irstructure_to_stmt(wg_pro_neutral_structure.get())
+          : Evaluate(0);
+  Stmt epi_neutral_body =
+      wg_epi_neutral_has_stmts
+          ? irstructure_to_stmt(wg_epi_neutral_structure.get())
+          : Evaluate(0);
   Stmt then_body =
       wg0_has_stmts ? irstructure_to_stmt(wg0_structure.get()) : Evaluate(0);
   Stmt else_body =
       wg1_has_stmts ? irstructure_to_stmt(wg1_structure.get()) : Evaluate(0);
 
-  // Create IfThenElse statement with barrier synchronization if both warpgroups
-  // have statements
   Stmt if_then_else;
   if (wg0_has_stmts && wg1_has_stmts) {
     bool has_simt_copy = SimtCopyDetector::Detect(else_body);
-    if (has_simt_copy) {
-      if_then_else = IfThenElse(condition, then_body, else_body);
+    if (has_simt_copy || !config.enable_set_max_nreg) {
+      if_then_else =
+          IfThenElse(condition, then_body,
+                     IfThenElse(wg1_condition, else_body, Evaluate(0)));
     } else {
       std::vector<Stmt> then_body_with_nreg{
-          Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {240, 1})),
+          Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                        {config.consumer_max_nreg, 1})),
           then_body};
       std::vector<Stmt> else_body_with_nreg{
-          Evaluate(Call(DataType::Handle(), tl::set_max_nreg(), {24, 0})),
+          Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                        {config.producer_max_nreg, 0})),
           else_body};
-      if_then_else = IfThenElse(condition, SeqStmt(then_body_with_nreg),
-                                SeqStmt(else_body_with_nreg));
+      if_then_else = IfThenElse(
+          condition, SeqStmt(then_body_with_nreg),
+          IfThenElse(wg1_condition, SeqStmt(else_body_with_nreg), Evaluate(0)));
     }
   } else if (wg0_has_stmts) {
     // Only warpgroup 0 has statements, execute unconditionally
@@ -2024,37 +2540,53 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     if_then_else = Evaluate(0);
   }
 
-  // Combine neutral tasks (warpgroup -1) with the if-then-else statement
-  // Add barrier synchronization between neutral tasks and warpgroup-specific
-  // work
-  Stmt combined_stmt;
-  if (wg_neutral_has_stmts) {
-    if (!IsEvaluateZero(if_then_else) && !IsEvaluateZero(neutral_body)) {
+  PrimExpr barrier_count = config.enable_thread_extend
+                               ? thread_count[0] + thread_count[1]
+                               : thread_var->dom->extent;
+
+  Stmt pro_and_warpgroup_stmt;
+  if (wg_pro_neutral_has_stmts) {
+    if (!IsEvaluateZero(if_then_else) && !IsEvaluateZero(pro_neutral_body)) {
       // Both have statements: insert barriers for neutral-to-warpgroup
       // synchronization
-      combined_stmt = InsertBarriersForNeutralSync(neutral_body, if_then_else,
-                                                   barrier_buffers, barrier_map,
-                                                   thread_count);
-    } else if (!IsEvaluateZero(if_then_else) || !IsEvaluateZero(neutral_body)) {
+      pro_and_warpgroup_stmt = InsertBarriersForNeutralSync(
+          pro_neutral_body, if_then_else, barrier_buffers, barrier_map,
+          barrier_count);
+    } else if (!IsEvaluateZero(if_then_else) ||
+               !IsEvaluateZero(pro_neutral_body)) {
       // Only one has actual statements
       std::vector<Stmt> stmts;
-      if (!IsEvaluateZero(neutral_body)) {
-        stmts.push_back(neutral_body);
+      if (!IsEvaluateZero(pro_neutral_body)) {
+        stmts.push_back(pro_neutral_body);
       }
       if (!IsEvaluateZero(if_then_else)) {
         stmts.push_back(if_then_else);
       }
       if (stmts.size() == 1) {
-        combined_stmt = stmts[0];
+        pro_and_warpgroup_stmt = stmts[0];
       } else {
-        combined_stmt = SeqStmt(stmts);
+        pro_and_warpgroup_stmt = SeqStmt(stmts);
       }
     } else {
       // Both are empty
-      combined_stmt = Evaluate(0);
+      pro_and_warpgroup_stmt = Evaluate(0);
     }
   } else {
-    combined_stmt = if_then_else;
+    pro_and_warpgroup_stmt = if_then_else;
+  }
+
+  Stmt combined_stmt;
+  if (!IsEvaluateZero(pro_and_warpgroup_stmt) &&
+      !IsEvaluateZero(epi_neutral_body)) {
+    // Both have statements: insert barriers for warpgroup-to-epi_neutral
+    // synchronization
+    combined_stmt = InsertBarriersForNeutralSync(
+        pro_and_warpgroup_stmt, epi_neutral_body, barrier_buffers, barrier_map,
+        barrier_count);
+  } else if (!IsEvaluateZero(epi_neutral_body)) {
+    combined_stmt = epi_neutral_body;
+  } else {
+    combined_stmt = pro_and_warpgroup_stmt;
   }
 
   return combined_stmt;

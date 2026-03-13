@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "../target/utils.h"
 #include "./auto_schedule/barrier.h"
 #include "./auto_schedule/ir_structure.h"
 #include "./auto_schedule/latency_estimator.h"
@@ -43,6 +44,14 @@ public:
     return parent[x];
   }
 
+  int find(int x) const {
+    int root = x;
+    while (parent[root] != root) {
+      root = parent[root];
+    }
+    return root;
+  }
+
   void unite(int x, int y) {
     int root_x = find(x);
     int root_y = find(y);
@@ -74,12 +83,44 @@ struct ComponentInfo {
   bool uses_tensor_core_{false};
 };
 
+// Warp specialization architecture enum
+enum class WarpSpecializeArch : uint8_t {
+  kHopper = 0,
+  kBlackwell = 1,
+  kUnsupported = 2,
+};
+
+// Configuration for warp specialization
+struct WarpSpecializeConfig {
+  WarpSpecializeArch arch = WarpSpecializeArch::kUnsupported;
+  int consumer_max_nreg = 0;
+  int producer_max_nreg = 0;
+  int producer_thread_count = 0;
+  bool enable_set_max_nreg = false;
+  bool enable_warpgroup_partition = false;
+  bool enable_thread_extend = false;
+  bool enable_warp_partition = false;
+};
+
+// Factory function to get warp specialization configuration for a target
+inline WarpSpecializeConfig GetWarpSpecializeConfig(Target target) {
+  if (TargetIsHopper(target)) {
+    return {WarpSpecializeArch::kHopper, 240, 24, 128, true, true, true, false};
+  } else if (TargetIsSm100(target)) {
+    return {WarpSpecializeArch::kBlackwell, 0, 0, 32, false, true, false, true};
+  } else {
+    return {
+        WarpSpecializeArch::kUnsupported, 0, 0, 0, false, false, false, false};
+  }
+}
+
 // Global warpgroup id assignment - should be called from the top level
 // Tasks that use the same register region must have the same warpgroup id
 // Goal: balance weighted latency between two warpgroups (0 and 1)
 // Weighted latency = latency * tripcount (tripcount = 100 for non-constant loop
 // extent)
-bool AssignWarpgroupIdsGlobal(IRStructure *root);
+bool AssignWarpgroupIdsGlobal(IRStructure *root,
+                              bool enable_warp_partition = false);
 
 // Function to rewrite alloc_buffers for multi-version support
 Stmt RewriteAllocBuffers(

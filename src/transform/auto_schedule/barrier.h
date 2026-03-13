@@ -196,14 +196,14 @@ static Stmt makeBarrierWait(PrimExpr barrier_expr, PrimExpr parity) {
 static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
                                          std::vector<Buffer> &barrier_buffers,
                                          Map<ObjectRef, ObjectRef> &barrier_map,
-                                         PrimExpr thread_count[2]) {
+                                         PrimExpr total_thread_count) {
   // If either body is empty, no barriers needed
   if (IsEvaluateZero(neutral_body) || IsEvaluateZero(warpgroup_body)) {
     return SeqStmt({neutral_body, warpgroup_body});
   }
 
   // Allocate barrier buffer for neutral-to-warpgroup synchronization
-  PrimExpr arrive_count = thread_count[0] + thread_count[1];
+  PrimExpr arrive_count = total_thread_count;
   Buffer barrier_buffer =
       makeBarrierBuffer(arrive_count, "neutral_warpgroup_barrier", 1,
                         barrier_buffers, barrier_map);
@@ -476,10 +476,9 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
       if (child->is_TCGEN05()) {
         int wg_id = child->GetWarpgroupId();
         int barrier_id = next_barrier_id++;
-        Buffer barrier_buffer =
-            makeBarrierBuffer(thread_count[wg_id],
-                              "tcgen05_barrier_" + std::to_string(barrier_id),
-                              1, barrier_buffers, barrier_map);
+        Buffer barrier_buffer = makeBarrierBuffer(
+            1, "tcgen05_barrier_" + std::to_string(barrier_id), 1,
+            barrier_buffers, barrier_map);
         barrier_unit_map[task] = barrier_buffer;
 
         PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
@@ -603,13 +602,16 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
           continue;
         if (!task->isInnerTask())
           continue;
-        Buffer buffer = region->buffer;
-        if (!found_wgmma) {
-          found_wgmma = true;
-          ++total_wgmma[wg_id];
+        auto child = static_cast<TaskNode *>(task->child.get());
+        if (child->is_WGMMA()) {
+          Buffer buffer = region->buffer;
+          if (!found_wgmma) {
+            found_wgmma = true;
+            ++total_wgmma[wg_id];
+          }
+          last_wgmma_map[wg_id][buffer] =
+              std::make_pair(task, total_wgmma[wg_id]);
         }
-        last_wgmma_map[wg_id][buffer] =
-            std::make_pair(task, total_wgmma[wg_id]);
       } else {
         Buffer buffer = region->buffer;
         last_access_map[wg_id][buffer] = std::make_pair(task, wg_id);
@@ -750,8 +752,7 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             int barrier_id = next_barrier_id++;
             // Create a single barrier buffer with shape (num_stages,)
             Buffer barrier_buffer = makeBarrierBuffer(
-                thread_count[wg_id],
-                "tcgen05_barrier_" + std::to_string(barrier_id), num_stages,
+                1, "tcgen05_barrier_" + std::to_string(barrier_id), num_stages,
                 barrier_buffers, barrier_map);
             barrier_unit_map[task] = barrier_buffer;
 
@@ -929,13 +930,16 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
                 continue;
               if (!task->isInnerTask())
                 continue;
-              Buffer buffer = region->buffer;
-              if (!found_wgmma) {
-                found_wgmma = true;
-                ++total_wgmma[wg_id];
+              auto child = static_cast<TaskNode *>(task->child.get());
+              if (child->is_WGMMA()) {
+                Buffer buffer = region->buffer;
+                if (!found_wgmma) {
+                  found_wgmma = true;
+                  ++total_wgmma[wg_id];
+                }
+                last_wgmma_map[wg_id][buffer] =
+                    std::make_pair(task, total_wgmma[wg_id]);
               }
-              last_wgmma_map[wg_id][buffer] =
-                  std::make_pair(task, total_wgmma[wg_id]);
             } else {
               if (iter == 1)
                 continue;
