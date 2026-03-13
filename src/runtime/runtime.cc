@@ -7,8 +7,11 @@
 #include "runtime.h"
 
 #include "../target/stubs/cuda.h"
+#include <cstdint>
+#include <sstream>
 #include <tvm/ffi/function.h>
 #include <tvm/node/node.h>
+#include <vector>
 
 namespace tvm {
 namespace tl {
@@ -29,6 +32,199 @@ template <typename T> static std::string ArrayToStr(const T *ptr, size_t n) {
     ss << ptr[i]; // NOLINT(clang-analyzer-security.ArrayBound)
   }
   ss << "]";
+  return ss.str();
+}
+
+static uint64_t PtrModulo(const void *ptr, uint64_t align) {
+  return reinterpret_cast<uintptr_t>(ptr) % align;
+}
+
+static const char *TensorMapDataTypeToString(CUtensorMapDataType type) {
+  switch (type) {
+  case CU_TENSOR_MAP_DATA_TYPE_UINT8:
+    return "CU_TENSOR_MAP_DATA_TYPE_UINT8";
+  case CU_TENSOR_MAP_DATA_TYPE_UINT16:
+    return "CU_TENSOR_MAP_DATA_TYPE_UINT16";
+  case CU_TENSOR_MAP_DATA_TYPE_UINT32:
+    return "CU_TENSOR_MAP_DATA_TYPE_UINT32";
+  case CU_TENSOR_MAP_DATA_TYPE_INT32:
+    return "CU_TENSOR_MAP_DATA_TYPE_INT32";
+  case CU_TENSOR_MAP_DATA_TYPE_UINT64:
+    return "CU_TENSOR_MAP_DATA_TYPE_UINT64";
+  case CU_TENSOR_MAP_DATA_TYPE_INT64:
+    return "CU_TENSOR_MAP_DATA_TYPE_INT64";
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT16:
+    return "CU_TENSOR_MAP_DATA_TYPE_FLOAT16";
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT32:
+    return "CU_TENSOR_MAP_DATA_TYPE_FLOAT32";
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT64:
+    return "CU_TENSOR_MAP_DATA_TYPE_FLOAT64";
+  case CU_TENSOR_MAP_DATA_TYPE_BFLOAT16:
+    return "CU_TENSOR_MAP_DATA_TYPE_BFLOAT16";
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ:
+    return "CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ";
+  case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32:
+    return "CU_TENSOR_MAP_DATA_TYPE_TFLOAT32";
+  case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ:
+    return "CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ";
+  default:
+    return "<unknown CUtensorMapDataType>";
+  }
+}
+
+static const char *
+TensorMapInterleaveToString(CUtensorMapInterleave interleave) {
+  switch (interleave) {
+  case CU_TENSOR_MAP_INTERLEAVE_NONE:
+    return "CU_TENSOR_MAP_INTERLEAVE_NONE";
+  case CU_TENSOR_MAP_INTERLEAVE_16B:
+    return "CU_TENSOR_MAP_INTERLEAVE_16B";
+  case CU_TENSOR_MAP_INTERLEAVE_32B:
+    return "CU_TENSOR_MAP_INTERLEAVE_32B";
+  default:
+    return "<unknown CUtensorMapInterleave>";
+  }
+}
+
+static const char *TensorMapSwizzleToString(CUtensorMapSwizzle swizzle) {
+  switch (swizzle) {
+  case CU_TENSOR_MAP_SWIZZLE_NONE:
+    return "CU_TENSOR_MAP_SWIZZLE_NONE";
+  case CU_TENSOR_MAP_SWIZZLE_32B:
+    return "CU_TENSOR_MAP_SWIZZLE_32B";
+  case CU_TENSOR_MAP_SWIZZLE_64B:
+    return "CU_TENSOR_MAP_SWIZZLE_64B";
+  case CU_TENSOR_MAP_SWIZZLE_128B:
+    return "CU_TENSOR_MAP_SWIZZLE_128B";
+  default:
+    return "<unknown CUtensorMapSwizzle>";
+  }
+}
+
+static const char *TensorMapL2PromotionToString(CUtensorMapL2promotion l2) {
+  switch (l2) {
+  case CU_TENSOR_MAP_L2_PROMOTION_NONE:
+    return "CU_TENSOR_MAP_L2_PROMOTION_NONE";
+  case CU_TENSOR_MAP_L2_PROMOTION_L2_64B:
+    return "CU_TENSOR_MAP_L2_PROMOTION_L2_64B";
+  case CU_TENSOR_MAP_L2_PROMOTION_L2_128B:
+    return "CU_TENSOR_MAP_L2_PROMOTION_L2_128B";
+  case CU_TENSOR_MAP_L2_PROMOTION_L2_256B:
+    return "CU_TENSOR_MAP_L2_PROMOTION_L2_256B";
+  default:
+    return "<unknown CUtensorMapL2promotion>";
+  }
+}
+
+static const char *TensorMapOOBFillToString(CUtensorMapFloatOOBfill oob_fill) {
+  switch (oob_fill) {
+  case CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE:
+    return "CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE";
+  case CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA:
+    return "CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA";
+  default:
+    return "<unknown CUtensorMapFloatOOBfill>";
+  }
+}
+
+static uint64_t TensorMapDataTypeBits(CUtensorMapDataType type) {
+  switch (type) {
+  case CU_TENSOR_MAP_DATA_TYPE_UINT8:
+    return 8;
+  case CU_TENSOR_MAP_DATA_TYPE_UINT16:
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT16:
+  case CU_TENSOR_MAP_DATA_TYPE_BFLOAT16:
+    return 16;
+  case CU_TENSOR_MAP_DATA_TYPE_UINT32:
+  case CU_TENSOR_MAP_DATA_TYPE_INT32:
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT32:
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ:
+  case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32:
+  case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ:
+    return 32;
+  case CU_TENSOR_MAP_DATA_TYPE_UINT64:
+  case CU_TENSOR_MAP_DATA_TYPE_INT64:
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT64:
+    return 64;
+  default:
+    return 0;
+  }
+}
+
+static bool IsFloatTensorMapType(CUtensorMapDataType type) {
+  switch (type) {
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT16:
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT32:
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT64:
+  case CU_TENSOR_MAP_DATA_TYPE_BFLOAT16:
+  case CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ:
+  case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32:
+  case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static uint64_t
+RequiredGlobalAddressAlignment(CUtensorMapDataType type,
+                               CUtensorMapInterleave interleave) {
+  if (interleave == CU_TENSOR_MAP_INTERLEAVE_32B) {
+    return 32;
+  }
+  return 16;
+}
+
+static uint64_t
+RequiredGlobalStrideAlignment(CUtensorMapDataType type,
+                              CUtensorMapInterleave interleave) {
+  if (interleave == CU_TENSOR_MAP_INTERLEAVE_32B) {
+    return 32;
+  }
+  return 16;
+}
+
+static uint64_t SwizzleSpanBytes(CUtensorMapSwizzle swizzle) {
+  switch (swizzle) {
+  case CU_TENSOR_MAP_SWIZZLE_NONE:
+    return 0;
+  case CU_TENSOR_MAP_SWIZZLE_32B:
+    return 32;
+  case CU_TENSOR_MAP_SWIZZLE_64B:
+    return 64;
+  case CU_TENSOR_MAP_SWIZZLE_128B:
+    return 128;
+  default:
+    return 0;
+  }
+}
+
+static std::string CudaResultToString(CUresult result) {
+  const char *error_name = nullptr;
+  const char *error_string = nullptr;
+  (void)cuGetErrorName(result, &error_name);
+  (void)cuGetErrorString(result, &error_string);
+
+  std::stringstream ss;
+  ss << result;
+  if (error_name != nullptr) {
+    ss << " (" << error_name;
+    if (error_string != nullptr) {
+      ss << ": " << error_string;
+    }
+    ss << ")";
+  } else if (error_string != nullptr) {
+    ss << " (" << error_string << ")";
+  }
+  return ss.str();
+}
+
+static std::string
+FormatValidationIssues(const std::vector<std::string> &issues) {
+  std::stringstream ss;
+  for (size_t i = 0; i < issues.size(); ++i) {
+    ss << "  [" << (i + 1) << "] " << issues[i] << '\n';
+  }
   return ss.str();
 }
 
@@ -78,21 +274,156 @@ struct TensorMapArgs {
 
   std::string ToDebugString() {
     std::stringstream ss;
-    ss << "TMA Desc Addr:   " << map << '\n'
-       << "format         " << type << '\n'
+    ss << "TMA Desc Addr:   " << map << " (mod64=" << PtrModulo(map, 64)
+       << ")\n"
+       << "format         " << type << " (" << TensorMapDataTypeToString(type)
+       << ")\n"
        << "dim            " << tensorRank << '\n'
-       << "gmem_address   " << globalAddress << '\n'
+       << "gmem_address   " << globalAddress
+       << " (mod16=" << PtrModulo(globalAddress, 16)
+       << ", mod32=" << PtrModulo(globalAddress, 32) << ")\n"
        << "globalDim      " << ArrayToStr(globalDim, tensorRank) << '\n'
-       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << '\n'
+       << "globalStridesRaw " << ArrayToStr(globalStride, tensorRank) << '\n'
+       << "cudaGlobalStrides "
+       << ArrayToStr(globalStride + 1, tensorRank == 0 ? 0 : tensorRank - 1)
+       << '\n'
        << "boxDim         " << ArrayToStr(boxDim, tensorRank) << '\n'
        << "elementStrides " << ArrayToStr(elementStrides, tensorRank) << '\n'
-       << "interleave     " << interleave << '\n'
-       << "swizzle        " << swizzle << '\n'
-       << "l2Promotion    " << l2Promotion << '\n'
-       << "oobFill        " << oobFill << '\n';
+       << "interleave     " << interleave << " ("
+       << TensorMapInterleaveToString(interleave) << ")\n"
+       << "swizzle        " << swizzle << " ("
+       << TensorMapSwizzleToString(swizzle) << ")\n"
+       << "l2Promotion    " << l2Promotion << " ("
+       << TensorMapL2PromotionToString(l2Promotion) << ")\n"
+       << "oobFill        " << oobFill << " ("
+       << TensorMapOOBFillToString(oobFill) << ")\n";
     return ss.str();
   }
 };
+
+static std::vector<std::string> ValidateTensorMapArgs(const TensorMapArgs &T) {
+  std::vector<std::string> issues;
+  uint64_t type_bits = TensorMapDataTypeBits(T.type);
+  uint64_t addr_align = RequiredGlobalAddressAlignment(T.type, T.interleave);
+  uint64_t stride_align = RequiredGlobalStrideAlignment(T.type, T.interleave);
+
+  if (T.map == nullptr) {
+    issues.push_back("tensorMap must be non-null");
+  } else if (PtrModulo(T.map, 64) != 0) {
+    issues.push_back("tensorMap address must be 64-byte aligned, but got " +
+                     std::to_string(reinterpret_cast<uintptr_t>(T.map)) +
+                     " with mod64=" + std::to_string(PtrModulo(T.map, 64)));
+  }
+
+  if (type_bits == 0) {
+    issues.push_back(
+        "tensorDataType is not a supported CUtensorMapDataType enum: " +
+        std::to_string(static_cast<int>(T.type)));
+  }
+
+  if (T.tensorRank == 0 || T.tensorRank > 5) {
+    issues.push_back("tensorRank must be in [1, 5], but got " +
+                     std::to_string(T.tensorRank));
+  }
+  if (T.interleave != CU_TENSOR_MAP_INTERLEAVE_NONE && T.tensorRank < 3) {
+    issues.push_back("tensorRank must be >= 3 when interleave is not NONE");
+  }
+
+  if (T.globalAddress == nullptr) {
+    issues.push_back("globalAddress must be non-null");
+  } else if (PtrModulo(T.globalAddress, addr_align) != 0) {
+    issues.push_back("globalAddress must be " + std::to_string(addr_align) +
+                     "-byte aligned, but mod" + std::to_string(addr_align) +
+                     "=" +
+                     std::to_string(PtrModulo(T.globalAddress, addr_align)));
+  }
+
+  for (size_t i = 0; i < T.tensorRank; ++i) {
+    if (T.globalDim[i] == 0) {
+      issues.push_back("globalDim[" + std::to_string(i) + "] must be non-zero");
+    }
+    if (T.globalDim[i] > (uint64_t{1} << 32)) {
+      issues.push_back("globalDim[" + std::to_string(i) +
+                       "] must be <= 2^32, but got " +
+                       std::to_string(T.globalDim[i]));
+    }
+  }
+
+  for (size_t raw_i = 1; raw_i < T.tensorRank; ++raw_i) {
+    cuuint64_t stride = T.globalStride[raw_i];
+    size_t cuda_i = raw_i - 1;
+    if (stride == 0) {
+      issues.push_back("effective cuda globalStrides[" +
+                       std::to_string(cuda_i) + "] (raw globalStride[" +
+                       std::to_string(raw_i) + "]) must be non-zero");
+    }
+    if (stride % stride_align != 0) {
+      issues.push_back("effective cuda globalStrides[" +
+                       std::to_string(cuda_i) + "] (raw globalStride[" +
+                       std::to_string(raw_i) + "] = " + std::to_string(stride) +
+                       ") must be a multiple of " +
+                       std::to_string(stride_align) + " bytes");
+    }
+    if (stride >= (uint64_t{1} << 40)) {
+      issues.push_back("effective cuda globalStrides[" +
+                       std::to_string(cuda_i) + "] (raw globalStride[" +
+                       std::to_string(raw_i) + "] = " + std::to_string(stride) +
+                       ") must be < 2^40");
+    }
+  }
+
+  for (size_t i = 0; i < T.tensorRank; ++i) {
+    if (T.boxDim[i] == 0) {
+      issues.push_back("boxDim[" + std::to_string(i) + "] must be non-zero");
+    }
+    if (T.boxDim[i] > 256) {
+      issues.push_back("boxDim[" + std::to_string(i) +
+                       "] must be <= 256, but got " +
+                       std::to_string(T.boxDim[i]));
+    }
+  }
+
+  if (T.tensorRank > 0 && T.interleave == CU_TENSOR_MAP_INTERLEAVE_NONE &&
+      type_bits != 0 && ((uint64_t{T.boxDim[0]} * type_bits) % 128 != 0)) {
+    issues.push_back("boxDim[0] * elementSize must be a multiple of 16 bytes "
+                     "when interleave is NONE, but got " +
+                     std::to_string(T.boxDim[0]) + " * " +
+                     std::to_string(type_bits) + " bits");
+  }
+
+  for (size_t i = 0; i < T.tensorRank; ++i) {
+    if (T.elementStrides[i] == 0 || T.elementStrides[i] > 8) {
+      issues.push_back("elementStrides[" + std::to_string(i) +
+                       "] must be in [1, 8], but got " +
+                       std::to_string(T.elementStrides[i]));
+    }
+  }
+
+  if (T.interleave == CU_TENSOR_MAP_INTERLEAVE_32B &&
+      T.swizzle != CU_TENSOR_MAP_SWIZZLE_32B) {
+    issues.push_back("swizzle must be CU_TENSOR_MAP_SWIZZLE_32B when "
+                     "interleave is CU_TENSOR_MAP_INTERLEAVE_32B");
+  }
+
+  uint64_t swizzle_bytes = SwizzleSpanBytes(T.swizzle);
+  if (T.tensorRank > 0 && T.interleave == CU_TENSOR_MAP_INTERLEAVE_NONE &&
+      swizzle_bytes != 0 && type_bits != 0 &&
+      (uint64_t{T.boxDim[0]} * type_bits > swizzle_bytes * 8)) {
+    issues.push_back("boxDim[0] * elementSize must be <= swizzle span (" +
+                     std::to_string(swizzle_bytes) +
+                     " bytes) when swizzle is enabled, but got " +
+                     std::to_string(T.boxDim[0]) + " * " +
+                     std::to_string(type_bits) + " bits");
+  }
+
+  if (T.oobFill == CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA &&
+      !IsFloatTensorMapType(T.type)) {
+    issues.push_back("CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA can "
+                     "only be used with floating-point tensorDataType");
+  }
+
+  return issues;
+}
 
 // set device api
 TVM_FFI_STATIC_INIT_BLOCK() {
@@ -101,13 +432,21 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def_packed(
       tl::tvm_tensormap_create_tiled, [](PackedArgs args, Any *ret) {
         TensorMapArgs T = TensorMapArgs::Extract(args);
+        std::vector<std::string> issues = ValidateTensorMapArgs(T);
+        if (!issues.empty()) {
+          LOG_FATAL << "Invalid TMA descriptor arguments for "
+                    << tl::tvm_tensormap_create_tiled << ":\n"
+                    << FormatValidationIssues(issues) << T.ToDebugString();
+        }
         CUresult result = cuTensorMapEncodeTiled(
             T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
             T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave,
             T.swizzle, T.l2Promotion, T.oobFill);
         if (result != CUDA_SUCCESS) {
-          LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                    << '\n'
+          LOG_FATAL << "Failed to initialize the TMA descriptor "
+                    << CudaResultToString(result) << '\n'
+                    << "No local tiled-TMA constraint violation was detected "
+                       "before calling cuTensorMapEncodeTiled.\n"
                     << T.ToDebugString();
         }
         *ret = static_cast<int>(result);
@@ -167,12 +506,19 @@ struct TensorMapIm2ColArgs {
 
   std::string ToDebugString() {
     std::stringstream ss;
-    ss << "TMA Desc Addr:   " << map << '\n'
-       << "format         " << type << '\n'
+    ss << "TMA Desc Addr:   " << map << " (mod64=" << PtrModulo(map, 64)
+       << ")\n"
+       << "format         " << type << " (" << TensorMapDataTypeToString(type)
+       << ")\n"
        << "dim            " << tensorRank << '\n'
-       << "gmem_address   " << globalAddress << '\n'
+       << "gmem_address   " << globalAddress
+       << " (mod16=" << PtrModulo(globalAddress, 16)
+       << ", mod32=" << PtrModulo(globalAddress, 32) << ")\n"
        << "globalDim      " << ArrayToStr(globalDim, tensorRank) << '\n'
-       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << '\n'
+       << "globalStridesRaw " << ArrayToStr(globalStride, tensorRank) << '\n'
+       << "cudaGlobalStrides "
+       << ArrayToStr(globalStride + 1, tensorRank == 0 ? 0 : tensorRank - 1)
+       << '\n'
        << "smem_box_pixel " << smem_box_pixel << '\n'
        << "smem_box_channel " << smem_box_channel << '\n'
        << "pixelBoxLowerCorner  "
@@ -180,27 +526,127 @@ struct TensorMapIm2ColArgs {
        << "pixelBoxUpperCorner  "
        << ArrayToStr(pixelBoxUpperCorner, tensorRank - 2) << '\n'
        << "elementStrides " << ArrayToStr(elementStrides, tensorRank) << '\n'
-       << "interleave     " << interleave << '\n'
-       << "swizzle        " << swizzle << '\n'
-       << "l2Promotion    " << l2Promotion << '\n'
-       << "oobFill        " << oobFill << '\n';
+       << "interleave     " << interleave << " ("
+       << TensorMapInterleaveToString(interleave) << ")\n"
+       << "swizzle        " << swizzle << " ("
+       << TensorMapSwizzleToString(swizzle) << ")\n"
+       << "l2Promotion    " << l2Promotion << " ("
+       << TensorMapL2PromotionToString(l2Promotion) << ")\n"
+       << "oobFill        " << oobFill << " ("
+       << TensorMapOOBFillToString(oobFill) << ")\n";
     return ss.str();
   }
 };
+
+static std::vector<std::string>
+ValidateTensorMapIm2ColArgs(const TensorMapIm2ColArgs &T) {
+  std::vector<std::string> issues;
+  uint64_t type_bits = TensorMapDataTypeBits(T.type);
+  uint64_t addr_align = RequiredGlobalAddressAlignment(T.type, T.interleave);
+  uint64_t stride_align = RequiredGlobalStrideAlignment(T.type, T.interleave);
+
+  if (T.map == nullptr) {
+    issues.push_back("tensorMap must be non-null");
+  } else if (PtrModulo(T.map, 64) != 0) {
+    issues.push_back("tensorMap address must be 64-byte aligned, but mod64=" +
+                     std::to_string(PtrModulo(T.map, 64)));
+  }
+
+  if (type_bits == 0) {
+    issues.push_back(
+        "tensorDataType is not a supported CUtensorMapDataType enum: " +
+        std::to_string(static_cast<int>(T.type)));
+  }
+
+  if (T.tensorRank < 3 || T.tensorRank > 5) {
+    issues.push_back("tensorRank must be in [3, 5] for im2col, but got " +
+                     std::to_string(T.tensorRank));
+  }
+
+  if (T.globalAddress == nullptr) {
+    issues.push_back("globalAddress must be non-null");
+  } else if (PtrModulo(T.globalAddress, addr_align) != 0) {
+    issues.push_back("globalAddress must be " + std::to_string(addr_align) +
+                     "-byte aligned, but mod" + std::to_string(addr_align) +
+                     "=" +
+                     std::to_string(PtrModulo(T.globalAddress, addr_align)));
+  }
+
+  for (size_t i = 0; i < T.tensorRank; ++i) {
+    if (T.globalDim[i] == 0) {
+      issues.push_back("globalDim[" + std::to_string(i) + "] must be non-zero");
+    }
+    if (T.globalDim[i] > (uint64_t{1} << 32)) {
+      issues.push_back("globalDim[" + std::to_string(i) +
+                       "] must be <= 2^32, but got " +
+                       std::to_string(T.globalDim[i]));
+    }
+    if (T.elementStrides[i] == 0 || T.elementStrides[i] > 8) {
+      issues.push_back("elementStrides[" + std::to_string(i) +
+                       "] must be in [1, 8], but got " +
+                       std::to_string(T.elementStrides[i]));
+    }
+  }
+
+  for (size_t raw_i = 1; raw_i < T.tensorRank; ++raw_i) {
+    cuuint64_t stride = T.globalStride[raw_i];
+    size_t cuda_i = raw_i - 1;
+    if (stride == 0) {
+      issues.push_back("effective cuda globalStrides[" +
+                       std::to_string(cuda_i) + "] (raw globalStride[" +
+                       std::to_string(raw_i) + "]) must be non-zero");
+    }
+    if (stride % stride_align != 0) {
+      issues.push_back("effective cuda globalStrides[" +
+                       std::to_string(cuda_i) + "] (raw globalStride[" +
+                       std::to_string(raw_i) + "] = " + std::to_string(stride) +
+                       ") must be a multiple of " +
+                       std::to_string(stride_align) + " bytes");
+    }
+    if (stride >= (uint64_t{1} << 40)) {
+      issues.push_back("effective cuda globalStrides[" +
+                       std::to_string(cuda_i) + "] (raw globalStride[" +
+                       std::to_string(raw_i) + "] = " + std::to_string(stride) +
+                       ") must be < 2^40");
+    }
+  }
+
+  if (T.interleave == CU_TENSOR_MAP_INTERLEAVE_32B &&
+      T.swizzle != CU_TENSOR_MAP_SWIZZLE_32B) {
+    issues.push_back("swizzle must be CU_TENSOR_MAP_SWIZZLE_32B when "
+                     "interleave is CU_TENSOR_MAP_INTERLEAVE_32B");
+  }
+
+  if (T.oobFill == CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA &&
+      !IsFloatTensorMapType(T.type)) {
+    issues.push_back("CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA can "
+                     "only be used with floating-point tensorDataType");
+  }
+
+  return issues;
+}
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def_packed(
       tl::tvm_tensormap_create_im2col, [](PackedArgs args, Any *ret) {
         TensorMapIm2ColArgs T = TensorMapIm2ColArgs::Extract(args);
+        std::vector<std::string> issues = ValidateTensorMapIm2ColArgs(T);
+        if (!issues.empty()) {
+          LOG_FATAL << "Invalid TMA im2col descriptor arguments for "
+                    << tl::tvm_tensormap_create_im2col << ":\n"
+                    << FormatValidationIssues(issues) << T.ToDebugString();
+        }
         CUresult result = cuTensorMapEncodeIm2col(
             T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
             T.globalStride + 1, T.pixelBoxLowerCorner, T.pixelBoxUpperCorner,
             T.smem_box_channel, T.smem_box_pixel, T.elementStrides,
             T.interleave, T.swizzle, T.l2Promotion, T.oobFill);
         if (result != CUDA_SUCCESS) {
-          LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                    << '\n'
+          LOG_FATAL << "Failed to initialize the TMA descriptor "
+                    << CudaResultToString(result) << '\n'
+                    << "No local im2col-TMA constraint violation was detected "
+                       "before calling cuTensorMapEncodeIm2col.\n"
                     << T.ToDebugString();
         }
         *ret = static_cast<int>(result);
