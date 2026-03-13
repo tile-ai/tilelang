@@ -23,6 +23,7 @@
  */
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/pattern.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -73,13 +74,17 @@ public:
 
 private:
   void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+        call->op.same_as(tma_load_multicast())) {
       auto arg0 = call->args[0].as<Call>();
       if (call->op.same_as(tma_load()) && arg0 &&
           !arg0.value()->op.same_as(create_tma_descriptor())) {
         // 1D TMA load has tvm_access_ptr of shared tensor in its args[0]
         bulk_copy_bytes = call->args[3] * loop_extents;
       } else {
+        // Descriptor-based TMA load: smem_ptr is always at args[2]
+        // (for tma_load_multicast, args[3] is the mask, but args[2] is still
+        // the smem access_ptr)
         Call access_ptr = Downcast<Call>(call->args[2]);
         ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
         int type_bytes = access_ptr->args[0]->dtype.bytes();
@@ -94,6 +99,44 @@ private:
     loop_extents *= op->extent;
     StmtExprVisitor::VisitStmt_(op);
     loop_extents = old_loop_evtents;
+  }
+
+  // IfThenElse branches are mutually exclusive: exactly one executes at
+  // runtime, so the single unconditional mbarrier_expect_tx that the rewriter
+  // injects must match the byte count for *whichever* branch runs.  When an
+  // else branch is present, collect both sides independently (preserving the
+  // loop_extents context), verify they carry the same byte count, and advance
+  // the running total by that count.  Asymmetric arms (e.g. a tail partition
+  // or a passive multicast receiver that moves a different number of bytes)
+  // cannot be represented by a single expect_tx and will fail the check below.
+  void VisitStmt_(const IfThenElseNode *op) final {
+    if (!op->else_case.defined()) {
+      // No else arm: standard traversal visits only the then branch.
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
+
+    // Save the running total accumulated by outer context.
+    PrimExpr base = bulk_copy_bytes;
+
+    // Collect then branch.
+    bulk_copy_bytes = 0;
+    StmtExprVisitor::VisitStmt(op->then_case);
+    PrimExpr then_bytes = bulk_copy_bytes;
+
+    // Collect else branch.
+    bulk_copy_bytes = 0;
+    StmtExprVisitor::VisitStmt(op->else_case.value());
+    PrimExpr else_bytes = bulk_copy_bytes;
+
+    ICHECK(StructuralEqual()(then_bytes, else_bytes))
+        << "IfThenElse branches carry different TMA byte counts: "
+        << "then=" << then_bytes << " else=" << else_bytes
+        << ".  A single unconditional mbarrier_expect_tx cannot represent both "
+           "paths.  Ensure both arms of this branch transfer the same tile or "
+           "restructure so expect_tx is issued per-branch.";
+
+    bulk_copy_bytes = base + then_bytes;
   }
 
   PrimExpr bulk_copy_bytes = 0;
@@ -145,7 +188,36 @@ private:
     if (op->condition.as<CallNode>()) {
       flag = op->condition.as<CallNode>()->op.same_as(tl_shuffle_elect());
     }
-    if (op->condition.as<EQNode>() || flag) {
+    // Only trigger for EQ conditions that select exactly one threadIdx.x
+    // value. The condition must be of the form (threadIdx.x - c == 0), i.e.,
+    // linear in threadIdx.x with coefficient ±1.
+    //
+    // Predicates like (threadIdx.x % 32) == 0 or (threadIdx.x & 31) == 0
+    // also contain threadIdx.x inside an EQNode but are satisfied by multiple
+    // threads. Injecting mbarrier_expect_tx under such guards overcounts
+    // expected transactions and deadlocks the corresponding mbarrier_wait.
+    //
+    // Runtime conditions such as get_cluster_block_rank() == min_rank do not
+    // involve the thread variable at all and must also be excluded.
+    bool is_thread_eq = false;
+    if (auto eq = op->condition.as<EQNode>()) {
+      if (thread_var_.defined()) {
+        // Compute lhs - rhs and check if it is affine in threadIdx.x with
+        // coefficient exactly ±1. DetectLinearEquation returns [coef, offset]
+        // when the expression equals coef*var + offset; an empty array means
+        // the expression is not linear in the variable (e.g. involves mod or
+        // bitwise ops).
+        PrimExpr diff = eq->a - eq->b;
+        Array<PrimExpr> coefs =
+            arith::DetectLinearEquation(diff, {thread_var_->var});
+        if (coefs.size() == 2) {
+          if (auto imm = coefs[0].as<IntImmNode>()) {
+            is_thread_eq = (imm->value == 1 || imm->value == -1);
+          }
+        }
+      }
+    }
+    if (is_thread_eq || flag) {
       Stmt ret = IRMutatorWithAnalyzer::VisitStmt_(op);
 
       if (visited_tma_load_) {
@@ -173,7 +245,8 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(tma_load_multicast())) {
       bool is_1d_tma_load = Is1DTmaLoad(op);
       visited_tma_load_ = true;
       Array<PrimExpr> new_args = op->args;
@@ -210,7 +283,8 @@ private:
 
   void VisitStmt_(const EvaluateNode *op) final {
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+          call->op.same_as(tma_load_multicast())) {
         pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
       } else if (call->op.same_as(mbarrier_expect_tx())) {
         pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
@@ -353,7 +427,23 @@ private:
       return 1;
     }
     auto bound = analyzer_.const_int_bound(thread_var_);
-    int64_t extent = bound->max_value - bound->min_value + 1;
+    int64_t min_val = bound->min_value;
+    int64_t max_val = bound->max_value;
+
+    // TVM's const_int_bound does not tighten the upper bound under equality
+    // constraints (e.g., "tx - 128 == 0" leaves the range as [128, 255]).
+    // Use CanProve to detect when the thread variable is provably pinned to
+    // a single value, which indicates a single-thread arrive guard.
+    if (min_val != arith::ConstIntBound::kNegInf && min_val < max_val) {
+      PrimExpr thread_expr =
+          thread_var_; // IterVar -> Var via operator PrimExpr()
+      if (analyzer_.CanProve(thread_expr <=
+                             IntImm(thread_expr.dtype(), min_val))) {
+        return 1;
+      }
+    }
+
+    int64_t extent = max_val - min_val + 1;
     return static_cast<int>(std::max<int64_t>(extent, 1));
   }
 
@@ -599,7 +689,8 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(tma_load_multicast())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (!tma_op_to_barrier_id_.count(call_ref)) {
         // Promote raw integer barrier id to get_mbarrier(id) so codegen can
@@ -631,6 +722,8 @@ private:
       if (is_1d_tma_load) {
         new_args.Set(2, barrier_id);
       } else {
+        // Descriptor-based tma_load, tma_load_multicast, and tma_load_im2col
+        // all have the mbarrier at args[1]
         new_args.Set(1, barrier_id);
       }
       return Call(op->dtype, op->op, new_args, op->annotations);

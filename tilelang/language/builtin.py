@@ -597,6 +597,24 @@ def get_warp_group_idx(
     return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_group_idx"), *args)
 
 
+def get_cluster_id() -> PrimExpr:
+    """Return the cluster id (rank) of the current block within the cluster.
+
+    This lowers to the intrinsic `tl.get_cluster_id` and is emitted for CUDA
+    as `cooperative_groups::this_grid().cluster_rank()`.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_id"))
+
+
+def cluster_block_nums() -> PrimExpr:
+    """Return the number of blocks in the cluster.
+
+    Lowers to `tl.get_cluster_block_nums` and emits
+    `cooperative_groups::this_cluster().num_blocks()` in CUDA codegen.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_block_nums"))
+
+
 def shuffle_elect(thread_extent: int) -> PrimExpr:
     """Elect exactly one lane within a logical thread group.
 

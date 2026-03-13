@@ -38,6 +38,167 @@ TL_DEVICE void tma_load_multicast(void *smem_ptr, void *gmem_ptr,
       :);
 }
 
+// Generic SM-to-SM async bulk copy via cp.async.bulk.shared::cluster
+template <typename BarrierType = uint64_t>
+TL_DEVICE void tma_store_cluster(void *dst, void *src, int dst_cta,
+                                 uint32_t size_bytes, BarrierType &bar) {
+  uint32_t mbarrier_ptr = static_cast<uint32_t>(
+      __cvta_generic_to_shared(reinterpret_cast<uint64_t *>(&bar)));
+  uint32_t src_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(src));
+  uint32_t dst_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
+
+  uint32_t neighbor_addr_dst;
+  asm volatile("mapa.shared::cluster.u32  %0, %1, %2;\n"
+               : "=r"(neighbor_addr_dst)
+               : "r"(dst_ptr), "r"(dst_cta));
+
+  uint32_t neighbor_addr_mbarrier;
+  asm volatile("mapa.shared::cluster.u32  %0, %1, %2;\n"
+               : "=r"(neighbor_addr_mbarrier)
+               : "r"(mbarrier_ptr), "r"(dst_cta));
+
+  // Arrive at the remote barrier and announce the expected TX byte count.
+  // This satisfies one arrival (matching the mbarrier_init count) and tells
+  // the barrier how many bytes the subsequent cp.async.bulk will transfer.
+  asm volatile("mbarrier.arrive.expect_tx.shared::cluster.b64 _, [%0], %1;\n"
+               :
+               : "r"(neighbor_addr_mbarrier), "r"(size_bytes)
+               : "memory");
+
+  asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+  asm volatile("cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_"
+               "tx::bytes [%0], [%1], %2, [%3];\n"
+               :
+               : "r"(neighbor_addr_dst), "r"(src_ptr), "r"(size_bytes),
+                 "r"(neighbor_addr_mbarrier)
+               : "memory");
+}
+
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          typename BarrierType = uint64_t>
+TL_DEVICE void
+tma_load_multicast(const CUtensorMap &descriptor, BarrierType &smem_mbar,
+                   void const *const smem_ptr, uint16_t multicast_mask,
+                   int32_t const &crd0) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_mbar;
+  if constexpr (std::is_pointer_v<BarrierType>) {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
+  } else {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
+  }
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::complete_tx::"
+      "bytes.multicast::cluster.L2::cache_hint"
+      " [%0], [%1, {%3}], [%2], %4, %5;"
+      :
+      : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar), "r"(crd0),
+        "h"(multicast_mask), "l"(cache_hint)
+      : "memory");
+}
+
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          typename BarrierType = uint64_t>
+TL_DEVICE void
+tma_load_multicast(const CUtensorMap &descriptor, BarrierType &smem_mbar,
+                   void const *const smem_ptr, uint16_t multicast_mask,
+                   int32_t const &crd0, int32_t const &crd1) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_mbar;
+  if constexpr (std::is_pointer_v<BarrierType>) {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
+  } else {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
+  }
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::"
+      "bytes.multicast::cluster.L2::cache_hint"
+      " [%0], [%1, {%3, %4}], [%2], %5, %6;"
+      :
+      : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar), "r"(crd0),
+        "r"(crd1), "h"(multicast_mask), "l"(cache_hint)
+      : "memory");
+}
+
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          typename BarrierType = uint64_t>
+TL_DEVICE void tma_load_multicast(const CUtensorMap &descriptor,
+                                  BarrierType &smem_mbar,
+                                  void const *const smem_ptr,
+                                  uint16_t multicast_mask, int32_t const &crd0,
+                                  int32_t const &crd1, int32_t const &crd2) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_mbar;
+  if constexpr (std::is_pointer_v<BarrierType>) {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
+  } else {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
+  }
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::"
+      "bytes.multicast::cluster.L2::cache_hint"
+      " [%0], [%1, {%3, %4, %5}], [%2], %6, %7;"
+      :
+      : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar), "r"(crd0),
+        "r"(crd1), "r"(crd2), "h"(multicast_mask), "l"(cache_hint)
+      : "memory");
+}
+
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          typename BarrierType = uint64_t>
+TL_DEVICE void
+tma_load_multicast(const CUtensorMap &descriptor, BarrierType &smem_mbar,
+                   void const *const smem_ptr, uint16_t multicast_mask,
+                   int32_t const &crd0, int32_t const &crd1,
+                   int32_t const &crd2, int32_t const &crd3) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_mbar;
+  if constexpr (std::is_pointer_v<BarrierType>) {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
+  } else {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
+  }
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::"
+      "bytes.multicast::cluster.L2::cache_hint"
+      " [%0], [%1, {%3, %4, %5, %6}], [%2], %7, %8;"
+      :
+      : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar), "r"(crd0),
+        "r"(crd1), "r"(crd2), "r"(crd3), "h"(multicast_mask), "l"(cache_hint)
+      : "memory");
+}
+
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          typename BarrierType = uint64_t>
+TL_DEVICE void tma_load_multicast(const CUtensorMap &descriptor,
+                                  BarrierType &smem_mbar,
+                                  void const *const smem_ptr,
+                                  uint16_t multicast_mask, int32_t const &crd0,
+                                  int32_t const &crd1, int32_t const &crd2,
+                                  int32_t const &crd3, int32_t const &crd4) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_mbar;
+  if constexpr (std::is_pointer_v<BarrierType>) {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
+  } else {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
+  }
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::complete_tx::"
+      "bytes.multicast::cluster.L2::cache_hint"
+      " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8, %9;"
+      :
+      : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar), "r"(crd0),
+        "r"(crd1), "r"(crd2), "r"(crd3), "r"(crd4), "h"(multicast_mask),
+        "l"(cache_hint)
+      : "memory");
+}
+
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
           typename BarrierType = uint64_t>
 TL_DEVICE void tma_load(const CUtensorMap &descriptor, BarrierType &smem_mbar,

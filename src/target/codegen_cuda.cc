@@ -1739,6 +1739,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+  auto print_mbarrier_obj = [&](PrimExpr barrier_id) {
+    std::ostringstream ss;
+    if (barrier_id.as<IntImmNode>()) {
+      ss << mbarrier_name_ << "[" << barrier_id << "]";
+    } else {
+      ss << this->PrintExpr(barrier_id);
+    }
+    return ss.str();
+  };
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
@@ -1804,6 +1813,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 1);
     std::string barrier_id = this->PrintExpr(op->args[0]);
     os << mbarrier_name_ + "[" + barrier_id + "]";
+  } else if (op->op.same_as(tl::mbarrier_arrive())) {
+    ICHECK_EQ(op->args.size(), 3);
+    this->PrintIndent();
+    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto cta_id = this->PrintExpr(op->args[1]);
+    auto pred = this->PrintExpr(op->args[2]);
+    this->stream << mbarrier_obj << ".arrive(" << cta_id << ", " << pred
+                 << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();
@@ -1888,6 +1905,35 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       if (i > 2)
         ss << ", ";
       ss << this->PrintExpr(op->args[i]);
+    }
+    ss << ");\n";
+    this->PrintIndent();
+    this->stream << ss.str();
+  } else if (op->op.same_as(tl::tma_load_multicast())) {
+    // args layout: [descriptor, mbarrier, smem_ptr, multicast_mask,
+    //               coord_0, ..., coord_{n-1}, eviction_policy]
+    std::ostringstream ss;
+    ICHECK_GE(op->args.size(), 5)
+        << "tma_load_multicast requires at least 5 args";
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_load_multicast<tl::CacheHintSm90::" << eviction_policy
+         << ">(";
+    } else {
+      ss << "tl::tma_load_multicast(";
+    }
+    // descriptor
+    ss << this->PrintExpr(op->args[0]) << ", ";
+    // mbarrier
+    ss << this->PrintExpr(op->args[1]) << ", ";
+    ss << this->PrintExpr(op->args[2]) << ", ";
+    // multicast_mask cast to uint16_t
+    ss << "(uint16_t)(" << this->PrintExpr(op->args[3]) << ")";
+    // global coordinates (args[4..N-2])
+    for (size_t i = 4; i < op->args.size() - 1; i++) {
+      ss << ", " << this->PrintExpr(op->args[i]);
     }
     ss << ");\n";
     this->PrintIndent();
@@ -2157,6 +2203,72 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
+  } else if (op->op.same_as(tl::tma_store_cluster())) {
+    // args: [dst_ptr, src_ptr, dst_cta, size_bytes, bar_ref]
+    //   dst_ptr   – address_of(dst_buf[offset])  (void*)
+    //   src_ptr   – address_of(src_buf[offset])  (void*)
+    //   dst_cta   – destination CTA rank          (int)
+    //   size_bytes– bytes to transfer             (uint32_t)
+    //   bar_ref   – mbarrier element              (uint64_t&)
+    ICHECK_EQ(op->args.size(), 5U) << "tma_store_cluster requires 5 args";
+    this->PrintIndent();
+    this->stream << "tl::tma_store_cluster(";
+    this->stream << this->PrintExpr(op->args[0]) << ", ";
+    this->stream << this->PrintExpr(op->args[1]) << ", ";
+    this->stream << "(int)(" << this->PrintExpr(op->args[2]) << "), ";
+    this->stream << "(uint32_t)(" << this->PrintExpr(op->args[3]) << "), ";
+    this->stream << this->PrintExpr(op->args[4]) << ");\n";
+
+  } else if (op->op.same_as(tl::ptx_cluster_store())) {
+    // arg 0: buffer var (handle)
+    // arg 1: value to store
+    // arg 2: dst block index
+    // arg 3: linearized index
+
+    ICHECK_EQ(op->args.size(), 4U);
+
+    std::string buffer_var = this->PrintExpr(op->args[0]);
+    std::string value = this->PrintExpr(op->args[1]);
+    std::string dst_block = this->PrintExpr(op->args[2]);
+    std::string index = this->PrintExpr(op->args[3]);
+
+    // We need to cast the buffer var to the correct type if it's not already.
+    // But `buffer_var` here is likely just the name of the variable.
+    // We need to handle the type of the value being stored.
+
+    // The generated code should look like:
+    // {
+    //   namespace cg = cooperative_groups;
+    //   cg::cluster_group cluster = cg::this_cluster();
+    //   auto* dst_ptr = cluster.map_shared_rank(&buffer[index], dst_block);
+    //   *dst_ptr = value;
+    // }
+
+    // However, `buffer[index]` might be an expression.
+    // We need to get the address of `buffer[index]`.
+    // If `buffer` is a pointer, then `&buffer[index]` is `buffer + index`.
+
+    // We need to know the type of the value to cast the pointer correctly if
+    // needed. But `map_shared_rank` is a template or returns a pointer to the
+    // same type? `T* map_shared_rank(T* addr, unsigned int rank)`
+
+    this->need_cooperative_groups_ = true;
+    this->PrintIndent();
+    this->stream << "{\n";
+    int cluster_scope = this->BeginScope();
+    this->PrintIndent();
+    this->stream << "namespace cg = cooperative_groups;\n";
+    this->PrintIndent();
+    this->stream << "cg::cluster_group cluster = cg::this_cluster();\n";
+    this->PrintIndent();
+    this->stream << "auto* dst_ptr = cluster.map_shared_rank(&" << buffer_var
+                 << "[" << index << "], " << dst_block << ");\n";
+    this->PrintIndent();
+    this->stream << "*dst_ptr = " << value << ";\n";
+    this->EndScope(cluster_scope);
+    this->PrintIndent();
+    this->stream << "}\n";
+
   } else if (op->op.same_as(tl::ptx_mma_sm70())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
@@ -3024,6 +3136,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << PrintExpr(op->args[i]);
     }
     os << ")";
+  } else if (op->op.same_as(tl::get_cluster_id())) {
+    ICHECK_EQ(op->args.size(), 0) << "tl.get_cluster_id expects no arguments.";
+    need_cluster_h_ = true;
+    os << "tl::block_rank_in_cluster()";
+  } else if (op->op.same_as(tl::get_cluster_block_nums())) {
+    ICHECK_EQ(op->args.size(), 0)
+        << "tl.get_cluster_block_nums expects no arguments.";
+    need_cluster_h_ = true;
+    os << "([]{auto s=tl::cluster_shape();return (int)(s.x*s.y*s.z);}())";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else if (op->op.same_as(tl::initialize_wgmma_descriptor())) {

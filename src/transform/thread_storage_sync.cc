@@ -456,11 +456,33 @@ private:
     if (barrier_id_map_.count(key)) {
       return {barrier_id_map_[key], thread_count_map_[key]};
     }
+    size_t thread_count = extent_tx * extent_ty * extent_tz;
+
+    // Special-case: enforce distinct, fixed barrier IDs for the common
+    // producer/consumer split (256-thread CTA -> two 128-thread groups).
+    // This avoids accidentally mixing the same barrier id between the two
+    // halves, which can deadlock when both halves use bar.sync.
+    if (thread_count == 128 && key.ty_min == key.ty_max &&
+        key.tz_min == key.tz_max) {
+      if (key.tx_min == 0 && key.tx_max == 127) {
+        size_t barrier_id =
+            static_cast<size_t>(ReservedNamedBarriers::kConsumer);
+        barrier_id_map_[key] = barrier_id;
+        thread_count_map_[key] = thread_count;
+        return {barrier_id, thread_count};
+      }
+      if (key.tx_min == 128 && key.tx_max == 255) {
+        size_t barrier_id =
+            static_cast<size_t>(ReservedNamedBarriers::kProducer);
+        barrier_id_map_[key] = barrier_id;
+        thread_count_map_[key] = thread_count;
+        return {barrier_id, thread_count};
+      }
+    }
 
     size_t barrier_id =
         barrier_id_map_.size() +
         static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
-    size_t thread_count = extent_tx * extent_ty * extent_tz;
 
     barrier_id_map_[key] = barrier_id;
     thread_count_map_[key] = thread_count;
@@ -1077,7 +1099,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       if (auto opt = op->op.as<Op>()) {
         const Op &call_op = opt.value();
         return call_op.same_as(tl::tma_load()) ||
-               call_op.same_as(tl::tma_load_im2col());
+               call_op.same_as(tl::tma_load_im2col()) ||
+               call_op.same_as(tl::tma_load_multicast());
       }
       return false;
     }();

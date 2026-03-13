@@ -12,7 +12,6 @@
 
 #include "../op/builtin.h"
 #include "../runtime/runtime.h"
-#include "./common/mbarrier.h"
 
 namespace tvm {
 namespace tl {
@@ -20,6 +19,11 @@ namespace tl {
 using namespace tir;
 
 #if (CUDA_MAJOR_VERSION >= 12)
+// Barrier IDs 0–2 are reserved: 0 by InjectTmaBarrier (descriptor-based TMA
+// loads) and 1–2 by the backend for internal synchronization (e.g. AllReduce).
+// User-managed barriers must start after this reserved range.
+static constexpr int kReservedBarriers = 3;
+
 class LowerHopperIntrin : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
@@ -138,6 +142,16 @@ public:
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
           Array<Stmt> stmt_seq;
+          if (num_required_barriers_ > 0) {
+            // num_required_barriers_ already accounts for kReservedBarriers
+            // and covers the highest ID referenced by any barrier init,
+            // whether from create_list_of_mbarrier() or a direct
+            // ptx_init_barrier_thread_count() call.
+            auto alloc_mbarrier =
+                Evaluate(Call(DataType::Handle(), builtin::create_barriers(),
+                              {num_required_barriers_}));
+            stmt_seq.push_back(alloc_mbarrier);
+          }
 
           auto stmts = prefetch_calls_;
           stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
@@ -171,16 +185,10 @@ public:
 
           Stmt result = SeqStmt(stmt_seq);
 
-          if (!init_mbarrier_calls_.empty()) {
-            mbarrier_buffer_ = CreateMBarrierBuffer(
-                injected_mbarrier_name_, init_mbarrier_calls_.size());
-            result = DeclBuffer(mbarrier_buffer_, result);
-            result = Allocate(mbarrier_buffer_->data, mbarrier_buffer_->dtype,
-                              mbarrier_buffer_->shape, const_true(), result);
-          }
-
           prefetch_calls_.clear();
           init_mbarrier_calls_.clear();
+          num_managed_barriers_ = 0;
+          num_required_barriers_ = 0;
           return AttrStmt(op->node, op->attr_key, op->value, result);
         }
       }
@@ -206,28 +214,91 @@ public:
       }
       return var;
     } else if (call->op.same_as(create_list_of_mbarrier())) {
-      ICHECK(init_mbarrier_calls_.empty());
+      // ICHECK(init_mbarrier_calls_.empty());
       int num_barriers = static_cast<int>(call->args.size());
+      // Offset by kReservedBarriers so user IDs begin after the reserved range.
+      int barrier_base = num_managed_barriers_ + kReservedBarriers;
+      num_managed_barriers_ += num_barriers;
+      // Track the total slots needed: highest assigned ID + 1.
+      num_required_barriers_ =
+          std::max(num_required_barriers_, barrier_base + num_barriers);
       for (int i = 0; i < num_barriers; i++) {
-        PrimExpr mbarrier = Call(DataType::Handle(), get_mbarrier(), {i});
+        PrimExpr mbarrier =
+            Call(DataType::Handle(), get_mbarrier(), {barrier_base + i});
         init_mbarrier_calls_.push_back(Evaluate(
             Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
                  {mbarrier, call->args[i]})));
       }
       return 0;
+    } else if (call->op.same_as(builtin::ptx_init_barrier_thread_count())) {
+      // args[0] is get_mbarrier(id); extract id to size the allocation.
+      if (const auto *mbar_call = call->args[0].as<CallNode>()) {
+        if (mbar_call->op.same_as(get_mbarrier())) {
+          if (const auto *id = mbar_call->args[0].as<IntImmNode>()) {
+            // Slots needed = id + 1 (IDs are 0-based).
+            num_required_barriers_ =
+                std::max(num_required_barriers_, (int)(id->value + 1));
+          }
+        }
+      }
+      init_mbarrier_calls_.push_back(Evaluate(tvm::ffi::GetRef<Call>(call)));
+      return 0;
+    } else if (call->op.same_as(get_mbarrier())) {
+      // All get_mbarrier(i) calls that reach this branch carry a pipeline
+      // stage index (0, 1, …) emitted by InjectPipeline, InjectTmaBarrier,
+      // or MbarrierRewriter.  Shift by kReservedBarriers so they address
+      // the correct slot in the barrier array, which starts user-managed
+      // barriers after the reserved prefix.
+      //
+      // get_mbarrier calls that live inside create_list_of_mbarrier or
+      // ptx_init_barrier_thread_count are consumed by their own early-return
+      // branches above and never reach this handler, so there is no risk of
+      // double-shifting.
+      return Call(call->dtype, get_mbarrier(),
+                  {call->args[0] + kReservedBarriers});
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }
   }
 
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    Stmt new_stmt = StmtExprMutator::VisitStmt_(op);
+    if (const auto *if_node = new_stmt.as<IfThenElseNode>()) {
+      if (IsNoOp(if_node->then_case) && (!if_node->else_case.defined() ||
+                                         IsNoOp(if_node->else_case.value()))) {
+        return Evaluate(0);
+      }
+    }
+    return new_stmt;
+  }
+
+  bool IsNoOp(const Stmt &stmt) {
+    if (const auto *eval = stmt.as<EvaluateNode>()) {
+      return is_const_int(eval->value, 0);
+    } else if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const auto &s : seq->seq) {
+        if (!IsNoOp(s))
+          return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
 private:
   Array<Stmt> prefetch_calls_;
   Array<Stmt> init_mbarrier_calls_;
+  // Tracks the next free user-barrier slot (offset within the user range).
+  int num_managed_barriers_ = 0;
+  // Tracks 1 + the highest barrier ID referenced by any init call, across
+  // both create_list_of_mbarrier() and direct ptx_init_barrier_thread_count()
+  // paths. Used to size create_barriers() so every get_mbarrier(id) has a
+  // backing slot.
+  int num_required_barriers_ = 0;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
-  Buffer mbarrier_buffer_;
 };
 
 using namespace tir::transform;

@@ -651,6 +651,7 @@ private:
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_load_multicast()) ||
         op->op.same_as(tl::tma_store())) {
       // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
@@ -658,6 +659,12 @@ private:
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       in_tma_context_ = false;
       return call;
+    }
+    if (op->op.same_as(tl::tma_store_cluster())) {
+      // SM-to-SM bulk async copy does not use a tensor-map descriptor, so
+      // shared-memory swizzle must still be reflected in pointer/index
+      // remapping.
+      return Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
 
     if (is_ptx_) {
