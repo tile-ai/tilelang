@@ -94,8 +94,14 @@ private:
                 }
                 // LOG(INFO) << "Found 2SM TCGEN5MMA!";
                 has_2sm_tcgen5mma_ = true;
-                // NOTE(wt): Currently this only act as a detector of tcgen05
-                // 2sm, while we may add the lower logic here in the future.
+                // Annotate the GemmPy CallNode with use_2cta so that
+                // Python lower code can read it and pass disable_2cta=False.
+                auto new_annotations = call->annotations;
+                new_annotations.Set(attr::kUse2Cta,
+                                    IntImm(DataType::Int(32), 1));
+                auto new_call = Call(call->dtype, call->op, call->args,
+                                     new_annotations, call->span);
+                return Evaluate(new_call);
               }
             }
           }

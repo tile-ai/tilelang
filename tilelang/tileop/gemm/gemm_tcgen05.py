@@ -74,9 +74,13 @@ class GemmTCGEN5(GemmBase):
         a_is_k_major = not self.trans_A
         b_is_k_major = self.trans_B
 
+        annotations = getattr(self.gemm_node, "annotations", {})
+        use_2cta = bool(annotations.get("use_2cta", 0))
+        mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
+
         if self.is_gemm_ss():
-            a_continuity = self.M if a_is_k_major else 4 * self.K // m_warp
-            b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
+            a_continuity = self.K if a_is_k_major else self.M
+            b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])  # don't use N, as it may be for 2cta
 
             return {
                 self.A: self.infer_shared_layout(a_continuity)(self.A),
@@ -120,7 +124,10 @@ class GemmTCGEN5(GemmBase):
         if not (self.is_gemm_ss() or self.is_gemm_ts()):
             raise ValueError(f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}")
 
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K)
+        annotations = getattr(self.gemm_node, "annotations", {})
+        use_2cta = bool(annotations.get("use_2cta", 0))
+        mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.meta
 
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
