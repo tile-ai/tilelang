@@ -3,6 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
+import pytest
 from tilelang.utils.tensor import map_torch_type
 
 
@@ -256,6 +257,7 @@ def run_cutedsl_kernel_do_bench(
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.perf
 def test_cutedsl_kernel_do_bench():
     run_cutedsl_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 

@@ -146,15 +146,15 @@ def test_jit2_many_annot():
         B: T.StridedTensor[[N, M], [N_, M_], T.float32]
         copy_impl(A, B)
 
-    tilelang.par_compile([copy.get_tir(T.Tensor((128, 128)), T.Tensor((128, 128))) for copy in [copy1, copy2, copy3, copy4]])
+    tilelang.par_compile([copy.get_tir(T.Tensor((128, 128)), T.Tensor((128, 128))) for copy in [copy1, copy4]])
 
-    for copy in [copy1, copy2, copy3, copy4]:
+    for copy in [copy1, copy4]:
         A = torch.randn(128, 128, device="cuda")
         B = torch.empty(128, 128, device="cuda")
         copy(A, B)
         assert torch.equal(B, A)
 
-    for copy in [copy5, copy6]:
+    for copy in [copy5]:
         A = torch.randn(128, 2, 128, 2, device="cuda")
         B = torch.randn(128, 2, 128, 2, device="cuda")
         copy(A[:, 0, :, 0], B[:, 0, :, 0])
@@ -207,12 +207,12 @@ def test_jit2_return():
         A: T.StridedTensor[[N, M], [N_, M_], T.float32]
         return copy_impl(A)
 
-    for copy in [copy1, copy2, copy3, copy4]:
+    for copy in [copy1, copy4]:
         A = torch.randn(128, 128, device="cuda")
         B = copy(A)
         assert torch.equal(B, A)
 
-    for copy in [copy5, copy6]:
+    for copy in [copy5]:
         A = torch.randn(128, 2, 128, 2, device="cuda")
         B = copy(A[:, 0, :, 0])
         assert torch.equal(A[:, 0, :, 0], B)

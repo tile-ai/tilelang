@@ -3,6 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
+import pytest
 from tilelang.utils.tensor import map_torch_type
 
 
@@ -208,6 +209,7 @@ def run_nvrtc_kernel_do_bench(
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.perf
 def test_nvrtc_kernel_do_bench():
     run_nvrtc_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
