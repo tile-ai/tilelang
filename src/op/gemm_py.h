@@ -36,6 +36,7 @@ public:
   int kPack_ = 1;
   int wgWait_ = 0;
   mutable GemmWarpPolicy policy_;
+  Map<String, ObjectRef> annotations_;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmPy", GemmPyNode, TileOperatorNode);
 
@@ -62,7 +63,8 @@ public:
         .def_ro("cCoords", &GemmPyNode::cCoords_)
         .def_ro("kPack", &GemmPyNode::kPack_)
         .def_ro("wgWait", &GemmPyNode::wgWait_)
-        .def_ro("policy", &GemmPyNode::policy_);
+        .def_ro("policy", &GemmPyNode::policy_)
+        .def_ro("annotations", &GemmPyNode::annotations_);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;

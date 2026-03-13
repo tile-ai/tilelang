@@ -181,7 +181,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
-        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
+        meta = self.meta
         if len(meta) != 5:
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
@@ -406,7 +406,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
-        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
+        meta = self.meta
         if len(meta) != 5:
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
@@ -597,7 +597,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         n = int(tmem_buf.shape[1])
         k = int(self.chunk)
 
-        meta = self.get_tcgen5_mma_meta(m, n, k)
+        meta = self.meta
         if len(meta) != 5:
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
@@ -623,6 +623,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 ]
             if atom_m == 128:
                 # Layout D
+                print(f"Layout D: ai={ai}, aj={aj}, atom_idx={atom_idx}")
                 return [
                     ai,
                     aj + atom_idx * atom_n,
@@ -646,11 +647,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         return Layout([m, n], forward)
 
-    def get_tcgen5_mma_meta(self, m: int, n: int, k: int):
-        """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta)."""
-        pass_ctx = tilelang.transform.get_pass_context()
-        disable_2cta = pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_2CTA_TCGEN5MMA, False)
-        return _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype), bool(disable_2cta))
+    def get_tcgen5_mma_meta(self, m: int, n: int, k: int, disable_2cta: bool):
+        """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta), and record them in `self.meta`."""
+        self.meta = _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype), bool(disable_2cta))
 
     def get_tcgen5_instr_desc(
         self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool, b_is_k_major: bool, scale_in_a: int, scale_in_b: int
