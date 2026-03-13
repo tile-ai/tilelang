@@ -52,8 +52,6 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
 
         # Wait for all tcgen5 to finish
         T.mbarrier_wait_parity(tmem_full, 0)
-
-        T.sync_threads()  # TileLang won't generate this if not annotated
         T.copy(C_tmem, C_local)
         if use_tma_store:
             T.copy(C_local, C_shared)
@@ -129,7 +127,7 @@ def main():
     M, N, K = 8192, 8192, 8192
     block_M, block_N, block_K = 128, 256, 64
     in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
-    enable_2cta_tcgen5mma = True
+    enable_2cta_tcgen5mma = False
     num_stages = 6 if enable_2cta_tcgen5mma else 4  # Each cta only needs to load half of B, enabling larger stages
     kernel = gemm_2cta if enable_2cta_tcgen5mma else gemm
 
