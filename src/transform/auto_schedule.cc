@@ -2575,14 +2575,31 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     pro_and_warpgroup_stmt = if_then_else;
   }
 
+  bool need_shared_barrier_for_epi = false;
+  bool need_tmem_barrier_for_epi = false;
+  if (wg_epi_neutral_structure) {
+    for (const auto *warpgroup_structure :
+         {wg0_structure.get(), wg1_structure.get()}) {
+      need_shared_barrier_for_epi =
+          need_shared_barrier_for_epi ||
+          HasSharedWriteReadDependency(warpgroup_structure,
+                                       wg_epi_neutral_structure.get());
+      need_tmem_barrier_for_epi =
+          need_tmem_barrier_for_epi ||
+          HasTmemWriteReadDependency(warpgroup_structure,
+                                     wg_epi_neutral_structure.get());
+    }
+  }
+
   Stmt combined_stmt;
   if (!IsEvaluateZero(pro_and_warpgroup_stmt) &&
       !IsEvaluateZero(epi_neutral_body)) {
     // Both have statements: insert barriers for warpgroup-to-epi_neutral
     // synchronization
-    combined_stmt = InsertBarriersForNeutralSync(
+    combined_stmt = InsertBarriersForNeutralSyncWithDependency(
         pro_and_warpgroup_stmt, epi_neutral_body, barrier_buffers, barrier_map,
-        barrier_count);
+        barrier_count, need_shared_barrier_for_epi, need_tmem_barrier_for_epi,
+        thread_var->var, 0, thread_count[0]);
   } else if (!IsEvaluateZero(epi_neutral_body)) {
     combined_stmt = epi_neutral_body;
   } else {

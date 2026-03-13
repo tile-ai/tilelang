@@ -181,6 +181,18 @@ static Stmt makeBarrierArrive(PrimExpr barrier_expr, int cta_id = -1,
       Call(DataType::Handle(), builtin::ptx_arrive_barrier(), args));
 }
 
+static Stmt makeTcgen05MmaArrive(Buffer barrier_buffer) {
+  Array<PrimExpr> access_ptr_args;
+  access_ptr_args.push_back(tir::TypeAnnotation(DataType::UInt(64)));
+  access_ptr_args.push_back(barrier_buffer->data);
+  access_ptr_args.push_back(barrier_buffer->elem_offset);
+  access_ptr_args.push_back(IntImm(DataType::Int(32), 1));
+  access_ptr_args.push_back(IntImm(DataType::Int(32), 3));
+  auto access_ptr =
+      Call(DataType::Handle(), builtin::tvm_access_ptr(), access_ptr_args);
+  return Evaluate(Call(DataType::Handle(), tcgen05_mma_arrive(), {access_ptr}));
+}
+
 // Create a barrier_wait statement for the given barrier expression and parity
 // Equivalent to T.barrier_wait(barrier_expr, parity) in Python
 // barrier_expr should be BufferLoad(barrier_buffer, {0}) where barrier_buffer
@@ -191,49 +203,114 @@ static Stmt makeBarrierWait(PrimExpr barrier_expr, PrimExpr parity) {
   return Evaluate(call);
 }
 
+static bool IsRegularSharedScope(const String &scope) {
+  return scope == "shared" || scope == "shared.dyn";
+}
+
+static bool IsTmemScope(const String &scope) { return scope == "shared.tmem"; }
+
+static bool HasWriteReadDependencyByScope(
+    const IRStructure *producer, const IRStructure *consumer,
+    const std::function<bool(const String &)> &scope_matcher) {
+  if (!producer || !consumer) {
+    return false;
+  }
+
+  auto producer_writes = producer->GetWriteRegions();
+  auto consumer_reads = consumer->GetReadRegions();
+
+  for (const auto &write_region : producer_writes) {
+    const Buffer &write_buffer = write_region->buffer;
+    if (!scope_matcher(write_buffer.scope())) {
+      continue;
+    }
+    for (const auto &read_region : consumer_reads) {
+      if (write_buffer.same_as(read_region->buffer)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool HasSharedWriteReadDependency(const IRStructure *producer,
+                                         const IRStructure *consumer) {
+  return HasWriteReadDependencyByScope(
+      producer, consumer,
+      [](const String &scope) { return IsRegularSharedScope(scope); });
+}
+
+static bool HasTmemWriteReadDependency(const IRStructure *producer,
+                                       const IRStructure *consumer) {
+  return HasWriteReadDependencyByScope(
+      producer, consumer,
+      [](const String &scope) { return IsTmemScope(scope); });
+}
+
+static Stmt InsertBarriersForNeutralSyncWithDependency(
+    Stmt producer_body, Stmt consumer_body,
+    std::vector<Buffer> &barrier_buffers,
+    Map<ObjectRef, ObjectRef> &barrier_map, PrimExpr total_thread_count,
+    bool need_regular_barrier, bool need_tmem_barrier, Var thread_var = Var(),
+    PrimExpr tensor_core_wg_start = PrimExpr(),
+    PrimExpr tensor_core_wg_end = PrimExpr()) {
+  if (IsEvaluateZero(producer_body) || IsEvaluateZero(consumer_body)) {
+    return SeqStmt({producer_body, consumer_body});
+  }
+
+  if (!need_regular_barrier && !need_tmem_barrier) {
+    return SeqStmt({producer_body, consumer_body});
+  }
+
+  std::vector<Stmt> arrive_stmts;
+  std::vector<Stmt> wait_stmts;
+
+  if (need_regular_barrier) {
+    Buffer barrier_buffer =
+        makeBarrierBuffer(total_thread_count, "neutral_sync_shared_barrier", 1,
+                          barrier_buffers, barrier_map);
+    PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
+    arrive_stmts.push_back(makeBarrierArrive(barrier_load));
+    wait_stmts.push_back(makeBarrierWait(barrier_load, 0));
+  }
+
+  if (need_tmem_barrier) {
+    // TMEM barrier: arrive_count = 1 (only tensor core warp arrives)
+    Buffer barrier_buffer = makeBarrierBuffer(IntImm(DataType::Int(32), 1),
+                                              "neutral_sync_tmem_barrier", 1,
+                                              barrier_buffers, barrier_map);
+    PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
+
+    // tcgen05_mma_arrive only in tensor core warpgroup
+    Stmt tmem_arrive = makeTcgen05MmaArrive(barrier_buffer);
+    if (tensor_core_wg_start.defined() && tensor_core_wg_end.defined()) {
+      // Wrap in if condition for tensor core warpgroup only
+      // Condition: tensor_core_wg_start <= thread_idx < tensor_core_wg_end
+      tmem_arrive = IfThenElse((thread_var >= tensor_core_wg_start) &&
+                                   (thread_var < tensor_core_wg_end),
+                               tmem_arrive, Evaluate(0));
+    }
+    arrive_stmts.push_back(tmem_arrive);
+    wait_stmts.push_back(makeBarrierWait(barrier_load, 0));
+  }
+
+  std::vector<Stmt> stmts;
+  stmts.push_back(producer_body);
+  stmts.insert(stmts.end(), arrive_stmts.begin(), arrive_stmts.end());
+  stmts.insert(stmts.end(), wait_stmts.begin(), wait_stmts.end());
+  stmts.push_back(consumer_body);
+  return SeqStmt(stmts);
+}
+
 // Insert barriers between neutral tasks and warpgroup-specific work
 // This ensures neutral tasks complete before any warpgroup-specific work begins
 static Stmt InsertBarriersForNeutralSync(Stmt neutral_body, Stmt warpgroup_body,
                                          std::vector<Buffer> &barrier_buffers,
                                          Map<ObjectRef, ObjectRef> &barrier_map,
                                          PrimExpr total_thread_count) {
-  // If either body is empty, no barriers needed
-  if (IsEvaluateZero(neutral_body) || IsEvaluateZero(warpgroup_body)) {
-    return SeqStmt({neutral_body, warpgroup_body});
-  }
-
-  // Allocate barrier buffer for neutral-to-warpgroup synchronization
-  PrimExpr arrive_count = total_thread_count;
-  Buffer barrier_buffer =
-      makeBarrierBuffer(arrive_count, "neutral_warpgroup_barrier", 1,
-                        barrier_buffers, barrier_map);
-
-  // Create BufferLoad expression for barrier[0]
-  PrimExpr barrier_load = BufferLoad(barrier_buffer, {0});
-
-  // Use barrier buffer for neutral-to-warpgroup synchronization
-  Stmt arrive_barrier = makeBarrierArrive(barrier_load);
-  Stmt wait_barrier = makeBarrierWait(barrier_load, 0);
-
-  // Combine: neutral_body -> arrive_barrier -> wait_barrier -> warpgroup_body
-  std::vector<Stmt> stmts;
-  if (!IsEvaluateZero(neutral_body)) {
-    stmts.push_back(neutral_body);
-  }
-  stmts.push_back(arrive_barrier);
-  stmts.push_back(wait_barrier);
-  if (!IsEvaluateZero(warpgroup_body)) {
-    stmts.push_back(warpgroup_body);
-  }
-
-  Stmt sync_body;
-  if (stmts.size() == 1) {
-    sync_body = stmts[0];
-  } else {
-    sync_body = SeqStmt(stmts);
-  }
-
-  return sync_body;
+  return InsertBarriersForNeutralSyncWithDependency(
+      neutral_body, warpgroup_body, barrier_buffers, barrier_map,
+      total_thread_count, true, false);
 }
 
 // StmtExprMutator to rewrite BufferLoad/BufferStore for multi-version buffers
