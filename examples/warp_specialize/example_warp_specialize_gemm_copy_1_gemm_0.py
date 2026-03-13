@@ -84,20 +84,20 @@ def run_regression_perf(M=16384, N=16384, K=16384):
     jit_kernel = matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K)
     print(jit_kernel.get_kernel_source())
 
-    # import torch
+    import torch
 
-    # a = torch.randn(M, K, device="cuda", dtype=torch.float16)
-    # b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
 
-    # c = jit_kernel(a, b)
+    c = jit_kernel(a, b)
 
-    # ref_c = a @ b
+    ref_c = a @ b
 
-    # torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 
-    # profiler = jit_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    profiler = jit_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
-    # return profiler.do_bench(backend="cupti")
+    return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":

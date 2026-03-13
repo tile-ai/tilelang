@@ -105,9 +105,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
             tx = T.get_thread_binding()
 
-            T.copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :h_dim], Q_shared_l)
-            T.copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, h_dim:], Q_shared_r)
-            T.copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.tma_copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :h_dim], Q_shared_l, barrier=q_shared_ready_barrier)
+            T.tma_copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, h_dim:], Q_shared_r, barrier=q_shared_ready_barrier)
+            T.tma_copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_pe_shared, barrier=q_shared_ready_barrier)
             T.barrier_arrive(q_shared_ready_barrier)
             T.barrier_wait(q_shared_ready_barrier, 0)
 
@@ -120,13 +120,13 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.fill(acc_o_l, 0)
                 T.fill(logsum_0, 0)
 
-                T.copy(KV[bid, block_N : 2 * block_N, cur_kv_head, :h_dim], KV_shared_1_l)
+                T.tma_copy(KV[bid, block_N : 2 * block_N, cur_kv_head, :h_dim], KV_shared_1_l, barrier=kv_shared_1_l_is_ready)
                 T.barrier_arrive(kv_shared_1_l_is_ready)
 
-                T.copy(KV[bid, block_N : 2 * block_N, cur_kv_head, h_dim:], KV_shared_1_r)
+                T.tma_copy(KV[bid, block_N : 2 * block_N, cur_kv_head, h_dim:], KV_shared_1_r, barrier=kv_shared_1_r_is_ready)
                 T.barrier_arrive(kv_shared_1_r_is_ready)
 
-                T.copy(K_pe[bid, block_N : 2 * block_N, cur_kv_head, :], K_pe_shared_1)
+                T.tma_copy(K_pe[bid, block_N : 2 * block_N, cur_kv_head, :], K_pe_shared_1, barrier=kv_shared_1_pe_is_ready)
                 T.barrier_arrive(kv_shared_1_pe_is_ready)
 
                 for k in T.serial(loop_range):
@@ -171,7 +171,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.barrier_wait(scale_1_ready_barrier, k % 2)
 
                     if k < loop_range - 1:
-                        T.copy(KV[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, :h_dim], KV_shared_0_l)
+                        T.tma_copy(
+                            KV[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, :h_dim],
+                            KV_shared_0_l,
+                            barrier=kv_shared_0_l_is_ready,
+                        )
                         T.barrier_arrive(kv_shared_0_l_is_ready)
 
                     # Step 11.
@@ -191,10 +195,18 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.gemm(SP1_shared, KV_shared_1_l, acc_o_l)
 
                     if k < loop_range - 1:
-                        T.copy(KV[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, :h_dim], KV_shared_1_l)
+                        T.tma_copy(
+                            KV[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, :h_dim],
+                            KV_shared_1_l,
+                            barrier=kv_shared_1_l_is_ready,
+                        )
                         T.barrier_arrive(kv_shared_1_l_is_ready)
 
-                        T.copy(K_pe[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, :], K_pe_shared_1)
+                        T.tma_copy(
+                            K_pe[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, :],
+                            K_pe_shared_1,
+                            barrier=kv_shared_1_pe_is_ready,
+                        )
                         T.barrier_arrive(kv_shared_1_pe_is_ready)
 
                 T.copy(logsum_0, logsum)
@@ -210,11 +222,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.fill(acc_o_r, 0)
                 T.fill(logsum_1, 0)
 
-                T.copy(KV[bid, :block_N, cur_kv_head, :h_dim], KV_shared_0_l)
+                T.tma_copy(KV[bid, :block_N, cur_kv_head, :h_dim], KV_shared_0_l, barrier=kv_shared_0_l_is_ready)
                 T.barrier_arrive(kv_shared_0_l_is_ready)
-                T.copy(KV[bid, :block_N, cur_kv_head, h_dim:], KV_shared_0_r)
+                T.tma_copy(KV[bid, :block_N, cur_kv_head, h_dim:], KV_shared_0_r, barrier=kv_shared_0_r_is_ready)
                 T.barrier_arrive(kv_shared_0_r_is_ready)
-                T.copy(K_pe[bid, :block_N, cur_kv_head, :], K_pe_shared_0)
+                T.tma_copy(K_pe[bid, :block_N, cur_kv_head, :], K_pe_shared_0, barrier=kv_shared_0_pe_is_ready)
                 T.barrier_arrive(kv_shared_0_pe_is_ready)
 
                 for k in T.serial(loop_range):
@@ -263,7 +275,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.barrier_arrive(s_shared_ready_barrier)
 
                     if k < loop_range - 1:
-                        T.copy(KV[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, h_dim:], KV_shared_1_r)
+                        T.tma_copy(
+                            KV[bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, h_dim:],
+                            KV_shared_1_r,
+                            barrier=kv_shared_1_r_is_ready,
+                        )
                         T.barrier_arrive(kv_shared_1_r_is_ready)
 
                     T.barrier_wait(p0_1_1_ready_barrier, k % 2)
@@ -271,10 +287,18 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.gemm(SP0_shared, KV_shared_0_r, acc_o_r)
 
                     if k < loop_range - 1:
-                        T.copy(KV[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, h_dim:], KV_shared_0_r)
+                        T.tma_copy(
+                            KV[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, h_dim:],
+                            KV_shared_0_r,
+                            barrier=kv_shared_0_r_is_ready,
+                        )
                         T.barrier_arrive(kv_shared_0_r_is_ready)
 
-                        T.copy(K_pe[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, :], K_pe_shared_0)
+                        T.tma_copy(
+                            K_pe[bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, :],
+                            K_pe_shared_0,
+                            barrier=kv_shared_0_pe_is_ready,
+                        )
                         T.barrier_arrive(kv_shared_0_pe_is_ready)
 
                 T.barrier_wait(lse_0_ready_barrier, 0)

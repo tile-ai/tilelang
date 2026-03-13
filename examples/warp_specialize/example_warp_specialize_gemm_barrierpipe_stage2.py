@@ -30,8 +30,16 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
             for ko in range(T.ceildiv(K, block_K)):
                 with T.ws(1):
                     T.mbarrier_wait_parity(mbarrier=mbars[ko % num_stages + num_stages], parity=((ko // num_stages) % num_stages) ^ 1)
-                    T.copy(A[by * block_M : (by + 1) * block_M, ko * block_K : (ko + 1) * block_K], A_shared[ko % num_stages, :, :])
-                    T.copy(B[ko * block_K : (ko + 1) * block_K, bx * block_N : (bx + 1) * block_N], B_shared[ko % num_stages, :, :])
+                    T.tma_copy(
+                        A[by * block_M : (by + 1) * block_M, ko * block_K : (ko + 1) * block_K],
+                        A_shared[ko % num_stages, :, :],
+                        barrier=mbars[ko % num_stages],
+                    )
+                    T.tma_copy(
+                        B[ko * block_K : (ko + 1) * block_K, bx * block_N : (bx + 1) * block_N],
+                        B_shared[ko % num_stages, :, :],
+                        barrier=mbars[ko % num_stages],
+                    )
                     T.mbarrier_arrive(mbarrier=mbars[ko % num_stages])
                 with T.ws(0):
                     T.mbarrier_wait_parity(mbarrier=mbars[ko % num_stages], parity=(ko // num_stages) % num_stages)
