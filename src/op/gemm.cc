@@ -106,8 +106,7 @@ TileOperator GemmNode::Clone() const {
 bool GemmNode::allowTcgen5Mma(Target target) const {
   return TargetIsSm100(target) &&
          ((IsSharedBuffer(a_) || a_.scope() == "shared.tmem") &&
-          IsSharedBuffer(b_) &&
-          c_.scope() == "shared.tmem") &&
+          IsSharedBuffer(b_) && c_.scope() == "shared.tmem") &&
          GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype).first;
 }
 

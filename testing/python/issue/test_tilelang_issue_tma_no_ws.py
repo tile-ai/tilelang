@@ -208,9 +208,7 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
             T.annotate_layout(
                 {
                     E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="9.0", block_k=block_k),
-                    E_shared: make_cutlass_metadata_layout(
-                        E_shared, mma_dtype=T.float16, arch="9.0", block_k=block_k
-                    ),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="9.0", block_k=block_k),
                 }
             )
 

@@ -1,5 +1,5 @@
-#include "common/constr_visitor.h"
 #include "../op/utils.h"
+#include "common/constr_visitor.h"
 #include "layout_reducer.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ffi/base_details.h"

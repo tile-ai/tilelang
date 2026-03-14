@@ -6,8 +6,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../op/utils.h"
 #include "../op/builtin.h"
+#include "../op/utils.h"
 #include <algorithm>
 #include <functional>
 #include <limits>

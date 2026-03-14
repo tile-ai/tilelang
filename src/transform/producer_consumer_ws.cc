@@ -730,13 +730,14 @@ private:
     PrimExpr stage_expr = FloorMod(linear_idx, num_stages);
     PrimExpr parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
 
-    std::vector<Array<Stmt>> producer_loop_prefix_stmts(extractor.blocks.size());
-    std::vector<bool> moved_compute_stmts(extractor.compute_stmts.size(), false);
+    std::vector<Array<Stmt>> producer_loop_prefix_stmts(
+        extractor.blocks.size());
+    std::vector<bool> moved_compute_stmts(extractor.compute_stmts.size(),
+                                          false);
     int compute_cursor = 0;
     for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-      bool is_first_in_group =
-          ti == 0 || !remap_pure_tma_barriers_ ||
-          block_group[ti] != block_group[ti - 1];
+      bool is_first_in_group = ti == 0 || !remap_pure_tma_barriers_ ||
+                               block_group[ti] != block_group[ti - 1];
       if (!is_first_in_group) {
         continue;
       }
