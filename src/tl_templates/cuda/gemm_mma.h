@@ -46,6 +46,8 @@ using _X = Underscore;
 #include <cute/arch/mma_sm120.hpp>
 #include <cute/arch/mma_sm80.hpp>
 TL_DISPATCH_MMA_TEMPLATE(fp4_e2_t, fp4_e2_t, float, SM120_16x8x32_TN)
+TL_DISPATCH_MMA_TEMPLATE(fp8_e4_t, fp4_e2_t, float, SM120_16x8x32_TN)
+TL_DISPATCH_MMA_TEMPLATE(fp4_e2_t, fp8_e4_t, float, SM120_16x8x32_TN)
 TL_DISPATCH_MMA_TEMPLATE(fp8_e4_t, fp8_e4_t, float, SM120_16x8x32_TN)
 TL_DISPATCH_MMA_TEMPLATE(fp8_e5_t, fp8_e5_t, float, SM120_16x8x32_TN)
 TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
