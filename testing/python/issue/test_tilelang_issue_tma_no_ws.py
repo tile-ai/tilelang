@@ -3,6 +3,7 @@ import re
 import tilelang
 import tilelang.testing
 from tilelang import language as T
+from tilelang.layout import make_cutlass_metadata_layout
 import torch
 
 
@@ -179,6 +180,65 @@ def test_pure_tma_warp_specialized_does_not_emit_cp_async_arrive():
     ref = torch.matmul(a.to(torch.float32), b.to(torch.float32)).to(torch.float16)
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
     torch.cuda.synchronize()
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_sparse_ws_regular_metadata_copy_stays_in_producer():
+    """Ordinary global->shared metadata copies should stay in the producer."""
+
+    M, N, K = 128, 128, 256
+    block_m = block_n = 128
+    block_k = 128
+    num_stages = 2
+    threads = 128
+
+    @T.prim_func
+    def sparse_tensorcore_metadata_copy(
+        A_sparse: T.Tensor((M, K // 2), T.float16),
+        E: T.Tensor((M, K // 8), "uint8"),
+        B: T.Tensor((K, N), T.float16),
+        C: T.Tensor((M, N), T.float16),
+    ):
+        with T.Kernel(T.ceildiv(N, block_n), T.ceildiv(M, block_m), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared((block_m, block_k // 2), T.float16)
+            B_shared = T.alloc_shared((block_k, block_n), T.float16)
+            E_shared = T.alloc_shared((block_m, block_k // 8), "uint8")
+            C_local = T.alloc_fragment((block_m, block_n), T.float32)
+
+            T.annotate_layout(
+                {
+                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="9.0", block_k=block_k),
+                    E_shared: make_cutlass_metadata_layout(
+                        E_shared, mma_dtype=T.float16, arch="9.0", block_k=block_k
+                    ),
+                }
+            )
+
+            T.clear(C_local)
+            for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
+                T.copy(E[by * block_m, k * block_k // 8], E_shared)
+                T.copy(A_sparse[by * block_m, k * block_k // 2], A_shared)
+                T.copy(B[k * block_k, bx * block_n], B_shared)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False)
+
+            T.copy(C_local, C[by * block_m, bx * block_n])
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+    }
+    kernel = _compile_tvm_ffi(sparse_tensorcore_metadata_copy, pass_configs, out_idx=[3])
+
+    src = kernel.get_kernel_source()
+    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
+    consumer_idx = src.index("} else {", producer_idx)
+    metadata_copy_idx = src.index("*(uchar2*)(E +")
+    gemm_idx = src.index("tl::gemm_sp_ss<")
+
+    assert producer_idx < metadata_copy_idx < consumer_idx
+    assert consumer_idx < gemm_idx
+    assert "*(uchar2*)(E +" not in src[consumer_idx:]
 
 
 if __name__ == "__main__":

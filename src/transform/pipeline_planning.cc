@@ -6,6 +6,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../op/utils.h"
 #include "../op/builtin.h"
 #include <algorithm>
 #include <functional>
@@ -299,8 +300,7 @@ private:
 
     is_global_read_ = false;
     this->VisitExpr(op->value);
-    if (is_global_read_ && (store_buffer.scope() == "shared" ||
-                            store_buffer.scope() == "shared.dyn")) {
+    if (is_global_read_ && IsSharedBuffer(store_buffer)) {
       is_global_copy_pattern_ = true;
     }
     is_global_read_ = false;
@@ -317,7 +317,7 @@ private:
     auto load_region = BufferRegion(load_buffer, region);
     reads_.push_back(load_region);
 
-    if (op->buffer.scope() == "global" && !within_condition_expr_) {
+    if (IsGlobalBuffer(op->buffer) && !within_condition_expr_) {
       // skip condition expr of if_then_else node
       // shared[i] = T.if_then_else(global[i] < n, register_a[i], register_b[i])
       // is not a global read shared[i] = T.if_then_else(global[i] < n,
@@ -367,10 +367,9 @@ private:
           writes_.push_back(BufferRegion::FullRegion(dst_buf.value()));
         }
         if (src_buf.defined() && dst_buf.defined() &&
-            (src_buf.value().scope() == "global" ||
+            (IsGlobalBuffer(src_buf.value()) ||
              src_buf.value().scope().empty()) &&
-            (dst_buf.value().scope() == "shared" ||
-             dst_buf.value().scope() == "shared.dyn")) {
+            IsSharedBuffer(dst_buf.value())) {
           is_global_copy_pattern_ = true;
         }
       }

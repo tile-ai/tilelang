@@ -104,9 +104,8 @@ TileOperator GemmPyNode::Clone() const {
 }
 
 bool GemmPyNode::allowTcgen5Mma(Target target) const {
-  bool scope_ok = (a_.scope() == "shared.dyn" || a_.scope() == "shared" ||
-                   a_.scope() == "shared.tmem") &&
-                  (b_.scope() == "shared.dyn" || b_.scope() == "shared") &&
+  bool scope_ok = (IsSharedBuffer(a_) || a_.scope() == "shared.tmem") &&
+                  IsSharedBuffer(b_) &&
                   c_.scope() == "shared.tmem";
   if (!TargetIsSm100(target) || !scope_ok)
     return false;

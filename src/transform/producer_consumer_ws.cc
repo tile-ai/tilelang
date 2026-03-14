@@ -20,6 +20,7 @@
  *   expect_transaction -> tma_load -> arrive
  */
 
+#include "../op/utils.h"
 #include "common/tma_copy_utils.h"
 #include "warp_specialized_rewriter.h"
 
@@ -729,6 +730,37 @@ private:
     PrimExpr stage_expr = FloorMod(linear_idx, num_stages);
     PrimExpr parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
 
+    std::vector<Array<Stmt>> producer_loop_prefix_stmts(extractor.blocks.size());
+    std::vector<bool> moved_compute_stmts(extractor.compute_stmts.size(), false);
+    int compute_cursor = 0;
+    for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
+      bool is_first_in_group =
+          ti == 0 || !remap_pure_tma_barriers_ ||
+          block_group[ti] != block_group[ti - 1];
+      if (!is_first_in_group) {
+        continue;
+      }
+      int wait_pos = wait_insert_pos[ti];
+      if (wait_pos <= compute_cursor) {
+        compute_cursor = std::max(compute_cursor, wait_pos);
+        continue;
+      }
+      bool all_movable = true;
+      for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+        if (!IsProducerMovableLoopPrefixStmt(extractor.compute_stmts[ci])) {
+          all_movable = false;
+          break;
+        }
+      }
+      if (all_movable) {
+        for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+          producer_loop_prefix_stmts[ti].push_back(extractor.compute_stmts[ci]);
+          moved_compute_stmts[ci] = true;
+        }
+      }
+      compute_cursor = wait_pos;
+    }
+
     // --- Build Producer Body ---
     Array<Stmt> producer_body_stmts;
     for (size_t ti = 0; ti < extractor.blocks.size(); ti++) {
@@ -745,6 +777,9 @@ private:
       if (is_first_in_group) {
         producer_body_stmts.push_back(
             makeParityWait(bp_id, bitwise_xor(parity_expr, 1)));
+        for (const auto &stmt : producer_loop_prefix_stmts[ti]) {
+          producer_body_stmts.push_back(stmt);
+        }
       }
 
       Stmt producer_stmt = tma.producer_stmt;
@@ -812,7 +847,9 @@ private:
           consumer_body_stmts.push_back(normalized_waits[ti]);
         }
       }
-      consumer_body_stmts.push_back(extractor.compute_stmts[ci]);
+      if (!moved_compute_stmts[ci]) {
+        consumer_body_stmts.push_back(extractor.compute_stmts[ci]);
+      }
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
         bool is_last_in_group = ti + 1 == extractor.blocks.size() ||
                                 !remap_pure_tma_barriers_ ||
@@ -1081,13 +1118,6 @@ private:
 
   bool IsMovableConsumerPrefixStmt(const Stmt &stmt) {
     bool has_disallowed = false;
-    auto is_shared_scope = [](const String &scope) {
-      std::string s = scope;
-      return s.rfind("shared", 0) == 0;
-    };
-    auto is_global_scope = [](const String &scope) {
-      return std::string(scope) == "global";
-    };
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (has_disallowed) {
         return;
@@ -1102,21 +1132,66 @@ private:
         // Only move pure local init into the consumer prefix. If a stmt reads
         // global or shared memory, the producer may also depend on its result
         // (for example a mask controlling which async copies to issue).
-        if (is_shared_scope(ld->buffer.scope()) ||
-            is_global_scope(ld->buffer.scope())) {
+        if (IsSharedBuffer(ld->buffer) || IsGlobalBuffer(ld->buffer)) {
           has_disallowed = true;
           return;
         }
       }
       if (auto *st = node.as<BufferStoreNode>()) {
-        if (is_shared_scope(st->buffer.scope()) ||
-            is_global_scope(st->buffer.scope())) {
+        if (IsSharedBuffer(st->buffer) || IsGlobalBuffer(st->buffer)) {
           has_disallowed = true;
           return;
         }
       }
     });
     return !has_disallowed;
+  }
+
+  bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt) {
+    bool has_allowed_work = false;
+    bool has_disallowed = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (has_disallowed) {
+        return;
+      }
+      if (const auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(builtin::tvm_storage_sync())) {
+          if (call->args.size() < 2) {
+            has_disallowed = true;
+            return;
+          }
+          const auto *scope = call->args[0].as<StringImmNode>();
+          if (!scope ||
+              (scope->value != "shared" && scope->value != "shared.dyn")) {
+            has_disallowed = true;
+            return;
+          }
+          has_allowed_work = true;
+          return;
+        }
+        if (IsBarrierOrTmaControlCall(call)) {
+          has_disallowed = true;
+          return;
+        }
+      }
+      if (const auto *ld = node.as<BufferLoadNode>()) {
+        if (IsSharedBuffer(ld->buffer) || IsLocalScopedBuffer(ld->buffer)) {
+          has_disallowed = true;
+          return;
+        }
+        if (IsGlobalBuffer(ld->buffer)) {
+          has_allowed_work = true;
+        }
+      }
+      if (const auto *st = node.as<BufferStoreNode>()) {
+        if (IsSharedBuffer(st->buffer)) {
+          has_allowed_work = true;
+          return;
+        }
+        has_disallowed = true;
+      }
+    });
+    return has_allowed_work && !has_disallowed;
   }
 
   Optional<Stmt> TryPrependToConsumerBranch(const Stmt &stmt,
@@ -1623,10 +1698,6 @@ private:
   bool IsSharedDependentConsumerPreStmt(const Stmt &stmt) {
     bool has_shared_access = false;
     bool has_control_ops = false;
-    auto is_shared_scope = [](const String &scope) {
-      std::string s = scope;
-      return s.rfind("shared", 0) == 0;
-    };
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (has_control_ops) {
         return;
@@ -1638,12 +1709,12 @@ private:
         }
       }
       if (auto *ld = node.as<BufferLoadNode>()) {
-        if (is_shared_scope(ld->buffer.scope())) {
+        if (IsSharedBuffer(ld->buffer)) {
           has_shared_access = true;
         }
       }
       if (auto *st = node.as<BufferStoreNode>()) {
-        if (is_shared_scope(st->buffer.scope())) {
+        if (IsSharedBuffer(st->buffer)) {
           has_shared_access = true;
         }
       }
@@ -1653,13 +1724,6 @@ private:
 
   bool IsDuplicableBranchLocalPreStmt(const Stmt &stmt) {
     bool has_disallowed = false;
-    auto is_shared_scope = [](const String &scope) {
-      std::string s = scope;
-      return s.rfind("shared", 0) == 0;
-    };
-    auto is_global_scope = [](const String &scope) {
-      return std::string(scope) == "global";
-    };
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (has_disallowed) {
         return;
@@ -1671,14 +1735,13 @@ private:
         }
       }
       if (const auto *ld = node.as<BufferLoadNode>()) {
-        if (is_shared_scope(ld->buffer.scope())) {
+        if (IsSharedBuffer(ld->buffer)) {
           has_disallowed = true;
           return;
         }
       }
       if (const auto *st = node.as<BufferStoreNode>()) {
-        if (is_shared_scope(st->buffer.scope()) ||
-            is_global_scope(st->buffer.scope())) {
+        if (IsSharedBuffer(st->buffer) || IsGlobalBuffer(st->buffer)) {
           has_disallowed = true;
           return;
         }

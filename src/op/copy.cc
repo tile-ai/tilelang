@@ -771,8 +771,7 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
 // Checks if copy can use CUDA's Load Matrix (LDSM) instruction.
 // Requires: LDMATRIX support, shared->fragment scope.
 bool CopyNode::CheckLDSMCopy(Target target) const {
-  return TargetHasLdmatrix(target) &&
-         (src.scope() == "shared.dyn" || src.scope() == "shared") &&
+  return TargetHasLdmatrix(target) && IsSharedBuffer(src) &&
          IsFragmentBuffer(dst);
 }
 
@@ -780,7 +779,7 @@ bool CopyNode::CheckLDSMCopy(Target target) const {
 // Requires: STMATRIX support, fragment->shared scope.
 bool CopyNode::CheckSTSMCopy(Target target) const {
   return TargetHasStmatrix(target) && IsFragmentBuffer(src) &&
-         (dst.scope() == "shared.dyn" || dst.scope() == "shared");
+         IsSharedBuffer(dst);
 }
 
 // Checks if copy can use tensor memory load (tcgen05.ld).
@@ -2032,8 +2031,7 @@ TileOperator Conv2DIm2ColOpNode::Clone() const {
 Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
   ICHECK(TargetIsHopper(T.target));
-  ICHECK(src_.scope() == "global" &&
-         (dst_.scope() == "shared.dyn" || dst_.scope() == "shared"));
+  ICHECK(IsGlobalBuffer(src_) && IsSharedBuffer(dst_));
   ICHECK(src_->shape.size() == 4);
   ICHECK(dst_->shape.size() == 2);
   ICHECK(src_->dtype == dst_->dtype);
