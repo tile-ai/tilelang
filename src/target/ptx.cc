@@ -40,15 +40,15 @@ static const char *enum_to_str[] = {
     "kUInt16",      "kInt32",         "kUInt32",  "kInt64",    "kUInt64",
     "kFloat8_e4m3", "kFloat8_e5m2",   "kFloat16", "kBFloat16", "kFloat16x2",
     "kFloat32",     "kTensorFloat32", "kFloat64", "kBit1",     "kBit8",
-    "kBit16",       "kBit32",         "kBit64"};
+    "kBit16",       "kBit32",         "kBit64",   "kFloat4_e2m1fn"};
 
 static const char *dtype_str[] = {
     ".s4",   ".u4",  ".s8",   ".u8",   ".s16", ".u16",  ".s32",   ".u32",
     ".s64",  ".u64", ".e4m3", ".e5m2", ".f16", ".bf16", ".f16x2", ".f32",
-    ".tf32", ".f64", ".b1",   ".b8",   ".b16", ".b32",  ".b64"};
+    ".tf32", ".f64", ".b1",   ".b8",   ".b16", ".b32",  ".b64",   ".e2m1"};
 static const uint32_t num_bits[] = {4,  4,  8, 8, 16, 16, 32, 32,
                                     64, 64, 8, 8, 16, 16, 32, 32,
-                                    32, 64, 1, 8, 16, 32, 64};
+                                    32, 64, 1, 8, 16, 32, 64, 4};
 
 /*!
  * \brief Create PTX data type from string.
@@ -80,6 +80,8 @@ DataType DTypeFromString(const std::string str) {
   } else if (str == "float8_e5m2" || str == "float8_e5m2fn" || str == "e5m2" ||
              str == ".e5m2") {
     return DataType::kFloat8_e5m2;
+  } else if (str == "float4_e2m1fn" || str == ".e2m1") {
+    return DataType::kFloat4_e2m1fn;
   } else if (str == "float16" || str == "fp16" || str == ".f16") {
     return DataType::kFloat16;
   } else if (str == "bfloat16" || str == "bf16") {

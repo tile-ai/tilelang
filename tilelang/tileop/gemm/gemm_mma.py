@@ -20,7 +20,7 @@ class GemmMMA(GemmBase):
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
+            b_dtype=self.in_dtype_b,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -64,7 +64,7 @@ class GemmMMA(GemmBase):
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
+            b_dtype=self.in_dtype_b,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -77,6 +77,7 @@ class GemmMMA(GemmBase):
         )
 
         in_dtype = self.in_dtype
+        in_dtype_b = self.in_dtype_b
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
@@ -109,7 +110,7 @@ class GemmMMA(GemmBase):
                 accumulating into C_local.
                 """
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype_b)
                 if clear_accum:
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):
@@ -173,7 +174,7 @@ class GemmMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype_b)
                 if clear_accum:
                     T.clear(C_buf)
                 for ki in T.serial(0, (block_K // micro_size_k)):

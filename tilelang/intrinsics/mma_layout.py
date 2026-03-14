@@ -39,6 +39,21 @@ def ldmatrix_32x16_to_shared_16x32_layout_b(thread_id, local_id):
     return row, col
 
 
+def ldmatrix_32x16_to_shared_16x32_fp4_layout_a(thread_id, local_id):
+    """FP4 with unpacked shared memory (1 byte/element) uses the same
+    layout as INT8 — shared memory rows are 32 bytes for K=32."""
+    row = thread_id % 16
+    col = local_id + (thread_id // 16) * 16
+    return row, col
+
+
+def ldmatrix_32x16_to_shared_16x32_fp4_layout_b(thread_id, local_id):
+    """FP4 with unpacked shared memory — same as INT8."""
+    row = (thread_id // 16) * 8 + (thread_id % 8)
+    col = local_id + 16 * ((thread_id % 16) // 8)
+    return row, col
+
+
 def mma_store_32x8_to_shared_16x16_layout(thread_id, local_id):
     row = 8 * (local_id % 4 // 2) + (thread_id // 4)
     col = 8 * (local_id // 4) + (thread_id % 4) * 2 + (local_id % 2)

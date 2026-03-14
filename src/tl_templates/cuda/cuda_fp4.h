@@ -1,48 +1,12 @@
 #pragma once
 
 #include "common.h"
+#include <cute/numeric/numeric_types.hpp>
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 #include <cuda_fp4.h>
 
-// Wrapper for __nv_fp4_e2m1 with implicit conversions
-struct fp4_e2_t {
-  __nv_fp4_storage_t __x;
-
-  TL_DEVICE fp4_e2_t() = default;
-
-  // Constructor from __nv_fp4_e2m1
-  TL_DEVICE fp4_e2_t(__nv_fp4_e2m1 x) : __x(x.__x) {}
-
-  // Constructor from storage type
-  TL_DEVICE fp4_e2_t(__nv_fp4_storage_t x) : __x(x) {}
-
-  // Constructor from float
-  TL_DEVICE explicit fp4_e2_t(float x) {
-    __nv_fp4_e2m1 tmp(x);
-    __x = tmp.__x;
-  }
-
-  // Conversion to __nv_fp4_e2m1
-  TL_DEVICE operator __nv_fp4_e2m1() const {
-    __nv_fp4_e2m1 tmp;
-    tmp.__x = __x;
-    return tmp;
-  }
-
-  // Conversion to float
-  TL_DEVICE operator float() const {
-    __nv_fp4_e2m1 tmp;
-    tmp.__x = __x;
-    return float(tmp);
-  }
-
-  // Implicit conversion to half_t (cutlass::half_t)
-  TL_DEVICE operator half_t() const { return half_t(float(*this)); }
-
-  // Implicit conversion to __half
-  TL_DEVICE operator __half() const { return __half(float(*this)); }
-};
+using fp4_e2_t = tl::float_e2m1_t;
 
 class fp4_e2_2_t {
 public:
@@ -63,11 +27,11 @@ public:
   }
 
   // Set low 4 bits (first fp4)
-  TL_DEVICE void set_x(fp4_e2_t val) { __x = (__x & 0xF0) | (val.__x & 0x0F); }
+  TL_DEVICE void set_x(fp4_e2_t val) { __x = (__x & 0xF0) | (val.raw() & 0x0F); }
 
   // Set high 4 bits (second fp4)
   TL_DEVICE void set_y(fp4_e2_t val) {
-    __x = (__x & 0x0F) | ((val.__x & 0x0F) << 4);
+    __x = (__x & 0x0F) | ((val.raw() & 0x0F) << 4);
   }
 };
 
@@ -106,7 +70,7 @@ struct __CUDA_ALIGN__(32) fp4_e2_64_t {
 
 // Pack two fp4_e2_t values.
 TL_DEVICE fp4_e2_2_t make_fp4_e2_2_t(fp4_e2_t x, fp4_e2_t y) {
-  __nv_fp4x2_storage_t packed = (x.__x & 0x0F) | ((y.__x & 0x0F) << 4);
+  __nv_fp4x2_storage_t packed = (x.raw() & 0x0F) | ((y.raw() & 0x0F) << 4);
   fp4_e2_2_t result;
   result.__x = packed;
   return result;

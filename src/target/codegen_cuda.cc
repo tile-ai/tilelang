@@ -1621,17 +1621,21 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     os << "*((" << ptr_cast(t) << vid << ")" << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    // FP4 div_factor=2 only for global memory (packed 2/byte).
+    // Shared/local stores unpacked FP4 (1 byte per element, sizeof=1).
+    bool is_packed_scope = scope.empty() || scope == "global";
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
+        && is_packed_scope) {
       div_factor = 2;
     }
     index_str =
         PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
     os << buffer_str << "[" << index_str << "]";
   } else {
-    // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
-    // fp4* + n incorrectly advances n bytes (skipping 2n elements).
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    bool is_packed_scope = scope.empty() || scope == "global";
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
+        && is_packed_scope) {
       div_factor = 2;
     }
     index_str =
@@ -3352,15 +3356,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   } else if (scope == "local.descriptor.tcgen05_instr") {
     stream << "tl::Tcgen05InstrDescriptor " << vid << ";\n";
   } else {
-    // For FP4 scalar local buffers, we use packed storage type,
-    // so skip type declaration here (will be handled in the local scope section
-    // below)
-    bool is_fp4_scalar_local = op->dtype.is_float4() && op->dtype.is_scalar() &&
-                               (scope == "local" || scope.empty());
-    if (!is_fp4_scalar_local) {
-      PrintStorageScope(scope, stream);
-      PrintType(op->dtype, stream);
-    }
+    PrintStorageScope(scope, stream);
+    PrintType(op->dtype, stream);
   }
 
   if (scope == "shared.dyn") {
@@ -3387,19 +3384,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
       stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
              << "*>(" << v_id_mem << ");\n";
     } else if (scope == "local") {
-      // For FP4 types, use packed storage type to avoid wasting registers.
-      // fp4_e2_t uses int8 as storage but only needs 4 bits per element.
-      // By using fp4_e2_2_t (which stores 2 fp4 values in 1 byte), we halve the
-      // storage.
-      if (op->dtype.is_float4() && op->dtype.is_scalar()) {
-        auto vid_packed = vid + "_packed";
-        stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
-               << "];\n";
-        // Record mapping from original buffer to packed buffer name
-        fp4_packed_buffers_[op->buffer_var.get()] = vid_packed;
-      } else {
-        stream << ' ' << vid << '[' << constant_size << "];\n";
-      }
+      // For FP4 local fragment buffers (MMA operands), do NOT pack into
+      // fp4_e2_2_t. ldmatrix loads raw bytes regardless of element type, so
+      // the buffer needs the full byte count (1 byte per fp4_e2_t element).
+      // Packing would halve the buffer and cause stack overflow.
+      stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "local.var") {
       PrimExpr init = tir::make_const(op->dtype, 0);
       auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
