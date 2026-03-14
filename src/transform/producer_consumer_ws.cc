@@ -484,7 +484,9 @@ private:
 
     const Block &orig_block = op->block;
 
-    // Find the pipelined loop with "num_stages" annotation
+    // Find the pipelined loop. Prefer explicit software-pipeline annotations,
+    // but also allow num_stages=0 loops that still carry TMA/cp.async producer
+    // blocks. Those loops are treated as single-stage WS pipelines.
     const ForNode *pipeline_loop = FindPipelineLoop(orig_block->body);
     if (!pipeline_loop)
       return StmtExprMutator::VisitStmt_(op);
@@ -1031,33 +1033,84 @@ private:
     }
   }
 
-  const ForNode *FindPipelineLoop(const Stmt &stmt) {
+  bool LoopContainsAsyncProducerBlocks(const ForNode *loop) {
+    if (!loop || loop->kind != ForKind::kSerial) {
+      return false;
+    }
+    Array<Stmt> flat_stmts;
+    Stmt loop_body_root = loop->body;
+    if (auto *realize = loop->body.as<BlockRealizeNode>()) {
+      loop_body_root = realize->block->body;
+    }
+    FlattenSeqStmt(loop_body_root, &flat_stmts);
+    AsyncCopyBlockExtractor extractor;
+    extractor.Extract(flat_stmts);
+    return !extractor.blocks.empty();
+  }
+
+  const ForNode *FindAnnotatedPipelineLoop(const Stmt &stmt) {
     if (auto *for_node = stmt.as<ForNode>()) {
       if (for_node->annotations.Get("num_stages")) {
         return for_node;
       }
     }
-    // Look through SeqStmt, BlockRealize, Block etc.
     if (auto *seq = stmt.as<SeqStmtNode>()) {
       for (const auto &s : seq->seq) {
-        auto *result = FindPipelineLoop(s);
-        if (result)
+        if (auto *result = FindAnnotatedPipelineLoop(s)) {
           return result;
+        }
       }
+      return nullptr;
     }
     if (auto *realize = stmt.as<BlockRealizeNode>()) {
-      return FindPipelineLoop(realize->block->body);
+      return FindAnnotatedPipelineLoop(realize->block->body);
     }
     if (auto *block = stmt.as<BlockNode>()) {
-      return FindPipelineLoop(block->body);
+      return FindAnnotatedPipelineLoop(block->body);
     }
     if (auto *attr = stmt.as<AttrStmtNode>()) {
-      return FindPipelineLoop(attr->body);
+      return FindAnnotatedPipelineLoop(attr->body);
     }
     if (auto *let_s = stmt.as<LetStmtNode>()) {
-      return FindPipelineLoop(let_s->body);
+      return FindAnnotatedPipelineLoop(let_s->body);
     }
     return nullptr;
+  }
+
+  const ForNode *FindAsyncProducerLoop(const Stmt &stmt) {
+    if (auto *for_node = stmt.as<ForNode>()) {
+      if (LoopContainsAsyncProducerBlocks(for_node)) {
+        return for_node;
+      }
+    }
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const auto &s : seq->seq) {
+        if (auto *result = FindAsyncProducerLoop(s)) {
+          return result;
+        }
+      }
+      return nullptr;
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      return FindAsyncProducerLoop(realize->block->body);
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      return FindAsyncProducerLoop(block->body);
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      return FindAsyncProducerLoop(attr->body);
+    }
+    if (auto *let_s = stmt.as<LetStmtNode>()) {
+      return FindAsyncProducerLoop(let_s->body);
+    }
+    return nullptr;
+  }
+
+  const ForNode *FindPipelineLoop(const Stmt &stmt) {
+    if (auto *annotated = FindAnnotatedPipelineLoop(stmt)) {
+      return annotated;
+    }
+    return FindAsyncProducerLoop(stmt);
   }
 
   // Infer how many mbarriers are already referenced by this block body.
