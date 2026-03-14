@@ -13,6 +13,10 @@ This is a simplified single-expert example. For full routing + grouped GEMM,
 see examples/fusedmoe/example_fusedmoe_tilelang.py.
 """
 
+<<<<<<< HEAD
+=======
+import os
+>>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 import time
 import torch
 import tilelang
@@ -20,6 +24,7 @@ import tilelang.language as T
 
 
 FP4_E2M1_TO_FLOAT = [
+<<<<<<< HEAD
     0.0,
     0.5,
     1.0,
@@ -36,6 +41,10 @@ FP4_E2M1_TO_FLOAT = [
     -3.0,
     -4.0,
     -6.0,
+=======
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+>>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 ]
 
 
@@ -45,6 +54,7 @@ def fp4_uint8_to_float(t):
 
 
 def moe_shared_expert_a8w4(
+<<<<<<< HEAD
     num_tokens,
     d_hidden,
     d_expert,
@@ -53,6 +63,11 @@ def moe_shared_expert_a8w4(
     block_expert=128,
     threads=128,
     num_stages=1,
+=======
+    num_tokens, d_hidden, d_expert,
+    block_token=128, block_hidden=128, block_expert=128,
+    threads=128, num_stages=1,
+>>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 ):
     """Single shared expert: gate_up GEMM -> SiLU*up -> down GEMM."""
     scale = 1.44269504  # log2(e) for fast SiLU
@@ -90,7 +105,13 @@ def moe_shared_expert_a8w4(
 
             # Fused SiLU activation: gate = gate * sigmoid(gate), then up = up * gate
             for i, j in T.Parallel(block_token, block_expert):
+<<<<<<< HEAD
                 gate_local[i, j] = gate_local[i, j] * (1.0 / (1.0 + T.exp2(-gate_local[i, j] * scale)))
+=======
+                gate_local[i, j] = gate_local[i, j] * (
+                    1.0 / (1.0 + T.exp2(-gate_local[i, j] * scale))
+                )
+>>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
                 up_local[i, j] = up_local[i, j] * gate_local[i, j]
 
             T.copy(up_local, output[bx * block_token, by * block_expert])
@@ -106,6 +127,7 @@ d_expert = 256
 print(f"Running FP4 MoE (A8W4): tokens={num_tokens}, hidden={d_hidden}, expert={d_expert}")
 
 func = moe_shared_expert_a8w4(
+<<<<<<< HEAD
     num_tokens,
     d_hidden,
     d_expert,
@@ -114,6 +136,11 @@ func = moe_shared_expert_a8w4(
     block_expert=128,
     threads=128,
     num_stages=1,
+=======
+    num_tokens, d_hidden, d_expert,
+    block_token=128, block_hidden=128, block_expert=128,
+    threads=128, num_stages=1,
+>>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 )
 
 jit_kernel = tilelang.compile(
