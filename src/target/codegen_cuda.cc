@@ -1621,17 +1621,21 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     os << "*((" << ptr_cast(t) << vid << ")" << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    // FP4 div_factor=2 only for global memory (packed 2/byte).
+    // Shared/local stores unpacked FP4 (1 byte per element, sizeof=1).
+    bool is_packed_scope = scope.empty() || scope == "global";
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
+        && is_packed_scope) {
       div_factor = 2;
     }
     index_str =
         PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
     os << buffer_str << "[" << index_str << "]";
   } else {
-    // Fix fp4 pointer arithmetic: fp4 elements are 4-bit packed 2 per byte.
-    // fp4* + n incorrectly advances n bytes (skipping 2n elements).
     int div_factor = 1;
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
+    bool is_packed_scope = scope.empty() || scope == "global";
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
+        && is_packed_scope) {
       div_factor = 2;
     }
     index_str =
