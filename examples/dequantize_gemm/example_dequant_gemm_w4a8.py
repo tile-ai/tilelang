@@ -188,6 +188,7 @@ def run_regression_perf(m=4096, n=4096, k=4096):
     kernel = matmul_int8xint4(m, n, k, "int8", "int32", "int32", num_bits=4, tune=False)(
         block_M=32, block_N=32, block_K=128, num_stages=1, threads=128
     )
+    print(f"{kernel.get_kernel_source()}")
     profiler = kernel.get_profiler()
     return profiler.do_bench(backend="cupti")
 
@@ -201,5 +202,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    main(M, N, K, args.tune)
-    # main(M, N, K, True)
+    # main(M, N, K, args.tune)
+    latency = run_regression_perf()
+    print(latency)
