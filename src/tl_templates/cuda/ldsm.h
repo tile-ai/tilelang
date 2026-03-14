@@ -51,6 +51,39 @@ TL_DEVICE void ptx_ldmatrix_x2_trans(void const *const smem_ptr,
       : "r"(smem_int_ptr));
 }
 
+// ldmatrix for 4-bit sub-byte types (FP4/INT4 on SM120+).
+// Reads packed 4-bit data from shared memory and unpacks each 4-bit value
+// into the low 4 bits of an 8-bit container (upper 4 bits zeroed).
+TL_DEVICE void ptx_ldmatrix_b4x16_x1(void const *const smem_ptr,
+                                      void *const local_ptr) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n16.x1.shared.b8x16.b4x16_p64 {%0}, [%1];\n"
+      : "=r"(value[0])
+      : "r"(smem_int_ptr));
+}
+
+TL_DEVICE void ptx_ldmatrix_b4x16_x2(void const *const smem_ptr,
+                                      void *const local_ptr) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n16.x2.shared.b8x16.b4x16_p64 {%0, %1}, [%2];\n"
+      : "=r"(value[0]), "=r"(value[1])
+      : "r"(smem_int_ptr));
+}
+
+TL_DEVICE void ptx_ldmatrix_b4x16_x4(void const *const smem_ptr,
+                                      void *const local_ptr) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  int32_t *value = reinterpret_cast<int32_t *>(local_ptr);
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n16.x4.shared.b8x16.b4x16_p64 {%0, %1, %2, %3}, [%4];\n"
+      : "=r"(value[0]), "=r"(value[1]), "=r"(value[2]), "=r"(value[3])
+      : "r"(smem_int_ptr));
+}
+
 TL_DEVICE void ptx_ldmatrix_x4_trans(void const *const smem_ptr,
                                      void *const local_ptr) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);

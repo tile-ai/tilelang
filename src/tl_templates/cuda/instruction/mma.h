@@ -148,6 +148,14 @@ using SM120_FP4_FP4_F32_TN = cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::fl
 TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
                          false, true, false, SM120_FP4_FP4_F32_TN)
 
+// Mixed FP8 x FP4 and FP4 x FP8 (k32, SM120 kind::f8f6f4)
+using SM120_FP8_FP4_F32_TN = cute::SM120_16x8x32_TN<cute::float_e4m3_t, cute::float_e2m1_t, float>;
+using SM120_FP4_FP8_F32_TN = cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e4m3_t, float>;
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
+                         false, true, false, SM120_FP8_FP4_F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat8_e4m3, kFloat32, 16, 8, 32,
+                         false, true, false, SM120_FP4_FP8_F32_TN)
+
 #undef TL_DEFINE_MMA_DISPATCHER
 
 } // namespace detail
@@ -173,9 +181,11 @@ TL_DEVICE void mma_sync(
     constexpr int nB = detail::MmaImplTraits<typename Dispatcher::Impl>::kBRegs;
     AReg as[nA]; BReg bs[nB];
     #pragma unroll
-    for (int i = 0; i < nA; ++i) as[i] = a[i] << 2;
+    for (int i = 0; i < nA; ++i)
+      as[i] = (AType == DataType::kFloat4_e2m1fn) ? (a[i] << 2) : a[i];
     #pragma unroll
-    for (int i = 0; i < nB; ++i) bs[i] = b[i] << 2;
+    for (int i = 0; i < nB; ++i)
+      bs[i] = (BType == DataType::kFloat4_e2m1fn) ? (b[i] << 2) : b[i];
     Dispatcher::exec(c, as, bs, c);
   } else {
     Dispatcher::exec(c, a, b, c);

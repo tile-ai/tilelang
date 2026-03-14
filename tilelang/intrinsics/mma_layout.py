@@ -40,17 +40,17 @@ def ldmatrix_32x16_to_shared_16x32_layout_b(thread_id, local_id):
 
 
 def ldmatrix_32x16_to_shared_16x32_fp4_layout_a(thread_id, local_id):
-    """FP4 variant: each row is 16 bytes (32 FP4 elements), ldmatrix covers
-    the full row in one 128-bit load. No half-row selection needed."""
+    """FP4 with unpacked shared memory (1 byte/element) uses the same
+    layout as INT8 — shared memory rows are 32 bytes for K=32."""
     row = thread_id % 16
-    col = local_id
+    col = local_id + (thread_id // 16) * 16
     return row, col
 
 
 def ldmatrix_32x16_to_shared_16x32_fp4_layout_b(thread_id, local_id):
-    """FP4 variant: same reasoning — full row covered by one ldmatrix load."""
+    """FP4 with unpacked shared memory — same as INT8."""
     row = (thread_id // 16) * 8 + (thread_id % 8)
-    col = local_id
+    col = local_id + 16 * ((thread_id % 16) // 8)
     return row, col
 
 

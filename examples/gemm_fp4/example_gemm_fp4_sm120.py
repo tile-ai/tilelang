@@ -1,6 +1,11 @@
 """FP4 (float4_e2m1fn) GEMM on SM120 (RTX 5080/5090) using fragment-based MMA.
 
 Uses mma.sync.aligned.kind::f8f6f4 instructions (not TCGEN05/TMEM).
+FP4 data is pre-unpacked to uint8 on the host (1 byte per element, low
+nibble holds the 4-bit value). Shared memory stores uint8, making the
+layout identical to INT8 and satisfying ldmatrix 16B alignment.
+The << 2 bit-shift before MMA places FP4 data at bits 2-5 as required.
+
 Addresses https://github.com/tile-ai/tilelang/issues/1592
 """
 
@@ -13,7 +18,7 @@ import tilelang.language as T
 
 def matmul_fp4(
     M, N, K, block_M, block_N, block_K,
-    in_dtype, out_dtype, accum_dtype,
+    out_dtype, accum_dtype,
     num_stages=2, threads=128,
 ):
     A_shape = (M, K)
@@ -23,13 +28,13 @@ def matmul_fp4(
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
+        A: T.Tensor(A_shape, "uint8"),
+        B: T.Tensor(B_shape, "uint8"),
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+            A_shared = T.alloc_shared(A_shared_shape, "uint8")
+            B_shared = T.alloc_shared(B_shared_shape, "uint8")
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             T.clear(C_local)
@@ -49,24 +54,23 @@ FP4_E2M1_TO_FLOAT = [
 ]
 
 
+def unpack_fp4_to_uint8(packed_int8: torch.Tensor, M: int, K: int) -> torch.Tensor:
+    """Unpack (M, K//2) int8 -> (M, K) uint8, 1 FP4 per byte in low nibble."""
+    flat = packed_int8.to(torch.uint8).reshape(M, K // 2)
+    lo = flat & 0x0F
+    hi = (flat >> 4) & 0x0F
+    return torch.stack([lo, hi], dim=-1).reshape(M, K).contiguous()
+
+
 def unpack_fp4_to_float(packed_int8: torch.Tensor, M: int, K: int) -> torch.Tensor:
-    """Unpack (M, K//2) int8 tensor → (M, K) float32 tensor."""
+    """Unpack (M, K//2) int8 -> (M, K) float32 via e2m1 lookup table."""
     lut = torch.tensor(FP4_E2M1_TO_FLOAT, dtype=torch.float32, device=packed_int8.device)
-    flat = packed_int8.to(torch.uint8).flatten()
-    lo = (flat & 0x0F).to(torch.int64)
-    hi = ((flat >> 4) & 0x0F).to(torch.int64)
-    pairs = torch.stack([lut[lo], lut[hi]], dim=-1)
-    return pairs.reshape(M, K)
-
-
-def make_fp4_tensor(M: int, K: int, device="cuda") -> torch.Tensor:
-    """Create random packed FP4 tensor as (M, K//2) int8."""
-    return torch.randint(0, 256, (M, K // 2), dtype=torch.uint8, device=device).to(torch.int8)
+    unpacked = unpack_fp4_to_uint8(packed_int8, M, K).to(torch.int64)
+    return lut[unpacked]
 
 
 M, N, K = 256, 256, 256
 block_M, block_N, block_K = 128, 128, 128
-in_dtype = T.float4_e2m1fn
 out_dtype = T.float32
 accum_dtype = T.float32
 
@@ -75,7 +79,7 @@ print(f"  block_M={block_M}, block_N={block_N}, block_K={block_K}")
 
 func = matmul_fp4(
     M, N, K, block_M, block_N, block_K,
-    in_dtype, out_dtype, accum_dtype,
+    out_dtype, accum_dtype,
     num_stages=2, threads=128,
 )
 
@@ -93,19 +97,23 @@ print("Compilation succeeded!")
 with open(os.path.join(os.path.dirname(__file__), "gemm_fp4_sm120.cu"), "w") as f:
     f.write(jit_kernel.get_kernel_source())
 
-# --- Test 1: zeros in → zeros out ---
-a_zero = torch.zeros(M, K // 2, device="cuda", dtype=torch.int8)
-b_zero = torch.zeros(N, K // 2, device="cuda", dtype=torch.int8)
+torch.manual_seed(42)
+
+# Create packed FP4 data (2 per byte), then pre-unpack to uint8
+a_packed = torch.randint(0, 256, (M, K // 2), device="cuda", dtype=torch.uint8).to(torch.int8)
+b_packed = torch.randint(0, 256, (N, K // 2), device="cuda", dtype=torch.uint8).to(torch.int8)
+a_unpacked = unpack_fp4_to_uint8(a_packed, M, K)
+b_unpacked = unpack_fp4_to_uint8(b_packed, N, K)
+
+# --- Test 1: zeros ---
+a_zero = torch.zeros(M, K, device="cuda", dtype=torch.uint8)
+b_zero = torch.zeros(N, K, device="cuda", dtype=torch.uint8)
 c_zero = jit_kernel(a_zero, b_zero)
 assert c_zero.abs().max().item() == 0.0, f"Zero test failed: max={c_zero.abs().max().item()}"
-print("[PASS] zeros in → zeros out")
+print("[PASS] zeros in -> zeros out")
 
-# --- Test 2: numerical verification with random FP4 data ---
-torch.manual_seed(42)
-a_packed = make_fp4_tensor(M, K)
-b_packed = make_fp4_tensor(N, K)
-
-c = jit_kernel(a_packed, b_packed)
+# --- Test 2: numerical verification ---
+c = jit_kernel(a_unpacked, b_unpacked)
 
 a_float = unpack_fp4_to_float(a_packed, M, K)
 b_float = unpack_fp4_to_float(b_packed, N, K)
@@ -118,13 +126,13 @@ print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
 if max_diff < 1.0:
     print("[PASS] numerical verification (max_abs_diff < 1.0)")
 else:
-    print(f"[WARN] large diff — may indicate layout or data flow issue")
+    print(f"[WARN] large diff -- may indicate layout or data flow issue")
 
 # --- Benchmark ---
 torch.cuda.synchronize()
 start = time.perf_counter()
 for _ in range(100):
-    jit_kernel(a_packed, b_packed)
+    jit_kernel(a_unpacked, b_unpacked)
 torch.cuda.synchronize()
 elapsed = (time.perf_counter() - start) / 100 * 1000
 print(f"Latency: {elapsed:.4f} ms")
