@@ -631,8 +631,11 @@ private:
     int num_existing_barriers = 0;
     int num_preloop_fwd_barriers = 0;
     if (remap_pure_tma_barriers_) {
+      // Only preserve pre-loop forward barriers that already exist in the IR.
+      // Reserving an unconditional extra slot leaves an initialized-but-unused
+      // mbarrier when the pipeline contains no pre-loop TMA prefix.
       num_preloop_fwd_barriers =
-          std::max(1, inferred_existing_required -
+          std::max(0, inferred_existing_required -
                           original_num_existing_loop_fwd_barriers);
       num_existing_barriers =
           num_existing_loop_fwd_barriers + num_preloop_fwd_barriers;
