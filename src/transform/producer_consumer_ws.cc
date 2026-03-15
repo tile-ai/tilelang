@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <string>
+#include <unordered_set>
 
 namespace tvm {
 namespace tl {
@@ -120,6 +121,8 @@ public:
           Optional<Var> write_buffer_data = std::nullopt;
           if (auto *v = attr->node.as<VarNode>()) {
             write_buffer_data = GetRef<Var>(v);
+          } else {
+            write_buffer_data = GetTmaDstBufferData(flat_stmts[i]);
           }
           blocks.push_back({AsyncProducerKind::kTma,
                             StripTmaCopyWriteBufferAttr(flat_stmts[i]),
@@ -132,7 +135,8 @@ public:
         if (ContainsTmaLoad(flat_stmts[i])) {
           blocks.push_back({AsyncProducerKind::kTma,
                             StripTmaCopyWriteBufferAttr(flat_stmts[i]),
-                            Optional<Stmt>(flat_stmts[i + 1]), std::nullopt});
+                            Optional<Stmt>(flat_stmts[i + 1]),
+                            GetTmaDstBufferData(flat_stmts[i])});
           i += 2;
           continue;
         }
@@ -205,6 +209,45 @@ private:
         }
       }
     });
+    return found;
+  }
+
+  static Optional<Var> GetTmaDstBufferData(const Stmt &stmt) {
+    Optional<Var> found = std::nullopt;
+    bool multiple = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (multiple) {
+        return;
+      }
+      const auto *call = node.as<CallNode>();
+      if (!call || !(call->op.same_as(tma_load()) ||
+                     call->op.same_as(tma_load_im2col()))) {
+        return;
+      }
+      bool is_1d_tma_load = false;
+      if (call->op.same_as(tma_load())) {
+        if (const auto *arg0 = call->args[0].as<CallNode>()) {
+          is_1d_tma_load = !arg0->op.same_as(create_tma_descriptor()) &&
+                           !arg0->op.same_as(create_tma_im2col_descriptor());
+        }
+      }
+      int shared_arg_index = is_1d_tma_load ? 0 : 2;
+      if (call->args.size() <= static_cast<size_t>(shared_arg_index)) {
+        return;
+      }
+      Optional<Var> current = AccessPtrBufferVar(call->args[shared_arg_index]);
+      if (!current.defined()) {
+        return;
+      }
+      if (!found.defined()) {
+        found = current;
+      } else if (found.value().get() != current.value().get()) {
+        multiple = true;
+      }
+    });
+    if (multiple) {
+      return Optional<Var>();
+    }
     return found;
   }
 
@@ -1776,7 +1819,109 @@ private:
     return has_shared_access && !has_control_ops;
   }
 
-  bool IsDuplicableBranchLocalPreStmt(const Stmt &stmt) {
+  struct LocalVarAccess {
+    std::unordered_set<const VarNode *> reads;
+    std::unordered_set<const VarNode *> writes;
+  };
+
+  class LocalVarAccessCollector : public StmtExprVisitor {
+  public:
+    LocalVarAccess access;
+
+  private:
+    void VisitExpr_(const BufferLoadNode *op) final {
+      if (IsLocalScopedBuffer(op->buffer) && op->buffer->data.defined()) {
+        access.reads.insert(op->buffer->data.get());
+      }
+      for (const auto &index : op->indices) {
+        VisitExpr(index);
+      }
+    }
+
+    void VisitStmt_(const BufferStoreNode *op) final {
+      if (IsLocalScopedBuffer(op->buffer) && op->buffer->data.defined()) {
+        access.writes.insert(op->buffer->data.get());
+      }
+      VisitExpr(op->value);
+      for (const auto &index : op->indices) {
+        VisitExpr(index);
+      }
+    }
+
+    void VisitStmt_(const LetStmtNode *op) final {
+      access.writes.insert(op->var.get());
+      VisitExpr(op->value);
+      VisitStmt(op->body);
+    }
+
+    void VisitExpr_(const VarNode *op) final { access.reads.insert(op); }
+  };
+
+  LocalVarAccess CollectLocalVarAccess(const Stmt &stmt) const {
+    LocalVarAccessCollector collector;
+    collector(stmt);
+    return collector.access;
+  }
+
+  void AddAccess(std::unordered_set<const VarNode *> *dst,
+                 const std::unordered_set<const VarNode *> &src) const {
+    dst->insert(src.begin(), src.end());
+  }
+
+  void KillAccess(std::unordered_set<const VarNode *> *dst,
+                  const std::unordered_set<const VarNode *> &defs) const {
+    for (const auto *var : defs) {
+      dst->erase(var);
+    }
+  }
+
+  bool Intersects(const std::unordered_set<const VarNode *> &lhs,
+                  const std::unordered_set<const VarNode *> &rhs) const {
+    const auto &smaller = lhs.size() < rhs.size() ? lhs : rhs;
+    const auto &larger = lhs.size() < rhs.size() ? rhs : lhs;
+    return std::any_of(smaller.begin(), smaller.end(),
+                       [&](const VarNode *var) { return larger.count(var); });
+  }
+
+  bool ExtractProducerConsumerBranches(const Stmt &stmt,
+                                       Optional<Stmt> *producer_branch,
+                                       Optional<Stmt> *consumer_branch) const {
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return ExtractProducerConsumerBranches(attr->body, producer_branch,
+                                             consumer_branch);
+    }
+    if (const auto *let_stmt = stmt.as<LetStmtNode>()) {
+      return ExtractProducerConsumerBranches(let_stmt->body, producer_branch,
+                                             consumer_branch);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      return ExtractProducerConsumerBranches(realize->block->body,
+                                             producer_branch, consumer_branch);
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return ExtractProducerConsumerBranches(block->body, producer_branch,
+                                             consumer_branch);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (auto it = seq->seq.rbegin(); it != seq->seq.rend(); ++it) {
+        if (ExtractProducerConsumerBranches(*it, producer_branch,
+                                            consumer_branch)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (if_stmt->else_case.defined()) {
+        *producer_branch = if_stmt->then_case;
+        *consumer_branch = if_stmt->else_case.value();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool IsBranchLocalPreStmt(const Stmt &stmt) {
     bool has_disallowed = false;
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (has_disallowed) {
@@ -1846,35 +1991,65 @@ private:
         }
       }
 
-      // Move a movable suffix of pre-loop statements into consumer branch
-      // (e.g. fragment initialization), keeping barriers/syncs outside.
-      size_t movable_begin = pre_loop_stmts.size();
-      while (movable_begin > 0 &&
-             IsMovableConsumerPrefixStmt(pre_loop_stmts[movable_begin - 1])) {
-        --movable_begin;
+      std::unordered_set<const VarNode *> producer_live;
+      std::unordered_set<const VarNode *> consumer_live;
+      Optional<Stmt> producer_branch = std::nullopt;
+      Optional<Stmt> consumer_branch = std::nullopt;
+      if (rebuilt_loop.defined() &&
+          ExtractProducerConsumerBranches(rebuilt_loop.value(),
+                                          &producer_branch, &consumer_branch)) {
+        if (producer_branch.defined()) {
+          AddAccess(&producer_live,
+                    CollectLocalVarAccess(producer_branch.value()).reads);
+        }
+        if (consumer_branch.defined()) {
+          AddAccess(&consumer_live,
+                    CollectLocalVarAccess(consumer_branch.value()).reads);
+        }
+      }
+      for (const auto &s : post_loop_stmts) {
+        AddAccess(&consumer_live, CollectLocalVarAccess(s).reads);
       }
 
-      // Split non-movable pre-loop statements into:
-      //   common statements kept outside the WS split
-      //   producer-side async issues
-      //   consumer-side waits / shared-dependent setup
-      //
-      // In pure-TMA mode we also duplicate branch-local scalar prefix code
-      // (for example loop-bound computation) into both branches. Leaving those
-      // statements outside the split can make producer and consumer observe
-      // inconsistent values after register repartitioning.
-      Array<Stmt> common_pre_stmts;
-      Array<Stmt> producer_prefix_stmts;
-      Array<Stmt> consumer_wait_prefix_stmts;
-      Array<Stmt> consumer_shared_prefix_stmts;
-      Array<Stmt> duplicated_prefix_stmts;
-      size_t i = 0;
-      while (i < movable_begin) {
-        if (i + 1 < movable_begin && ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
-            IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1])) {
+      auto UpdateProducerLiveness = [&](const LocalVarAccess &access) {
+        KillAccess(&producer_live, access.writes);
+        AddAccess(&producer_live, access.reads);
+      };
+      auto UpdateConsumerLiveness = [&](const LocalVarAccess &access) {
+        KillAccess(&consumer_live, access.writes);
+        AddAccess(&consumer_live, access.reads);
+      };
+      std::unordered_set<const VarNode *> common_live;
+      auto UpdateCommonLiveness = [&](const LocalVarAccess &access) {
+        KillAccess(&common_live, access.writes);
+        AddAccess(&common_live, access.reads);
+      };
+
+      // Reverse-scan pre-loop statements and partition them based on the local
+      // values they define. Pure local / global->local setup can be sunk into
+      // the producer/consumer branches even if there is a common shared-memory
+      // sync later in the prefix, as long as no common stmt depends on the
+      // values they produce.
+      std::vector<Stmt> producer_prefix_stmts_rev;
+      std::vector<Stmt> consumer_pre_wait_prefix_stmts_rev;
+      std::vector<Stmt> consumer_wait_prefix_stmts_rev;
+      std::vector<Stmt> consumer_post_wait_prefix_stmts_rev;
+      std::vector<Stmt> common_pre_stmts_rev;
+      bool seen_common_pre_stmt = false;
+      for (int i = static_cast<int>(pre_loop_stmts.size()) - 1; i >= 0;) {
+        if (i > 0 && IsMbarrierWaitParityStmt(pre_loop_stmts[i]) &&
+            ContainsTmaLoadStmt(pre_loop_stmts[i - 1])) {
+          if (seen_common_pre_stmt) {
+            common_pre_stmts_rev.push_back(pre_loop_stmts[i]);
+            common_pre_stmts_rev.push_back(pre_loop_stmts[i - 1]);
+            UpdateCommonLiveness(CollectLocalVarAccess(pre_loop_stmts[i]));
+            UpdateCommonLiveness(CollectLocalVarAccess(pre_loop_stmts[i - 1]));
+            i -= 2;
+            continue;
+          }
           Stmt producer_prefix_stmt =
-              StripTmaCopyWriteBufferAttr(pre_loop_stmts[i]);
-          Stmt consumer_wait_stmt = pre_loop_stmts[i + 1];
+              StripTmaCopyWriteBufferAttr(pre_loop_stmts[i - 1]);
+          Stmt consumer_wait_stmt = pre_loop_stmts[i];
           if (remap_pure_tma_barriers_) {
             ICHECK_GE(pure_tma_preloop_fwd_base_, 0);
             ICHECK_LT(pure_tma_preloop_fwd_cursor_,
@@ -1888,7 +2063,7 @@ private:
             consumer_wait_stmt =
                 RewriteWaitBarrierId(consumer_wait_stmt, barrier_id);
           } else if (use_full_tma_forward_barrier_protocol_) {
-            auto barrier_id = ExtractWaitBarrierId(pre_loop_stmts[i + 1]);
+            auto barrier_id = ExtractWaitBarrierId(pre_loop_stmts[i]);
             ICHECK(barrier_id.defined())
                 << "ProducerConsumerWS: failed to extract pre-loop TMA "
                    "forward barrier id";
@@ -1898,26 +2073,50 @@ private:
           }
           producer_prefix_stmt =
               MergeAdjacentEquivalentIfs(producer_prefix_stmt);
-          producer_prefix_stmts.push_back(producer_prefix_stmt);
-          consumer_wait_prefix_stmts.push_back(consumer_wait_stmt);
-          i += 2;
+          producer_prefix_stmts_rev.push_back(producer_prefix_stmt);
+          consumer_wait_prefix_stmts_rev.push_back(consumer_wait_stmt);
+          UpdateProducerLiveness(CollectLocalVarAccess(pre_loop_stmts[i - 1]));
+          UpdateConsumerLiveness(CollectLocalVarAccess(pre_loop_stmts[i]));
+          i -= 2;
           continue;
         }
-        if (remap_pure_tma_barriers_ &&
-            IsDuplicableBranchLocalPreStmt(pre_loop_stmts[i])) {
-          duplicated_prefix_stmts.push_back(pre_loop_stmts[i]);
-          ++i;
+
+        const Stmt &stmt = pre_loop_stmts[i];
+        LocalVarAccess access = CollectLocalVarAccess(stmt);
+        if (remap_pure_tma_barriers_ && IsBranchLocalPreStmt(stmt)) {
+          bool common_needs = Intersects(access.writes, common_live);
+          bool producer_needs = Intersects(access.writes, producer_live);
+          bool consumer_needs = Intersects(access.writes, consumer_live);
+          if (!common_needs && (producer_needs || consumer_needs)) {
+            if (producer_needs) {
+              producer_prefix_stmts_rev.push_back(stmt);
+              UpdateProducerLiveness(access);
+            }
+            if (consumer_needs) {
+              consumer_pre_wait_prefix_stmts_rev.push_back(stmt);
+              UpdateConsumerLiveness(access);
+            }
+            --i;
+            continue;
+          }
+        }
+
+        if (!seen_common_pre_stmt && (IsSharedDependentConsumerPreStmt(stmt) ||
+                                      IsMovableConsumerPrefixStmt(stmt))) {
+          if (IsSharedDependentConsumerPreStmt(stmt)) {
+            consumer_post_wait_prefix_stmts_rev.push_back(stmt);
+          } else {
+            consumer_pre_wait_prefix_stmts_rev.push_back(stmt);
+          }
+          UpdateConsumerLiveness(access);
+          --i;
           continue;
         }
-        if (IsSharedDependentConsumerPreStmt(pre_loop_stmts[i])) {
-          consumer_shared_prefix_stmts.push_back(pre_loop_stmts[i]);
-        } else {
-          common_pre_stmts.push_back(pre_loop_stmts[i]);
-        }
-        ++i;
-      }
-      for (const auto &s : common_pre_stmts) {
-        new_seq.push_back(s);
+
+        common_pre_stmts_rev.push_back(stmt);
+        UpdateCommonLiveness(access);
+        seen_common_pre_stmt = true;
+        --i;
       }
 
       auto MakeOptionalStmt = [](const Array<Stmt> &stmts) -> Optional<Stmt> {
@@ -1927,32 +2126,30 @@ private:
         return stmts.size() == 1 ? Optional<Stmt>(stmts[0])
                                  : Optional<Stmt>(SeqStmt(stmts));
       };
-
-      Array<Stmt> producer_prefix_all_stmts;
-      for (const auto &s : duplicated_prefix_stmts) {
-        producer_prefix_all_stmts.push_back(s);
-      }
-      for (const auto &s : producer_prefix_stmts) {
-        producer_prefix_all_stmts.push_back(s);
-      }
-
-      Array<Stmt> consumer_prefix_stmts;
-      for (const auto &s : duplicated_prefix_stmts) {
+      auto ReverseToArray = [](const std::vector<Stmt> &stmts_rev) {
+        Array<Stmt> ordered;
+        for (auto it = stmts_rev.rbegin(); it != stmts_rev.rend(); ++it) {
+          ordered.push_back(*it);
+        }
+        return ordered;
+      };
+      Array<Stmt> producer_prefix_stmts =
+          ReverseToArray(producer_prefix_stmts_rev);
+      Array<Stmt> consumer_prefix_stmts =
+          ReverseToArray(consumer_pre_wait_prefix_stmts_rev);
+      for (const auto &s : ReverseToArray(consumer_wait_prefix_stmts_rev)) {
         consumer_prefix_stmts.push_back(s);
       }
-      // Keep pure local init before waits to delay blocking until needed.
-      for (size_t j = movable_begin; j < pre_loop_stmts.size(); ++j) {
-        consumer_prefix_stmts.push_back(pre_loop_stmts[j]);
-      }
-      for (const auto &s : consumer_wait_prefix_stmts) {
+      for (const auto &s :
+           ReverseToArray(consumer_post_wait_prefix_stmts_rev)) {
         consumer_prefix_stmts.push_back(s);
       }
-      for (const auto &s : consumer_shared_prefix_stmts) {
-        consumer_prefix_stmts.push_back(s);
+      Array<Stmt> common_pre_stmts = ReverseToArray(common_pre_stmts_rev);
+      for (const auto &s : common_pre_stmts) {
+        new_seq.push_back(s);
       }
       Optional<Stmt> consumer_prefix = MakeOptionalStmt(consumer_prefix_stmts);
-      Optional<Stmt> producer_prefix =
-          MakeOptionalStmt(producer_prefix_all_stmts);
+      Optional<Stmt> producer_prefix = MakeOptionalStmt(producer_prefix_stmts);
 
       Optional<Stmt> ws_stmt = rebuilt_loop;
       Optional<Stmt> producer_guard = std::nullopt;
