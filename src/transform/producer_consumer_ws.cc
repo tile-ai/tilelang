@@ -26,6 +26,8 @@
 
 #include <algorithm>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace tvm {
 namespace tl {
@@ -44,6 +46,199 @@ struct AsyncCopyBlockInfo {
   Stmt producer_stmt;              // TMA issue or cp.async enqueue+commit
   Optional<Stmt> wait_stmt;        // Existing forward wait for TMA blocks
   Optional<Var> write_buffer_data; // shared buffer written by producer
+};
+
+using BufferDataToBufferMap =
+    std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+
+struct LocalAccessSummary {
+  BufferSet read_buffers;
+  BufferSet write_buffers;
+  VarSet read_vars;
+  VarSet def_vars;
+
+  bool HasTrackedDefs() const {
+    return !write_buffers.empty() || !def_vars.empty();
+  }
+};
+
+struct LocalLiveSet {
+  BufferSet buffers;
+  VarSet vars;
+
+  bool NeedsAnyDef(const LocalAccessSummary &summary) const {
+    for (const auto &buf : summary.write_buffers) {
+      if (buffers.count(buf)) {
+        return true;
+      }
+    }
+    for (const auto &var : summary.def_vars) {
+      if (vars.count(var)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void KillDefs(const LocalAccessSummary &summary) {
+    for (const auto &buf : summary.write_buffers) {
+      buffers.erase(buf);
+    }
+    for (const auto &var : summary.def_vars) {
+      vars.erase(var);
+    }
+  }
+
+  void AddUses(const LocalAccessSummary &summary) {
+    buffers.insert(summary.read_buffers.begin(), summary.read_buffers.end());
+    vars.insert(summary.read_vars.begin(), summary.read_vars.end());
+  }
+};
+
+class BufferDataToBufferCollector : public StmtExprVisitor {
+public:
+  static BufferDataToBufferMap Collect(const Stmt &stmt) {
+    BufferDataToBufferCollector collector;
+    collector.VisitStmt(stmt);
+    return collector.result_;
+  }
+
+private:
+  void VisitStmt_(const BlockRealizeNode *op) final {
+    CollectBuffers(op->block);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const BlockNode *op) final {
+    CollectBuffers(GetRef<Block>(op));
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void CollectBuffers(const Block &block) {
+    for (const auto &buffer : block->alloc_buffers) {
+      result_.emplace(buffer->data, buffer);
+    }
+  }
+
+  BufferDataToBufferMap result_;
+};
+
+class LocalAccessCollector : public StmtExprVisitor {
+public:
+  static LocalAccessSummary Collect(const Stmt &stmt,
+                                    const BufferDataToBufferMap &buffer_map) {
+    LocalAccessCollector collector(buffer_map);
+    collector.VisitStmt(stmt);
+    return std::move(collector.summary_);
+  }
+
+private:
+  explicit LocalAccessCollector(const BufferDataToBufferMap &buffer_map)
+      : buffer_data_to_buffer_(buffer_map) {}
+
+  void VisitStmt_(const LetStmtNode *op) final {
+    VisitExpr(op->value);
+    summary_.def_vars.insert(op->var);
+    bound_vars_.insert(op->var);
+    VisitStmt(op->body);
+    bound_vars_.erase(op->var);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    VisitExpr(op->min);
+    VisitExpr(op->extent);
+    bound_vars_.insert(op->loop_var);
+    VisitStmt(op->body);
+    bound_vars_.erase(op->loop_var);
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (IsLocalScopedBuffer(op->buffer)) {
+      summary_.read_buffers.insert(op->buffer);
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    if (IsLocalScopedBuffer(op->buffer)) {
+      summary_.write_buffers.insert(op->buffer);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const VarNode *op) final {
+    Var var = GetRef<Var>(op);
+    if (bound_vars_.count(var) || buffer_data_to_buffer_.count(var)) {
+      return;
+    }
+    summary_.read_vars.insert(var);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::access_ptr())) {
+      if (op->args.size() != 3) {
+        StmtExprVisitor::VisitExpr_(op);
+        return;
+      }
+      const auto *base_load = op->args[0].as<BufferLoadNode>();
+      if (base_load) {
+        if (IsLocalScopedBuffer(base_load->buffer)) {
+          int rw_mask = GetConstAccessMask(op->args[2]);
+          if (rw_mask & 1) {
+            summary_.read_buffers.insert(base_load->buffer);
+          }
+          if (rw_mask & 2) {
+            summary_.write_buffers.insert(base_load->buffer);
+          }
+        }
+        for (const auto &index : base_load->indices) {
+          VisitExpr(index);
+        }
+      } else {
+        VisitExpr(op->args[0]);
+      }
+      VisitExpr(op->args[1]);
+      return;
+    }
+
+    if (op->op.same_as(builtin::tvm_access_ptr())) {
+      if (op->args.size() != 5) {
+        StmtExprVisitor::VisitExpr_(op);
+        return;
+      }
+      if (const auto *var = op->args[1].as<VarNode>()) {
+        auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+        if (it != buffer_data_to_buffer_.end() &&
+            IsLocalScopedBuffer(it->second)) {
+          int rw_mask = GetConstAccessMask(op->args[4]);
+          if (rw_mask & 1) {
+            summary_.read_buffers.insert(it->second);
+          }
+          if (rw_mask & 2) {
+            summary_.write_buffers.insert(it->second);
+          }
+        }
+      }
+      VisitExpr(op->args[2]);
+      VisitExpr(op->args[3]);
+      return;
+    }
+
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  int GetConstAccessMask(const PrimExpr &expr) const {
+    if (const auto *imm = expr.as<IntImmNode>()) {
+      return static_cast<int>(imm->value);
+    }
+    return 3;
+  }
+
+  const BufferDataToBufferMap &buffer_data_to_buffer_;
+  LocalAccessSummary summary_;
+  VarSet bound_vars_;
 };
 
 // ---------------------------------------------------------------------------
@@ -114,25 +309,16 @@ public:
     while (i < flat_stmts.size()) {
       if (i + 1 < flat_stmts.size() &&
           IsMbarrierWaitParity(flat_stmts[i + 1])) {
-        // Check Pattern 1: AttrStmt("tl.tma_copy_write_buffer")
-        auto *attr = flat_stmts[i].as<AttrStmtNode>();
-        if (attr && attr->attr_key == "tl.tma_copy_write_buffer") {
-          Optional<Var> write_buffer_data = std::nullopt;
-          if (auto *v = attr->node.as<VarNode>()) {
-            write_buffer_data = GetRef<Var>(v);
-          }
+        Optional<Var> write_buffer_data =
+            ExtractTmaCopyWriteBufferData(flat_stmts[i]);
+        // Check Pattern 1/2: TMA producer + wait pair, optionally wrapped in a
+        // simple guard/Block/Let/Attr shell. Recover the written shared buffer
+        // when the tl.tma_copy_write_buffer annotation survives under wrappers.
+        if (write_buffer_data.defined() || ContainsTmaLoad(flat_stmts[i])) {
           blocks.push_back({AsyncProducerKind::kTma,
                             StripTmaCopyWriteBufferAttr(flat_stmts[i]),
                             Optional<Stmt>(flat_stmts[i + 1]),
                             write_buffer_data});
-          i += 2;
-          continue;
-        }
-        // Check Pattern 2: IfThenElse containing tma_load
-        if (ContainsTmaLoad(flat_stmts[i])) {
-          blocks.push_back({AsyncProducerKind::kTma,
-                            StripTmaCopyWriteBufferAttr(flat_stmts[i]),
-                            Optional<Stmt>(flat_stmts[i + 1]), std::nullopt});
           i += 2;
           continue;
         }
@@ -188,6 +374,44 @@ private:
       return nullptr;
     }
     return nullptr;
+  }
+
+  static Optional<Var> ExtractTmaCopyWriteBufferData(const Stmt &stmt) {
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (attr->attr_key == "tl.tma_copy_write_buffer") {
+        if (const auto *v = attr->node.as<VarNode>()) {
+          return GetRef<Var>(v);
+        }
+        return Optional<Var>();
+      }
+      return ExtractTmaCopyWriteBufferData(attr->body);
+    }
+    if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined() ||
+          IsTrivialNoOpStmt(if_stmt->else_case.value())) {
+        return ExtractTmaCopyWriteBufferData(if_stmt->then_case);
+      }
+      return Optional<Var>();
+    }
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return ExtractTmaCopyWriteBufferData(let->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return ExtractTmaCopyWriteBufferData(seq->seq[0]);
+      }
+      return Optional<Var>();
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return ExtractTmaCopyWriteBufferData(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return ExtractTmaCopyWriteBufferData(realize->block->body);
+      }
+      return Optional<Var>();
+    }
+    return Optional<Var>();
   }
 
   static bool IsMbarrierWaitParity(const Stmt &stmt) {
@@ -963,10 +1187,18 @@ private:
     Stmt init_barrier = Evaluate(Call(
         DataType::Handle(), create_list_of_mbarrier(), barrier_arrive_counts));
 
+    BufferDataToBufferMap buffer_data_to_buffer =
+        BufferDataToBufferCollector::Collect(GetRef<Stmt>(op));
+    LocalLiveSet producer_live_seed =
+        SeedLiveSetFromStmt(producer_loop_body, buffer_data_to_buffer);
+    LocalLiveSet consumer_live_seed =
+        SeedLiveSetFromStmt(consumer_loop_body, buffer_data_to_buffer);
+
     // Reconstruct block body: replace the pipeline loop and
     // create_list_of_mbarrier with new init_barrier + ws_body.
-    Stmt new_block_body = RebuildBlockBody(orig_block->body, pipeline_loop,
-                                           init_barrier, ws_body);
+    Stmt new_block_body = RebuildBlockBody(
+        orig_block->body, pipeline_loop, init_barrier, ws_body,
+        buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
 
     // Update thread extent
     updated_thread_extent_ = consumer_thread_extent + producer_thread_extent;
@@ -1779,7 +2011,11 @@ private:
     return has_shared_access && !has_control_ops;
   }
 
-  bool IsDuplicableBranchLocalPreStmt(const Stmt &stmt) {
+  bool IsBranchLocalPreStmtCandidate(const Stmt &stmt,
+                                     const LocalAccessSummary &summary) {
+    if (!summary.HasTrackedDefs()) {
+      return false;
+    }
     bool has_disallowed = false;
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (has_disallowed) {
@@ -1807,6 +2043,13 @@ private:
     return !has_disallowed;
   }
 
+  LocalLiveSet SeedLiveSetFromStmt(const Stmt &stmt,
+                                   const BufferDataToBufferMap &buffer_map) {
+    LocalLiveSet live;
+    live.AddUses(LocalAccessCollector::Collect(stmt, buffer_map));
+    return live;
+  }
+
   /*!
    * \brief Rebuild the block body, replacing the pipeline loop with
    *        init_barrier + ws_body and removing old create_list_of_mbarrier.
@@ -1817,7 +2060,10 @@ private:
    *  If that is not possible, fall back to an explicit consumer-thread guard.
    */
   Stmt RebuildBlockBody(const Stmt &body, const ForNode *target_loop,
-                        const Stmt &init_barrier, const Stmt &ws_body) {
+                        const Stmt &init_barrier, const Stmt &ws_body,
+                        const BufferDataToBufferMap &buffer_data_to_buffer,
+                        const LocalLiveSet &producer_live_seed,
+                        const LocalLiveSet &consumer_live_seed) {
     // If this IS the target loop, replace it
     if (body.as<ForNode>() == target_loop) {
       return SeqStmt({init_barrier, ws_body});
@@ -1837,8 +2083,9 @@ private:
 
         if (!found_loop && ContainsLoop(s, target_loop)) {
           // Replace the pipeline loop
-          rebuilt_loop =
-              RebuildBlockBody(s, target_loop, init_barrier, ws_body);
+          rebuilt_loop = RebuildBlockBody(
+              s, target_loop, init_barrier, ws_body, buffer_data_to_buffer,
+              producer_live_seed, consumer_live_seed);
           found_loop = true;
         } else if (found_loop) {
           // Collect statements after the pipeline loop
@@ -1861,19 +2108,60 @@ private:
       //   common statements kept outside the WS split
       //   producer-side async issues
       //   consumer-side waits / shared-dependent setup
+      //   branch-local prefix code that is assigned by actual downstream use
+      //     (producer only / consumer only / duplicated).
       //
-      // In pure-TMA mode we also duplicate branch-local scalar prefix code
-      // (for example loop-bound computation) into both branches. Leaving those
-      // statements outside the split can make producer and consumer observe
-      // inconsistent values after register repartitioning.
+      // We drive the branch-local assignment with a backward liveness walk over
+      // local buffers / Let vars. This avoids duplicating consumer-only local
+      // initialization into the producer branch.
+      enum class PrefixRole : uint8_t {
+        kUnknown,
+        kSkip,
+        kCommon,
+        kProducer,
+        kConsumer,
+        kBoth,
+        kConsumerShared,
+        kSpecialTmaStart,
+      };
+
       Array<Stmt> common_pre_stmts;
-      Array<Stmt> producer_prefix_stmts;
+      Array<Stmt> producer_prefix_ordered_stmts;
+      Array<Stmt> consumer_prefix_early_stmts;
       Array<Stmt> consumer_wait_prefix_stmts;
       Array<Stmt> consumer_shared_prefix_stmts;
-      Array<Stmt> duplicated_prefix_stmts;
-      size_t i = 0;
-      while (i < movable_begin) {
-        if (i + 1 < movable_begin && ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
+      std::vector<PrefixRole> prefix_roles(movable_begin, PrefixRole::kUnknown);
+      std::vector<Optional<Stmt>> rewritten_producer_prefix(movable_begin,
+                                                            std::nullopt);
+      std::vector<Optional<Stmt>> rewritten_consumer_wait(movable_begin,
+                                                          std::nullopt);
+
+      auto apply_to_live = [](LocalLiveSet *live,
+                              const LocalAccessSummary &summary) {
+        live->KillDefs(summary);
+        live->AddUses(summary);
+      };
+
+      LocalLiveSet producer_live = producer_live_seed;
+      LocalLiveSet consumer_live = consumer_live_seed;
+      for (size_t j = movable_begin; j < pre_loop_stmts.size(); ++j) {
+        consumer_live.AddUses(LocalAccessCollector::Collect(
+            pre_loop_stmts[j], buffer_data_to_buffer));
+      }
+      for (const auto &stmt : post_loop_stmts) {
+        consumer_live.AddUses(
+            LocalAccessCollector::Collect(stmt, buffer_data_to_buffer));
+      }
+
+      for (int i = static_cast<int>(movable_begin) - 1; i >= 0; --i) {
+        if (i > 0 && ContainsTmaLoadStmt(pre_loop_stmts[i - 1]) &&
+            IsMbarrierWaitParityStmt(pre_loop_stmts[i])) {
+          prefix_roles[i] = PrefixRole::kSkip;
+          continue;
+        }
+
+        if (static_cast<size_t>(i + 1) < movable_begin &&
+            ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
             IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1])) {
           Stmt producer_prefix_stmt =
               StripTmaCopyWriteBufferAttr(pre_loop_stmts[i]);
@@ -1901,24 +2189,88 @@ private:
           }
           producer_prefix_stmt =
               MergeAdjacentEquivalentIfs(producer_prefix_stmt);
-          producer_prefix_stmts.push_back(producer_prefix_stmt);
-          consumer_wait_prefix_stmts.push_back(consumer_wait_stmt);
-          i += 2;
+          rewritten_producer_prefix[i] = producer_prefix_stmt;
+          rewritten_consumer_wait[i] = consumer_wait_stmt;
+          prefix_roles[i] = PrefixRole::kSpecialTmaStart;
+          prefix_roles[i + 1] = PrefixRole::kSkip;
+          apply_to_live(&producer_live,
+                        LocalAccessCollector::Collect(producer_prefix_stmt,
+                                                      buffer_data_to_buffer));
+          apply_to_live(&consumer_live,
+                        LocalAccessCollector::Collect(consumer_wait_stmt,
+                                                      buffer_data_to_buffer));
           continue;
         }
+
+        const Stmt &stmt = pre_loop_stmts[i];
+        LocalAccessSummary summary =
+            LocalAccessCollector::Collect(stmt, buffer_data_to_buffer);
         if (remap_pure_tma_barriers_ &&
-            IsDuplicableBranchLocalPreStmt(pre_loop_stmts[i])) {
-          duplicated_prefix_stmts.push_back(pre_loop_stmts[i]);
-          ++i;
+            IsBranchLocalPreStmtCandidate(stmt, summary)) {
+          bool producer_needed = producer_live.NeedsAnyDef(summary);
+          bool consumer_needed = consumer_live.NeedsAnyDef(summary);
+          if (producer_needed && consumer_needed) {
+            prefix_roles[i] = PrefixRole::kBoth;
+            apply_to_live(&producer_live, summary);
+            apply_to_live(&consumer_live, summary);
+          } else if (producer_needed) {
+            prefix_roles[i] = PrefixRole::kProducer;
+            apply_to_live(&producer_live, summary);
+          } else if (consumer_needed) {
+            prefix_roles[i] = PrefixRole::kConsumer;
+            apply_to_live(&consumer_live, summary);
+          } else {
+            prefix_roles[i] = PrefixRole::kCommon;
+            apply_to_live(&producer_live, summary);
+            apply_to_live(&consumer_live, summary);
+          }
           continue;
         }
-        if (IsSharedDependentConsumerPreStmt(pre_loop_stmts[i])) {
-          consumer_shared_prefix_stmts.push_back(pre_loop_stmts[i]);
+
+        if (IsSharedDependentConsumerPreStmt(stmt)) {
+          prefix_roles[i] = PrefixRole::kConsumerShared;
+          apply_to_live(&consumer_live, summary);
         } else {
-          common_pre_stmts.push_back(pre_loop_stmts[i]);
+          prefix_roles[i] = PrefixRole::kCommon;
+          apply_to_live(&producer_live, summary);
+          apply_to_live(&consumer_live, summary);
         }
-        ++i;
       }
+
+      for (size_t i = 0; i < movable_begin; ++i) {
+        switch (prefix_roles[i]) {
+        case PrefixRole::kSkip:
+          break;
+        case PrefixRole::kCommon:
+          common_pre_stmts.push_back(pre_loop_stmts[i]);
+          break;
+        case PrefixRole::kProducer:
+          producer_prefix_ordered_stmts.push_back(pre_loop_stmts[i]);
+          break;
+        case PrefixRole::kConsumer:
+          consumer_prefix_early_stmts.push_back(pre_loop_stmts[i]);
+          break;
+        case PrefixRole::kBoth:
+          producer_prefix_ordered_stmts.push_back(pre_loop_stmts[i]);
+          consumer_prefix_early_stmts.push_back(pre_loop_stmts[i]);
+          break;
+        case PrefixRole::kConsumerShared:
+          consumer_shared_prefix_stmts.push_back(pre_loop_stmts[i]);
+          break;
+        case PrefixRole::kSpecialTmaStart:
+          ICHECK(rewritten_producer_prefix[i].defined());
+          ICHECK(rewritten_consumer_wait[i].defined());
+          producer_prefix_ordered_stmts.push_back(
+              rewritten_producer_prefix[i].value());
+          consumer_wait_prefix_stmts.push_back(
+              rewritten_consumer_wait[i].value());
+          break;
+        case PrefixRole::kUnknown:
+          common_pre_stmts.push_back(pre_loop_stmts[i]);
+          break;
+        }
+      }
+
       for (const auto &s : common_pre_stmts) {
         new_seq.push_back(s);
       }
@@ -1931,16 +2283,8 @@ private:
                                  : Optional<Stmt>(SeqStmt(stmts));
       };
 
-      Array<Stmt> producer_prefix_all_stmts;
-      for (const auto &s : duplicated_prefix_stmts) {
-        producer_prefix_all_stmts.push_back(s);
-      }
-      for (const auto &s : producer_prefix_stmts) {
-        producer_prefix_all_stmts.push_back(s);
-      }
-
       Array<Stmt> consumer_prefix_stmts;
-      for (const auto &s : duplicated_prefix_stmts) {
+      for (const auto &s : consumer_prefix_early_stmts) {
         consumer_prefix_stmts.push_back(s);
       }
       // Keep pure local init before waits to delay blocking until needed.
@@ -1955,7 +2299,7 @@ private:
       }
       Optional<Stmt> consumer_prefix = MakeOptionalStmt(consumer_prefix_stmts);
       Optional<Stmt> producer_prefix =
-          MakeOptionalStmt(producer_prefix_all_stmts);
+          MakeOptionalStmt(producer_prefix_ordered_stmts);
 
       Optional<Stmt> ws_stmt = rebuilt_loop;
       Optional<Stmt> producer_guard = std::nullopt;
@@ -2043,15 +2387,17 @@ private:
     // Walk through wrapper nodes
     if (auto *attr = body.as<AttrStmtNode>()) {
       if (ContainsLoop(attr->body, target_loop)) {
-        Stmt new_body =
-            RebuildBlockBody(attr->body, target_loop, init_barrier, ws_body);
+        Stmt new_body = RebuildBlockBody(
+            attr->body, target_loop, init_barrier, ws_body,
+            buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
         return AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
       }
     }
     if (auto *let_s = body.as<LetStmtNode>()) {
       if (ContainsLoop(let_s->body, target_loop)) {
-        Stmt new_body =
-            RebuildBlockBody(let_s->body, target_loop, init_barrier, ws_body);
+        Stmt new_body = RebuildBlockBody(
+            let_s->body, target_loop, init_barrier, ws_body,
+            buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
         return LetStmt(let_s->var, let_s->value, new_body);
       }
     }
