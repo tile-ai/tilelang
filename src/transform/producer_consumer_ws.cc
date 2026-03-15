@@ -808,6 +808,8 @@ private:
     int num_new_cp_async_fwd_barriers = num_cp_async_groups * num_stages;
     int inferred_existing_required =
         InferMinRequiredBarrierCount(orig_block->body);
+    int required_preloop_tma_pairs = CountRewrittenPureTmaPreloopForwardPairs(
+        orig_block->body, pipeline_loop);
     bool old_use_full_tma_forward_barrier_protocol =
         use_full_tma_forward_barrier_protocol_;
     bool old_remap_pure_tma_barriers = remap_pure_tma_barriers_;
@@ -855,12 +857,14 @@ private:
     int num_existing_barriers = 0;
     int num_preloop_fwd_barriers = 0;
     if (remap_pure_tma_barriers_) {
-      // Only preserve pre-loop forward barriers that already exist in the IR.
-      // Reserving an unconditional extra slot leaves an initialized-but-unused
-      // mbarrier when the pipeline contains no pre-loop TMA prefix.
+      // Pure-TMA WS remaps pre-loop TMA prefixes to a dedicated barrier range.
+      // Some kernels reuse loop barrier ids for those prefixes in the original
+      // IR, so `inferred_existing_required` alone can undercount how many
+      // distinct pre-loop barriers the rewritten form needs.
       num_preloop_fwd_barriers =
-          std::max(0, inferred_existing_required -
-                          original_num_existing_loop_fwd_barriers);
+          std::max(required_preloop_tma_pairs,
+                   std::max(0, inferred_existing_required -
+                                   original_num_existing_loop_fwd_barriers));
       num_existing_barriers =
           num_existing_loop_fwd_barriers + num_preloop_fwd_barriers;
     } else {
@@ -1386,6 +1390,62 @@ private:
         << "mbarrier id expressions. Refusing to allocate back-pressure "
         << "barriers to avoid id overlap.";
     return collector.max_idx + 1;
+  }
+
+  int CountRewrittenPureTmaPreloopForwardPairs(const Stmt &stmt,
+                                               const ForNode *target_loop) {
+    if (stmt.as<ForNode>() == target_loop) {
+      return 0;
+    }
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      Array<Stmt> pre_loop_stmts;
+      bool found_loop = false;
+      int nested_count = 0;
+      for (const auto &s : seq->seq) {
+        if (IsCreateListOfMbarrier(s)) {
+          continue;
+        }
+        if (!found_loop && ContainsLoop(s, target_loop)) {
+          nested_count =
+              CountRewrittenPureTmaPreloopForwardPairs(s, target_loop);
+          found_loop = true;
+        } else if (!found_loop) {
+          pre_loop_stmts.push_back(s);
+        }
+      }
+      if (!found_loop) {
+        return 0;
+      }
+
+      size_t movable_begin = pre_loop_stmts.size();
+      while (movable_begin > 0 &&
+             IsMovableConsumerPrefixStmt(pre_loop_stmts[movable_begin - 1])) {
+        --movable_begin;
+      }
+
+      int local_count = 0;
+      for (size_t i = 0; i + 1 < movable_begin; ++i) {
+        if (ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
+            IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1])) {
+          ++local_count;
+        }
+      }
+      return nested_count + local_count;
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      return CountRewrittenPureTmaPreloopForwardPairs(attr->body, target_loop);
+    }
+    if (auto *let_s = stmt.as<LetStmtNode>()) {
+      return CountRewrittenPureTmaPreloopForwardPairs(let_s->body, target_loop);
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      return CountRewrittenPureTmaPreloopForwardPairs(realize->block->body,
+                                                      target_loop);
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      return CountRewrittenPureTmaPreloopForwardPairs(block->body, target_loop);
+    }
+    return 0;
   }
 
   // Single source of truth for barrier/TMA control-like calls that should not
