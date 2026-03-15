@@ -7,6 +7,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../op/utils.h"
 #include <algorithm>
 #include <functional>
 #include <limits>
@@ -241,6 +242,8 @@ public:
 
   bool GetGlobalCopyPattern() const { return is_global_copy_pattern_; }
 
+  bool GetTmaCopyPattern() const { return is_tma_copy_; }
+
 private:
   Optional<Buffer> TryGetBufFromAccessPtr(const PrimExpr &expr) const {
     auto call = expr.as<CallNode>();
@@ -268,6 +271,22 @@ private:
     return Optional<Buffer>();
   }
 
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == "tl.tma_copy_write_buffer") {
+      // TMA copy lowering annotates the producer with the shared buffer
+      // it writes to. Use this to detect TMA copy stages and track the
+      // written buffer for pipeline dependency analysis.
+      auto var = Downcast<Var>(op->node);
+      auto it = buffer_data_to_buffer_.find(var);
+      if (it != buffer_data_to_buffer_.end()) {
+        writes_.push_back(BufferRegion::FullRegion((*it).second));
+        is_global_copy_pattern_ = true;
+        is_tma_copy_ = true;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   void VisitStmt_(const BufferStoreNode *op) final {
     Buffer store_buffer = op->buffer;
     Array<PrimExpr> indices = op->indices;
@@ -281,8 +300,7 @@ private:
 
     is_global_read_ = false;
     this->VisitExpr(op->value);
-    if (is_global_read_ && (store_buffer.scope() == "shared" ||
-                            store_buffer.scope() == "shared.dyn")) {
+    if (is_global_read_ && IsSharedBuffer(store_buffer)) {
       is_global_copy_pattern_ = true;
     }
     is_global_read_ = false;
@@ -299,7 +317,7 @@ private:
     auto load_region = BufferRegion(load_buffer, region);
     reads_.push_back(load_region);
 
-    if (op->buffer.scope() == "global" && !within_condition_expr_) {
+    if (IsGlobalBuffer(op->buffer) && !within_condition_expr_) {
       // skip condition expr of if_then_else node
       // shared[i] = T.if_then_else(global[i] < n, register_a[i], register_b[i])
       // is not a global read shared[i] = T.if_then_else(global[i] < n,
@@ -349,10 +367,9 @@ private:
           writes_.push_back(BufferRegion::FullRegion(dst_buf.value()));
         }
         if (src_buf.defined() && dst_buf.defined() &&
-            (src_buf.value().scope() == "global" ||
+            (IsGlobalBuffer(src_buf.value()) ||
              src_buf.value().scope().empty()) &&
-            (dst_buf.value().scope() == "shared" ||
-             dst_buf.value().scope() == "shared.dyn")) {
+            IsSharedBuffer(dst_buf.value())) {
           is_global_copy_pattern_ = true;
         }
       }
@@ -369,21 +386,26 @@ private:
         this->VisitExpr(op->args[i]);
       }
     } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
-      ICHECK(args[0].as<BufferLoadNode>());
-      Buffer mbar_buf = args[0].as<BufferLoadNode>()->buffer;
-      auto buffer_reads =
-          chain_builder_.mbar_to_buffer_reads_.find(mbar_buf.get());
-      auto buffer_writes =
-          chain_builder_.mbar_to_buffer_writes_.find(mbar_buf.get());
-      if (buffer_reads != chain_builder_.mbar_to_buffer_reads_.end()) {
-        reads_.insert(reads_.end(), buffer_reads->second.begin(),
-                      buffer_reads->second.end());
-      }
-      if (buffer_writes != chain_builder_.mbar_to_buffer_writes_.end()) {
-        writes_.insert(
-            writes_.end(),
-            chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).begin(),
-            chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).end());
+      // The mbarrier argument can be either a BufferLoad (user-allocated
+      // barrier via T.alloc_barrier) or a Call to get_mbarrier (compiler-
+      // generated inline barrier from TMA copy lowering).  Only track
+      // mbarrier→buffer dependencies for user-allocated barriers.
+      if (auto *buf_load = args[0].as<BufferLoadNode>()) {
+        Buffer mbar_buf = buf_load->buffer;
+        auto buffer_reads =
+            chain_builder_.mbar_to_buffer_reads_.find(mbar_buf.get());
+        auto buffer_writes =
+            chain_builder_.mbar_to_buffer_writes_.find(mbar_buf.get());
+        if (buffer_reads != chain_builder_.mbar_to_buffer_reads_.end()) {
+          reads_.insert(reads_.end(), buffer_reads->second.begin(),
+                        buffer_reads->second.end());
+        }
+        if (buffer_writes != chain_builder_.mbar_to_buffer_writes_.end()) {
+          writes_.insert(
+              writes_.end(),
+              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).begin(),
+              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).end());
+        }
       }
     } else {
       StmtExprVisitor::VisitExpr_(op);
@@ -410,6 +432,7 @@ private:
   bool is_global_read_ = false;
   bool under_buffer_store_ = false;
   bool is_global_copy_pattern_ = false;
+  bool is_tma_copy_ = false;
   bool within_condition_expr_ = false;
 };
 
@@ -456,6 +479,7 @@ private:
     int original_stmt_index{};
     int order = -1, stage = -1;
     bool copy_stage = false;
+    bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
     bool producer_for_copy = false;
     // Commit statements have no buffer writes, but they must be scheduled as a
     // part of their cp.async producer group (after the cp.async calls).
@@ -476,6 +500,7 @@ private:
       return copy_stage || producer_for_copy || cp_async_commit_stage;
     }
     bool is_copy_stage() const { return copy_stage; }
+    bool is_tma_copy() const { return tma_copy; }
     bool is_producer_for_copy() const { return producer_for_copy; }
     bool is_cp_async_commit_stage() const { return cp_async_commit_stage; }
     bool has_cp_async_call() const { return cp_async_call_count > 0; }
@@ -538,6 +563,7 @@ private:
     pinfo.writes = std::move(collector.GetWrites());
     pinfo.original_stmt_index = idx;
     pinfo.copy_stage = collector.GetGlobalCopyPattern();
+    pinfo.tma_copy = collector.GetTmaCopyPattern();
     auto async_info = AnalyzeAsyncIntrinsics(block->body);
     pinfo.cp_async_call_count = async_info.cp_async_call_count;
     pinfo.cp_async_commit_count = async_info.cp_async_commit_count;
@@ -642,13 +668,30 @@ private:
     CHECK(num_stages >= 1);
     CHECK(loop->kind == ForKind::kSerial);
 
+    // Flatten nested SeqStmts. TMA copy lowering emits
+    // SeqStmt({produce, wait}) which creates nested SeqStmts when placed
+    // inside the loop body. Flatten them so pipeline planning can assign
+    // individual stages to the produce and wait statements.
+    Array<Stmt> flat_stmts;
+    std::function<void(const Stmt &)> flatten_seq = [&](const Stmt &s) {
+      if (auto *seq = s.as<SeqStmtNode>()) {
+        for (const auto &sub : seq->seq) {
+          flatten_seq(sub);
+        }
+      } else {
+        flat_stmts.push_back(s);
+      }
+    };
+    for (size_t i = 0; i < pipeline_body_seq->size(); i++) {
+      flatten_seq(pipeline_body_seq->seq[i]);
+    }
+
     AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
     chain_builder(pipeline_body_root);
 
     std::vector<PipelineStageInfo> pipeline_stage_infos;
-    for (size_t i = 0; i < pipeline_body_seq->size(); i++) {
-      auto pinfo =
-          MakePipelineStageInfo(pipeline_body_seq->seq[i], i, chain_builder);
+    for (size_t i = 0; i < flat_stmts.size(); i++) {
+      auto pinfo = MakePipelineStageInfo(flat_stmts[i], i, chain_builder);
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
@@ -662,6 +705,7 @@ private:
       std::vector<int> cp_async_stmt_indices;
       std::vector<int> commit_stmt_indices;
       std::unordered_set<const BufferNode *> written_buffers;
+      int last_use_stmt_index = -1;
     };
     struct WaitDependencyInfo {
       int wait_stmt_index = -1;
@@ -745,21 +789,12 @@ private:
       return false;
     };
 
-    // Record earliest consumers for each cp.async group, and track all
-    // cp.async-written buffers for wait remapping.
+    // Track all cp.async-written buffers for wait remapping.
     std::unordered_set<const BufferNode *> async_written_buffers;
-    std::vector<int> cp_async_group_first_consumer(
-        cp_async_groups.size(), std::numeric_limits<int>::max());
     for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
       const auto &group = cp_async_groups[group_id];
       async_written_buffers.insert(group.written_buffers.begin(),
                                    group.written_buffers.end());
-      for (int stmt_idx = 0; stmt_idx < pipeline_stmt_count; ++stmt_idx) {
-        if (stmt_reads_buffer_set(stmt_idx, group.written_buffers)) {
-          cp_async_group_first_consumer[group_id] = stmt_idx;
-          break;
-        }
-      }
     }
 
     // Heuristic for wait_group(0): bind each wait to the first unmatched
@@ -813,25 +848,6 @@ private:
       wait_dep.required_group_ids = std::move(required_groups_for_consumer);
       last_bound_consumer_stmt = consumer_stmt_idx;
     }
-
-    // Prioritize cp.async groups with earlier consumers when enforcing group
-    // boundary ordering. This helps place prefetches for near-term consumers
-    // earlier in the stage-0 schedule.
-    std::vector<int> cp_async_group_schedule_order;
-    cp_async_group_schedule_order.reserve(cp_async_groups.size());
-    for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
-      cp_async_group_schedule_order.push_back(static_cast<int>(group_id));
-    }
-    std::stable_sort(
-        cp_async_group_schedule_order.begin(),
-        cp_async_group_schedule_order.end(), [&](int lhs_group, int rhs_group) {
-          int lhs_first_consumer = cp_async_group_first_consumer[lhs_group];
-          int rhs_first_consumer = cp_async_group_first_consumer[rhs_group];
-          if (lhs_first_consumer != rhs_first_consumer) {
-            return lhs_first_consumer < rhs_first_consumer;
-          }
-          return lhs_group < rhs_group;
-        });
 
     // For every copy stage, mark all its dependency stages as producer_for_copy
     // Helper struct to manage copy stage dependency reads
@@ -940,7 +956,7 @@ private:
 
       // Check all subsequent statements to find the latest consumer
       for (int i = pinfo.original_stmt_index + 1;
-           i < static_cast<int>(pipeline_body_seq->size()); i++) {
+           i < static_cast<int>(flat_stmts.size()); i++) {
 
         // Check if any read operation in statement 'i' uses data written by
         // this copy stage
@@ -982,16 +998,12 @@ private:
       }
     }
 
-    // CPAsync commit statements are pure sync ops without explicit buffer
-    // accesses, but they must be kept with their corresponding cp.async group.
-    // Otherwise pipeline planning may schedule commit early (since it has no
-    // data deps), and then later force stage(commit)=stage(cp_async), causing
-    // illegal order like "commit; cp_async" in the generated prologue/body.
-    //
-    // We treat commit-only statements as "first-stage" scheduling candidates
-    // and reuse the group's last_use to place them right after the group's
-    // cp.async calls (in original statement order).
-    for (const auto &group : cp_async_groups) {
+    // Treat each explicit `cp_async* ; commit` producer group as a synthetic
+    // copy stage for scheduling. All statements in the group share the same
+    // last-use anchor, so stage assignment keeps the producer group together
+    // instead of scheduling individual cp.async members near different
+    // consumers.
+    for (auto &group : cp_async_groups) {
       if (group.anchor_cp_async_stmt < 0) {
         continue;
       }
@@ -1009,15 +1021,20 @@ private:
         // (rare, but keep local ordering correct).
         group_last_use = group_last_cp_async_stmt;
       }
+      group.last_use_stmt_index = group_last_use;
+      for (int cp_async_stmt_idx : group.cp_async_stmt_indices) {
+        pipeline_stage_infos[cp_async_stmt_idx].last_use_stmt_index =
+            group_last_use;
+      }
       for (int commit_stmt_idx : group.commit_stmt_indices) {
         auto &commit_info = pipeline_stage_infos[commit_stmt_idx];
+        commit_info.last_use_stmt_index = group_last_use;
         // Only mark commit-only statements. If commit is already fused with
         // cp.async calls in the same statement, its local ordering is
-        // preserved.
+        // preserved by the statement itself.
         if (commit_info.has_cp_async_commit() &&
             !commit_info.has_cp_async_call()) {
           commit_info.cp_async_commit_stage = true;
-          commit_info.last_use_stmt_index = group_last_use;
         }
       }
     }
@@ -1247,6 +1264,41 @@ private:
         }
       };
 
+      auto group_schedule_key = [&](const CPAsyncGroupInfo &group) {
+        int key = std::numeric_limits<int>::max();
+        for (int cp_stmt_idx : group.cp_async_stmt_indices) {
+          key = std::min(key, pipeline_stage_infos[cp_stmt_idx].order);
+        }
+        for (int commit_stmt_idx : group.commit_stmt_indices) {
+          key = std::min(key, pipeline_stage_infos[commit_stmt_idx].order);
+        }
+        if (key == std::numeric_limits<int>::max()) {
+          key = group.anchor_cp_async_stmt;
+        }
+        return key;
+      };
+
+      // Respect the synthetic producer-group order computed above. The control
+      // dependencies below only preserve cp.async group boundaries; they must
+      // not re-prioritize groups using a different heuristic.
+      std::vector<int> cp_async_group_schedule_order;
+      cp_async_group_schedule_order.reserve(cp_async_groups.size());
+      for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
+        cp_async_group_schedule_order.push_back(static_cast<int>(group_id));
+      }
+      std::stable_sort(
+          cp_async_group_schedule_order.begin(),
+          cp_async_group_schedule_order.end(),
+          [&](int lhs_group, int rhs_group) {
+            int lhs_key = group_schedule_key(cp_async_groups[lhs_group]);
+            int rhs_key = group_schedule_key(cp_async_groups[rhs_group]);
+            if (lhs_key != rhs_key) {
+              return lhs_key < rhs_key;
+            }
+            return cp_async_groups[lhs_group].anchor_cp_async_stmt <
+                   cp_async_groups[rhs_group].anchor_cp_async_stmt;
+          });
+
       // (1) cp.async group semantics:
       //   group := cp_async* ; commit
       // and group boundaries must be preserved:
@@ -1448,12 +1500,45 @@ private:
 
     annotations.Set(tir::attr::software_pipeline_stage, Array<Integer>(stages));
     annotations.Set(tir::attr::software_pipeline_order, Array<Integer>(orders));
-    if (TargetHasAsyncCopy(target_) && use_async_copy_)
+
+    // Only mark stage 0 as async for cp.async copies. TMA copies use
+    // mbarrier synchronization and don't need async_commit/wait_queue.
+    bool has_tma_copy = false;
+    for (const auto &pinfo : pipeline_stage_infos) {
+      if (pinfo.is_tma_copy()) {
+        has_tma_copy = true;
+        break;
+      }
+    }
+    if (TargetHasAsyncCopy(target_) && use_async_copy_ && !has_tma_copy)
       annotations.Set(tir::attr::software_pipeline_async_stages,
                       Array<Integer>{0});
 
-    return For(loop->loop_var, loop->min, loop->extent, loop->kind, loop->body,
-               loop->thread_binding, annotations);
+    // Reconstruct the loop body with the flattened SeqStmt so that
+    // InjectSoftwarePipeline sees the correct number of pipeline stages.
+    Stmt new_body_seq = SeqStmt(flat_stmts);
+    // Rebuild any wrapper layers (IfThenElse, LetStmt, BlockRealize)
+    // between the loop body and the SeqStmt.
+    Stmt new_loop_body;
+    if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
+      const auto &block = realize->block;
+      // Rebuild: body_root → ... → new_body_seq
+      // We need to reconstruct the chain from block->body to the SeqStmt.
+      Stmt rebuilt_inner =
+          RebuildBodyWrapper(block->body, pipeline_body_seq, new_body_seq);
+      Block new_block(block->iter_vars, block->reads, block->writes,
+                      block->name_hint, rebuilt_inner, block->init,
+                      block->alloc_buffers, block->match_buffers,
+                      block->annotations);
+      new_loop_body =
+          BlockRealize(realize->iter_values, realize->predicate, new_block);
+    } else {
+      new_loop_body =
+          RebuildBodyWrapper(loop->body, pipeline_body_seq, new_body_seq);
+    }
+
+    return For(loop->loop_var, loop->min, loop->extent, loop->kind,
+               new_loop_body, loop->thread_binding, annotations);
   }
 
   Stmt VisitStmt_(const BlockNode *op) final {
@@ -1465,6 +1550,31 @@ private:
       buffer_data_to_buffer_.erase(buffer->data);
     }
     return std::move(block);
+  }
+
+  /*!
+   * \brief Rebuild the chain of wrapper statements (IfThenElse, LetStmt)
+   *        between the loop body root and the inner SeqStmt, replacing
+   *        the old SeqStmt with the new (flattened) one.
+   */
+  Stmt RebuildBodyWrapper(const Stmt &current, const SeqStmtNode *old_seq,
+                          const Stmt &new_seq) {
+    if (current.get() == old_seq) {
+      return new_seq;
+    }
+    if (const auto *if_node = current.as<IfThenElseNode>()) {
+      return IfThenElse(
+          if_node->condition,
+          RebuildBodyWrapper(if_node->then_case, old_seq, new_seq),
+          if_node->else_case);
+    }
+    if (const auto *let_node = current.as<LetStmtNode>()) {
+      return LetStmt(let_node->var, let_node->value,
+                     RebuildBodyWrapper(let_node->body, old_seq, new_seq));
+    }
+    LOG(FATAL) << "RebuildBodyWrapper: unexpected node type "
+               << current->GetTypeKey();
+    return current;
   }
 
   Map<Var, Buffer> buffer_data_to_buffer_;

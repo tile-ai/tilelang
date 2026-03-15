@@ -157,11 +157,10 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_sp_ss";
-  ICHECK((a_.scope() == "shared" || a_.scope() == "shared.dyn") &&
-         (b_.scope() == "shared" || b_.scope() == "shared.dyn"))
+  ICHECK(IsSharedBuffer(a_) && IsSharedBuffer(b_))
       << "Only support shared.dyn scope for A and B, but received "
       << a_.scope() << " and " << b_.scope();
-  ICHECK((e_.scope() == "shared" || e_.scope() == "shared.dyn"))
+  ICHECK(IsSharedBuffer(e_))
       << "Only support shared.dyn scope for E as copy from smem to rmem are "
          "delegated to cute implementation, found "
       << e_.scope();
@@ -239,7 +238,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
                         : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
                                             c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
-    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(a_)) {
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
@@ -251,7 +250,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       ICHECK(false) << "Not implemented";
     }
 
-    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(b_)) {
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
@@ -271,7 +270,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
                                             c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
 
-    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(a_)) {
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
@@ -286,7 +285,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     } else {
       ICHECK(0);
     }
-    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(b_)) {
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
