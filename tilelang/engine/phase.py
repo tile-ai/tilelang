@@ -240,6 +240,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
             mod = tilelang.transform.PipelinePlanning()(mod)
             mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
         if is_hopper(target):
             mod = tilelang.transform.RewriteWgmmaSync()(mod)

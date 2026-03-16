@@ -51,6 +51,7 @@ def test_example_wy_fast_compilation():
     )
     print(kernel.get_kernel_source())
     W_tilelang, U_tilelang = kernel(K, V, Beta, G, A)
+    torch.cuda.synchronize()
 
 
 def test_example_wy_fast_bwd_split_compilation():

@@ -807,7 +807,6 @@ private:
         num_existing_tma_fwd_barriers * num_stages;
     int original_num_existing_loop_fwd_barriers =
         num_existing_loop_fwd_barriers;
-    int num_new_cp_async_fwd_barriers = num_cp_async_groups * num_stages;
     int inferred_existing_required =
         InferMinRequiredBarrierCount(orig_block->body);
     int required_preloop_tma_pairs = CountRewrittenPureTmaPreloopForwardPairs(
@@ -827,34 +826,68 @@ private:
           ExtractNonThreadProducerGuard(extractor.blocks[i].producer_stmt);
     }
 
+    StructuralEqual equal;
+    auto same_guard = [&](size_t lhs, size_t rhs) {
+      const Optional<PrimExpr> &guard_a = producer_guards[lhs];
+      const Optional<PrimExpr> &guard_b = producer_guards[rhs];
+      if (guard_a.defined() != guard_b.defined()) {
+        return false;
+      }
+      return !guard_a.defined() || equal(guard_a.value(), guard_b.value());
+    };
     std::vector<int> block_group(extractor.blocks.size(), 0);
-    int num_block_groups = static_cast<int>(extractor.blocks.size());
-    if (remap_pure_tma_barriers_ && !extractor.blocks.empty()) {
-      StructuralEqual equal;
-      auto same_guard = [&](size_t lhs, size_t rhs) {
-        const Optional<PrimExpr> &guard_a = producer_guards[lhs];
-        const Optional<PrimExpr> &guard_b = producer_guards[rhs];
-        if (guard_a.defined() != guard_b.defined()) {
-          return false;
-        }
-        return !guard_a.defined() || equal(guard_a.value(), guard_b.value());
-      };
+    int num_block_groups = 0;
+    if (!extractor.blocks.empty()) {
       int next_group = 0;
       block_group[0] = next_group++;
+      bool current_group_has_tma =
+          extractor.blocks[0].kind == AsyncProducerKind::kTma;
       for (size_t i = 1; i < extractor.blocks.size(); ++i) {
         bool merge_with_prev =
-            extractor.blocks[i].kind == AsyncProducerKind::kTma &&
-            extractor.blocks[i - 1].kind == AsyncProducerKind::kTma &&
             wait_insert_pos[i] == wait_insert_pos[i - 1] &&
             arrive_insert_pos[i] == arrive_insert_pos[i - 1] &&
             same_guard(i - 1, i);
+        if (merge_with_prev && !remap_pure_tma_barriers_ &&
+            current_group_has_tma &&
+            extractor.blocks[i].kind == AsyncProducerKind::kTma) {
+          // Mixed groups can safely share one TMA barrier with cp.async
+          // arrive-on notifications, but keeping multiple TMA producers on the
+          // same preserved protocol would over-arrive the barrier.
+          merge_with_prev = false;
+        }
         block_group[i] = merge_with_prev ? block_group[i - 1] : next_group++;
+        if (!merge_with_prev) {
+          current_group_has_tma =
+              extractor.blocks[i].kind == AsyncProducerKind::kTma;
+        } else if (extractor.blocks[i].kind == AsyncProducerKind::kTma) {
+          current_group_has_tma = true;
+        }
       }
       num_block_groups = next_group;
-      num_existing_tma_fwd_barriers = num_block_groups;
-      num_existing_loop_fwd_barriers =
-          num_existing_tma_fwd_barriers * num_stages;
     }
+
+    std::vector<bool> group_has_tma(num_block_groups, false);
+    std::vector<bool> group_has_cp_async(num_block_groups, false);
+    for (size_t i = 0; i < extractor.blocks.size(); ++i) {
+      int group = block_group[i];
+      if (extractor.blocks[i].kind == AsyncProducerKind::kTma) {
+        group_has_tma[group] = true;
+      } else if (extractor.blocks[i].kind == AsyncProducerKind::kCpAsync) {
+        group_has_cp_async[group] = true;
+      }
+    }
+    int num_tma_groups = 0;
+    int num_cp_async_only_groups = 0;
+    for (int group = 0; group < num_block_groups; ++group) {
+      if (group_has_tma[group]) {
+        ++num_tma_groups;
+      } else if (group_has_cp_async[group]) {
+        ++num_cp_async_only_groups;
+      }
+    }
+    num_existing_tma_fwd_barriers = num_tma_groups;
+    num_existing_loop_fwd_barriers = num_existing_tma_fwd_barriers * num_stages;
+    int num_new_cp_async_fwd_barriers = num_cp_async_only_groups * num_stages;
 
     int num_existing_barriers = 0;
     int num_preloop_fwd_barriers = 0;
@@ -870,26 +903,21 @@ private:
       num_existing_barriers =
           num_existing_loop_fwd_barriers + num_preloop_fwd_barriers;
     } else {
-      // Reserve one extra slot for non-pipelined forward barriers such as a
-      // prologue TMA load that lives outside the main pipeline loop.
-      int min_reserved_non_pipeline = num_existing_loop_fwd_barriers + 1;
+      // Mixed TMA/cp.async keeps any existing non-pipelined forward barriers
+      // at their original ids. `inferred_existing_required` already accounts
+      // for those explicit references, so avoid reserving an extra unused slot.
       num_existing_barriers =
-          std::max(min_reserved_non_pipeline, inferred_existing_required);
+          std::max(num_existing_loop_fwd_barriers, inferred_existing_required);
       num_preloop_fwd_barriers =
           num_existing_barriers - num_existing_loop_fwd_barriers;
     }
     int num_total_fwd_barriers = 0;
-    int num_bp_barriers =
-        (remap_pure_tma_barriers_ ? num_block_groups
-                                  : static_cast<int>(extractor.blocks.size())) *
-        num_stages;
+    int num_bp_barriers = num_block_groups * num_stages;
     int total_barriers = 0;
 
-    std::vector<int> tma_fwd_bases(extractor.blocks.size(), -1);
-    std::vector<int> cp_async_fwd_bases(extractor.blocks.size(), -1);
-
-    std::vector<int> bp_bases;
-    bp_bases.reserve(extractor.blocks.size());
+    std::vector<int> fwd_bases(extractor.blocks.size(), -1);
+    std::vector<int> bp_bases(extractor.blocks.size(), -1);
+    std::vector<PrimExpr> mixed_fwd_arrive_counts;
 
     if (remap_pure_tma_barriers_) {
       // Pure-TMA layout:
@@ -898,20 +926,18 @@ private:
       //   [loop_fwd + bp, total_barriers) : preloop/prologue forward barriers
       int next_loop_fwd_base = 0;
       for (size_t i = 0; i < extractor.blocks.size(); ++i) {
-        if (extractor.blocks[i].kind == AsyncProducerKind::kTma) {
-          if (i == 0 || block_group[i] != block_group[i - 1]) {
-            tma_fwd_bases[i] = next_loop_fwd_base;
-            next_loop_fwd_base += num_stages;
-          } else {
-            tma_fwd_bases[i] = tma_fwd_bases[i - 1];
-          }
+        if (i == 0 || block_group[i] != block_group[i - 1]) {
+          fwd_bases[i] = next_loop_fwd_base;
+          next_loop_fwd_base += num_stages;
+        } else {
+          fwd_bases[i] = fwd_bases[i - 1];
         }
       }
       num_total_fwd_barriers =
           num_existing_loop_fwd_barriers + num_preloop_fwd_barriers;
       for (size_t i = 0; i < extractor.blocks.size(); ++i) {
-        bp_bases.push_back(num_existing_loop_fwd_barriers +
-                           block_group[i] * num_stages);
+        bp_bases[i] =
+            num_existing_loop_fwd_barriers + block_group[i] * num_stages;
       }
       pure_tma_preloop_fwd_base_ =
           num_existing_loop_fwd_barriers + num_bp_barriers;
@@ -925,16 +951,32 @@ private:
       //   [total_fwd, total)         : back-pressure barriers
       num_total_fwd_barriers =
           num_existing_barriers + num_new_cp_async_fwd_barriers;
+      int next_existing_tma_fwd_base = 0;
       int next_cp_async_fwd_base = num_existing_barriers;
-      for (size_t i = 0; i < extractor.blocks.size(); ++i) {
-        if (extractor.blocks[i].kind == AsyncProducerKind::kCpAsync) {
-          cp_async_fwd_bases[i] = next_cp_async_fwd_base;
+      std::vector<int> group_fwd_bases(num_block_groups, -1);
+      mixed_fwd_arrive_counts.assign(num_total_fwd_barriers,
+                                     IntImm(DataType::Int(32), 1));
+      for (int group = 0; group < num_block_groups; ++group) {
+        if (group_has_tma[group]) {
+          group_fwd_bases[group] = next_existing_tma_fwd_base;
+          next_existing_tma_fwd_base += num_stages;
+        } else {
+          ICHECK(group_has_cp_async[group]);
+          group_fwd_bases[group] = next_cp_async_fwd_base;
           next_cp_async_fwd_base += num_stages;
         }
+        PrimExpr group_arrive_count = IntImm(DataType::Int(32), 1);
+        if (group_has_cp_async[group]) {
+          group_arrive_count = producer_thread_extent;
+        }
+        for (int stage = 0; stage < num_stages; ++stage) {
+          mixed_fwd_arrive_counts[group_fwd_bases[group] + stage] =
+              group_arrive_count;
+        }
       }
-      for (size_t i = 0; i < extractor.blocks.size(); i++) {
-        bp_bases.push_back(num_total_fwd_barriers +
-                           static_cast<int>(i) * num_stages);
+      for (size_t i = 0; i < extractor.blocks.size(); ++i) {
+        fwd_bases[i] = group_fwd_bases[block_group[i]];
+        bp_bases[i] = num_total_fwd_barriers + block_group[i] * num_stages;
       }
       total_barriers = num_total_fwd_barriers + num_bp_barriers;
       pure_tma_preloop_fwd_base_ = -1;
@@ -971,8 +1013,8 @@ private:
                                           false);
     int compute_cursor = 0;
     for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-      bool is_first_in_group = ti == 0 || !remap_pure_tma_barriers_ ||
-                               block_group[ti] != block_group[ti - 1];
+      bool is_first_in_group =
+          ti == 0 || block_group[ti] != block_group[ti - 1];
       if (!is_first_in_group) {
         continue;
       }
@@ -1001,10 +1043,10 @@ private:
     Array<Stmt> producer_body_stmts;
     for (size_t ti = 0; ti < extractor.blocks.size(); ti++) {
       const auto &tma = extractor.blocks[ti];
-      bool is_first_in_group = ti == 0 || !remap_pure_tma_barriers_ ||
-                               block_group[ti] != block_group[ti - 1];
+      int group = block_group[ti];
+      bool is_first_in_group =
+          ti == 0 || block_group[ti] != block_group[ti - 1];
       bool is_last_in_group = ti + 1 == extractor.blocks.size() ||
-                              !remap_pure_tma_barriers_ ||
                               block_group[ti] != block_group[ti + 1];
       PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
 
@@ -1019,17 +1061,24 @@ private:
       }
 
       Stmt producer_stmt = tma.producer_stmt;
-      if (use_full_tma_forward_barrier_protocol_ &&
-          tma.kind == AsyncProducerKind::kTma) {
-        // Pure-TMA WS uses a full producer-side release protocol so the
-        // consumer waits on a barrier owned by the producer branch.
-        ICHECK_GE(tma_fwd_bases[ti], 0);
-        PrimExpr barrier_id =
-            IntImm(DataType::Int(32), tma_fwd_bases[ti]) + stage_expr;
-        producer_stmt = RewriteTmaForwardProducerStmt(producer_stmt, barrier_id,
-                                                      is_last_in_group);
-      }
       if (tma.kind == AsyncProducerKind::kTma) {
+        ICHECK_GE(fwd_bases[ti], 0);
+        PrimExpr barrier_id =
+            IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
+        if (use_full_tma_forward_barrier_protocol_) {
+          // Pure-TMA WS uses a full producer-side release protocol so the
+          // consumer waits on a barrier owned by the producer branch.
+          producer_stmt = RewriteTmaForwardProducerStmt(
+              producer_stmt, barrier_id, is_last_in_group);
+        } else {
+          // Mixed groups keep the original producer-side TMA protocol, but
+          // rebind grouped loads onto a shared forward barrier. If the group
+          // also contains cp.async, let cp.async.mbarrier.arrive.noinc own the
+          // arrival count so the shared forward barrier stays on the producer
+          // thread extent instead of adding an extra leader-only arrive.
+          producer_stmt = RewriteTmaStmtBarrierIdPreserveProtocol(
+              producer_stmt, barrier_id, group_has_cp_async[group]);
+        }
         // Keep expect/load under the same elected lane when lowering has
         // emitted them as adjacent identical IfThenElse wrappers.
         producer_stmt = MergeAdjacentEquivalentIfs(producer_stmt);
@@ -1037,10 +1086,9 @@ private:
 
       // Execute the producer statement.
       producer_body_stmts.push_back(producer_stmt);
-      if (tma.kind == AsyncProducerKind::kCpAsync) {
-        ICHECK(cp_async_fwd_bases[ti] >= 0);
-        PrimExpr fwd_id =
-            IntImm(DataType::Int(32), cp_async_fwd_bases[ti]) + stage_expr;
+      if (is_last_in_group && group_has_cp_async[group]) {
+        ICHECK_GE(fwd_bases[ti], 0);
+        PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
         producer_body_stmts.push_back(makeCpAsyncBarrierNoInc(fwd_id));
       }
     }
@@ -1057,28 +1105,15 @@ private:
     std::vector<Stmt> normalized_waits;
     normalized_waits.reserve(extractor.blocks.size());
     for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-      if (extractor.blocks[ti].kind == AsyncProducerKind::kTma &&
-          remap_pure_tma_barriers_) {
-        ICHECK_GE(tma_fwd_bases[ti], 0);
-        PrimExpr fwd_id =
-            IntImm(DataType::Int(32), tma_fwd_bases[ti]) + stage_expr;
-        normalized_waits.push_back(makeParityWait(fwd_id, parity_expr));
-      } else if (extractor.blocks[ti].kind == AsyncProducerKind::kTma) {
-        ICHECK(extractor.blocks[ti].wait_stmt.defined());
-        normalized_waits.push_back(NormalizeForwardWaitParity(
-            extractor.blocks[ti].wait_stmt.value(), parity_expr));
-      } else {
-        ICHECK(cp_async_fwd_bases[ti] >= 0);
-        PrimExpr fwd_id =
-            IntImm(DataType::Int(32), cp_async_fwd_bases[ti]) + stage_expr;
-        normalized_waits.push_back(makeParityWait(fwd_id, parity_expr));
-      }
+      ICHECK_GE(fwd_bases[ti], 0);
+      PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
+      normalized_waits.push_back(makeParityWait(fwd_id, parity_expr));
     }
     // Emit waits / compute / arrives according to insertion points.
     for (size_t ci = 0; ci < extractor.compute_stmts.size(); ++ci) {
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-        bool is_first_in_group = ti == 0 || !remap_pure_tma_barriers_ ||
-                                 block_group[ti] != block_group[ti - 1];
+        bool is_first_in_group =
+            ti == 0 || block_group[ti] != block_group[ti - 1];
         if (is_first_in_group && wait_insert_pos[ti] == static_cast<int>(ci)) {
           consumer_body_stmts.push_back(normalized_waits[ti]);
         }
@@ -1088,7 +1123,6 @@ private:
       }
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
         bool is_last_in_group = ti + 1 == extractor.blocks.size() ||
-                                !remap_pure_tma_barriers_ ||
                                 block_group[ti] != block_group[ti + 1];
         if (is_last_in_group &&
             arrive_insert_pos[ti] == static_cast<int>(ci + 1)) {
@@ -1102,8 +1136,8 @@ private:
     // Handle degenerate loops with no compute statements.
     if (extractor.compute_stmts.empty()) {
       for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-        bool is_first_in_group = ti == 0 || !remap_pure_tma_barriers_ ||
-                                 block_group[ti] != block_group[ti - 1];
+        bool is_first_in_group =
+            ti == 0 || block_group[ti] != block_group[ti - 1];
         if (is_first_in_group) {
           consumer_body_stmts.push_back(normalized_waits[ti]);
         }
@@ -1113,7 +1147,6 @@ private:
     // Emit loop-tail arrives (blocks with unknown deps or tail use).
     for (size_t ti = 0; ti < extractor.blocks.size(); ti++) {
       bool is_last_in_group = ti + 1 == extractor.blocks.size() ||
-                              !remap_pure_tma_barriers_ ||
                               block_group[ti] != block_group[ti + 1];
       if (is_last_in_group && !arrive_emitted[ti] &&
           arrive_insert_pos[ti] ==
@@ -1178,13 +1211,10 @@ private:
         barrier_arrive_counts.push_back(IntImm(DataType::Int(32), 1));
       }
     } else {
-      for (int i = 0; i < num_existing_barriers; i++) {
-        barrier_arrive_counts.push_back(use_full_tma_forward_barrier_protocol_
-                                            ? IntImm(DataType::Int(32), 1)
-                                            : IntImm(DataType::Int(32), 1));
-      }
-      for (int i = 0; i < num_new_cp_async_fwd_barriers; i++) {
-        barrier_arrive_counts.push_back(producer_thread_extent);
+      ICHECK_EQ(mixed_fwd_arrive_counts.size(),
+                static_cast<size_t>(num_total_fwd_barriers));
+      for (const auto &count : mixed_fwd_arrive_counts) {
+        barrier_arrive_counts.push_back(count);
       }
       for (int i = 0; i < num_bp_barriers; i++) {
         barrier_arrive_counts.push_back(consumer_thread_extent);
@@ -1471,6 +1501,7 @@ private:
   bool IsBarrierOrTmaControlCall(const CallNode *call) {
     return call->op.same_as(create_list_of_mbarrier()) ||
            call->op.same_as(mbarrier_wait_parity()) ||
+           call->op.same_as(mbarrier_expect_tx()) ||
            call->op.same_as(builtin::ptx_arrive_barrier()) ||
            call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
            call->op.same_as(builtin::ptx_cp_async_barrier()) ||
@@ -1945,11 +1976,12 @@ private:
   }
 
   Stmt RewriteTmaStmtBarrierIdPreserveProtocol(const Stmt &stmt,
-                                               const PrimExpr &barrier_id) {
+                                               const PrimExpr &barrier_id,
+                                               bool drop_arrive = false) {
     class TmaBarrierIdRewriter : public StmtExprMutator {
     public:
-      explicit TmaBarrierIdRewriter(PrimExpr barrier_id)
-          : barrier_id_(std::move(barrier_id)) {}
+      TmaBarrierIdRewriter(PrimExpr barrier_id, bool drop_arrive)
+          : barrier_id_(std::move(barrier_id)), drop_arrive_(drop_arrive) {}
 
       PrimExpr VisitExpr_(const CallNode *op) final {
         auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
@@ -1972,14 +2004,25 @@ private:
                              makeGetBarrier(barrier_id_));
           return call;
         }
+        if (call->op.same_as(builtin::ptx_arrive_barrier()) &&
+            !call->args.empty()) {
+          if (drop_arrive_) {
+            return IntImm(DataType::Int(32), 0);
+          }
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(0, makeGetBarrier(barrier_id_));
+          return call;
+        }
         return call;
       }
 
     private:
       PrimExpr barrier_id_;
+      bool drop_arrive_;
     };
 
-    return MergeAdjacentEquivalentIfs(TmaBarrierIdRewriter(barrier_id)(stmt));
+    return MergeAdjacentEquivalentIfs(
+        TmaBarrierIdRewriter(barrier_id, drop_arrive)(stmt));
   }
 
   Stmt MergeAdjacentEquivalentIfs(const Stmt &stmt) {
@@ -2079,6 +2122,10 @@ private:
           new_call->args.Set(is_1d_tma_load ? 2 : 1,
                              makeGetBarrier(barrier_id_));
           return call;
+        }
+        if (call->op.same_as(builtin::ptx_arrive_barrier()) &&
+            !call->args.empty()) {
+          return IntImm(DataType::Int(32), 0);
         }
         return call;
       }

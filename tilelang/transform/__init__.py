@@ -287,6 +287,11 @@ def InjectTmaBarrier():
     return _ffi_api.InjectTmaBarrier()  # type: ignore
 
 
+def FuseMBarrierArriveExpectTx():
+    """Fuse simple expect_tx -> TMA issue -> arrive back into arrive_and_expect_tx."""
+    return _ffi_api.FuseMBarrierArriveExpectTx()  # type: ignore
+
+
 def InjectFenceProxy():
     """InjectFenceProxy
 
