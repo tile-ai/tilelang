@@ -298,7 +298,6 @@ TIR_DEFINE_TL_BUILTIN(warpgroup_fence_operand)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-
 TIR_DEFINE_TL_BUILTIN(get_cluster_block_nums)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",

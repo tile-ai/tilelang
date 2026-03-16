@@ -509,7 +509,6 @@ TVM_DLL const Op &warpgroup_wait();
  */
 TVM_DLL const Op &warpgroup_fence_operand();
 
-
 /*!
  * \brief Return the number of blocks in the cluster.
  *
