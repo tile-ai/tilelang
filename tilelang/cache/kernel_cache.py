@@ -22,6 +22,7 @@ from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang import __version__
+import platform
 
 
 class KernelCache:
@@ -91,7 +92,7 @@ class KernelCache:
     @staticmethod
     @functools.cache
     def _get_base_key() -> dict:
-        base = {"version": __version__}
+        base = {"version": __version__, "platform": platform.machine()}
         lib_stamp = KernelCache._get_tilelang_lib_stamp()
         if lib_stamp:
             base["tilelang_lib"] = lib_stamp

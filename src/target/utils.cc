@@ -21,6 +21,9 @@ bool TargetIsRocm(Target target) {
 bool TargetIsMetal(Target target) {
   return target->GetTargetDeviceType() == kDLMetal;
 }
+bool TargetIsCPU(Target target) {
+  return target->GetTargetDeviceType() == kDLCPU;
+}
 
 int GetArchInt(Target target) {
   auto s = target->GetAttr<tvm::ffi::String>("arch");

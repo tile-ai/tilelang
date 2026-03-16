@@ -549,6 +549,32 @@ def test_sync_inside_uniform_if_blockidx():
 
 
 @tilelang.testing.requires_cuda
+def test_sync_inside_uniform_if_runtime_block_uniform_condition():
+    """Runtime-loaded but block-uniform conditions should keep syncs in the if."""
+
+    @T.prim_func(private=True)
+    def func(flags: T.Buffer((4,), "int32")):
+        temp_shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 4)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        if flags[bx] > 0:
+            temp_shared[tx] = T.float32(tx)
+            result_local[0] = temp_shared[(tx + 64) % 128]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    assert s.count('T.tvm_storage_sync("shared")') == 1, f"Expected exactly one sync:\n{s}"
+    if_pos = s.index("if flags[bx] > 0")
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    assert sync_pos > if_pos, f"Block-uniform runtime condition should keep sync inside if:\n{s}"
+
+
+@tilelang.testing.requires_cuda
 def test_sync_hoist_nested_non_uniform_if():
     """Test sync hoisting with nested if statements where outer is non-uniform."""
 
