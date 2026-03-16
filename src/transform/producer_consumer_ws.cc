@@ -708,9 +708,11 @@ private:
 
     const Block &orig_block = op->block;
 
-    // Find the pipelined loop. Prefer explicit software-pipeline annotations,
-    // but also allow num_stages=0 loops that still carry TMA/cp.async producer
-    // blocks. Those loops are treated as single-stage WS pipelines.
+    // Find the candidate loop for producer/consumer WS.
+    // Prefer explicit frontend pipeline annotations. For `num_stages=0`, keep
+    // the fallback only for loops that contain TMA producers. Pure cp.async
+    // loops should preserve their original semantics, while TMA-containing
+    // loops still need WS to move async copies into the producer partition.
     const ForNode *pipeline_loop = FindPipelineLoop(orig_block->body);
     if (!pipeline_loop)
       return StmtExprMutator::VisitStmt_(op);
@@ -1272,9 +1274,18 @@ private:
     }
   }
 
-  bool LoopContainsAsyncProducerBlocks(const ForNode *loop) {
+  struct AsyncProducerLoopSummary {
+    bool has_tma{false};
+    bool has_cp_async{false};
+
+    bool HasAnyAsyncProducer() const { return has_tma || has_cp_async; }
+    bool HasTmaProducer() const { return has_tma; }
+  };
+
+  AsyncProducerLoopSummary AnalyzeAsyncProducerLoop(const ForNode *loop) {
+    AsyncProducerLoopSummary summary;
     if (!loop || loop->kind != ForKind::kSerial) {
-      return false;
+      return summary;
     }
     Array<Stmt> flat_stmts;
     Stmt loop_body_root = loop->body;
@@ -1284,7 +1295,14 @@ private:
     FlattenSeqStmt(loop_body_root, &flat_stmts);
     AsyncCopyBlockExtractor extractor;
     extractor.Extract(flat_stmts);
-    return !extractor.blocks.empty();
+    for (const auto &block : extractor.blocks) {
+      if (block.kind == AsyncProducerKind::kTma) {
+        summary.has_tma = true;
+      } else if (block.kind == AsyncProducerKind::kCpAsync) {
+        summary.has_cp_async = true;
+      }
+    }
+    return summary;
   }
 
   const ForNode *FindAnnotatedPipelineLoop(const Stmt &stmt) {
@@ -1316,31 +1334,31 @@ private:
     return nullptr;
   }
 
-  const ForNode *FindAsyncProducerLoop(const Stmt &stmt) {
+  const ForNode *FindTmaProducerLoop(const Stmt &stmt) {
     if (auto *for_node = stmt.as<ForNode>()) {
-      if (LoopContainsAsyncProducerBlocks(for_node)) {
+      if (AnalyzeAsyncProducerLoop(for_node).HasTmaProducer()) {
         return for_node;
       }
     }
     if (auto *seq = stmt.as<SeqStmtNode>()) {
       for (const auto &s : seq->seq) {
-        if (auto *result = FindAsyncProducerLoop(s)) {
+        if (auto *result = FindTmaProducerLoop(s)) {
           return result;
         }
       }
       return nullptr;
     }
     if (auto *realize = stmt.as<BlockRealizeNode>()) {
-      return FindAsyncProducerLoop(realize->block->body);
+      return FindTmaProducerLoop(realize->block->body);
     }
     if (auto *block = stmt.as<BlockNode>()) {
-      return FindAsyncProducerLoop(block->body);
+      return FindTmaProducerLoop(block->body);
     }
     if (auto *attr = stmt.as<AttrStmtNode>()) {
-      return FindAsyncProducerLoop(attr->body);
+      return FindTmaProducerLoop(attr->body);
     }
     if (auto *let_s = stmt.as<LetStmtNode>()) {
-      return FindAsyncProducerLoop(let_s->body);
+      return FindTmaProducerLoop(let_s->body);
     }
     return nullptr;
   }
@@ -1349,7 +1367,7 @@ private:
     if (auto *annotated = FindAnnotatedPipelineLoop(stmt)) {
       return annotated;
     }
-    return FindAsyncProducerLoop(stmt);
+    return FindTmaProducerLoop(stmt);
   }
 
   // Infer how many mbarriers are already referenced by this block body.
@@ -1926,6 +1944,44 @@ private:
     return wait_stmt;
   }
 
+  Stmt RewriteTmaStmtBarrierIdPreserveProtocol(const Stmt &stmt,
+                                               const PrimExpr &barrier_id) {
+    class TmaBarrierIdRewriter : public StmtExprMutator {
+    public:
+      explicit TmaBarrierIdRewriter(PrimExpr barrier_id)
+          : barrier_id_(std::move(barrier_id)) {}
+
+      PrimExpr VisitExpr_(const CallNode *op) final {
+        auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+        if ((call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+             call->op.same_as(mbarrier_expect_tx())) &&
+            call->args.size() == 2) {
+          return Call(call->dtype, call->op,
+                      {makeGetBarrier(barrier_id_), call->args[1]},
+                      call->annotations, call->span);
+        }
+        if (call->op.same_as(tma_load()) ||
+            call->op.same_as(tma_load_im2col())) {
+          bool is_1d_tma_load = false;
+          if (const auto *arg0 = call->args[0].as<CallNode>()) {
+            is_1d_tma_load = !arg0->op.same_as(create_tma_descriptor()) &&
+                             call->op.same_as(tma_load());
+          }
+          auto new_call = call.CopyOnWrite();
+          new_call->args.Set(is_1d_tma_load ? 2 : 1,
+                             makeGetBarrier(barrier_id_));
+          return call;
+        }
+        return call;
+      }
+
+    private:
+      PrimExpr barrier_id_;
+    };
+
+    return MergeAdjacentEquivalentIfs(TmaBarrierIdRewriter(barrier_id)(stmt));
+  }
+
   Stmt MergeAdjacentEquivalentIfs(const Stmt &stmt) {
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       return AttrStmt(attr->node, attr->attr_key, attr->value,
@@ -2042,6 +2098,54 @@ private:
         Call(DataType::Bool(), tl_shuffle_elect(), {producer_thread_extent_}),
         makeArriveBarrier(barrier_id), std::nullopt);
     return SeqStmt({rewritten, elect_arrive});
+  }
+
+  Stmt RewritePureTmaForwardPairsWithFreshBarriers(const Stmt &stmt) {
+    class OutsideLoopPureTmaRewriter : public StmtExprMutator {
+    public:
+      explicit OutsideLoopPureTmaRewriter(ProducerConsumerWSRewriter *parent)
+          : parent_(parent) {}
+
+      Stmt VisitStmt_(const SeqStmtNode *op) final {
+        Array<Stmt> new_seq;
+        bool changed = false;
+        for (size_t i = 0; i < op->seq.size(); ++i) {
+          if (i + 1 < op->seq.size() &&
+              parent_->ContainsTmaLoadStmt(op->seq[i]) &&
+              parent_->IsMbarrierWaitParityStmt(op->seq[i + 1])) {
+            ICHECK_GE(parent_->pure_tma_preloop_fwd_base_, 0);
+            ICHECK_LT(parent_->pure_tma_preloop_fwd_cursor_,
+                      parent_->pure_tma_preloop_fwd_count_);
+            PrimExpr barrier_id = IntImm(
+                DataType::Int(32), parent_->pure_tma_preloop_fwd_base_ +
+                                       parent_->pure_tma_preloop_fwd_cursor_++);
+            Stmt producer_stmt = parent_->MergeAdjacentEquivalentIfs(
+                parent_->RewriteTmaStmtBarrierIdPreserveProtocol(
+                    StripTmaCopyWriteBufferAttr(op->seq[i]), barrier_id));
+            Stmt wait_stmt =
+                parent_->RewriteWaitBarrierId(op->seq[i + 1], barrier_id);
+            new_seq.push_back(producer_stmt);
+            new_seq.push_back(wait_stmt);
+            ++i;
+            changed = true;
+            continue;
+          }
+          Stmt visited = StmtExprMutator::VisitStmt(op->seq[i]);
+          new_seq.push_back(visited);
+          changed = changed || !visited.same_as(op->seq[i]);
+        }
+        if (!changed) {
+          return GetRef<Stmt>(op);
+        }
+        return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
+      }
+
+    private:
+      ProducerConsumerWSRewriter *parent_;
+    };
+
+    OutsideLoopPureTmaRewriter rewriter(this);
+    return rewriter(stmt);
   }
 
   bool IsSharedDependentConsumerPreStmt(const Stmt &stmt) {
@@ -2410,6 +2514,13 @@ private:
       if (!post_loop_stmts.empty()) {
         Stmt post_body = post_loop_stmts.size() == 1 ? post_loop_stmts[0]
                                                      : SeqStmt(post_loop_stmts);
+        if (remap_pure_tma_barriers_) {
+          // When the target loop remaps pure-TMA forward barriers to the WS
+          // layout, any remaining TMA forward pairs outside that loop need
+          // fresh ids as well. Otherwise a rewritten pre-loop pair can alias a
+          // later consumer-only TMA loop that still uses its original id.
+          post_body = RewritePureTmaForwardPairsWithFreshBarriers(post_body);
+        }
         bool merged = false;
         if (ws_stmt.defined()) {
           auto merged_stmt =
