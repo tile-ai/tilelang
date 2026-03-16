@@ -510,14 +510,6 @@ TVM_DLL const Op &warpgroup_wait();
 TVM_DLL const Op &warpgroup_fence_operand();
 
 /*!
- * \brief Return the cluster id (rank) of the current block within a cluster.
- *
- * get_cluster_id()
- *
- */
-TVM_DLL const Op &get_cluster_id();
-
-/*!
  * \brief Return the number of blocks in the cluster.
  *
  * get_cluster_block_nums()
