@@ -270,6 +270,16 @@ public:
   Map<PrimExpr, IntImm> barrier_id_to_range() { return barrier_id_to_range_; }
 
 private:
+  int GetCurrentThreadExtent() {
+    if (!thread_var_.defined()) {
+      return 1;
+    }
+    auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+    int64_t extent =
+        const_int_bound->max_value - const_int_bound->min_value + 1;
+    return static_cast<int>(std::max<int64_t>(extent, 1));
+  }
+
   void UpdateBarrierRange(const PrimExpr &barrier_id, const IntImm &extent) {
     if (barrier_id_to_range_.count(barrier_id)) {
       auto old_extent = barrier_id_to_range_[barrier_id];
@@ -293,9 +303,7 @@ private:
         for (const auto &tma_call : pending_tma_ops_) {
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto extent =
-            const_int_bound->max_value - const_int_bound->min_value + 1;
+        int extent = GetCurrentThreadExtent();
         UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
         pending_tma_ops_.clear();
       } else if (call->op.same_as(builtin::ptx_cp_async_barrier()) ||
@@ -308,16 +316,12 @@ private:
         for (const auto &tma_call : pending_tma_ops_) {
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto extent =
-            const_int_bound->max_value - const_int_bound->min_value + 1;
+        int extent = GetCurrentThreadExtent();
         UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
         pending_tma_ops_.clear();
       } else if (call->op.same_as(builtin::ptx_wait_barrier())) {
         PrimExpr barrier_id = call->args[0];
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto extent =
-            const_int_bound->max_value - const_int_bound->min_value + 1;
+        int extent = GetCurrentThreadExtent();
         UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
       }
     }
@@ -424,7 +428,8 @@ private:
       return 1;
     }
     if (!thread_var_.defined()) {
-      return 1;
+      int inferred = max_init_barrier_thread_count_ + elect_thread_count_;
+      return std::max(inferred, 1);
     }
     auto bound = analyzer_.const_int_bound(thread_var_);
     int64_t min_val = bound->min_value;
@@ -500,6 +505,12 @@ private:
     bool is_elect_if = false;
     if (const auto *call = op->condition.as<CallNode>()) {
       is_elect_if = call->op.same_as(tl_shuffle_elect());
+      if (is_elect_if && !call->args.empty()) {
+        if (const auto *imm = call->args[0].as<IntImmNode>()) {
+          elect_thread_count_ =
+              std::max(elect_thread_count_, static_cast<int>(imm->value));
+        }
+      }
     }
     if (is_elect_if) {
       bool old_inside = inside_elect_if_;
@@ -515,6 +526,22 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(create_list_of_mbarrier())) {
+      for (const PrimExpr &arg : op->args) {
+        if (const auto *imm = arg.as<IntImmNode>()) {
+          max_init_barrier_thread_count_ = std::max(
+              max_init_barrier_thread_count_, static_cast<int>(imm->value));
+        }
+      }
+    } else if (op->op.same_as(tl_shuffle_elect())) {
+      if (!op->args.empty()) {
+        if (const auto *imm = op->args[0].as<IntImmNode>()) {
+          elect_thread_count_ =
+              std::max(elect_thread_count_, static_cast<int>(imm->value));
+        }
+      }
+    }
+
     if (op->op.same_as(builtin::ptx_arrive_barrier()) ||
         op->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
         op->op.same_as(builtin::ptx_cp_async_barrier()) ||
@@ -529,6 +556,8 @@ private:
   bool inside_elect_if_{false};
   Map<Var, arith::IntSet> var_int_set_;
   std::unordered_map<int, int> barrier_thread_counts_;
+  int elect_thread_count_{0};
+  int max_init_barrier_thread_count_{0};
 };
 
 class BarrierCreationRewriter : public StmtExprMutator {
