@@ -875,8 +875,8 @@ private:
         ws_producer_stmts[i] =
             StripNonThreadProducerGuard(extractor.blocks[i].producer_stmt);
         if (extractor.blocks[i].wait_stmt.defined()) {
-          ws_wait_stmts[i] =
-              StripNonThreadProducerGuard(extractor.blocks[i].wait_stmt.value());
+          ws_wait_stmts[i] = StripNonThreadProducerGuard(
+              extractor.blocks[i].wait_stmt.value());
         }
         producer_issue_guards[i] = std::nullopt;
         producer_issue_guard_sources[i] = std::nullopt;
@@ -1175,8 +1175,8 @@ private:
       ICHECK_GE(fwd_bases[ti], 0);
       PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
       if (ws_wait_stmts[ti].defined()) {
-        normalized_waits.push_back(RewriteWaitBarrier(
-            ws_wait_stmts[ti].value(), fwd_id, parity_expr));
+        normalized_waits.push_back(
+            RewriteWaitBarrier(ws_wait_stmts[ti].value(), fwd_id, parity_expr));
       } else {
         normalized_waits.push_back(WrapStmtWithGuardSource(
             producer_issue_guard_sources[ti], producer_issue_guards[ti],
@@ -2128,7 +2128,8 @@ private:
               return true;
             }
           }
-          PrimExpr resolved = ResolveGuardBinding(if_stmt->condition, *bindings);
+          PrimExpr resolved =
+              ResolveGuardBinding(if_stmt->condition, *bindings);
           return IsMaskLikeBooleanExpr(resolved);
         }
         return CanIssueProducerWithoutGuardImpl(if_stmt->then_case, bindings);
@@ -2154,9 +2155,8 @@ private:
     if (const auto *realize = stmt.as<BlockRealizeNode>()) {
       const Block &orig = realize->block;
       Block new_block(orig->iter_vars, orig->reads, orig->writes,
-                      orig->name_hint,
-                      StripNonThreadProducerGuard(orig->body), orig->init,
-                      orig->alloc_buffers, orig->match_buffers,
+                      orig->name_hint, StripNonThreadProducerGuard(orig->body),
+                      orig->init, orig->alloc_buffers, orig->match_buffers,
                       orig->annotations);
       return BlockRealize(realize->iter_values, realize->predicate, new_block);
     }
@@ -2199,8 +2199,7 @@ private:
   Optional<Stmt> WrapStmtWithNonThreadGuardLike(const Stmt &source,
                                                 const Stmt &stmt) const {
     if (const auto *attr = source.as<AttrStmtNode>()) {
-      Optional<Stmt> wrapped =
-          WrapStmtWithNonThreadGuardLike(attr->body, stmt);
+      Optional<Stmt> wrapped = WrapStmtWithNonThreadGuardLike(attr->body, stmt);
       if (!wrapped.defined()) {
         return std::nullopt;
       }
