@@ -2079,6 +2079,18 @@ private:
       }
     }
     if (const auto *call = resolved.as<CallNode>()) {
+      if (const auto *op = call->op.as<OpNode>()) {
+        if (op->name == "tl.any_of" || op->name == "tl.all_of") {
+          return true;
+        }
+      }
+      if (call->op.same_as(builtin::call_extern()) && !call->args.empty()) {
+        if (const auto *name = call->args[0].as<StringImmNode>()) {
+          if (name->value == "tl::Any" || name->value == "tl::All") {
+            return true;
+          }
+        }
+      }
       if (call->op.same_as(builtin::if_then_else()) && call->args.size() == 3) {
         if (is_const_bool(call->args[2], false)) {
           return IsMaskLikeBooleanExpr(call->args[1]);
