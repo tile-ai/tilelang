@@ -19,6 +19,9 @@ except ImportError:
     pass
 else:
     torch.manual_seed(0)
+    # Workaround: hipBLASLt on ROCm 7.1 nightly has a bug with certain matmul shapes
+    if hasattr(torch.version, "hip") and torch.version.hip:
+        torch.backends.cuda.preferred_blas_library("hipblas")
 
 try:
     import numpy as np

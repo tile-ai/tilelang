@@ -401,7 +401,12 @@ void CodeGenTileLangCPP::VisitExpr_(const CallNode *op,
       LOG(FATAL) << "Unknown stack alloca type " << type;
     }
     this->PrintIndent();
-    this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
+    if (type == "arg_value") {
+      this->stream << "alignas(64) TVMFFIAny " << stack_name << "[" << size
+                   << "];\n";
+    } else {
+      this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
+    }
     os << stack_name;
   } else if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
     auto function_info = GetFunctionInfo(op, false /* has_resource_handle */);
