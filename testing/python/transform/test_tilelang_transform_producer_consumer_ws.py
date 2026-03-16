@@ -1,3 +1,4 @@
+# ruff: noqa
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -18,6 +19,41 @@ def _collect_calls(stmt, op_name: str):
 
     tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
     return calls
+
+
+def _collect_ifs(stmt):
+    ifs = []
+
+    def visitor(node):
+        if isinstance(node, tvm.tir.IfThenElse):
+            ifs.append(node)
+
+    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
+    return ifs
+
+
+def _stmt_contains_call(stmt, op_name: str) -> bool:
+    found = False
+
+    def visitor(node):
+        nonlocal found
+        if isinstance(node, tvm.tir.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
+            found = True
+
+    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
+    return found
+
+
+def _count_calls_in_stmt(stmt, op_name: str) -> int:
+    count = 0
+
+    def visitor(node):
+        nonlocal count
+        if isinstance(node, tvm.tir.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
+            count += 1
+
+    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
+    return count
 
 
 def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier():
@@ -108,6 +144,134 @@ def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier()
     create_list_calls = _collect_calls(main_func.body, "tl.create_list_of_mbarrier")
     assert len(create_list_calls) == 1
     assert len(create_list_calls[0].args) == 6
+
+
+def test_producer_consumer_ws_preserves_guarded_forward_wait():
+    @T.prim_func
+    def before(A: T.Tensor((512, 512), T.float16)):
+        bx = T.launch_thread("blockIdx.x", 1)
+        by = T.launch_thread("blockIdx.y", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+
+        with T.block(""):
+            T.reads(A[0:128, 0:64])
+            T.writes()
+
+            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
+            C_local = T.alloc_buffer((1,), "float32", scope="local")
+
+            T.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), 1, 1)
+
+            for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
+                i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
+
+                if i_s >= 0:
+                    T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1)
+                    if tx == 0:
+                        T.call_intrin(
+                            "handle",
+                            tir.op.Op.get("tl.mbarrier_expect_tx"),
+                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            4096,
+                        )
+                    if tx == 0:
+                        T.tma_load(
+                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
+                            k * 32,
+                            by * 64,
+                        )
+                if i_s >= 0:
+                    T.call_intrin(
+                        "handle",
+                        tir.op.Op.get("tl.mbarrier_wait_parity"),
+                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                        k // 2 % 2,
+                    )
+                if i_s >= 0:
+                    C_local[0] = C_local[0] + T.float32(1)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tir.transform.LowerOpaqueBlock()(mod)
+
+    main_func = mod["main"]
+    body_text = main_func.script()
+    assert 'threadIdx.x", 256' in body_text
+
+    guarded_waits = []
+    for if_stmt in _collect_ifs(main_func.body):
+        if _stmt_contains_call(if_stmt.then_case, "tl.mbarrier_wait_parity"):
+            guarded_waits.append(str(if_stmt.condition))
+
+    assert guarded_waits
+    assert any("i_s" in cond for cond in guarded_waits)
+
+
+def test_producer_consumer_ws_preserves_guarded_producer_backpressure_wait():
+    @T.prim_func
+    def before(A: T.Tensor((512, 512), T.float16)):
+        bx = T.launch_thread("blockIdx.x", 1)
+        by = T.launch_thread("blockIdx.y", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+
+        with T.block(""):
+            T.reads(A[0:128, 0:64])
+            T.writes()
+
+            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
+            C_local = T.alloc_buffer((1,), "float32", scope="local")
+
+            T.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), 1, 1)
+
+            for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
+                i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
+
+                if i_s >= 0:
+                    T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1)
+                    if tx == 0:
+                        T.call_intrin(
+                            "handle",
+                            tir.op.Op.get("tl.mbarrier_expect_tx"),
+                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            4096,
+                        )
+                    if tx == 0:
+                        T.tma_load(
+                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
+                            k * 32,
+                            by * 64,
+                        )
+                if i_s >= 0:
+                    T.call_intrin(
+                        "handle",
+                        tir.op.Op.get("tl.mbarrier_wait_parity"),
+                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                        k // 2 % 2,
+                    )
+                if i_s >= 0:
+                    C_local[0] = C_local[0] + T.float32(1)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tir.transform.LowerOpaqueBlock()(mod)
+
+    main_func = mod["main"]
+    body_text = main_func.script()
+    assert 'threadIdx.x", 256' in body_text
+
+    guarded_wait_count = 0
+    for if_stmt in _collect_ifs(main_func.body):
+        if "i_s" not in str(if_stmt.condition):
+            continue
+        guarded_wait_count += _count_calls_in_stmt(if_stmt.then_case, "tl.mbarrier_wait_parity")
+
+    assert guarded_wait_count >= 2
 
 
 if __name__ == "__main__":

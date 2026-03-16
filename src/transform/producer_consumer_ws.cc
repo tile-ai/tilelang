@@ -728,7 +728,19 @@ private:
     if (auto *realize = pipeline_loop->body.as<BlockRealizeNode>()) {
       loop_body_root = realize->block->body;
     }
+    std::vector<std::pair<Var, PrimExpr>> loop_body_lets;
+    while (const auto *let_stmt = loop_body_root.as<LetStmtNode>()) {
+      loop_body_lets.emplace_back(let_stmt->var, let_stmt->value);
+      loop_body_root = let_stmt->body;
+    }
     FlattenSeqStmt(loop_body_root, &flat_stmts);
+    auto rewrap_loop_body_lets = [&](Stmt body) {
+      for (auto it = loop_body_lets.rbegin(); it != loop_body_lets.rend();
+           ++it) {
+        body = LetStmt((*it).first, (*it).second, body);
+      }
+      return body;
+    };
 
     // Extract async producer blocks (TMA and cp.async)
     AsyncCopyBlockExtractor extractor;
@@ -1053,8 +1065,9 @@ private:
       // Back-pressure wait: producer cannot reuse the stage buffer until the
       // consumer releases it. xor(parity, 1) bootstraps the first iteration.
       if (is_first_in_group) {
-        producer_body_stmts.push_back(
-            makeParityWait(bp_id, bitwise_xor(parity_expr, 1)));
+        producer_body_stmts.push_back(WrapStmtWithOptionalGuard(
+            producer_guards[ti],
+            makeParityWait(bp_id, bitwise_xor(parity_expr, 1))));
         for (const auto &stmt : producer_loop_prefix_stmts[ti]) {
           producer_body_stmts.push_back(stmt);
         }
@@ -1089,11 +1102,13 @@ private:
       if (is_last_in_group && group_has_cp_async[group]) {
         ICHECK_GE(fwd_bases[ti], 0);
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
-        producer_body_stmts.push_back(makeCpAsyncBarrierNoInc(fwd_id));
+        producer_body_stmts.push_back(WrapStmtWithOptionalGuard(
+            producer_guards[ti], makeCpAsyncBarrierNoInc(fwd_id)));
       }
     }
     Stmt producer_loop_body =
         MergeAdjacentEquivalentIfs(SeqStmt(producer_body_stmts));
+    producer_loop_body = rewrap_loop_body_lets(producer_loop_body);
 
     // --- Build Consumer Body ---
     Array<Stmt> consumer_body_stmts;
@@ -1107,7 +1122,13 @@ private:
     for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
       ICHECK_GE(fwd_bases[ti], 0);
       PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
-      normalized_waits.push_back(makeParityWait(fwd_id, parity_expr));
+      if (extractor.blocks[ti].wait_stmt.defined()) {
+        normalized_waits.push_back(RewriteWaitBarrierId(
+            extractor.blocks[ti].wait_stmt.value(), fwd_id));
+      } else {
+        normalized_waits.push_back(WrapStmtWithOptionalGuard(
+            producer_guards[ti], makeParityWait(fwd_id, parity_expr)));
+      }
     }
     // Emit waits / compute / arrives according to insertion points.
     for (size_t ci = 0; ci < extractor.compute_stmts.size(); ++ci) {
@@ -1156,6 +1177,7 @@ private:
       }
     }
     Stmt consumer_loop_body = SeqStmt(consumer_body_stmts);
+    consumer_loop_body = rewrap_loop_body_lets(consumer_loop_body);
 
     // --- Build the loops ---
     // Remove pipeline annotations since WS handles overlap directly
@@ -1962,17 +1984,38 @@ private:
     return std::nullopt;
   }
 
+  Stmt WrapStmtWithOptionalGuard(const Optional<PrimExpr> &guard,
+                                 const Stmt &stmt) const {
+    if (!guard.defined()) {
+      return stmt;
+    }
+    return IfThenElse(guard.value(), stmt, std::nullopt);
+  }
+
   Stmt RewriteWaitBarrierId(const Stmt &wait_stmt,
                             const PrimExpr &new_barrier_id) {
-    if (const auto *eval = wait_stmt.as<EvaluateNode>()) {
-      if (const auto *call = eval->value.as<CallNode>()) {
+    class WaitBarrierIdRewriter : public StmtExprMutator {
+    public:
+      explicit WaitBarrierIdRewriter(PrimExpr barrier_id)
+          : barrier_id_(std::move(barrier_id)) {}
+
+      PrimExpr VisitExpr_(const CallNode *op) final {
+        auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
         if (call->op.same_as(mbarrier_wait_parity()) &&
             call->args.size() == 2) {
-          return makeParityWait(new_barrier_id, call->args[1]);
+          return Call(call->dtype, call->op,
+                      {makeGetBarrier(barrier_id_), call->args[1]},
+                      call->annotations, call->span);
         }
+        return call;
       }
-    }
-    return wait_stmt;
+
+    private:
+      PrimExpr barrier_id_;
+    };
+
+    return MergeAdjacentEquivalentIfs(
+        WaitBarrierIdRewriter(new_barrier_id)(wait_stmt));
   }
 
   Stmt RewriteTmaStmtBarrierIdPreserveProtocol(const Stmt &stmt,
@@ -2141,10 +2184,12 @@ private:
     if (!append_arrive) {
       return rewritten;
     }
+    Optional<PrimExpr> guard = ExtractNonThreadProducerGuard(stmt);
     Stmt elect_arrive = IfThenElse(
         Call(DataType::Bool(), tl_shuffle_elect(), {producer_thread_extent_}),
         makeArriveBarrier(barrier_id), std::nullopt);
-    return SeqStmt({rewritten, elect_arrive});
+    elect_arrive = WrapStmtWithOptionalGuard(guard, elect_arrive);
+    return MergeAdjacentEquivalentIfs(SeqStmt({rewritten, elect_arrive}));
   }
 
   Stmt RewritePureTmaForwardPairsWithFreshBarriers(const Stmt &stmt) {
