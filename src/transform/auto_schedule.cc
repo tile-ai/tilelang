@@ -1183,6 +1183,13 @@ protected:
       } else {
       }
 
+      // Absorb WrapperNode chain into ControlNode.wrappers
+      while (control_node->child && control_node->child->IsWrapper()) {
+        auto *wrapper = static_cast<WrapperNode *>(control_node->child.get());
+        control_node->wrappers.push_back(wrapper->wrapper);
+        control_node->child = std::move(wrapper->child);
+      }
+
       root_ = std::move(control_node);
     } else {
       // Parallel For -> TaskNode
@@ -1711,6 +1718,7 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
     auto new_ctrl = std::make_unique<ControlNode>();
     new_ctrl->control = ctrl->control;
     new_ctrl->SetPromote(ctrl->hasPromote());
+    new_ctrl->wrappers = ctrl->wrappers;
     new_ctrl->child =
         CloneIRStructureWithWarpgroupFilter(ctrl->child.get(), warpgroup_id);
     return new_ctrl;
@@ -1846,6 +1854,16 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
           LOG(FATAL);
         }
         Stmt body = SeqStmt::Flatten(stmts);
+        // Re-wrap body with ControlNode wrappers (innermost first = reverse
+        // order)
+        for (auto it = ctrl->wrappers.rbegin(); it != ctrl->wrappers.rend();
+             ++it) {
+          if (const auto *let = (*it).as<LetStmtNode>()) {
+            body = LetStmt(let->var, let->value, body);
+          } else if (const auto *attr = (*it).as<AttrStmtNode>()) {
+            body = AttrStmt(attr->node, attr->attr_key, attr->value, body);
+          }
+        }
         // Filter out "num_stages" annotation
         Map<String, Any> filtered_annotations = ctrl->control->annotations;
         filtered_annotations.erase("num_stages");
@@ -1951,6 +1969,17 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
         steady.push_back(Substitute(stmt, substitution));
       }
       Stmt new_body = SeqStmt::Flatten(steady);
+      // Re-wrap body with ControlNode wrappers (innermost first = reverse
+      // order)
+      for (auto it = ctrl->wrappers.rbegin(); it != ctrl->wrappers.rend();
+           ++it) {
+        if (const auto *let = (*it).as<LetStmtNode>()) {
+          new_body = LetStmt(let->var, let->value, new_body);
+        } else if (const auto *attr = (*it).as<AttrStmtNode>()) {
+          new_body =
+              AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
+        }
+      }
       auto new_var = loop_var.copy_with_suffix("");
       // Filter out "num_stages" annotation
       Map<String, Any> filtered_annotations = ctrl->control->annotations;
@@ -2153,6 +2182,16 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           LOG(FATAL);
         }
         Stmt body = SeqStmt::Flatten(stmts);
+        // Re-wrap body with ControlNode wrappers (innermost first = reverse
+        // order)
+        for (auto it = ctrl->wrappers.rbegin(); it != ctrl->wrappers.rend();
+             ++it) {
+          if (const auto *let = (*it).as<LetStmtNode>()) {
+            body = LetStmt(let->var, let->value, body);
+          } else if (const auto *attr = (*it).as<AttrStmtNode>()) {
+            body = AttrStmt(attr->node, attr->attr_key, attr->value, body);
+          }
+        }
         // Filter out "num_stages" annotation
         Map<String, Any> filtered_annotations = ctrl->control->annotations;
         filtered_annotations.erase("num_stages");
@@ -2258,6 +2297,17 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         steady.push_back(Substitute(stmt, substitution));
       }
       Stmt new_body = SeqStmt::Flatten(steady);
+      // Re-wrap body with ControlNode wrappers (innermost first = reverse
+      // order)
+      for (auto it = ctrl->wrappers.rbegin(); it != ctrl->wrappers.rend();
+           ++it) {
+        if (const auto *let = (*it).as<LetStmtNode>()) {
+          new_body = LetStmt(let->var, let->value, new_body);
+        } else if (const auto *attr = (*it).as<AttrStmtNode>()) {
+          new_body =
+              AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
+        }
+      }
       auto new_var = loop_var.copy_with_suffix("");
       // Filter out "num_stages" annotation
       Map<String, Any> filtered_annotations = ctrl->control->annotations;

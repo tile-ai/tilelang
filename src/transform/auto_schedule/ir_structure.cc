@@ -302,6 +302,7 @@ std::unique_ptr<IRStructure> ControlNode::Clone() const {
     new_ctrl->child = child->Clone();
   }
   // Copy latency and II
+  new_ctrl->wrappers = wrappers;
   new_ctrl->SetLatency(GetLatency());
   new_ctrl->SetII(GetII());
   new_ctrl->SetPromote(hasPromote());

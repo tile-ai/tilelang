@@ -310,6 +310,10 @@ public:
   For control; // The For operation
   std::unique_ptr<IRStructure> child;
 
+  // Wrapper Stmts (LetStmt/AttrStmt) that originally wrapped the For loop body.
+  // Stored outermost-first. Re-applied in reverse order during IR conversion.
+  std::vector<Stmt> wrappers;
+
   Kind GetKind() const override { return Kind::kControl; }
 
   // Resource usage flags (aggregate from child)
@@ -789,6 +793,13 @@ inline void PrintAllStmts(const IRStructure *node, int indent = 0) {
     LOG(INFO) << indent_str << "  For statement:";
     LOG(INFO) << indent_str + "    " << control->control;
 
+    if (!control->wrappers.empty()) {
+      LOG(INFO) << indent_str << "  Wrappers: " << control->wrappers.size();
+      for (size_t w = 0; w < control->wrappers.size(); w++) {
+        LOG(INFO) << indent_str << "    Wrapper " << w << ": "
+                  << control->wrappers[w];
+      }
+    }
     // Recursively print child statements
     if (control->child) {
       LOG(INFO) << indent_str << "  Loop body:";
@@ -864,7 +875,13 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
   } else if (node->IsControl()) {
     const ControlNode *control = static_cast<const ControlNode *>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
-    // Could print loop info if needed
+    if (!control->wrappers.empty()) {
+      LOG(INFO) << indent_str << "  Wrappers: " << control->wrappers.size();
+      for (size_t w = 0; w < control->wrappers.size(); w++) {
+        LOG(INFO) << indent_str << "    Wrapper " << w << ": "
+                  << control->wrappers[w];
+      }
+    }
     if (control->child) {
       LOG(INFO) << indent_str << "  Child:";
       PrintIRStructure(control->child.get(), indent + 2);
