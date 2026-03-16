@@ -52,6 +52,8 @@ using BufferDataToBufferMap =
     std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+using VarBindingMap =
+    std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
 
 struct LocalAccessSummary {
   BufferSet read_buffers;
@@ -741,7 +743,6 @@ private:
       }
       return body;
     };
-
     // Extract async producer blocks (TMA and cp.async)
     AsyncCopyBlockExtractor extractor;
     extractor.Extract(flat_stmts);
@@ -763,6 +764,11 @@ private:
           return StmtExprMutator::VisitStmt_(op);
         }
       }
+    }
+
+    VarBindingMap saved_loop_guard_bindings = current_loop_guard_bindings_;
+    for (const auto &[var, value] : loop_body_lets) {
+      current_loop_guard_bindings_[var] = value;
     }
 
     // ---------------------------------------------------------------
@@ -831,21 +837,66 @@ private:
     int old_pure_tma_preloop_fwd_cursor = pure_tma_preloop_fwd_cursor_;
     use_full_tma_forward_barrier_protocol_ = (num_cp_async_groups == 0);
     remap_pure_tma_barriers_ = use_full_tma_forward_barrier_protocol_;
-    std::vector<Optional<PrimExpr>> producer_guards(extractor.blocks.size(),
+    std::vector<Stmt> ws_producer_stmts(extractor.blocks.size());
+    std::vector<Optional<Stmt>> ws_wait_stmts(extractor.blocks.size(),
+                                              std::nullopt);
+    std::vector<Optional<PrimExpr>> producer_issue_guards(
+        extractor.blocks.size(), std::nullopt);
+    std::vector<Optional<Stmt>> producer_issue_guard_sources(
+        extractor.blocks.size(), std::nullopt);
+    std::vector<Optional<PrimExpr>> protocol_guards(extractor.blocks.size(),
                                                     std::nullopt);
+    std::vector<Optional<Stmt>> protocol_guard_sources(extractor.blocks.size(),
+                                                       std::nullopt);
     for (size_t i = 0; i < extractor.blocks.size(); ++i) {
-      producer_guards[i] =
+      ws_producer_stmts[i] = extractor.blocks[i].producer_stmt;
+      ws_wait_stmts[i] = extractor.blocks[i].wait_stmt;
+      producer_issue_guards[i] =
           ExtractNonThreadProducerGuard(extractor.blocks[i].producer_stmt);
+      if (producer_issue_guards[i].defined()) {
+        producer_issue_guard_sources[i] = extractor.blocks[i].producer_stmt;
+        protocol_guards[i] = producer_issue_guards[i];
+        protocol_guard_sources[i] = extractor.blocks[i].producer_stmt;
+        if (arrive_insert_pos[i] > 0 &&
+            arrive_insert_pos[i] <=
+                static_cast<int>(extractor.compute_stmts.size())) {
+          const Stmt &arrive_source =
+              extractor.compute_stmts[arrive_insert_pos[i] - 1];
+          Optional<PrimExpr> arrive_guard =
+              ExtractNonThreadProducerGuard(arrive_source);
+          if (arrive_guard.defined()) {
+            protocol_guards[i] = arrive_guard;
+            protocol_guard_sources[i] = arrive_source;
+          }
+        }
+      }
+      if (producer_issue_guards[i].defined() &&
+          CanIssueProducerWithoutGuard(extractor.blocks[i].producer_stmt)) {
+        ws_producer_stmts[i] =
+            StripNonThreadProducerGuard(extractor.blocks[i].producer_stmt);
+        if (extractor.blocks[i].wait_stmt.defined()) {
+          ws_wait_stmts[i] =
+              StripNonThreadProducerGuard(extractor.blocks[i].wait_stmt.value());
+        }
+        producer_issue_guards[i] = std::nullopt;
+        producer_issue_guard_sources[i] = std::nullopt;
+        protocol_guards[i] = std::nullopt;
+        protocol_guard_sources[i] = std::nullopt;
+      }
     }
 
     StructuralEqual equal;
-    auto same_guard = [&](size_t lhs, size_t rhs) {
-      const Optional<PrimExpr> &guard_a = producer_guards[lhs];
-      const Optional<PrimExpr> &guard_b = producer_guards[rhs];
+    auto same_optional_expr = [&](const Optional<PrimExpr> &guard_a,
+                                  const Optional<PrimExpr> &guard_b) {
       if (guard_a.defined() != guard_b.defined()) {
         return false;
       }
       return !guard_a.defined() || equal(guard_a.value(), guard_b.value());
+    };
+    auto same_guard = [&](size_t lhs, size_t rhs) {
+      return same_optional_expr(producer_issue_guards[lhs],
+                                producer_issue_guards[rhs]) &&
+             same_optional_expr(protocol_guards[lhs], protocol_guards[rhs]);
     };
     std::vector<int> block_group(extractor.blocks.size(), 0);
     int num_block_groups = 0;
@@ -1065,15 +1116,15 @@ private:
       // Back-pressure wait: producer cannot reuse the stage buffer until the
       // consumer releases it. xor(parity, 1) bootstraps the first iteration.
       if (is_first_in_group) {
-        producer_body_stmts.push_back(WrapStmtWithOptionalGuard(
-            producer_guards[ti],
+        producer_body_stmts.push_back(WrapStmtWithGuardSource(
+            protocol_guard_sources[ti], protocol_guards[ti],
             makeParityWait(bp_id, bitwise_xor(parity_expr, 1))));
         for (const auto &stmt : producer_loop_prefix_stmts[ti]) {
           producer_body_stmts.push_back(stmt);
         }
       }
 
-      Stmt producer_stmt = tma.producer_stmt;
+      Stmt producer_stmt = ws_producer_stmts[ti];
       if (tma.kind == AsyncProducerKind::kTma) {
         ICHECK_GE(fwd_bases[ti], 0);
         PrimExpr barrier_id =
@@ -1102,8 +1153,9 @@ private:
       if (is_last_in_group && group_has_cp_async[group]) {
         ICHECK_GE(fwd_bases[ti], 0);
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
-        producer_body_stmts.push_back(WrapStmtWithOptionalGuard(
-            producer_guards[ti], makeCpAsyncBarrierNoInc(fwd_id)));
+        producer_body_stmts.push_back(WrapStmtWithGuardSource(
+            producer_issue_guard_sources[ti], producer_issue_guards[ti],
+            makeCpAsyncBarrierNoInc(fwd_id)));
       }
     }
     Stmt producer_loop_body =
@@ -1122,12 +1174,13 @@ private:
     for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
       ICHECK_GE(fwd_bases[ti], 0);
       PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
-      if (extractor.blocks[ti].wait_stmt.defined()) {
+      if (ws_wait_stmts[ti].defined()) {
         normalized_waits.push_back(RewriteWaitBarrier(
-            extractor.blocks[ti].wait_stmt.value(), fwd_id, parity_expr));
+            ws_wait_stmts[ti].value(), fwd_id, parity_expr));
       } else {
-        normalized_waits.push_back(WrapStmtWithOptionalGuard(
-            producer_guards[ti], makeParityWait(fwd_id, parity_expr)));
+        normalized_waits.push_back(WrapStmtWithGuardSource(
+            producer_issue_guard_sources[ti], producer_issue_guards[ti],
+            makeParityWait(fwd_id, parity_expr)));
       }
     }
     // Emit waits / compute / arrives according to insertion points.
@@ -1148,7 +1201,9 @@ private:
         if (is_last_in_group &&
             arrive_insert_pos[ti] == static_cast<int>(ci + 1)) {
           PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
-          consumer_body_stmts.push_back(makeArriveBarrier(bp_id));
+          consumer_body_stmts.push_back(WrapStmtWithGuardSource(
+              protocol_guard_sources[ti], protocol_guards[ti],
+              makeArriveBarrier(bp_id)));
           arrive_emitted[ti] = true;
         }
       }
@@ -1173,7 +1228,9 @@ private:
           arrive_insert_pos[ti] ==
               static_cast<int>(extractor.compute_stmts.size())) {
         PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
-        consumer_body_stmts.push_back(makeArriveBarrier(bp_id));
+        consumer_body_stmts.push_back(WrapStmtWithGuardSource(
+            protocol_guard_sources[ti], protocol_guards[ti],
+            makeArriveBarrier(bp_id)));
       }
     }
     Stmt consumer_loop_body = SeqStmt(consumer_body_stmts);
@@ -1268,6 +1325,7 @@ private:
     pure_tma_preloop_fwd_base_ = old_pure_tma_preloop_fwd_base;
     pure_tma_preloop_fwd_count_ = old_pure_tma_preloop_fwd_count;
     pure_tma_preloop_fwd_cursor_ = old_pure_tma_preloop_fwd_cursor;
+    current_loop_guard_bindings_ = std::move(saved_loop_guard_bindings);
 
     // Build the new Block and BlockRealize (without recursive mutation
     // since we've already transformed the body directly).
@@ -1984,12 +2042,239 @@ private:
     return std::nullopt;
   }
 
+  PrimExpr ResolveGuardBinding(const PrimExpr &expr,
+                               const VarBindingMap &bindings) const {
+    if (const auto *var = expr.as<VarNode>()) {
+      auto it = bindings.find(GetRef<Var>(var));
+      if (it != bindings.end()) {
+        return ResolveGuardBinding(it->second, bindings);
+      }
+    }
+    if (const auto *cast = expr.as<CastNode>()) {
+      return ResolveGuardBinding(cast->value, bindings);
+    }
+    return expr;
+  }
+
+  bool IsMaskLikeBooleanExpr(const PrimExpr &expr) const {
+    PrimExpr resolved = expr;
+    while (const auto *cast = resolved.as<CastNode>()) {
+      resolved = cast->value;
+    }
+    auto is_const_bool = [](const PrimExpr &value, bool expected) {
+      if (const auto *imm = value.as<IntImmNode>()) {
+        return static_cast<bool>(imm->value) == expected;
+      }
+      return false;
+    };
+    if (const auto *load = resolved.as<BufferLoadNode>()) {
+      return load->buffer->dtype.is_bool();
+    }
+    if (const auto *select = resolved.as<SelectNode>()) {
+      if (is_const_bool(select->false_value, false)) {
+        return IsMaskLikeBooleanExpr(select->true_value);
+      }
+      if (is_const_bool(select->true_value, false)) {
+        return IsMaskLikeBooleanExpr(select->false_value);
+      }
+    }
+    if (const auto *call = resolved.as<CallNode>()) {
+      if (call->op.same_as(builtin::if_then_else()) && call->args.size() == 3) {
+        if (is_const_bool(call->args[2], false)) {
+          return IsMaskLikeBooleanExpr(call->args[1]);
+        }
+        if (is_const_bool(call->args[1], false)) {
+          return IsMaskLikeBooleanExpr(call->args[2]);
+        }
+      }
+    }
+    return false;
+  }
+
+  bool CanIssueProducerWithoutGuardImpl(const Stmt &stmt,
+                                        VarBindingMap *bindings) const {
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return CanIssueProducerWithoutGuardImpl(attr->body, bindings);
+    }
+    if (const auto *let_s = stmt.as<LetStmtNode>()) {
+      bindings->emplace(let_s->var, let_s->value);
+      bool result = CanIssueProducerWithoutGuardImpl(let_s->body, bindings);
+      bindings->erase(let_s->var);
+      return result;
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      return CanIssueProducerWithoutGuardImpl(realize->block->body, bindings);
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return CanIssueProducerWithoutGuardImpl(block->body, bindings);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const auto &s : seq->seq) {
+        if (CanIssueProducerWithoutGuardImpl(s, bindings)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined() ||
+          IsTrivialNoOpStmt(if_stmt->else_case.value())) {
+        if (!IsThreadOnlyPredicate(if_stmt->condition)) {
+          if (const auto *var = if_stmt->condition.as<VarNode>()) {
+            Var cond_var = GetRef<Var>(var);
+            if (!UsesVar(if_stmt->then_case, [cond_var](const VarNode *vn) {
+                  return vn == cond_var.get();
+                })) {
+              return true;
+            }
+          }
+          PrimExpr resolved = ResolveGuardBinding(if_stmt->condition, *bindings);
+          return IsMaskLikeBooleanExpr(resolved);
+        }
+        return CanIssueProducerWithoutGuardImpl(if_stmt->then_case, bindings);
+      }
+    }
+    return false;
+  }
+
+  bool CanIssueProducerWithoutGuard(const Stmt &stmt) const {
+    VarBindingMap bindings = current_loop_guard_bindings_;
+    return CanIssueProducerWithoutGuardImpl(stmt, &bindings);
+  }
+
+  Stmt StripNonThreadProducerGuard(const Stmt &stmt) const {
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return AttrStmt(attr->node, attr->attr_key, attr->value,
+                      StripNonThreadProducerGuard(attr->body), attr->span);
+    }
+    if (const auto *let_s = stmt.as<LetStmtNode>()) {
+      return LetStmt(let_s->var, let_s->value,
+                     StripNonThreadProducerGuard(let_s->body));
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      const Block &orig = realize->block;
+      Block new_block(orig->iter_vars, orig->reads, orig->writes,
+                      orig->name_hint,
+                      StripNonThreadProducerGuard(orig->body), orig->init,
+                      orig->alloc_buffers, orig->match_buffers,
+                      orig->annotations);
+      return BlockRealize(realize->iter_values, realize->predicate, new_block);
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return Block(block->iter_vars, block->reads, block->writes,
+                   block->name_hint, StripNonThreadProducerGuard(block->body),
+                   block->init, block->alloc_buffers, block->match_buffers,
+                   block->annotations);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      Array<Stmt> stripped;
+      stripped.reserve(seq->seq.size());
+      for (const auto &s : seq->seq) {
+        stripped.push_back(StripNonThreadProducerGuard(s));
+      }
+      return stripped.size() == 1 ? stripped[0] : SeqStmt(stripped, seq->span);
+    }
+    if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined() ||
+          IsTrivialNoOpStmt(if_stmt->else_case.value())) {
+        if (!IsThreadOnlyPredicate(if_stmt->condition)) {
+          return StripNonThreadProducerGuard(if_stmt->then_case);
+        }
+        return IfThenElse(if_stmt->condition,
+                          StripNonThreadProducerGuard(if_stmt->then_case),
+                          std::nullopt, if_stmt->span);
+      }
+    }
+    return stmt;
+  }
+
   Stmt WrapStmtWithOptionalGuard(const Optional<PrimExpr> &guard,
                                  const Stmt &stmt) const {
     if (!guard.defined()) {
       return stmt;
     }
     return IfThenElse(guard.value(), stmt, std::nullopt);
+  }
+
+  Optional<Stmt> WrapStmtWithNonThreadGuardLike(const Stmt &source,
+                                                const Stmt &stmt) const {
+    if (const auto *attr = source.as<AttrStmtNode>()) {
+      Optional<Stmt> wrapped =
+          WrapStmtWithNonThreadGuardLike(attr->body, stmt);
+      if (!wrapped.defined()) {
+        return std::nullopt;
+      }
+      return AttrStmt(attr->node, attr->attr_key, attr->value, wrapped.value(),
+                      attr->span);
+    }
+    if (const auto *let_s = source.as<LetStmtNode>()) {
+      Optional<Stmt> wrapped =
+          WrapStmtWithNonThreadGuardLike(let_s->body, stmt);
+      if (!wrapped.defined()) {
+        return std::nullopt;
+      }
+      return LetStmt(let_s->var, let_s->value, wrapped.value());
+    }
+    if (const auto *realize = source.as<BlockRealizeNode>()) {
+      Optional<Stmt> wrapped =
+          WrapStmtWithNonThreadGuardLike(realize->block->body, stmt);
+      if (!wrapped.defined()) {
+        return std::nullopt;
+      }
+      const Block &orig = realize->block;
+      Block new_block(orig->iter_vars, orig->reads, orig->writes,
+                      orig->name_hint, wrapped.value(), orig->init,
+                      orig->alloc_buffers, orig->match_buffers,
+                      orig->annotations);
+      return BlockRealize(realize->iter_values, realize->predicate, new_block);
+    }
+    if (const auto *block = source.as<BlockNode>()) {
+      Optional<Stmt> wrapped =
+          WrapStmtWithNonThreadGuardLike(block->body, stmt);
+      if (!wrapped.defined()) {
+        return std::nullopt;
+      }
+      return Block(block->iter_vars, block->reads, block->writes,
+                   block->name_hint, wrapped.value(), block->init,
+                   block->alloc_buffers, block->match_buffers,
+                   block->annotations);
+    }
+    if (const auto *seq = source.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return WrapStmtWithNonThreadGuardLike(seq->seq[0], stmt);
+      }
+      return std::nullopt;
+    }
+    if (const auto *if_stmt = source.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined() ||
+          IsTrivialNoOpStmt(if_stmt->else_case.value())) {
+        if (!IsThreadOnlyPredicate(if_stmt->condition)) {
+          return IfThenElse(if_stmt->condition, stmt, std::nullopt,
+                            if_stmt->span);
+        }
+        Optional<Stmt> wrapped =
+            WrapStmtWithNonThreadGuardLike(if_stmt->then_case, stmt);
+        if (!wrapped.defined()) {
+          return std::nullopt;
+        }
+        return IfThenElse(if_stmt->condition, wrapped.value(), std::nullopt,
+                          if_stmt->span);
+      }
+    }
+    return std::nullopt;
+  }
+
+  Stmt WrapStmtWithGuardSource(const Optional<Stmt> &guard_source,
+                               const Optional<PrimExpr> &guard,
+                               const Stmt &stmt) const {
+    if (guard_source.defined()) {
+      Optional<Stmt> wrapped =
+          WrapStmtWithNonThreadGuardLike(guard_source.value(), stmt);
+      if (wrapped.defined()) {
+        return wrapped.value();
+      }
+    }
+    return WrapStmtWithOptionalGuard(guard, stmt);
   }
 
   Stmt RewriteWaitBarrier(const Stmt &wait_stmt, const PrimExpr &new_barrier_id,
@@ -2716,6 +3001,7 @@ private:
   int pure_tma_preloop_fwd_base_ = -1;
   int pure_tma_preloop_fwd_count_ = 0;
   int pure_tma_preloop_fwd_cursor_ = 0;
+  VarBindingMap current_loop_guard_bindings_;
 };
 
 // ---------------------------------------------------------------------------
