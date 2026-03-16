@@ -3136,10 +3136,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << PrintExpr(op->args[i]);
     }
     os << ")";
-  } else if (op->op.same_as(tl::get_cluster_id())) {
-    ICHECK_EQ(op->args.size(), 0) << "tl.get_cluster_id expects no arguments.";
-    need_cluster_h_ = true;
-    os << "tl::block_rank_in_cluster()";
   } else if (op->op.same_as(tl::get_cluster_block_nums())) {
     ICHECK_EQ(op->args.size(), 0)
         << "tl.get_cluster_block_nums expects no arguments.";
