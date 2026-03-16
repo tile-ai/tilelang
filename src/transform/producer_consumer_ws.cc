@@ -1123,8 +1123,8 @@ private:
       ICHECK_GE(fwd_bases[ti], 0);
       PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
       if (extractor.blocks[ti].wait_stmt.defined()) {
-        normalized_waits.push_back(RewriteWaitBarrierId(
-            extractor.blocks[ti].wait_stmt.value(), fwd_id));
+        normalized_waits.push_back(RewriteWaitBarrier(
+            extractor.blocks[ti].wait_stmt.value(), fwd_id, parity_expr));
       } else {
         normalized_waits.push_back(WrapStmtWithOptionalGuard(
             producer_guards[ti], makeParityWait(fwd_id, parity_expr)));
@@ -1992,30 +1992,32 @@ private:
     return IfThenElse(guard.value(), stmt, std::nullopt);
   }
 
-  Stmt RewriteWaitBarrierId(const Stmt &wait_stmt,
-                            const PrimExpr &new_barrier_id) {
-    class WaitBarrierIdRewriter : public StmtExprMutator {
+  Stmt RewriteWaitBarrier(const Stmt &wait_stmt, const PrimExpr &new_barrier_id,
+                          Optional<PrimExpr> new_parity = std::nullopt) {
+    class WaitBarrierRewriter : public StmtExprMutator {
     public:
-      explicit WaitBarrierIdRewriter(PrimExpr barrier_id)
-          : barrier_id_(std::move(barrier_id)) {}
+      WaitBarrierRewriter(PrimExpr barrier_id, Optional<PrimExpr> parity)
+          : barrier_id_(std::move(barrier_id)), parity_(std::move(parity)) {}
 
       PrimExpr VisitExpr_(const CallNode *op) final {
         auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
         if (call->op.same_as(mbarrier_wait_parity()) &&
             call->args.size() == 2) {
+          PrimExpr parity = parity_.defined() ? parity_.value() : call->args[1];
           return Call(call->dtype, call->op,
-                      {makeGetBarrier(barrier_id_), call->args[1]},
-                      call->annotations, call->span);
+                      {makeGetBarrier(barrier_id_), parity}, call->annotations,
+                      call->span);
         }
         return call;
       }
 
     private:
       PrimExpr barrier_id_;
+      Optional<PrimExpr> parity_;
     };
 
     return MergeAdjacentEquivalentIfs(
-        WaitBarrierIdRewriter(new_barrier_id)(wait_stmt));
+        WaitBarrierRewriter(new_barrier_id, std::move(new_parity))(wait_stmt));
   }
 
   Stmt RewriteTmaStmtBarrierIdPreserveProtocol(const Stmt &stmt,
@@ -2215,7 +2217,7 @@ private:
                 parent_->RewriteTmaStmtBarrierIdPreserveProtocol(
                     StripTmaCopyWriteBufferAttr(op->seq[i]), barrier_id));
             Stmt wait_stmt =
-                parent_->RewriteWaitBarrierId(op->seq[i + 1], barrier_id);
+                parent_->RewriteWaitBarrier(op->seq[i + 1], barrier_id);
             new_seq.push_back(producer_stmt);
             new_seq.push_back(wait_stmt);
             ++i;
@@ -2433,7 +2435,7 @@ private:
                 RewriteTmaForwardProducerStmt(producer_prefix_stmt, barrier_id,
                                               /*append_arrive=*/true);
             consumer_wait_stmt =
-                RewriteWaitBarrierId(consumer_wait_stmt, barrier_id);
+                RewriteWaitBarrier(consumer_wait_stmt, barrier_id);
           } else if (use_full_tma_forward_barrier_protocol_) {
             auto barrier_id = ExtractWaitBarrierId(pre_loop_stmts[i + 1]);
             ICHECK(barrier_id.defined())
