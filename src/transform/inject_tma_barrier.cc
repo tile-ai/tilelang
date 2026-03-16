@@ -235,6 +235,21 @@ private:
             const_int_bound->max_value - const_int_bound->min_value + 1;
         UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
         pending_tma_ops_.clear();
+      } else if (call->op.same_as(builtin::ptx_cp_async_barrier()) ||
+                 call->op.same_as(tl::ptx_cp_async_barrier_noinc())) {
+        // Under warp specialization, the producer→consumer dependency may be
+        // released with cp.async.mbarrier.arrive instead of mbarrier.arrive.
+        // Treat this as a barrier release point for preceding TMA ops so we
+        // can correctly associate tma_load/expect_tx with the right barrier.
+        PrimExpr barrier_id = call->args[0];
+        for (const auto &tma_call : pending_tma_ops_) {
+          tma_op_to_barrier_id_.Set(tma_call, barrier_id);
+        }
+        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+        auto extent =
+            const_int_bound->max_value - const_int_bound->min_value + 1;
+        UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
+        pending_tma_ops_.clear();
       } else if (call->op.same_as(builtin::ptx_wait_barrier())) {
         PrimExpr barrier_id = call->args[0];
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
@@ -280,23 +295,6 @@ public:
       } else {
         if (zero_count == 1) {
           clear_zero_list[zero_idx] = expect_[zero_idx] && !has_simt_copy_;
-          if (clear_zero_list[zero_idx] == false && !is_cluster_[zero_idx]) {
-            int begin = int_sets_[zero_idx].min().as<IntImmNode>()->value;
-            int end = int_sets_[zero_idx].max().as<IntImmNode>()->value;
-            for (int i = begin; i <= end; ++i) {
-              restore_barrier_ids_.push_back(i);
-            }
-          }
-        } else {
-          for (int i{zero_idx}; i > zero_idx - zero_count; --i) {
-            if (!is_cluster_[i]) {
-              int begin = int_sets_[i].min().as<IntImmNode>()->value;
-              int end = int_sets_[i].max().as<IntImmNode>()->value;
-              for (int j = begin; j <= end; ++j) {
-                restore_barrier_ids_.push_back(j);
-              }
-            }
-          }
         }
         zero_count = 0;
       }
@@ -309,20 +307,8 @@ public:
     if (op->op.same_as(mbarrier_expect_tx())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (tma_op_to_barrier_id_.count(call_ref)) {
-        PrimExpr barrier_id = tma_op_to_barrier_id_[call_ref];
-        // Cluster barriers have a BufferLoad as barrier_id (not get_mbarrier).
-        // Skip int_set computation for them — they don't need
-        // restore_barrier_ids_.
-        bool is_cluster = (barrier_id.as<CallNode>() == nullptr);
-        arith::IntSet int_set = arith::IntSet::Nothing();
-        if (!is_cluster) {
-          PrimExpr e = barrier_id.as<CallNode>()->args[0];
-          int_set = arith::EvalSet(e, var_int_set_);
-        }
         expect_.push_back(if_depth_ == 1);
         sequence.push_back(0);
-        int_sets_.push_back(int_set);
-        is_cluster_.push_back(is_cluster);
         expect_tx_count_ += 1;
       }
     } else if (op->op.same_as(builtin::ptx_arrive_barrier()) ||
@@ -348,13 +334,9 @@ public:
   std::vector<int> sequence;
   int expect_tx_count_{0};
   std::vector<bool> expect_;
-  std::vector<bool> is_cluster_;
-  std::vector<arith::IntSet> int_sets_;
-  std::vector<int> restore_barrier_ids_;
   bool has_simt_copy_{false};
   int if_depth_{0};
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
-  Map<Var, arith::IntSet> var_int_set_;
 };
 
 class ArriveThreadCountCollector : public IRVisitorWithAnalyzer {
