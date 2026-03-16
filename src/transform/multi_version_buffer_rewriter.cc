@@ -41,7 +41,8 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+          call->op.same_as(tma_load_multicast())) {
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }

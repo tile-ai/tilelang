@@ -29,7 +29,8 @@ public:
   void clear() { has_producer_buffer_ = false; }
 
   void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+        call->op.same_as(tma_load_multicast())) {
       has_producer_buffer_ = true;
     }
     StmtExprVisitor::VisitExpr_(call);
@@ -376,7 +377,8 @@ public:
 private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+        call->op.same_as(tma_load_multicast())) {
       auto mbar = makeGetBarrier(producer_barrier_idx_);
       auto arg0 = call->args[0].as<Call>();
       // Check if this is a 1D TMA load (raw address, no descriptor, no
