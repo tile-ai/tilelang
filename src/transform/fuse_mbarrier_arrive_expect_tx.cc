@@ -30,13 +30,6 @@ public:
   }
 
 private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == attr::kWarpSpecializationScope) {
-      return tvm::ffi::GetRef<Stmt>(op);
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
   static bool Is1DTmaLoad(const CallNode *op) {
     if (!op->op.same_as(tma_load())) {
       return false;

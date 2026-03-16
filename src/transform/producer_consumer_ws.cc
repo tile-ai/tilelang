@@ -243,6 +243,119 @@ private:
   VarSet bound_vars_;
 };
 
+class ProducerSimtCopyDetector : public StmtExprVisitor {
+public:
+  static bool HasSimtCopy(const Stmt &stmt,
+                          const BufferDataToBufferMap &buffer_map) {
+    ProducerSimtCopyDetector detector(buffer_map);
+    detector.VisitStmt(stmt);
+    return detector.has_global_read_ && detector.has_shared_write_;
+  }
+
+private:
+  explicit ProducerSimtCopyDetector(const BufferDataToBufferMap &buffer_map)
+      : buffer_data_to_buffer_(buffer_map) {}
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    bool old_in_if_cond = in_if_cond_;
+    in_if_cond_ = true;
+    VisitExpr(op->condition);
+    in_if_cond_ = old_in_if_cond;
+    VisitStmt(op->then_case);
+    if (op->else_case.defined()) {
+      VisitStmt(op->else_case.value());
+    }
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (!in_if_cond_ && !in_async_copy_ && IsGlobalBuffer(op->buffer)) {
+      has_global_read_ = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    if (!in_if_cond_ && !in_async_copy_ && IsSharedBuffer(op->buffer)) {
+      has_shared_write_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    bool old_in_async_copy = in_async_copy_;
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(tma_store()) || op->op.same_as(tma_store_arrive()) ||
+        op->op.same_as(tma_store_wait()) ||
+        op->op.same_as(tl::ptx_cp_async()) ||
+        op->op.same_as(builtin::ptx_cp_async())) {
+      in_async_copy_ = true;
+    }
+
+    if (op->op.same_as(tl::access_ptr())) {
+      if (op->args.size() == 3) {
+        if (const auto *base_load = op->args[0].as<BufferLoadNode>()) {
+          MarkAccess(base_load->buffer, GetConstAccessMask(op->args[2]));
+          for (const auto &index : base_load->indices) {
+            VisitExpr(index);
+          }
+        } else {
+          VisitExpr(op->args[0]);
+        }
+        VisitExpr(op->args[1]);
+      } else {
+        StmtExprVisitor::VisitExpr_(op);
+      }
+      in_async_copy_ = old_in_async_copy;
+      return;
+    }
+
+    if (op->op.same_as(builtin::tvm_access_ptr())) {
+      if (op->args.size() == 5) {
+        if (const auto *var = op->args[1].as<VarNode>()) {
+          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+          if (it != buffer_data_to_buffer_.end()) {
+            MarkAccess(it->second, GetConstAccessMask(op->args[4]));
+          }
+        }
+        VisitExpr(op->args[2]);
+        VisitExpr(op->args[3]);
+      } else {
+        StmtExprVisitor::VisitExpr_(op);
+      }
+      in_async_copy_ = old_in_async_copy;
+      return;
+    }
+
+    StmtExprVisitor::VisitExpr_(op);
+    in_async_copy_ = old_in_async_copy;
+  }
+
+  void MarkAccess(const Buffer &buffer, int rw_mask) {
+    if (in_if_cond_ || in_async_copy_ || !buffer.defined()) {
+      return;
+    }
+    if ((rw_mask & 1) && IsGlobalBuffer(buffer)) {
+      has_global_read_ = true;
+    }
+    if ((rw_mask & 2) && IsSharedBuffer(buffer)) {
+      has_shared_write_ = true;
+    }
+  }
+
+  int GetConstAccessMask(const PrimExpr &expr) const {
+    if (const auto *imm = expr.as<IntImmNode>()) {
+      return static_cast<int>(imm->value);
+    }
+    return 3;
+  }
+
+  const BufferDataToBufferMap &buffer_data_to_buffer_;
+  bool has_global_read_{false};
+  bool has_shared_write_{false};
+  bool in_if_cond_{false};
+  bool in_async_copy_{false};
+};
+
 // ---------------------------------------------------------------------------
 // Helpers (reused from warp_specialized_rewriter.cc patterns)
 // ---------------------------------------------------------------------------
@@ -771,6 +884,9 @@ private:
       current_loop_guard_bindings_[var] = value;
     }
 
+    BufferDataToBufferMap buffer_data_to_buffer =
+        BufferDataToBufferCollector::Collect(GetRef<Stmt>(op));
+
     // ---------------------------------------------------------------
     // Build producer and consumer loop bodies
     // ---------------------------------------------------------------
@@ -929,6 +1045,65 @@ private:
       num_block_groups = next_group;
     }
 
+    std::vector<Array<Stmt>> producer_loop_prefix_stmts(
+        extractor.blocks.size());
+    std::vector<bool> moved_compute_stmts(extractor.compute_stmts.size(),
+                                          false);
+    int compute_cursor = 0;
+    for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
+      bool is_first_in_group =
+          ti == 0 || block_group[ti] != block_group[ti - 1];
+      if (!is_first_in_group) {
+        continue;
+      }
+      int wait_pos = wait_insert_pos[ti];
+      if (wait_pos <= compute_cursor) {
+        compute_cursor = std::max(compute_cursor, wait_pos);
+        continue;
+      }
+      bool all_movable = true;
+      for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+        if (!IsProducerMovableLoopPrefixStmt(extractor.compute_stmts[ci])) {
+          all_movable = false;
+          break;
+        }
+      }
+      if (all_movable) {
+        for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+          producer_loop_prefix_stmts[ti].push_back(extractor.compute_stmts[ci]);
+          moved_compute_stmts[ci] = true;
+        }
+      }
+      compute_cursor = wait_pos;
+    }
+
+    auto stmt_has_lowered_simt_copy = [&](const Stmt &stmt) {
+      return ProducerSimtCopyDetector::HasSimtCopy(stmt, buffer_data_to_buffer);
+    };
+    bool producer_needs_full_thread_extent =
+        std::any_of(ws_producer_stmts.begin(), ws_producer_stmts.end(),
+                    stmt_has_lowered_simt_copy);
+    if (!producer_needs_full_thread_extent) {
+      for (const auto &prefix_stmts : producer_loop_prefix_stmts) {
+        for (const auto &stmt : prefix_stmts) {
+          if (stmt_has_lowered_simt_copy(stmt)) {
+            producer_needs_full_thread_extent = true;
+            break;
+          }
+        }
+        if (producer_needs_full_thread_extent) {
+          break;
+        }
+      }
+    }
+    if (producer_needs_full_thread_extent) {
+      // LowerTileOp may already have materialized SIMT global->shared copies.
+      // Those copies cannot be safely remapped onto a smaller producer warp
+      // partition, so keep the producer extent at the original thread extent.
+      producer_thread_extent = consumer_thread_extent;
+    }
+    producer_thread_extent_ = producer_thread_extent;
+
     std::vector<bool> group_has_tma(num_block_groups, false);
     std::vector<bool> group_has_cp_async(num_block_groups, false);
     for (size_t i = 0; i < extractor.blocks.size(); ++i) {
@@ -1069,38 +1244,6 @@ private:
     PrimExpr linear_idx = loop_var - loop_min;
     PrimExpr stage_expr = FloorMod(linear_idx, num_stages);
     PrimExpr parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
-
-    std::vector<Array<Stmt>> producer_loop_prefix_stmts(
-        extractor.blocks.size());
-    std::vector<bool> moved_compute_stmts(extractor.compute_stmts.size(),
-                                          false);
-    int compute_cursor = 0;
-    for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
-      bool is_first_in_group =
-          ti == 0 || block_group[ti] != block_group[ti - 1];
-      if (!is_first_in_group) {
-        continue;
-      }
-      int wait_pos = wait_insert_pos[ti];
-      if (wait_pos <= compute_cursor) {
-        compute_cursor = std::max(compute_cursor, wait_pos);
-        continue;
-      }
-      bool all_movable = true;
-      for (int ci = compute_cursor; ci < wait_pos; ++ci) {
-        if (!IsProducerMovableLoopPrefixStmt(extractor.compute_stmts[ci])) {
-          all_movable = false;
-          break;
-        }
-      }
-      if (all_movable) {
-        for (int ci = compute_cursor; ci < wait_pos; ++ci) {
-          producer_loop_prefix_stmts[ti].push_back(extractor.compute_stmts[ci]);
-          moved_compute_stmts[ci] = true;
-        }
-      }
-      compute_cursor = wait_pos;
-    }
 
     // --- Build Producer Body ---
     Array<Stmt> producer_body_stmts;
@@ -1302,8 +1445,6 @@ private:
     Stmt init_barrier = Evaluate(Call(
         DataType::Handle(), create_list_of_mbarrier(), barrier_arrive_counts));
 
-    BufferDataToBufferMap buffer_data_to_buffer =
-        BufferDataToBufferCollector::Collect(GetRef<Stmt>(op));
     LocalLiveSet producer_live_seed =
         SeedLiveSetFromStmt(producer_loop_body, buffer_data_to_buffer);
     LocalLiveSet consumer_live_seed =
