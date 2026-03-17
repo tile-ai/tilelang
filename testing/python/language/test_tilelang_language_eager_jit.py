@@ -1,16 +1,8 @@
 import tilelang.testing
 import tilelang
 import tilelang.language as T
-from functools import lru_cache
+from itertools import product
 import torch
-import pytest
-
-JIT2_GEMM_PTR_CASES = [
-    (T.float16, T.float32),
-    (T.float32, T.float32),
-]
-JIT2_MANY_ANNOT_CASES = ("copy1", "copy4", "copy5")
-JIT2_RETURN_CASES = ("copy1", "copy4", "copy5")
 
 
 def test_jit2_gemm():
@@ -52,8 +44,7 @@ def test_jit2_gemm():
     torch.testing.assert_close(C, C_ref, atol=1e-2, rtol=1e-2)
 
 
-@lru_cache(maxsize=1)
-def _get_jit2_gemm_ptr():
+def test_jit2_gemm_ptr():
     @tilelang.jit
     def gemm_ptr(
         A: T.ptr,
@@ -82,28 +73,25 @@ def _get_jit2_gemm_ptr():
                 T.gemm(A_shared, B_shared, C_local)
             T.copy(C_local, C[bx * block_M, by * block_N])
 
-    return gemm_ptr
+    prod = product([T.float16, T.float32], [T.float32])
+    gemm_ptr.par_compile(
+        [
+            {"A": T.ptr(), "B": T.ptr(), "C": T.ptr(), "M": 1024, "N": 1024, "K": 1024, "dtype": in_dtype, "out_dtype": out_dtype}
+            for in_dtype, out_dtype in prod
+        ]
+    )
+    for in_dtype, out_dtype in prod:
+        in_dtype = in_dtype.as_torch()
+        out_dtype = out_dtype.as_torch()
+        A = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
+        B = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
+        C_ref = out_dtype(A @ B)
+        C = torch.empty(1024, 1024, dtype=out_dtype, device="cuda")
+        gemm_ptr(A, B, C, 1024, 1024, 1024, in_dtype, out_dtype)
+        torch.testing.assert_close(C, C_ref, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.parametrize(
-    ("in_dtype", "out_dtype"),
-    JIT2_GEMM_PTR_CASES,
-    ids=[f"{in_dtype}-to-{out_dtype}" for in_dtype, out_dtype in JIT2_GEMM_PTR_CASES],
-)
-def test_jit2_gemm_ptr(in_dtype, out_dtype):
-    gemm_ptr = _get_jit2_gemm_ptr()
-    torch_in_dtype = in_dtype.as_torch()
-    torch_out_dtype = out_dtype.as_torch()
-    A = torch.randn(1024, 1024, dtype=torch_in_dtype, device="cuda")
-    B = torch.randn(1024, 1024, dtype=torch_in_dtype, device="cuda")
-    C_ref = (A @ B).to(torch_out_dtype)
-    C = torch.empty(1024, 1024, dtype=torch_out_dtype, device="cuda")
-    gemm_ptr(A, B, C, 1024, 1024, 1024, torch_in_dtype, torch_out_dtype)
-    torch.testing.assert_close(C, C_ref, atol=1e-2, rtol=1e-2)
-
-
-@lru_cache(maxsize=1)
-def _get_jit2_many_annot_copies():
+def test_jit2_many_annot():
     @T.macro
     def copy_impl(A, B):
         M, N = A.shape
@@ -158,27 +146,22 @@ def _get_jit2_many_annot_copies():
         B: T.StridedTensor[[N, M], [N_, M_], T.float32]
         copy_impl(A, B)
 
-    tilelang.par_compile([copy.get_tir(T.Tensor((128, 128)), T.Tensor((128, 128))) for copy in [copy1, copy4]])
-    return {"copy1": copy1, "copy4": copy4, "copy5": copy5}
+    tilelang.par_compile([copy.get_tir(T.Tensor((128, 128)), T.Tensor((128, 128))) for copy in [copy1, copy2, copy3, copy4]])
 
-
-@pytest.mark.parametrize("copy_name", JIT2_MANY_ANNOT_CASES, ids=JIT2_MANY_ANNOT_CASES)
-def test_jit2_many_annot(copy_name):
-    copy = _get_jit2_many_annot_copies()[copy_name]
-    if copy_name in ("copy1", "copy4"):
+    for copy in [copy1, copy2, copy3, copy4]:
         A = torch.randn(128, 128, device="cuda")
         B = torch.empty(128, 128, device="cuda")
         copy(A, B)
         assert torch.equal(B, A)
-    else:
+
+    for copy in [copy5, copy6]:
         A = torch.randn(128, 2, 128, 2, device="cuda")
         B = torch.randn(128, 2, 128, 2, device="cuda")
         copy(A[:, 0, :, 0], B[:, 0, :, 0])
         assert torch.equal(A[:, 0, :, 0], B[:, 0, :, 0])
 
 
-@lru_cache(maxsize=1)
-def _get_jit2_return_copies():
+def test_jit2_return():
     @T.macro
     def copy_impl(A):
         M, N = A.shape
@@ -224,17 +207,12 @@ def _get_jit2_return_copies():
         A: T.StridedTensor[[N, M], [N_, M_], T.float32]
         return copy_impl(A)
 
-    return {"copy1": copy1, "copy4": copy4, "copy5": copy5}
-
-
-@pytest.mark.parametrize("copy_name", JIT2_RETURN_CASES, ids=JIT2_RETURN_CASES)
-def test_jit2_return(copy_name):
-    copy = _get_jit2_return_copies()[copy_name]
-    if copy_name in ("copy1", "copy4"):
+    for copy in [copy1, copy2, copy3, copy4]:
         A = torch.randn(128, 128, device="cuda")
         B = copy(A)
         assert torch.equal(B, A)
-    else:
+
+    for copy in [copy5, copy6]:
         A = torch.randn(128, 2, 128, 2, device="cuda")
         B = copy(A[:, 0, :, 0])
         assert torch.equal(A[:, 0, :, 0], B)
@@ -260,5 +238,4 @@ def test_jit2_compile_with_consts():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_jit2_return()
+    tilelang.testing.main()
