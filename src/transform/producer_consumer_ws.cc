@@ -410,7 +410,7 @@ static bool IsTrivialNoOpStmt(const Stmt &stmt) {
  *
  *  Pattern 1: AttrStmt("tl.tma_copy_write_buffer", ...) + mbarrier_wait_parity
  *  Pattern 2: IfThenElse containing tma_load + mbarrier_wait_parity
- *  Pattern 3: cp_async-only stmt + commit_group + wait_group(0)
+ *  Pattern 3: one or more cp_async-only stmts + commit_group + wait_group(0)
  *
  * Everything else is classified as a compute statement.
  */
@@ -438,17 +438,29 @@ public:
           continue;
         }
       }
-      if (i + 2 < flat_stmts.size() && ContainsPtxCpAsync(flat_stmts[i]) &&
-          IsPtxCommitGroup(flat_stmts[i + 1]) &&
-          IsPtxWaitGroupZero(flat_stmts[i + 2])) {
-        Array<Stmt> producer_seq{flat_stmts[i], flat_stmts[i + 1]};
-        Stmt producer_stmt =
-            producer_seq.size() == 1 ? producer_seq[0] : SeqStmt(producer_seq);
-        blocks.push_back({AsyncProducerKind::kCpAsync, producer_stmt,
-                          Optional<Stmt>(),
-                          GetCpAsyncDstBufferData(flat_stmts[i])});
-        i += 3;
-        continue;
+      if (ContainsPtxCpAsync(flat_stmts[i])) {
+        size_t cp_async_end = i;
+        while (cp_async_end + 1 < flat_stmts.size() &&
+               ContainsPtxCpAsync(flat_stmts[cp_async_end + 1])) {
+          ++cp_async_end;
+        }
+        if (cp_async_end + 2 < flat_stmts.size() &&
+            IsPtxCommitGroup(flat_stmts[cp_async_end + 1]) &&
+            IsPtxWaitGroupZero(flat_stmts[cp_async_end + 2])) {
+          Array<Stmt> producer_seq;
+          producer_seq.reserve(cp_async_end - i + 2);
+          for (size_t j = i; j <= cp_async_end; ++j) {
+            producer_seq.push_back(flat_stmts[j]);
+          }
+          producer_seq.push_back(flat_stmts[cp_async_end + 1]);
+          Stmt producer_stmt = producer_seq.size() == 1 ? producer_seq[0]
+                                                        : SeqStmt(producer_seq);
+          blocks.push_back({AsyncProducerKind::kCpAsync, producer_stmt,
+                            Optional<Stmt>(),
+                            GetCpAsyncDstBufferData(producer_stmt)});
+          i = cp_async_end + 3;
+          continue;
+        }
       }
       compute_stmts.push_back(flat_stmts[i]);
       i++;
@@ -914,21 +926,29 @@ private:
       if (!extractor.blocks[ti].write_buffer_data.defined()) {
         continue;
       }
-      auto *target = extractor.blocks[ti].write_buffer_data.value().get();
-      auto uses_target = [target](const VarNode *v) { return v == target; };
-      int first_use = -1;
-      int last_use = -1;
+      const Var &target = extractor.blocks[ti].write_buffer_data.value();
+      int first_read = -1;
+      int last_access = -1;
       for (size_t ci = 0; ci < extractor.compute_stmts.size(); ++ci) {
-        if (UsesVar(extractor.compute_stmts[ci], uses_target)) {
-          if (first_use < 0) {
-            first_use = static_cast<int>(ci);
-          }
-          last_use = static_cast<int>(ci);
+        BufferDataAccessInfo access = AnalyzeBufferDataAccess(
+            extractor.compute_stmts[ci], target, buffer_data_to_buffer);
+        if (access.read && first_read < 0) {
+          first_read = static_cast<int>(ci);
+        }
+        if (access.HasAnyAccess()) {
+          last_access = static_cast<int>(ci);
         }
       }
-      if (first_use >= 0) {
-        wait_insert_pos[ti] = first_use;
-        arrive_insert_pos[ti] = last_use + 1;
+      if (first_read >= 0) {
+        wait_insert_pos[ti] = first_read;
+        arrive_insert_pos[ti] = last_access + 1;
+      } else if (last_access >= 0) {
+        // Write-only statements that touch the producer-written shared buffer
+        // do not need the producer result, so keep the forward wait at the
+        // loop head while still delaying back-pressure release until the last
+        // consumer-side access.
+        wait_insert_pos[ti] = 0;
+        arrive_insert_pos[ti] = last_access + 1;
       }
     }
     int num_existing_loop_fwd_barriers =
@@ -1527,6 +1547,13 @@ private:
     bool HasTmaProducer() const { return has_tma; }
   };
 
+  struct BufferDataAccessInfo {
+    bool read{false};
+    bool write{false};
+
+    bool HasAnyAccess() const { return read || write; }
+  };
+
   AsyncProducerLoopSummary AnalyzeAsyncProducerLoop(const ForNode *loop) {
     AsyncProducerLoopSummary summary;
     if (!loop || loop->kind != ForKind::kSerial) {
@@ -1548,6 +1575,87 @@ private:
       }
     }
     return summary;
+  }
+
+  BufferDataAccessInfo
+  AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
+                          const BufferDataToBufferMap &buffer_map) const {
+    class BufferDataAccessDetector : public StmtExprVisitor {
+    public:
+      BufferDataAccessDetector(const Var &buffer_data,
+                               const BufferDataToBufferMap &buffer_map)
+          : buffer_data_(buffer_data), buffer_map_(buffer_map) {}
+
+      BufferDataAccessInfo Result() const { return result_; }
+
+    private:
+      void VisitExpr_(const BufferLoadNode *op) final {
+        if (op->buffer->data.same_as(buffer_data_)) {
+          result_.read = true;
+        }
+        StmtExprVisitor::VisitExpr_(op);
+      }
+
+      void VisitStmt_(const BufferStoreNode *op) final {
+        if (op->buffer->data.same_as(buffer_data_)) {
+          result_.write = true;
+        }
+        StmtExprVisitor::VisitStmt_(op);
+      }
+
+      void VisitExpr_(const CallNode *op) final {
+        if (op->op.same_as(tl::access_ptr()) && op->args.size() == 3) {
+          if (const auto *base_load = op->args[0].as<BufferLoadNode>()) {
+            if (base_load->buffer->data.same_as(buffer_data_)) {
+              MarkAccess(op->args[2]);
+            }
+            for (const auto &index : base_load->indices) {
+              VisitExpr(index);
+            }
+          } else {
+            VisitExpr(op->args[0]);
+          }
+          VisitExpr(op->args[1]);
+          return;
+        }
+
+        if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() == 5) {
+          if (const auto *var = op->args[1].as<VarNode>()) {
+            auto it = buffer_map_.find(GetRef<Var>(var));
+            if (it != buffer_map_.end() &&
+                it->second->data.same_as(buffer_data_)) {
+              MarkAccess(op->args[4]);
+            }
+          }
+          VisitExpr(op->args[2]);
+          VisitExpr(op->args[3]);
+          return;
+        }
+
+        StmtExprVisitor::VisitExpr_(op);
+      }
+
+      void MarkAccess(const PrimExpr &rw_expr) {
+        int rw_mask = 3;
+        if (const auto *imm = rw_expr.as<IntImmNode>()) {
+          rw_mask = static_cast<int>(imm->value);
+        }
+        if (rw_mask & 1) {
+          result_.read = true;
+        }
+        if (rw_mask & 2) {
+          result_.write = true;
+        }
+      }
+
+      Var buffer_data_;
+      const BufferDataToBufferMap &buffer_map_;
+      BufferDataAccessInfo result_;
+    };
+
+    BufferDataAccessDetector detector(buffer_data, buffer_map);
+    detector(stmt);
+    return detector.Result();
   }
 
   const ForNode *FindAnnotatedPipelineLoop(const Stmt &stmt) {
