@@ -25,6 +25,7 @@
 #include "warp_specialized_rewriter.h"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -96,6 +97,59 @@ struct LocalLiveSet {
   void AddUses(const LocalAccessSummary &summary) {
     buffers.insert(summary.read_buffers.begin(), summary.read_buffers.end());
     vars.insert(summary.read_vars.begin(), summary.read_vars.end());
+  }
+};
+
+// ---------------------------------------------------------------------------
+// PhaseCounter: mutable int32 counter for guarded-loop phase tracking
+// ---------------------------------------------------------------------------
+
+/*!
+ * \brief When a pipeline loop body is conditionally guarded (e.g.
+ *        `if block_mask[k]: ...`), the loop-variable-based parity
+ *        `(k / num_stages) % 2` can desynchronise because skipped iterations
+ *        don't touch barriers.  A PhaseCounter is a local int32[1] buffer
+ *        that tracks the *actual* number of guarded-body entries so that
+ *        parity/stage are always correct.
+ */
+struct PhaseCounter {
+  Buffer buf;
+
+  static PhaseCounter Create(const std::string &name) {
+    return {decl_buffer({IntImm(DataType::Int(32), 1)}, DataType::Int(32), name,
+                        "local")};
+  }
+
+  PrimExpr Load() const {
+    return BufferLoad(buf, {IntImm(DataType::Int(32), 0)});
+  }
+
+  Stmt Init() const {
+    return BufferStore(buf, IntImm(DataType::Int(32), 0),
+                       {IntImm(DataType::Int(32), 0)});
+  }
+
+  Stmt Increment() const {
+    return BufferStore(buf, Load() + 1, {IntImm(DataType::Int(32), 0)});
+  }
+
+  /*! Wrap a For-loop with Allocate + DeclBuffer + Init(0). */
+  Stmt WrapLoopWithAlloc(Stmt loop) const {
+    Stmt body = SeqStmt({Init(), std::move(loop)});
+    body = DeclBuffer(buf, body);
+    return Allocate(buf->data, buf->dtype, buf->shape, const_true(), body);
+  }
+
+  PrimExpr StageExpr(int num_stages) const {
+    if (num_stages == 1)
+      return IntImm(DataType::Int(32), 0);
+    return FloorMod(Load(), num_stages);
+  }
+
+  PrimExpr ParityExpr(int num_stages) const {
+    if (num_stages == 1)
+      return FloorMod(Load(), 2);
+    return FloorMod(FloorDiv(Load(), num_stages), 2);
   }
 };
 
@@ -824,20 +878,16 @@ private:
 
     const Block &orig_block = op->block;
 
-    // Find the candidate loop for producer/consumer WS.
-    // Prefer explicit frontend pipeline annotations. For `num_stages=0`, keep
-    // the fallback only for loops that contain TMA producers. Pure cp.async
-    // loops should preserve their original semantics, while TMA-containing
-    // loops still need WS to move async copies into the producer partition.
-    const ForNode *pipeline_loop = FindPipelineLoop(orig_block->body);
+    // Find the explicitly pipelined loop for producer/consumer WS.
+    const ForNode *pipeline_loop = FindAnnotatedPipelineLoop(orig_block->body);
     if (!pipeline_loop)
       return StmtExprMutator::VisitStmt_(op);
 
-    int num_stages = 1;
-    if (auto num_stages_anno = pipeline_loop->annotations.Get("num_stages")) {
-      num_stages =
-          static_cast<int>(Downcast<Integer>(num_stages_anno.value())->value);
-    }
+    auto num_stages_anno = pipeline_loop->annotations.Get("num_stages");
+    ICHECK(num_stages_anno);
+    int num_stages =
+        static_cast<int>(Downcast<Integer>(num_stages_anno.value())->value);
+    ICHECK_GE(num_stages, 1);
     // Flatten the loop body
     Array<Stmt> flat_stmts;
     Stmt loop_body_root = pipeline_loop->body;
@@ -1008,6 +1058,50 @@ private:
         protocol_guards[i] = std::nullopt;
         protocol_guard_sources[i] = std::nullopt;
       }
+    }
+
+    // ---------------------------------------------------------------
+    // Detect whether the pipeline loop needs counter-based phase
+    // tracking.  This is necessary when the loop body is conditionally
+    // guarded (e.g. `if block_mask[k]`) so that skipped iterations do
+    // not desynchronise the mbarrier parity.
+    // ---------------------------------------------------------------
+    bool needs_phase_counter = false;
+    Optional<PrimExpr> uniform_phase_guard;
+    Optional<Stmt> uniform_phase_guard_source;
+    {
+      StructuralEqual eq;
+      for (size_t i = 0; i < extractor.blocks.size(); ++i) {
+        if (protocol_guards[i].defined()) {
+          if (!needs_phase_counter) {
+            needs_phase_counter = true;
+            uniform_phase_guard = protocol_guards[i];
+            uniform_phase_guard_source = protocol_guard_sources[i];
+          } else if (!eq(uniform_phase_guard.value(),
+                         protocol_guards[i].value())) {
+            // Different guards on different blocks – fall back to
+            // original loop-variable parity (no counter).
+            needs_phase_counter = false;
+            break;
+          }
+        }
+      }
+      // Only use counter when ALL blocks share the same guard.
+      if (needs_phase_counter) {
+        for (size_t i = 0; i < extractor.blocks.size(); ++i) {
+          if (!protocol_guards[i].defined()) {
+            needs_phase_counter = false;
+            break;
+          }
+        }
+      }
+    }
+
+    std::optional<PhaseCounter> producer_phase_counter;
+    std::optional<PhaseCounter> consumer_phase_counter;
+    if (needs_phase_counter) {
+      producer_phase_counter = PhaseCounter::Create("producer_phase_cnt");
+      consumer_phase_counter = PhaseCounter::Create("consumer_phase_cnt");
     }
 
     StructuralEqual equal;
@@ -1247,12 +1341,27 @@ private:
     PrimExpr loop_extent = pipeline_loop->extent;
     PrimExpr loop_min = pipeline_loop->min;
 
-    // Compute stage and parity expressions
-    // stage_expr = (loop_var - min) % num_stages
-    // parity_expr = ((loop_var - min) / num_stages) % 2
+    // Compute stage and parity expressions.
+    // When needs_phase_counter is true, the loop body is conditionally
+    // guarded and we use a mutable counter instead of the loop variable
+    // to derive stage/parity.  Producer and consumer have separate
+    // counters because they run on different warp partitions.
     PrimExpr linear_idx = loop_var - loop_min;
-    PrimExpr stage_expr = FloorMod(linear_idx, num_stages);
-    PrimExpr parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
+    PrimExpr base_stage_expr = FloorMod(linear_idx, num_stages);
+    PrimExpr base_parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
+
+    PrimExpr producer_stage_expr =
+        needs_phase_counter ? producer_phase_counter->StageExpr(num_stages)
+                            : base_stage_expr;
+    PrimExpr producer_parity_expr =
+        needs_phase_counter ? producer_phase_counter->ParityExpr(num_stages)
+                            : base_parity_expr;
+    PrimExpr consumer_stage_expr =
+        needs_phase_counter ? consumer_phase_counter->StageExpr(num_stages)
+                            : base_stage_expr;
+    PrimExpr consumer_parity_expr =
+        needs_phase_counter ? consumer_phase_counter->ParityExpr(num_stages)
+                            : base_parity_expr;
 
     // --- Build Producer Body ---
     Array<Stmt> producer_body_stmts;
@@ -1263,14 +1372,15 @@ private:
           ti == 0 || block_group[ti] != block_group[ti - 1];
       bool is_last_in_group = ti + 1 == extractor.blocks.size() ||
                               block_group[ti] != block_group[ti + 1];
-      PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
+      PrimExpr bp_id =
+          IntImm(DataType::Int(32), bp_bases[ti]) + producer_stage_expr;
 
       // Back-pressure wait: producer cannot reuse the stage buffer until the
       // consumer releases it. xor(parity, 1) bootstraps the first iteration.
       if (is_first_in_group) {
         producer_body_stmts.push_back(WrapStmtWithGuardSource(
             protocol_guard_sources[ti], protocol_guards[ti],
-            makeParityWait(bp_id, bitwise_xor(parity_expr, 1))));
+            makeParityWait(bp_id, bitwise_xor(producer_parity_expr, 1))));
         for (const auto &stmt : producer_loop_prefix_stmts[ti]) {
           producer_body_stmts.push_back(stmt);
         }
@@ -1280,7 +1390,7 @@ private:
       if (tma.kind == AsyncProducerKind::kTma) {
         ICHECK_GE(fwd_bases[ti], 0);
         PrimExpr barrier_id =
-            IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
+            IntImm(DataType::Int(32), fwd_bases[ti]) + producer_stage_expr;
         if (use_full_tma_forward_barrier_protocol_) {
           // Pure-TMA WS uses a full producer-side release protocol so the
           // consumer waits on a barrier owned by the producer branch.
@@ -1304,10 +1414,19 @@ private:
       producer_body_stmts.push_back(producer_stmt);
       if (is_last_in_group && group_has_cp_async[group]) {
         ICHECK_GE(fwd_bases[ti], 0);
-        PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
+        PrimExpr fwd_id =
+            IntImm(DataType::Int(32), fwd_bases[ti]) + producer_stage_expr;
         producer_body_stmts.push_back(WrapStmtWithGuardSource(
             producer_issue_guard_sources[ti], producer_issue_guards[ti],
             makeCpAsyncBarrierNoInc(fwd_id)));
+      }
+      // Phase counter increment – exactly once per guarded iteration,
+      // after ALL groups have issued their barrier ops.
+      // MergeAdjacentEquivalentIfs will fold this into the same guard.
+      if (needs_phase_counter && ti + 1 == extractor.blocks.size()) {
+        producer_body_stmts.push_back(WrapStmtWithGuardSource(
+            uniform_phase_guard_source, uniform_phase_guard,
+            producer_phase_counter->Increment()));
       }
     }
     Stmt producer_loop_body =
@@ -1325,14 +1444,15 @@ private:
     normalized_waits.reserve(extractor.blocks.size());
     for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
       ICHECK_GE(fwd_bases[ti], 0);
-      PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_bases[ti]) + stage_expr;
+      PrimExpr fwd_id =
+          IntImm(DataType::Int(32), fwd_bases[ti]) + consumer_stage_expr;
       if (ws_wait_stmts[ti].defined()) {
-        normalized_waits.push_back(
-            RewriteWaitBarrier(ws_wait_stmts[ti].value(), fwd_id, parity_expr));
+        normalized_waits.push_back(RewriteWaitBarrier(
+            ws_wait_stmts[ti].value(), fwd_id, consumer_parity_expr));
       } else {
         normalized_waits.push_back(WrapStmtWithGuardSource(
             producer_issue_guard_sources[ti], producer_issue_guards[ti],
-            makeParityWait(fwd_id, parity_expr)));
+            makeParityWait(fwd_id, consumer_parity_expr)));
       }
     }
     // Emit waits / compute / arrives according to insertion points.
@@ -1352,7 +1472,8 @@ private:
                                 block_group[ti] != block_group[ti + 1];
         if (is_last_in_group &&
             arrive_insert_pos[ti] == static_cast<int>(ci + 1)) {
-          PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
+          PrimExpr bp_id =
+              IntImm(DataType::Int(32), bp_bases[ti]) + consumer_stage_expr;
           consumer_body_stmts.push_back(WrapStmtWithGuardSource(
               protocol_guard_sources[ti], protocol_guards[ti],
               makeArriveBarrier(bp_id)));
@@ -1379,13 +1500,21 @@ private:
       if (is_last_in_group && !arrive_emitted[ti] &&
           arrive_insert_pos[ti] ==
               static_cast<int>(extractor.compute_stmts.size())) {
-        PrimExpr bp_id = IntImm(DataType::Int(32), bp_bases[ti]) + stage_expr;
+        PrimExpr bp_id =
+            IntImm(DataType::Int(32), bp_bases[ti]) + consumer_stage_expr;
         consumer_body_stmts.push_back(WrapStmtWithGuardSource(
             protocol_guard_sources[ti], protocol_guards[ti],
             makeArriveBarrier(bp_id)));
       }
     }
-    Stmt consumer_loop_body = SeqStmt(consumer_body_stmts);
+    // Phase counter increment for the consumer side.
+    if (needs_phase_counter) {
+      consumer_body_stmts.push_back(WrapStmtWithGuardSource(
+          uniform_phase_guard_source, uniform_phase_guard,
+          consumer_phase_counter->Increment()));
+    }
+    Stmt consumer_loop_body =
+        MergeAdjacentEquivalentIfs(SeqStmt(consumer_body_stmts));
     consumer_loop_body = rewrap_loop_body_lets(consumer_loop_body);
 
     // --- Build the loops ---
@@ -1405,6 +1534,12 @@ private:
     Stmt consumer_loop =
         For(loop_var, loop_min, loop_extent, ForKind::kSerial,
             consumer_loop_body, Optional<IterVar>(), loop_annos);
+
+    // Wrap loops with phase counter allocation when needed.
+    if (needs_phase_counter) {
+      producer_loop = producer_phase_counter->WrapLoopWithAlloc(producer_loop);
+      consumer_loop = consumer_phase_counter->WrapLoopWithAlloc(consumer_loop);
+    }
 
     // Rewrite threadIdx.x in producer: threadIdx.x -> threadIdx.x -
     // consumer_threads Also converts `if (threadIdx.x == 0)` to `if
@@ -1548,43 +1683,12 @@ private:
     }
   }
 
-  struct AsyncProducerLoopSummary {
-    bool has_tma{false};
-    bool has_cp_async{false};
-
-    bool HasAnyAsyncProducer() const { return has_tma || has_cp_async; }
-    bool HasTmaProducer() const { return has_tma; }
-  };
-
   struct BufferDataAccessInfo {
     bool read{false};
     bool write{false};
 
     bool HasAnyAccess() const { return read || write; }
   };
-
-  AsyncProducerLoopSummary AnalyzeAsyncProducerLoop(const ForNode *loop) {
-    AsyncProducerLoopSummary summary;
-    if (!loop || loop->kind != ForKind::kSerial) {
-      return summary;
-    }
-    Array<Stmt> flat_stmts;
-    Stmt loop_body_root = loop->body;
-    if (auto *realize = loop->body.as<BlockRealizeNode>()) {
-      loop_body_root = realize->block->body;
-    }
-    FlattenSeqStmt(loop_body_root, &flat_stmts);
-    AsyncCopyBlockExtractor extractor;
-    extractor.Extract(flat_stmts);
-    for (const auto &block : extractor.blocks) {
-      if (block.kind == AsyncProducerKind::kTma) {
-        summary.has_tma = true;
-      } else if (block.kind == AsyncProducerKind::kCpAsync) {
-        summary.has_cp_async = true;
-      }
-    }
-    return summary;
-  }
 
   BufferDataAccessInfo
   AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
@@ -1694,42 +1798,6 @@ private:
       return FindAnnotatedPipelineLoop(let_s->body);
     }
     return nullptr;
-  }
-
-  const ForNode *FindTmaProducerLoop(const Stmt &stmt) {
-    if (auto *for_node = stmt.as<ForNode>()) {
-      if (AnalyzeAsyncProducerLoop(for_node).HasTmaProducer()) {
-        return for_node;
-      }
-    }
-    if (auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const auto &s : seq->seq) {
-        if (auto *result = FindTmaProducerLoop(s)) {
-          return result;
-        }
-      }
-      return nullptr;
-    }
-    if (auto *realize = stmt.as<BlockRealizeNode>()) {
-      return FindTmaProducerLoop(realize->block->body);
-    }
-    if (auto *block = stmt.as<BlockNode>()) {
-      return FindTmaProducerLoop(block->body);
-    }
-    if (auto *attr = stmt.as<AttrStmtNode>()) {
-      return FindTmaProducerLoop(attr->body);
-    }
-    if (auto *let_s = stmt.as<LetStmtNode>()) {
-      return FindTmaProducerLoop(let_s->body);
-    }
-    return nullptr;
-  }
-
-  const ForNode *FindPipelineLoop(const Stmt &stmt) {
-    if (auto *annotated = FindAnnotatedPipelineLoop(stmt)) {
-      return annotated;
-    }
-    return FindTmaProducerLoop(stmt);
   }
 
   // Infer how many mbarriers are already referenced by this block body.

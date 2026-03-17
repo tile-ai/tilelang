@@ -117,8 +117,8 @@ def test_tma_lower_no_warp_specialized_2d_descriptor_uses_args1_barrier():
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_num_stages_zero_pure_tma_keeps_auto_warp_specialize():
-    """Pure TMA loops should still auto-WS even when num_stages=0."""
+def test_num_stages_zero_pure_tma_does_not_auto_warp_specialize():
+    """num_stages=0 should keep pure TMA loops out of auto-WS."""
 
     M, K = 8, 256
     block_m, block_k = 4, 128
@@ -156,6 +156,55 @@ def test_num_stages_zero_pure_tma_keeps_auto_warp_specialize():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
+    assert "__launch_bounds__(160, 1)" not in src
+    assert "if (32 <= ((int)threadIdx.x))" not in src
+
+    x = torch.randn((M, K), device="cuda", dtype=torch.float16)
+    y = kernel(x)
+    torch.testing.assert_close(y, x)
+    torch.cuda.synchronize()
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
+    """Pure TMA loops should auto-WS when num_stages is explicitly enabled."""
+
+    M, K = 8, 256
+    block_m, block_k = 4, 128
+    threads = 32
+
+    @T.prim_func
+    def copy_loop_num_stages_one(
+        x: T.Tensor((M, K), T.float16),
+        y: T.Tensor((M, K), T.float16),
+    ):
+        with T.Kernel(T.ceildiv(M, block_m), threads=threads) as pid_m:
+            x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
+            for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=1):
+                T.copy(
+                    x[
+                        pid_m * block_m : (pid_m + 1) * block_m,
+                        ko * block_k : (ko + 1) * block_k,
+                    ],
+                    x_shared,
+                )
+                T.copy(
+                    x_shared,
+                    y[
+                        pid_m * block_m : (pid_m + 1) * block_m,
+                        ko * block_k : (ko + 1) * block_k,
+                    ],
+                )
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+    }
+    kernel = _compile_tvm_ffi(copy_loop_num_stages_one, pass_configs, out_idx=[1])
+
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load" in src
     assert "__launch_bounds__(160, 1)" in src
     assert "if (32 <= ((int)threadIdx.x))" in src
 
@@ -167,7 +216,7 @@ def test_num_stages_zero_pure_tma_keeps_auto_warp_specialize():
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
-    """cp.async-only loops should not trigger the TMA WS fallback."""
+    """num_stages=0 should keep cp.async-only loops out of auto-WS."""
 
     bytes_per_copy = 16
     threads = 32
@@ -210,8 +259,8 @@ def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_num_stages_zero_mixed_tma_cp_async_keeps_auto_ws():
-    """Mixed TMA+cp.async loops still need auto WS even with num_stages=0."""
+def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
+    """Mixed TMA+cp.async loops should auto-WS when num_stages is enabled."""
 
     M, K = 8, 256
     block_m, block_k = 4, 128
@@ -219,7 +268,7 @@ def test_num_stages_zero_mixed_tma_cp_async_keeps_auto_ws():
     cp_async_bytes = 16
 
     @T.prim_func
-    def mixed_async_num_stages_zero(
+    def mixed_async_num_stages_one(
         x: T.Tensor((M, K), T.float16),
         meta: T.Tensor((2 * cp_async_bytes,), T.uint8),
         y: T.Tensor((M, K), T.float16),
@@ -229,7 +278,7 @@ def test_num_stages_zero_mixed_tma_cp_async_keeps_auto_ws():
             x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
             meta_shared = T.alloc_shared((cp_async_bytes,), dtype=T.uint8)
 
-            for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=0):
+            for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=1):
                 T.copy(
                     x[
                         pid_m * block_m : (pid_m + 1) * block_m,
@@ -259,7 +308,7 @@ def test_num_stages_zero_mixed_tma_cp_async_keeps_auto_ws():
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
     }
-    kernel = _compile_tvm_ffi(mixed_async_num_stages_zero, pass_configs, out_idx=[2, 3])
+    kernel = _compile_tvm_ffi(mixed_async_num_stages_one, pass_configs, out_idx=[2, 3])
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
