@@ -258,14 +258,6 @@ TVM_DLL const Op &create_list_of_mbarrier();
 TVM_DLL const Op &get_mbarrier();
 
 /*!
- * \brief Arrive at mbarrier with remote cta support
- *
- * mbarrier_arrive(mbarrier, cta_id, pred)
- *
- */
-TVM_DLL const Op &mbarrier_arrive();
-
-/*!
  * \brief tvm intrinsics for loading data from global tensor descriptor to
  * shared memory
  *

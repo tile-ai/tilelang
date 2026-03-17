@@ -1813,14 +1813,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 1);
     std::string barrier_id = this->PrintExpr(op->args[0]);
     os << mbarrier_name_ + "[" + barrier_id + "]";
-  } else if (op->op.same_as(tl::mbarrier_arrive())) {
-    ICHECK_EQ(op->args.size(), 3);
-    this->PrintIndent();
-    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
-    auto cta_id = this->PrintExpr(op->args[1]);
-    auto pred = this->PrintExpr(op->args[2]);
-    this->stream << mbarrier_obj << ".arrive(" << cta_id << ", " << pred
-                 << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();
