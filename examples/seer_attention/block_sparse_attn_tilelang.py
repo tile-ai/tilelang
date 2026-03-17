@@ -35,7 +35,7 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
 def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_causal):
     block_M = 64
     block_N = 64
-    num_stages = 0
+    num_stages = 1
     threads = 128
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     q_shape = [batch, heads, seq_q, dim]

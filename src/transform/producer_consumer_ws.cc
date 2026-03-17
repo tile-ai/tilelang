@@ -153,6 +153,60 @@ struct PhaseCounter {
   }
 };
 
+/*!
+ * \brief Replace the loop-variable-based stage expression with a
+ *        phase-counter-based one inside producer / consumer statements.
+ *
+ *  When `needs_phase_counter` is true, the barrier IDs already use
+ *  `phase_counter->StageExpr(N)` but the shared-memory buffer offsets
+ *  still embed `FloorMod(loop_var - loop_min, N)`.  This mutator
+ *  rewrites every matching FloorMod to the replacement expression so
+ *  that stage indexing stays in sync with barrier indexing when loop
+ *  iterations are conditionally skipped.
+ */
+class StageExprReplacer : public StmtExprMutator {
+public:
+  static Stmt Replace(const Stmt &stmt, Var loop_var, PrimExpr loop_min,
+                      int num_stages, PrimExpr replacement) {
+    StageExprReplacer r(std::move(loop_var), std::move(loop_min), num_stages,
+                        std::move(replacement));
+    return r.VisitStmt(stmt);
+  }
+
+private:
+  StageExprReplacer(Var loop_var, PrimExpr loop_min, int num_stages,
+                    PrimExpr replacement)
+      : loop_var_(std::move(loop_var)), loop_min_(std::move(loop_min)),
+        num_stages_(num_stages), replacement_(std::move(replacement)) {}
+
+  PrimExpr VisitExpr_(const FloorModNode *op) final {
+    if (is_const_int(op->b, num_stages_) && MatchLinearIdx(op->a)) {
+      return replacement_;
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  /*! Match `loop_var`, `loop_var - loop_min`, or `loop_var - 0`. */
+  bool MatchLinearIdx(const PrimExpr &expr) const {
+    if (expr.same_as(loop_var_))
+      return true;
+    if (const auto *sub = expr.as<SubNode>()) {
+      if (sub->a.same_as(loop_var_)) {
+        if (is_const_int(sub->b, 0))
+          return true;
+        if (sub->b.same_as(loop_min_))
+          return true;
+      }
+    }
+    return false;
+  }
+
+  Var loop_var_;
+  PrimExpr loop_min_;
+  int num_stages_;
+  PrimExpr replacement_;
+};
+
 class BufferDataToBufferCollector : public StmtExprVisitor {
 public:
   static BufferDataToBufferMap Collect(const Stmt &stmt) {
@@ -1045,19 +1099,12 @@ private:
           }
         }
       }
-      if (producer_issue_guards[i].defined() &&
-          CanIssueProducerWithoutGuard(extractor.blocks[i].producer_stmt)) {
-        ws_producer_stmts[i] =
-            StripNonThreadProducerGuard(extractor.blocks[i].producer_stmt);
-        if (extractor.blocks[i].wait_stmt.defined()) {
-          ws_wait_stmts[i] = StripNonThreadProducerGuard(
-              extractor.blocks[i].wait_stmt.value());
-        }
-        producer_issue_guards[i] = std::nullopt;
-        producer_issue_guard_sources[i] = std::nullopt;
-        protocol_guards[i] = std::nullopt;
-        protocol_guard_sources[i] = std::nullopt;
-      }
+      // NOTE: Previously, when the guard was a mask-like boolean expression
+      // (e.g. BlockMask[by, bx, k]), the producer would strip the guard and
+      // issue TMA loads unconditionally.  This causes unnecessary memory
+      // traffic for sparse workloads, so we now keep the guard on the
+      // producer side and rely on phase-counter-based parity tracking to
+      // maintain barrier synchronisation.
     }
 
     // ---------------------------------------------------------------
@@ -1516,6 +1563,20 @@ private:
     Stmt consumer_loop_body =
         MergeAdjacentEquivalentIfs(SeqStmt(consumer_body_stmts));
     consumer_loop_body = rewrap_loop_body_lets(consumer_loop_body);
+
+    // --- Replace shared-memory stage expressions with phase counters ---
+    // When the loop body is conditionally guarded, the barrier IDs already
+    // use phase-counter-based stage/parity, but the shared-memory buffer
+    // offsets still embed FloorMod(loop_var - loop_min, num_stages).
+    // Rewrite them so that buffer staging stays in sync with barriers.
+    if (needs_phase_counter) {
+      producer_loop_body = StageExprReplacer::Replace(
+          producer_loop_body, loop_var, loop_min, num_stages,
+          producer_phase_counter->StageExpr(num_stages));
+      consumer_loop_body = StageExprReplacer::Replace(
+          consumer_loop_body, loop_var, loop_min, num_stages,
+          consumer_phase_counter->StageExpr(num_stages));
+    }
 
     // --- Build the loops ---
     // Remove pipeline annotations since WS handles overlap directly
