@@ -47,7 +47,7 @@ Global memory ──TMA multicast──▶ shared memory (rank 0)
 ### API
 
 ```python
-T.copy(src_global, dst_shared, cluster_mask=<int>)
+T.copy_cluster(src_global, dst_shared, cluster_mask=<int>)
 ```
 
 `cluster_mask` is a bitmask where each set bit identifies a CTA rank that
@@ -80,8 +80,8 @@ def make_tma_multicast_kernel(M, N, block_M, block_N, cluster_mask):
             # cluster_mask=0b0011: ranks 0 and 1 participate.
             # Rank 0 issues tma_load_multicast; rank 1 receives passively.
             # Ranks 2 and 3 each issue a regular tma_load.
-            T.copy(A[by * block_M, bx * block_N], A_shared,
-                   cluster_mask=cluster_mask)
+            T.copy_cluster(A[by * block_M, bx * block_N], A_shared,
+                           cluster_mask=cluster_mask)
 
             T.copy(A_shared, B[by * block_M, bx * block_N])
 
@@ -132,7 +132,7 @@ Two sub-variants are provided depending on whether an mbarrier is supplied:
 ### Fast path — bulk async copy with mbarrier
 
 ```python
-T.copy(src_shared, dst_shared, dst_block=<rank>, remote_barrier=<mbarrier>)
+T.copy_cluster(src_shared, dst_shared, dst_block=<rank>, remote_barrier=<mbarrier>)
 ```
 
 A single elected thread issues one `cp.async.bulk.shared::cluster` instruction.
@@ -144,7 +144,7 @@ Steps:
 1. Both CTAs allocate the **same** shared memory layout so their mbarriers live
    at the same offset.
 2. Every CTA initialises its own barrier for 1 arrival.
-3. The source CTA (`pid == 0` below) calls `T.copy(... dst_block=1, remote_barrier=...)`.
+3. The source CTA (`pid == 0` below) calls `T.copy_cluster(... dst_block=1, remote_barrier=...)`.
 4. The destination CTA (`pid == 1`) waits on its local barrier copy.
 
 ```python
@@ -174,8 +174,8 @@ def make_cluster_copy_kernel(N: int):
                     s_src[i] = A[i]
 
                 # Async-push s_src → s_dst in CTA 1, signal CTA 1's barrier.
-                T.copy(s_src, s_dst, dst_block=1,
-                       remote_barrier=s_barrier[0])
+                T.copy_cluster(s_src, s_dst, dst_block=1,
+                               remote_barrier=s_barrier[0])
 
             if pid == 1:
                 # Wait until CTA 0 finishes writing.
@@ -201,7 +201,7 @@ if (((int)threadIdx.x) == 0) {
 Omit `remote_barrier` to use the slow path:
 
 ```python
-T.copy(s_src, s_dst, dst_block=1)
+T.copy_cluster(s_src, s_dst, dst_block=1)
 ```
 
 This lowers to a SIMT parallel loop where every thread writes one (or a few)
@@ -262,7 +262,7 @@ def split_k_gemm(A, B, C):
         # Phase 1: each CTA loads its K-slice; A is multicast to rank 0 and 1.
         for ko in T.Pipelined(T.ceildiv(K, BK * 4), num_stages=3):
             k_off = (rank + ko * 4) * BK
-            T.copy(A[by * BM, k_off], A_s, cluster_mask=0b0011)
+            T.copy_cluster(A[by * BM, k_off], A_s, cluster_mask=0b0011)
             T.copy(B[k_off, bx * BN], B_s)
             T.gemm(A_s, B_s, C_f)
 
@@ -283,8 +283,8 @@ def split_k_gemm(A, B, C):
         if rank != 0:
             # Push this rank's slot to the *same* slot index in rank 0's
             # C_parts — different offsets, so no destination race.
-            T.copy(C_parts[rank], C_parts[rank],
-                   dst_block=0, remote_barrier=barrier[0])
+            T.copy_cluster(C_parts[rank], C_parts[rank],
+                           dst_block=0, remote_barrier=barrier[0])
 
         if rank == 0:
             T.mbarrier_wait_parity(barrier[0], 0)  # wakes after all 3 arrivals

@@ -44,7 +44,7 @@ def make_store_cluster_kernel(N: int):
 
                 # Bulk-async copy s_src (local) → s_dst (remote, block 1)
                 # using tl::tma_store_cluster, signalling block 1's barrier.
-                T.copy(s_src, s_dst, dst_block=1, remote_barrier=s_barrier[0])
+                T.copy_cluster(s_src, s_dst, dst_block=1, remote_barrier=s_barrier[0])
 
             if pid == 1:
                 # Wait until block 0 finishes writing to our s_dst.
@@ -68,12 +68,12 @@ def test_tma_store_cluster():
     # Assert that the lowering actually produced tl::tma_store_cluster.
     # The SIMT fallback (map_shared_rank + scalar stores) also copies data
     # correctly, so a pure numerical check would miss a regression where
-    # T.copy(dst_block=..., remote_barrier=...) stops emitting the bulk-async
+    # T.copy_cluster(dst_block=..., remote_barrier=...) stops emitting the bulk-async
     # cluster intrinsic.
     src = mod.get_kernel_source()
     assert "tl::tma_store_cluster" in src, (
         "Expected tl::tma_store_cluster in generated kernel source; "
-        "T.copy(dst_block=..., remote_barrier=...) may have regressed to the "
+        "T.copy_cluster(dst_block=..., remote_barrier=...) may have regressed to the "
         f"SIMT fallback.\nKernel source:\n{src}"
     )
 

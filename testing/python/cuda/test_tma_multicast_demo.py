@@ -43,7 +43,7 @@ def make_tma_multicast_demo_kernel(M, N, block_M, block_N, cluster_mask):
             cluster_dims=(4, 1, 1),
         ) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), "float16")
-            T.copy(A[by * block_M, bx * block_N], A_shared, cluster_mask=cluster_mask)
+            T.copy_cluster(A[by * block_M, bx * block_N], A_shared, cluster_mask=cluster_mask)
             T.copy(A_shared, B[by * block_M, bx * block_N])
 
     return kernel
