@@ -797,8 +797,11 @@ private:
       return false;
     };
 
-    // Track all cp.async-written buffers for wait remapping.
+    // Record earliest consumers for each cp.async group, and track all
+    // cp.async-written buffers for wait remapping.
     std::unordered_set<const BufferNode *> async_written_buffers;
+    std::vector<int> cp_async_group_first_consumer(
+        cp_async_groups.size(), std::numeric_limits<int>::max());
     for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
       const auto &group = cp_async_groups[group_id];
       async_written_buffers.insert(group.written_buffers.begin(),

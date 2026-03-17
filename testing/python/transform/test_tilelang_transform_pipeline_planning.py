@@ -309,6 +309,8 @@ def test_pipeline_planning_orders_cp_async_groups_by_group_last_use():
     assert stages[0] == stages[1] == stages[3] == stages[4], (
         f"Expected both cp.async groups and their commits to stay in the same producer stage, got stages={stages}"
     )
+
+
 @tilelang.testing.requires_cuda
 def test_pipeline_predicated_copy_preserves_shared_fill_correctness():
     @T.prim_func
