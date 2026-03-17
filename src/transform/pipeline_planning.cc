@@ -374,6 +374,14 @@ private:
         }
       }
       if (args.size() == 4) {
+        // Predicated cp.async should not be treated as a proven full
+        // overwrite of the destination buffer at pipeline-planning
+        // granularity. Model a conservative dependence on the destination so
+        // required initialization or other producer-side writes are not moved
+        // across the async copy.
+        if (auto dst_buf = TryGetBufFromAccessPtr(args[0])) {
+          reads_.push_back(BufferRegion::FullRegion(dst_buf.value()));
+        }
         // Preserve dependence from a predicated guard expression.
         this->VisitExpr(args[3]);
       }
@@ -795,6 +803,15 @@ private:
       const auto &group = cp_async_groups[group_id];
       async_written_buffers.insert(group.written_buffers.begin(),
                                    group.written_buffers.end());
+      for (int stmt_idx = 0; stmt_idx < pipeline_stmt_count; ++stmt_idx) {
+        if (pipeline_stage_infos[stmt_idx].is_first_stage()) {
+          continue;
+        }
+        if (stmt_reads_buffer_set(stmt_idx, group.written_buffers)) {
+          cp_async_group_first_consumer[group_id] = stmt_idx;
+          break;
+        }
+      }
     }
 
     // Heuristic for wait_group(0): bind each wait to the first unmatched
@@ -825,6 +842,9 @@ private:
       int consumer_stmt_idx = -1;
       for (int stmt_idx = search_start; stmt_idx < pipeline_stmt_count;
            ++stmt_idx) {
+        if (pipeline_stage_infos[stmt_idx].is_first_stage()) {
+          continue;
+        }
         if (stmt_reads_buffer_set(stmt_idx, async_written_buffers)) {
           consumer_stmt_idx = stmt_idx;
           break;
@@ -1205,6 +1225,9 @@ private:
         for (int stmt_idx = wait_dep.wait_stmt_index + 1;
              stmt_idx < static_cast<int>(pipeline_stage_infos.size());
              ++stmt_idx) {
+          if (pipeline_stage_infos[stmt_idx].is_first_stage()) {
+            continue;
+          }
           bool dependent_read = false;
           for (const BufferRegion &read :
                pipeline_stage_infos[stmt_idx].reads) {

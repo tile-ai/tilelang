@@ -3,6 +3,7 @@ import tilelang as tl
 from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
+import torch
 from tvm.tir.stmt_functor import post_order_visit
 
 auto_target = tvm.target.Target(determine_target("auto"))
@@ -308,6 +309,43 @@ def test_pipeline_planning_orders_cp_async_groups_by_group_last_use():
     assert stages[0] == stages[1] == stages[3] == stages[4], (
         f"Expected both cp.async groups and their commits to stay in the same producer stage, got stages={stages}"
     )
+@tilelang.testing.requires_cuda
+def test_pipeline_predicated_copy_preserves_shared_fill_correctness():
+    @T.prim_func
+    def main(
+        A: T.Tensor((8,), T.float16),
+        B: T.Tensor((16,), T.float16),
+    ):
+        with T.Kernel(1, threads=32):
+            S = T.alloc_shared((16,), T.float16)
+            for _ in T.Pipelined(1, num_stages=2):
+                T.fill(S, 0)
+                T.ptx_cp_async(
+                    T.access_ptr(S[0], "w", 16),
+                    T.access_ptr(A[0], "r", 16),
+                    16,
+                    True,
+                )
+                T.ptx_cp_async(
+                    T.access_ptr(S[8], "w", 16),
+                    T.access_ptr(A[0], "r", 16),
+                    16,
+                    False,
+                )
+                T.ptx_commit_group()
+                T.ptx_wait_group(0)
+                T.copy(S, B[0:16])
+
+    kernel = tl.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    assert "cp_async_gs_conditional<16>" in src, "Expected predicated cp.async in generated CUDA source"
+
+    a = torch.randn((8,), dtype=torch.float16, device="cuda")
+    b = kernel(a)
+
+    expected = torch.zeros((16,), dtype=torch.float16, device="cuda")
+    expected[:8] = a
+    torch.testing.assert_close(b, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

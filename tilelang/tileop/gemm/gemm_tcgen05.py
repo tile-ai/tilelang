@@ -1,6 +1,12 @@
 from .gemm_base import GemmBase
 from .inst import GemmInst
-from tilelang.layout import make_tcgen05mma_swizzled_layout
+from tilelang.layout import (
+    Layout,
+    make_full_bank_swizzled_layout,
+    make_half_bank_swizzled_layout,
+    make_quarter_bank_swizzled_layout,
+    make_linear_layout,
+)
 from tilelang.intrinsics.tcgen05_macro_generator import (
     TensorCoreIntrinEmitter,
 )
@@ -11,6 +17,7 @@ from tvm import tir
 from tvm.target import Target
 from tvm.ir import Range
 from tvm.arith import Analyzer
+from typing import Callable
 
 
 _FLOAT8_DTYPES = {
@@ -30,6 +37,18 @@ class GemmTCGEN5(GemmBase):
     Layout inference and lowering are dispatched based on the memory scopes
     of operands A and B.
     """
+
+    def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
+        """Infer a standard shared-memory swizzle layout for TCGEN05 operands."""
+        vectorized_size = 128 // self.in_dtype.bits
+        if continuity % (vectorized_size * 8) == 0:
+            return make_full_bank_swizzled_layout
+        elif continuity % (vectorized_size * 4) == 0:
+            return make_half_bank_swizzled_layout
+        elif continuity % (vectorized_size * 2) == 0:
+            return make_quarter_bank_swizzled_layout
+        else:
+            return make_linear_layout
 
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer swizzled layouts for operands and accumulator.
@@ -60,15 +79,15 @@ class GemmTCGEN5(GemmBase):
             b_continuity = self.K if b_is_k_major else self.N // n_warp
 
             return {
-                self.A: make_tcgen05mma_swizzled_layout(self.A, continuity=a_continuity, k_major=a_is_k_major),
-                self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.A: self.infer_shared_layout(a_continuity)(self.A),
+                self.B: self.infer_shared_layout(b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
             b_continuity = self.K if b_is_k_major else self.N // n_warp
             layouts = {
                 self.A: mma_emitter.make_mma_store_layout(self.A),
-                self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.B: self.infer_shared_layout(b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
             return layouts
