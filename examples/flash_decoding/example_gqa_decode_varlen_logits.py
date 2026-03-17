@@ -194,7 +194,6 @@ def test_varlen_decode_main(args):
         sink = torch.randn(q_heads, device="cuda", dtype=torch.float32) * 0.1 if args.test_sink else None
 
     # Run tilelang kernel
-    tilelang.disable_cache()
     tl_kernel = flashattn(batch_size, q_heads, kv_heads, max_k_seqlen, total_k_tokens, head_size, args.test_sink)
     O_tl, S_tl = tl_kernel(q, k_varlen, v_varlen, cu_seqlens_k, sink)
     S_tl = torch.max_pool2d(S_tl, kernel_size=(q_heads, 1), stride=(q_heads, 1))

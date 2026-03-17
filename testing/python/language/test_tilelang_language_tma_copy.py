@@ -73,10 +73,8 @@ def run_gemm_tma_copy(num_stages):
         out_dtype,
         accum_dtype,
         threads,
-        # num_stages,
-        2,
+        num_stages,
     )
-    tilelang.disable_cache()
     kernel = tilelang.compile(
         program,
         out_idx=[2],
@@ -85,7 +83,6 @@ def run_gemm_tma_copy(num_stages):
         },
     )
     print(kernel.get_kernel_source())
-    # exit()
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
