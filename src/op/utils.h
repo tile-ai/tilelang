@@ -47,11 +47,6 @@ TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
 TVM_DLL PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load,
                                              int rw_mask);
 
-inline bool IsLocalScopedScope(const String &scope) {
-  const std::string scope_str = scope;
-  return scope == "local" || scope_str.rfind("local.", 0) == 0;
-}
-
 // Check if a buffer is a fragment buffer (scope == "local.fragment")
 inline bool IsFragmentBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.fragment";
@@ -111,12 +106,6 @@ inline bool IsLocalBuffer(const Buffer &buffer, bool allow_var = false) {
 
 inline bool IsLocalVarBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.var";
-}
-
-// Check if a buffer belongs to any local-prefixed scope ("local",
-// "local.var", "local.fragment", "local.descriptor.*", etc.).
-inline bool IsLocalScopedBuffer(const Buffer &buffer) {
-  return buffer.defined() && IsLocalScopedScope(buffer.scope());
 }
 
 } // namespace tl

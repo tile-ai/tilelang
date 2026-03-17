@@ -164,14 +164,14 @@ private:
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsLocalScopedBuffer(op->buffer)) {
+    if (IsLocalBuffer(op->buffer)) {
       summary_.read_buffers.insert(op->buffer);
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsLocalScopedBuffer(op->buffer)) {
+    if (IsLocalBuffer(op->buffer)) {
       summary_.write_buffers.insert(op->buffer);
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -187,47 +187,37 @@ private:
 
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(tl::access_ptr())) {
-      if (op->args.size() != 3) {
-        StmtExprVisitor::VisitExpr_(op);
-        return;
-      }
+      ICHECK_EQ(op->args.size(), 3);
       const auto *base_load = op->args[0].as<BufferLoadNode>();
-      if (base_load) {
-        if (IsLocalScopedBuffer(base_load->buffer)) {
-          int rw_mask = GetConstAccessMask(op->args[2]);
-          if (rw_mask & 1) {
-            summary_.read_buffers.insert(base_load->buffer);
-          }
-          if (rw_mask & 2) {
-            summary_.write_buffers.insert(base_load->buffer);
-          }
+      ICHECK(base_load);
+      if (IsLocalBuffer(base_load->buffer)) {
+        int rw_mask = GetConstAccessMask(op->args[2]);
+        if (rw_mask & 1) {
+          summary_.read_buffers.insert(base_load->buffer);
         }
-        for (const auto &index : base_load->indices) {
-          VisitExpr(index);
+        if (rw_mask & 2) {
+          summary_.write_buffers.insert(base_load->buffer);
         }
-      } else {
-        VisitExpr(op->args[0]);
+      }
+      for (const auto &index : base_load->indices) {
+        VisitExpr(index);
       }
       VisitExpr(op->args[1]);
       return;
     }
 
     if (op->op.same_as(builtin::tvm_access_ptr())) {
-      if (op->args.size() != 5) {
-        StmtExprVisitor::VisitExpr_(op);
-        return;
-      }
-      if (const auto *var = op->args[1].as<VarNode>()) {
-        auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
-        if (it != buffer_data_to_buffer_.end() &&
-            IsLocalScopedBuffer(it->second)) {
-          int rw_mask = GetConstAccessMask(op->args[4]);
-          if (rw_mask & 1) {
-            summary_.read_buffers.insert(it->second);
-          }
-          if (rw_mask & 2) {
-            summary_.write_buffers.insert(it->second);
-          }
+      ICHECK_EQ(op->args.size(), 5);
+      const auto *var = op->args[1].as<VarNode>();
+      ICHECK(var);
+      auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+      if (it != buffer_data_to_buffer_.end() && IsLocalBuffer(it->second)) {
+        int rw_mask = GetConstAccessMask(op->args[4]);
+        if (rw_mask & 1) {
+          summary_.read_buffers.insert(it->second);
+        }
+        if (rw_mask & 2) {
+          summary_.write_buffers.insert(it->second);
         }
       }
       VisitExpr(op->args[2]);
@@ -299,36 +289,28 @@ private:
     }
 
     if (op->op.same_as(tl::access_ptr())) {
-      if (op->args.size() == 3) {
-        if (const auto *base_load = op->args[0].as<BufferLoadNode>()) {
-          MarkAccess(base_load->buffer, GetConstAccessMask(op->args[2]));
-          for (const auto &index : base_load->indices) {
-            VisitExpr(index);
-          }
-        } else {
-          VisitExpr(op->args[0]);
-        }
-        VisitExpr(op->args[1]);
-      } else {
-        StmtExprVisitor::VisitExpr_(op);
+      ICHECK_EQ(op->args.size(), 3);
+      const auto *base_load = op->args[0].as<BufferLoadNode>();
+      ICHECK(base_load);
+      MarkAccess(base_load->buffer, GetConstAccessMask(op->args[2]));
+      for (const auto &index : base_load->indices) {
+        VisitExpr(index);
       }
+      VisitExpr(op->args[1]);
       in_async_copy_ = old_in_async_copy;
       return;
     }
 
     if (op->op.same_as(builtin::tvm_access_ptr())) {
-      if (op->args.size() == 5) {
-        if (const auto *var = op->args[1].as<VarNode>()) {
-          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
-          if (it != buffer_data_to_buffer_.end()) {
-            MarkAccess(it->second, GetConstAccessMask(op->args[4]));
-          }
-        }
-        VisitExpr(op->args[2]);
-        VisitExpr(op->args[3]);
-      } else {
-        StmtExprVisitor::VisitExpr_(op);
+      ICHECK_EQ(op->args.size(), 5);
+      const auto *var = op->args[1].as<VarNode>();
+      ICHECK(var);
+      auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+      if (it != buffer_data_to_buffer_.end()) {
+        MarkAccess(it->second, GetConstAccessMask(op->args[4]));
       }
+      VisitExpr(op->args[2]);
+      VisitExpr(op->args[3]);
       in_async_copy_ = old_in_async_copy;
       return;
     }
@@ -513,10 +495,9 @@ private:
   static Optional<Var> ExtractTmaCopyWriteBufferData(const Stmt &stmt) {
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       if (attr->attr_key == "tl.tma_copy_write_buffer") {
-        if (const auto *v = attr->node.as<VarNode>()) {
-          return GetRef<Var>(v);
-        }
-        return Optional<Var>();
+        const auto *v = attr->node.as<VarNode>();
+        ICHECK(v);
+        return GetRef<Var>(v);
       }
       return ExtractTmaCopyWriteBufferData(attr->body);
     }
@@ -589,14 +570,13 @@ private:
 
   static bool IsPtxWaitGroupZero(const Stmt &stmt) {
     const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
-    if (!call || !call->op.same_as(builtin::ptx_wait_group()) ||
-        call->args.size() != 1) {
+    if (!call || !call->op.same_as(builtin::ptx_wait_group())) {
       return false;
     }
-    if (const auto *imm = call->args[0].as<IntImmNode>()) {
-      return imm->value == 0;
-    }
-    return false;
+    ICHECK_EQ(call->args.size(), 1);
+    const auto *imm = call->args[0].as<IntImmNode>();
+    ICHECK(imm);
+    return imm->value == 0;
   }
 
   static Optional<Var> AccessPtrBufferVar(const PrimExpr &ptr) {
@@ -605,18 +585,19 @@ private:
       return Optional<Var>();
     }
     if (call->op.same_as(tl::access_ptr())) {
+      ICHECK_EQ(call->args.size(), 3);
       const auto *base_load = call->args[0].as<BufferLoadNode>();
-      if (!base_load) {
-        return Optional<Var>();
-      }
+      ICHECK(base_load);
       return base_load->buffer->data;
     }
     if (call->op.same_as(builtin::tvm_access_ptr())) {
-      if (call->args[1].as<VarNode>()) {
-        return Downcast<Var>(call->args[1]);
-      }
+      ICHECK_EQ(call->args.size(), 5);
+      const auto *var = call->args[1].as<VarNode>();
+      ICHECK(var);
+      return GetRef<Var>(var);
     }
-    return Optional<Var>();
+    ICHECK(false) << "Expected tl.access_ptr or tvm_access_ptr";
+    throw;
   }
 
   static Optional<Var> GetCpAsyncDstBufferData(const Stmt &stmt) {
@@ -631,10 +612,10 @@ private:
         return;
       }
       if (!(call->op.same_as(builtin::ptx_cp_async()) ||
-            call->op.same_as(tl::ptx_cp_async())) ||
-          call->args.empty()) {
+            call->op.same_as(tl::ptx_cp_async()))) {
         return;
       }
+      ICHECK(!call->args.empty());
       Optional<Var> current = AccessPtrBufferVar(call->args[0]);
       if (!current.defined()) {
         return;
@@ -1623,28 +1604,28 @@ private:
       }
 
       void VisitExpr_(const CallNode *op) final {
-        if (op->op.same_as(tl::access_ptr()) && op->args.size() == 3) {
-          if (const auto *base_load = op->args[0].as<BufferLoadNode>()) {
-            if (base_load->buffer->data.same_as(buffer_data_)) {
-              MarkAccess(op->args[2]);
-            }
-            for (const auto &index : base_load->indices) {
-              VisitExpr(index);
-            }
-          } else {
-            VisitExpr(op->args[0]);
+        if (op->op.same_as(tl::access_ptr())) {
+          ICHECK_EQ(op->args.size(), 3);
+          const auto *base_load = op->args[0].as<BufferLoadNode>();
+          ICHECK(base_load);
+          if (base_load->buffer->data.same_as(buffer_data_)) {
+            MarkAccess(op->args[2]);
+          }
+          for (const auto &index : base_load->indices) {
+            VisitExpr(index);
           }
           VisitExpr(op->args[1]);
           return;
         }
 
-        if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() == 5) {
-          if (const auto *var = op->args[1].as<VarNode>()) {
-            auto it = buffer_map_.find(GetRef<Var>(var));
-            if (it != buffer_map_.end() &&
-                it->second->data.same_as(buffer_data_)) {
-              MarkAccess(op->args[4]);
-            }
+        if (op->op.same_as(builtin::tvm_access_ptr())) {
+          ICHECK_EQ(op->args.size(), 5);
+          const auto *var = op->args[1].as<VarNode>();
+          ICHECK(var);
+          auto it = buffer_map_.find(GetRef<Var>(var));
+          if (it != buffer_map_.end() &&
+              it->second->data.same_as(buffer_data_)) {
+            MarkAccess(op->args[4]);
           }
           VisitExpr(op->args[2]);
           VisitExpr(op->args[3]);
@@ -1911,7 +1892,7 @@ private:
         }
       }
       if (const auto *ld = node.as<BufferLoadNode>()) {
-        if (IsSharedBuffer(ld->buffer) || IsLocalScopedBuffer(ld->buffer)) {
+        if (IsSharedBuffer(ld->buffer) || IsLocalBuffer(ld->buffer)) {
           has_disallowed = true;
           return;
         }
