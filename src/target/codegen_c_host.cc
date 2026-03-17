@@ -22,6 +22,7 @@
  */
 #include "codegen_c_host.h"
 
+#include <cstddef>
 #include <tvm/ffi/container/shape.h>
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -35,6 +36,7 @@
 
 // For escaping strings embedded into generated C sources
 #include "support/str_escape.h"
+#include "tvm/tir/stmt.h"
 
 namespace tvm {
 namespace tl {
