@@ -59,6 +59,7 @@ TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
 TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 1000
 #include "cuda_fp8.h"
+#include "cuda_fp4.h"
 #include <cute/arch/mma_sm100.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>

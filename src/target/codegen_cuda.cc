@@ -1621,9 +1621,17 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     os << "*((" << ptr_cast(t) << vid << ")" << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    // FP4 div_factor=2 only for global memory (packed 2/byte).
-    // Shared/local stores unpacked FP4 (1 byte per element, sizeof=1).
     bool is_packed_scope = scope.empty() || scope == "global";
+    // SM100: FP4 in shared memory is also packed (2 per byte) for TCGEN05MMA.
+    if (!is_packed_scope && scope == "shared" &&
+        buffer_element_dtype.is_float4()) {
+      Target cur_target = Target::Current(/*allow_not_defined=*/true);
+      if (cur_target.defined() &&
+          tl::TargetHasSMVersionGE(cur_target, 100) &&
+          !tl::TargetHasSMVersionGE(cur_target, 120)) {
+        is_packed_scope = true;
+      }
+    }
     if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
         && is_packed_scope) {
       div_factor = 2;
@@ -1634,6 +1642,16 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   } else {
     int div_factor = 1;
     bool is_packed_scope = scope.empty() || scope == "global";
+    // SM100: FP4 in shared memory is also packed (2 per byte) for TCGEN05MMA.
+    if (!is_packed_scope && scope == "shared" &&
+        buffer_element_dtype.is_float4()) {
+      Target cur_target = Target::Current(/*allow_not_defined=*/true);
+      if (cur_target.defined() &&
+          tl::TargetHasSMVersionGE(cur_target, 100) &&
+          !tl::TargetHasSMVersionGE(cur_target, 120)) {
+        is_packed_scope = true;
+      }
+    }
     if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
         && is_packed_scope) {
       div_factor = 2;
@@ -3369,6 +3387,17 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
          op->dtype == DataType::Int(1)) &&
         scope == "shared") {
       constant_size = constant_size / (32 / op->dtype.bits());
+    }
+    // SM100 (TCGEN05MMA): pack FP4 in shared memory (2 elements per byte).
+    // fp4_e2_t has sizeof=1 but logical width=4 bits, so N elements need N/2 bytes.
+    // SM120 keeps unpacked 1-byte-per-element layout for the ldmatrix path.
+    if (op->dtype.is_float4_e2m1fn() && scope == "shared") {
+      Target cur_target = Target::Current(/*allow_not_defined=*/true);
+      if (cur_target.defined() &&
+          tl::TargetHasSMVersionGE(cur_target, 100) &&
+          !tl::TargetHasSMVersionGE(cur_target, 120)) {
+        constant_size = constant_size / 2;
+      }
     }
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
