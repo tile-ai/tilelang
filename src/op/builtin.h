@@ -453,7 +453,7 @@ TVM_DLL const Op &tvm_mfma();
 /*!
  * \brief tvm intrinsic for amd matrix core mmac instructions.
  *
- *  void tvm_mfma(StringImm shape, StringImm A_layout, StringImm B_layout,
+ *  void tvm_mmac(StringImm shape, StringImm A_layout, StringImm B_layout,
  *               StringImm A_dtype, StringImm B_dtype, StringImm C_dtype,
  *               Var multiplicand_a, Expr a_index,
  *               Var multiplicand_b, Expr b_index,

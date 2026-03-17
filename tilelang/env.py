@@ -237,7 +237,7 @@ class Environment:
 
     # Kernel selection options
     # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
-    TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "0")
+    TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "1")
 
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")

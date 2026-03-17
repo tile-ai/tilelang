@@ -23,7 +23,7 @@ enum class GemmWarpPolicyType : uint8_t {
 };
 
 // Target GEMM instruction
-enum class GemmInst : uint8_t { kMMA, kWGMMA, kTCGEN5MMA, kMFMA };
+enum class GemmInst : uint8_t { kMMA, kWGMMA, kTCGEN5MMA, kMFMA, KMMAC };
 class GemmWarpPolicyNode : public Object {
 public:
   mutable int m_warp{0};

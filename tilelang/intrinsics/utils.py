@@ -90,6 +90,9 @@ def mma_store_index_map_fp64(thread_id, local_id):
 def mfma_store_index_map(thread_id, local_id):
     return thread_id_shared_access_64x4_to_16x16_layout_C_n_m(thread_id, local_id)
 
+def mmac_store_index_map(thread_id, local_id):
+    return thread_id_shared_access_64x4_to_16x16_layout_C_n_m(thread_id, local_id)
+
 
 def get_mma_micro_size(dtype: Literal["float16", "int8"]):
     # TODO(lei): FP8 related precision support.

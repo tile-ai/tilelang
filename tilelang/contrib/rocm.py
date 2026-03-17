@@ -228,7 +228,7 @@ def have_matrixcore(compute_version=None):
 
 
 @tvm_ffi.register_global_func("tvm_callback_rocm_get_arch", override=True)
-def get_rocm_arch(rocm_path="/opt/rocm"):
+def get_rocm_arch(rocm_path="/opt/dtk"):
     # @tvm.ffi.register_func("tvm_callback_rocm_get_arch", override=True)
     # def get_rocm_arch(rocm_path="/opt/dtk"):
     """Utility function to get the AMD GPU architecture

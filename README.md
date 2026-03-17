@@ -83,6 +83,8 @@ TileLang achieves exceptional performance across a variety of computational patt
   </div>
 
 ## Installation
+### Method 0: Install for Hygon DCU
+ - [Install from Source](./docs/get_started/Installation_dcu.md)
 ### Method 1: Install with Pip
 
 The quickest way to get started is to install the latest release from PyPI:

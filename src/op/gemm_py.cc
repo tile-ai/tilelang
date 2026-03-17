@@ -131,6 +131,8 @@ GemmInst GemmPyNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kTCGEN5MMA;
   } else if (allow_wgmma) {
     return GemmInst::kWGMMA;
+  } else if(TargetIsDCU(target)) {
+    return GemmInst::KMMAC;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
   } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||

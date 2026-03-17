@@ -85,6 +85,7 @@ bool TargetIsDCU(Target target) {
   if (!TargetIsRocm(target))
     return false;
   if (target->attrs.count("mcpu")) {
+    std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
     // if mcpu start with "gfx936", it is DCU
     return mcpu.find("gfx936") == 0;
   }

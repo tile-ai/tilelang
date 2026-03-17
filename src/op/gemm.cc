@@ -131,6 +131,8 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kTCGEN5MMA;
   } else if (allowWgmma(block_size, target)) {
     return GemmInst::kWGMMA;
+  } else if(TargetIsDCU(target)) {
+    return GemmInst::KMMAC;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
   } else if (TargetIsCuda(target)) {
