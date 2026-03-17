@@ -164,14 +164,14 @@ private:
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsLocalBuffer(op->buffer)) {
+    if (IsLocalBuffer(op->buffer, true)) {
       summary_.read_buffers.insert(op->buffer);
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsLocalBuffer(op->buffer)) {
+    if (IsLocalBuffer(op->buffer, true)) {
       summary_.write_buffers.insert(op->buffer);
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -190,7 +190,7 @@ private:
       ICHECK_EQ(op->args.size(), 3);
       const auto *base_load = op->args[0].as<BufferLoadNode>();
       ICHECK(base_load);
-      if (IsLocalBuffer(base_load->buffer)) {
+      if (IsLocalBuffer(base_load->buffer, true)) {
         int rw_mask = GetConstAccessMask(op->args[2]);
         if (rw_mask & 1) {
           summary_.read_buffers.insert(base_load->buffer);
@@ -211,7 +211,8 @@ private:
       const auto *var = op->args[1].as<VarNode>();
       ICHECK(var);
       auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
-      if (it != buffer_data_to_buffer_.end() && IsLocalBuffer(it->second)) {
+      if (it != buffer_data_to_buffer_.end() &&
+          IsLocalBuffer(it->second, true)) {
         int rw_mask = GetConstAccessMask(op->args[4]);
         if (rw_mask & 1) {
           summary_.read_buffers.insert(it->second);
@@ -782,6 +783,7 @@ public:
     ProducerConsumerWSRewriter T;
     f.CopyOnWrite()->body = T(f->body);
 
+    // TODO(lei): This should be refactored
     // If WS was applied, remove any create_list_of_mbarrier calls that
     // remain OUTSIDE the block (e.g. at function body level from
     // lower_tile_op). The new init is already inside the block.
@@ -798,13 +800,18 @@ private:
     if (op->attr_key == tir::attr::thread_extent &&
         Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
       thread_iv_ = Downcast<IterVar>(op->node);
-      need_update_thread_extent_ = false;
+      Optional<PrimExpr> old_num_threads = num_threads_;
+      num_threads_ = std::nullopt;
       AttrStmt attr_stmt = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
-      if (need_update_thread_extent_) {
-        thread_iv_.CopyOnWrite()->dom = {0, updated_thread_extent_.value()};
+      if (num_threads_.defined()) {
+        PrimExpr num_threads = num_threads_.value();
+        thread_iv_.CopyOnWrite()->dom = {0, num_threads};
         attr_stmt.CopyOnWrite()->node = thread_iv_;
-        attr_stmt.CopyOnWrite()->value = updated_thread_extent_.value();
+        attr_stmt.CopyOnWrite()->value = num_threads;
       }
+      // clean up if we may have multiple threadIdx.x that
+      // need to be transformed
+      num_threads_ = old_num_threads;
       thread_iv_ = {};
       return attr_stmt;
     }
@@ -827,9 +834,9 @@ private:
       return StmtExprMutator::VisitStmt_(op);
 
     int num_stages = 1;
-    auto ns_anno = pipeline_loop->annotations.Get("num_stages");
-    if (ns_anno) {
-      num_stages = static_cast<int>(ns_anno.value().as<IntImmNode>()->value);
+    if (auto num_stages_anno = pipeline_loop->annotations.Get("num_stages")) {
+      num_stages =
+          static_cast<int>(Downcast<Integer>(num_stages_anno.value())->value);
     }
     // Flatten the loop body
     Array<Stmt> flat_stmts;
@@ -1471,8 +1478,7 @@ private:
         buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
 
     // Update thread extent
-    updated_thread_extent_ = consumer_thread_extent + producer_thread_extent;
-    need_update_thread_extent_ = true;
+    num_threads_ = consumer_thread_extent + producer_thread_extent;
     ws_transformed_ = true;
     use_full_tma_forward_barrier_protocol_ =
         old_use_full_tma_forward_barrier_protocol;
@@ -1497,16 +1503,19 @@ private:
         op->thread_binding.value()->thread_tag == "threadIdx.x" &&
         !thread_iv_.defined()) {
       thread_iv_ = op->thread_binding.value();
-      need_update_thread_extent_ = false;
+      Optional<PrimExpr> old_num_threads = num_threads_;
+      num_threads_ = std::nullopt;
       For for_node = Downcast<For>(StmtExprMutator::VisitStmt_(op));
-      if (need_update_thread_extent_) {
+      if (num_threads_.defined()) {
+        PrimExpr num_threads = num_threads_.value();
         auto n = for_node.CopyOnWrite();
-        n->extent = updated_thread_extent_.value();
+        n->extent = num_threads;
         IterVar new_thread_iv = n->thread_binding.value();
         new_thread_iv.CopyOnWrite()->dom =
-            Range::FromMinExtent(Integer(0), updated_thread_extent_.value());
+            Range::FromMinExtent(Integer(0), num_threads);
         n->thread_binding = new_thread_iv;
       }
+      num_threads_ = old_num_threads;
       thread_iv_ = {};
       return for_node;
     }
@@ -1892,7 +1901,7 @@ private:
         }
       }
       if (const auto *ld = node.as<BufferLoadNode>()) {
-        if (IsSharedBuffer(ld->buffer) || IsLocalBuffer(ld->buffer)) {
+        if (IsSharedBuffer(ld->buffer) || IsLocalBuffer(ld->buffer, true)) {
           has_disallowed = true;
           return;
         }
@@ -3243,8 +3252,7 @@ private:
   PrimExpr
       consumer_thread_extent_; // Original thread extent (consumer warp count)
   PrimExpr producer_thread_extent_ = IntImm(DataType::Int(32), 128);
-  Optional<PrimExpr> updated_thread_extent_;
-  bool need_update_thread_extent_ = false;
+  Optional<PrimExpr> num_threads_;
   bool ws_transformed_ = false;
   bool use_full_tma_forward_barrier_protocol_ = false;
   bool remap_pure_tma_barriers_ = false;
