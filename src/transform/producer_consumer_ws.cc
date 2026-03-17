@@ -136,6 +136,13 @@ public:
     return std::move(collector.summary_);
   }
 
+  static LocalAccessSummary
+  CollectExpr(const PrimExpr &expr, const BufferDataToBufferMap &buffer_map) {
+    LocalAccessCollector collector(buffer_map);
+    collector.VisitExpr(expr);
+    return std::move(collector.summary_);
+  }
+
 private:
   explicit LocalAccessCollector(const BufferDataToBufferMap &buffer_map)
       : buffer_data_to_buffer_(buffer_map) {}
@@ -1463,6 +1470,18 @@ private:
         SeedLiveSetFromStmt(producer_loop_body, buffer_data_to_buffer);
     LocalLiveSet consumer_live_seed =
         SeedLiveSetFromStmt(consumer_loop_body, buffer_data_to_buffer);
+    // Pre-loop liveness assignment must also account for variables used only in
+    // the pipeline loop bounds. Otherwise scalar setup that feeds the loop
+    // extent/min can be misclassified as common code and hoisted outside the
+    // warp-specialized split.
+    producer_live_seed.AddUses(
+        LocalAccessCollector::CollectExpr(loop_min, buffer_data_to_buffer));
+    producer_live_seed.AddUses(
+        LocalAccessCollector::CollectExpr(loop_extent, buffer_data_to_buffer));
+    consumer_live_seed.AddUses(
+        LocalAccessCollector::CollectExpr(loop_min, buffer_data_to_buffer));
+    consumer_live_seed.AddUses(
+        LocalAccessCollector::CollectExpr(loop_extent, buffer_data_to_buffer));
 
     // Reconstruct block body: replace the pipeline loop and
     // create_list_of_mbarrier with new init_barrier + ws_body.
