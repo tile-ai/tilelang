@@ -3,7 +3,7 @@
 ```bash
 mkdir -p build
 cd build
-cmake .. -DUSE_CUDA=ON -DUSE_ROCM=OFF
+cmake .. -DUSE_CUDA=OFF -DUSE_ROCM=ON
 make -j
 ```
 
