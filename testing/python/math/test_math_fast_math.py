@@ -3,6 +3,7 @@ import tilelang.language as T
 import torch
 import tilelang.testing
 import re
+import pytest
 
 
 def get_mathop_lines(source, mathop_name):
@@ -242,52 +243,63 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, b
     print(f"✓ {mathop_name} numerical test passed")
 
 
+FASTMATH_MATHOPS = [
+    ("__exp", T.__exp),
+    ("__exp10", T.__exp10),
+    ("__log", T.__log),
+    ("__log2", T.__log2),
+    ("__log10", T.__log10),
+    ("__tan", T.__tan),
+    ("__cos", T.__cos),
+    ("__sin", T.__sin),
+]
+
+TWO_ARG_MATHOPS = [
+    ("pow", T.pow),
+    ("fmod", T.fmod),
+]
+
+SINGLE_ARG_MATHOPS = [
+    ("exp", T.exp),
+    ("exp2", T.exp2),
+    ("exp10", T.exp10),
+    ("log", T.log),
+    ("log2", T.log2),
+    ("log10", T.log10),
+    ("sin", T.sin),
+    ("cos", T.cos),
+    ("tan", T.tan),
+    ("sinh", T.sinh),
+    ("cosh", T.cosh),
+    ("tanh", T.tanh),
+    ("atan", T.atan),
+    ("sqrt", T.sqrt),
+    ("rsqrt", T.rsqrt),
+    ("erf", T.erf),
+    ("floor", T.floor),
+    ("ceil", T.ceil),
+    ("trunc", T.trunc),
+    ("round", T.round),
+    ("nearbyint", T.nearbyint),
+]
+
+
 @tilelang.testing.requires_cuda
-def test_mathops_generate_no_fastmath():
+@pytest.mark.parametrize(("name", "func"), SINGLE_ARG_MATHOPS, ids=[name for name, _ in SINGLE_ARG_MATHOPS])
+def test_mathops_generate_no_fastmath(name, func):
     """Test that our tl.* mathops generate fastmath CUDA code (__expf etc.)"""
     # Based on test results, our tl.* intrinsics actually generate
     # no fastmath versions
     # This appears to be the intended behavior
-    single_arg_mathops = [
-        ("exp", T.exp),
-        ("exp2", T.exp2),
-        ("exp10", T.exp10),
-        ("log", T.log),
-        ("log2", T.log2),
-        ("log10", T.log10),
-        ("sin", T.sin),
-        ("cos", T.cos),
-        ("tan", T.tan),
-        ("sinh", T.sinh),
-        ("cosh", T.cosh),
-        ("tanh", T.tanh),
-        ("atan", T.atan),
-        ("sqrt", T.sqrt),
-        ("rsqrt", T.rsqrt),
-        ("erf", T.erf),
-        ("floor", T.floor),
-        ("ceil", T.ceil),
-        ("trunc", T.trunc),
-        ("round", T.round),
-        ("nearbyint", T.nearbyint),
-    ]
-
-    for name, func in single_arg_mathops:
-        run_single_arg_mathop_test(name, func, dtype=T.float32)
-        print(f"✓ {name} test passed")
+    run_single_arg_mathop_test(name, func, dtype=T.float32)
+    print(f"✓ {name} test passed")
 
 
 @tilelang.testing.requires_cuda
-def test_two_arg_mathops_fastmath():
+@pytest.mark.parametrize(("name", "func"), TWO_ARG_MATHOPS, ids=[name for name, _ in TWO_ARG_MATHOPS])
+def test_two_arg_mathops_fastmath(name, func):
     """Test all two-argument mathops"""
-    # Two argument mathops
-    two_arg_mathops = [
-        ("pow", T.pow),
-        ("fmod", T.fmod),
-    ]
-
-    for name, func in two_arg_mathops:
-        run_two_arg_mathop_test(name, func, dtype=T.float32)
+    run_two_arg_mathop_test(name, func, dtype=T.float32)
 
 
 @tilelang.testing.requires_cuda
@@ -297,23 +309,11 @@ def test_abs_maps_to_fabs():
 
 
 @tilelang.testing.requires_cuda
-def test_fastmath_versions():
+@pytest.mark.parametrize(("name", "func"), FASTMATH_MATHOPS, ids=[name for name, _ in FASTMATH_MATHOPS])
+def test_fastmath_versions(name, func):
     """Test that __exp, __exp10, __log, __log2, __log10, __tan, __cos, __sin generate fastmath CUDA code"""
-    # Test fastmath versions
-    fastmath_mathops = [
-        ("__exp", T.__exp),
-        ("__exp10", T.__exp10),
-        ("__log", T.__log),
-        ("__log2", T.__log2),
-        ("__log10", T.__log10),
-        ("__tan", T.__tan),
-        ("__cos", T.__cos),
-        ("__sin", T.__sin),
-    ]
-
-    for name, func in fastmath_mathops:
-        run_fastmath_mathop_test(name, func, dtype=T.float32)
-        print(f"✓ {name} test passed")
+    run_fastmath_mathop_test(name, func, dtype=T.float32)
+    print(f"✓ {name} test passed")
 
 
 if __name__ == "__main__":

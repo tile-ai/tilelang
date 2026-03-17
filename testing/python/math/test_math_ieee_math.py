@@ -4,6 +4,8 @@ import torch
 import tilelang.testing
 import pytest
 
+ROUNDING_MODES = ["rn", "rz", "ru", "rd"]
+
 
 def run_ieee_math_test(
     mathop_name,
@@ -134,63 +136,51 @@ def test_rounding_mode_validation():
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_add_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_add_all_rounding_modes(mode):
     """Test IEEE addition with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode=mode, run_execution=mode == "rn")
-        print(f"✓ ieee_add with {mode} passed")
+    run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_add with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_sub_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_sub_all_rounding_modes(mode):
     """Test IEEE subtraction with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_sub", T.ieee_sub, rounding_mode=mode, run_execution=mode == "rn")
-        print(f"✓ ieee_sub with {mode} passed")
+    run_ieee_math_test("ieee_sub", T.ieee_sub, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_sub with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_mul_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_mul_all_rounding_modes(mode):
     """Test IEEE multiplication with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_mul", T.ieee_mul, rounding_mode=mode, run_execution=mode == "rn")
-        print(f"✓ ieee_mul with {mode} passed")
+    run_ieee_math_test("ieee_mul", T.ieee_mul, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_mul with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_fmaf_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_fmaf_all_rounding_modes(mode):
     """Test IEEE fused multiply-add with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_fmaf", T.ieee_fmaf, rounding_mode=mode, run_execution=mode == "rn")
-        print(f"✓ ieee_fmaf with {mode} passed")
+    run_ieee_math_test("ieee_fmaf", T.ieee_fmaf, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_fmaf with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_frcp_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_frcp_all_rounding_modes(mode):
     """Test IEEE reciprocal with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_frcp", T.ieee_frcp, rounding_mode=mode, run_execution=mode == "rn")
-        print(f"✓ ieee_frcp with {mode} passed")
+    run_ieee_math_test("ieee_frcp", T.ieee_frcp, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_frcp with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_fsqrt_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_fsqrt_all_rounding_modes(mode):
     """Test IEEE square root with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_fsqrt", T.ieee_fsqrt, rounding_mode=mode, run_execution=mode == "rn")
-        print(f"✓ ieee_fsqrt with {mode} passed")
+    run_ieee_math_test("ieee_fsqrt", T.ieee_fsqrt, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_fsqrt with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
@@ -230,13 +220,11 @@ def test_ieee_frsqrt_rn_only():
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_fdiv_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_fdiv_all_rounding_modes(mode):
     """Test IEEE division with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_fdiv", T.ieee_fdiv, rounding_mode=mode, run_execution=mode == "rn")
-        print(f"✓ ieee_fdiv with {mode} passed")
+    run_ieee_math_test("ieee_fdiv", T.ieee_fdiv, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_fdiv with {mode} passed")
 
 
 if __name__ == "__main__":
