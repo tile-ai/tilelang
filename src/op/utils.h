@@ -47,28 +47,6 @@ TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
 TVM_DLL PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load,
                                              int rw_mask);
 
-inline bool IsFragmentScope(const String &scope) {
-  return scope == "local.fragment";
-}
-
-inline bool IsSharedScope(const String &scope, bool allow_dynamic = true) {
-  if (allow_dynamic) {
-    return scope == "shared" || scope == "shared.dyn";
-  } else {
-    return scope == "shared";
-  }
-}
-
-inline bool IsGlobalScope(const String &scope) { return scope == "global"; }
-
-inline bool IsLocalScope(const String &scope, bool allow_var = false) {
-  if (allow_var) {
-    return scope == "local" || scope == "local.var";
-  } else {
-    return scope == "local";
-  }
-}
-
 inline bool IsLocalScopedScope(const String &scope) {
   const std::string scope_str = scope;
   return scope == "local" || scope_str.rfind("local.", 0) == 0;
@@ -76,7 +54,7 @@ inline bool IsLocalScopedScope(const String &scope) {
 
 // Check if a buffer is a fragment buffer (scope == "local.fragment")
 inline bool IsFragmentBuffer(const Buffer &buffer) {
-  return buffer.defined() && IsFragmentScope(buffer.scope());
+  return buffer.defined() && buffer.scope() == "local.fragment";
 }
 
 // Expand a lower-rank layout by prepending the leading dimensions of `buffer`
@@ -104,11 +82,17 @@ inline Layout ExpandLayoutToMatchBuffer(const Layout &layout,
 }
 
 inline bool IsSharedBuffer(const Buffer &buffer, bool allow_dynamic = true) {
-  return buffer.defined() && IsSharedScope(buffer.scope(), allow_dynamic);
+  if (!buffer.defined()) {
+    return false;
+  }
+  if (allow_dynamic) {
+    return buffer.scope() == "shared" || buffer.scope() == "shared.dyn";
+  }
+  return buffer.scope() == "shared";
 }
 
 inline bool IsGlobalBuffer(const Buffer &buffer) {
-  return buffer.defined() && IsGlobalScope(buffer.scope());
+  return buffer.defined() && buffer.scope() == "global";
 }
 
 inline bool IsValidCPAsyncTransferBytes(int bytes) {
@@ -116,7 +100,13 @@ inline bool IsValidCPAsyncTransferBytes(int bytes) {
 }
 
 inline bool IsLocalBuffer(const Buffer &buffer, bool allow_var = false) {
-  return buffer.defined() && IsLocalScope(buffer.scope(), allow_var);
+  if (!buffer.defined()) {
+    return false;
+  }
+  if (allow_var) {
+    return buffer.scope() == "local" || buffer.scope() == "local.var";
+  }
+  return buffer.scope() == "local";
 }
 
 inline bool IsLocalVarBuffer(const Buffer &buffer) {

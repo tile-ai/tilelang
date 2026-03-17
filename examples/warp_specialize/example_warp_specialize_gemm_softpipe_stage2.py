@@ -48,8 +48,6 @@ def main(M=16384, N=16384, K=16384):
     block_K = 64
 
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K)
-    print(jit_kernel.get_kernel_source())
-    # exit()
     # 3. Test the kernel in Python with PyTorch data
     import torch
 

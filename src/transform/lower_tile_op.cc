@@ -37,13 +37,13 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
       TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
   Type new_type;
   // convert fragments to normal local buffer
-  if (IsFragmentScope(ptr_type->storage_scope)) {
+  if (IsFragmentBuffer(buffer)) {
     new_type = PointerType(ptr_type->element_type, "local");
   } else {
     new_type = buffer->data->type_annotation;
   }
   Var new_var;
-  if (IsGlobalScope(ptr_type->storage_scope)) {
+  if (IsGlobalBuffer(buffer)) {
     new_var = buffer->data;
   } else {
     if (var_remap.count(buffer->data)) {
@@ -55,7 +55,7 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   }
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
-  if (IsSharedScope(ptr_type->storage_scope)) {
+  if (IsSharedBuffer(buffer)) {
     int replicate_extent = 1;
     Array<PrimExpr> buffer_shape = buffer->shape;
     int buffer_extent = 1;

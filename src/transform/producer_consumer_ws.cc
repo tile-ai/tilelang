@@ -586,9 +586,6 @@ private:
       return Optional<Var>();
     }
     if (call->op.same_as(tl::access_ptr())) {
-      if (call->args.size() != 3) {
-        return Optional<Var>();
-      }
       const auto *base_load = call->args[0].as<BufferLoadNode>();
       if (!base_load) {
         return Optional<Var>();
@@ -596,9 +593,6 @@ private:
       return base_load->buffer->data;
     }
     if (call->op.same_as(builtin::tvm_access_ptr())) {
-      if (call->args.size() != 5) {
-        return Optional<Var>();
-      }
       if (call->args[1].as<VarNode>()) {
         return Downcast<Var>(call->args[1]);
       }
@@ -1775,10 +1769,6 @@ private:
       }
       if (const auto *call = node.as<CallNode>()) {
         if (call->op.same_as(builtin::tvm_storage_sync())) {
-          if (call->args.size() < 2) {
-            has_disallowed = true;
-            return;
-          }
           const auto *scope = call->args[0].as<StringImmNode>();
           if (!scope ||
               (scope->value != "shared" && scope->value != "shared.dyn")) {

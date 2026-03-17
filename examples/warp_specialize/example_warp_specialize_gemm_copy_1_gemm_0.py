@@ -47,8 +47,6 @@ def main(M=16384, N=16384, K=16384):
     block_K = 64
 
     jit_kernel = matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K)
-    print(jit_kernel.get_kernel_source())
-    # exit()
     import torch
 
     a = torch.randn(M, K, device="cuda", dtype=torch.float16)
@@ -102,5 +100,4 @@ def run_regression_perf(M=16384, N=16384, K=16384):
 
 if __name__ == "__main__":
     # Test with smaller size first
-    tilelang.disable_cache()
-    main(M=2048, N=2048, K=2048)
+    tilelang.testing.main()
