@@ -872,6 +872,25 @@ private:
       last_bound_consumer_stmt = consumer_stmt_idx;
     }
 
+    // Prioritize cp.async groups with earlier consumers when enforcing group
+    // boundary ordering. This helps place prefetches for near-term consumers
+    // earlier in the stage-0 schedule.
+    std::vector<int> cp_async_group_schedule_order;
+    cp_async_group_schedule_order.reserve(cp_async_groups.size());
+    for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
+      cp_async_group_schedule_order.push_back(static_cast<int>(group_id));
+    }
+    std::stable_sort(
+        cp_async_group_schedule_order.begin(),
+        cp_async_group_schedule_order.end(), [&](int lhs_group, int rhs_group) {
+          int lhs_first_consumer = cp_async_group_first_consumer[lhs_group];
+          int rhs_first_consumer = cp_async_group_first_consumer[rhs_group];
+          if (lhs_first_consumer != rhs_first_consumer) {
+            return lhs_first_consumer < rhs_first_consumer;
+          }
+          return lhs_group < rhs_group;
+        });
+
     // For every copy stage, mark all its dependency stages as producer_for_copy
     // Helper struct to manage copy stage dependency reads
     struct CopyStageDependencyReadsManager {
