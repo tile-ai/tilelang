@@ -458,10 +458,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << mbarrier_name_
            << " = tl.alloc_smem(cutlass.Uint64, size_in_elems=" << barrier_count
            << ")\n";
-  } else if (op->op.same_as(tl::get_mbarrier())) {
-    ICHECK_EQ(op->args.size(), 1);
-    std::string barrier_id = PrintExpr_(op->args[0]);
-    os << "(" << mbarrier_name_ << "+" << barrier_id << ")";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     ICHECK_EQ(op->args.size(), 1);
     PrintIndent();

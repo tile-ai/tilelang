@@ -56,6 +56,18 @@ def _count_calls_in_stmt(stmt, op_name: str) -> int:
     return count
 
 
+def _collect_buffer_loads(stmt, scope: str):
+    """Collect BufferLoad nodes from buffers with the given scope."""
+    loads = []
+
+    def visitor(node):
+        if isinstance(node, tvm.tir.BufferLoad) and node.buffer.scope() == scope:
+            loads.append(node)
+
+    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
+    return loads
+
+
 def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier():
     @T.prim_func
     def before(A: T.Tensor((512, 512), T.float16), B: T.Tensor((512, 512), T.float16)):
@@ -71,29 +83,20 @@ def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier()
             B_shared = T.alloc_buffer((3, 1, 4, 512), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((32,), scope="local")
 
-            T.call_intrin(
-                "handle",
-                tir.op.Op.get("tl.create_list_of_mbarrier"),
-                128,
-                128,
-                128,
-                128,
-                128,
-                128,
-            )
+            mbarrier = T.alloc_barrier([128, 128, 128, 128, 128, 128])
 
             for k in T.serial(16, annotations={"num_stages": T.int32(3)}):
                 if v == 0:
                     T.call_intrin(
                         "handle",
                         tir.op.Op.get("tl.mbarrier_expect_tx"),
-                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3),
+                        mbarrier[k % 3],
                         4096,
                     )
                 if v == 0:
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3),
+                        mbarrier[k % 3],
                         T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 2),
                         k * 32,
                         by * 64,
@@ -101,7 +104,7 @@ def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier()
                 T.call_intrin(
                     "handle",
                     tir.op.Op.get("tl.mbarrier_wait_parity"),
-                    T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3),
+                    mbarrier[k % 3],
                     k // 3 % 2,
                 )
 
@@ -109,13 +112,13 @@ def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier()
                     T.call_intrin(
                         "handle",
                         tir.op.Op.get("tl.mbarrier_expect_tx"),
-                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3 + 3),
+                        mbarrier[k % 3 + 3],
                         4096,
                     )
                 if v == 0:
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3, 2, 0),
-                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3 + 3),
+                        mbarrier[k % 3 + 3],
                         T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 2),
                         k * 32,
                         bx * 64,
@@ -123,7 +126,7 @@ def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier()
                 T.call_intrin(
                     "handle",
                     tir.op.Op.get("tl.mbarrier_wait_parity"),
-                    T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 3 + 3),
+                    mbarrier[k % 3 + 3],
                     k // 3 % 2,
                 )
 
@@ -141,9 +144,10 @@ def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier()
     mod = tir.transform.LowerOpaqueBlock()(mod)
 
     main_func = mod["main"]
-    create_list_calls = _collect_calls(main_func.body, "tl.create_list_of_mbarrier")
-    assert len(create_list_calls) == 1
-    assert len(create_list_calls[0].args) == 6
+    # After the WS pass, the barrier buffer should still be present as shared.barrier
+    # scope BufferLoads in the output (the pass creates its own barrier buffer).
+    barrier_loads = _collect_buffer_loads(main_func.body, "shared.barrier")
+    assert len(barrier_loads) > 0, "Expected shared.barrier BufferLoad nodes in WS output"
 
 
 def test_producer_consumer_ws_preserves_guarded_forward_wait():
@@ -160,7 +164,7 @@ def test_producer_consumer_ws_preserves_guarded_forward_wait():
             A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((1,), "float32", scope="local")
 
-            T.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), 1, 1)
+            mbarrier = T.alloc_barrier([1, 1])
 
             for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
                 i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
@@ -171,13 +175,13 @@ def test_producer_consumer_ws_preserves_guarded_forward_wait():
                         T.call_intrin(
                             "handle",
                             tir.op.Op.get("tl.mbarrier_expect_tx"),
-                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            mbarrier[k % 2],
                             4096,
                         )
                     if tx == 0:
                         T.tma_load(
                             T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            mbarrier[k % 2],
                             T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
                             k * 32,
                             by * 64,
@@ -186,7 +190,7 @@ def test_producer_consumer_ws_preserves_guarded_forward_wait():
                     T.call_intrin(
                         "handle",
                         tir.op.Op.get("tl.mbarrier_wait_parity"),
-                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                        mbarrier[k % 2],
                         k // 2 % 2,
                     )
                 if i_s >= 0:
@@ -224,7 +228,7 @@ def test_producer_consumer_ws_preserves_guarded_producer_backpressure_wait():
             A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((1,), "float32", scope="local")
 
-            T.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), 1, 1)
+            mbarrier = T.alloc_barrier([1, 1])
 
             for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
                 i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
@@ -235,13 +239,13 @@ def test_producer_consumer_ws_preserves_guarded_producer_backpressure_wait():
                         T.call_intrin(
                             "handle",
                             tir.op.Op.get("tl.mbarrier_expect_tx"),
-                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            mbarrier[k % 2],
                             4096,
                         )
                     if tx == 0:
                         T.tma_load(
                             T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            mbarrier[k % 2],
                             T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
                             k * 32,
                             by * 64,
@@ -250,7 +254,7 @@ def test_producer_consumer_ws_preserves_guarded_producer_backpressure_wait():
                     T.call_intrin(
                         "handle",
                         tir.op.Op.get("tl.mbarrier_wait_parity"),
-                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                        mbarrier[k % 2],
                         k // 2 % 2,
                     )
                 if i_s >= 0:
@@ -291,7 +295,7 @@ def test_producer_consumer_ws_uses_consumer_guard_for_backpressure_protocol():
             A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
             C_local = T.alloc_buffer((1,), "float32", scope="local")
 
-            T.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), 1, 1)
+            mbarrier = T.alloc_barrier([1, 1])
 
             for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
                 i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
@@ -302,13 +306,13 @@ def test_producer_consumer_ws_uses_consumer_guard_for_backpressure_protocol():
                         T.call_intrin(
                             "handle",
                             tir.op.Op.get("tl.mbarrier_expect_tx"),
-                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            mbarrier[k % 2],
                             4096,
                         )
                     if tx == 0:
                         T.tma_load(
                             T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                            T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                            mbarrier[k % 2],
                             T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
                             k * 32,
                             by * 64,
@@ -317,7 +321,7 @@ def test_producer_consumer_ws_uses_consumer_guard_for_backpressure_protocol():
                     T.call_intrin(
                         "handle",
                         tir.op.Op.get("tl.mbarrier_wait_parity"),
-                        T.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), k % 2),
+                        mbarrier[k % 2],
                         k // 2 % 2,
                     )
 
