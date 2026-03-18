@@ -228,18 +228,19 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         # MultiVersionBuffer before LowerSharedBarrier so barrier buffers
         # (shared.barrier scope) can be expanded for pipelining.
         mod = tilelang.transform.MultiVersionBuffer()(mod)
-        mod = tilelang.transform.LowerSharedBarrier()(mod)
         if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
             # Producer-Consumer Warp Specialization:
             # Splits TMA pipeline loops into producer (TMA loads) and consumer
             # (compute) warps with mbarrier-based synchronization.
             # When WS succeeds, it handles the pipeline overlap directly,
             # so PipelinePlanning + InjectSoftwarePipeline are skipped.
+            # NOTE: LowerSharedBarrier runs ONLY after WS, not before.
+            # Running it before would generate barrier init calls that
+            # WS cannot clean up when it replaces the barriers.
             mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
-            # Process barrier buffers created by the WS pass
-            # (the first LowerSharedBarrier only handled pre-WS barriers).
             mod = tilelang.transform.LowerSharedBarrier()(mod)
         else:
+            mod = tilelang.transform.LowerSharedBarrier()(mod)
             mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
             mod = tilelang.transform.PipelinePlanning()(mod)
             mod = tilelang.transform.InjectSoftwarePipeline()(mod)

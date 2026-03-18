@@ -127,8 +127,6 @@ public:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    // Insert the prefetch TMA descriptor statement TO the beginning of the
-    // kernel
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
@@ -137,7 +135,6 @@ public:
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
           Array<Stmt> stmt_seq;
-
           PrimExpr condition;
           if (!disable_shuffle_elect_) {
             condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
@@ -149,9 +146,7 @@ public:
                                   stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
           stmt_seq.push_back(stmt_);
           stmt_seq.push_back(body);
-
           Stmt result = SeqStmt(stmt_seq);
-
           prefetch_calls_.clear();
           return AttrStmt(op->node, op->attr_key, op->value, result);
         }

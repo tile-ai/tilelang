@@ -233,27 +233,29 @@ public:
     }
 
     // If any TMA copies allocated mbarriers, inject the barrier buffer
-    // into the root block with a barrier_init annotation.
-    // LowerSharedBarrier will later process this into actual
-    // ptx_init_barrier_thread_count, fence_barrier_init, and storage_sync.
+    // into the tilelang_root block with a barrier_init annotation.
+    // MultiVersionBuffer will expand it for pipelining, and
+    // LowerSharedBarrier will process it into ptx_init_barrier_thread_count.
     if (substituter.mbarrier_count_ > 0) {
       ICHECK(substituter.mbarrier_buffer_.defined())
           << "mbarrier_buffer_ must have been created by AllocMBarrier "
              "callback";
       Buffer mbar_buf = substituter.mbarrier_buffer_.value();
-      // Update the buffer shape to the final barrier count
-      mbar_buf =
-          Buffer(mbar_buf->data, mbar_buf->dtype,
-                 {IntImm(DataType::Int(32), substituter.mbarrier_count_)}, {},
-                 PrimExpr(), mbar_buf->name, 0, 0, kDefault);
+      // Update buffer shape in-place to final count.  We use const_cast
+      // because CopyOnWrite would create a new BufferNode, breaking identity
+      // with BufferLoad references already in the body.  MultiVersionBuffer
+      // relies on buffer identity to remap accesses correctly.
+      const_cast<BufferNode *>(mbar_buf.get())->shape = {
+          IntImm(DataType::Int(32), substituter.mbarrier_count_)};
 
       Array<PrimExpr> counts;
       counts.reserve(substituter.mbarrier_count_);
       for (auto c : substituter.mbarrier_arrive_counts_)
         counts.push_back(IntImm(DataType::Int(32), c));
 
-      // Walk the body to find the outermost BlockRealize and inject
-      // the barrier buffer + barrier_init annotation into its block.
+      // Walk the body to find the inner "tilelang_root" BlockRealize
+      // (inside the threadIdx.x scope) and inject the barrier buffer
+      // + barrier_init annotation.
       struct RootBlockInjector : public StmtMutator {
         Buffer barrier_buf;
         Array<PrimExpr> arrive_counts;
@@ -262,11 +264,13 @@ public:
         Stmt VisitStmt_(const BlockRealizeNode *op) final {
           if (injected)
             return StmtMutator::VisitStmt_(op);
+          if (op->block->name_hint == "root") {
+            return StmtMutator::VisitStmt_(op);
+          }
           injected = true;
           Block block = op->block;
           auto block_ptr = block.CopyOnWrite();
           block_ptr->alloc_buffers.push_back(barrier_buf);
-          // Merge barrier_init annotation
           Map<Var, Array<PrimExpr>> barrier_init_map;
           if (block_ptr->annotations.count("barrier_init")) {
             barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
@@ -1062,8 +1066,6 @@ private:
 
     AllocMBarrierCallback mbarrier_callback = [this](int arrive_count) -> int {
       if (!mbarrier_buffer_.defined()) {
-        // Create the barrier buffer on first allocation. The shape will be
-        // updated later when the final count is known.
         mbarrier_buffer_ = CreateMBarrierBuffer(injected_mbarrier_name_, 1);
       }
       int id = mbarrier_count_++;
@@ -1095,7 +1097,7 @@ private:
                   mbarrier_callback, layout_map_, buffer_remap_,
                   let_var_to_expr,
                   /*in_pipeline=*/pipelined_depth_ > 0, mbar_phase_expr,
-                  pipeline_num_stages, mbar_stage_expr, mbarrier_buffer_},
+                  pipeline_num_stages, mbar_stage_expr, &mbarrier_buffer_},
         analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);

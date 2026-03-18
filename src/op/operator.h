@@ -72,9 +72,10 @@ struct LowerArgs {
   // Expression for mbarrier stage index: ko % pipeline_num_stages.
   // Used to cycle through multiple mbarriers in pipelined loops.
   PrimExpr mbar_stage_expr;
-  // The shared.barrier scope buffer for compiler-generated mbarriers.
-  // Set by LowerTileOp so that copy.cc can reference it via BufferLoad.
-  Optional<Buffer> mbarrier_buffer;
+  // Pointer to the shared.barrier buffer for compiler-generated mbarriers.
+  // Points to the LowerTileOpPass member so copy.cc sees the buffer
+  // even when created lazily by the AllocMBarrier callback.
+  Optional<Buffer> *mbarrier_buffer = nullptr;
 };
 
 struct LayoutInferArgs {

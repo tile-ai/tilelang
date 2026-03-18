@@ -825,8 +825,7 @@ private:
 /*!
  * \brief Post-transform cleanup: remove barrier_init annotations and
  *        shared.barrier alloc_buffers that remain outside the transformed
- *        block (e.g., at the function body level where lower_tile_op.cc
- *        originally placed them).
+ *        block.
  *        The new init is already emitted inside the block by the rewriter.
  */
 class MbarrierInitRemover : public StmtExprMutator {

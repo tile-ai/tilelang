@@ -60,21 +60,7 @@ private:
       if (call->op.same_as(mbarrier_wait_parity()) ||
           call->op.same_as(builtin::ptx_arrive_barrier()) ||
           call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
-          call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-          call->op.same_as(builtin::ptx_init_barrier_thread_count())) {
-        has_mbarrier_op_ = true;
-      }
-    }
-    IRVisitorWithAnalyzer::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const BlockNode *op) final {
-    // Check if any alloc_buffer has shared.barrier scope
-    for (const auto &buffer : op->alloc_buffers) {
-      const auto *ptr_type =
-          buffer->data->type_annotation.as<PointerTypeNode>();
-      if (ptr_type && (ptr_type->storage_scope == "shared.barrier" ||
-                       ptr_type->storage_scope == "shared.cluster_barrier")) {
+          call->op.same_as(builtin::ptx_cp_async_barrier())) {
         has_mbarrier_op_ = true;
       }
     }
