@@ -1499,6 +1499,141 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   return body;
 }
 
+// ---------------------------------------------------------------------------
+// Multi-TMA decomposition helper
+// ---------------------------------------------------------------------------
+// Recursively splits an N-D copy region into individual contiguous "rows" and
+// emits one tma_store_cluster call per row.
+//
+// Returns (stmts, arrive_count_expr) where:
+//   • stmts          – flat list of TIR statements to emit (may contain For
+//                      loops when an extent is symbolic/dynamic)
+//   • arrive_count   – PrimExpr for the total number of tma_store_cluster
+//                      calls; used as the mbarrier arrive_count so the
+//                      destination CTA's wait completes only after all rows
+//                      have been transferred.
+//
+// Algorithm:
+//   Base case  – both regions are already contiguous → emit one call, count=1.
+//   Static dim – extent is a compile-time IntImm → unroll and recurse.
+//   Dynamic dim – extent is symbolic → generate a TIR For loop; the loop
+//                 body is the recursion result; count = extent * body_count.
+//
+// Preconditions:
+//   • src_ranges and dst_ranges have the same rank and matching per-dim
+//     extents (checked by the caller).
+static std::pair<Array<Stmt>, PrimExpr>
+MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
+            const Buffer &dst, const Array<Range> &dst_ranges,
+            PrimExpr dst_block, PrimExpr barrier_load,
+            arith::Analyzer *analyzer) {
+  int n = static_cast<int>(src_ranges.size());
+
+  // Check whether a buffer/range pair is contiguous in row-major storage.
+  auto is_contig = [&](const Buffer &buf, const Array<Range> &ranges) -> bool {
+    int pivot = -1;
+    for (int i = 0; i < n; ++i) {
+      if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
+        pivot = i;
+        break;
+      }
+    }
+    if (pivot == -1)
+      return true;
+    for (int i = pivot + 1; i < n; ++i) {
+      if (!analyzer->CanProveEqual(ranges[i]->min, 0) ||
+          !analyzer->CanProveEqual(ranges[i]->extent, buf->shape[i]))
+        return false;
+    }
+    return true;
+  };
+
+  // Linear element offset for the starting element of a region.
+  auto linear_off = [](const Buffer &buf,
+                       const Array<Range> &ranges) -> PrimExpr {
+    int r = static_cast<int>(ranges.size());
+    PrimExpr off = 0, stride = 1;
+    for (int i = r - 1; i >= 0; --i) {
+      off = off + ranges[i]->min * stride;
+      if (i > 0)
+        stride = stride * buf->shape[i];
+    }
+    return off;
+  };
+
+  // Base case: both regions are contiguous → one tma_store_cluster.
+  if (is_contig(src, src_ranges) && is_contig(dst, dst_ranges)) {
+    PrimExpr total_elems = 1;
+    for (const auto &r : src_ranges)
+      total_elems = total_elems * r->extent;
+    PrimExpr size_bytes =
+        cast(DataType::UInt(32), total_elems * src->dtype.bytes());
+    PrimExpr src_ptr = src.access_ptr(1, DataType::Handle(), 1,
+                                      linear_off(src, src_ranges), total_elems);
+    PrimExpr dst_ptr = dst.access_ptr(2, DataType::Handle(), 1,
+                                      linear_off(dst, dst_ranges), total_elems);
+    Stmt call =
+        Evaluate(Call(DataType::Handle(), tma_store_cluster(),
+                      {dst_ptr, src_ptr, dst_block, size_bytes, barrier_load}));
+    return {{call}, IntImm(DataType::Int(32), 1)};
+  }
+
+  // Recursive case: find the outermost non-trivial dimension.
+  int split_dim = -1;
+  for (int d = 0; d < n; ++d) {
+    if (!analyzer->CanProveEqual(src_ranges[d]->extent, 1)) {
+      split_dim = d;
+      break;
+    }
+  }
+  ICHECK(split_dim >= 0)
+      << "MakeTMARows: all dimensions are trivial yet region is not "
+         "contiguous – this should not happen";
+
+  PrimExpr extent = src_ranges[split_dim]->extent;
+  const auto *ext_imm = extent.as<IntImmNode>();
+
+  if (ext_imm) {
+    // ── Static extent: unroll at compile time ──────────────────────────────
+    Array<Stmt> all_stmts;
+    PrimExpr total = IntImm(DataType::Int(32), 0);
+    for (int64_t k = 0; k < ext_imm->value; ++k) {
+      Array<Range> new_src = src_ranges;
+      Array<Range> new_dst = dst_ranges;
+      PrimExpr kexpr = IntImm(DataType::Int(32), k);
+      new_src.Set(split_dim,
+                  Range::FromMinExtent(src_ranges[split_dim]->min + kexpr, 1));
+      new_dst.Set(split_dim,
+                  Range::FromMinExtent(dst_ranges[split_dim]->min + kexpr, 1));
+      auto [stmts, cnt] = MakeTMARows(src, new_src, dst, new_dst, dst_block,
+                                      barrier_load, analyzer);
+      for (const auto &s : stmts)
+        all_stmts.push_back(s);
+      total = total + cnt;
+    }
+    return {all_stmts, total};
+  } else {
+    // ── Dynamic extent: emit a TIR For loop ────────────────────────────────
+    // Build the loop body: fix split_dim to (range_min + loop_var).
+    Var k("k_tma_row", DataType::Int(32));
+    Array<Range> body_src = src_ranges;
+    Array<Range> body_dst = dst_ranges;
+    body_src.Set(split_dim,
+                 Range::FromMinExtent(src_ranges[split_dim]->min + k, 1));
+    body_dst.Set(split_dim,
+                 Range::FromMinExtent(dst_ranges[split_dim]->min + k, 1));
+    auto [body_stmts, body_cnt] = MakeTMARows(
+        src, body_src, dst, body_dst, dst_block, barrier_load, analyzer);
+    Stmt body = body_stmts.size() == 1 ? body_stmts[0]
+                                       : static_cast<Stmt>(SeqStmt(body_stmts));
+    Stmt for_loop =
+        For(k, IntImm(DataType::Int(32), 0), extent, ForKind::kSerial, body);
+    // arrive_count = extent * body_count (every iteration contributes the same)
+    PrimExpr total = extent * body_cnt;
+    return {{for_loop}, total};
+  }
+}
+
 Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
                                 arith::Analyzer *analyzer) const {
   // Check if the target supports cluster copy
@@ -1560,13 +1695,10 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
       dst_elements = dst_elements * r->extent;
     bool element_match = analyzer->CanProveEqual(src_elements, dst_elements);
 
-    if (!(src_contiguous && dst_contiguous && element_match)) {
-      LOG(WARNING)
-          << "Falling back to element-wise cluster copy: bulk cluster fast "
-             "path requires contiguous src/dst regions with matching element "
-             "counts. src="
-          << src->name << ", dst=" << dst->name;
-    } else {
+    if (src_contiguous && dst_contiguous && element_match) {
+      // -----------------------------------------------------------------------
+      // Fast path: single tma_store_cluster for the whole contiguous region.
+      // -----------------------------------------------------------------------
       PrimExpr barrier_load = barrier_opt.value();
 
       // Compute linear offsets from the copy ranges (one offset per buffer).
@@ -1608,6 +1740,52 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
       // Single-thread guard: only thread_bounds->min issues the instruction.
       return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), bulk_copy);
     }
+
+    // -------------------------------------------------------------------------
+    // Multi-TMA path: non-contiguous region decomposed into N contiguous rows.
+    // Requires matching per-dim extents between src and dst (element_match
+    // alone is insufficient – we need the same iteration space on both sides).
+    // Extents may be compile-time constants (→ unrolled calls) or symbolic
+    // (→ TIR For loops); in both cases MakeTMARows computes the arrive_count
+    // expression used to initialise the mbarrier.
+    // -------------------------------------------------------------------------
+    bool same_shape = (src_range.size() == dst_range.size());
+    for (size_t d = 0; d < src_range.size() && same_shape; ++d) {
+      if (!analyzer->CanProveEqual(src_range[d]->extent,
+                                   dst_range[d]->extent)) {
+        same_shape = false;
+      }
+    }
+
+    if (element_match && same_shape) {
+      PrimExpr barrier_load = barrier_opt.value();
+      const auto *barrier_buf_load = barrier_load.as<tir::BufferLoadNode>();
+      ICHECK(barrier_buf_load)
+          << "LowerClusterCopy: expected BufferLoad for barrier annotation";
+      Var barrier_data_var = barrier_buf_load->buffer->data;
+
+      auto [tma_stmts, n_rows] =
+          MakeTMARows(src, src_range, dst, dst_range, dst_block.value(),
+                      barrier_load, analyzer);
+
+      // Inform LowerTileOpPass so it can update the barrier's arrive_count in
+      // the barrier_init block annotation before LowerSharedBarrier runs.
+      if (T.UpdateBarrierArrive) {
+        T.UpdateBarrierArrive(barrier_data_var, n_rows);
+      }
+
+      Stmt seq = (tma_stmts.size() == 1)
+                     ? tma_stmts[0]
+                     : static_cast<Stmt>(SeqStmt(tma_stmts));
+      // Single-thread guard: only thread_bounds->min issues TMA instructions.
+      return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), seq);
+    }
+
+    LOG(WARNING)
+        << "Falling back to element-wise cluster copy: bulk cluster "
+           "fast/multi-TMA paths require matching element counts and same "
+           "per-dim extents between src and dst. src="
+        << src->name << ", dst=" << dst->name;
   }
 
   // ---------------------------------------------------------------------------

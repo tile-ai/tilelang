@@ -220,21 +220,29 @@ def test_store_cluster_simt_no_barrier():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_store_cluster_simt_barrier():
-    """SIMT fallback with auto-injected ptx_arrive_cluster_barrier.
+def test_store_cluster_multi_tma_barrier():
+    """Multi-TMA path: non-contiguous 2-D slice decomposed into N row TMA calls.
 
-    A non-full-span 2-D slice forces the fallback even though remote_barrier
-    is supplied.  The auto-injected arrive lets block 1 wait on the same
-    mbarrier as in the fast-path API, verifying barrier correctness.
+    The compiler decomposes a non-full-span 2-D slice (shape [M, N_tile] inside
+    a buffer of shape [M, N_full]) into M individual tma_store_cluster calls –
+    one per contiguous row.  The mbarrier arrive_count is updated to M so the
+    destination CTA's wait(0) completes only after all rows are transferred.
     """
-    M, N_full, N_tile = 4, 64, 32  # M * N_tile == 128 == thread count
+    M, N_full, N_tile = 4, 64, 32  # M rows, each N_tile elements
 
     prim_func = make_store_cluster_simt_barrier_kernel(M, N_full, N_tile)
     mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
 
     src = mod.get_kernel_source()
-    assert "map_shared_rank" in src, f"Expected map_shared_rank for SIMT+barrier fallback.\nKernel source:\n{src}"
-    assert "tl::tma_store_cluster" not in src, f"Non-contiguous 2-D slice must NOT emit tl::tma_store_cluster.\nKernel source:\n{src}"
+    # Multi-TMA path must emit M separate tma_store_cluster calls, not SIMT stores.
+    assert "tl::tma_store_cluster" in src, f"Expected tl::tma_store_cluster for multi-TMA row decomposition.\nKernel source:\n{src}"
+    assert "map_shared_rank" not in src, f"Multi-TMA path must NOT fall back to map_shared_rank.\nKernel source:\n{src}"
+    # The barrier must be initialised with arrive_count == M (one per TMA call).
+    assert f"s_barrier[0].init({M})" in src, f"Expected barrier arrive_count={M} for {M}-row decomposition.\nKernel source:\n{src}"
+    # Exactly M tma_store_cluster calls should appear in the source.
+    assert src.count("tl::tma_store_cluster") == M, (
+        f"Expected exactly {M} tma_store_cluster calls, got {src.count('tl::tma_store_cluster')}.\nKernel source:\n{src}"
+    )
 
     A = torch.arange(M * N_tile, dtype=torch.float32, device="cuda").reshape(M, N_tile)
     B = mod(A)
@@ -243,7 +251,89 @@ def test_store_cluster_simt_barrier():
         A.cpu().numpy(),
         rtol=0,
         atol=0,
-        err_msg="SIMT+auto-barrier cluster copy produced wrong result",
+        err_msg="Multi-TMA row-decomposed cluster copy produced wrong result",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3-D multi-TMA: two levels of recursive decomposition
+# ---------------------------------------------------------------------------
+
+
+def make_store_cluster_3d_multi_tma_kernel(D: int, M: int, N_full: int, N_tile: int):
+    """3-D slice copy decomposed into D*M tma_store_cluster calls.
+
+    Buffer shape is [D, M, N_full]; the copy region is [0:D, 0:M, 0:N_tile].
+    Because N_tile < N_full the innermost dim is not full-span.
+    MakeTMARows recurses twice (once on dim 0, once on dim 1) producing D*M
+    contiguous-row TMA calls and sets barrier arrive_count = D*M.
+    """
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((D, M, N_tile), "float32"),
+        B: T.Tensor((D, M, N_tile), "float32"),
+    ):
+        with T.Kernel(2, threads=D * M * N_tile, cluster_dims=(2, 1, 1)) as pid:
+            s_src = T.alloc_shared((D, M, N_full), "float32")
+            s_dst = T.alloc_shared((D, M, N_full), "float32")
+            s_barrier = T.alloc_cluster_barrier([1])
+
+            T.fill(s_src, 0.0)
+            T.fill(s_dst, 0.0)
+            T.cluster_sync()
+
+            if pid == 0:
+                for d, i, j in T.Parallel(D, M, N_tile):
+                    s_src[d, i, j] = A[d, i, j]
+
+                T.copy_cluster(
+                    s_src[0:D, 0:M, 0:N_tile],
+                    s_dst[0:D, 0:M, 0:N_tile],
+                    dst_block=1,
+                    remote_barrier=s_barrier[0],
+                )
+
+            if pid == 1:
+                T.mbarrier_wait_parity(s_barrier[0], 0)
+                for d, i, j in T.Parallel(D, M, N_tile):
+                    B[d, i, j] = s_dst[d, i, j]
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_store_cluster_3d_multi_tma():
+    """3-D multi-TMA: recursive decomposition produces D*M separate TMA calls.
+
+    With D=2 and M=4, the two-level recursion over dims 0 and 1 yields 8
+    contiguous-row tma_store_cluster calls and initialises the barrier with
+    arrive_count=8.
+    """
+    D, M, N_full, N_tile = 2, 4, 32, 16  # D*M*N_tile == 128 == thread count
+
+    prim_func = make_store_cluster_3d_multi_tma_kernel(D, M, N_full, N_tile)
+    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
+
+    src = mod.get_kernel_source()
+    n_expected = D * M
+    assert "tl::tma_store_cluster" in src, f"Expected tl::tma_store_cluster for 3-D multi-TMA.\nKernel source:\n{src}"
+    assert f"s_barrier[0].init({n_expected})" in src, (
+        f"Expected barrier arrive_count={n_expected} for {D}x{M} decomposition.\nKernel source:\n{src}"
+    )
+    assert src.count("tl::tma_store_cluster") == n_expected, (
+        f"Expected exactly {n_expected} tma_store_cluster calls, got {src.count('tl::tma_store_cluster')}.\nKernel source:\n{src}"
+    )
+
+    A = torch.arange(D * M * N_tile, dtype=torch.float32, device="cuda").reshape(D, M, N_tile)
+    B = mod(A)
+    np.testing.assert_allclose(
+        B.cpu().numpy(),
+        A.cpu().numpy(),
+        rtol=0,
+        atol=0,
+        err_msg="3-D multi-TMA cluster copy produced wrong result",
     )
 
 

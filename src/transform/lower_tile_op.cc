@@ -291,6 +291,36 @@ private:
       }
       workspace_stack_.pop_back();
     }
+
+    // Apply any barrier arrive-count overrides registered by LowerClusterCopy
+    // during the multi-TMA decomposition path.  We update the barrier_init
+    // annotation here (before LowerSharedBarrier consumes it) so that the
+    // mbarrier is initialised with arrive_count = N (number of TMA rows).
+    if (!barrier_arrive_updates_.empty() &&
+        block->annotations.count("barrier_init")) {
+      auto barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+          block->annotations.Get("barrier_init").value());
+      bool updated = false;
+      for (auto it = barrier_arrive_updates_.begin();
+           it != barrier_arrive_updates_.end();) {
+        if (barrier_init_map.count(it->first)) {
+          auto old_counts = barrier_init_map.at(it->first);
+          Array<PrimExpr> new_counts;
+          for (size_t i = 0; i < old_counts.size(); i++) {
+            new_counts.push_back(it->second);
+          }
+          barrier_init_map.Set(it->first, new_counts);
+          updated = true;
+          it = barrier_arrive_updates_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      if (updated) {
+        block_ptr->annotations.Set("barrier_init", barrier_init_map);
+      }
+    }
+
     return block;
   }
 
@@ -1029,6 +1059,11 @@ private:
       return id;
     };
 
+    UpdateBarrierArriveCallback barrier_arrive_callback = [this](Var data_var,
+                                                                 PrimExpr n) {
+      barrier_arrive_updates_[data_var] = n;
+    };
+
     // Compute mbarrier expressions from the enclosing loop and pipeline info.
     // pipeline_num_stages: number of pipeline stages (from T.Pipelined
     // annotation) mbar_stage_expr: ko % num_stages (cycles through multiple
@@ -1050,8 +1085,8 @@ private:
 
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  mbarrier_callback, layout_map_, buffer_remap_,
-                  let_var_to_expr,
+                  mbarrier_callback, barrier_arrive_callback, layout_map_,
+                  buffer_remap_, let_var_to_expr,
                   /*in_pipeline=*/pipelined_depth_ > 0, mbar_phase_expr,
                   pipeline_num_stages, mbar_stage_expr},
         analyzer_);
@@ -1350,6 +1385,13 @@ private:
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
   int pipelined_depth_{0};
+  // Pending barrier arrive-count overrides from multi-TMA cluster-copy
+  // decomposition.  Maps barrier buffer data Var → new arrive count N.
+  // Populated by LowerClusterCopy via UpdateBarrierArriveCallback and
+  // consumed (then cleared) in VisitStmt_(BlockNode) before LowerSharedBarrier
+  // processes the barrier_init annotation.
+  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+      barrier_arrive_updates_;
 };
 
 namespace transform {
