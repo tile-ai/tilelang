@@ -3297,25 +3297,32 @@ private:
       }
 
       // Merge movable pre-loop suffix into consumer branch when possible.
+      // Remap threadIdx.x for the new layout where consumer occupies the high
+      // partition [producer_extent, total): threadIdx.x -> threadIdx.x -
+      // producer_extent.
       if (consumer_prefix.defined()) {
+        ICHECK(thread_iv_.defined());
+        Stmt rewritten_consumer_prefix = PCThreadIdxRewriter::Rewrite(
+            consumer_prefix.value(), thread_iv_->var,
+            thread_iv_->var - producer_thread_extent_, consumer_thread_extent_,
+            /*do_shuffle=*/false);
         if (ws_stmt.defined()) {
-          auto merged = TryPrependToConsumerBranch(ws_stmt.value(),
-                                                   consumer_prefix.value());
+          auto merged =
+              TryPrependToConsumerBranch(ws_stmt.value(), rewritten_consumer_prefix);
           if (merged.defined()) {
             ws_stmt = merged.value();
           } else {
-            ICHECK(thread_iv_.defined());
             pre_guard = IfThenElse(GE(thread_iv_->var, producer_thread_extent_),
-                                   consumer_prefix.value());
+                                   rewritten_consumer_prefix);
           }
         } else {
-          ICHECK(thread_iv_.defined());
           pre_guard = IfThenElse(GE(thread_iv_->var, producer_thread_extent_),
-                                 consumer_prefix.value());
+                                 rewritten_consumer_prefix);
         }
       }
 
-      // Keep post-loop statements on consumer threads.
+      // Keep post-loop statements on consumer threads. Remap threadIdx.x as
+      // above since post-loop code runs on the consumer partition.
       if (!post_loop_stmts.empty()) {
         Stmt post_body = post_loop_stmts.size() == 1 ? post_loop_stmts[0]
                                                      : SeqStmt(post_loop_stmts);
@@ -3326,6 +3333,11 @@ private:
           // later consumer-only TMA loop that still uses its original id.
           post_body = RewritePureTmaForwardPairsWithFreshBarriers(post_body);
         }
+        ICHECK(thread_iv_.defined());
+        post_body = PCThreadIdxRewriter::Rewrite(
+            post_body, thread_iv_->var,
+            thread_iv_->var - producer_thread_extent_, consumer_thread_extent_,
+            /*do_shuffle=*/false);
         bool merged = false;
         if (ws_stmt.defined()) {
           auto merged_stmt =
@@ -3336,7 +3348,6 @@ private:
           }
         }
         if (!merged) {
-          ICHECK(thread_iv_.defined());
           post_guard = IfThenElse(GE(thread_iv_->var, producer_thread_extent_),
                                   post_body);
         }

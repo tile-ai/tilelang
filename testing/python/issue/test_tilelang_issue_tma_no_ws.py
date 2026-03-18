@@ -206,7 +206,7 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
     assert "__launch_bounds__(160, 1)" in src
-    assert "if (32 <= ((int)threadIdx.x))" in src
+    assert "if (((int)threadIdx.x) < 128)" in src
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x)
@@ -312,7 +312,7 @@ def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
-    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
+    producer_idx = src.index("if (((int)threadIdx.x) < 128) {")
     consumer_idx = src.index("} else {", producer_idx)
     cp_async_idx = src.index("cp_async_gs<16>")
 
@@ -427,7 +427,7 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     kernel = _compile_tvm_ffi(sparse_tensorcore_metadata_copy, pass_configs, out_idx=[3])
 
     src = kernel.get_kernel_source()
-    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
+    producer_idx = src.index("if (((int)threadIdx.x) < 128) {")
     consumer_idx = src.index("} else {", producer_idx)
     metadata_copy_idx = src.index("*(uchar2*)(E +")
     gemm_idx = src.index("tl::gemm_sp_ss<")
@@ -526,7 +526,7 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
     kernel = _compile_tvm_ffi(sparse_flash_attn, pass_configs, out_idx=[4])
 
     src = kernel.get_kernel_source()
-    producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
+    producer_idx = src.index("if (((int)threadIdx.x) < 128) {")
     consumer_idx = src.index("} else {", producer_idx)
     prelude_src = src[:producer_idx]
     producer_src = src[producer_idx:consumer_idx]
