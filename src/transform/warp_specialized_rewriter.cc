@@ -269,8 +269,7 @@ private:
   std::unordered_set<const BufferNode *> producer_buffers_;
 };
 
-static PrimExpr makeGetBarrier(const Buffer &barrier_buf,
-                               PrimExpr barrier_id) {
+static PrimExpr makeGetBarrier(const Buffer &barrier_buf, PrimExpr barrier_id) {
   return MakeBarrierRef(barrier_buf, std::move(barrier_id));
 }
 
@@ -294,10 +293,9 @@ static Stmt makeCpAsyncBarrierNoInc(const Buffer &barrier_buf,
 
 static Stmt makeParityWait(const Buffer &barrier_buf, PrimExpr barrier_id,
                            PrimExpr parity) {
-  auto call =
-      Call(DataType::Handle(), mbarrier_wait_parity(),
-           {makeGetBarrier(barrier_buf, std::move(barrier_id)),
-            std::move(parity)});
+  auto call = Call(
+      DataType::Handle(), mbarrier_wait_parity(),
+      {makeGetBarrier(barrier_buf, std::move(barrier_id)), std::move(parity)});
   return Evaluate(call);
 }
 
@@ -938,7 +936,8 @@ private:
           PrimExpr parity = map.is_loop_dependency(pattern_idx)
                                 ? bitwise_xor(parity_, 1)
                                 : parity_;
-          block_stmt.push_back(makeParityWait(barrier_buf_.value(), acquire_barrier_id, parity));
+          block_stmt.push_back(
+              makeParityWait(barrier_buf_.value(), acquire_barrier_id, parity));
         }
 
         // It is possible that a producer does not participate in any
@@ -984,8 +983,8 @@ private:
           int pattern_idx = map.release[i][j];
           PrimExpr release_barrier_id =
               stage_ + num_barriers_ + num_stages_ * pattern_idx;
-          auto stmt =
-              MbarrierRewriter::Rewrite(seq_transformed[i], barrier_buf_.value(), release_barrier_id);
+          auto stmt = MbarrierRewriter::Rewrite(
+              seq_transformed[i], barrier_buf_.value(), release_barrier_id);
           collector.Collect(stmt);
           block_stmt.push_back(stmt);
 
@@ -1003,9 +1002,11 @@ private:
               // Use the `.noinc` variant so we don't implicitly update the
               // mbarrier transaction counter, which is managed separately by
               // TMA expect_tx/complete_tx when present.
-              block_stmt.push_back(makeCpAsyncBarrierNoInc(barrier_buf_.value(), release_barrier_id));
+              block_stmt.push_back(makeCpAsyncBarrierNoInc(barrier_buf_.value(),
+                                                           release_barrier_id));
             } else {
-              Stmt arrive = makeArriveBarrier(barrier_buf_.value(), release_barrier_id);
+              Stmt arrive =
+                  makeArriveBarrier(barrier_buf_.value(), release_barrier_id);
               if (!require_full_participation) {
                 // Single-thread producer (e.g. TMA-only): match
                 // mbarrier.init(1) by ensuring only one producer thread arrives
@@ -1039,7 +1040,8 @@ private:
           PrimExpr parity = map.is_loop_dependency(pattern_idx)
                                 ? bitwise_xor(parity_, 1)
                                 : parity_;
-          block_stmt.push_back(makeParityWait(barrier_buf_.value(), acquire_barrier_id, parity));
+          block_stmt.push_back(
+              makeParityWait(barrier_buf_.value(), acquire_barrier_id, parity));
         }
         block_stmt.push_back(seq_transformed[i]);
         for (size_t j = 0; j < map.release[i].size(); j++) {
@@ -1047,7 +1049,8 @@ private:
             int pattern_idx = map.release[i][j];
             PrimExpr release_barrier_id =
                 stage_ + num_barriers_ + num_stages_ * pattern_idx;
-            block_stmt.push_back(makeArriveBarrier(barrier_buf_.value(), release_barrier_id));
+            block_stmt.push_back(
+                makeArriveBarrier(barrier_buf_.value(), release_barrier_id));
             for (int s = 0; s < num_stages_; s++) {
               released_barrier_.insert(s + num_barriers_ +
                                        num_stages_ * pattern_idx);
@@ -1486,8 +1489,7 @@ private:
     if (disable_warp_specialized_) {
       // Create a placeholder barrier buffer; the emitter will populate
       // num_barriers_ while running.
-      Buffer barrier_buf =
-          CreateMBarrierBuffer(injected_mbarrier_name_, 1);
+      Buffer barrier_buf = CreateMBarrierBuffer(injected_mbarrier_name_, 1);
       WSCodeEmitter mbarrier_emitter(true, thread_iv_, buffer_data_to_buffer_,
                                      marker, true, barrier_buf);
       auto code = mbarrier_emitter(block->body);
@@ -1514,8 +1516,7 @@ private:
       return block_realize;
     }
     // Create a placeholder barrier buffer for WS code emission.
-    Buffer barrier_buf =
-        CreateMBarrierBuffer(injected_mbarrier_name_, 1);
+    Buffer barrier_buf = CreateMBarrierBuffer(injected_mbarrier_name_, 1);
     WSCodeEmitter producer(true, thread_iv_, buffer_data_to_buffer_, marker,
                            false, barrier_buf);
     WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker,

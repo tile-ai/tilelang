@@ -238,12 +238,14 @@ public:
     // ptx_init_barrier_thread_count, fence_barrier_init, and storage_sync.
     if (substituter.mbarrier_count_ > 0) {
       ICHECK(substituter.mbarrier_buffer_.defined())
-          << "mbarrier_buffer_ must have been created by AllocMBarrier callback";
+          << "mbarrier_buffer_ must have been created by AllocMBarrier "
+             "callback";
       Buffer mbar_buf = substituter.mbarrier_buffer_.value();
       // Update the buffer shape to the final barrier count
-      mbar_buf = Buffer(mbar_buf->data, mbar_buf->dtype,
-                        {IntImm(DataType::Int(32), substituter.mbarrier_count_)},
-                        {}, PrimExpr(), mbar_buf->name, 0, 0, kDefault);
+      mbar_buf =
+          Buffer(mbar_buf->data, mbar_buf->dtype,
+                 {IntImm(DataType::Int(32), substituter.mbarrier_count_)}, {},
+                 PrimExpr(), mbar_buf->name, 0, 0, kDefault);
 
       Array<PrimExpr> counts;
       counts.reserve(substituter.mbarrier_count_);
@@ -267,9 +269,8 @@ public:
           // Merge barrier_init annotation
           Map<Var, Array<PrimExpr>> barrier_init_map;
           if (block_ptr->annotations.count("barrier_init")) {
-            barrier_init_map =
-                Downcast<Map<Var, Array<PrimExpr>>>(
-                    block_ptr->annotations.at("barrier_init"));
+            barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+                block_ptr->annotations.at("barrier_init"));
           }
           barrier_init_map.Set(barrier_buf->data, arrive_counts);
           block_ptr->annotations.Set("barrier_init", barrier_init_map);
@@ -1063,8 +1064,7 @@ private:
       if (!mbarrier_buffer_.defined()) {
         // Create the barrier buffer on first allocation. The shape will be
         // updated later when the final count is known.
-        mbarrier_buffer_ =
-            CreateMBarrierBuffer(injected_mbarrier_name_, 1);
+        mbarrier_buffer_ = CreateMBarrierBuffer(injected_mbarrier_name_, 1);
       }
       int id = mbarrier_count_++;
       mbarrier_arrive_counts_.push_back(arrive_count);

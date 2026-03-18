@@ -478,9 +478,9 @@ static Stmt makeCpAsyncBarrierNoInc(const Buffer &barrier_buf,
 
 static Stmt makeParityWait(const Buffer &barrier_buf, PrimExpr barrier_id,
                            PrimExpr parity) {
-  auto call = Call(DataType::Handle(), mbarrier_wait_parity(),
-                   {makeGetBarrier(barrier_buf, std::move(barrier_id)),
-                    std::move(parity)});
+  auto call = Call(
+      DataType::Handle(), mbarrier_wait_parity(),
+      {makeGetBarrier(barrier_buf, std::move(barrier_id)), std::move(parity)});
   return Evaluate(call);
 }
 
@@ -1443,7 +1443,8 @@ private:
       if (is_first_in_group) {
         producer_body_stmts.push_back(WrapStmtWithGuardSource(
             protocol_guard_sources[ti], protocol_guards[ti],
-            makeParityWait(barrier_buf_, bp_id, bitwise_xor(producer_parity_expr, 1))));
+            makeParityWait(barrier_buf_, bp_id,
+                           bitwise_xor(producer_parity_expr, 1))));
         for (const auto &stmt : producer_loop_prefix_stmts[ti]) {
           producer_body_stmts.push_back(stmt);
         }
@@ -1685,8 +1686,8 @@ private:
     // Reconstruct block body: replace the pipeline loop with ws_body
     // and remove old barrier_init annotations / shared.barrier buffers.
     Stmt new_block_body = RebuildBlockBody(
-        orig_block->body, pipeline_loop, ws_body,
-        buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
+        orig_block->body, pipeline_loop, ws_body, buffer_data_to_buffer,
+        producer_live_seed, consumer_live_seed);
 
     // Update thread extent
     num_threads_ = consumer_thread_extent + producer_thread_extent;
@@ -1912,8 +1913,7 @@ private:
       }
 
       void VisitExpr_(const BufferLoadNode *op) final {
-        if (op->buffer.scope() == "shared.barrier" &&
-            op->indices.size() == 1) {
+        if (op->buffer.scope() == "shared.barrier" && op->indices.size() == 1) {
           auto bound = analyzer_.const_int_bound(op->indices[0]);
           if (bound->max_value != arith::ConstIntBound::kPosInf &&
               bound->max_value != arith::ConstIntBound::kNegInf) {
@@ -2343,8 +2343,7 @@ private:
       }
       // Check for BufferLoad on shared.barrier scope buffer
       if (auto *bl = call->args[0].as<BufferLoadNode>()) {
-        if (bl->buffer.scope() == "shared.barrier" &&
-            bl->indices.size() == 1) {
+        if (bl->buffer.scope() == "shared.barrier" && bl->indices.size() == 1) {
           return bl->indices[0];
         }
       }
@@ -2725,9 +2724,8 @@ private:
       Optional<PrimExpr> parity_;
     };
 
-    return MergeAdjacentEquivalentIfs(
-        WaitBarrierRewriter(barrier_buf_, new_barrier_id,
-                            std::move(new_parity))(wait_stmt));
+    return MergeAdjacentEquivalentIfs(WaitBarrierRewriter(
+        barrier_buf_, new_barrier_id, std::move(new_parity))(wait_stmt));
   }
 
   Stmt RewriteTmaStmtBarrierIdPreserveProtocol(const Stmt &stmt,
@@ -2745,9 +2743,10 @@ private:
         if ((call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
              call->op.same_as(mbarrier_expect_tx())) &&
             call->args.size() == 2) {
-          return Call(call->dtype, call->op,
-                      {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
-                      call->annotations, call->span);
+          return Call(
+              call->dtype, call->op,
+              {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
+              call->annotations, call->span);
         }
         if (call->op.same_as(tma_load()) ||
             call->op.same_as(tma_load_im2col())) {
@@ -2866,9 +2865,10 @@ private:
         if ((call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
              call->op.same_as(mbarrier_expect_tx())) &&
             call->args.size() == 2) {
-          return Call(call->dtype, mbarrier_expect_tx(),
-                      {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
-                      call->annotations, call->span);
+          return Call(
+              call->dtype, mbarrier_expect_tx(),
+              {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
+              call->annotations, call->span);
         }
         if (call->op.same_as(tma_load()) ||
             call->op.same_as(tma_load_im2col())) {
@@ -3053,9 +3053,9 @@ private:
       for (const auto &s : seq->seq) {
         if (!found_loop && ContainsLoop(s, target_loop)) {
           // Replace the pipeline loop
-          rebuilt_loop = RebuildBlockBody(
-              s, target_loop, ws_body, buffer_data_to_buffer,
-              producer_live_seed, consumer_live_seed);
+          rebuilt_loop =
+              RebuildBlockBody(s, target_loop, ws_body, buffer_data_to_buffer,
+                               producer_live_seed, consumer_live_seed);
           found_loop = true;
         } else if (found_loop) {
           // Collect statements after the pipeline loop
@@ -3365,16 +3365,16 @@ private:
     if (auto *attr = body.as<AttrStmtNode>()) {
       if (ContainsLoop(attr->body, target_loop)) {
         Stmt new_body = RebuildBlockBody(
-            attr->body, target_loop, ws_body,
-            buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
+            attr->body, target_loop, ws_body, buffer_data_to_buffer,
+            producer_live_seed, consumer_live_seed);
         return AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
       }
     }
     if (auto *let_s = body.as<LetStmtNode>()) {
       if (ContainsLoop(let_s->body, target_loop)) {
         Stmt new_body = RebuildBlockBody(
-            let_s->body, target_loop, ws_body,
-            buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
+            let_s->body, target_loop, ws_body, buffer_data_to_buffer,
+            producer_live_seed, consumer_live_seed);
         return LetStmt(let_s->var, let_s->value, new_body);
       }
     }
@@ -3411,7 +3411,7 @@ private:
   PrimExpr
       consumer_thread_extent_; // Original thread extent (consumer warp count)
   PrimExpr producer_thread_extent_ = IntImm(DataType::Int(32), 128);
-  Buffer barrier_buf_;          // shared.barrier scope buffer for mbarriers
+  Buffer barrier_buf_; // shared.barrier scope buffer for mbarriers
   Optional<PrimExpr> num_threads_;
   bool ws_transformed_ = false;
   bool use_full_tma_forward_barrier_protocol_ = false;

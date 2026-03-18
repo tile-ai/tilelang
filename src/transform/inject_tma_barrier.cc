@@ -107,7 +107,8 @@ public:
     // Find the shared.barrier scope buffer from the IR
     Optional<Buffer> barrier_buf;
     PostOrderVisit(f->body, [&](const ObjectRef &node) {
-      if (barrier_buf.defined()) return;
+      if (barrier_buf.defined())
+        return;
       if (const auto *block = node.as<BlockNode>()) {
         for (const auto &buf : block->alloc_buffers) {
           if (buf.scope() == "shared.barrier") {
@@ -142,8 +143,7 @@ private:
   }
 
   TmaExpectTxRewriter(arith::Analyzer *analyzer, Optional<Buffer> barrier_buf)
-      : IRMutatorWithAnalyzer(analyzer),
-        barrier_buf_(std::move(barrier_buf)) {}
+      : IRMutatorWithAnalyzer(analyzer), barrier_buf_(std::move(barrier_buf)) {}
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
 
@@ -488,10 +488,9 @@ public:
       return StmtExprMutator::VisitStmt_(op);
     }
 
-    auto barrier_init_map =
-        op->annotations.Get("barrier_init")
-            ->as<Map<Var, Array<PrimExpr>>>()
-            .value();
+    auto barrier_init_map = op->annotations.Get("barrier_init")
+                                ->as<Map<Var, Array<PrimExpr>>>()
+                                .value();
 
     bool changed = false;
     Map<Var, Array<PrimExpr>> new_barrier_init_map;
@@ -576,8 +575,7 @@ public:
                 Array<PrimExpr> extended_counts = counts;
                 for (size_t i = counts.size();
                      i < static_cast<size_t>(ensure_min_count_); ++i) {
-                  auto tc_it =
-                      barrier_thread_counts_.find(static_cast<int>(i));
+                  auto tc_it = barrier_thread_counts_.find(static_cast<int>(i));
                   if (tc_it != barrier_thread_counts_.end()) {
                     extended_counts.push_back(Integer(tc_it->second));
                   } else {
@@ -615,8 +613,7 @@ public:
   TmaBarrierRewriter(arith::Analyzer *analyzer,
                      Map<ObjectRef, PrimExpr> tma_op_to_barrier_id,
                      Map<PrimExpr, IntImm> barrier_id_to_range,
-                     bool has_barrier_alloc,
-                     Optional<Buffer> barrier_buf)
+                     bool has_barrier_alloc, Optional<Buffer> barrier_buf)
       : IRMutatorWithAnalyzer(analyzer),
         tma_op_to_barrier_id_(std::move(tma_op_to_barrier_id)),
         barrier_id_to_range_(std::move(barrier_id_to_range)),
@@ -660,8 +657,7 @@ public:
     struct GetMbarrierMaxIdxCollector : public StmtExprVisitor {
       int max_idx{-1};
       void VisitExpr_(const BufferLoadNode *op) final {
-        if (op->buffer.scope() == "shared.barrier" &&
-            op->indices.size() == 1) {
+        if (op->buffer.scope() == "shared.barrier" && op->indices.size() == 1) {
           if (const auto *imm = op->indices[0].as<IntImmNode>()) {
             max_idx = std::max(max_idx, static_cast<int>(imm->value));
           }

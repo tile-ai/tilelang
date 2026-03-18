@@ -264,7 +264,6 @@ def create_tma_descriptor(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.create_tma_descriptor"), *args)
 
 
-
 def tma_load(*args):
     """Perform a Tensor Memory Access (TMA) load operation.
 
