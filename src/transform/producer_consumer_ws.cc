@@ -1602,19 +1602,19 @@ private:
       consumer_loop = consumer_phase_counter->WrapLoopWithAlloc(consumer_loop);
     }
 
-    // Rewrite threadIdx.x in producer: threadIdx.x -> threadIdx.x -
-    // consumer_threads Also converts `if (threadIdx.x == 0)` to `if
-    // (tl_shuffle_elect(extent))`
+    // Rewrite threadIdx.x: producer keeps original IDs [0, producer_extent),
+    // consumer remaps threadIdx.x -> threadIdx.x - producer_extent.
+    // Also converts `if (threadIdx.x == 0)` to `if (tl_shuffle_elect(extent))`
     producer_loop = PCThreadIdxRewriter::Rewrite(
-        producer_loop, thread_iv_->var,
-        thread_iv_->var - consumer_thread_extent, producer_thread_extent,
+        producer_loop, thread_iv_->var, thread_iv_->var, producer_thread_extent,
         /*do_shuffle=*/true);
     consumer_loop = PCThreadIdxRewriter::Rewrite(
-        consumer_loop, thread_iv_->var, thread_iv_->var, consumer_thread_extent,
+        consumer_loop, thread_iv_->var,
+        thread_iv_->var - producer_thread_extent, consumer_thread_extent,
         /*do_shuffle=*/true);
 
-    // Wrap in IfThenElse: producer if threadIdx.x >= consumer_threads
-    Stmt ws_body = IfThenElse(GE(thread_iv_->var, consumer_thread_extent),
+    // Wrap in IfThenElse: producer if threadIdx.x < producer_threads
+    Stmt ws_body = IfThenElse(LT(thread_iv_->var, producer_thread_extent),
                               producer_loop, consumer_loop);
 
     // Add warp specialization scope attribute
@@ -3241,8 +3241,8 @@ private:
       if (producer_prefix.defined()) {
         ICHECK(thread_iv_.defined());
         Stmt rewritten = PCThreadIdxRewriter::Rewrite(
-            producer_prefix.value(), thread_iv_->var,
-            thread_iv_->var - consumer_thread_extent_, producer_thread_extent_,
+            producer_prefix.value(), thread_iv_->var, thread_iv_->var,
+            producer_thread_extent_,
             /*do_shuffle=*/true);
         if (ws_stmt.defined()) {
           auto merged = TryPrependToProducerBranch(ws_stmt.value(), rewritten);
@@ -3250,11 +3250,11 @@ private:
             ws_stmt = merged.value();
           } else {
             producer_guard = IfThenElse(
-                GE(thread_iv_->var, consumer_thread_extent_), rewritten);
+                LT(thread_iv_->var, producer_thread_extent_), rewritten);
           }
         } else {
           producer_guard = IfThenElse(
-              GE(thread_iv_->var, consumer_thread_extent_), rewritten);
+              LT(thread_iv_->var, producer_thread_extent_), rewritten);
         }
       }
 
@@ -3267,12 +3267,12 @@ private:
             ws_stmt = merged.value();
           } else {
             ICHECK(thread_iv_.defined());
-            pre_guard = IfThenElse(LT(thread_iv_->var, consumer_thread_extent_),
+            pre_guard = IfThenElse(GE(thread_iv_->var, producer_thread_extent_),
                                    consumer_prefix.value());
           }
         } else {
           ICHECK(thread_iv_.defined());
-          pre_guard = IfThenElse(LT(thread_iv_->var, consumer_thread_extent_),
+          pre_guard = IfThenElse(GE(thread_iv_->var, producer_thread_extent_),
                                  consumer_prefix.value());
         }
       }
@@ -3299,7 +3299,7 @@ private:
         }
         if (!merged) {
           ICHECK(thread_iv_.defined());
-          post_guard = IfThenElse(LT(thread_iv_->var, consumer_thread_extent_),
+          post_guard = IfThenElse(GE(thread_iv_->var, producer_thread_extent_),
                                   post_body);
         }
       }

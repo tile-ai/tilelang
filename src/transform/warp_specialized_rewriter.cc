@@ -1504,11 +1504,11 @@ private:
     updated_thread_extent_ = consumer_thread_extent + producer_thread_extent;
 
     producer_code = ThreadIdxRewriter::Rewrite(
-        producer_code, thread_iv_->var,
-        thread_iv_->var - consumer_thread_extent, producer_thread_extent,
+        producer_code, thread_iv_->var, thread_iv_->var, producer_thread_extent,
         !disable_shuffle_elect_);
     consumer_code = ThreadIdxRewriter::Rewrite(
-        consumer_code, thread_iv_->var, thread_iv_->var, consumer_thread_extent,
+        consumer_code, thread_iv_->var,
+        thread_iv_->var - producer_thread_extent, consumer_thread_extent,
         !disable_shuffle_elect_);
     need_update_thread_extent_ = true;
 
@@ -1529,7 +1529,7 @@ private:
 
     Stmt init_barrier = Evaluate(Call(
         DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
-    Stmt body = IfThenElse(GE(thread_iv_->var, consumer_thread_extent),
+    Stmt body = IfThenElse(LT(thread_iv_->var, producer_thread_extent),
                            producer_code, consumer_code);
     // Add an attr here to handle the partial thread count in ThreadSync pass.
     Array<IntImm> ws_partition = {Downcast<IntImm>(producer_thread_extent),
