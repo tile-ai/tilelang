@@ -5,11 +5,13 @@
 
 #include "reduce.h"
 
+#include <tvm/ir/transform.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/stmt_functor.h>
 
+#include "builtin.h"
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/parallel.h"
@@ -129,16 +131,22 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc,
 }
 
 std::string ReduceOpNode::MakeCodegenReducer() const {
+  bool nan_propagate = true;
+  if (tvm::transform::PassContext::Current().defined()) {
+    nan_propagate = tvm::transform::PassContext::Current()
+                        ->GetConfig<Bool>(kReduceMaxMinNanPropagate, Bool(true))
+                        .value();
+  }
   if (type->isSum()) {
     return "tl::SumOp";
   } else if (type->isAbsSum()) {
     return "tl::SumOp";
   } else if (type->isMax()) {
-    return "tl::MaxOp";
+    return nan_propagate ? "tl::MaxOp" : "tl::MaxOpNan";
   } else if (type->isMin()) {
-    return "tl::MinOp";
+    return nan_propagate ? "tl::MinOp" : "tl::MinOpNan";
   } else if (type->isAbsMax()) {
-    return "tl::MaxOp";
+    return nan_propagate ? "tl::MaxOp" : "tl::MaxOpNan";
   } else if (type->isBitAnd()) {
     return "tl::BitAndOp";
   } else if (type->isBitOr()) {
