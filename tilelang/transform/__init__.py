@@ -236,17 +236,6 @@ def MultiVersionBuffer():
     return _ffi_api.MultiVersionBuffer()  # type: ignore
 
 
-def WarpSpecialized():
-    """WarpSpecializedPipeline
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.WarpSpecialized()  # type: ignore
-
-
 def ProducerConsumerWarpSpecialized():
     """Producer-Consumer Warp Specialization for TMA pipelines.
 
@@ -274,17 +263,6 @@ def AnnotateWarpGroupRegAlloc():
         The result pass
     """
     return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
-
-
-def InjectTmaBarrier():
-    """InjectTmaBarrier
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.InjectTmaBarrier()  # type: ignore
 
 
 def FuseMBarrierArriveExpectTx():

@@ -221,8 +221,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
     # which may be introduced by the LegalizeSafeMemoryAccess
-    # Note: The WarpSpecialized + InjectTmaBarrier pipeline is required for correct TMA lowering
-    # (mbarrier allocation/init + expect_tx injection) even when warp specialization is disabled.
     if allow_tma_lower(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
         # MultiVersionBuffer before LowerSharedBarrier so barrier buffers
