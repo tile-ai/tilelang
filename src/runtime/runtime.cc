@@ -146,6 +146,11 @@ static uint64_t TensorMapDataTypeBits(CUtensorMapDataType type) {
   case CU_TENSOR_MAP_DATA_TYPE_INT64:
   case CU_TENSOR_MAP_DATA_TYPE_FLOAT64:
     return 64;
+  case CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B:
+  case CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B:
+    return 4;
+  case CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B:
+    return 6;
   default:
     return 0;
   }

@@ -345,6 +345,105 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
 
+  int src_bits = src->dtype.bits();
+  bool is_sub_byte = (!is_scalar && src_bits < 8 &&
+                      src->dtype == dst->dtype &&
+                      src->dtype.lanes() == 1);
+
+  if (is_sub_byte) {
+    int pack_ratio = 8 / src_bits;
+    DataType byte_dtype = DataType::UInt(8);
+
+    auto make_byte_buf = [&](const Buffer &buf) {
+      Array<PrimExpr> new_shape;
+      for (size_t i = 0; i + 1 < buf->shape.size(); i++)
+        new_shape.push_back(buf->shape[i]);
+      new_shape.push_back(FloorDiv(buf->shape.back(), pack_ratio));
+      return Buffer(buf->data, byte_dtype, new_shape, {},
+                    buf->elem_offset, buf->name, buf->data_alignment,
+                    buf->offset_factor, buf->buffer_type);
+    };
+    Buffer byte_src = make_byte_buf(src);
+    Buffer byte_dst = make_byte_buf(dst);
+
+    auto adjust_ranges = [&](const Array<Range> &ranges) {
+      Array<Range> result;
+      for (size_t i = 0; i + 1 < ranges.size(); i++)
+        result.push_back(ranges[i]);
+      Range last = ranges.back();
+      result.push_back(
+          Range(FloorDiv(last->min, pack_ratio),
+                FloorDiv(last->extent, pack_ratio)));
+      return result;
+    };
+    Array<Range> byte_src_range = adjust_ranges(src_range);
+    Array<Range> byte_dst_range = adjust_ranges(dst_range);
+
+    auto scope_level = [](const Buffer &b) -> int {
+      String s = b.scope();
+      if (s == "local.fragment" || s == "local") return 2;
+      if (s == "shared" || s == "shared.dyn" || s == "shared.tmem") return 1;
+      return 0;
+    };
+    bool base_is_src = (scope_level(src) >= scope_level(dst));
+    const Array<Range> &base_ranges =
+        base_is_src ? byte_src_range : byte_dst_range;
+
+    Array<IterVar> byte_loop_vars;
+    size_t idx = 0;
+    for (size_t i = 0; i < base_ranges.size(); i++) {
+      if (is_one(base_ranges[i]->extent)) continue;
+      Var var = Var(std::string{char('i' + idx)},
+                    base_ranges[i]->extent->dtype);
+      idx++;
+      byte_loop_vars.push_back(
+          {Range(0, base_ranges[i]->extent), var, IterVarType::kDataPar});
+    }
+
+    for (const auto &iv : byte_loop_vars)
+      analyzer->Bind(iv->var, iv->dom);
+
+    auto make_indices = [](const Array<IterVar> &ivs,
+                           const Array<Range> &ranges) {
+      Array<PrimExpr> indices;
+      size_t iv_idx = 0;
+      for (size_t i = 0; i < ranges.size(); i++) {
+        if (is_one(ranges[i]->extent))
+          indices.push_back(ranges[i]->min);
+        else {
+          indices.push_back(ranges[i]->min + ivs[iv_idx]->var);
+          iv_idx++;
+        }
+      }
+      return indices;
+    };
+    Array<PrimExpr> byte_src_indices =
+        make_indices(byte_loop_vars, byte_src_range);
+    Array<PrimExpr> byte_dst_indices =
+        make_indices(byte_loop_vars, byte_dst_range);
+
+    PrimExpr value = BufferLoad(byte_src, byte_src_indices);
+    Stmt body = BufferStore(byte_dst, value, byte_dst_indices);
+
+    for (int i = byte_loop_vars.size() - 1; i >= 0; i--) {
+      Map<String, ObjectRef> loop_annotations;
+      if (i == 0) {
+        if (annotations.count(attr::kCoalescedWidth))
+          loop_annotations.Set(
+              attr::kCoalescedWidth,
+              annotations.Get(attr::kCoalescedWidth).value());
+        if (annotations.count(attr::kParallelLoopLayout))
+          loop_annotations.Set(
+              attr::kParallelLoopLayout,
+              annotations.Get(attr::kParallelLoopLayout).value());
+      }
+      body = For(byte_loop_vars[i]->var, 0,
+                 byte_loop_vars[i]->dom->extent, ForKind::kParallel,
+                 body, std::nullopt, loop_annotations);
+    }
+    return Downcast<For>(body);
+  }
+
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
   ICHECK(loop_vars.size() <= src_range.size())
@@ -635,15 +734,22 @@ bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
   // last dim of src * dtype.bits() must be a multiple of 16
   // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
   // now we check src (gmem) as tma box dim is deduced from src
+  // For sub-byte types (e.g., FP4, 4 bits), use bits-based byte calculation
+  // so the alignment check reflects the packed memory layout.
+  int src_elem_byte_num = src->dtype.bytes();
+  int src_elem_bit_width = src->dtype.bits();
+  PrimExpr last_extent = src_range[src_range.size() - 1]->extent;
+  PrimExpr last_dim_bytes = (src_elem_bit_width < 8)
+      ? floordiv(last_extent * src_elem_bit_width, 8)
+      : last_extent * src_elem_byte_num;
   if (check_last_dim &&
-      analyzer->CanProve(
-          FloorMod(src_range[src_range.size() - 1]->extent * src->dtype.bytes(),
-                   16) != 0,
-          arith::ProofStrength::kSymbolicBound)) {
+      analyzer->CanProve(FloorMod(last_dim_bytes, 16) != 0,
+                         arith::ProofStrength::kSymbolicBound)) {
     LOG(WARNING)
-        << "src range must have last dim multiple of 16 for tma bulk load "
-        << src->name << " range " << src_range[src_range.size() - 1]->extent
-        << " * " << src->dtype.bytes() << " % 16 != 0";
+        << "src range must have last dim multiple of 16 bytes for tma bulk "
+           "load "
+        << src->name << " range " << last_extent << " * "
+        << src_elem_bit_width << " bits / 8 % 16 != 0";
     return false;
   }
 
@@ -747,16 +853,23 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
   // last dim of dst * dtype.bits() must be a multiple of 16
   // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
   // now we check dst (gmem) as tma box dim is deduced from dst
-  if (check_last_dim &&
-      analyzer->CanProve(
-          FloorMod(dst_range[dst_range.size() - 1]->extent * dst->dtype.bytes(),
-                   16) != 0,
-          arith::ProofStrength::kSymbolicBound)) {
-    LOG(WARNING)
-        << "dst range must have last dim multiple of 16 for tma bulk store "
-        << dst->name << " range " << dst_range[dst_range.size() - 1]->extent
-        << " * " << dst->dtype.bytes() << " % 16 != 0";
-    return false;
+  {
+    int dst_elem_bit_width = dst->dtype.bits();
+    int dst_elem_byte_num = dst->dtype.bytes();
+    PrimExpr dst_last_extent = dst_range[dst_range.size() - 1]->extent;
+    PrimExpr dst_last_bytes = (dst_elem_bit_width < 8)
+        ? floordiv(dst_last_extent * dst_elem_bit_width, 8)
+        : dst_last_extent * dst_elem_byte_num;
+    if (check_last_dim &&
+        analyzer->CanProve(FloorMod(dst_last_bytes, 16) != 0,
+                           arith::ProofStrength::kSymbolicBound)) {
+      LOG(WARNING)
+          << "dst range must have last dim multiple of 16 bytes for tma bulk "
+             "store "
+          << dst->name << " range " << dst_last_extent << " * "
+          << dst_elem_bit_width << " bits / 8 % 16 != 0";
+      return false;
+    }
   }
   // 4. src and dst must have the same dtype
   if (src->dtype != dst->dtype) {
@@ -945,6 +1058,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
   }
+  return Stmt();  // unreachable
 }
 
 // Lowers copy to cp.async global->shared transfers.
@@ -1532,10 +1646,25 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   }
   // The first stride element should be 1
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
-  // Make global stride in bytes
+  // Make global stride in bytes.
+  // Sub-byte types (e.g., FP4 with bits=4, bytes=1): dtype.bytes() over-counts
+  // because sizeof(fp4_e2_t)==1 but packed storage is 0.5 bytes/element.
+  // After the Map (which uses dtype.bytes()), we correct strides[i>0] by
+  // dividing by the packing ratio so cuTensorMapEncodeTiled sees real byte
+  // strides for the packed layout.
+  int sub_byte_pack_ratio = 1;
+  if (global_tensor->dtype.bits() < 8) {
+    sub_byte_pack_ratio = 8 / global_tensor->dtype.bits();
+  }
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
     return cast(DataType::Int(64), e) * global_tensor->dtype.bytes();
   });
+  if (sub_byte_pack_ratio > 1) {
+    for (size_t i = 1; i < desc.global_stride.size(); i++) {
+      desc.global_stride.Set(
+          i, floordiv(cast(DataType::Int(64), desc.global_stride[i]), sub_byte_pack_ratio));
+    }
+  }
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
     auto stride = desc.global_stride[i].as<IntImmNode>();
     if (stride != nullptr) {
@@ -1646,14 +1775,26 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     return LowerNormalCopy(T, analyzer);
   }
   int instruction_dim = *inner_box_dim;
-  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-    instruction_dim = 64 / src->dtype.bytes();
-  } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-    instruction_dim = 128 / src->dtype.bytes();
+  // For sub-byte types (e.g., FP4), element_size_bytes is the packed size
+  // per element (bits/8). Since bits/8 < 1, we compute the swizzle-based
+  // instruction_dim as swizzle_bytes * 8 / bits to get element count.
+  int elem_bits = src->dtype.bits();
+  int elem_bytes_for_swizzle = src->dtype.bytes();  // >= 1
+  if (elem_bits < 8) {
+    // e.g., FP4: 64B swizzle → 64*8/4 = 128 elements, 128B → 256 elements
+    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+      instruction_dim = 64 * 8 / elem_bits;
+    } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
+      instruction_dim = 128 * 8 / elem_bits;
+    }
+  } else {
+    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+      instruction_dim = 64 / elem_bytes_for_swizzle;
+    } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
+      instruction_dim = 128 / elem_bytes_for_swizzle;
+    }
   }
   if (instruction_dim > 256) {
-    // smem_box dim must be in [0, 256]
-    // if is 512, we need to split the copy into two parts
     ICHECK((*inner_box_dim) % 256 == 0)
         << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
     instruction_dim = 256;
@@ -1663,7 +1804,10 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       << " is not divisible by instruction_dim: " << instruction_dim;
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
-  int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
+  // inner_box_dim_ in bytes: for sub-byte types use packed size
+  int inner_box_dim_ = (elem_bits < 8)
+      ? instruction_dim * elem_bits / 8
+      : instruction_dim * shared_tensor->dtype.bytes();
 
   // Check inner_box_dim_ for each swizzle type in a cleaner way
   struct SwizzleCheck {

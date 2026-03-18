@@ -3388,17 +3388,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
         scope == "shared") {
       constant_size = constant_size / (32 / op->dtype.bits());
     }
-    // SM100 (TCGEN05MMA): pack FP4 in shared memory (2 elements per byte).
-    // fp4_e2_t has sizeof=1 but logical width=4 bits, so N elements need N/2 bytes.
-    // SM120 keeps unpacked 1-byte-per-element layout for the ldmatrix path.
-    if (op->dtype.is_float4_e2m1fn() && scope == "shared") {
-      Target cur_target = Target::Current(/*allow_not_defined=*/true);
-      if (cur_target.defined() &&
-          tl::TargetHasSMVersionGE(cur_target, 100) &&
-          !tl::TargetHasSMVersionGE(cur_target, 120)) {
-        constant_size = constant_size / 2;
-      }
-    }
+    // SM100 (TCGEN05MMA): FP4 shared memory keeps full allocation (N elements
+    // of fp4_e2_t = N bytes). The addressing uses div_factor=2 in GetBufferRef
+    // so only the first N/2 bytes hold valid packed data. We do NOT halve the
+    // allocation here because cp.async with div_factor=2 produces overlapping
+    // 2x-wide writes that spill vec_size/2 bytes past the packed range; the
+    // full allocation absorbs this safely.
+    // When TMA is used instead, TMA copies exactly N/2 packed bytes and the
+    // extra space is simply unused.
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {

@@ -157,6 +157,8 @@ int to_CUtensorMapDataType(DataType dtype) {
     tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   } else if (dtype.is_float8()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+  } else if (dtype.is_float4_e2m1fn()) {
+    tp = CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B;
   } else if (dtype.is_int()) {
     switch (dtype.bits()) {
     case 64:
