@@ -3307,8 +3307,8 @@ private:
             thread_iv_->var - producer_thread_extent_, consumer_thread_extent_,
             /*do_shuffle=*/false);
         if (ws_stmt.defined()) {
-          auto merged =
-              TryPrependToConsumerBranch(ws_stmt.value(), rewritten_consumer_prefix);
+          auto merged = TryPrependToConsumerBranch(ws_stmt.value(),
+                                                   rewritten_consumer_prefix);
           if (merged.defined()) {
             ws_stmt = merged.value();
           } else {
