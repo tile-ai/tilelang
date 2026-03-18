@@ -1710,7 +1710,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       }
       PrimExpr mbar_idx =
           IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-      mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+      mbar_handle = BufferLoad(T.mbarrier_buffer.value(), {mbar_idx});
     }
   }
 
@@ -1915,7 +1915,7 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
       }
       PrimExpr mbar_idx =
           IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-      mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+      mbar_handle = BufferLoad(T.mbarrier_buffer.value(), {mbar_idx});
     }
   }
 
@@ -2157,7 +2157,7 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
     }
     PrimExpr mbar_idx =
         IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-    mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+    mbar_handle = BufferLoad(T.mbarrier_buffer.value(), {mbar_idx});
   }
 
   Array<PrimExpr> args;

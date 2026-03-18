@@ -21,6 +21,7 @@
  */
 
 #include "../op/utils.h"
+#include "common/mbarrier.h"
 #include "common/tma_copy_utils.h"
 #include "warp_specialized_rewriter.h"
 
@@ -458,25 +459,28 @@ private:
 // Helpers (reused from warp_specialized_rewriter.cc patterns)
 // ---------------------------------------------------------------------------
 
-static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
-  return Call(DataType::Handle(), get_mbarrier(), {std::move(barrier_id)});
+static PrimExpr makeGetBarrier(const Buffer &barrier_buf, PrimExpr barrier_id) {
+  return MakeBarrierRef(barrier_buf, std::move(barrier_id));
 }
 
-static Stmt makeArriveBarrier(PrimExpr barrier_id) {
-  Array<PrimExpr> args = {makeGetBarrier(std::move(barrier_id))};
+static Stmt makeArriveBarrier(const Buffer &barrier_buf, PrimExpr barrier_id) {
+  Array<PrimExpr> args = {makeGetBarrier(barrier_buf, std::move(barrier_id))};
   return Evaluate(
       Call(DataType::Handle(), builtin::ptx_arrive_barrier(), args));
 }
 
-static Stmt makeCpAsyncBarrierNoInc(PrimExpr barrier_id) {
+static Stmt makeCpAsyncBarrierNoInc(const Buffer &barrier_buf,
+                                    PrimExpr barrier_id) {
   auto call = Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
-                   {makeGetBarrier(std::move(barrier_id))});
+                   {makeGetBarrier(barrier_buf, std::move(barrier_id))});
   return Evaluate(call);
 }
 
-static Stmt makeParityWait(PrimExpr barrier_id, PrimExpr parity) {
+static Stmt makeParityWait(const Buffer &barrier_buf, PrimExpr barrier_id,
+                           PrimExpr parity) {
   auto call = Call(DataType::Handle(), mbarrier_wait_parity(),
-                   {makeGetBarrier(std::move(barrier_id)), std::move(parity)});
+                   {makeGetBarrier(barrier_buf, std::move(barrier_id)),
+                    std::move(parity)});
   return Evaluate(call);
 }
 
@@ -814,13 +818,15 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// MbarrierInitRemover: removes all create_list_of_mbarrier calls from a stmt
+// MbarrierInitRemover: removes barrier_init annotations and shared.barrier
+// buffers from blocks outside the transformed block.
 // ---------------------------------------------------------------------------
 
 /*!
- * \brief Post-transform cleanup: remove any create_list_of_mbarrier calls
- *        that remain outside the transformed block (e.g., at the function
- *        body level where lower_tile_op.cc originally placed them).
+ * \brief Post-transform cleanup: remove barrier_init annotations and
+ *        shared.barrier alloc_buffers that remain outside the transformed
+ *        block (e.g., at the function body level where lower_tile_op.cc
+ *        originally placed them).
  *        The new init is already emitted inside the block by the rewriter.
  */
 class MbarrierInitRemover : public StmtExprMutator {
@@ -831,47 +837,52 @@ public:
   }
 
 private:
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> new_seq;
-    bool changed = false;
-    for (const auto &s : op->seq) {
-      if (IsCreateListOfMbarrier(s)) {
-        changed = true;
-        continue; // drop this statement
+  Stmt VisitStmt_(const BlockNode *op) final {
+    // Remove barrier_init annotation and shared.barrier buffers from
+    // blocks outside the transformed region.
+    bool has_barrier_init = op->annotations.count("barrier_init");
+    bool has_barrier_bufs = false;
+    for (const auto &buf : op->alloc_buffers) {
+      if (buf.scope() == "shared.barrier") {
+        has_barrier_bufs = true;
+        break;
       }
-      Stmt visited = VisitStmt(s);
-      new_seq.push_back(visited);
-      if (!visited.same_as(s))
-        changed = true;
     }
-    if (!changed)
-      return GetRef<Stmt>(op);
-    if (new_seq.size() == 1)
-      return new_seq[0];
-    return SeqStmt(new_seq);
-  }
 
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (IsCreateListOfMbarrier(GetRef<Stmt>(op))) {
-      // Return a no-op (should be caught by SeqStmt visitor above,
-      // but handle standalone case too)
-      return Evaluate(0);
+    if (!has_barrier_init && !has_barrier_bufs) {
+      return StmtExprMutator::VisitStmt_(op);
     }
-    return GetRef<Stmt>(op);
+
+    Block block = GetRef<Block>(op);
+    auto block_ptr = block.CopyOnWrite();
+
+    if (has_barrier_init) {
+      Map<String, Any> new_annos;
+      for (const auto &[key, value] : block_ptr->annotations) {
+        if (key != "barrier_init") {
+          new_annos.Set(key, value);
+        }
+      }
+      block_ptr->annotations = new_annos;
+    }
+
+    if (has_barrier_bufs) {
+      Array<Buffer> new_alloc_buffers;
+      for (const auto &buf : block_ptr->alloc_buffers) {
+        if (buf.scope() != "shared.barrier") {
+          new_alloc_buffers.push_back(buf);
+        }
+      }
+      block_ptr->alloc_buffers = new_alloc_buffers;
+    }
+
+    block_ptr->body = VisitStmt(block_ptr->body);
+    return block;
   }
 
   // Stop recursion at BlockRealize — the new init is inside the block
   // and we don't want to remove it.
   Stmt VisitStmt_(const BlockRealizeNode *op) final { return GetRef<Stmt>(op); }
-
-  static bool IsCreateListOfMbarrier(const Stmt &stmt) {
-    if (auto *eval = stmt.as<EvaluateNode>()) {
-      if (auto *call = eval->value.as<CallNode>()) {
-        return call->op.same_as(create_list_of_mbarrier());
-      }
-    }
-    return false;
-  }
 };
 
 // ---------------------------------------------------------------------------
@@ -892,9 +903,10 @@ public:
     f.CopyOnWrite()->body = T(f->body);
 
     // TODO(lei): This should be refactored
-    // If WS was applied, remove any create_list_of_mbarrier calls that
-    // remain OUTSIDE the block (e.g. at function body level from
-    // lower_tile_op). The new init is already inside the block.
+    // If WS was applied, remove any barrier_init annotations and
+    // shared.barrier buffers that remain OUTSIDE the block (e.g. at
+    // function body level from lower_tile_op). The new init is already
+    // inside the block.
     if (T.ws_transformed_) {
       f.CopyOnWrite()->body = MbarrierInitRemover::Remove(f->body);
     }
@@ -1384,6 +1396,10 @@ private:
           << ", bp_last=" << bp_last;
     }
 
+    // Create barrier buffer early so loop body builders can use it.
+    barrier_buf_ =
+        CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
+
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_extent = pipeline_loop->extent;
     PrimExpr loop_min = pipeline_loop->min;
@@ -1427,7 +1443,7 @@ private:
       if (is_first_in_group) {
         producer_body_stmts.push_back(WrapStmtWithGuardSource(
             protocol_guard_sources[ti], protocol_guards[ti],
-            makeParityWait(bp_id, bitwise_xor(producer_parity_expr, 1))));
+            makeParityWait(barrier_buf_, bp_id, bitwise_xor(producer_parity_expr, 1))));
         for (const auto &stmt : producer_loop_prefix_stmts[ti]) {
           producer_body_stmts.push_back(stmt);
         }
@@ -1465,7 +1481,7 @@ private:
             IntImm(DataType::Int(32), fwd_bases[ti]) + producer_stage_expr;
         producer_body_stmts.push_back(WrapStmtWithGuardSource(
             producer_issue_guard_sources[ti], producer_issue_guards[ti],
-            makeCpAsyncBarrierNoInc(fwd_id)));
+            makeCpAsyncBarrierNoInc(barrier_buf_, fwd_id)));
       }
       // Phase counter increment – exactly once per guarded iteration,
       // after ALL groups have issued their barrier ops.
@@ -1499,7 +1515,7 @@ private:
       } else {
         normalized_waits.push_back(WrapStmtWithGuardSource(
             producer_issue_guard_sources[ti], producer_issue_guards[ti],
-            makeParityWait(fwd_id, consumer_parity_expr)));
+            makeParityWait(barrier_buf_, fwd_id, consumer_parity_expr)));
       }
     }
     // Emit waits / compute / arrives according to insertion points.
@@ -1523,7 +1539,7 @@ private:
               IntImm(DataType::Int(32), bp_bases[ti]) + consumer_stage_expr;
           consumer_body_stmts.push_back(WrapStmtWithGuardSource(
               protocol_guard_sources[ti], protocol_guards[ti],
-              makeArriveBarrier(bp_id)));
+              makeArriveBarrier(barrier_buf_, bp_id)));
           arrive_emitted[ti] = true;
         }
       }
@@ -1551,7 +1567,7 @@ private:
             IntImm(DataType::Int(32), bp_bases[ti]) + consumer_stage_expr;
         consumer_body_stmts.push_back(WrapStmtWithGuardSource(
             protocol_guard_sources[ti], protocol_guards[ti],
-            makeArriveBarrier(bp_id)));
+            makeArriveBarrier(barrier_buf_, bp_id)));
       }
     }
     // Phase counter increment for the consumer side.
@@ -1647,8 +1663,7 @@ private:
         barrier_arrive_counts.push_back(consumer_thread_extent);
       }
     }
-    Stmt init_barrier = Evaluate(Call(
-        DataType::Handle(), create_list_of_mbarrier(), barrier_arrive_counts));
+    // barrier_arrive_counts will be used for the barrier_init annotation.
 
     LocalLiveSet producer_live_seed =
         SeedLiveSetFromStmt(producer_loop_body, buffer_data_to_buffer);
@@ -1667,10 +1682,10 @@ private:
     consumer_live_seed.AddUses(
         LocalAccessCollector::CollectExpr(loop_extent, buffer_data_to_buffer));
 
-    // Reconstruct block body: replace the pipeline loop and
-    // create_list_of_mbarrier with new init_barrier + ws_body.
+    // Reconstruct block body: replace the pipeline loop with ws_body
+    // and remove old barrier_init annotations / shared.barrier buffers.
     Stmt new_block_body = RebuildBlockBody(
-        orig_block->body, pipeline_loop, init_barrier, ws_body,
+        orig_block->body, pipeline_loop, ws_body,
         buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
 
     // Update thread extent
@@ -1684,12 +1699,31 @@ private:
     pure_tma_preloop_fwd_cursor_ = old_pure_tma_preloop_fwd_cursor;
     current_loop_guard_bindings_ = std::move(saved_loop_guard_bindings);
 
-    // Build the new Block and BlockRealize (without recursive mutation
-    // since we've already transformed the body directly).
+    // Build the new Block and BlockRealize.
+    // Add barrier buffer to alloc_buffers and barrier_init annotation.
+    Array<Buffer> new_alloc_buffers = orig_block->alloc_buffers;
+    // Remove any existing shared.barrier buffers from old approach
+    {
+      Array<Buffer> filtered;
+      for (const auto &buf : new_alloc_buffers) {
+        if (buf.scope() != "shared.barrier") {
+          filtered.push_back(buf);
+        }
+      }
+      new_alloc_buffers = filtered;
+    }
+    new_alloc_buffers.push_back(barrier_buf_);
+
+    Map<String, Any> new_annotations = orig_block->annotations;
+    // Remove any old barrier_init and build fresh
+    Map<Var, Array<PrimExpr>> barrier_init_map;
+    barrier_init_map.Set(barrier_buf_->data, barrier_arrive_counts);
+    new_annotations.Set("barrier_init", barrier_init_map);
+
     Block new_block(orig_block->iter_vars, orig_block->reads,
                     orig_block->writes, orig_block->name_hint, new_block_body,
-                    orig_block->init, orig_block->alloc_buffers,
-                    orig_block->match_buffers, orig_block->annotations);
+                    orig_block->init, new_alloc_buffers,
+                    orig_block->match_buffers, new_annotations);
     return BlockRealize(op->iter_values, op->predicate, new_block);
   }
 
@@ -1877,9 +1911,10 @@ private:
         StmtExprVisitor::VisitStmt_(op);
       }
 
-      void VisitExpr_(const CallNode *op) final {
-        if (op->op.same_as(get_mbarrier()) && op->args.size() == 1) {
-          auto bound = analyzer_.const_int_bound(op->args[0]);
+      void VisitExpr_(const BufferLoadNode *op) final {
+        if (op->buffer.scope() == "shared.barrier" &&
+            op->indices.size() == 1) {
+          auto bound = analyzer_.const_int_bound(op->indices[0]);
           if (bound->max_value != arith::ConstIntBound::kPosInf &&
               bound->max_value != arith::ConstIntBound::kNegInf) {
             max_idx = std::max(max_idx, static_cast<int>(bound->max_value));
@@ -1911,9 +1946,6 @@ private:
       bool found_loop = false;
       int nested_count = 0;
       for (const auto &s : seq->seq) {
-        if (IsCreateListOfMbarrier(s)) {
-          continue;
-        }
         if (!found_loop && ContainsLoop(s, target_loop)) {
           nested_count =
               CountRewrittenPureTmaPreloopForwardPairs(s, target_loop);
@@ -1960,8 +1992,7 @@ private:
   // Single source of truth for barrier/TMA control-like calls that should not
   // be moved across producer/consumer partition boundaries.
   bool IsBarrierOrTmaControlCall(const CallNode *call) {
-    return call->op.same_as(create_list_of_mbarrier()) ||
-           call->op.same_as(mbarrier_wait_parity()) ||
+    return call->op.same_as(mbarrier_wait_parity()) ||
            call->op.same_as(mbarrier_expect_tx()) ||
            call->op.same_as(builtin::ptx_arrive_barrier()) ||
            call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
@@ -2310,9 +2341,11 @@ private:
           call->args.size() != 2) {
         return std::nullopt;
       }
-      if (auto *get = call->args[0].as<CallNode>()) {
-        if (get->op.same_as(get_mbarrier()) && get->args.size() == 1) {
-          return get->args[0];
+      // Check for BufferLoad on shared.barrier scope buffer
+      if (auto *bl = call->args[0].as<BufferLoadNode>()) {
+        if (bl->buffer.scope() == "shared.barrier" &&
+            bl->indices.size() == 1) {
+          return bl->indices[0];
         }
       }
       return std::nullopt;
@@ -2357,7 +2390,7 @@ private:
     if (!barrier_id.defined()) {
       return wait_stmt;
     }
-    return makeParityWait(barrier_id.value(), normalized_parity);
+    return makeParityWait(barrier_buf_, barrier_id.value(), normalized_parity);
   }
 
   bool ContainsTmaLoadStmt(const Stmt &stmt) {
@@ -2669,8 +2702,10 @@ private:
                           Optional<PrimExpr> new_parity = std::nullopt) {
     class WaitBarrierRewriter : public StmtExprMutator {
     public:
-      WaitBarrierRewriter(PrimExpr barrier_id, Optional<PrimExpr> parity)
-          : barrier_id_(std::move(barrier_id)), parity_(std::move(parity)) {}
+      WaitBarrierRewriter(const Buffer &barrier_buf, PrimExpr barrier_id,
+                          Optional<PrimExpr> parity)
+          : barrier_buf_(barrier_buf), barrier_id_(std::move(barrier_id)),
+            parity_(std::move(parity)) {}
 
       PrimExpr VisitExpr_(const CallNode *op) final {
         auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
@@ -2678,19 +2713,21 @@ private:
             call->args.size() == 2) {
           PrimExpr parity = parity_.defined() ? parity_.value() : call->args[1];
           return Call(call->dtype, call->op,
-                      {makeGetBarrier(barrier_id_), parity}, call->annotations,
-                      call->span);
+                      {makeGetBarrier(barrier_buf_, barrier_id_), parity},
+                      call->annotations, call->span);
         }
         return call;
       }
 
     private:
+      Buffer barrier_buf_;
       PrimExpr barrier_id_;
       Optional<PrimExpr> parity_;
     };
 
     return MergeAdjacentEquivalentIfs(
-        WaitBarrierRewriter(new_barrier_id, std::move(new_parity))(wait_stmt));
+        WaitBarrierRewriter(barrier_buf_, new_barrier_id,
+                            std::move(new_parity))(wait_stmt));
   }
 
   Stmt RewriteTmaStmtBarrierIdPreserveProtocol(const Stmt &stmt,
@@ -2698,8 +2735,10 @@ private:
                                                bool drop_arrive = false) {
     class TmaBarrierIdRewriter : public StmtExprMutator {
     public:
-      TmaBarrierIdRewriter(PrimExpr barrier_id, bool drop_arrive)
-          : barrier_id_(std::move(barrier_id)), drop_arrive_(drop_arrive) {}
+      TmaBarrierIdRewriter(const Buffer &barrier_buf, PrimExpr barrier_id,
+                           bool drop_arrive)
+          : barrier_buf_(barrier_buf), barrier_id_(std::move(barrier_id)),
+            drop_arrive_(drop_arrive) {}
 
       PrimExpr VisitExpr_(const CallNode *op) final {
         auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
@@ -2707,7 +2746,7 @@ private:
              call->op.same_as(mbarrier_expect_tx())) &&
             call->args.size() == 2) {
           return Call(call->dtype, call->op,
-                      {makeGetBarrier(barrier_id_), call->args[1]},
+                      {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
                       call->annotations, call->span);
         }
         if (call->op.same_as(tma_load()) ||
@@ -2719,7 +2758,7 @@ private:
           }
           auto new_call = call.CopyOnWrite();
           new_call->args.Set(is_1d_tma_load ? 2 : 1,
-                             makeGetBarrier(barrier_id_));
+                             makeGetBarrier(barrier_buf_, barrier_id_));
           return call;
         }
         if (call->op.same_as(builtin::ptx_arrive_barrier()) &&
@@ -2728,19 +2767,20 @@ private:
             return IntImm(DataType::Int(32), 0);
           }
           auto new_call = call.CopyOnWrite();
-          new_call->args.Set(0, makeGetBarrier(barrier_id_));
+          new_call->args.Set(0, makeGetBarrier(barrier_buf_, barrier_id_));
           return call;
         }
         return call;
       }
 
     private:
+      Buffer barrier_buf_;
       PrimExpr barrier_id_;
       bool drop_arrive_;
     };
 
     return MergeAdjacentEquivalentIfs(
-        TmaBarrierIdRewriter(barrier_id, drop_arrive)(stmt));
+        TmaBarrierIdRewriter(barrier_buf_, barrier_id, drop_arrive)(stmt));
   }
 
   Stmt MergeAdjacentEquivalentIfs(const Stmt &stmt) {
@@ -2817,8 +2857,9 @@ private:
                                      bool append_arrive) {
     class TmaForwardBarrierStmtRewriter : public StmtExprMutator {
     public:
-      explicit TmaForwardBarrierStmtRewriter(PrimExpr barrier_id)
-          : barrier_id_(std::move(barrier_id)) {}
+      explicit TmaForwardBarrierStmtRewriter(const Buffer &barrier_buf,
+                                             PrimExpr barrier_id)
+          : barrier_buf_(barrier_buf), barrier_id_(std::move(barrier_id)) {}
 
       PrimExpr VisitExpr_(const CallNode *op) final {
         auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
@@ -2826,7 +2867,7 @@ private:
              call->op.same_as(mbarrier_expect_tx())) &&
             call->args.size() == 2) {
           return Call(call->dtype, mbarrier_expect_tx(),
-                      {makeGetBarrier(barrier_id_), call->args[1]},
+                      {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
                       call->annotations, call->span);
         }
         if (call->op.same_as(tma_load()) ||
@@ -2838,7 +2879,7 @@ private:
           }
           auto new_call = call.CopyOnWrite();
           new_call->args.Set(is_1d_tma_load ? 2 : 1,
-                             makeGetBarrier(barrier_id_));
+                             makeGetBarrier(barrier_buf_, barrier_id_));
           return call;
         }
         if (call->op.same_as(builtin::ptx_arrive_barrier()) &&
@@ -2849,20 +2890,21 @@ private:
       }
 
     private:
+      Buffer barrier_buf_;
       PrimExpr barrier_id_;
     };
 
     // Rebind the producer-side barrier id and finish the stage with a normal
     // barrier arrival. Pure-TMA pipelines do not need cp.async.mbarrier.arrive.
     Stmt rewritten = MergeAdjacentEquivalentIfs(
-        TmaForwardBarrierStmtRewriter(barrier_id)(stmt));
+        TmaForwardBarrierStmtRewriter(barrier_buf_, barrier_id)(stmt));
     if (!append_arrive) {
       return rewritten;
     }
     Optional<PrimExpr> guard = ExtractNonThreadProducerGuard(stmt);
     Stmt elect_arrive = IfThenElse(
         Call(DataType::Bool(), tl_shuffle_elect(), {producer_thread_extent_}),
-        makeArriveBarrier(barrier_id), std::nullopt);
+        makeArriveBarrier(barrier_buf_, barrier_id), std::nullopt);
     elect_arrive = WrapStmtWithOptionalGuard(guard, elect_arrive);
     return MergeAdjacentEquivalentIfs(SeqStmt({rewritten, elect_arrive}));
   }
@@ -2983,7 +3025,8 @@ private:
 
   /*!
    * \brief Rebuild the block body, replacing the pipeline loop with
-   *        init_barrier + ws_body and removing old create_list_of_mbarrier.
+   *        ws_body and removing old barrier_init annotations /
+   *        shared.barrier buffers.
    *
    *  Statements after the pipeline loop (e.g. epilogue, store) should execute
    *  only on consumer threads. Prefer appending them into the consumer branch
@@ -2991,13 +3034,13 @@ private:
    *  If that is not possible, fall back to an explicit consumer-thread guard.
    */
   Stmt RebuildBlockBody(const Stmt &body, const ForNode *target_loop,
-                        const Stmt &init_barrier, const Stmt &ws_body,
+                        const Stmt &ws_body,
                         const BufferDataToBufferMap &buffer_data_to_buffer,
                         const LocalLiveSet &producer_live_seed,
                         const LocalLiveSet &consumer_live_seed) {
     // If this IS the target loop, replace it
     if (body.as<ForNode>() == target_loop) {
-      return SeqStmt({init_barrier, ws_body});
+      return ws_body;
     }
 
     if (auto *seq = body.as<SeqStmtNode>()) {
@@ -3008,14 +3051,10 @@ private:
       Optional<Stmt> rebuilt_loop = std::nullopt;
 
       for (const auto &s : seq->seq) {
-        // Remove existing create_list_of_mbarrier
-        if (IsCreateListOfMbarrier(s))
-          continue;
-
         if (!found_loop && ContainsLoop(s, target_loop)) {
           // Replace the pipeline loop
           rebuilt_loop = RebuildBlockBody(
-              s, target_loop, init_barrier, ws_body, buffer_data_to_buffer,
+              s, target_loop, ws_body, buffer_data_to_buffer,
               producer_live_seed, consumer_live_seed);
           found_loop = true;
         } else if (found_loop) {
@@ -3326,7 +3365,7 @@ private:
     if (auto *attr = body.as<AttrStmtNode>()) {
       if (ContainsLoop(attr->body, target_loop)) {
         Stmt new_body = RebuildBlockBody(
-            attr->body, target_loop, init_barrier, ws_body,
+            attr->body, target_loop, ws_body,
             buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
         return AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
       }
@@ -3334,7 +3373,7 @@ private:
     if (auto *let_s = body.as<LetStmtNode>()) {
       if (ContainsLoop(let_s->body, target_loop)) {
         Stmt new_body = RebuildBlockBody(
-            let_s->body, target_loop, init_barrier, ws_body,
+            let_s->body, target_loop, ws_body,
             buffer_data_to_buffer, producer_live_seed, consumer_live_seed);
         return LetStmt(let_s->var, let_s->value, new_body);
       }
@@ -3368,19 +3407,11 @@ private:
     return false;
   }
 
-  bool IsCreateListOfMbarrier(const Stmt &stmt) {
-    if (auto *eval = stmt.as<EvaluateNode>()) {
-      if (auto *call = eval->value.as<CallNode>()) {
-        return call->op.same_as(create_list_of_mbarrier());
-      }
-    }
-    return false;
-  }
-
   IterVar thread_iv_;
   PrimExpr
       consumer_thread_extent_; // Original thread extent (consumer warp count)
   PrimExpr producer_thread_extent_ = IntImm(DataType::Int(32), 128);
+  Buffer barrier_buf_;          // shared.barrier scope buffer for mbarriers
   Optional<PrimExpr> num_threads_;
   bool ws_transformed_ = false;
   bool use_full_tma_forward_barrier_protocol_ = false;

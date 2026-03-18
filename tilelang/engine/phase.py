@@ -236,6 +236,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # When WS succeeds, it handles the pipeline overlap directly,
             # so PipelinePlanning + InjectSoftwarePipeline are skipped.
             mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+            # Process barrier buffers created by the WS pass
+            # (the first LowerSharedBarrier only handled pre-WS barriers).
+            mod = tilelang.transform.LowerSharedBarrier()(mod)
         else:
             mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
             mod = tilelang.transform.PipelinePlanning()(mod)

@@ -38,6 +38,7 @@
 #include "../op/builtin.h"
 #include "./common/attr.h"
 #include "./common/collector.h"
+#include "./common/mbarrier.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 
@@ -103,7 +104,20 @@ private:
 class TmaExpectTxRewriter : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
-    TmaExpectTxRewriter rewriter(analyzer);
+    // Find the shared.barrier scope buffer from the IR
+    Optional<Buffer> barrier_buf;
+    PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      if (barrier_buf.defined()) return;
+      if (const auto *block = node.as<BlockNode>()) {
+        for (const auto &buf : block->alloc_buffers) {
+          if (buf.scope() == "shared.barrier") {
+            barrier_buf = buf;
+            return;
+          }
+        }
+      }
+    });
+    TmaExpectTxRewriter rewriter(analyzer, barrier_buf);
     f.CopyOnWrite()->body = rewriter(f->body);
     return f;
   }
@@ -113,9 +127,12 @@ private:
   bool visited_tma_load_{false};
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
+  Optional<Buffer> barrier_buf_;
 
   PrimExpr makeGetBarrier(PrimExpr barrier_id) {
-    return Call(DataType::Handle(), get_mbarrier(), {std::move(barrier_id)});
+    ICHECK(barrier_buf_.defined())
+        << "No shared.barrier scope buffer found in IR";
+    return MakeBarrierRef(barrier_buf_.value(), std::move(barrier_id));
   }
 
   Stmt makeExpectTX(PrimExpr barrier_id, PrimExpr bytes) {
@@ -124,8 +141,9 @@ private:
     return Evaluate(call);
   }
 
-  TmaExpectTxRewriter(arith::Analyzer *analyzer)
-      : IRMutatorWithAnalyzer(analyzer) {}
+  TmaExpectTxRewriter(arith::Analyzer *analyzer, Optional<Buffer> barrier_buf)
+      : IRMutatorWithAnalyzer(analyzer),
+        barrier_buf_(std::move(barrier_buf)) {}
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
 
@@ -134,6 +152,19 @@ private:
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_var_ = iv;
+      }
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const BlockNode *op) final {
+    // Discover barrier buffer from block allocations if not yet found
+    if (!barrier_buf_.defined()) {
+      for (const auto &buf : op->alloc_buffers) {
+        if (buf.scope() == "shared.barrier") {
+          barrier_buf_ = buf;
+          break;
+        }
       }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
@@ -178,8 +209,7 @@ private:
       visited_tma_load_ = true;
       Array<PrimExpr> new_args = op->args;
       new_args.Set(is_1d_tma_load ? 2 : 1,
-                   Call(DataType::Handle(), get_mbarrier(),
-                        {IntImm(DataType::Int(32), 0)}));
+                   makeGetBarrier(IntImm(DataType::Int(32), 0)));
       return Call(op->dtype, op->op, new_args, op->annotations);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -336,10 +366,11 @@ public:
 
 private:
   PrimExpr NormalizeBarrierExpr(const PrimExpr &barrier_expr) const {
-    if (const auto *call = barrier_expr.as<CallNode>()) {
-      if (call->op.same_as(get_mbarrier())) {
-        ICHECK_EQ(call->args.size(), 1);
-        return call->args[0];
+    // Handle BufferLoad on shared.barrier scope buffers
+    if (const auto *load = barrier_expr.as<BufferLoadNode>()) {
+      if (load->buffer.scope() == "shared.barrier" &&
+          load->indices.size() == 1) {
+        return load->indices[0];
       }
     }
     return barrier_expr;
@@ -451,37 +482,125 @@ public:
         default_barrier_thread_count_(std::move(default_barrier_thread_count)) {
   }
 
-  PrimExpr VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(create_list_of_mbarrier())) {
-      size_t cur_n = op->args.size();
+  Stmt VisitStmt_(const BlockNode *op) final {
+    // Check if this block has a barrier_init annotation
+    if (!op->annotations.count("barrier_init")) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    auto barrier_init_map =
+        op->annotations.Get("barrier_init")
+            ->as<Map<Var, Array<PrimExpr>>>()
+            .value();
+
+    bool changed = false;
+    Map<Var, Array<PrimExpr>> new_barrier_init_map;
+
+    for (const auto &[data_var, arrive_counts] : barrier_init_map) {
+      size_t cur_n = arrive_counts.size();
       size_t need_n =
           std::max<size_t>(cur_n, static_cast<size_t>(ensure_min_count_));
 
-      Array<PrimExpr> new_args;
-      new_args.reserve(need_n);
+      Array<PrimExpr> new_counts;
+      new_counts.reserve(need_n);
 
       // Preserve existing entries unless we have explicit arrive-domain counts.
       for (size_t i{0}; i < cur_n; ++i) {
         auto it = barrier_thread_counts_.find(static_cast<int>(i));
         if (it != barrier_thread_counts_.end()) {
-          new_args.push_back(Integer(it->second));
+          new_counts.push_back(Integer(it->second));
         } else {
-          new_args.push_back(op->args[i]);
+          new_counts.push_back(arrive_counts[i]);
         }
       }
       // Append additional barriers if required.
       for (size_t i = cur_n; i < need_n; ++i) {
         auto it = barrier_thread_counts_.find(static_cast<int>(i));
         if (it != barrier_thread_counts_.end()) {
-          new_args.push_back(Integer(it->second));
+          new_counts.push_back(Integer(it->second));
         } else {
-          new_args.push_back(default_barrier_thread_count_);
+          new_counts.push_back(default_barrier_thread_count_);
         }
       }
-      return Call(op->dtype, op->op, new_args, op->annotations);
-    } else {
-      return StmtExprMutator::VisitExpr_(op);
+
+      if (new_counts.size() != cur_n) {
+        changed = true;
+      } else {
+        for (size_t i = 0; i < cur_n; ++i) {
+          auto *old_imm = arrive_counts[i].as<IntImmNode>();
+          auto *new_imm = new_counts[i].as<IntImmNode>();
+          if (old_imm && new_imm && old_imm->value != new_imm->value) {
+            changed = true;
+            break;
+          } else if (!old_imm || !new_imm) {
+            // Non-constant, check structural equality
+            if (!StructuralEqual()(arrive_counts[i], new_counts[i])) {
+              changed = true;
+              break;
+            }
+          }
+        }
+      }
+
+      new_barrier_init_map.Set(data_var, new_counts);
     }
+
+    if (!changed) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    Block block = tvm::ffi::GetRef<Block>(op);
+    auto block_ptr = block.CopyOnWrite();
+
+    // Update the barrier_init annotation
+    block_ptr->annotations.Set("barrier_init", new_barrier_init_map);
+
+    // Also update the barrier buffer shape if needed
+    if (ensure_min_count_ > 0) {
+      Array<Buffer> new_alloc_buffers;
+      for (const auto &buf : block_ptr->alloc_buffers) {
+        if (buf.scope() == "shared.barrier") {
+          const auto *shape_imm = buf->shape[0].as<IntImmNode>();
+          if (shape_imm &&
+              static_cast<int>(shape_imm->value) < ensure_min_count_) {
+            // Resize the buffer to fit the new count
+            Buffer new_buf(buf->data, buf->dtype,
+                           {IntImm(DataType::Int(32), ensure_min_count_)}, {},
+                           PrimExpr(), buf->name, 0, 0, kDefault);
+            new_alloc_buffers.push_back(new_buf);
+            // Also update the arrive counts array for this buffer
+            auto it = new_barrier_init_map.find(buf->data);
+            if (it != new_barrier_init_map.end()) {
+              auto counts = (*it).second;
+              if (counts.size() < static_cast<size_t>(ensure_min_count_)) {
+                Array<PrimExpr> extended_counts = counts;
+                for (size_t i = counts.size();
+                     i < static_cast<size_t>(ensure_min_count_); ++i) {
+                  auto tc_it =
+                      barrier_thread_counts_.find(static_cast<int>(i));
+                  if (tc_it != barrier_thread_counts_.end()) {
+                    extended_counts.push_back(Integer(tc_it->second));
+                  } else {
+                    extended_counts.push_back(default_barrier_thread_count_);
+                  }
+                }
+                new_barrier_init_map.Set(buf->data, extended_counts);
+                block_ptr->annotations.Set("barrier_init",
+                                           new_barrier_init_map);
+              }
+            }
+          } else {
+            new_alloc_buffers.push_back(buf);
+          }
+        } else {
+          new_alloc_buffers.push_back(buf);
+        }
+      }
+      block_ptr->alloc_buffers = new_alloc_buffers;
+    }
+
+    block_ptr->body = VisitStmt(block_ptr->body);
+    return block;
   }
 
 private:
@@ -496,11 +615,13 @@ public:
   TmaBarrierRewriter(arith::Analyzer *analyzer,
                      Map<ObjectRef, PrimExpr> tma_op_to_barrier_id,
                      Map<PrimExpr, IntImm> barrier_id_to_range,
-                     bool has_create_list_of_mbarrier)
+                     bool has_barrier_alloc,
+                     Optional<Buffer> barrier_buf)
       : IRMutatorWithAnalyzer(analyzer),
         tma_op_to_barrier_id_(std::move(tma_op_to_barrier_id)),
         barrier_id_to_range_(std::move(barrier_id_to_range)),
-        has_create_list_of_mbarrier_(has_create_list_of_mbarrier) {}
+        has_barrier_alloc_(has_barrier_alloc),
+        barrier_buf_(std::move(barrier_buf)) {}
 
   static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
     auto buffer_lca = DetectBufferAccessLCA(f);
@@ -510,30 +631,39 @@ public:
     f = TmaExpectTxRewriter::Rewrite(f, analyzer);
     TmaBarrierCollector collector(buffer_data_to_buffer_);
     collector(f->body);
-    bool has_create_list_of_mbarrier = false;
+    // Detect shared.barrier scope buffer allocations or ptx_init_barrier calls
+    bool has_barrier_alloc = false;
+    Optional<Buffer> barrier_buf;
     PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      if (const auto *block = node.as<BlockNode>()) {
+        for (const auto &buf : block->alloc_buffers) {
+          if (buf.scope() == "shared.barrier") {
+            has_barrier_alloc = true;
+            if (!barrier_buf.defined()) {
+              barrier_buf = buf;
+            }
+          }
+        }
+      }
       if (const auto *call = node.as<CallNode>()) {
-        if (call->op.same_as(create_list_of_mbarrier())) {
-          has_create_list_of_mbarrier = true;
-        } else if (call->op.same_as(builtin::ptx_init_barrier_thread_count())) {
-          has_create_list_of_mbarrier = true;
+        if (call->op.same_as(builtin::ptx_init_barrier_thread_count())) {
+          has_barrier_alloc = true;
         }
       }
     });
     TmaBarrierRewriter rewriter(analyzer, collector.tma_op_to_barrier_id(),
                                 collector.barrier_id_to_range(),
-                                has_create_list_of_mbarrier);
+                                has_barrier_alloc, barrier_buf);
     f.CopyOnWrite()->body = rewriter(f->body);
     // Compute the minimum number of barriers actually referenced in the body
-    // after TMA barrier rewrites (e.g., get_mbarrier(0) inserted for TMA).
+    // after TMA barrier rewrites (e.g., BufferLoad on shared.barrier buffer).
     struct GetMbarrierMaxIdxCollector : public StmtExprVisitor {
       int max_idx{-1};
-      void VisitExpr_(const CallNode *op) final {
-        if (op->op.same_as(get_mbarrier())) {
-          if (op->args.size() == 1) {
-            if (const auto *imm = op->args[0].as<IntImmNode>()) {
-              max_idx = std::max(max_idx, static_cast<int>(imm->value));
-            }
+      void VisitExpr_(const BufferLoadNode *op) final {
+        if (op->buffer.scope() == "shared.barrier" &&
+            op->indices.size() == 1) {
+          if (const auto *imm = op->indices[0].as<IntImmNode>()) {
+            max_idx = std::max(max_idx, static_cast<int>(imm->value));
           }
         }
         StmtExprVisitor::VisitExpr_(op);
@@ -559,9 +689,18 @@ public:
 private:
   Stmt VisitStmt_(const BlockNode *op) {
     auto block = tvm::ffi::GetRef<Block>(op);
-    if (!has_create_list_of_mbarrier_ && !barrier_id_to_range_.empty() &&
+    // Discover barrier buffer from block allocations if not yet found
+    if (!barrier_buf_.defined()) {
+      for (const auto &buf : op->alloc_buffers) {
+        if (buf.scope() == "shared.barrier") {
+          barrier_buf_ = buf;
+          break;
+        }
+      }
+    }
+    if (!has_barrier_alloc_ && !barrier_id_to_range_.empty() &&
         op->name_hint == MainBlockName) {
-      ICHECK(false) << "Please declare create_list_of_mbarrier.";
+      ICHECK(false) << "Please declare a shared.barrier scope buffer.";
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
@@ -602,25 +741,29 @@ private:
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (!tma_op_to_barrier_id_.count(call_ref)) {
-        // Promote raw integer barrier id to get_mbarrier(id) so codegen can
-        // emit mbarrier[index]. This handles degenerate producer-only kernels
-        // where no arrive()/expect mapping is recorded.
-        bool is_1d_tma_load = Is1DTmaLoad(op);
-        if (is_1d_tma_load && op->args.size() >= 3) {
-          if (const auto *imm = op->args[2].as<IntImmNode>()) {
-            Array<PrimExpr> new_args = op->args;
-            new_args.Set(2, Call(DataType::Handle(), get_mbarrier(),
-                                 {IntImm(DataType::Int(32),
-                                         static_cast<int>(imm->value))}));
-            return Call(op->dtype, op->op, new_args, op->annotations);
-          }
-        } else if (!is_1d_tma_load && op->args.size() >= 2) {
-          if (const auto *imm = op->args[1].as<IntImmNode>()) {
-            Array<PrimExpr> new_args = op->args;
-            new_args.Set(1, Call(DataType::Handle(), get_mbarrier(),
-                                 {IntImm(DataType::Int(32),
-                                         static_cast<int>(imm->value))}));
-            return Call(op->dtype, op->op, new_args, op->annotations);
+        // Promote raw integer barrier id to BufferLoad on the barrier buffer
+        // so codegen can emit mbarrier[index]. This handles degenerate
+        // producer-only kernels where no arrive()/expect mapping is recorded.
+        if (barrier_buf_.defined()) {
+          bool is_1d_tma_load = Is1DTmaLoad(op);
+          if (is_1d_tma_load && op->args.size() >= 3) {
+            if (const auto *imm = op->args[2].as<IntImmNode>()) {
+              Array<PrimExpr> new_args = op->args;
+              new_args.Set(
+                  2, MakeBarrierRef(barrier_buf_.value(),
+                                    IntImm(DataType::Int(32),
+                                           static_cast<int>(imm->value))));
+              return Call(op->dtype, op->op, new_args, op->annotations);
+            }
+          } else if (!is_1d_tma_load && op->args.size() >= 2) {
+            if (const auto *imm = op->args[1].as<IntImmNode>()) {
+              Array<PrimExpr> new_args = op->args;
+              new_args.Set(
+                  1, MakeBarrierRef(barrier_buf_.value(),
+                                    IntImm(DataType::Int(32),
+                                           static_cast<int>(imm->value))));
+              return Call(op->dtype, op->op, new_args, op->annotations);
+            }
           }
         }
         return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -664,7 +807,8 @@ private:
   }
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
-  bool has_create_list_of_mbarrier_;
+  bool has_barrier_alloc_;
+  Optional<Buffer> barrier_buf_;
   bool clear_arrive_{false};
   bool first_if{false}, has_warp_specialization_{false}, is_producer_{false};
   IterVar thread_var_;
