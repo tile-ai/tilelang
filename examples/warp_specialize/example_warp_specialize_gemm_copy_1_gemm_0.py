@@ -99,5 +99,4 @@ def run_regression_perf(M=16384, N=16384, K=16384):
 
 
 if __name__ == "__main__":
-    # Test with smaller size first
     tilelang.testing.main()

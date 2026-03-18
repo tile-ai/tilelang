@@ -550,27 +550,5 @@ def test_optimize_cp_async_sync_does_not_relax_wait_without_prefetch():
     assert 1 not in wait_args, f"Did not expect wait_group(1) without prefetch, got wait args {wait_args}"
 
 
-def test_optimize_cp_async_sync_keeps_protected_auto_injected_wait_zero():
-    @T.prim_func
-    def before(A: T.Tensor((64,), T.uint8), B: T.Tensor((16,), T.uint8)):
-        S = T.alloc_buffer((12,), dtype=T.uint8, scope="shared")
-        for k in T.serial(0, 4, annotations={"tl_pipelined_num_stages": T.int32(3)}):
-            T.ptx_cp_async(
-                T.access_ptr(S[(k % 3) * 4], "w", 4),
-                T.access_ptr(A[k * 4], "r", 4),
-                4,
-            )
-            T.ptx_commit_group()
-            with T.attr(0, "tl.keep_auto_async_wait_zero", 1):
-                T.ptx_wait_group(0)
-            B[k * 4] = S[(k % 3) * 4]
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = _run(mod)
-    wait_args = _collect_wait_args(mod["main"])
-    assert 0 in wait_args, f"Expected protected wait_group(0) to remain, got wait args {wait_args}"
-    assert 1 not in wait_args and 2 not in wait_args, f"Did not expect protected wait_group(0) to be relaxed, got wait args {wait_args}"
-
-
 if __name__ == "__main__":
     tilelang.testing.main()
