@@ -247,6 +247,20 @@ def WarpSpecialized():
     return _ffi_api.WarpSpecialized()  # type: ignore
 
 
+def ProducerConsumerWarpSpecialized():
+    """Producer-Consumer Warp Specialization for TMA pipelines.
+
+    Splits pipelined loops with TMA loads into producer (TMA copy) and
+    consumer (compute) warp groups with mbarrier-based synchronization.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
+
+
 def AnnotateWarpGroupRegAlloc():
     """Inject set_max_nreg calls into warp-specialized functions.
 
@@ -271,6 +285,11 @@ def InjectTmaBarrier():
         The result pass
     """
     return _ffi_api.InjectTmaBarrier()  # type: ignore
+
+
+def FuseMBarrierArriveExpectTx():
+    """Fuse simple expect_tx -> TMA issue -> arrive back into arrive_and_expect_tx."""
+    return _ffi_api.FuseMBarrierArriveExpectTx()  # type: ignore
 
 
 def InjectFenceProxy():

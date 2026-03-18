@@ -37,13 +37,13 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
       TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
   Type new_type;
   // convert fragments to normal local buffer
-  if (ptr_type->storage_scope == "local.fragment") {
+  if (IsFragmentBuffer(buffer)) {
     new_type = PointerType(ptr_type->element_type, "local");
   } else {
     new_type = buffer->data->type_annotation;
   }
   Var new_var;
-  if (ptr_type->storage_scope == "global") {
+  if (IsGlobalBuffer(buffer)) {
     new_var = buffer->data;
   } else {
     if (var_remap.count(buffer->data)) {
@@ -55,8 +55,7 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   }
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
-  if (ptr_type->storage_scope == "shared" ||
-      ptr_type->storage_scope == "shared.dyn") {
+  if (IsSharedBuffer(buffer)) {
     int replicate_extent = 1;
     Array<PrimExpr> buffer_shape = buffer->shape;
     int buffer_extent = 1;
@@ -231,6 +230,21 @@ public:
       // cp async lowering won't be generated.
       ctxt->config.Set(kDisableTMALower, Bool(!substituter.has_tma_));
     }
+
+    // If any TMA copies allocated mbarriers, emit a single
+    // create_list_of_mbarrier call at the top of the function body.
+    // LowerHopperIntrin will later process this into actual mbarrier buffer
+    // allocation, ptx_init_barrier_thread_count, and fence_barrier_init.
+    if (substituter.mbarrier_count_ > 0) {
+      Array<PrimExpr> counts;
+      counts.reserve(substituter.mbarrier_count_);
+      for (auto c : substituter.mbarrier_arrive_counts_)
+        counts.push_back(IntImm(DataType::Int(32), c));
+      auto create_call =
+          Evaluate(Call(DataType::Handle(), create_list_of_mbarrier(), counts));
+      fptr->body = SeqStmt({create_call, fptr->body});
+    }
+
     return f;
   }
 
@@ -1009,10 +1023,37 @@ private:
       let_var_to_expr.Set(var, expr);
     }
 
+    AllocMBarrierCallback mbarrier_callback = [this](int arrive_count) -> int {
+      int id = mbarrier_count_++;
+      mbarrier_arrive_counts_.push_back(arrive_count);
+      return id;
+    };
+
+    // Compute mbarrier expressions from the enclosing loop and pipeline info.
+    // pipeline_num_stages: number of pipeline stages (from T.Pipelined
+    // annotation) mbar_stage_expr: ko % num_stages (cycles through multiple
+    // mbarriers) mbar_phase_expr: (ko / num_stages) % 2 (mbarrier parity for
+    // wait)
+    int pipeline_num_stages = 1;
+    PrimExpr mbar_phase_expr;
+    PrimExpr mbar_stage_expr = IntImm(DataType::Int(32), 0);
+    if (!loop_var_stack_.empty()) {
+      pipeline_num_stages = pipeline_num_stages_stack_.back();
+      Var loop_var = loop_var_stack_.back();
+      PrimExpr ns = IntImm(DataType::Int(32), pipeline_num_stages);
+      mbar_stage_expr = FloorMod(loop_var, ns);
+      mbar_phase_expr =
+          FloorMod(FloorDiv(loop_var, ns), IntImm(DataType::Int(32), 2));
+    } else {
+      mbar_phase_expr = IntImm(DataType::Int(32), 0);
+    }
+
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_, let_var_to_expr,
-                  /*in_pipeline=*/pipelined_depth_ > 0},
+                  mbarrier_callback, layout_map_, buffer_remap_,
+                  let_var_to_expr,
+                  /*in_pipeline=*/pipelined_depth_ > 0, mbar_phase_expr,
+                  pipeline_num_stages, mbar_stage_expr},
         analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
@@ -1053,6 +1094,17 @@ private:
    * @return Stmt The lowered statement.
    */
   Stmt VisitStmt_(const ForNode *op) final {
+    // Track enclosing loop variables for mbarrier parity computation.
+    loop_var_stack_.push_back(op->loop_var);
+    // Track pipeline num_stages from the loop's annotation.
+    int num_stages = 1;
+    if (auto ns_anno = op->annotations.Get("num_stages")) {
+      if (auto *ns_int = ns_anno.value().as<IntImmNode>()) {
+        num_stages = static_cast<int>(ns_int->value);
+      }
+    }
+    pipeline_num_stages_stack_.push_back(num_stages);
+
     // Extract reducer info from annotations
     Map<Var, ReducerInfo> reducer_info;
     if (op->annotations.count(attr::kReducerInfo)) {
@@ -1078,6 +1130,8 @@ private:
       ICHECK_GT(pipelined_depth_, 0);
       --pipelined_depth_;
     }
+    loop_var_stack_.pop_back();
+    pipeline_num_stages_stack_.pop_back();
 
     // Only process parallel loops
     if (op->kind != ForKind::kParallel) {
@@ -1272,6 +1326,15 @@ private:
   size_t thread_block_size_ = 0;
   // Stack of per-Block workspace buffers gathered while visiting children
   std::vector<Array<Buffer>> workspace_stack_;
+  // Counter and arrive-counts for mbarrier allocation via
+  // AllocMBarrierCallback. Used to emit a single create_list_of_mbarrier call
+  // after all tile ops are lowered.
+  int mbarrier_count_{0};
+  std::vector<int> mbarrier_arrive_counts_;
+  // Stack of enclosing loop variables for mbarrier parity computation.
+  std::vector<Var> loop_var_stack_;
+  // Stack of pipeline num_stages values from enclosing loop annotations.
+  std::vector<int> pipeline_num_stages_stack_;
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.
   bool is_ptx_{false};

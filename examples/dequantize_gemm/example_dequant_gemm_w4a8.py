@@ -202,4 +202,3 @@ if __name__ == "__main__":
 
     M, N, K = args.m, args.n, args.k
     main(M, N, K, args.tune)
-    # main(M, N, K, True)

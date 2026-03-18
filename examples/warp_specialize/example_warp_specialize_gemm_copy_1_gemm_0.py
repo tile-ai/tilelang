@@ -27,9 +27,9 @@ def matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K, dty
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                 with T.ws(1):
                     T.barrier_wait(compute_is_done, (ko + 1) % 2)
-                    T.copy(A[by * block_M, ko * block_K], A_shared)
-                    T.copy(B[ko * block_K, bx * block_N], B_shared)
-                    T.barrier_arrive(data_is_ready)
+                    T.tma_copy(A[by * block_M, ko * block_K], A_shared, barrier=data_is_ready)
+                    T.tma_copy(B[ko * block_K, bx * block_N], B_shared, barrier=data_is_ready)
+                    T.barrier_arrive(data_is_ready)  # Arrive once after all tma_copy
                 with T.ws(0):
                     T.barrier_wait(data_is_ready, ko % 2)
                     T.gemm(A_shared, B_shared, C_local)
@@ -47,7 +47,6 @@ def main(M=16384, N=16384, K=16384):
     block_K = 64
 
     jit_kernel = matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K)
-
     import torch
 
     a = torch.randn(M, K, device="cuda", dtype=torch.float16)
@@ -81,6 +80,7 @@ def run_regression_perf(M=16384, N=16384, K=16384):
     block_K = 64
 
     jit_kernel = matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K)
+    print(jit_kernel.get_kernel_source())
 
     import torch
 
@@ -99,4 +99,4 @@ def run_regression_perf(M=16384, N=16384, K=16384):
 
 
 if __name__ == "__main__":
-    main()
+    tilelang.testing.main()

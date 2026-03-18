@@ -281,11 +281,7 @@ public:
     } else if (op->attr_key == tir::attr::virtual_thread) {
       VisitNewScope(op);
     } else if (op->attr_key == "kWarpSpecializationScope") {
-      IfThenElse body = Downcast<IfThenElse>(op->body);
-      this->VisitStmt(body->then_case);
-      if (body->else_case.defined()) {
-        this->VisitStmt(body->else_case.value());
-      }
+      VisitWarpSpecializationBody(op->body);
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }
@@ -327,6 +323,32 @@ public:
   std::unordered_map<const Object *, StmtAttr> stmt_attrs_;
 
 private:
+  void VisitWarpSpecializationBody(const Stmt &stmt) {
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const auto &sub_stmt : seq->seq) {
+        VisitWarpSpecializationBody(sub_stmt);
+      }
+      return;
+    }
+    if (const auto *if_node = stmt.as<IfThenElseNode>()) {
+      this->VisitStmt(if_node->then_case);
+      if (if_node->else_case.defined()) {
+        this->VisitStmt(if_node->else_case.value());
+      }
+      return;
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      VisitWarpSpecializationBody(attr->body);
+      return;
+    }
+    if (const auto *let_node = stmt.as<LetStmtNode>()) {
+      this->VisitExpr(let_node->value);
+      VisitWarpSpecializationBody(let_node->body);
+      return;
+    }
+    StmtExprVisitor::VisitStmt(stmt);
+  }
+
   // Wrapper function to determine if the shared memory allocation for a
   // variable is appropriate.
   bool IsAppropriateSharedMemory(const Var &var) {

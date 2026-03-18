@@ -155,6 +155,15 @@ public:
     return false;
   }
 
+  bool GetIsTmaCopy() const {
+    if (auto val = annotations.Get("is_tma_copy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
   int GetEvictionPolicy() const {
     if (auto val = annotations.Get("eviction_policy")) {
       if (auto int_val = val->as<IntImmNode>()) {

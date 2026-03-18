@@ -213,6 +213,10 @@ ignore = [
 [tool.pytest.ini_options]
 verbosity_assertions = 3
 filterwarnings = ["always"]
+markers = [
+    "perf: benchmark and performance API tests skipped by default",
+    "slow: long-running correctness sweeps",
+]
 
 [tool.cibuildwheel]
 archs = ["auto64"]

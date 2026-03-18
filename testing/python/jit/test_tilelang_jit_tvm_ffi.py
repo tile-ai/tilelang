@@ -3,6 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
+import pytest
 from tilelang.utils.tensor import map_torch_type
 
 
@@ -206,6 +207,7 @@ def run_tvm_ffi_kernel_do_bench(
     assert tvm_latency is not None
 
 
+@pytest.mark.perf
 def test_tvm_ffi_kernel_do_bench():
     run_tvm_ffi_kernel_do_bench(512, 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
 

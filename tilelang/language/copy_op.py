@@ -235,6 +235,62 @@ def async_copy(
     )
 
 
+def tma_copy(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+    *,
+    barrier,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    annotations: dict | None = None,
+) -> tir.PrimExpr | tir.Stmt:
+    """TMA copy — issues arrive_and_expect_tx + tma_load, no wait.
+
+    Unlike T.copy() which emits a full synchronous TMA sequence (arrive + load + wait),
+    T.tma_copy() emits only the producer part (arrive_and_expect_tx + tma_load).
+    The user manages synchronization explicitly via T.mbarrier_wait_parity().
+
+    Args:
+        src: Source memory region (global or shared)
+        dst: Destination memory region (shared or global)
+        barrier: Mbarrier (from T.alloc_barrier()) for TMA synchronization.
+            The TMA load will arrive at this barrier with expected byte count.
+            The user must wait on the same barrier via T.mbarrier_wait_parity().
+        eviction_policy: Cache eviction policy. Defaults to None.
+        annotations: Additional annotations dict. Values in annotations take
+            precedence over individual arguments.
+
+    Returns:
+        tir.Call: A handle to the tma_copy operation
+    """
+    # If both side are buffers, we should make sure their shapes are equal
+    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
+        ir.assert_structural_equal(src.shape, dst.shape)
+
+    src_extent = get_extent(src)
+    dst_extent = get_extent(dst)
+
+    assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
+    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
+    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
+
+    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
+
+    src = to_buffer_region(src, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
+
+    ann = annotations.copy() if annotations else {}
+
+    from .builtin import _mbar_to_buffer_load
+
+    ann["barrier"] = _mbar_to_buffer_load(barrier)
+
+    if "eviction_policy" not in ann and eviction_policy is not None:
+        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
+
+
 def c2d_im2col(
     img: BufferLikeType,
     col: BufferLikeType,

@@ -568,5 +568,4 @@ if __name__ == "__main__":
     parser.add_argument("--E", type=int, default=32, help="E")  # number of experts
     parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
-
     main(args.M, args.N, args.K, args.scale_size, topk=args.topk, E=args.E, fast_dequant=True, with_bias=True, tune=args.tune)

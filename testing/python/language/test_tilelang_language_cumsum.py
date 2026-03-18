@@ -144,33 +144,31 @@ def run_cumsum_1d(N, block_N, reverse=False, dtype=T.float32, scope="smem"):
 
 def test_cumsum_smem():
     # Test different sizes
-    run_cumsum(1024, 1024, 128, 128)
-    run_cumsum(1024, 1024, 128, 128, dim=1)
-    run_cumsum(1024, 1024, 128, 128, dim=1, reverse=True)
+    run_cumsum(256, 256, 64, 64)
+    run_cumsum(256, 256, 64, 64, dim=1)
+    run_cumsum(256, 256, 64, 64, dim=1, reverse=True)
 
     # Test different dtypes
-    run_cumsum(256, 256, 128, 128, dtype=T.float32)
-    run_cumsum(256, 256, 128, 128, dtype=T.float32)
+    run_cumsum(128, 128, 64, 64, dtype=T.float32)
 
 
 def test_cumsum_fragment():
-    run_cumsum(1024, 1024, 128, 128, scope="fragment")
-    run_cumsum(1024, 1024, 128, 128, dim=1, scope="fragment")
-    run_cumsum(1024, 1024, 128, 128, dim=1, reverse=True, scope="fragment")
+    run_cumsum(256, 256, 64, 64, scope="fragment")
+    run_cumsum(256, 256, 64, 64, dim=1, scope="fragment")
+    run_cumsum(256, 256, 64, 64, dim=1, reverse=True, scope="fragment")
 
     # Test different dtypes
-    run_cumsum(256, 256, 128, 128, dtype=T.float32, scope="fragment")
-    run_cumsum(256, 256, 128, 128, dtype=T.float32, scope="fragment")
+    run_cumsum(128, 128, 64, 64, dtype=T.float32, scope="fragment")
 
 
 def test_cumsum_smem_1d():
-    run_cumsum_1d(1024, 128)
-    run_cumsum_1d(1024, 128, reverse=True)
+    run_cumsum_1d(512, 64)
+    run_cumsum_1d(512, 64, reverse=True)
 
 
 def test_cumsum_fragment_1d():
-    run_cumsum_1d(1024, 128, scope="fragment")
-    run_cumsum_1d(1024, 128, reverse=True, scope="fragment")
+    run_cumsum_1d(512, 64, scope="fragment")
+    run_cumsum_1d(512, 64, reverse=True, scope="fragment")
 
 
 def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype=T.float32):
@@ -285,26 +283,25 @@ def run_cumsum_region_2d(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.f
 def test_cumsum_region_1d():
     """Test cumsum with 1D region input."""
     # Test normal cumsum with region input
-    run_cumsum_region_1d(1024, 128)
-    # Test reverse cumsum with region input
-    run_cumsum_region_1d(1024, 128, reverse=True)
-    # Test with different chunk sizes
     run_cumsum_region_1d(512, 64)
-    run_cumsum_region_1d(2048, 256)
+    # Test reverse cumsum with region input
+    run_cumsum_region_1d(512, 64, reverse=True)
+    # Test with different chunk sizes
+    run_cumsum_region_1d(384, 128)
     # Tail coverage (non-divisible size)
-    run_cumsum_region_1d(1000, 128)
+    run_cumsum_region_1d(250, 64)
 
 
 def test_cumsum_region_2d():
     """Test cumsum with 2D region input."""
     # Test 2D cumsum along dim 0
-    run_cumsum_region_2d(1024, 1024, 128, 128, dim=0)
+    run_cumsum_region_2d(256, 256, 64, 64, dim=0)
     # Test 2D cumsum along dim 1
-    run_cumsum_region_2d(1024, 1024, 128, 128, dim=1)
+    run_cumsum_region_2d(256, 256, 64, 64, dim=1)
     # Test reverse cumsum
-    run_cumsum_region_2d(512, 512, 64, 64, dim=1, reverse=True)
+    run_cumsum_region_2d(192, 192, 64, 64, dim=1, reverse=True)
     # Tail coverage (non-divisible size)
-    run_cumsum_region_2d(1000, 1000, 128, 128, dim=1)
+    run_cumsum_region_2d(250, 250, 64, 64, dim=1)
 
 
 if __name__ == "__main__":

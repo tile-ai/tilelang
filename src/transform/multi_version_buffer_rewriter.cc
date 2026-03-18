@@ -3,6 +3,7 @@
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -289,11 +290,18 @@ private:
   static Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
     ObjectPtr<BufferNode> new_buffer =
         tvm::ffi::make_object<BufferNode>(*(buffer.get()));
-    new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
-    if (!new_buffer->strides.empty()) {
-      ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
-      PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
-      new_buffer->strides.insert(new_buffer->strides.begin(), stride_0);
+    if (buffer.scope() == "shared.barrier") {
+      // Barrier buffers: expand first dimension to keep 1D shape.
+      // (1,) -> (num_versions,) so lower_shared_barrier.cc still works.
+      new_buffer->shape.Set(0, PrimExpr(num_versions) * new_buffer->shape[0]);
+    } else {
+      new_buffer->shape.insert(new_buffer->shape.begin(),
+                               PrimExpr(num_versions));
+      if (!new_buffer->strides.empty()) {
+        ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
+        PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
+        new_buffer->strides.insert(new_buffer->strides.begin(), stride_0);
+      }
     }
     return Buffer(new_buffer);
   }
@@ -312,6 +320,44 @@ private:
       }
     }
     block.CopyOnWrite()->alloc_buffers = std::move(alloc_buffers);
+
+    // Update barrier_init annotation: replicate arrive counts for versioned
+    // barrier buffers so lower_shared_barrier sees the correct count.
+    if (block->annotations.count("barrier_init")) {
+      auto barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+          block->annotations.Get("barrier_init").value());
+      Map<Var, Array<PrimExpr>> new_init;
+      bool changed = false;
+      for (auto [data_var, counts] : barrier_init_map) {
+        auto buf_it = buffer_data_to_buffer_.find(data_var);
+        if (buf_it != buffer_data_to_buffer_.end()) {
+          Buffer old_buf = (*buf_it).second;
+          auto remap_it = buffer_remap_.find(old_buf);
+          if (remap_it != buffer_remap_.end()) {
+            Buffer new_buf = (*remap_it).second;
+            int new_size =
+                static_cast<int>(Downcast<IntImm>(new_buf->shape[0])->value);
+            Array<PrimExpr> new_counts;
+            new_counts.reserve(new_size);
+            for (int v = 0; v < new_size;
+                 v += static_cast<int>(counts.size())) {
+              for (auto c : counts)
+                new_counts.push_back(c);
+            }
+            new_init.Set(data_var, new_counts);
+            changed = true;
+            continue;
+          }
+        }
+        new_init.Set(data_var, counts);
+      }
+      if (changed) {
+        auto ann = block->annotations;
+        ann.Set("barrier_init", new_init);
+        block.CopyOnWrite()->annotations = std::move(ann);
+      }
+    }
+
     // Record the updated alloc list to recover buffers whose LCA is the block.
     block_alloc_buffers_[op->block.get()] = block->alloc_buffers;
     block_realize.CopyOnWrite()->block = block;
@@ -434,8 +480,9 @@ private:
       }
       if (!in_scope)
         continue;
-      // Only double-buffer shared allocations; locals do not need versioning.
-      if (!IsSharedBuffer(buffer))
+      // Only double-buffer shared/barrier allocations; locals do not need
+      // versioning.
+      if (!IsSharedBuffer(buffer) && buffer.scope() != "shared.barrier")
         continue;
       if (seen.insert(buffer.get()).second) {
         scoped_buffers.push_back(buffer);
@@ -445,11 +492,14 @@ private:
       if (!(*it)->IsInstance<BlockNode>())
         continue;
       const auto *block = static_cast<const BlockNode *>(*it);
+      // Try cached alloc list first; fall back to the original IR node
+      // (the cache may not be populated yet during the recursive visit).
       auto map_it = block_alloc_buffers_.find(block);
-      if (map_it == block_alloc_buffers_.end())
-        continue;
-      for (const Buffer &buffer : map_it->second) {
-        if (!IsSharedBuffer(buffer))
+      const Array<Buffer> &buffers = map_it != block_alloc_buffers_.end()
+                                         ? map_it->second
+                                         : block->alloc_buffers;
+      for (const Buffer &buffer : buffers) {
+        if (!IsSharedBuffer(buffer) && buffer.scope() != "shared.barrier")
           continue;
         if (seen.insert(buffer.get()).second) {
           scoped_buffers.push_back(buffer);
@@ -460,10 +510,29 @@ private:
     Array<Buffer> versioned_buffers =
         GetVersionedBuffers(pipeline_body_seq->seq, scoped_buffers);
 
+    // Barrier buffers always get versioned in pipelined loops —
+    // they don't fit the producer/consumer analysis above.
+    {
+      std::unordered_set<const BufferNode *> already;
+      for (auto b : versioned_buffers)
+        already.insert(b.get());
+      for (auto buffer : scoped_buffers) {
+        if (buffer.scope() == "shared.barrier" &&
+            !already.count(buffer.get())) {
+          versioned_buffers.push_back(buffer);
+        }
+      }
+    }
+
     for (auto buffer : versioned_buffers) {
       Var buffer_var = buffer->data;
       Buffer new_buffer = RewriteAllocBuffer(buffer, num_stages);
       buffer_remap_.Set(buffer, new_buffer);
+      // Ensure the data var is discoverable so the barrier_init annotation
+      // update in VisitStmt_(BlockRealizeNode*) can find the remapped buffer.
+      if (!buffer_data_to_buffer_.count(buffer_var)) {
+        buffer_data_to_buffer_.Set(buffer_var, buffer);
+      }
     }
     PrimExpr version_index_before = version_index_;
 
@@ -493,8 +562,17 @@ private:
           linear_index * loop_stack_[i].second + loop_stack_[i].first;
     }
     version_index_ = FloorMod(linear_index, num_stages);
+    // Parity cycles every num_stages iterations for mbarrier phase tracking.
+    parity_cycle_ = FloorMod(FloorDiv(linear_index, num_stages), 2);
+    // Store the pipelined loop variable and its min value so we can compute
+    // the initial-phase offset of each mbarrier_wait_parity expression.
+    pipeline_loop_var_ = op->loop_var;
+    pipeline_loop_min_ = op->min;
     auto for_node = StmtExprMutator::VisitStmt_(op);
     version_index_ = version_index_before;
+    parity_cycle_ = PrimExpr(); // reset
+    pipeline_loop_var_ = Var();
+    pipeline_loop_min_ = PrimExpr();
     loop_stack_.pop_back();
     stmt_stack_.pop_back();
 
@@ -507,10 +585,16 @@ private:
     if (it == buffer_remap_.end()) {
       return std::move(load);
     }
+    Buffer old_buffer = load->buffer;
     const Buffer &new_buffer = (*it).second;
     auto *n = load.CopyOnWrite();
     n->buffer = new_buffer;
-    n->indices.insert(n->indices.begin(), version_index_);
+    if (old_buffer.scope() == "shared.barrier") {
+      // Barrier: offset into expanded 1D array
+      n->indices.Set(0, version_index_ * old_buffer->shape[0] + n->indices[0]);
+    } else {
+      n->indices.insert(n->indices.begin(), version_index_);
+    }
     return std::move(load);
   }
 
@@ -520,10 +604,15 @@ private:
     if (it == buffer_remap_.end()) {
       return std::move(store);
     }
+    Buffer old_buffer = store->buffer;
     const Buffer &new_buffer = (*it).second;
     auto *n = store.CopyOnWrite();
     n->buffer = new_buffer;
-    n->indices.insert(n->indices.begin(), version_index_);
+    if (old_buffer.scope() == "shared.barrier") {
+      n->indices.Set(0, version_index_ * old_buffer->shape[0] + n->indices[0]);
+    } else {
+      n->indices.insert(n->indices.begin(), version_index_);
+    }
     return std::move(store);
   }
 
@@ -531,6 +620,43 @@ private:
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
+    }
+    // Rewrite parity for mbarrier_wait_parity on versioned barrier buffers.
+    // The user writes single-barrier parity (e.g. k % 2 or (k+1) % 2).
+    // After multi-versioning, each barrier is reused every num_stages
+    // iterations, so the base parity becomes (k // num_stages) % 2.
+    // However, different barriers may have different initial-phase offsets
+    // (e.g. back-pressure barriers use (k+1)%2 so the first iteration
+    // passes immediately). We detect this offset by evaluating the original
+    // parity at the loop's initial value and preserving it.
+    if (call->op.same_as(mbarrier_wait_parity()) && parity_cycle_.defined()) {
+      if (auto load = call->args[0].as<BufferLoadNode>()) {
+        if (load->buffer.scope() == "shared.barrier") {
+          PrimExpr new_parity = parity_cycle_;
+          if (pipeline_loop_var_.defined()) {
+            arith::Analyzer analyzer;
+            auto subst = [&](const Var &v) -> Optional<PrimExpr> {
+              if (v.same_as(pipeline_loop_var_))
+                return pipeline_loop_min_;
+              return Optional<PrimExpr>();
+            };
+            PrimExpr init_orig =
+                analyzer.Simplify(tir::Substitute(call->args[1], subst));
+            PrimExpr init_cycle =
+                analyzer.Simplify(tir::Substitute(parity_cycle_, subst));
+            PrimExpr offset =
+                analyzer.Simplify(FloorMod(init_orig - init_cycle, 2));
+            if (auto *imm = offset.as<IntImmNode>()) {
+              if (imm->value % 2 != 0) {
+                new_parity = FloorMod(parity_cycle_ + 1, 2);
+              }
+            }
+          }
+          Array<PrimExpr> new_args = call->args;
+          new_args.Set(1, new_parity);
+          return Call(call->dtype, call->op, new_args, call->annotations);
+        }
+      }
     }
     return call;
   }
@@ -571,6 +697,9 @@ private:
   Buffer ragged_prefix_buf_;
   bool needs_ragged_prefix_ = false;
   bool inserted_ragged_prefix_ = false;
+  PrimExpr parity_cycle_; // (k / num_stages) % 2 for mbarrier parity rewriting
+  Var pipeline_loop_var_; // loop variable of the pipelined loop
+  PrimExpr pipeline_loop_min_; // min value of the pipelined loop
   std::vector<std::pair<Var, PrimExpr>> loop_stack_;
   // Track ancestor statements to query whether an LCA is inside the current
   // loop.
