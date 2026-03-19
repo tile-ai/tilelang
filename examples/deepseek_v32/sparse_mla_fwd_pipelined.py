@@ -133,9 +133,9 @@ def sparse_mla_fwd(
 
             tx = T.get_thread_binding()
 
-            T.copy(Q[b_i, s_i, H0:H1, 0 : D // 2], Q_shared_l)
-            T.copy(Q[b_i, s_i, H0:H1, D // 2 : D], Q_shared_r)
-            T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
+            T.tma_copy(Q[b_i, s_i, H0:H1, 0 : D // 2], Q_shared_l, barrier=bar_q)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D // 2 : D], Q_shared_r, barrier=bar_q)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared, barrier=bar_q)
             T.barrier_arrive(bar_q)
 
             if tx < 128:

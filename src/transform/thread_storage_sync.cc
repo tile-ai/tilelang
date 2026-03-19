@@ -544,42 +544,62 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
+struct ConditionThreadProperty {
+  bool depends_on_runtime{false};
+  bool is_block_uniform{true};
+  bool requires_hoist{false};
+
+  void Merge(const ConditionThreadProperty &other) {
+    depends_on_runtime = depends_on_runtime || other.depends_on_runtime;
+    is_block_uniform = is_block_uniform && other.is_block_uniform;
+    requires_hoist = requires_hoist || other.requires_hoist;
+  }
+};
+
 /*!
- * \brief Check if an if-condition depends on runtime-variable values.
+ * \brief Analyze whether an if-condition is runtime-dependent and/or uniform
+ * across all threads in a block.
  *
- * For sync hoisting decisions, we distinguish two types of non-uniform
- * conditions:
+ * For sync hoisting decisions we care about two independent properties:
  *
- * 1. Conditions that only depend on threadIdx (e.g., `threadIdx.x >= 512`):
- *    - The number of threads entering the if can be determined at compile time
- *    - ThreadPartialSyncRewriter can handle this by computing the thread count
- *    - No need to hoist sync
+ * 1. Does the condition depend on runtime values such as memory loads?
+ * 2. Even if it does, is it still block-uniform, i.e. identical for every
+ *    thread in the block?
  *
- * 2. Conditions that depend on runtime values (e.g., `shared_mem[tx] != -1`):
- *    - Cannot determine at compile time how many threads will enter
- *    - Must hoist sync to before the if to avoid potential deadlock
+ * Example:
+ * - `token_ids[tx] != -1` is runtime-dependent and non-uniform.
+ * - `batch_sizes[bx] > 0` is runtime-dependent but block-uniform.
  *
- * This checker identifies case (2) - conditions that depend on runtime values.
+ * Only runtime-dependent, non-uniform conditions need to force sync hoisting.
+ * In addition, some non-uniform threadIdx-only conditions still need hoisting
+ * when ThreadPartialSyncRewriter cannot handle them.
  */
-class RuntimeDependentConditionChecker : public IRMutatorWithAnalyzer {
+class ConditionThreadPropertyChecker : public IRMutatorWithAnalyzer {
 public:
-  explicit RuntimeDependentConditionChecker(arith::Analyzer *analyzer,
-                                            int warp_size = 32)
-      : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
+  explicit ConditionThreadPropertyChecker(
+      arith::Analyzer *analyzer, const Array<IterVar> &env_threads,
+      const std::unordered_map<const VarNode *, ConditionThreadProperty>
+          &let_var_properties,
+      int warp_size = 32)
+      : IRMutatorWithAnalyzer(analyzer), env_threads_(env_threads),
+        let_var_properties_(let_var_properties), warp_size_(warp_size) {}
 
   /*!
-   * \brief Check if expression depends on runtime-variable values.
-   * \return true if the expression depends on values that cannot be determined
-   *         at compile time (e.g., shared memory loads), false if it only
-   *         depends on compile-time known values (constants, threadIdx,
-   * blockIdx).
+   * \brief Analyze condition properties relevant to thread-sync hoisting.
    */
-  bool DependsOnRuntimeValue(const PrimExpr &expr, const IterVar &iv) {
-    depends_on_runtime_ = false;
+  ConditionThreadProperty AnalyzeExpr(const PrimExpr &expr) {
+    current_ = ConditionThreadProperty();
+    this->VisitExpr(expr);
+    return current_;
+  }
+
+  ConditionThreadProperty AnalyzeCondition(const PrimExpr &expr,
+                                           const IterVar &iv) {
+    current_ = ConditionThreadProperty();
     this->VisitExpr(expr);
     auto extent_opt = as_const_int(iv->dom->extent);
     ICHECK(extent_opt != nullptr)
-        << "DependsOnRuntimeValue: thread extent must be a "
+        << "AnalyzeCondition: thread extent must be a "
            "constant, but got: "
         << iv->dom->extent;
     int64_t thread_extent = *extent_opt;
@@ -588,36 +608,88 @@ public:
       auto count = analyzer_->z3_prover.CountSatisfyingValues(
           iv->var, thread_extent, /*min_consecutive=*/warp_size_);
       if (count < 0) {
-        // failed to count satisfying values, return true
-        depends_on_runtime_ = true;
+        // ThreadPartialSyncRewriter cannot safely lower this condition.
+        current_.requires_hoist = true;
       }
     }
-    return depends_on_runtime_;
+    return current_;
   }
 
 private:
+  StorageScope GetScope(Var buffer_var) const {
+    return StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+  }
+
+  bool IsThreadVar(const VarNode *op) const {
+    for (const auto &iv : env_threads_) {
+      if (iv->var.get() == op &&
+          runtime::ThreadScope::Create(iv->thread_tag).rank == 1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool IsThreadLocalScope(const StorageScope &scope) const {
+    switch (scope.rank) {
+    case StorageRank::kWarp:
+    case StorageRank::kLocal:
+    case StorageRank::kWMMAMatrixA:
+    case StorageRank::kWMMAMatrixB:
+    case StorageRank::kWMMAAccumulator:
+    case StorageRank::kAMXTMM:
+    case StorageRank::kMMAMatrixA:
+    case StorageRank::kMMAMatrixB:
+    case StorageRank::kMMAMatrixC:
+    case StorageRank::kMetalSimdGroup:
+      return true;
+    case StorageRank::kGlobal:
+    case StorageRank::kShared:
+    case StorageRank::kTexture:
+      return false;
+    }
+    return false;
+  }
+
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    if (IsThreadVar(op)) {
+      current_.is_block_uniform = false;
+    }
+    auto it = let_var_properties_.find(op);
+    if (it != let_var_properties_.end()) {
+      current_.Merge(it->second);
+    }
+    return GetRef<Var>(op);
+  }
+
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    // Any buffer load introduces runtime dependency
-    // (we don't know the buffer contents at compile time)
-    depends_on_runtime_ = true;
+    current_.depends_on_runtime = true;
+    if (IsThreadLocalScope(GetScope(op->buffer->data))) {
+      current_.is_block_uniform = false;
+    }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
-    // Check tvm_access_ptr and address_of - if used in condition, it's reading
-    // memory
     if (op->op.same_as(builtin::tvm_access_ptr()) ||
         op->op.same_as(builtin::address_of())) {
-      depends_on_runtime_ = true;
-      return IRMutatorWithAnalyzer::VisitExpr_(op);
+      current_.depends_on_runtime = true;
+      if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() >= 2) {
+        if (const auto *data_var = op->args[1].as<VarNode>()) {
+          if (IsThreadLocalScope(GetScope(GetRef<Var>(data_var)))) {
+            current_.is_block_uniform = false;
+          }
+        }
+      }
     }
-    // Other calls might also introduce runtime dependency
-    // but we'll be conservative and check children
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
 private:
-  bool depends_on_runtime_{false};
+  ConditionThreadProperty current_;
+  const Array<IterVar> &env_threads_;
+  const std::unordered_map<const VarNode *, ConditionThreadProperty>
+      &let_var_properties_;
   int warp_size_;
 };
 
@@ -774,8 +846,21 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     allow_append_ = false;
     // traverse body block
     {
+      auto let_prop = AnalyzeExprProperty(op->value);
+      auto it = let_var_properties_.find(op->var.get());
+      bool had_prev = it != let_var_properties_.end();
+      ConditionThreadProperty prev_prop;
+      if (had_prev) {
+        prev_prop = it->second;
+      }
+      let_var_properties_[op->var.get()] = let_prop;
       auto guard = MakeGuard(op->var, op->value);
       this->VisitStmt(op->body);
+      if (had_prev) {
+        let_var_properties_[op->var.get()] = prev_prop;
+      } else {
+        let_var_properties_.erase(op->var.get());
+      }
     }
   }
   void VisitStmt_(const BlockNode *op) final {
@@ -926,29 +1011,26 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     bool has_syncs_inside = !syncs_in_then.empty() || !syncs_in_else.empty();
 
     if (has_syncs_inside) {
-      // Check if the condition depends on runtime values (e.g., shared memory
-      // loads). If so, we cannot determine at compile time how many threads
-      // will enter the if, so we must hoist the sync to before the if to avoid
-      // potential deadlock.
+      // Runtime-dependent conditions are only problematic when they can differ
+      // across threads in the same block. Block-uniform runtime conditions
+      // such as `batch_sizes[blockIdx.z] > 0` are safe to keep in-place.
       //
-      // If the condition only depends on threadIdx (e.g., `threadIdx.x >=
-      // 512`), we use Z3 to check if the thread count is a multiple of 32.
-      // If not, ThreadPartialSyncRewriter cannot handle it properly, so we
-      // must also hoist the sync.
+      // Separately, some threadIdx-only non-uniform conditions still need
+      // hoisting when ThreadPartialSyncRewriter cannot lower them safely.
       arith::Analyzer analyzer;
       ConstrSet constr_set = GetConstrSet();
       constr_set.Populate(analyzer);
-      RuntimeDependentConditionChecker checker(&analyzer, warp_size_);
+      ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
+                                             let_var_properties_, warp_size_);
       IterVar tx = GetThreadVar("threadIdx.x");
-      bool depends_on_runtime =
-          checker.DependsOnRuntimeValue(op->condition, tx);
+      auto condition_prop = checker.AnalyzeCondition(op->condition, tx);
 
-      if (depends_on_runtime) {
-        // Condition depends on runtime values - must hoist sync
-        // Condition depends on runtime values - must hoist sync
+      if ((condition_prop.depends_on_runtime &&
+           !condition_prop.is_block_uniform) ||
+          condition_prop.requires_hoist) {
         LOG(WARNING)
             << "[ThreadSync] Hoisting sync from inside if to before if. "
-            << "Condition depends on runtime value: " << op->condition;
+            << "Condition is not safe for in-if sync: " << op->condition;
         for (const auto &sync : syncs_in_then) {
           syncs_inserted_.erase(sync);
         }
@@ -1374,6 +1456,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   const Array<IterVar> &env_threads() const { return env_threads_; }
 
 private:
+  ConditionThreadProperty AnalyzeExprProperty(const PrimExpr &expr) const {
+    arith::Analyzer analyzer;
+    ConstrSet constr_set = GetConstrSet();
+    constr_set.Populate(analyzer);
+    ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
+                                           let_var_properties_, warp_size_);
+    return checker.AnalyzeExpr(expr);
+  }
+
   bool Enabled(const VarNode *buf, const StorageScope &scope) {
     return in_device_env() && scope == sync_scope_;
   }
@@ -1396,6 +1487,10 @@ private:
   StmtEntry curr_stmt_;
   // The involving threads
   Array<IterVar> env_threads_;
+  // Thread-uniform/runtime properties for let-bound vars visible in the
+  // current lexical scope.
+  std::unordered_map<const VarNode *, ConditionThreadProperty>
+      let_var_properties_;
   // The buffer map
   Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope

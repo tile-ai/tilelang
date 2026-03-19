@@ -172,20 +172,28 @@ def test_varlen_decode_main(args):
     max_k_seqlen, head_size, block_size = args.k_seqlen, args.head_size, args.block_size
     dtype = torch.bfloat16 if args.dtype == T.bfloat16 else torch.float16
 
-    # Generate variable length sequences and cumulative lengths
-    k_seqlens = torch.randint(max_k_seqlen // 4, max_k_seqlen + 1, size=(batch_size,))
-    cu_seqlens_k = torch.zeros(batch_size + 1, device="cuda", dtype=torch.int32)
-    cu_seqlens_k[1:] = torch.cumsum(k_seqlens, dim=0).to(torch.int32).cuda()
-    total_k_tokens = cu_seqlens_k[-1].item()
+    # Make the test deterministic and independent of global RNG state.
+    # This avoids flaky allclose failures when run under xdist with different
+    # test ordering.
+    cuda_devices = list(range(torch.cuda.device_count()))
+    with torch.random.fork_rng(devices=cuda_devices):
+        torch.manual_seed(0)
+        if cuda_devices:
+            torch.cuda.manual_seed_all(0)
 
-    # Generate input tensors
-    q = torch.randn(batch_size, q_heads, head_size, device="cuda", dtype=dtype)
-    k_varlen = torch.randn(total_k_tokens, kv_heads, head_size, device="cuda", dtype=dtype)
-    v_varlen = torch.randn(total_k_tokens, kv_heads, head_size, device="cuda", dtype=dtype)
-    sink = torch.randn(q_heads, device="cuda", dtype=torch.float32) * 0.1 if args.test_sink else None
+        # Generate variable length sequences and cumulative lengths
+        k_seqlens = torch.randint(max_k_seqlen // 4, max_k_seqlen + 1, size=(batch_size,))
+        cu_seqlens_k = torch.zeros(batch_size + 1, device="cuda", dtype=torch.int32)
+        cu_seqlens_k[1:] = torch.cumsum(k_seqlens, dim=0).to(torch.int32).cuda()
+        total_k_tokens = cu_seqlens_k[-1].item()
+
+        # Generate input tensors
+        q = torch.randn(batch_size, q_heads, head_size, device="cuda", dtype=dtype)
+        k_varlen = torch.randn(total_k_tokens, kv_heads, head_size, device="cuda", dtype=dtype)
+        v_varlen = torch.randn(total_k_tokens, kv_heads, head_size, device="cuda", dtype=dtype)
+        sink = torch.randn(q_heads, device="cuda", dtype=torch.float32) * 0.1 if args.test_sink else None
 
     # Run tilelang kernel
-    tilelang.disable_cache()
     tl_kernel = flashattn(batch_size, q_heads, kv_heads, max_k_seqlen, total_k_tokens, head_size, args.test_sink)
     O_tl, S_tl = tl_kernel(q, k_varlen, v_varlen, cu_seqlens_k, sink)
     S_tl = torch.max_pool2d(S_tl, kernel_size=(q_heads, 1), stride=(q_heads, 1))

@@ -230,28 +230,36 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
-    # Lower the shared.barrier and shared.cluster_barrier into specific initialization slot
-    mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
     # which may be introduced by the LegalizeSafeMemoryAccess
-    # Note: The WarpSpecialized + InjectTmaBarrier pipeline is required for correct TMA lowering
-    # (mbarrier allocation/init + expect_tx injection) even when warp specialization is disabled.
     if allow_tma_lower(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
+        # MultiVersionBuffer before LowerSharedBarrier so barrier buffers
+        # (shared.barrier scope) can be expanded for pipelining.
         mod = tilelang.transform.MultiVersionBuffer()(mod)
-        mod = tilelang.transform.WarpSpecialized()(mod)
-        mod = tilelang.transform.InjectTmaBarrier()(mod)
-        # Pipeline planning applies to both TMA and non-TMA paths
-        # to get better performance with async copy
-        mod = tilelang.transform.PipelinePlanning()(mod)
-        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-        # warp_specialized pass will pack the if stmt into the block
-        # so we need to lower the opaque block first
+        if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
+            # Producer-Consumer Warp Specialization:
+            # Splits TMA pipeline loops into producer (TMA loads) and consumer
+            # (compute) warps with mbarrier-based synchronization.
+            # When WS succeeds, it handles the pipeline overlap directly,
+            # so PipelinePlanning + InjectSoftwarePipeline are skipped.
+            # NOTE: LowerSharedBarrier runs ONLY after WS, not before.
+            # Running it before would generate barrier init calls that
+            # WS cannot clean up when it replaces the barriers.
+            mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+            mod = tilelang.transform.LowerSharedBarrier()(mod)
+        else:
+            mod = tilelang.transform.LowerSharedBarrier()(mod)
+            mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+            mod = tilelang.transform.PipelinePlanning()(mod)
+            mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
         if is_hopper(target):
             mod = tilelang.transform.RewriteWgmmaSync()(mod)
     else:
+        mod = tilelang.transform.LowerSharedBarrier()(mod)
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)

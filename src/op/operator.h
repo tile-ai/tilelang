@@ -23,6 +23,7 @@ namespace tl {
 using namespace tir;
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
+using AllocMBarrierCallback = std::function<int(int arrive_count)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
 
@@ -51,6 +52,7 @@ struct LowerArgs {
   Range thread_bounds;
   Var thread_var;
   AddWorkspaceCallback AddWorkspace;
+  AllocMBarrierCallback AllocMBarrier;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
   // Map from LetStmt variable to its bound expression, for resolving
@@ -59,6 +61,21 @@ struct LowerArgs {
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
+  // Expression for mbarrier wait parity.
+  // For pipeline_num_stages=1: ko % 2
+  // For pipeline_num_stages=N: (ko / N) % 2
+  // For non-loop contexts: 0
+  PrimExpr mbar_phase_expr;
+  // Number of pipeline stages (from T.Pipelined num_stages annotation).
+  // Determines how many mbarriers to allocate per TMA copy operation.
+  int pipeline_num_stages = 1;
+  // Expression for mbarrier stage index: ko % pipeline_num_stages.
+  // Used to cycle through multiple mbarriers in pipelined loops.
+  PrimExpr mbar_stage_expr;
+  // Pointer to the shared.barrier buffer for compiler-generated mbarriers.
+  // Points to the LowerTileOpPass member so copy.cc sees the buffer
+  // even when created lazily by the AllocMBarrier callback.
+  Optional<Buffer> *mbarrier_buffer = nullptr;
 };
 
 struct LayoutInferArgs {

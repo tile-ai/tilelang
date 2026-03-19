@@ -237,15 +237,18 @@ def MultiVersionBuffer():
     return _ffi_api.MultiVersionBuffer()  # type: ignore
 
 
-def WarpSpecialized():
-    """WarpSpecializedPipeline
+def ProducerConsumerWarpSpecialized():
+    """Producer-Consumer Warp Specialization for TMA pipelines.
+
+    Splits pipelined loops with TMA loads into producer (TMA copy) and
+    consumer (compute) warp groups with mbarrier-based synchronization.
 
     Returns
     -------
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.WarpSpecialized()  # type: ignore
+    return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 
 def AnnotateWarpGroupRegAlloc():
@@ -263,15 +266,9 @@ def AnnotateWarpGroupRegAlloc():
     return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
 
 
-def InjectTmaBarrier():
-    """InjectTmaBarrier
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.InjectTmaBarrier()  # type: ignore
+def FuseMBarrierArriveExpectTx():
+    """Fuse simple expect_tx -> TMA issue -> arrive back into arrive_and_expect_tx."""
+    return _ffi_api.FuseMBarrierArriveExpectTx()  # type: ignore
 
 
 def InjectFenceProxy():

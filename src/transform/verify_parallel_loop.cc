@@ -1,3 +1,4 @@
+#include "../op/utils.h"
 #include "common/constr_visitor.h"
 #include "layout_reducer.h"
 #include "tvm/arith/analyzer.h"
@@ -35,8 +36,8 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     }
   }
   void VisitStmt_(const BufferStoreNode *op) override {
-    if (reducers.count(op->buffer->data) || op->buffer.scope() == "local.var" ||
-        op->buffer.scope() == "local") {
+    if (reducers.count(op->buffer->data) ||
+        IsLocalBuffer(op->buffer, /*allow_var=*/true)) {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }

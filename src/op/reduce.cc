@@ -575,9 +575,8 @@ Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (IsFragmentBuffer(this->src) && IsFragmentBuffer(this->dst)) {
     LOG(FATAL) << "CumSum for fragment not implemented, please raise an issue "
                   "if you need this feature.";
-  } else if (this->src.scope() == "shared.dyn" ||
-             this->src.scope() == "shared") {
-    ICHECK(this->dst.scope() == "shared.dyn" || this->dst.scope() == "shared");
+  } else if (IsSharedBuffer(this->src)) {
+    ICHECK(IsSharedBuffer(this->dst));
     std::stringstream ss;
     auto threads = T.thread_bounds->extent;
     Array<PrimExpr> args;

@@ -77,12 +77,13 @@ inline Layout ExpandLayoutToMatchBuffer(const Layout &layout,
 }
 
 inline bool IsSharedBuffer(const Buffer &buffer, bool allow_dynamic = true) {
-  if (allow_dynamic) {
-    return buffer.defined() &&
-           (buffer.scope() == "shared" || buffer.scope() == "shared.dyn");
-  } else {
-    return buffer.defined() && buffer.scope() == "shared";
+  if (!buffer.defined()) {
+    return false;
   }
+  if (allow_dynamic) {
+    return buffer.scope() == "shared" || buffer.scope() == "shared.dyn";
+  }
+  return buffer.scope() == "shared";
 }
 
 inline bool IsGlobalBuffer(const Buffer &buffer) {
@@ -94,12 +95,13 @@ inline bool IsValidCPAsyncTransferBytes(int bytes) {
 }
 
 inline bool IsLocalBuffer(const Buffer &buffer, bool allow_var = false) {
-  if (allow_var) {
-    return buffer.defined() &&
-           (buffer.scope() == "local" || buffer.scope() == "local.var");
-  } else {
-    return buffer.defined() && buffer.scope() == "local";
+  if (!buffer.defined()) {
+    return false;
   }
+  if (allow_var) {
+    return buffer.scope() == "local" || buffer.scope() == "local.var";
+  }
+  return buffer.scope() == "local";
 }
 
 inline bool IsLocalVarBuffer(const Buffer &buffer) {

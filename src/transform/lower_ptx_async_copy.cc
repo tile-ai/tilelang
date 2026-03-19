@@ -676,7 +676,7 @@ private:
   }
 
   // ---- Synchronization emission helpers ----
-  static void AppendSyncVisibility(Array<Stmt> *seq, bool include_commit) {
+  void AppendSyncVisibility(Array<Stmt> *seq, bool include_commit) const {
     if (include_commit) {
       seq->push_back(MakeCommitGroupStmt());
     }

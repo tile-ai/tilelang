@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "common/tma_copy_utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
 #include "tir/transforms/ir_utils.h"
@@ -203,8 +204,12 @@ private:
     };
     Array<PrimExpr> new_args = call->args;
     for (int i : arg_indices) {
-      const Buffer &buffer =
-          buffer_data_to_buffer_.at(Downcast<Var>(call->args[i]));
+      auto buffer_var = Downcast<Var>(call->args[i]);
+      auto buf_it = buffer_data_to_buffer_.find(buffer_var);
+      if (buf_it == buffer_data_to_buffer_.end()) {
+        continue;
+      }
+      const Buffer &buffer = (*buf_it).second;
       auto it = buffer_remap_.find(buffer);
       if (it != buffer_remap_.end()) {
         const Buffer &new_buffer = (*it).second;
@@ -1106,6 +1111,7 @@ tir::transform::Pass InjectSoftwarePipeline() {
     auto *fptr = f.CopyOnWrite();
     fptr->body = software_pipeline::PipelineInjector::Inject(f);
     fptr->body = ConvertSSA(std::move(fptr->body));
+    fptr->body = StripTmaCopyWriteBufferAttr(std::move(fptr->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectSoftwarePipeline", {});

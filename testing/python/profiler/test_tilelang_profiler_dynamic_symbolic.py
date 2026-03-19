@@ -4,6 +4,10 @@ import tilelang
 import tilelang.testing
 import tilelang.language as T
 import torch
+import pytest
+
+SINGLE_SYMBOLIC_M_VALUES = [128, 256, 512]
+MULTIPLE_SYMBOLIC_CONSTRAINTS = [(128, 128), (256, 512), (512, 256)]
 
 
 @tilelang.jit(out_idx=[-1])
@@ -30,7 +34,8 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
     return gemm
 
 
-def test_profiler_dynamic_symbolic_single():
+@pytest.mark.parametrize("m_val", SINGLE_SYMBOLIC_M_VALUES, ids=[f"m={m}" for m in SINGLE_SYMBOLIC_M_VALUES])
+def test_profiler_dynamic_symbolic_single(m_val):
     """Test profiler with a single dynamic symbolic variable."""
     M = T.dynamic("m")
     N = 256
@@ -42,19 +47,17 @@ def test_profiler_dynamic_symbolic_single():
     kernel = matmul(M, N, K, block_M, block_N, block_K)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
-    # Test with dynamic_symbolic_constraints
-    latency = profiler.do_bench(dynamic_symbolic_constraints={"m": 256})
-    assert latency > 0, f"Expected positive latency, got {latency}"
-    print(f"Latency (m=256): {latency:.3f} ms")
-
-    # Test with different M values
-    for m_val in [128, 256, 512]:
-        latency = profiler.do_bench(dynamic_symbolic_constraints={"m": m_val})
-        assert latency > 0, f"Expected positive latency for m={m_val}, got {latency}"
-        print(f"Latency (m={m_val}): {latency:.3f} ms")
+    latency = profiler.do_bench(dynamic_symbolic_constraints={"m": m_val})
+    assert latency > 0, f"Expected positive latency for m={m_val}, got {latency}"
+    print(f"Latency (m={m_val}): {latency:.3f} ms")
 
 
-def test_profiler_dynamic_symbolic_multiple():
+@pytest.mark.parametrize(
+    ("m_val", "n_val"),
+    MULTIPLE_SYMBOLIC_CONSTRAINTS,
+    ids=[f"m={m}-n={n}" for m, n in MULTIPLE_SYMBOLIC_CONSTRAINTS],
+)
+def test_profiler_dynamic_symbolic_multiple(m_val, n_val):
     """Test profiler with multiple dynamic symbolic variables."""
     M = T.dynamic("m")
     N = T.dynamic("n")
@@ -66,19 +69,13 @@ def test_profiler_dynamic_symbolic_multiple():
     kernel = matmul(M, N, K, block_M, block_N, block_K)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
-    # Test with multiple dynamic_symbolic_constraints
-    latency = profiler.do_bench(dynamic_symbolic_constraints={"m": 256, "n": 256})
-    assert latency > 0, f"Expected positive latency, got {latency}"
-    print(f"Latency (m=256, n=256): {latency:.3f} ms")
-
-    # Test with different M and N values
-    for m_val, n_val in [(128, 128), (256, 512), (512, 256)]:
-        latency = profiler.do_bench(dynamic_symbolic_constraints={"m": m_val, "n": n_val})
-        assert latency > 0, f"Expected positive latency for m={m_val}, n={n_val}, got {latency}"
-        print(f"Latency (m={m_val}, n={n_val}): {latency:.3f} ms")
+    latency = profiler.do_bench(dynamic_symbolic_constraints={"m": m_val, "n": n_val})
+    assert latency > 0, f"Expected positive latency for m={m_val}, n={n_val}, got {latency}"
+    print(f"Latency (m={m_val}, n={n_val}): {latency:.3f} ms")
 
 
-def test_profiler_dynamic_symbolic_correctness():
+@pytest.mark.parametrize("m_val", SINGLE_SYMBOLIC_M_VALUES, ids=[f"m={m}" for m in SINGLE_SYMBOLIC_M_VALUES])
+def test_profiler_dynamic_symbolic_correctness(m_val):
     """Test that kernel with dynamic symbolic produces correct results."""
     M = T.dynamic("m")
     N = 256
@@ -89,16 +86,14 @@ def test_profiler_dynamic_symbolic_correctness():
 
     kernel = matmul(M, N, K, block_M, block_N, block_K)
 
-    # Test correctness with different M values
-    for m_val in [128, 256, 512]:
-        a = torch.randn(m_val, K, dtype=torch.float16, device="cuda")
-        b = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    a = torch.randn(m_val, K, dtype=torch.float16, device="cuda")
+    b = torch.randn(K, N, dtype=torch.float16, device="cuda")
 
-        c = kernel(a, b)
-        ref_c = a @ b
+    c = kernel(a, b)
+    ref_c = a @ b
 
-        torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
-        print(f"Correctness test passed for m={m_val}")
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    print(f"Correctness test passed for m={m_val}")
 
 
 def test_profiler_dynamic_symbolic_missing_constraint():

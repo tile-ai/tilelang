@@ -105,10 +105,8 @@ TileOperator GemmNode::Clone() const {
 
 bool GemmNode::allowTcgen5Mma(Target target) const {
   return TargetIsSm100(target) &&
-         ((a_.scope() == "shared.dyn" || a_.scope() == "shared" ||
-           a_.scope() == "shared.tmem") &&
-          (b_.scope() == "shared.dyn" || b_.scope() == "shared") &&
-          c_.scope() == "shared.tmem") &&
+         ((IsSharedBuffer(a_) || a_.scope() == "shared.tmem") &&
+          IsSharedBuffer(b_) && c_.scope() == "shared.tmem") &&
          GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype).first;
 }
 
@@ -455,12 +453,12 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto [can_use_tcgen5mma, meta] =
         GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype);
     ICHECK(can_use_tcgen5mma);
-    ICHECK(b_.scope() == "shared.dyn" || b_.scope() == "shared");
+    ICHECK(IsSharedBuffer(b_));
     ICHECK(c_.scope() == "shared.tmem");
     ICHECK(mbar_.defined()) << "mbar must be provided for TCGEN5MMA";
     if (a_.scope() == "shared.tmem") {
       op_name = "tl::tcgen5mma_gemm_ts";
-    } else if (a_.scope() == "shared.dyn" || a_.scope() == "shared") {
+    } else if (IsSharedBuffer(a_)) {
       op_name = "tl::tcgen5mma_gemm_ss";
     } else {
       ICHECK(0)
@@ -607,7 +605,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     auto fragment = makeGemmVoltaFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
                                            c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
-    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(a_)) {
       int dim_A = a_->shape.size();
       auto layout = makeGemmVoltaABLayout(*as_const_int(a_->shape[dim_A - 2]),
                                           *as_const_int(a_->shape[dim_A - 1]),
@@ -622,7 +620,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       ICHECK(0);
     }
 
-    ICHECK(b_.scope() == "shared" || b_.scope() == "shared.dyn");
+    ICHECK(IsSharedBuffer(b_));
     int dim_B = b_->shape.size();
     auto layout = makeGemmVoltaABLayout(*as_const_int(b_->shape[dim_B - 2]),
                                         *as_const_int(b_->shape[dim_B - 1]),
@@ -638,7 +636,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
         makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n, c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
 
-    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(a_)) {
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
@@ -652,7 +650,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     } else {
       ICHECK(0);
     }
-    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(b_)) {
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
@@ -676,7 +674,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                         : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
                                             c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
-    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(a_)) {
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
@@ -694,7 +692,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                         a_->dtype.bits(), transA_);
       results.Set(a_, fragment->BindThreadRange(thread_range));
     }
-    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(b_)) {
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
@@ -716,7 +714,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   } else if (gemm_inst == GemmInst::kTCGEN5MMA) {
     ICHECK(c_.scope() == "shared.tmem")
         << "TCGEN5MMA only supports C in shared.tmem scope, got " << c_.scope();
-    ICHECK(a_.scope() == "shared.dyn" || a_.scope() == "shared")
+    ICHECK(IsSharedBuffer(a_))
         << "Current TCGEN5MMA only supports A in shared.dyn scope";
     auto [can_use_tcgen5mma, meta] =
         GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype);
@@ -782,7 +780,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                           c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
 
-    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(a_)) {
       int dim_A = a_->shape.size();
       auto shared_layout = makeGemmABLayoutCDNA(
           *as_const_int(a_->shape[dim_A - 2]),
@@ -796,7 +794,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     } else {
       ICHECK(0);
     }
-    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(b_)) {
       int dim_B = b_->shape.size();
       auto shared_layout = makeGemmABLayoutCDNA(
           *as_const_int(b_->shape[dim_B - 2]),
