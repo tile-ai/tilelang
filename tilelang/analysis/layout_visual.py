@@ -6,7 +6,7 @@ from tvm.tir.transform import prim_func_pass
 from tilelang.tools.plot_layout import plot_layout
 
 
-def print_fragment_format(layout: T.Fragment) -> str:
+def print_fragment_format(layout: T.Fragment) -> None:
     """
     Format fragment layout information into a human-readable string.
 
@@ -23,7 +23,12 @@ def print_fragment_format(layout: T.Fragment) -> str:
     if isinstance(layout, T.Fragment):
         input_shape = layout.get_input_shape()
         output_shape = layout.get_output_shape()
-        lines = [f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}", f"  Index:  {layout.forward_index}"]
+        lines = [
+            f"  Shape: {input_shape} -> {output_shape}",
+            f"  Thread: {layout.forward_thread}",
+            f"  Index:  {layout.forward_index}",
+            f"  Replicate:  {layout.replicate_size}",
+        ]
         print("\n".join(lines))
     else:
         raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
@@ -55,10 +60,8 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
     - "png,svg": Generate multiple formats (comma-separated)
     """
 
-    def __init__(self, formats: list[str] = ""):
+    def __init__(self, formats: list[str] = None):
         super().__init__()
-        self.layout_found = []
-        self.processed_layouts = set()
         self.formats_list = [f for f in formats if f != "txt"]
 
     def visit_block_(self, op: tir.Block) -> None:
@@ -67,15 +70,10 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
 
             for key, layout in layout_map.items():
                 if isinstance(layout, T.Fragment):
-                    layout_id = str(layout)
-                    if layout_id not in self.processed_layouts:
-                        print(f"{key} inferenced layout:")
-                        print_fragment_format(layout)
-                        for fmt in self.formats_list:
-                            plot_layout(layout, name=f"{key}_layout", formats=fmt)
-                        self.processed_layouts.add(layout_id)
-
-        # super().visit_block_(op)
+                    print(f"{key} inferenced layout:")
+                    print_fragment_format(layout)
+                    for fmt in self.formats_list:
+                        plot_layout(layout, name=f"{key}_layout", formats=fmt)
 
 
 def LayoutVisual(formats: str = ""):
