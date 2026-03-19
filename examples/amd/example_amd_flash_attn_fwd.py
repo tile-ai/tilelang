@@ -62,7 +62,7 @@ def get_configs():
     incorrect results in the shared memory transpose used to convert softmax scores
     to the GEMM 2 A-matrix layout.
     """
-    if IsRDNA:
+    if IsRDNA():
         block_M = [16, 32]
         block_N = [16, 32]
         threads = [32, 64]
@@ -172,7 +172,7 @@ def fast_flashattn(
                 # D and A have different register layouts, so a direct fragment-to-
                 # fragment copy would cause a layout conflict. Routing through shared
                 # memory correctly transposes the softmax values.
-                if IsRDNA:
+                if IsRDNA():
                     P_shared = T.alloc_shared([block_M, block_N], dtype)
                 # Use register fragment for P instead of shared memory to reduce LDS usage
                 acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
@@ -228,7 +228,7 @@ def fast_flashattn(
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
 
-                    if IsRDNA:
+                    if IsRDNA():
                         # Cast softmax values from f32 (acc_s, D-layout) to f16 (acc_s_cast, A-layout).
                         # On RDNA with WMMA, D and A have different register layouts.
                         # Route through shared memory (P_shared) to correctly bridge them:
