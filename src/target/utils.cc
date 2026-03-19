@@ -93,9 +93,8 @@ bool TargetIsRDNA(Target target) {
     return false;
   if (target->attrs.count("mcpu")) {
     std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
-    // gfx10xx, gfx11xx, gfx12xx are RDNA architectures
-    return mcpu.find("gfx10") == 0 || mcpu.find("gfx11") == 0 ||
-           mcpu.find("gfx12") == 0;
+    // gfx11xx, gfx12xx are RDNA architectures
+    return mcpu.find("gfx11") == 0 || mcpu.find("gfx12") == 0;
   }
   return false;
 }
