@@ -11,6 +11,7 @@ from .gemm_mma_sm70 import GemmMMASm70
 from .gemm_wgmma import GemmWGMMA
 from .gemm_tcgen05 import GemmTCGEN5
 from .gemm_mfma import GemmMFMA
+from .gemm_wmma import GemmWMMA
 from .gemm_scalar import GemmScalar
 from tilelang import _ffi_api
 from tilelang.utils.target import target_is_volta
@@ -166,6 +167,8 @@ class GemmPy(Node, Scriptable):
             return GemmTCGEN5
         elif gemm_inst.is_mfma():
             return GemmMFMA
+        elif gemm_inst.is_wmma():
+            return GemmWMMA
         elif gemm_inst.is_scalar():
             return GemmScalar
         else:

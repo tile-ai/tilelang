@@ -127,6 +127,8 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
+  } else if (TargetIsRDNA(target)) {
+    return GemmInst::kWMMA;
   } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else {
@@ -150,6 +152,8 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
   if (TargetIsVolta(target)) {
     kNPerWarp = 16;
   } else if (TargetIsCDNA(target)) {
+    kNPerWarp = 16;
+  } else if (TargetIsRDNA(target)) {
     kNPerWarp = 16;
   }
   ICHECK(M % kMPerWarp == 0)
