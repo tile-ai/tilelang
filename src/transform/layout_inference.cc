@@ -47,7 +47,7 @@ int64_t GetElementStorageBits(DataType dtype) {
   return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
 }
 
-}  // namespace
+} // namespace
 
 /*!
  * \brief collect the mapping from the buffer var to it allocated buffer
@@ -163,14 +163,13 @@ public:
                   ? src_layout
                   // Alias buffers may reinterpret the same storage with a
                   // different element width.  Reshape the inferred layout using
-                  // the old/new storage bit ratio so that layout inference keeps
-                  // the physical storage footprint unchanged while allowing the
-                  // logical element count to change.
-                  : src_layout->Reshape(sib->shape, &analyzer_,
-                                        Integer(GetElementStorageBits(
-                                            src_buffer->dtype)),
-                                        Integer(GetElementStorageBits(
-                                            sib->dtype)));
+                  // the old/new storage bit ratio so that layout inference
+                  // keeps the physical storage footprint unchanged while
+                  // allowing the logical element count to change.
+                  : src_layout->Reshape(
+                        sib->shape, &analyzer_,
+                        Integer(GetElementStorageBits(src_buffer->dtype)),
+                        Integer(GetElementStorageBits(sib->dtype)));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -403,14 +402,13 @@ public:
             }
           }
 
-          Layout reshaped = shapes_equal
-                                ? rep_layout.value()
-                                : rep_layout.value()->Reshape(
-                                      buf->shape, &analyzer_,
-                                      Integer(GetElementStorageBits(
-                                          rep.value()->dtype)),
-                                      Integer(GetElementStorageBits(
-                                          buf->dtype)));
+          Layout reshaped =
+              shapes_equal
+                  ? rep_layout.value()
+                  : rep_layout.value()->Reshape(
+                        buf->shape, &analyzer_,
+                        Integer(GetElementStorageBits(rep.value()->dtype)),
+                        Integer(GetElementStorageBits(buf->dtype)));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -806,8 +804,7 @@ private:
             // Use the first buffer sharing this var as the base for dtype ratio
             int64_t base_bits = GetElementStorageBits(buffers[0]->dtype);
             auto reshaped_layout =
-                layout->Reshape(buffer->shape, &analyzer_,
-                                Integer(base_bits),
+                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bits),
                                 Integer(GetElementStorageBits(buffer->dtype)));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }

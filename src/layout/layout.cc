@@ -101,7 +101,8 @@ Array<PrimExpr> RestoreInputPlaceholders(const Array<PrimExpr> &forward_index,
   return restored;
 }
 
-PrimExpr RestoreInputPlaceholders(const PrimExpr &expr, const Array<Var> &vars) {
+PrimExpr RestoreInputPlaceholders(const PrimExpr &expr,
+                                  const Array<Var> &vars) {
   PrimExpr restored = expr;
   for (size_t i = 0; i < vars.size(); ++i) {
     restored = Substitute(restored, {{vars[i], InputPlaceholder(i)}});
@@ -139,9 +140,9 @@ Layout TryPackedSubtypeReshape(const LayoutNode *layout_node,
 
     Array<PrimExpr> original_indices =
         RecoverOriginalIndices(input_shape, old_flat_index);
-    Array<PrimExpr> new_forward_index = SubstituteForwardIndex(
-        layout_node->GetForwardIndex(), input_shape, original_indices,
-        analyzer);
+    Array<PrimExpr> new_forward_index =
+        SubstituteForwardIndex(layout_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
     new_forward_index.push_back(analyzer->Simplify(lane_in_pack));
     new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
     return Layout(shape, new_forward_index);
@@ -166,9 +167,9 @@ Layout TryPackedSubtypeReshape(const LayoutNode *layout_node,
     Array<PrimExpr> original_indices =
         RecoverOriginalIndices(input_shape, old_flat_index);
 
-    Array<PrimExpr> expanded_forward_index = SubstituteForwardIndex(
-        layout_node->GetForwardIndex(), input_shape, original_indices,
-        analyzer);
+    Array<PrimExpr> expanded_forward_index =
+        SubstituteForwardIndex(layout_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
     ICHECK_GT(expanded_forward_index.size(), 0);
     Array<PrimExpr> new_forward_index;
     new_forward_index.reserve(expanded_forward_index.size() - 1);
@@ -211,14 +212,14 @@ Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
 
     Array<PrimExpr> original_indices =
         RecoverOriginalIndices(input_shape, old_flat_index);
-    Array<PrimExpr> new_forward_index = SubstituteForwardIndex(
-        fragment_node->GetForwardIndex(), input_shape, original_indices,
-        analyzer);
+    Array<PrimExpr> new_forward_index =
+        SubstituteForwardIndex(fragment_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
     new_forward_index.push_back(analyzer->Simplify(lane_in_pack));
 
-    PrimExpr new_forward_thread = SubstituteReshapedExpr(
-        fragment_node->GetForwardThread(), input_shape, original_indices,
-        analyzer);
+    PrimExpr new_forward_thread =
+        SubstituteReshapedExpr(fragment_node->GetForwardThread(), input_shape,
+                               original_indices, analyzer);
     new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
     new_forward_thread = RestoreInputPlaceholders(new_forward_thread, new_vars);
 
@@ -245,9 +246,9 @@ Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
     Array<PrimExpr> original_indices =
         RecoverOriginalIndices(input_shape, old_flat_index);
 
-    Array<PrimExpr> expanded_forward_index = SubstituteForwardIndex(
-        fragment_node->GetForwardIndex(), input_shape, original_indices,
-        analyzer);
+    Array<PrimExpr> expanded_forward_index =
+        SubstituteForwardIndex(fragment_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
     ICHECK_GT(expanded_forward_index.size(), 0);
     Array<PrimExpr> new_forward_index;
     new_forward_index.reserve(expanded_forward_index.size() - 1);
@@ -255,9 +256,9 @@ Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
       new_forward_index.push_back(expanded_forward_index[i]);
     }
 
-    PrimExpr new_forward_thread = SubstituteReshapedExpr(
-        fragment_node->GetForwardThread(), input_shape, original_indices,
-        analyzer);
+    PrimExpr new_forward_thread =
+        SubstituteReshapedExpr(fragment_node->GetForwardThread(), input_shape,
+                               original_indices, analyzer);
     new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
     new_forward_thread = RestoreInputPlaceholders(new_forward_thread, new_vars);
 
@@ -272,7 +273,7 @@ Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
   return Fragment();
 }
 
-}  // namespace
+} // namespace
 
 static Var getPlaceholder(const std::string &s) {
   static std::unordered_map<std::string, Var> map;
@@ -669,8 +670,8 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
   // For subtype-changing views on packed sub-byte dtypes, that is not enough:
   // we must preserve which sub-element inside a packed storage slot is being
   // referenced.  Handle that first, then fall back to the ordinary reshape.
-  if (auto packed = TryPackedSubtypeReshape(this, shape, az, rescale_num,
-                                            rescale_den);
+  if (auto packed =
+          TryPackedSubtypeReshape(this, shape, az, rescale_num, rescale_den);
       packed.defined()) {
     return packed;
   }
@@ -687,8 +688,8 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
   Array<PrimExpr> original_indices =
       RecoverOriginalIndices(InputShape(), old_flat_index);
   // Step 5. Substitute original indices into forward_index_
-  Array<PrimExpr> new_forward_index =
-      SubstituteForwardIndex(forward_index_, InputShape(), original_indices, az);
+  Array<PrimExpr> new_forward_index = SubstituteForwardIndex(
+      forward_index_, InputShape(), original_indices, az);
   new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
   return Layout(shape, new_forward_index);
 }
@@ -721,8 +722,8 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
 
   // Fragments need the same special handling as plain layouts so that packed
   // subtype views keep a stable thread/data mapping through reshape.
-  if (auto packed = TryPackedSubtypeReshape(this, shape, az, rescale_num,
-                                            rescale_den);
+  if (auto packed =
+          TryPackedSubtypeReshape(this, shape, az, rescale_num, rescale_den);
       packed.defined()) {
     return packed;
   }
