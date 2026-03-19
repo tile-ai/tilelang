@@ -49,82 +49,77 @@ def prepare_output(
     return A
 
 
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit
 def tilelang_chunk_scaled_dot_kkt_fwd(
+    K,
+    Beta,
+    G,
     # task config
-    B,
-    S,
-    H,
-    DK,
-    chunk_size=64,
-    input_dtype=T.bfloat16,
-    output_dtype=T.bfloat16,
-    accum_dtype=T.float32,
-    use_g=True,
+    chunk_size: int = 64,
+    input_dtype: T.dtype = T.bfloat16,
+    output_dtype: T.dtype = T.bfloat16,
+    accum_dtype: T.dtype = T.float32,
+    use_g: bool = True,
     # kernel config
-    block_S=64,
-    block_DK=64,
-    threads=256,
-    num_stages=0,
+    block_S: int = 64,
+    block_DK: int = 64,
+    threads: int = 256,
+    num_stages: int = 0,
 ):
-    K_shape = (B, S, H, DK)
-    Beta_shape = (B, S, H)
-    G_shape = (B, S, H)
+    B, S, H, DK = T.const("B S H DK")
+    K: T.Tensor[[B, S, H, DK], input_dtype]
+    Beta: T.Tensor[[B, S, H], input_dtype]
+    G: T.Tensor[[B, S, H], accum_dtype]
+
     assert chunk_size == block_S, "chunk_size must be equal to block_S"
     BS = chunk_size
-    output_shape = (B, S, H, BS)
 
-    @T.prim_func
-    def kernel(
-        K: T.Tensor(K_shape, dtype=input_dtype),
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype),
-        G: T.Tensor(G_shape, dtype=accum_dtype),
-        A: T.Tensor(output_shape, dtype=output_dtype),
-    ):
-        with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
-            bb, bh = bbh // H, bbh % H
-            # !! Pay attention to the scope of the shared memory: may cause misaligned address when shape is one dimension or the buffer is too small
-            Beta_shared = T.alloc_shared((block_S,), dtype=input_dtype, scope="shared")
-            K_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
-            A_shared = T.alloc_shared((block_S, block_S), dtype=output_dtype)
-            Beta_K_fragment = T.alloc_fragment((block_S, block_DK), dtype=input_dtype)
-            A_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+    A = T.empty([B, S, H, BS], output_dtype)
 
-            # Tensor used for gated:
-            G_shared = T.alloc_shared((block_S,), dtype=accum_dtype, scope="shared")
-            G_diff_local = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+    with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
+        bb, bh = bbh // H, bbh % H
+        # !! Pay attention to the scope of the shared memory: may cause misaligned address when shape is one dimension or the buffer is too small
+        Beta_shared = T.alloc_shared((block_S,), dtype=input_dtype, scope="shared")
+        K_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
+        A_shared = T.alloc_shared((block_S, block_S), dtype=output_dtype)
+        Beta_K_fragment = T.alloc_fragment((block_S, block_DK), dtype=input_dtype)
+        A_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
 
-            T.fill(A_fragment, 0)
-            T.disable_warp_group_reg_alloc()
+        # Tensor used for gated:
+        G_shared = T.alloc_shared((block_S,), dtype=accum_dtype, scope="shared")
+        G_diff_local = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+
+        T.fill(A_fragment, 0)
+        T.disable_warp_group_reg_alloc()
+        for i_s in T.Parallel(block_S):
+            Beta_shared[i_s] = Beta[bb, bs * block_S + i_s, bh]
+
+        for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
+            T.copy(K[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], K_shared)
+            for i_s, i_k2 in T.Parallel(block_S, block_DK):
+                Beta_K_fragment[i_s, i_k2] = K_shared[i_s, i_k2] * Beta_shared[i_s]
+            T.gemm(Beta_K_fragment, K_shared, A_fragment, transpose_B=True)
+
+        if use_g:
             for i_s in T.Parallel(block_S):
-                Beta_shared[i_s] = Beta[bb, bs * block_S + i_s, bh]
+                G_shared[i_s] = G[bb, bs * block_S + i_s, bh]
+            for i_s1, i_s2 in T.Parallel(block_S, block_S):
+                G_diff_local[i_s1, i_s2] = G_shared[i_s1] - G_shared[i_s2]
+            for i_s1, i_s2 in T.Parallel(block_S, block_S):
+                A_fragment[i_s1, i_s2] = T.if_then_else(
+                    G_diff_local[i_s1, i_s2] <= 0 and i_s1 > i_s2,
+                    A_fragment[i_s1, i_s2] * T.exp(G_diff_local[i_s1, i_s2]),
+                    0,
+                )
+        else:
+            for i_s1, i_s2 in T.Parallel(block_S, block_S):
+                if i_s1 <= i_s2:
+                    A_fragment[i_s1, i_s2] = 0
 
-            for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
-                T.copy(K[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], K_shared)
-                for i_s, i_k2 in T.Parallel(block_S, block_DK):
-                    Beta_K_fragment[i_s, i_k2] = K_shared[i_s, i_k2] * Beta_shared[i_s]
-                T.gemm(Beta_K_fragment, K_shared, A_fragment, transpose_B=True)
+        T.copy(A_fragment, A_shared)
+        T.copy(A_shared, A[bb, bs * block_S : (bs + 1) * block_S, bh, :])
 
-            if use_g:
-                for i_s in T.Parallel(block_S):
-                    G_shared[i_s] = G[bb, bs * block_S + i_s, bh]
-                for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    G_diff_local[i_s1, i_s2] = G_shared[i_s1] - G_shared[i_s2]
-                for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    A_fragment[i_s1, i_s2] = T.if_then_else(
-                        G_diff_local[i_s1, i_s2] <= 0 and i_s1 > i_s2,
-                        A_fragment[i_s1, i_s2] * T.exp(G_diff_local[i_s1, i_s2]),
-                        0,
-                    )
-            else:
-                for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    if i_s1 <= i_s2:
-                        A_fragment[i_s1, i_s2] = 0
-
-            T.copy(A_fragment, A_shared)
-            T.copy(A_shared, A[bb, bs * block_S : (bs + 1) * block_S, bh, :])
-
-    return kernel
+    return A
 
 
 def run_test(
@@ -153,10 +148,9 @@ def run_test(
 
     # tilelang
     block_S = chunk_size
-    kernel = tilelang_chunk_scaled_dot_kkt_fwd(
-        B, S, H, DK, chunk_size, input_dtype, output_dtype, accum_dtype, use_g, block_S, block_DK, threads, num_stages
+    A_tilelang = tilelang_chunk_scaled_dot_kkt_fwd(
+        K, Beta, G, chunk_size, input_dtype, output_dtype, accum_dtype, use_g, block_S, block_DK, threads, num_stages
     )
-    A_tilelang = kernel(K, Beta, G)
 
     try:
         torch.testing.assert_close(A_tilelang, A_ref, rtol=1e-2, atol=1e-2)
@@ -164,8 +158,6 @@ def run_test(
     except Exception as e:
         print("tilelang chunk scaled dot kkt fwd failed ✗")
         print(e)
-        print("reference cuda kernel:")
-        print(kernel.get_kernel_source())
 
 
 def main():

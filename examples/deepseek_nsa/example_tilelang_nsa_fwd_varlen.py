@@ -24,24 +24,38 @@ from einops import rearrange
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     }
 )
-def native_sparse_attention_varlen(batch, heads, c_seq_len, dim, is_causal, scale=None, block_size=64, groups=1, selected_blocks=16):
+def native_sparse_attention_varlen(
+    Q,
+    K,
+    V,
+    O_slc,
+    BlockIndices,
+    BlockCounts,
+    Offsets,
+    TokenIndices,
+    is_causal: bool = True,
+    scale=None,
+    block_size: int = 64,
+    groups: int = 1,
+    selected_blocks: int = 16,
+):
+    c_seq_len, heads, dim = T.const("c_seq_len heads dim")
+    _, head_kv, _ = T.const("_ head_kv _")
+    batch_plus_one = T.const("batch_plus_one")
+    Q: T.Tensor[[c_seq_len, heads, dim], T.float16]
+    K: T.Tensor[[c_seq_len, head_kv, dim], T.float16]
+    V: T.Tensor[[c_seq_len, head_kv, dim], T.float16]
+    O_slc: T.Tensor[[c_seq_len, heads, dim], T.float16]
+    BlockIndices: T.Tensor[[c_seq_len, head_kv, selected_blocks], T.int32]
+    BlockCounts: T.Tensor[[c_seq_len, head_kv], T.int32]
+    Offsets: T.Tensor[[batch_plus_one], T.int32]
+    TokenIndices: T.Tensor[[c_seq_len, 2], T.int32]
+
+    batch = batch_plus_one - 1
+
     if scale is None:
         scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
-    head_kv = heads // groups
-    q_shape = [c_seq_len, heads, dim]
-    kv_shape = [c_seq_len, head_kv, dim]
-    o_slc_shape = [c_seq_len, heads, dim]
-    o_swa_shape = [c_seq_len, heads, dim]
-    lse_slc_shape = [c_seq_len, heads]
-    lse_swa_shape = [c_seq_len, heads]
-    block_indices_shape = [c_seq_len, head_kv, selected_blocks]
-    block_counts_shape = [c_seq_len, head_kv]
-    offsets_shape = [batch + 1]
-    token_indices_shape = [c_seq_len, 2]
-    block_indices_dtype = T.int32
-    block_counts_dtype = T.int32
-    offsets_dtype = T.int32
-    token_indices_dtype = T.int32
+
     dtype = T.float16
     accum_dtype = T.float32
     block_S = block_size
@@ -58,91 +72,78 @@ def native_sparse_attention_varlen(batch, heads, c_seq_len, dim, is_causal, scal
     num_stages = 0
     threads = 32
 
-    @T.prim_func
-    def native_sparse_attention_varlen(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
-        O_slc: T.Tensor(o_slc_shape, dtype),
-        BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
-        BlockCounts: T.Tensor(block_counts_shape, block_counts_dtype),
-        Offsets: T.Tensor(offsets_shape, offsets_dtype),
-        TokenIndices: T.Tensor(token_indices_shape, token_indices_dtype),
-    ):
-        with T.Kernel(c_seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
-            Q_shared = T.alloc_shared([G, BK], dtype)
-            K_shared = T.alloc_shared([BS, BK], dtype)
-            V_shared = T.alloc_shared([BS, BV], dtype)
-            O_shared = T.alloc_shared([G, BV], dtype)
+    with T.Kernel(c_seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
+        Q_shared = T.alloc_shared([G, BK], dtype)
+        K_shared = T.alloc_shared([BS, BK], dtype)
+        V_shared = T.alloc_shared([BS, BV], dtype)
+        O_shared = T.alloc_shared([G, BV], dtype)
 
-            acc_s = T.alloc_fragment([G, BS], accum_dtype)
-            acc_s_cast = T.alloc_fragment([G, BS], dtype)
-            acc_o = T.alloc_fragment([G, BV], accum_dtype)
-            scores_max = T.alloc_fragment([G], accum_dtype)
-            scores_max_prev = T.alloc_fragment([G], accum_dtype)
-            scores_scale = T.alloc_fragment([G], accum_dtype)
-            scores_sum = T.alloc_fragment([G], accum_dtype)
-            logsum = T.alloc_fragment([G], accum_dtype)
+        acc_s = T.alloc_fragment([G, BS], accum_dtype)
+        acc_s_cast = T.alloc_fragment([G, BS], dtype)
+        acc_o = T.alloc_fragment([G, BV], accum_dtype)
+        scores_max = T.alloc_fragment([G], accum_dtype)
+        scores_max_prev = T.alloc_fragment([G], accum_dtype)
+        scores_scale = T.alloc_fragment([G], accum_dtype)
+        scores_sum = T.alloc_fragment([G], accum_dtype)
+        logsum = T.alloc_fragment([G], accum_dtype)
 
-            i_c, i_v, i_bh = bx, by, bz
-            i_b, i_h = i_bh // head_kv, i_bh % head_kv
+        i_c, i_v, i_bh = bx, by, bz
+        i_b, i_h = i_bh // head_kv, i_bh % head_kv
 
-            i_n, i_t = TokenIndices[i_c, 0], TokenIndices[i_c, 1]
+        i_n, i_t = TokenIndices[i_c, 0], TokenIndices[i_c, 1]
 
-            bos = Offsets[i_n]
-            eos = Offsets[i_n + 1]
-            current_seq_len = eos - bos
+        bos = Offsets[i_n]
+        eos = Offsets[i_n + 1]
+        current_seq_len = eos - bos
 
-            NS = BlockCounts[i_t, i_h]
-            T.copy(Q[bos + i_t, i_h * G : (i_h + 1) * G, :BK], Q_shared)
+        NS = BlockCounts[i_t, i_h]
+        T.copy(Q[bos + i_t, i_h * G : (i_h + 1) * G, :BK], Q_shared)
 
-            T.fill(acc_o, 0)
-            T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
+        T.fill(acc_o, 0)
+        T.fill(logsum, 0)
+        T.fill(scores_max, -T.infinity(accum_dtype))
 
-            for i in T.Pipelined(NS, num_stages=num_stages):
-                i_s = BlockIndices[bos + i_t, i_h, i] * BS
-                if i_s <= i_t and i_s >= 0:
-                    # [BS, BK]
-                    # Lei: may have some padding issues
-                    # we should learn from mha varlen templates to handle this
-                    T.copy(K[bos + i_s : bos + i_s + BS, i_h, :BK], K_shared)
+        for i in T.Pipelined(NS, num_stages=num_stages):
+            i_s = BlockIndices[bos + i_t, i_h, i] * BS
+            if i_s <= i_t and i_s >= 0:
+                # [BS, BK]
+                # Lei: may have some padding issues
+                # we should learn from mha varlen templates to handle this
+                T.copy(K[bos + i_s : bos + i_s + BS, i_h, :BK], K_shared)
 
-                    if is_causal:
-                        for i, j in T.Parallel(G, BS):
-                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
-                    else:
-                        T.clear(acc_s)
-
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-
-                    # Softmax
-                    T.copy(scores_max, scores_max_prev)
-                    T.fill(scores_max, -T.infinity(accum_dtype))
-                    T.reduce_max(acc_s, scores_max, dim=1, clear=True)
-                    for i in T.Parallel(G):
-                        scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                if is_causal:
                     for i, j in T.Parallel(G, BS):
-                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                    T.reduce_sum(acc_s, scores_sum, dim=1)
-                    for i in T.Parallel(G):
-                        logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                    T.copy(acc_s, acc_s_cast)
+                        acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
+                else:
+                    T.clear(acc_s)
 
-                    # Rescale
-                    for i, j in T.Parallel(G, BV):
-                        acc_o[i, j] *= scores_scale[i]
+                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
-                    # V * softmax(Q * K)
-                    T.copy(V[bos + i_s : bos + i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
-                    T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+                # Softmax
+                T.copy(scores_max, scores_max_prev)
+                T.fill(scores_max, -T.infinity(accum_dtype))
+                T.reduce_max(acc_s, scores_max, dim=1, clear=True)
+                for i in T.Parallel(G):
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                for i, j in T.Parallel(G, BS):
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                T.reduce_sum(acc_s, scores_sum, dim=1)
+                for i in T.Parallel(G):
+                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                T.copy(acc_s, acc_s_cast)
 
-            for i, j in T.Parallel(G, BV):
-                acc_o[i, j] /= logsum[i]
-            T.copy(acc_o, O_shared)
-            T.copy(O_shared, O_slc[bos + i_t, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV])
+                # Rescale
+                for i, j in T.Parallel(G, BV):
+                    acc_o[i, j] *= scores_scale[i]
 
-    return native_sparse_attention_varlen
+                # V * softmax(Q * K)
+                T.copy(V[bos + i_s : bos + i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+
+        for i, j in T.Parallel(G, BV):
+            acc_o[i, j] /= logsum[i]
+        T.copy(acc_o, O_shared)
+        T.copy(O_shared, O_slc[bos + i_t, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV])
 
 
 def parallel_nsa_fwd(
@@ -165,19 +166,8 @@ def parallel_nsa_fwd(
     BS = block_size
     WS = window_size
 
-    kernel = native_sparse_attention_varlen(
-        batch=batch,
-        heads=HQ,
-        c_seq_len=C_SEQ_LEN,
-        dim=K,
-        is_causal=True,
-        block_size=block_size,
-        groups=G,
-        selected_blocks=S,
-    )
-
     o_slc = torch.empty(B, C_SEQ_LEN, HQ, V, dtype=v.dtype, device=q.device)
-    kernel(
+    native_sparse_attention_varlen(
         q.view(C_SEQ_LEN, HQ, D),
         k.view(C_SEQ_LEN, H, D),
         v.view(C_SEQ_LEN, H, D),
@@ -186,6 +176,10 @@ def parallel_nsa_fwd(
         block_counts.to(torch.int32).view(C_SEQ_LEN, H),
         offsets.to(torch.int32),
         token_indices.to(torch.int32),
+        is_causal=True,
+        block_size=block_size,
+        groups=G,
+        selected_blocks=S,
     )
     return o_slc
 

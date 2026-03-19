@@ -52,48 +52,42 @@ def get_configs():
 
 
 @autotune(configs=get_configs(), warmup=10, rep=5)
-@tilelang.jit(out_idx=[-1], pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def tilelang_chunk_bwd_kernel_dv_local(
-    B,
-    S,
-    H,
-    DV,
-    input_dtype,
-    output_dtype,
-    do_dtype,
-    chunk_size,
-    block_DV=128,
-    threads=128,
-    num_stages=1,
+    DO,
+    A,
+    input_dtype: str = "bfloat16",
+    output_dtype: str = "bfloat16",
+    do_dtype: str = "float32",
+    chunk_size: int = 64,
+    block_DV: int = 128,
+    threads: int = 128,
+    num_stages: int = 1,
 ):
     block_S = BS = chunk_size
-    DO_shape = (B, S, H, DV)
-    A_shape = (B, S, H, BS)
+    B, S, H, DV = T.const("B S H DV")
+    DO: T.Tensor[[B, S, H, DV], do_dtype]
+    A: T.Tensor[[B, S, H, BS], input_dtype]
+    dv = T.empty([B, S, H, DV], output_dtype)
 
-    @T.prim_func
-    def kernel(
-        DO: T.Tensor(DO_shape, dtype=do_dtype),
-        A: T.Tensor(A_shape, dtype=input_dtype),
-        dv: T.Tensor(DO_shape, dtype=output_dtype),
-    ):
-        with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
-            bb, bh = bbh // H, bbh % H
+    with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
+        bb, bh = bbh // H, bbh % H
 
-            A_shared = T.alloc_shared((BS, BS), dtype=do_dtype)
-            DO_shared = T.alloc_shared((BS, block_DV), dtype=do_dtype)
-            dv_fragment = T.alloc_fragment((BS, block_DV), dtype=T.float32)
-            dv_shared = T.alloc_shared((BS, block_DV), dtype=output_dtype)
+        A_shared = T.alloc_shared((BS, BS), dtype=do_dtype)
+        DO_shared = T.alloc_shared((BS, block_DV), dtype=do_dtype)
+        dv_fragment = T.alloc_fragment((BS, block_DV), dtype=T.float32)
+        dv_shared = T.alloc_shared((BS, block_DV), dtype=output_dtype)
 
-            T.copy(A[bb, bs * BS : (bs + 1) * BS, bh, :], A_shared)
-            for i_s1, i_s2 in T.Parallel(BS, BS):
-                A_shared[i_s1, i_s2] = T.if_then_else(i_s1 >= i_s2, A_shared[i_s1, i_s2], 0.0)
-            for i_v in T.Pipelined(T.ceildiv(DV, block_DV), num_stages=num_stages):
-                T.copy(DO[bb, bs * BS : (bs + 1) * BS, bh, i_v * block_DV : (i_v + 1) * block_DV], DO_shared)
-                T.gemm(A_shared, DO_shared, dv_fragment, transpose_A=True, clear_accum=True)  # transpose_A: A^T
-                T.copy(dv_fragment, dv_shared)
-                T.copy(dv_shared, dv[bb, bs * BS : (bs + 1) * BS, bh, i_v * block_DV : (i_v + 1) * block_DV])
+        T.copy(A[bb, bs * BS : (bs + 1) * BS, bh, :], A_shared)
+        for i_s1, i_s2 in T.Parallel(BS, BS):
+            A_shared[i_s1, i_s2] = T.if_then_else(i_s1 >= i_s2, A_shared[i_s1, i_s2], 0.0)
+        for i_v in T.Pipelined(T.ceildiv(DV, block_DV), num_stages=num_stages):
+            T.copy(DO[bb, bs * BS : (bs + 1) * BS, bh, i_v * block_DV : (i_v + 1) * block_DV], DO_shared)
+            T.gemm(A_shared, DO_shared, dv_fragment, transpose_A=True, clear_accum=True)  # transpose_A: A^T
+            T.copy(dv_fragment, dv_shared)
+            T.copy(dv_shared, dv[bb, bs * BS : (bs + 1) * BS, bh, i_v * block_DV : (i_v + 1) * block_DV])
 
-    return kernel
+    return dv
 
 
 def run_test(
@@ -111,22 +105,26 @@ def run_test(
     q, k, DO, A = prepare_input(B, S, H, DK, DV, chunk_size, getattr(torch, input_dtype), getattr(torch, do_dtype))
     dv_ref = chunk_bwd_dv_local(q, k, do=DO, A=A)
 
-    dv_tilelang = prepare_output(B, S, H, DV, chunk_size, getattr(torch, output_dtype))
-    kernel = tilelang_chunk_bwd_kernel_dv_local(
-        B=B,
-        S=S,
-        H=H,
-        DV=DV,
+    dv_tilelang = tilelang_chunk_bwd_kernel_dv_local(
+        DO,
+        A,
         input_dtype=input_dtype,
         output_dtype=output_dtype,
         do_dtype=do_dtype,
         chunk_size=chunk_size,
     )
-    dv_tilelang = kernel(DO, A)
     compare_tensors("dv", dv_ref, dv_tilelang)
 
     fla_time = do_bench(chunk_bwd_dv_local, q, k, do=DO, A=A)
-    tilelang_time = do_bench(kernel, DO, A)
+    tilelang_time = do_bench(
+        tilelang_chunk_bwd_kernel_dv_local,
+        DO,
+        A,
+        input_dtype=input_dtype,
+        output_dtype=output_dtype,
+        do_dtype=do_dtype,
+        chunk_size=chunk_size,
+    )
     print("fla_time: ", fla_time)
     print("tilelang_time: ", tilelang_time)
 

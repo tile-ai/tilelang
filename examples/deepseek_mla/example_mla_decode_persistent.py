@@ -9,12 +9,28 @@ import argparse
 
 
 @tilelang.jit(
-    out_idx=[6],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
+def flashattn(
+    Q,
+    Q_pe,
+    KV,
+    K_pe,
+    block_N: int = 64,
+    block_H: int = 64,
+    num_split: int = 2,
+):
+    batch, heads, dim = T.const("batch heads dim")
+    _, _, pe_dim = T.const("_ _ pe_dim")
+    _, seqlen_kv, kv_head_num, _ = T.const("_ seqlen_kv kv_head_num _")
+
+    Q: T.Tensor[[batch, heads, dim], T.float16]
+    Q_pe: T.Tensor[[batch, heads, pe_dim], T.float16]
+    KV: T.Tensor[[batch, seqlen_kv, kv_head_num, dim], T.float16]
+    K_pe: T.Tensor[[batch, seqlen_kv, kv_head_num, pe_dim], T.float16]
+
     scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
     dtype = T.float16
     accum_dtype = T.float32
@@ -23,117 +39,111 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     assert kv_head_num == 1, "kv_head_num must be 1"
     sm_num = driver.get_num_sms()
 
-    @T.prim_func
-    def main_split_persistent(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
-    ):
-        with T.Kernel(sm_num, threads=256) as (block_id):
-            Q_shared = T.alloc_shared([block_H, dim], dtype)
-            S_shared = T.alloc_shared([block_H, block_N], dtype)
-            Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
-            KV_shared = T.alloc_shared([block_N, dim], dtype)
-            K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
-            # O_shared = T.alloc_shared([block_H, dim], dtype)
-            acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
-            acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
-            acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
-            scores_max = T.alloc_fragment([block_H], accum_dtype)
-            scores_max_prev = T.alloc_fragment([block_H], accum_dtype)
-            scores_scale = T.alloc_fragment([block_H], accum_dtype)
-            scores_sum = T.alloc_fragment([block_H], accum_dtype)
-            logsum = T.alloc_fragment([block_H], accum_dtype)
-            po_local = T.alloc_fragment([dim], dtype)
-            o_accum_local = T.alloc_fragment([dim], accum_dtype)
-            lse_local_split = T.alloc_var(accum_dtype)
-            lse_logsum_local = T.alloc_var(accum_dtype)
-            lse_max_local = T.alloc_var(accum_dtype)
-            scale_local = T.alloc_var(accum_dtype)
+    glse = T.empty([batch, heads, num_split], dtype)
+    Output_partial = T.empty([batch, heads, num_split, dim], dtype)
+    Output = T.empty([batch, heads, dim], dtype)
 
-            T.use_swizzle(10)
+    with T.Kernel(sm_num, threads=256) as (block_id):
+        Q_shared = T.alloc_shared([block_H, dim], dtype)
+        S_shared = T.alloc_shared([block_H, block_N], dtype)
+        Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
+        KV_shared = T.alloc_shared([block_N, dim], dtype)
+        K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
+        # O_shared = T.alloc_shared([block_H, dim], dtype)
+        acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
+        acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
+        acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
+        scores_max = T.alloc_fragment([block_H], accum_dtype)
+        scores_max_prev = T.alloc_fragment([block_H], accum_dtype)
+        scores_scale = T.alloc_fragment([block_H], accum_dtype)
+        scores_sum = T.alloc_fragment([block_H], accum_dtype)
+        logsum = T.alloc_fragment([block_H], accum_dtype)
+        po_local = T.alloc_fragment([dim], dtype)
+        o_accum_local = T.alloc_fragment([dim], accum_dtype)
+        lse_local_split = T.alloc_var(accum_dtype)
+        lse_logsum_local = T.alloc_var(accum_dtype)
+        lse_max_local = T.alloc_var(accum_dtype)
+        scale_local = T.alloc_var(accum_dtype)
 
-            total_tiles = batch * (heads // min(block_H, kv_group_num)) * num_split
-            waves = T.ceildiv(total_tiles, sm_num)
-            for w in T.serial(waves):
-                tile_id = sm_num * w + block_id
-                bid = tile_id // ((heads // min(block_H, kv_group_num)) * num_split)
-                hid = tile_id // num_split % (heads // min(block_H, kv_group_num))
-                sid = tile_id % num_split
-                cur_kv_head = hid // (kv_group_num // block_H)
+        T.use_swizzle(10)
 
-                if bid < batch and hid * VALID_BLOCK_H < heads and sid < num_split:
-                    T.copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_shared)
-                    T.copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
-                    T.fill(acc_o, 0)
-                    T.fill(logsum, 0)
+        total_tiles = batch * (heads // min(block_H, kv_group_num)) * num_split
+        waves = T.ceildiv(total_tiles, sm_num)
+        for w in T.serial(waves):
+            tile_id = sm_num * w + block_id
+            bid = tile_id // ((heads // min(block_H, kv_group_num)) * num_split)
+            hid = tile_id // num_split % (heads // min(block_H, kv_group_num))
+            sid = tile_id % num_split
+            cur_kv_head = hid // (kv_group_num // block_H)
+
+            if bid < batch and hid * VALID_BLOCK_H < heads and sid < num_split:
+                T.copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_shared)
+                T.copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+                T.fill(acc_o, 0)
+                T.fill(logsum, 0)
+                T.fill(scores_max, -T.infinity(accum_dtype))
+
+                loop_range = T.ceildiv((seqlen_kv // num_split), block_N)
+                for k in T.Pipelined(loop_range, num_stages=2):
+                    kv_start = (seqlen_kv // num_split) * sid + k * block_N
+                    kv_end = (seqlen_kv // num_split) * sid + (k + 1) * block_N
+                    T.copy(KV[bid, kv_start:kv_end, cur_kv_head, :], KV_shared)
+                    T.copy(K_pe[bid, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
+                    T.clear(acc_s)
+                    T.gemm(Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                    T.gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                    T.copy(scores_max, scores_max_prev)
                     T.fill(scores_max, -T.infinity(accum_dtype))
-
-                    loop_range = T.ceildiv((seqlen_kv // num_split), block_N)
-                    for k in T.Pipelined(loop_range, num_stages=2):
-                        kv_start = (seqlen_kv // num_split) * sid + k * block_N
-                        kv_end = (seqlen_kv // num_split) * sid + (k + 1) * block_N
-                        T.copy(KV[bid, kv_start:kv_end, cur_kv_head, :], KV_shared)
-                        T.copy(K_pe[bid, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
-                        T.clear(acc_s)
-                        T.gemm(Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-                        T.gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-                        T.copy(scores_max, scores_max_prev)
-                        T.fill(scores_max, -T.infinity(accum_dtype))
-                        T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                        for i in T.Parallel(block_H):
-                            scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
-                        for i in T.Parallel(block_H):
-                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-                        for i, j in T.Parallel(block_H, block_N):
-                            acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                        T.reduce_sum(acc_s, scores_sum, dim=1)
-                        T.copy(acc_s, S_shared)
-                        T.copy(S_shared, acc_s_cast)
-                        for i in T.Parallel(block_H):
-                            logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                        for i, j in T.Parallel(block_H, dim):
-                            acc_o[i, j] *= scores_scale[i]
-                        T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
-                    for i, j in T.Parallel(block_H, dim):
-                        acc_o[i, j] /= logsum[i]
+                    T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                     for i in T.Parallel(block_H):
-                        logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-                    T.copy(logsum, glse[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, sid])
-                    # T.copy(acc_o, O_shared)
-                    T.copy(acc_o, Output_partial[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, sid, :])
+                        scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+                    for i in T.Parallel(block_H):
+                        scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                    for i, j in T.Parallel(block_H, block_N):
+                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                    T.reduce_sum(acc_s, scores_sum, dim=1)
+                    T.copy(acc_s, S_shared)
+                    T.copy(S_shared, acc_s_cast)
+                    for i in T.Parallel(block_H):
+                        logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                    for i, j in T.Parallel(block_H, dim):
+                        acc_o[i, j] *= scores_scale[i]
+                    T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
+                for i, j in T.Parallel(block_H, dim):
+                    acc_o[i, j] /= logsum[i]
+                for i in T.Parallel(block_H):
+                    logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
+                T.copy(logsum, glse[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, sid])
+                # T.copy(acc_o, O_shared)
+                T.copy(acc_o, Output_partial[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, sid, :])
 
-            T.sync_grid()
-            waves = T.ceildiv(heads * batch, sm_num)
-            for w in T.serial(waves):
-                tile_id = sm_num * w + block_id
-                hid = tile_id // batch
-                bid = tile_id % batch
-                if bid < batch and hid < heads:
-                    T.clear(lse_logsum_local)
-                    T.clear(o_accum_local)
-                    lse_max_local = -T.infinity(accum_dtype)
-                    for k in T.serial(num_split):
-                        lse_max_local = T.max(lse_max_local, glse[bid, hid, k])
-                    for k in T.Pipelined(num_split, num_stages=1):
-                        lse_local_split = glse[bid, hid, k]
-                        lse_logsum_local += T.exp2(lse_local_split - lse_max_local)
-                    lse_logsum_local = T.log2(lse_logsum_local) + lse_max_local
-                    for k in T.serial(num_split):
-                        for i in T.Parallel(dim):
-                            po_local[i] = Output_partial[bid, hid, k, i]
-                        lse_local_split = glse[bid, hid, k]
-                        scale_local = T.exp2(lse_local_split - lse_logsum_local)
-                        for i in T.Parallel(dim):
-                            o_accum_local[i] += po_local[i] * scale_local
+        T.sync_grid()
+        waves = T.ceildiv(heads * batch, sm_num)
+        for w in T.serial(waves):
+            tile_id = sm_num * w + block_id
+            hid = tile_id // batch
+            bid = tile_id % batch
+            if bid < batch and hid < heads:
+                T.clear(lse_logsum_local)
+                T.clear(o_accum_local)
+                lse_max_local = -T.infinity(accum_dtype)
+                for k in T.serial(num_split):
+                    lse_max_local = T.max(lse_max_local, glse[bid, hid, k])
+                for k in T.Pipelined(num_split, num_stages=1):
+                    lse_local_split = glse[bid, hid, k]
+                    lse_logsum_local += T.exp2(lse_local_split - lse_max_local)
+                lse_logsum_local = T.log2(lse_logsum_local) + lse_max_local
+                for k in T.serial(num_split):
                     for i in T.Parallel(dim):
-                        Output[bid, hid, i] = o_accum_local[i]
+                        po_local[i] = Output_partial[bid, hid, k, i]
+                    lse_local_split = glse[bid, hid, k]
+                    scale_local = T.exp2(lse_local_split - lse_logsum_local)
+                    for i in T.Parallel(dim):
+                        o_accum_local[i] += po_local[i] * scale_local
+                for i in T.Parallel(dim):
+                    Output[bid, hid, i] = o_accum_local[i]
 
-    return main_split_persistent
+    return Output
 
 
 def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
@@ -189,9 +199,23 @@ def main():
     BLOCK_H = 64
     num_split = 2
 
-    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
-    print(kernel.get_kernel_source())
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    dtype = torch.float16
+    Q = torch.randn(batch, heads, dim, dtype=dtype, device="cuda")
+    Q_pe = torch.randn(batch, heads, pe_dim, dtype=dtype, device="cuda")
+    KV = torch.randn(batch, kv_ctx, kv_heads, dim, dtype=dtype, device="cuda")
+    K_pe = torch.randn(batch, kv_ctx, kv_heads, pe_dim, dtype=dtype, device="cuda")
+
+    compiled = flashattn.compile(
+        Q,
+        Q_pe,
+        KV,
+        K_pe,
+        block_N=BLOCK_N,
+        block_H=BLOCK_H,
+        num_split=num_split,
+    )
+    print(compiled.get_kernel_source())
+    profiler = compiled.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")

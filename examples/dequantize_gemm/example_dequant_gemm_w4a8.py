@@ -32,37 +32,38 @@ def get_configs():
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
-@tilelang.jit(out_idx=[1])
-def _convert_test(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
+@tilelang.jit
+def _convert_test(B, block_N: int = 64, block_K: int = 64, in_dtype: T.dtype = T.int8, num_bits: int = 4, threads: int = 128):
     num_elems_per_byte = 8 // num_bits
     storage_dtype = T.uint8
-    B_shape = (N, K // num_elems_per_byte)
+
+    N, _ = T.const("N _")
+    B: T.Tensor[[N, _], storage_dtype]
+
+    K = _ * num_elems_per_byte
     B_shared_shape = (block_N, block_K // num_elems_per_byte)
     B_dequantize_shared_shape = (block_N, block_K)
 
-    @T.prim_func
-    def main(
-        B: T.Tensor(B_shape, storage_dtype),
-        C: T.Tensor((N, K), in_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
-            B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
-            B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
-            B_dequantize_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
+    C = T.empty((N, K), in_dtype)
 
-            for k in T.Pipelined(0, T.ceildiv(K, block_K), num_stages=1):
-                T.copy(B[bx * block_N, k * block_K // num_elems_per_byte], B_shared)
-                T.copy(B_shared, B_local)
-                for i, j in T.Parallel(block_N, block_K):
-                    B_dequantize_local[i, j] = _tir_u8_to_i4_to_i8(
-                        num_bits,
-                        B_local[i, j // num_elems_per_byte],
-                        j % num_elems_per_byte,
-                        dtype=in_dtype,
-                    )
-                T.copy(B_dequantize_local, C[bx * block_N, k * block_K])
+    with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
+        B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
+        B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
+        B_dequantize_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
 
-    return main
+        for k in T.Pipelined(0, T.ceildiv(K, block_K), num_stages=1):
+            T.copy(B[bx * block_N, k * block_K // num_elems_per_byte], B_shared)
+            T.copy(B_shared, B_local)
+            for i, j in T.Parallel(block_N, block_K):
+                B_dequantize_local[i, j] = _tir_u8_to_i4_to_i8(
+                    num_bits,
+                    B_local[i, j // num_elems_per_byte],
+                    j % num_elems_per_byte,
+                    dtype=in_dtype,
+                )
+            T.copy(B_dequantize_local, C[bx * block_N, k * block_K])
+
+    return C
 
 
 def torch_convert(tensor):
@@ -93,24 +94,79 @@ def ref_program(A, qB):
 
 
 def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
-    @tilelang.jit(out_idx=[2])
-    def kernel_func(block_M, block_N, block_K, num_stages, threads):
+    @tilelang.jit
+    def kernel_func(A, B, block_M: int = 32, block_N: int = 32, block_K: int = 128, num_stages: int = 1, threads: int = 128):
         num_elems_per_byte = 8 // num_bits
         storage_dtype = T.uint8
-        A_shape = (M, K)
-        B_shape = (N, K // num_elems_per_byte)
+
+        M, K = T.const("M K")
+        N, _ = T.const("N _")
+        A: T.Tensor[[M, K], in_dtype]
+        B: T.Tensor[[N, _], storage_dtype]
+
         A_shared_shape = (block_M, block_K)
         B_shared_shape = (block_N, block_K // num_elems_per_byte)
         B_dequantize_local_shape = (block_N, block_K)
 
         assert K % (block_K) == 0
 
-        @T.prim_func
-        def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, storage_dtype),
-            Ct: T.Tensor((N, M), out_dtype),
-        ):
+        Ct = T.empty((N, M), out_dtype)
+
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
+            B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
+            B_dequantize_local = T.alloc_fragment(B_dequantize_local_shape, in_dtype)
+            B_dequantize_prev_local = T.alloc_fragment(B_dequantize_local_shape, in_dtype)
+            Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
+            Ct_shared = T.alloc_shared((block_N, block_M), out_dtype)
+
+            T.annotate_layout(
+                {
+                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                }
+            )
+
+            T.clear(Ct_local)
+            for k in T.Pipelined(K // block_K, num_stages=num_stages):
+                T.copy(A[by * block_M, k * block_K], A_shared)
+                T.copy(B[bx * block_N, k * block_K // num_elems_per_byte], B_shared)
+                T.copy(B_shared, B_local)
+                for i, j in T.Parallel(block_N, block_K):
+                    B_dequantize_local[i, j] = _tir_u8_to_i4_to_i8(
+                        num_bits,
+                        B_local[i, j // num_elems_per_byte],
+                        j % num_elems_per_byte,
+                        dtype=in_dtype,
+                    )
+                T.copy(B_dequantize_local, B_dequantize_prev_local)
+                T.gemm(B_dequantize_prev_local, A_shared, Ct_local, transpose_B=True)
+            T.copy(Ct_local, Ct_shared)
+            T.copy(Ct_shared, Ct[bx * block_N : (bx + 1) * block_N, by * block_M : (by + 1) * block_M])
+
+        return Ct
+
+    if tune:
+
+        @autotune(configs=get_configs(), warmup=10, rep=10)
+        @tilelang.jit
+        def kernel(A, B, block_M: int = 32, block_N: int = 32, block_K: int = 128, num_stages: int = 1, threads: int = 128):
+            num_elems_per_byte = 8 // num_bits
+            storage_dtype = T.uint8
+
+            M, K = T.const("M K")
+            N, _ = T.const("N _")
+            A: T.Tensor[[M, K], in_dtype]
+            B: T.Tensor[[N, _], storage_dtype]
+
+            A_shared_shape = (block_M, block_K)
+            B_shared_shape = (block_N, block_K // num_elems_per_byte)
+            B_dequantize_local_shape = (block_N, block_K)
+
+            assert K % (block_K) == 0
+
+            Ct = T.empty((N, M), out_dtype)
+
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
                 A_shared = T.alloc_shared(A_shared_shape, in_dtype)
                 B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
@@ -143,21 +199,22 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
                 T.copy(Ct_local, Ct_shared)
                 T.copy(Ct_shared, Ct[bx * block_N : (bx + 1) * block_N, by * block_M : (by + 1) * block_M])
 
-        return main
+            return Ct
 
-    if tune:
-
-        @autotune(configs=get_configs(), warmup=10, rep=10)
-        @tilelang.jit(out_idx=[2])
-        def kernel(block_M=None, block_N=None, block_K=None, num_stages=None, threads=None):
-            return kernel_func(block_M, block_N, block_K, num_stages, threads).prim_func
-
-        return kernel()
+        num_elems_per_byte = 8 // num_bits
+        storage_dtype = T.uint8
+        A = torch.empty(M, K, dtype=getattr(torch, in_dtype), device="cuda")
+        B = torch.empty(N, K // num_elems_per_byte, dtype=getattr(torch, storage_dtype), device="cuda")
+        return kernel(A, B)
 
     else:
 
         def kernel(block_M, block_N, block_K, num_stages, threads):
-            return kernel_func(block_M, block_N, block_K, num_stages, threads)
+            num_elems_per_byte = 8 // num_bits
+            storage_dtype = T.uint8
+            A = torch.empty(M, K, dtype=getattr(torch, in_dtype), device="cuda")
+            B = torch.empty(N, K // num_elems_per_byte, dtype=getattr(torch, storage_dtype), device="cuda")
+            return kernel_func(A, B, block_M=block_M, block_N=block_N, block_K=block_K, num_stages=num_stages, threads=threads)
 
         return kernel
 

@@ -58,53 +58,63 @@ DEFAULT_CONFIG = {  # take best config from autotune script
 ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 
 
-@tilelang.jit(out_idx=[-1])
-def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasterization):
+@tilelang.jit
+def matmul_sp_fp16(
+    A_sparse,
+    E,
+    B,
+    accum_dtype: T.dtype = T.float,
+    block_M: int = 128,
+    block_N: int = 64,
+    block_K: int = 64,
+    num_stages: int = 1,
+    thread_num: int = 128,
+    policy: T.GemmWarpPolicy = T.GemmWarpPolicy.Square,
+    enable_rasterization: bool = True,
+):
     e_factor, e_dtype = ARCH_INFO[arch]
 
-    @T.prim_func
-    def gemm_sp_fp16(
-        A_sparse: T.Tensor((M, K // 2), T.float16),
-        E: T.Tensor((M, K // e_factor), e_dtype),
-        B: T.Tensor((K, N), T.float16),
-        C: T.Tensor((M, N), accum_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K // 2), T.float16)
-            E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
-            B_shared = T.alloc_shared((block_K, block_N), T.float16)
-            C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+    M, N, K_half = T.const("M N K_half")
+    A_sparse: T.Tensor[[M, K_half], T.float16]
+    K = K_half * 2
+    E: T.Tensor[[M, K // e_factor], e_dtype]
+    B: T.Tensor[[K, N], T.float16]
+    C = T.empty([M, N], accum_dtype)
 
-            T.clear(C_local)
-            T.disable_warp_group_reg_alloc()
-            T.use_swizzle(panel_size=10, enable=enable_rasterization)
-            T.annotate_layout(
-                {
-                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, block_k=block_K, arch=arch),
-                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, block_k=block_K, arch=arch),
-                }
-            )
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
-                T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
-                T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False, policy=policy)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+        A_shared = T.alloc_shared((block_M, block_K // 2), T.float16)
+        E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
+        B_shared = T.alloc_shared((block_K, block_N), T.float16)
+        C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            T.copy(C_local, C_shared)
-            T.copy(C_shared, C[by * block_M, bx * block_N])
+        T.clear(C_local)
+        T.disable_warp_group_reg_alloc()
+        T.use_swizzle(panel_size=10, enable=enable_rasterization)
+        T.annotate_layout(
+            {
+                E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, block_k=block_K, arch=arch),
+                E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, block_k=block_K, arch=arch),
+            }
+        )
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
+            T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
+            T.copy(B[k * block_K, bx * block_N], B_shared)
+            T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False, policy=policy)
 
-    return gemm_sp_fp16
+        T.copy(C_local, C_shared)
+        T.copy(C_shared, C[by * block_M, bx * block_N])
+
+    return C
 
 
 def main(M=1024, N=1024, K=1024, accum_dtype=T.float, cfg="h20"):
-    kernel = matmul_sp_fp16(M, N, K, accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype])
-
     a = randn_semi_sparse(M, K, device="cuda", dtype=torch.half)
     b = torch.randn(K, N, device="cuda", dtype=torch.half)
 
     a_sparse, e = compress(a, transposed=False, block_k=DEFAULT_CONFIG[cfg][accum_dtype]["block_K"], arch=arch)
-    c = kernel(a_sparse, e, b)
+    c = matmul_sp_fp16(a_sparse, e, b, accum_dtype=accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype])
 
     ref_c = a @ b
 
@@ -112,7 +122,7 @@ def main(M=1024, N=1024, K=1024, accum_dtype=T.float, cfg="h20"):
     torch.testing.assert_close(c, ref_c.to(c.dtype), rtol=1e-2, atol=1e-2)
     print(f"Precision check passed. diff: {(c - ref_c).abs().mean()}")
 
-    latency = do_bench(lambda: kernel(a_sparse, e, b))
+    latency = do_bench(lambda: matmul_sp_fp16(a_sparse, e, b, accum_dtype=accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype]))
     ref_latency = do_bench(lambda: a @ b)
 
     total_flops = 2 * M * N * K

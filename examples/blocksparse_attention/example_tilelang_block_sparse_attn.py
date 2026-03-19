@@ -27,103 +27,97 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
 
 
 @tilelang.jit(
-    out_idx=[4],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
+def blocksparse_flashattn(Q, K, V, BlockSparseMask, is_causal: bool = True):
+    batch, heads, seq_len, dim = T.const("batch heads seq_len dim")
+    downsample_len = T.const("downsample_len")
     block_M = 64
     block_N = 64
     num_stages = 1
     threads = 128
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
-    shape = [batch, heads, seq_len, dim]
-    block_mask_shape = [batch, heads, downsample_len, downsample_len]
 
     dtype = T.float16
     accum_dtype = T.float32
     block_mask_dtype = T.bool
 
-    def kernel_func(block_M, block_N, num_stages, threads):
-        @T.prim_func
-        def blocksparse_flashattn(
-            Q: T.Tensor(shape, dtype),
-            K: T.Tensor(shape, dtype),
-            V: T.Tensor(shape, dtype),
-            BlockSparseMask: T.Tensor(block_mask_shape, block_mask_dtype),
-            Output: T.Tensor(shape, dtype),
-        ):
-            with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
-                Q_shared = T.alloc_shared([block_M, dim], dtype)
-                K_shared = T.alloc_shared([block_N, dim], dtype)
-                V_shared = T.alloc_shared([block_N, dim], dtype)
-                O_shared = T.alloc_shared([block_M, dim], dtype)
-                acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
-                acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
-                acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
-                scores_max = T.alloc_fragment([block_M], accum_dtype)
-                scores_max_prev = T.alloc_fragment([block_M], accum_dtype)
-                scores_scale = T.alloc_fragment([block_M], accum_dtype)
-                scores_sum = T.alloc_fragment([block_M], accum_dtype)
-                logsum = T.alloc_fragment([block_M], accum_dtype)
-                block_mask = T.alloc_fragment([downsample_len], block_mask_dtype)
+    Q: T.Tensor[[batch, heads, seq_len, dim], dtype]
+    K: T.Tensor[[batch, heads, seq_len, dim], dtype]
+    V: T.Tensor[[batch, heads, seq_len, dim], dtype]
+    BlockSparseMask: T.Tensor[[batch, heads, downsample_len, downsample_len], block_mask_dtype]
+    Output = T.empty([batch, heads, seq_len, dim], dtype)
 
-                T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
-                T.fill(acc_o, 0)
-                T.fill(logsum, 0)
+    with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
+        Q_shared = T.alloc_shared([block_M, dim], dtype)
+        K_shared = T.alloc_shared([block_N, dim], dtype)
+        V_shared = T.alloc_shared([block_N, dim], dtype)
+        O_shared = T.alloc_shared([block_M, dim], dtype)
+        acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
+        acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
+        acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
+        scores_max = T.alloc_fragment([block_M], accum_dtype)
+        scores_max_prev = T.alloc_fragment([block_M], accum_dtype)
+        scores_scale = T.alloc_fragment([block_M], accum_dtype)
+        scores_sum = T.alloc_fragment([block_M], accum_dtype)
+        logsum = T.alloc_fragment([block_M], accum_dtype)
+        block_mask = T.alloc_fragment([downsample_len], block_mask_dtype)
+
+        T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
+        T.fill(acc_o, 0)
+        T.fill(logsum, 0)
+        T.fill(scores_max, -T.infinity(accum_dtype))
+
+        T.copy(BlockSparseMask[bz, by, bx, :], block_mask)
+
+        loop_range = (
+            T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N)
+        )
+
+        for k in T.Pipelined(loop_range, num_stages=num_stages):
+            if block_mask[k] != 0:
+                T.copy(K[bz, by, k * block_N : (k + 1) * block_N, :], K_shared)
+                if is_causal:
+                    for i, j in T.Parallel(block_M, block_N):
+                        acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype))
+                else:
+                    T.clear(acc_s)
+                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+
+                T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
-
-                T.copy(BlockSparseMask[bz, by, bx, :], block_mask)
-
-                loop_range = (
-                    T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N)
-                )
-
-                for k in T.Pipelined(loop_range, num_stages=num_stages):
-                    if block_mask[k] != 0:
-                        T.copy(K[bz, by, k * block_N : (k + 1) * block_N, :], K_shared)
-                        if is_causal:
-                            for i, j in T.Parallel(block_M, block_N):
-                                acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype))
-                        else:
-                            T.clear(acc_s)
-                        T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-
-                        T.copy(scores_max, scores_max_prev)
-                        T.fill(scores_max, -T.infinity(accum_dtype))
-                        T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                        # To do causal softmax, we need to set the scores_max to 0 if it is -inf
-                        # This process is called Check_inf in FlashAttention3 code, and it only need to be done
-                        # in the first ceil_div(kBlockM, kBlockN) steps.
-                        # for i in T.Parallel(block_M):
-                        #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
-                        for i in T.Parallel(block_M):
-                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-                        for i, j in T.Parallel(block_M, block_N):
-                            # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
-                            # max * log_2(e)) This allows the compiler to use the ffma
-                            # instruction instead of fadd and fmul separately.
-                            acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                        T.reduce_sum(acc_s, scores_sum, dim=1)
-                        for i in T.Parallel(block_M):
-                            logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                        T.copy(acc_s, acc_s_cast)
-
-                        for i, j in T.Parallel(block_M, dim):
-                            acc_o[i, j] *= scores_scale[i]
-
-                        T.copy(V[bz, by, k * block_N : (k + 1) * block_N, :], V_shared)
-                        T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                # To do causal softmax, we need to set the scores_max to 0 if it is -inf
+                # This process is called Check_inf in FlashAttention3 code, and it only need to be done
+                # in the first ceil_div(kBlockM, kBlockN) steps.
+                # for i in T.Parallel(block_M):
+                #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
+                for i in T.Parallel(block_M):
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                for i, j in T.Parallel(block_M, block_N):
+                    # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
+                    # max * log_2(e)) This allows the compiler to use the ffma
+                    # instruction instead of fadd and fmul separately.
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                T.reduce_sum(acc_s, scores_sum, dim=1)
+                for i in T.Parallel(block_M):
+                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                T.copy(acc_s, acc_s_cast)
 
                 for i, j in T.Parallel(block_M, dim):
-                    acc_o[i, j] /= logsum[i]
-                T.copy(acc_o, O_shared)
-                T.copy(O_shared, Output[bz, by, bx * block_M : (bx + 1) * block_M, :])
+                    acc_o[i, j] *= scores_scale[i]
 
-        return blocksparse_flashattn
+                T.copy(V[bz, by, k * block_N : (k + 1) * block_N, :], V_shared)
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
-    return kernel_func(block_M, block_N, num_stages, threads)
+        for i, j in T.Parallel(block_M, dim):
+            acc_o[i, j] /= logsum[i]
+        T.copy(acc_o, O_shared)
+        T.copy(O_shared, Output[bz, by, bx * block_M : (bx + 1) * block_M, :])
+
+    return Output
 
 
 def test_topk_sparse_attention():
@@ -148,9 +142,7 @@ def test_topk_sparse_attention():
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
 
     # Run tilelang kernel
-    kernel = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
-
-    tilelang_output = kernel(q, k, v, block_mask)
+    tilelang_output = blocksparse_flashattn(q, k, v, block_mask, is_causal=True)
 
     # Compute reference
     # Expand block mask to full attention matrix
@@ -189,10 +181,9 @@ def run_regression_perf():
     x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len], device="cuda", dtype=torch.bfloat16)
     x_ds[:, :, :, 0] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
-    kernel = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
 
     def run_kernel_only():
-        kernel(q, k, v, block_mask)
+        blocksparse_flashattn(q, k, v, block_mask, is_causal=True)
 
     return do_bench(run_kernel_only, backend="cupti")
 

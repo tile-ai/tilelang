@@ -53,63 +53,50 @@ def get_configs():
 @tilelang.autotune(
     configs=get_configs(), cache_input_tensors=True, ref_prog=ref_program, manual_check_prog=manual_check_prog, supply_prog=supply_prog
 )
-@tilelang.jit(out_idx=[-1])
-def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pack, gemm_type):
+@tilelang.jit
+def fp8_matmul(
+    A,
+    B,
+    block_M: int = 128,
+    block_N: int = 128,
+    block_K: int = 64,
+    num_stages: int = 0,
+    num_threads: int = 256,
+    k_pack: int = 1,
+    gemm_type: str = "ss",
+):
     dtype = determine_fp8_type()
     accum_dtype = T.float32
 
-    @T.prim_func
-    def gemm_fp8_rs(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((N, K), dtype),
-        C: T.Tensor((M, N), accum_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
-            A_local = T.alloc_fragment((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_N, block_K), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+    M, N, K = T.const("M N K")
+    A: T.Tensor[[M, K], dtype]
+    B: T.Tensor[[N, K], dtype]
+    C = T.empty([M, N], accum_dtype)
 
-            T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(A[by * block_M, k * block_K], A_local)
-                T.copy(B[bx * block_N, k * block_K], B_shared)
-                T.gemm(A_local, B_shared, C_local, transpose_B=True, k_pack=k_pack, policy=T.GemmWarpPolicy.FullRow)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
+        if gemm_type == "rs":
+            A_buf = T.alloc_fragment((block_M, block_K), dtype)
+        else:
+            A_buf = T.alloc_shared((block_M, block_K), dtype)
+        B_shared = T.alloc_shared((block_N, block_K), dtype)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            T.copy(C_local, C[by * block_M, bx * block_N])
+        T.clear(C_local)
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            T.copy(A[by * block_M, k * block_K], A_buf)
+            T.copy(B[bx * block_N, k * block_K], B_shared)
+            T.gemm(A_buf, B_shared, C_local, transpose_B=True, k_pack=k_pack, policy=T.GemmWarpPolicy.FullRow)
 
-    @T.prim_func
-    def gemm_fp8_ss(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((N, K), dtype),
-        C: T.Tensor((M, N), accum_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_N, block_K), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        T.copy(C_local, C[by * block_M, bx * block_N])
 
-            T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(A[by * block_M, k * block_K], A_shared)
-                T.copy(B[bx * block_N, k * block_K], B_shared)
-                T.gemm(A_shared, B_shared, C_local, transpose_B=True, k_pack=k_pack, policy=T.GemmWarpPolicy.FullRow)
-
-            T.copy(C_local, C[by * block_M, bx * block_N])
-
-    if gemm_type == "ss":
-        return gemm_fp8_ss
-    elif gemm_type == "rs":
-        return gemm_fp8_rs
-    else:
-        raise ValueError(f"Invalid gemm_type: {gemm_type}")
+    return C
 
 
 def test_gemm_fp8(M, N, K):
-    kernel = fp8_matmul(M, N, K)
     fp8_dtype = determine_torch_fp8_type()
     a = (torch.randn(M, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=fp8_dtype)
     b = (torch.randn(N, K, dtype=torch.float16, device="cuda") * 0.01).to(dtype=fp8_dtype)
-    c = kernel(a, b)
+    c = fp8_matmul(a, b)
     ref_c = ref_program(a, b)
     torch_assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("passed~")

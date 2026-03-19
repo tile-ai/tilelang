@@ -6,25 +6,32 @@ from utils import assert_tensors_similar
 
 
 @tilelang.jit(
-    out_idx=[-2, -1],
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     },
 )
 def sparse_mla_fwd(
-    heads,
-    dim,
-    tail_dim,
-    topk,
-    kv_group=1,
-    sm_scale=None,
-    is_causal=True,
-    CP0=True,
-    block_I=64,
-    num_stages=2,
-    threads=256,
+    Q,
+    KV,
+    Indices,
+    dim: int = 512,
+    tail_dim: int = 64,
+    kv_group: int = 1,
+    sm_scale: float = None,
+    is_causal: bool = True,
+    CP0: bool = True,
+    block_I: int = 64,
+    num_stages: int = 2,
+    threads: int = 256,
 ):
+    batch, seq_len, heads, _ = T.const("batch seq_len heads _")
+    _, seq_len_kv, _, _ = T.const("_ seq_len_kv _ _")
+    _, _, _, topk = T.const("_ _ _ topk")
+    Q: T.Tensor[[batch, seq_len, heads, dim + tail_dim], T.bfloat16]
+    KV: T.Tensor[[batch, seq_len_kv, kv_group, dim + tail_dim], T.bfloat16]
+    Indices: T.Tensor[[batch, seq_len, kv_group, topk], T.int32]
+
     assert dim == tilelang.math.next_power_of_2(dim), f"haven't check padding correctness yet, dim={dim}"
     assert tail_dim == tilelang.math.next_power_of_2(tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
     assert is_causal == True, "non-casual is not supported"
@@ -34,19 +41,15 @@ def sparse_mla_fwd(
     else:
         sm_scale = sm_scale * 1.44269504  # log2(e)
 
-    batch = T.dynamic("batch")
-    seq_len = T.dynamic("seq_len")
-    seq_len_kv = T.dynamic("seq_len_kv")
-
     head_kv = heads // kv_group
-    q_shape = [batch, seq_len, heads, dim + tail_dim]
-    kv_shape = [batch, seq_len_kv, kv_group, dim + tail_dim]
     o_shape = [batch, seq_len, heads, dim]
-    indices_shape = [batch, seq_len, kv_group, topk]
     lse_shape = [batch, seq_len, heads]
     indices_dtype = T.int32
     dtype = T.bfloat16
     accum_dtype = T.float32
+
+    Output = T.empty(o_shape, dtype)
+    Lse = T.empty(lse_shape, accum_dtype)
 
     G = kv_group
     H = head_kv
@@ -68,103 +71,95 @@ def sparse_mla_fwd(
 
     H_per_block = padded_H if REPLICATE_H == 1 else 64
 
-    @T.prim_func
-    def main(
-        Q: T.Tensor(q_shape, dtype),  # type: ignore
-        KV: T.Tensor(kv_shape, dtype),  # type: ignore
-        Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
-        Output: T.Tensor(o_shape, dtype),  # type: ignore
-        Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
+    with T.Kernel(seq_len * REPLICATE_H, batch, kv_group, threads=threads) as (
+        bx,
+        by,
+        bz,
     ):
-        with T.Kernel(seq_len * REPLICATE_H, batch, kv_group, threads=threads) as (
-            bx,
-            by,
-            bz,
-        ):
-            Q_shared = T.alloc_shared([H_per_block, D], dtype)
-            Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
-            KV_shared = T.alloc_shared([BI, D], dtype)
-            K_tail_shared = T.alloc_shared([BI, D_tail], dtype)
-            O_shared = T.alloc_shared([H_per_block, D], dtype)
-            Lse_shared = T.alloc_shared([H_per_block], accum_dtype)
-            mask = T.alloc_fragment([BI], "bool")
+        Q_shared = T.alloc_shared([H_per_block, D], dtype)
+        Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
+        KV_shared = T.alloc_shared([BI, D], dtype)
+        K_tail_shared = T.alloc_shared([BI, D_tail], dtype)
+        O_shared = T.alloc_shared([H_per_block, D], dtype)
+        Lse_shared = T.alloc_shared([H_per_block], accum_dtype)
+        mask = T.alloc_fragment([BI], "bool")
 
-            acc_o = T.alloc_fragment([H_per_block, D], accum_dtype)
-            acc_s = T.alloc_fragment([H_per_block, BI], accum_dtype)
-            S_shared = T.alloc_shared([H_per_block, BI], dtype)
-            sumexp = T.alloc_fragment([H_per_block], accum_dtype)
-            sumexp_i = T.alloc_fragment([H_per_block], accum_dtype)
-            alpha = T.alloc_fragment([H_per_block], accum_dtype)
-            m_i = T.alloc_fragment([H_per_block], accum_dtype)
-            m_i_prev = T.alloc_fragment([H_per_block], accum_dtype)
+        acc_o = T.alloc_fragment([H_per_block, D], accum_dtype)
+        acc_s = T.alloc_fragment([H_per_block, BI], accum_dtype)
+        S_shared = T.alloc_shared([H_per_block, BI], dtype)
+        sumexp = T.alloc_fragment([H_per_block], accum_dtype)
+        sumexp_i = T.alloc_fragment([H_per_block], accum_dtype)
+        alpha = T.alloc_fragment([H_per_block], accum_dtype)
+        m_i = T.alloc_fragment([H_per_block], accum_dtype)
+        m_i_prev = T.alloc_fragment([H_per_block], accum_dtype)
 
-            T.fill(acc_o, 0)
-            T.fill(sumexp, 0)
-            T.fill(m_i, -(2**30))  # avoid -inf - inf to cause nan
+        T.fill(acc_o, 0)
+        T.fill(sumexp, 0)
+        T.fill(m_i, -(2**30))  # avoid -inf - inf to cause nan
 
-            b_i, g_i = by, bz
-            s_i = bx if REPLICATE_H == 1 else (bx // REPLICATE_H)
-            q_i = s_i
-            max_kv_i = q_i
+        b_i, g_i = by, bz
+        s_i = bx if REPLICATE_H == 1 else (bx // REPLICATE_H)
+        q_i = s_i
+        max_kv_i = q_i
 
-            H0 = g_i * padded_H + (0 if REPLICATE_H == 1 else (bx % REPLICATE_H) * 64)
-            H1 = H0 + H_per_block
+        H0 = g_i * padded_H + (0 if REPLICATE_H == 1 else (bx % REPLICATE_H) * 64)
+        H1 = H0 + H_per_block
 
-            T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared)
-            T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
+        T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared)
+        T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
 
-            for i_i in T.Pipelined(NI, num_stages=num_stages):
-                for bi_i in T.Parallel(BI):
-                    mask[bi_i] = Indices[b_i, s_i, g_i, i_i * BI + bi_i] <= max_kv_i
+        for i_i in T.Pipelined(NI, num_stages=num_stages):
+            for bi_i in T.Parallel(BI):
+                mask[bi_i] = Indices[b_i, s_i, g_i, i_i * BI + bi_i] <= max_kv_i
 
-                for bi_i, d_i in T.Parallel(BI, D):
-                    KV_shared[bi_i, d_i] = KV[b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i, d_i]
-                for bi_i, d_i in T.Parallel(BI, D_tail):
-                    K_tail_shared[bi_i, d_i] = KV[b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i, D + d_i]
+            for bi_i, d_i in T.Parallel(BI, D):
+                KV_shared[bi_i, d_i] = KV[b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i, d_i]
+            for bi_i, d_i in T.Parallel(BI, D_tail):
+                K_tail_shared[bi_i, d_i] = KV[b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i, D + d_i]
 
-                for h_i, bi_i in T.Parallel(H_per_block, BI):
-                    acc_s[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_s.dtype))
-                T.gemm(
-                    Q_shared,
-                    KV_shared,
-                    acc_s,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                )
-                T.gemm(
-                    Q_tail_shared,
-                    K_tail_shared,
-                    acc_s,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                )
-                T.copy(m_i, m_i_prev)
-                T.reduce_max(acc_s, m_i, dim=1, clear=False)
-                for h_i in T.Parallel(H_per_block):
-                    m_i[h_i] = T.max(m_i[h_i], m_i_prev[h_i])
-                for h_i in T.Parallel(H_per_block):
-                    alpha[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
-                for h_i, bi_i in T.Parallel(H_per_block, BI):
-                    acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
-                T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
-                for h_i in T.Parallel(H_per_block):
-                    sumexp[h_i] = sumexp[h_i] * alpha[h_i] + sumexp_i[h_i]
-                for h_i, d_i in T.Parallel(H_per_block, D):
-                    acc_o[h_i, d_i] = acc_o[h_i, d_i] * alpha[h_i]
-
-                T.copy(acc_s, S_shared)
-                T.gemm(S_shared, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
-
-            # Rescale
-            for h_i, d_i in T.Parallel(H_per_block, D):
-                acc_o[h_i, d_i] /= sumexp[h_i]
+            for h_i, bi_i in T.Parallel(H_per_block, BI):
+                acc_s[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_s.dtype))
+            T.gemm(
+                Q_shared,
+                KV_shared,
+                acc_s,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+            )
+            T.gemm(
+                Q_tail_shared,
+                K_tail_shared,
+                acc_s,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+            )
+            T.copy(m_i, m_i_prev)
+            T.reduce_max(acc_s, m_i, dim=1, clear=False)
             for h_i in T.Parallel(H_per_block):
-                sumexp[h_i] = T.log2(sumexp[h_i]) + m_i[h_i] * sm_scale
+                m_i[h_i] = T.max(m_i[h_i], m_i_prev[h_i])
+            for h_i in T.Parallel(H_per_block):
+                alpha[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
+            for h_i, bi_i in T.Parallel(H_per_block, BI):
+                acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
+            T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
+            for h_i in T.Parallel(H_per_block):
+                sumexp[h_i] = sumexp[h_i] * alpha[h_i] + sumexp_i[h_i]
+            for h_i, d_i in T.Parallel(H_per_block, D):
+                acc_o[h_i, d_i] = acc_o[h_i, d_i] * alpha[h_i]
 
-            T.copy(acc_o, Output[b_i, s_i, H0:H1, :])
-            T.copy(sumexp, Lse[b_i, s_i, H0:H1])
+            T.copy(acc_s, S_shared)
+            T.gemm(S_shared, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
-    return main
+        # Rescale
+        for h_i, d_i in T.Parallel(H_per_block, D):
+            acc_o[h_i, d_i] /= sumexp[h_i]
+        for h_i in T.Parallel(H_per_block):
+            sumexp[h_i] = T.log2(sumexp[h_i]) + m_i[h_i] * sm_scale
+
+        T.copy(acc_o, Output[b_i, s_i, H0:H1, :])
+        T.copy(sumexp, Lse[b_i, s_i, H0:H1])
+
+    return Output, Lse
 
 
 def sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, return_p_sum: bool = False, d_v=512, block_I=64, num_stages=2, threads=256):
@@ -183,10 +178,9 @@ def sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, return_p_sum: bool =
     _, _, _, topk = indices.shape
     assert indices.shape == (batch, seq_len, kv_group, topk)
 
-    kernel = sparse_mla_fwd(
-        heads, dim, tail_dim, topk, kv_group, sm_scale, is_casual, block_I=block_I, num_stages=num_stages, threads=threads
+    out, lse = sparse_mla_fwd(
+        q, kv, indices, dim, tail_dim, kv_group, sm_scale, is_casual, block_I=block_I, num_stages=num_stages, threads=threads
     )
-    out, lse = kernel(q, kv, indices)
     return out, lse
 
 
@@ -296,10 +290,9 @@ def run_regression_perf(
     dim = 512
     tail_dim = dim_plus_tail_dim - dim
     _, _, _, topk = indices.shape
-    kernel = sparse_mla_fwd(heads, dim, tail_dim, topk, kv_group, None, is_casual, block_I=block_I, num_stages=num_stages, threads=threads)
 
     def run_kernel_only():
-        kernel(q, kv, indices)
+        sparse_mla_fwd(q, kv, indices, dim, tail_dim, kv_group, None, is_casual, block_I=block_I, num_stages=num_stages, threads=threads)
 
     from tilelang.profiler import do_bench
 

@@ -1,6 +1,6 @@
 import tilelang
 from tilelang import language as T
-from typing import Optional, Callable, Any
+from typing import Optional
 import torch
 from tilelang import DataType
 from tilelang.quantize import (
@@ -10,12 +10,11 @@ from tilelang.quantize import (
 
 @tilelang.jit
 def dequantize_gemv(
-    M: int,
-    N: int,
-    K: int,
-    in_dtype: str,
-    out_dtype: str,
-    accum_dtype: str,
+    A,
+    B,
+    in_dtype: T.dtype = T.float16,
+    out_dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float16,
     num_bits: int = 4,
     storage_dtype: T.dtype = T.int8,
     source_format: str = "uint",
@@ -26,7 +25,7 @@ def dequantize_gemv(
     trans_B: bool = True,
     group_size: int = -1,
     with_scaling: bool = False,
-) -> Callable[..., Any]:
+):
     assert n_partition is not None, "n_partition must be provided"
     assert reduce_thread is not None, (
         "reduce_thread must be provided currently, as related bitblas.gpu.gemv.GEMVsch_outer_reduction_with_config is not implemented"
@@ -43,12 +42,13 @@ def dequantize_gemv(
     micro_size_k_compressed = micro_size_k // num_elems_per_byte
     block_K = reduce_thread * micro_size_k
 
+    M, K = T.const("M K")
+    N, _ = T.const("N _")
+    A: T.Tensor[[M, K], in_dtype]
+    B: T.Tensor[[N, _], storage_dtype]
+
     if group_size == -1:
         group_size = K
-
-    A_shape = (M, K)
-    B_shape = (N, K // storage_nbit * num_bits)
-    C_shape = (M, N)
 
     dp4a_size = 4
     use_dp4a = in_dtype == T.int8 and accum_dtype == T.int32
@@ -74,85 +74,81 @@ def dequantize_gemv(
         assert func_name is not None, "lop3_intrin_info is not found"
         import_source = import_source
 
-    @T.prim_func
-    def main(
-        A: T.Tensor[A_shape, in_dtype],
-        B: T.Tensor[B_shape, storage_dtype],
-        C: T.Tensor[C_shape, out_dtype],
+    C = T.empty((M, N), out_dtype)
+
+    with T.Kernel(
+        T.ceildiv(N, n_partition),
+        M,
+        threads=(reduce_thread, n_partition),
+    ) as (
+        bx,
+        by,
     ):
-        with T.Kernel(
-            T.ceildiv(N, n_partition),
-            M,
-            threads=(reduce_thread, n_partition),
-        ) as (
-            bx,
-            by,
-        ):
-            A_local = T.alloc_local((micro_size_k,), in_dtype)
-            B_quant_local = T.alloc_local([micro_size_k_compressed], storage_dtype)
-            B_dequantize_local = T.alloc_local([micro_size_k], in_dtype)
-            accum_res = T.alloc_local((1,), accum_dtype)
-            reduced_accum_res = T.alloc_local((1,), accum_dtype)
+        A_local = T.alloc_local((micro_size_k,), in_dtype)
+        B_quant_local = T.alloc_local([micro_size_k_compressed], storage_dtype)
+        B_dequantize_local = T.alloc_local([micro_size_k], in_dtype)
+        accum_res = T.alloc_local((1,), accum_dtype)
+        reduced_accum_res = T.alloc_local((1,), accum_dtype)
 
-            kr = T.thread_binding(0, reduce_thread, thread="threadIdx.x")
-            ni = T.thread_binding(0, n_partition, thread="threadIdx.y")
+        kr = T.thread_binding(0, reduce_thread, thread="threadIdx.x")
+        ni = T.thread_binding(0, n_partition, thread="threadIdx.y")
 
-            T.import_source(import_source)
+        T.import_source(import_source)
 
-            T.clear(accum_res)
-            for ko in T.serial(T.ceildiv(K, block_K)):
-                for v in T.vectorized(micro_size_k):
-                    A_local[v] = A[by, ko * block_K + kr * micro_size_k + v]
+        T.clear(accum_res)
+        for ko in T.serial(T.ceildiv(K, block_K)):
+            for v in T.vectorized(micro_size_k):
+                A_local[v] = A[by, ko * block_K + kr * micro_size_k + v]
 
-                for v in T.vectorized(micro_size_k_compressed):
-                    B_quant_local[v] = B[
-                        bx * n_partition + ni,
-                        ko * (reduce_thread * micro_size_k_compressed) + kr * micro_size_k_compressed + v,
-                    ]
+            for v in T.vectorized(micro_size_k_compressed):
+                B_quant_local[v] = B[
+                    bx * n_partition + ni,
+                    ko * (reduce_thread * micro_size_k_compressed) + kr * micro_size_k_compressed + v,
+                ]
 
-                if fast_decoding:
-                    T.call_extern(
-                        func_name,
-                        T.access_ptr(B_quant_local, "r"),
-                        T.access_ptr(B_dequantize_local, "w"),
-                        dtype=in_dtype,
-                    )
-                else:
-                    for ki in T.serial(micro_size_k):
-                        B_dequantize_local[ki] = _tir_packed_int_to_int_convert(storage_type, storage_nbit)(
-                            num_bits, B_quant_local[ki // num_elems_per_byte], ki % num_elems_per_byte, in_dtype
-                        )
-
-                if use_dp4a:
-                    for ki in T.serial(micro_size_k // dp4a_size):
-                        T.dp4a(
-                            A_local[ki * dp4a_size],
-                            B_dequantize_local[ki * dp4a_size],
-                            accum_res[0],
-                        )
-                else:
-                    for ki in T.serial(micro_size_k):
-                        accum_res[0] += A_local[ki] * B_dequantize_local[ki]
-
-            with T.attr(
-                T.comm_reducer(lambda x, y: x + y, [T.cast(0, accum_dtype)]),
-                "reduce_scope",
-                T.reinterpret(T.uint64(0), dtype="handle"),
-            ):
-                T.evaluate(
-                    T.tvm_thread_allreduce(
-                        T.uint32(1),
-                        accum_res[0],
-                        True,
-                        reduced_accum_res[0],
-                        kr,
-                        dtype="handle",
-                    )
+            if fast_decoding:
+                T.call_extern(
+                    func_name,
+                    T.access_ptr(B_quant_local, "r"),
+                    T.access_ptr(B_dequantize_local, "w"),
+                    dtype=in_dtype,
                 )
-            if kr == 0:
-                C[by, bx * n_partition + ni] = reduced_accum_res[0]
+            else:
+                for ki in T.serial(micro_size_k):
+                    B_dequantize_local[ki] = _tir_packed_int_to_int_convert(storage_type, storage_nbit)(
+                        num_bits, B_quant_local[ki // num_elems_per_byte], ki % num_elems_per_byte, in_dtype
+                    )
 
-    return main
+            if use_dp4a:
+                for ki in T.serial(micro_size_k // dp4a_size):
+                    T.dp4a(
+                        A_local[ki * dp4a_size],
+                        B_dequantize_local[ki * dp4a_size],
+                        accum_res[0],
+                    )
+            else:
+                for ki in T.serial(micro_size_k):
+                    accum_res[0] += A_local[ki] * B_dequantize_local[ki]
+
+        with T.attr(
+            T.comm_reducer(lambda x, y: x + y, [T.cast(0, accum_dtype)]),
+            "reduce_scope",
+            T.reinterpret(T.uint64(0), dtype="handle"),
+        ):
+            T.evaluate(
+                T.tvm_thread_allreduce(
+                    T.uint32(1),
+                    accum_res[0],
+                    True,
+                    reduced_accum_res[0],
+                    kr,
+                    dtype="handle",
+                )
+            )
+        if kr == 0:
+            C[by, bx * n_partition + ni] = reduced_accum_res[0]
+
+    return C
 
 
 def main() -> None:
@@ -173,36 +169,33 @@ def main() -> None:
     group_size = -1
     with_scaling = False
 
-    kernel = dequantize_gemv(
-        M,
-        N,
-        K,
-        in_dtype,
-        out_dtype,
-        accum_dtype,
-        num_bits,
-        storage_dtype,
-        source_format,
-        n_partition,
-        reduce_thread,
-        fast_decoding,
-        trans_A,
-        trans_B,
-        group_size,
-        with_scaling,
-    )
-
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     num_elems_per_byte = storage_nbit // num_bits
     A = torch.rand(M, K, dtype=getattr(torch, in_dtype)).cuda()
     qB = torch.randint(0, 127, (N, K // num_elems_per_byte), dtype=getattr(torch, storage_dtype)).cuda()
-    C = torch.zeros(M, N, dtype=getattr(torch, accum_dtype)).cuda()
 
     if fast_decoding:
         from tilelang.quantize.utils import interleave_weight
 
         qB = interleave_weight(qB, num_bits, in_dtype)
-    kernel(A, qB, C)
+
+    C = dequantize_gemv(
+        A,
+        qB,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        accum_dtype=accum_dtype,
+        num_bits=num_bits,
+        storage_dtype=storage_dtype,
+        source_format=source_format,
+        n_partition=n_partition,
+        reduce_thread=reduce_thread,
+        fast_decoding=fast_decoding,
+        trans_A=trans_A,
+        trans_B=trans_B,
+        group_size=group_size,
+        with_scaling=with_scaling,
+    )
 
     # int4 reference
     B = torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4, dtype=torch.half).to(torch.half).to(A.device)
@@ -235,41 +228,36 @@ def run_regression_perf():
     group_size = -1
     with_scaling = False
 
-    kernel = dequantize_gemv(
-        M,
-        N,
-        K,
-        in_dtype,
-        out_dtype,
-        accum_dtype,
-        num_bits,
-        storage_dtype,
-        source_format,
-        n_partition,
-        reduce_thread,
-        fast_decoding,
-        trans_A,
-        trans_B,
-        group_size,
-        with_scaling,
-    )
-
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     num_elems_per_byte = storage_nbit // num_bits
     A = torch.rand(M, K, dtype=getattr(torch, in_dtype)).cuda()
     qB = torch.randint(0, 127, (N, K // num_elems_per_byte), dtype=getattr(torch, storage_dtype)).cuda()
-    C = torch.zeros(M, N, dtype=getattr(torch, accum_dtype)).cuda()
 
     if fast_decoding:
         from tilelang.quantize.utils import interleave_weight
 
         qB = interleave_weight(qB, num_bits, in_dtype)
-    kernel(A, qB, C)
 
     from tilelang.profiler import do_bench
 
     def run_kernel_only():
-        kernel(A, qB, C)
+        dequantize_gemv(
+            A,
+            qB,
+            in_dtype=in_dtype,
+            out_dtype=out_dtype,
+            accum_dtype=accum_dtype,
+            num_bits=num_bits,
+            storage_dtype=storage_dtype,
+            source_format=source_format,
+            n_partition=n_partition,
+            reduce_thread=reduce_thread,
+            fast_decoding=fast_decoding,
+            trans_A=trans_A,
+            trans_B=trans_B,
+            group_size=group_size,
+            with_scaling=with_scaling,
+        )
 
     return do_bench(run_kernel_only, backend="cupti")
 

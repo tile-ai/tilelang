@@ -115,53 +115,50 @@ def benchmark_pytorch(M, N, K, num_iters=10, warmup=5):
 
 # Main TileLang kernel - contains a BUG: GEMM shape mismatch!
 @tilelang.jit
-def buggy_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
-    @T.prim_func
-    def matmul_kernel(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            # Allocate shared memory
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            # BUG: the first dimension of B_shared should be block_K, but block_M is used here!
-            B_shared = T.alloc_shared((block_M, block_N), dtype)  # Wrong shape!
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+def buggy_matmul(A, B, C, block_M: int = 128, block_N: int = 128, block_K: int = 32, dtype: T.dtype = T.float16, accum_dtype=T.float32):
+    M, N, K = T.const("M N K")
+    A: T.Tensor[[M, K], dtype]
+    B: T.Tensor[[K, N], dtype]
+    C: T.Tensor[[M, N], dtype]
 
-            # Allocate some useless temp variables
-            temp_buffer = T.alloc_fragment((block_M, block_N), accum_dtype)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+        # Allocate shared memory
+        A_shared = T.alloc_shared((block_M, block_K), dtype)
+        # BUG: the first dimension of B_shared should be block_K, but block_M is used here!
+        B_shared = T.alloc_shared((block_M, block_N), dtype)  # Wrong shape!
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            # Zero out
-            T.clear(C_local)
-            T.clear(temp_buffer)
+        # Allocate some useless temp variables
+        temp_buffer = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            # Main loop
-            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-                # Copy a tile of A
-                T.copy(A[by * block_M, ko * block_K], A_shared)
+        # Zero out
+        T.clear(C_local)
+        T.clear(temp_buffer)
 
-                # Copy a tile of B - shape can mismatch here too
-                T.copy(B[ko * block_K, bx * block_N], B_shared)
+        # Main loop
+        for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+            # Copy a tile of A
+            T.copy(A[by * block_M, ko * block_K], A_shared)
 
-                # GEMM computation - shape mismatch will cause an error
-                # A_shared: (block_M, block_K)
-                # B_shared: (block_M, block_N) <- should be (block_K, block_N)
-                T.gemm(A_shared, B_shared, C_local)
+            # Copy a tile of B - shape can mismatch here too
+            T.copy(B[ko * block_K, bx * block_N], B_shared)
 
-            # ReLU activation
-            for i, j in T.Parallel(block_M, block_N):
-                C_local[i, j] = T.max(C_local[i, j], 0)
+            # GEMM computation - shape mismatch will cause an error
+            # A_shared: (block_M, block_K)
+            # B_shared: (block_M, block_N) <- should be (block_K, block_N)
+            T.gemm(A_shared, B_shared, C_local)
 
-            # Some useless postprocessing
-            for i, j in T.Parallel(block_M, block_N):
-                if temp_buffer[i, j] > 0:
-                    C_local[i, j] = C_local[i, j] + 0.0
+        # ReLU activation
+        for i, j in T.Parallel(block_M, block_N):
+            C_local[i, j] = T.max(C_local[i, j], 0)
 
-            # Write back result
-            T.copy(C_local, C[by * block_M, bx * block_N])
+        # Some useless postprocessing
+        for i, j in T.Parallel(block_M, block_N):
+            if temp_buffer[i, j] > 0:
+                C_local[i, j] = C_local[i, j] + 0.0
 
-    return matmul_kernel
+        # Write back result
+        T.copy(C_local, C[by * block_M, bx * block_N])
 
 
 def run_kernel(config):
@@ -185,8 +182,7 @@ def run_kernel(config):
     c = torch.empty(M, N, device="cuda", dtype=torch.float16)
 
     # Compile and run kernel - will trigger the BUG here
-    kernel = buggy_matmul(M, N, K, block_M, block_N, block_K)
-    kernel(a, b, c)
+    buggy_matmul(a, b, c, block_M=block_M, block_N=block_N, block_K=block_K)
 
     # Validate results (if it can get here)
     ref_c = torch.relu(a @ b)

@@ -234,30 +234,32 @@ def get_bwd_configs():
     return configs
 
 
-@tilelang.jit(out_idx=[2])
-def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
+@tilelang.jit
+def flashattn_bwd_preprocess(O, dO, batch: int = 1, heads: int = 8, seq_len: int = 1024, dim: int = 64):
+    batch, heads, seq_len, dim = T.const("batch heads seq_len dim")
     dtype = T.float16
     accum_dtype = T.float32
-    shape = [batch, seq_len, heads, dim]
     blk = 32
 
-    @T.prim_func
-    def flash_bwd_prep(O: T.Tensor(shape, dtype), dO: T.Tensor(shape, dtype), Delta: T.Tensor([batch, heads, seq_len], accum_dtype)):
-        with T.Kernel(batch, heads, T.ceildiv(seq_len, blk)) as (bz, bx, by):
-            o = T.alloc_fragment([blk, blk], dtype)
-            do = T.alloc_fragment([blk, blk], dtype)
-            acc = T.alloc_fragment([blk, blk], accum_dtype)
-            delta = T.alloc_fragment([blk], accum_dtype)
-            T.clear(acc)
-            for k in range(T.ceildiv(dim, blk)):
-                T.copy(O[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], o)
-                T.copy(dO[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], do)
-                for i, j in T.Parallel(blk, blk):
-                    acc[i, j] += o[i, j] * do[i, j]
-            T.reduce_sum(acc, delta, 1)
-            T.copy(delta, Delta[bz, bx, by * blk : (by + 1) * blk])
+    O: T.Tensor[[batch, seq_len, heads, dim], dtype]
+    dO: T.Tensor[[batch, seq_len, heads, dim], dtype]
+    Delta = T.empty([batch, heads, seq_len], accum_dtype)
 
-    return flash_bwd_prep
+    with T.Kernel(batch, heads, T.ceildiv(seq_len, blk)) as (bz, bx, by):
+        o = T.alloc_fragment([blk, blk], dtype)
+        do = T.alloc_fragment([blk, blk], dtype)
+        acc = T.alloc_fragment([blk, blk], accum_dtype)
+        delta = T.alloc_fragment([blk], accum_dtype)
+        T.clear(acc)
+        for k in range(T.ceildiv(dim, blk)):
+            T.copy(O[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], o)
+            T.copy(dO[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], do)
+            for i, j in T.Parallel(blk, blk):
+                acc[i, j] += o[i, j] * do[i, j]
+        T.reduce_sum(acc, delta, 1)
+        T.copy(delta, Delta[bz, bx, by * blk : (by + 1) * blk])
+
+    return Delta
 
 
 @tilelang.autotune(configs=get_bwd_configs(), cache_input_tensors=True)
@@ -366,22 +368,23 @@ def flashattn_bwd(
     return flash_bwd_kernel
 
 
-@tilelang.jit(out_idx=[1])
-def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
+@tilelang.jit
+def flashattn_bwd_postprocess(dQ_in, batch: int = 1, heads: int = 8, seq_len: int = 1024, dim: int = 64):
+    batch, heads, seq_len, dim = T.const("batch heads seq_len dim")
     dtype = T.float16
     accum_dtype = T.float32
-    shape = [batch, seq_len, heads, dim]
     blk = 64
 
-    @T.prim_func
-    def flash_bwd_post(dQ_in: T.Tensor(shape, accum_dtype), dQ_out: T.Tensor(shape, dtype)):
-        with T.Kernel(T.ceildiv(seq_len, blk), heads, batch, threads=128) as (bx, by, bz):
-            T.copy(
-                dQ_in[bz, bx * blk : (bx + 1) * blk, by, :],
-                dQ_out[bz, bx * blk : (bx + 1) * blk, by, :],
-            )
+    dQ_in: T.Tensor[[batch, seq_len, heads, dim], accum_dtype]
+    dQ_out = T.empty([batch, seq_len, heads, dim], dtype)
 
-    return flash_bwd_post
+    with T.Kernel(T.ceildiv(seq_len, blk), heads, batch, threads=128) as (bx, by, bz):
+        T.copy(
+            dQ_in[bz, bx * blk : (bx + 1) * blk, by, :],
+            dQ_out[bz, bx * blk : (bx + 1) * blk, by, :],
+        )
+
+    return dQ_out
 
 
 def debug_tensor_comparison(tensor1, tensor2, name, rtol=1e-3, atol=1e-3):
@@ -481,8 +484,7 @@ def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is
 
     o_tl, lse_tl = fwd_kernel(q, k, v)
 
-    bwd_prep = flashattn_bwd_preprocess(batch, heads, seq_len, dim)
-    delta_tl = bwd_prep(o_tl, dO)
+    delta_tl = flashattn_bwd_preprocess(o_tl, dO, batch=batch, heads=heads, seq_len=seq_len, dim=dim)
 
     print("\nStarting FlashAttention-V2 backward pass autotuning...")
     bwd_kernel = flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups)
@@ -497,8 +499,7 @@ def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is
 
     bwd_kernel(q, k, v, dO, lse_tl, delta_tl, dQ_accum, dK_tl, dV_tl)
 
-    post_kernel = flashattn_bwd_postprocess(batch, heads, seq_len, dim)
-    dQ_tl = post_kernel(dQ_accum)
+    dQ_tl = flashattn_bwd_postprocess(dQ_accum, batch=batch, heads=heads, seq_len=seq_len, dim=dim)
 
     q_ref = q.clone().detach().requires_grad_()
     k_ref = k.clone().detach().requires_grad_()
@@ -546,14 +547,14 @@ def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is
     def run_complete_fwd_bwd():
         o_tl_bench, lse_tl_bench = fwd_kernel(q, k, v)
 
-        delta_tl_bench = bwd_prep(o_tl_bench, dO)
+        delta_tl_bench = flashattn_bwd_preprocess(o_tl_bench, dO, batch=batch, heads=heads, seq_len=seq_len, dim=dim)
 
         dQ_bench = torch.zeros_like(q, dtype=torch.float32)
         dK_bench = torch.zeros_like(k, dtype=torch.float32)
         dV_bench = torch.zeros_like(v, dtype=torch.float32)
         bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_bench, dK_bench, dV_bench)
 
-        post_kernel(dQ_bench)
+        flashattn_bwd_postprocess(dQ_bench, batch=batch, heads=heads, seq_len=seq_len, dim=dim)
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()

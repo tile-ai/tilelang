@@ -1,5 +1,6 @@
 import torch
 from tilelang import tvm as tvm
+import tilelang
 import tilelang.testing
 from tvm import DataType
 import tilelang.language as T
@@ -27,15 +28,14 @@ def make_swizzle_layout(shared_buf):
     return T.Layout(shape, transform_func)
 
 
-@tilelang.jit(out_idx=[2])
+@tilelang.jit
 def tl_matmul(
-    M,
-    N,
-    K,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
+    A,
+    B,
+    out_dtype: T.dtype = T.float32,
+    accum_dtype: T.dtype = T.float32,
 ):
+    in_dtype = A.dtype
     assert in_dtype in [
         T.float16,
         T.float8_e4m3fn,
@@ -49,6 +49,11 @@ def tl_matmul(
         T.float32,
         T.int32,
     ], "Currently only float16, float32 and int32 are supported"
+
+    M, N, K = T.const("M N K")
+    A: T.Tensor[[M, K], in_dtype]
+    B: T.Tensor[[N, K], in_dtype]
+    C = T.empty([M, N], out_dtype)
 
     # This is a debug config
     block_row_warps = 2
@@ -65,8 +70,6 @@ def tl_matmul(
     block_N = block_col_warps * warp_col_tiles
     block_K = chunk
 
-    A_shape = (M, K)
-    B_shape = (N, K)
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, block_K)
     is_hip = torch.version.hip is not None
@@ -115,106 +118,98 @@ def tl_matmul(
     warp_rows = mma_emitter.warp_rows
     warp_cols = mma_emitter.warp_cols
 
-    @T.prim_func
-    def gemm_fp8_intrinsic(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
-            C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
-            A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-            B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
-            C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
+        B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
+        C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
+        A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+        B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+        C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzle_layout(A_shared),
-                    B_shared: make_swizzle_layout(B_shared),
-                }
-            )
+        T.annotate_layout(
+            {
+                A_shared: make_swizzle_layout(A_shared),
+                B_shared: make_swizzle_layout(B_shared),
+            }
+        )
 
-            # Improve L2 Cache
-            T.use_swizzle(panel_size=10)
+        # Improve L2 Cache
+        T.use_swizzle(panel_size=10)
 
-            T.clear(C_local)
+        T.clear(C_local)
 
-            for ko in T.Pipelined((K // block_K), num_stages=stage):
-                # Load A into shared memory
-                for i, k in T.Parallel(block_M, block_K):
-                    A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
+        for ko in T.Pipelined((K // block_K), num_stages=stage):
+            # Load A into shared memory
+            for i, k in T.Parallel(block_M, block_K):
+                A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
 
-                # Load B into shared memory
-                for j, k in T.Parallel(block_N, block_K):
-                    B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
+            # Load B into shared memory
+            for j, k in T.Parallel(block_N, block_K):
+                B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
-                for ki in T.serial(0, (block_K // micro_size_k)):
-                    # Load A into fragment
-                    mma_emitter.ldmatrix_a(
-                        A_local,
-                        A_shared,
-                        ki,
-                    )
+            for ki in T.serial(0, (block_K // micro_size_k)):
+                # Load A into fragment
+                mma_emitter.ldmatrix_a(
+                    A_local,
+                    A_shared,
+                    ki,
+                )
 
-                    # Load B into fragment
-                    mma_emitter.ldmatrix_b(
-                        B_local,
-                        B_shared,
-                        ki,
-                    )
+                # Load B into fragment
+                mma_emitter.ldmatrix_b(
+                    B_local,
+                    B_shared,
+                    ki,
+                )
 
-                    # Perform Matrix Multiplication
-                    if is_hip:
-                        mma_emitter.mfma(A_local, B_local, C_local, ki)
-                    else:
-                        mma_emitter.mma(A_local, B_local, C_local)
+                # Perform Matrix Multiplication
+                if is_hip:
+                    mma_emitter.mfma(A_local, B_local, C_local, ki)
+                else:
+                    mma_emitter.mma(A_local, B_local, C_local)
 
-            # Perform STMatrix
-            mma_emitter.stmatrix(
-                C_local,
-                C_shared,
-            )
+        # Perform STMatrix
+        mma_emitter.stmatrix(
+            C_local,
+            C_shared,
+        )
 
-            # Store shared into global
-            for i, j in T.Parallel(block_M, block_N):
-                C[by * block_M + i, bx * block_N + j] = C_shared[
-                    i // micro_size_x,
-                    j // micro_size_y,
-                    i % micro_size_x,
-                    j % micro_size_y,
-                ]
+        # Store shared into global
+        for i, j in T.Parallel(block_M, block_N):
+            C[by * block_M + i, bx * block_N + j] = C_shared[
+                i // micro_size_x,
+                j // micro_size_y,
+                i % micro_size_x,
+                j % micro_size_y,
+            ]
 
-    return gemm_fp8_intrinsic
+    return C
 
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
-    kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    src_code = kernel.get_kernel_source()
-    # src_code is the generated cuda source
-    assert src_code is not None
+    in_torch_dtype = map_torch_type(in_dtype)
+    out_torch_dtype = map_torch_type(out_dtype)
+    accum_torch_dtype = map_torch_type(accum_dtype)
 
-    in_dtype = map_torch_type(in_dtype)
-    out_dtype = map_torch_type(out_dtype)
-    accum_dtype = map_torch_type(accum_dtype)
-
-    if in_dtype in {torch.int8, torch.int32}:
-        A = torch.randint(-128, 128, (M, K), dtype=torch.int8).to(in_dtype).cuda()
-        B = torch.randint(-128, 128, (N, K), dtype=torch.int8).to(in_dtype).cuda()
-    elif in_dtype in {
+    if in_torch_dtype in {torch.int8, torch.int32}:
+        A = torch.randint(-128, 128, (M, K), dtype=torch.int8).to(in_torch_dtype).cuda()
+        B = torch.randint(-128, 128, (N, K), dtype=torch.int8).to(in_torch_dtype).cuda()
+    elif in_torch_dtype in {
         torch.float8_e4m3fn,
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
     }:
-        A = torch.randn(M, K).to(in_dtype).cuda()
-        B = torch.randn(N, K).to(in_dtype).cuda()
+        A = torch.randn(M, K).to(in_torch_dtype).cuda()
+        B = torch.randn(N, K).to(in_torch_dtype).cuda()
     else:
-        A = torch.randn(M, K).to(in_dtype).cuda() - 0.5
-        B = torch.randn(N, K).to(in_dtype).cuda() - 0.5
+        A = torch.randn(M, K).to(in_torch_dtype).cuda() - 0.5
+        B = torch.randn(N, K).to(in_torch_dtype).cuda() - 0.5
 
-    C = torch.zeros(M, N, device="cuda", dtype=accum_dtype)
+    kernel = tl_matmul.compile(A, B, out_dtype=out_dtype, accum_dtype=accum_dtype)
+    src_code = kernel.get_kernel_source()
+    # src_code is the generated cuda source
+    assert src_code is not None
 
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
 
@@ -226,7 +221,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     assert latency is not None
 
     # Get Reference Result
-    ref_c = torch.matmul(A.to(accum_dtype), B.T.to(accum_dtype)).to(out_dtype)
+    ref_c = torch.matmul(A.to(accum_torch_dtype), B.T.to(accum_torch_dtype)).to(out_torch_dtype)
     print(C)
     print(ref_c)
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
@@ -243,7 +238,10 @@ def run_regression_perf():
     M, N, K = 4096, 4096, 4096
     out_dtype, accum_dtype = "float32", "float32"
     in_dtype = determine_fp8_type()
-    kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    in_torch_dtype = map_torch_type(in_dtype)
+    A = torch.randn(M, K).to(in_torch_dtype).cuda()
+    B = torch.randn(N, K).to(in_torch_dtype).cuda()
+    kernel_e4m3 = tl_matmul.compile(A, B, out_dtype=out_dtype, accum_dtype=accum_dtype)
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
     if torch.version.hip is None:
         latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")

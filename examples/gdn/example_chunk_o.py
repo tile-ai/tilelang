@@ -55,99 +55,92 @@ def prepare_output(
     return O
 
 
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit
 def tilelang_chunk_fwd_o(
+    Q,
+    K,
+    V,
+    HIDDEN,
+    G,
     # task config
-    B,
-    S,
-    H,
-    DK,
-    DV,
-    input_dtype,
-    output_dtype,
-    accum_dtype,
-    gate_dtype,
-    chunk_size,
-    scale,
-    use_g,
+    input_dtype: T.dtype = T.float16,
+    output_dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float32,
+    gate_dtype: T.dtype = T.float32,
+    chunk_size: int = 64,
+    scale: float = 1.0,
+    use_g: bool = True,
     # kernel config
-    block_S=64,
-    block_DK=64,
-    block_DV=64,
-    threads=256,
-    num_stages=0,
+    block_S: int = 64,
+    block_DK: int = 64,
+    block_DV: int = 64,
+    threads: int = 256,
+    num_stages: int = 0,
 ):
+    B, S, H, DK = T.const("B S H DK")
+    DV = T.const("DV")
+    Q: T.Tensor[[B, S, H, DK], input_dtype]
+    K: T.Tensor[[B, S, H, DK], input_dtype]
+    V: T.Tensor[[B, S, H, DV], input_dtype]
+    HIDDEN: T.Tensor[[B, S // chunk_size, H, DK, DV], input_dtype]
+    G: T.Tensor[[B, S, H], gate_dtype]
+    O = T.empty([B, S, H, DV], output_dtype)
+
     assert chunk_size == block_S, "chunk_size must be equal to block_S"
-    BS = chunk_size
-    Q_shape = (B, S, H, DK)
-    K_shape = (B, S, H, DK)
-    V_shape = (B, S, H, DV)
-    H_shape = (B, S // BS, H, DK, DV)
-    G_shape = (B, S, H)
-    O_shape = (B, S, H, DV)
 
-    @T.prim_func
-    def kernel(
-        Q: T.Tensor(Q_shape, dtype=input_dtype),
-        K: T.Tensor(K_shape, dtype=input_dtype),
-        V: T.Tensor(V_shape, dtype=input_dtype),
-        HIDDEN: T.Tensor(H_shape, dtype=input_dtype),
-        G: T.Tensor(G_shape, dtype=gate_dtype),
-        O: T.Tensor(O_shape, dtype=output_dtype),
-    ):
-        with T.Kernel(T.ceildiv(DV, block_DV), T.ceildiv(S, block_S), B * H, threads=threads) as (bv, bs, bbh):
-            bb, bh = bbh // H, bbh % H
-            Q_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
-            K_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
-            V_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
-            H_shared = T.alloc_shared((block_DK, block_DV), dtype=input_dtype)
-            A_shared = T.alloc_shared((block_S, block_S), dtype=input_dtype)
-            O_shared = T.alloc_shared((block_S, block_DV), dtype=output_dtype)
-            A_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
-            O_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-            G_shared = T.alloc_shared((block_S,), dtype=gate_dtype, scope="shared")
-            G_diff_local = T.alloc_fragment((block_S, block_S), dtype=gate_dtype)
+    with T.Kernel(T.ceildiv(DV, block_DV), T.ceildiv(S, block_S), B * H, threads=threads) as (bv, bs, bbh):
+        bb, bh = bbh // H, bbh % H
+        Q_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
+        K_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
+        V_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
+        H_shared = T.alloc_shared((block_DK, block_DV), dtype=input_dtype)
+        A_shared = T.alloc_shared((block_S, block_S), dtype=input_dtype)
+        O_shared = T.alloc_shared((block_S, block_DV), dtype=output_dtype)
+        A_fragment = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
+        O_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+        G_shared = T.alloc_shared((block_S,), dtype=gate_dtype, scope="shared")
+        G_diff_local = T.alloc_fragment((block_S, block_S), dtype=gate_dtype)
 
-            T.clear(A_fragment)
-            T.clear(O_fragment)
-            T.disable_warp_group_reg_alloc()
-            for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
-                T.copy(Q[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], Q_shared)
-                T.copy(K[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], K_shared)
-                T.copy(HIDDEN[bb, bs, bh, i_k * block_DK : (i_k + 1) * block_DK, bv * block_DV : (bv + 1) * block_DV], H_shared)
-                T.gemm(Q_shared, H_shared, O_fragment)
-                T.gemm(Q_shared, K_shared, A_fragment, transpose_B=True)
+        T.clear(A_fragment)
+        T.clear(O_fragment)
+        T.disable_warp_group_reg_alloc()
+        for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
+            T.copy(Q[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], Q_shared)
+            T.copy(K[bb, bs * block_S : (bs + 1) * block_S, bh, i_k * block_DK : (i_k + 1) * block_DK], K_shared)
+            T.copy(HIDDEN[bb, bs, bh, i_k * block_DK : (i_k + 1) * block_DK, bv * block_DV : (bv + 1) * block_DV], H_shared)
+            T.gemm(Q_shared, H_shared, O_fragment)
+            T.gemm(Q_shared, K_shared, A_fragment, transpose_B=True)
 
-            if use_g:
-                for i_s in T.Parallel(block_S):
-                    G_shared[i_s] = G[bb, bs * block_S + i_s, bh]
-                # T.copy(G[bb, bs * block_S:(bs + 1) * block_S, bh], G_shared)
-                for i_s, i_v in T.Parallel(block_S, block_DV):
-                    O_fragment[i_s, i_v] = O_fragment[i_s, i_v] * T.exp(G_shared[i_s])
-                for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    G_diff_local[i_s1, i_s2] = G_shared[i_s1] - G_shared[i_s2]
-                for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    A_fragment[i_s1, i_s2] = T.if_then_else(
-                        G_diff_local[i_s1, i_s2] <= 0,
-                        A_fragment[i_s1, i_s2] * T.exp(G_diff_local[i_s1, i_s2]),
-                        0,
-                    )
-
-            for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                if i_s1 < i_s2:
-                    A_fragment[i_s1, i_s2] = 0
-
-            T.copy(V[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], V_shared)
-            T.copy(A_fragment, A_shared)
-            T.gemm(A_shared, V_shared, O_fragment)
-
+        if use_g:
+            for i_s in T.Parallel(block_S):
+                G_shared[i_s] = G[bb, bs * block_S + i_s, bh]
+            # T.copy(G[bb, bs * block_S:(bs + 1) * block_S, bh], G_shared)
             for i_s, i_v in T.Parallel(block_S, block_DV):
-                O_fragment[i_s, i_v] = O_fragment[i_s, i_v] * scale
+                O_fragment[i_s, i_v] = O_fragment[i_s, i_v] * T.exp(G_shared[i_s])
+            for i_s1, i_s2 in T.Parallel(block_S, block_S):
+                G_diff_local[i_s1, i_s2] = G_shared[i_s1] - G_shared[i_s2]
+            for i_s1, i_s2 in T.Parallel(block_S, block_S):
+                A_fragment[i_s1, i_s2] = T.if_then_else(
+                    G_diff_local[i_s1, i_s2] <= 0,
+                    A_fragment[i_s1, i_s2] * T.exp(G_diff_local[i_s1, i_s2]),
+                    0,
+                )
 
-            T.copy(O_fragment, O_shared)
-            T.copy(O_shared, O[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV])
+        for i_s1, i_s2 in T.Parallel(block_S, block_S):
+            if i_s1 < i_s2:
+                A_fragment[i_s1, i_s2] = 0
 
-    return kernel
+        T.copy(V[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], V_shared)
+        T.copy(A_fragment, A_shared)
+        T.gemm(A_shared, V_shared, O_fragment)
+
+        for i_s, i_v in T.Parallel(block_S, block_DV):
+            O_fragment[i_s, i_v] = O_fragment[i_s, i_v] * scale
+
+        T.copy(O_fragment, O_shared)
+        T.copy(O_shared, O[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV])
+
+    return O
 
 
 def run_test(
@@ -180,13 +173,12 @@ def run_test(
     O_ref = chunk_fwd_o(Q, K, V, HIDDEN, G, scale, chunk_size=chunk_size)
 
     block_S = chunk_size
-    O_tilelang = prepare_output(B, S, H, DK, DV, chunk_size, output_dtype_torch)
-    kernel = tilelang_chunk_fwd_o(
-        B,
-        S,
-        H,
-        DK,
-        DV,
+    O_tilelang = tilelang_chunk_fwd_o(
+        Q,
+        K,
+        V,
+        HIDDEN,
+        G,
         input_dtype,
         output_dtype,
         accum_dtype,
@@ -200,7 +192,6 @@ def run_test(
         threads,
         num_stages,
     )
-    O_tilelang = kernel(Q, K, V, HIDDEN, G)
 
     try:
         torch.testing.assert_close(O_tilelang, O_ref, rtol=1e-2, atol=1e-2)

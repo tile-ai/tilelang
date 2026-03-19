@@ -88,12 +88,19 @@ supply_prog = SupplyProg()
     },
 )
 def mqa_attn_return_logits(
-    heads,
-    index_dim,
-    block_N=256,
-    num_stages=3,
-    threads=512,
-    block_Q=None,
+    IndexQ,
+    IndexK,
+    IndexKScale,
+    Logits,
+    Weights,
+    CuSeqLenKS,
+    CuSeqLenKE,
+    heads: int = 1,
+    index_dim: int = 64,
+    block_N: int = 256,
+    num_stages: int = 3,
+    threads: int = 512,
+    block_Q: int = None,
 ):
     if block_Q is None:
         block_Q = 128 // heads
@@ -101,115 +108,94 @@ def mqa_attn_return_logits(
     accum_dtype = T.float32
     index_dtype = T.int32
 
-    seq_len = T.dynamic("seq_len")
-    seq_len_kv = T.dynamic("seq_len_kv")
+    seq_len, _ = T.const("seq_len _")
+    seq_len_kv, _ = T.const("seq_len_kv _")
+    IndexQ: T.Tensor[[seq_len * heads, index_dim], dtype]
+    IndexK: T.Tensor[[seq_len_kv, index_dim], dtype]
+    IndexKScale: T.Tensor[[seq_len_kv], accum_dtype]
+    Logits: T.Tensor[[seq_len, seq_len_kv], accum_dtype]
+    Weights: T.Tensor[[seq_len, heads], accum_dtype]
+    CuSeqLenKS: T.Tensor[[seq_len], index_dtype]
+    CuSeqLenKE: T.Tensor[[seq_len], index_dtype]
 
-    index_q_shape = [seq_len * heads, index_dim]
-    index_k_shape = [seq_len_kv, index_dim]
-    index_k_scale_shape = [seq_len_kv]
-    logits_shape = [seq_len, seq_len_kv]
+    with T.Kernel(T.ceildiv(seq_len, block_Q), threads=threads) as bx:
+        index_q_shared = T.alloc_shared([block_Q * heads, index_dim], dtype)
+        index_k_shared = T.alloc_shared([block_N, index_dim], dtype)
+        index_k_scale_fragment = T.alloc_fragment([block_N], accum_dtype)
+        s = T.alloc_fragment([block_N, block_Q * heads], accum_dtype)
+        s_reshaped = T.reshape(s, (block_N, block_Q, heads))
+        logits = T.alloc_fragment([block_N, block_Q], accum_dtype)
+        weights = T.alloc_fragment([block_Q, heads], accum_dtype)
 
-    @T.prim_func
-    def mqa_attn_return_logits_kernel(
-        IndexQ: T.Tensor(index_q_shape, dtype),  # type: ignore
-        IndexK: T.Tensor(index_k_shape, dtype),  # type: ignore
-        IndexKScale: T.Tensor(index_k_scale_shape, accum_dtype),  # type: ignore
-        Logits: T.Tensor(logits_shape, accum_dtype),  # type: ignore
-        Weights: T.Tensor([seq_len, heads], accum_dtype),  # type: ignore
-        CuSeqLenKS: T.Tensor([seq_len], index_dtype),  # type: ignore
-        CuSeqLenKE: T.Tensor([seq_len], index_dtype),  # type: ignore
-    ):
-        with T.Kernel(T.ceildiv(seq_len, block_Q), threads=threads) as bx:
-            index_q_shared = T.alloc_shared([block_Q * heads, index_dim], dtype)
-            index_k_shared = T.alloc_shared([block_N, index_dim], dtype)
-            index_k_scale_fragment = T.alloc_fragment([block_N], accum_dtype)
-            s = T.alloc_fragment([block_N, block_Q * heads], accum_dtype)
-            s_reshaped = T.reshape(s, (block_N, block_Q, heads))
-            logits = T.alloc_fragment([block_N, block_Q], accum_dtype)
-            weights = T.alloc_fragment([block_Q, heads], accum_dtype)
+        seq_len_i = bx * block_Q
 
-            seq_len_i = bx * block_Q
+        cu_k_s_min = T.alloc_var(index_dtype)
+        cu_k_e_max = T.alloc_var(index_dtype)
 
-            cu_k_s_min = T.alloc_var(index_dtype)
-            cu_k_e_max = T.alloc_var(index_dtype)
+        cu_k_s_min = 2147483647
+        cu_k_e_max = -2147483648
 
-            cu_k_s_min = 2147483647
-            cu_k_e_max = -2147483648
+        for bq_i in T.serial(block_Q):
+            cu_k_s_min = T.min(cu_k_s_min, T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv))
+        for bq_i in T.serial(block_Q):
+            cu_k_e_max = T.max(cu_k_e_max, T.min(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv))
 
-            for bq_i in T.serial(block_Q):
-                cu_k_s_min = T.min(cu_k_s_min, T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv))
-            for bq_i in T.serial(block_Q):
-                cu_k_e_max = T.max(cu_k_e_max, T.min(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv))
+        T.copy(IndexQ[seq_len_i * heads, 0], index_q_shared)
+        T.copy(Weights[seq_len_i, 0], weights)
 
-            T.copy(IndexQ[seq_len_i * heads, 0], index_q_shared)
-            T.copy(Weights[seq_len_i, 0], weights)
+        for nbn_i in T.Pipelined(T.ceildiv(cu_k_e_max - cu_k_s_min, block_N), num_stages=num_stages):
+            T.copy(IndexK[cu_k_s_min + nbn_i * block_N, 0], index_k_shared)
+            T.copy(IndexKScale[cu_k_s_min + nbn_i * block_N], index_k_scale_fragment)
 
-            for nbn_i in T.Pipelined(T.ceildiv(cu_k_e_max - cu_k_s_min, block_N), num_stages=num_stages):
-                T.copy(IndexK[cu_k_s_min + nbn_i * block_N, 0], index_k_shared)
-                T.copy(IndexKScale[cu_k_s_min + nbn_i * block_N], index_k_scale_fragment)
+            T.gemm(
+                index_k_shared,
+                index_q_shared,
+                s,
+                transpose_B=True,
+                clear_accum=True,
+                policy=T.GemmWarpPolicy.FullCol,
+            )
 
-                T.gemm(
-                    index_k_shared,
-                    index_q_shared,
-                    s,
-                    transpose_B=True,
-                    clear_accum=True,
-                    policy=T.GemmWarpPolicy.FullCol,
-                )
+            for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads):
+                s_reshaped[bn_i, bq_i, h_i] = (T.max(s_reshaped[bn_i, bq_i, h_i], 0) * weights[bq_i, h_i]) * index_k_scale_fragment[bn_i]
 
-                for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads):
-                    s_reshaped[bn_i, bq_i, h_i] = (T.max(s_reshaped[bn_i, bq_i, h_i], 0) * weights[bq_i, h_i]) * index_k_scale_fragment[
-                        bn_i
-                    ]
+            T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
 
-                T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
-
-                for bq_i, bn_i in T.Parallel(block_Q, block_N):
-                    Logits[seq_len_i + bq_i, cu_k_s_min + nbn_i * block_N + bn_i] = logits[bn_i, bq_i]
-
-    return mqa_attn_return_logits_kernel
+            for bq_i, bn_i in T.Parallel(block_Q, block_N):
+                Logits[seq_len_i + bq_i, cu_k_s_min + nbn_i * block_N + bn_i] = logits[bn_i, bq_i]
 
 
 @tilelang.jit
 def clean_logits_(
+    Logits,
+    CuSeqLenKS,
+    CuSeqLenKE,
     threads: int = 512,
     block_K: int = 4096,
 ):
-    seq_len = T.dynamic("seq_len")
-    seq_len_kv = T.dynamic("seq_len_kv")
+    seq_len, seq_len_kv = T.const("seq_len seq_len_kv")
+    Logits: T.Tensor[[seq_len, seq_len_kv], T.float32]
+    CuSeqLenKS: T.Tensor[[seq_len], T.int32]
+    CuSeqLenKE: T.Tensor[[seq_len], T.int32]
 
-    dtype = T.float
-    indices_dtype = T.int32
+    with T.Kernel(seq_len, threads=threads) as bx:
+        tx = T.thread_binding(0, threads, thread="threadIdx.x")
+        cu_k_s = CuSeqLenKS[bx]
+        cu_k_e = CuSeqLenKE[bx]
 
-    @T.prim_func
-    def clean_logits_kernel(
-        Logits: T.Tensor([seq_len, seq_len_kv], dtype),  # type: ignore
-        CuSeqLenKS: T.Tensor([seq_len], indices_dtype),  # type: ignore
-        CuSeqLenKE: T.Tensor([seq_len], indices_dtype),  # type: ignore
-    ):
-        with T.Kernel(seq_len, threads=threads) as bx:
-            tx = T.thread_binding(0, threads, thread="threadIdx.x")
-            cu_k_s = CuSeqLenKS[bx]
-            cu_k_e = CuSeqLenKE[bx]
-
-            for n_i in T.Pipelined(T.ceildiv(seq_len_kv, block_K)):
-                for k_i in T.serial(block_K // threads):
-                    idx = n_i * block_K + k_i * threads + tx
-                    if idx < cu_k_s or idx >= cu_k_e:
-                        Logits[bx, idx] = -T.infinity(dtype)
-
-    return clean_logits_kernel
+        for n_i in T.Pipelined(T.ceildiv(seq_len_kv, block_K)):
+            for k_i in T.serial(block_K // threads):
+                idx = n_i * block_K + k_i * threads + tx
+                if idx < cu_k_s or idx >= cu_k_e:
+                    Logits[bx, idx] = -T.infinity(T.float32)
 
 
 def mqa_attn_return_logits_interface(q, kv, kv_scales, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=True):
     seq_len, heads, index_dim = q.shape
     seq_len_kv = kv.shape[0]
 
-    clean_logits_kernel = clean_logits_()
-
-    mqa_attn_return_logits_kernel = mqa_attn_return_logits(heads=heads, index_dim=index_dim)
     logits = torch.empty([seq_len, seq_len_kv], device=q.device, dtype=torch.float32)
-    mqa_attn_return_logits_kernel(
+    mqa_attn_return_logits(
         q.view(seq_len * heads, index_dim),
         kv,
         kv_scales,
@@ -217,9 +203,11 @@ def mqa_attn_return_logits_interface(q, kv, kv_scales, weights, cu_seqlen_ks, cu
         weights,
         cu_seqlen_ks,
         cu_seqlen_ke,
+        heads=heads,
+        index_dim=index_dim,
     )
     if clean_logits:
-        clean_logits_kernel(logits, cu_seqlen_ks, cu_seqlen_ke)
+        clean_logits_(logits, cu_seqlen_ks, cu_seqlen_ke)
     return logits
 
 

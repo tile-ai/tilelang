@@ -54,16 +54,26 @@ def sinkhorn_bwd_configs(n_stream, seqlen):
     rep=repeat,
 )
 @tilelang.jit(
-    out_idx=[2],
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     },
 )
-def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 128):
-    seqlen = T.dynamic("seqlen")
+def sinkhorn_bwd_implicit_cg(
+    out,
+    dout,
+    n_stream: int = 16,
+    tilesize: int = 32,
+    threads: int = 128,
+):
+    seqlen, n_s, n_s2 = T.const("seqlen n_s n_s2")
+    out: T.Tensor[[seqlen, n_s, n_s2], T.float32]
+    dout: T.Tensor[[seqlen, n_s, n_s2], T.float32]
+
     tensor_shape = [seqlen, n_stream, n_stream]
     dtype = T.float32
+
+    res = T.empty(tensor_shape, dtype)
 
     @T.macro
     def matvec_A(R, x1, x2, buf, y1, y2):
@@ -86,99 +96,93 @@ def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 1
 
         T.reduce_sum(buf, out, dim=-1)
 
-    @T.prim_func
-    def main(
-        out: T.Tensor(tensor_shape, dtype),
-        dout: T.Tensor(tensor_shape, dtype),
-        res: T.Tensor(tensor_shape, dtype),
-    ):
-        with T.Kernel(T.ceildiv(seqlen, tilesize), threads=threads) as i_seq:
-            R = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
-            dR = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
-            RdR = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
-            res_tile = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
-            b1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            b2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            x1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            x2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            r1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            r2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            p1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            p2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            alpha = T.alloc_fragment([tilesize, n_stream], dtype=dtype)
-            beta = T.alloc_fragment([tilesize, n_stream], dtype=dtype)
-            r_normsq = T.alloc_fragment([tilesize], dtype=dtype)
-            r_new_normsq = T.alloc_fragment([tilesize], dtype=dtype)
-            Ap1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            Ap2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
-            pAp = T.alloc_fragment([tilesize], dtype=dtype)
+    with T.Kernel(T.ceildiv(seqlen, tilesize), threads=threads) as i_seq:
+        R = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
+        dR = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
+        RdR = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
+        res_tile = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
+        b1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        b2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        x1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        x2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        r1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        r2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        p1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        p2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        alpha = T.alloc_fragment([tilesize, n_stream], dtype=dtype)
+        beta = T.alloc_fragment([tilesize, n_stream], dtype=dtype)
+        r_normsq = T.alloc_fragment([tilesize], dtype=dtype)
+        r_new_normsq = T.alloc_fragment([tilesize], dtype=dtype)
+        Ap1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        Ap2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        pAp = T.alloc_fragment([tilesize], dtype=dtype)
 
-            # Buffers for intermediate results
-            buf1 = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
-            buf2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        # Buffers for intermediate results
+        buf1 = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
+        buf2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
 
-            T.copy(out[i_seq * tilesize : (i_seq + 1) * tilesize, :, :], R)
-            T.copy(dout[i_seq * tilesize : (i_seq + 1) * tilesize, :, :], dR)
+        T.copy(out[i_seq * tilesize : (i_seq + 1) * tilesize, :, :], R)
+        T.copy(dout[i_seq * tilesize : (i_seq + 1) * tilesize, :, :], dR)
 
-            for i_tile, i_nx, i_ny in T.Parallel(tilesize, n_stream, n_stream):
-                RdR[i_tile, i_nx, i_ny] = R[i_tile, i_nx, i_ny] * dR[i_tile, i_nx, i_ny]
+        for i_tile, i_nx, i_ny in T.Parallel(tilesize, n_stream, n_stream):
+            RdR[i_tile, i_nx, i_ny] = R[i_tile, i_nx, i_ny] * dR[i_tile, i_nx, i_ny]
 
-            T.reduce_sum(RdR, b1, dim=-1)
-            T.reduce_sum(RdR, b2, dim=-2)
+        T.reduce_sum(RdR, b1, dim=-1)
+        T.reduce_sum(RdR, b2, dim=-2)
 
-            T.fill(x1, 0.0)
-            T.fill(x2, 0.0)
+        T.fill(x1, 0.0)
+        T.fill(x2, 0.0)
 
-            matvec_A(R, x1, x2, buf1, r1, r2)
+        matvec_A(R, x1, x2, buf1, r1, r2)
+
+        for i_tile, i_n in T.Parallel(tilesize, n_stream):
+            r1[i_tile, i_n] = b1[i_tile, i_n] - r1[i_tile, i_n]
+
+        for i_tile, i_n in T.Parallel(tilesize, n_stream):
+            r2[i_tile, i_n] = b2[i_tile, i_n] - r2[i_tile, i_n]
+
+        T.copy(r1, p1)
+        T.copy(r2, p2)
+
+        dot(r1, r2, r1, r2, buf2, r_normsq)
+
+        # Conjugate gradient: iteration starts
+        for _ in T.serial(2 * n_stream):
+            matvec_A(R, p1, p2, buf1, Ap1, Ap2)
+
+            dot(p1, p2, Ap1, Ap2, buf2, pAp)
 
             for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                r1[i_tile, i_n] = b1[i_tile, i_n] - r1[i_tile, i_n]
+                # VERY important to avoid divide by zero
+                alpha[i_tile, i_n] = r_normsq[i_tile] / (pAp[i_tile] + EPS)
+            for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                x1[i_tile, i_n] += alpha[i_tile, i_n] * p1[i_tile, i_n]
+            for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                x2[i_tile, i_n] += alpha[i_tile, i_n] * p2[i_tile, i_n]
+            for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                r1[i_tile, i_n] -= alpha[i_tile, i_n] * Ap1[i_tile, i_n]
+            for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                r2[i_tile, i_n] -= alpha[i_tile, i_n] * Ap2[i_tile, i_n]
+
+            dot(r1, r2, r1, r2, buf2, r_new_normsq)
 
             for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                r2[i_tile, i_n] = b2[i_tile, i_n] - r2[i_tile, i_n]
+                # not very important to avoid divide by zero, but it's good to have it
+                beta[i_tile, i_n] = r_new_normsq[i_tile] / (r_normsq[i_tile] + EPS)
+            for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                p1[i_tile, i_n] = r1[i_tile, i_n] + beta[i_tile, i_n] * p1[i_tile, i_n]
+            for i_tile, i_n in T.Parallel(tilesize, n_stream):
+                p2[i_tile, i_n] = r2[i_tile, i_n] + beta[i_tile, i_n] * p2[i_tile, i_n]
 
-            T.copy(r1, p1)
-            T.copy(r2, p2)
+            T.copy(r_new_normsq, r_normsq)
+        # Conjugate gradient: iteration ends
 
-            dot(r1, r2, r1, r2, buf2, r_normsq)
+        for i_tile, i_nx, i_ny in T.Parallel(tilesize, n_stream, n_stream):
+            res_tile[i_tile, i_nx, i_ny] = (dR[i_tile, i_nx, i_ny] - x1[i_tile, i_nx] - x2[i_tile, i_ny]) * R[i_tile, i_nx, i_ny]
 
-            # Conjugate gradient: iteration starts
-            for _ in T.serial(2 * n_stream):
-                matvec_A(R, p1, p2, buf1, Ap1, Ap2)
+        T.copy(res_tile, res[i_seq * tilesize : (i_seq + 1) * tilesize, :, :])
 
-                dot(p1, p2, Ap1, Ap2, buf2, pAp)
-
-                for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                    # VERY important to avoid divide by zero
-                    alpha[i_tile, i_n] = r_normsq[i_tile] / (pAp[i_tile] + EPS)
-                for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                    x1[i_tile, i_n] += alpha[i_tile, i_n] * p1[i_tile, i_n]
-                for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                    x2[i_tile, i_n] += alpha[i_tile, i_n] * p2[i_tile, i_n]
-                for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                    r1[i_tile, i_n] -= alpha[i_tile, i_n] * Ap1[i_tile, i_n]
-                for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                    r2[i_tile, i_n] -= alpha[i_tile, i_n] * Ap2[i_tile, i_n]
-
-                dot(r1, r2, r1, r2, buf2, r_new_normsq)
-
-                for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                    # not very important to avoid divide by zero, but it's good to have it
-                    beta[i_tile, i_n] = r_new_normsq[i_tile] / (r_normsq[i_tile] + EPS)
-                for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                    p1[i_tile, i_n] = r1[i_tile, i_n] + beta[i_tile, i_n] * p1[i_tile, i_n]
-                for i_tile, i_n in T.Parallel(tilesize, n_stream):
-                    p2[i_tile, i_n] = r2[i_tile, i_n] + beta[i_tile, i_n] * p2[i_tile, i_n]
-
-                T.copy(r_new_normsq, r_normsq)
-            # Conjugate gradient: iteration ends
-
-            for i_tile, i_nx, i_ny in T.Parallel(tilesize, n_stream, n_stream):
-                res_tile[i_tile, i_nx, i_ny] = (dR[i_tile, i_nx, i_ny] - x1[i_tile, i_nx] - x2[i_tile, i_ny]) * R[i_tile, i_nx, i_ny]
-
-            T.copy(res_tile, res[i_seq * tilesize : (i_seq + 1) * tilesize, :, :])
-
-    return main
+    return res
 
 
 def main():
@@ -220,8 +224,7 @@ def main():
 
     # Set autotune inputs
     with set_autotune_inputs(R, grad_R):
-        kernel = sinkhorn_bwd_implicit_cg(n_stream)
-    print(kernel.get_kernel_source())
+        grad_M_implicit = sinkhorn_bwd_implicit_cg(R, grad_R, n_stream=n_stream)
     print("\n" + "=" * 60)
     print("Autotuning completed! Running with best configuration...")
     print("=" * 60)
@@ -230,7 +233,7 @@ def main():
     a = torch.randn(8192, 8192, device=device)
     for _ in trange(4, desc="Warmup"):
         _ = a @ a
-        grad_M_implicit = kernel(R, grad_R)
+        grad_M_implicit = sinkhorn_bwd_implicit_cg(R, grad_R, n_stream=n_stream)
         torch.cuda.synchronize()
 
     # Timing
@@ -241,7 +244,7 @@ def main():
     start_event.record()
 
     for _ in range(repeat):
-        grad_M_implicit = kernel(R, grad_R)
+        grad_M_implicit = sinkhorn_bwd_implicit_cg(R, grad_R, n_stream=n_stream)
 
     end_event.record()
     torch.cuda.synchronize()

@@ -57,38 +57,48 @@ def ref_program(A, B, BlockMask, block_M, block_N, block_K):
 @tilelang.autotune(
     configs=get_configs(),
 )
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit
 def blocksparse_matmul(
-    M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_rasteration, dtype=T.float16, accum_dtype=T.float32
+    A,
+    B,
+    BlockMask,
+    block_M: int = 128,
+    block_N: int = 128,
+    block_K: int = 32,
+    num_stages: int = 2,
+    thread_num: int = 128,
+    enable_rasteration: int = 1,
+    dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float32,
 ):
-    block_mask_shape = (M // block_M, N // block_N, K // block_K)
+    M, K = T.const("M K")
+    _, N = T.const("_ N")
+    block_mask_m, block_mask_n, block_mask_k = T.const("block_mask_m block_mask_n block_mask_k")
+    A: T.Tensor[[M, K], dtype]
+    B: T.Tensor[[K, N], dtype]
+    BlockMask: T.Tensor[[block_mask_m, block_mask_n, block_mask_k], "bool"]
 
-    @T.prim_func
-    def block_sparse_matmul(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        BlockMask: T.Tensor(block_mask_shape, "bool"),
-        C: T.Tensor((M, N), dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            C_shared = T.alloc_shared((block_M, block_N), dtype)
+    C = T.empty([M, N], dtype)
 
-            T.use_swizzle(panel_size=10, enable=enable_rasteration)
-            T.clear(C_local)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+        A_shared = T.alloc_shared((block_M, block_K), dtype)
+        B_shared = T.alloc_shared((block_K, block_N), dtype)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        C_shared = T.alloc_shared((block_M, block_N), dtype)
 
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                if BlockMask[by, bx, k]:
-                    T.copy(A[by * block_M, k * block_K], A_shared)
-                    T.copy(B[k * block_K, bx * block_N], B_shared)
-                    T.gemm(A_shared, B_shared, C_local)
+        T.use_swizzle(panel_size=10, enable=enable_rasteration)
+        T.clear(C_local)
 
-            T.copy(C_local, C_shared)
-            T.copy(C_shared, C[by * block_M, bx * block_N])
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            if BlockMask[by, bx, k]:
+                T.copy(A[by * block_M, k * block_K], A_shared)
+                T.copy(B[k * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
 
-    return block_sparse_matmul
+        T.copy(C_local, C_shared)
+        T.copy(C_shared, C[by * block_M, bx * block_N])
+
+    return C
 
 
 def main():
@@ -112,10 +122,13 @@ def main():
 
     if args.use_autotune:
         # Run the autotuner to find the best kernel configuration and performance
-        # get_best_config is expected to return an object containing the compiled kernel,
-        # the best configuration found, latency, and reference latency.
-        kernel = blocksparse_matmul(M, N, K)
+        block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
+        mask_shape = (M // block_M, N // block_N, K // block_K)
+        block_mask = torch.rand(mask_shape).cuda() > sparsity
 
+        c = blocksparse_matmul(a, b, block_mask)
+
+        kernel = blocksparse_matmul.compile(a, b, block_mask)
         best_config = kernel.config
         best_latency = kernel.latency
         block_M, block_N, block_K = best_config["block_M"], best_config["block_N"], best_config["block_K"]
@@ -124,10 +137,18 @@ def main():
         print(f"Sparsity Ratio: {sparsity}")
         print(f"Best Kernel Latency: {best_latency:.6f} ms")
     else:
-        kernel = blocksparse_matmul(
-            M,
-            N,
-            K,
+        block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
+        print(f"Using default kernel with block size ({block_M}, {block_N}, {block_K})")
+
+        # Create block mask with desired sparsity
+        mask_shape = (M // block_M, N // block_N, K // block_K)
+        block_mask = torch.rand(mask_shape).cuda() > sparsity
+
+        # Run the compiled kernel (either tuned or default) with the inputs
+        c = blocksparse_matmul(
+            a,
+            b,
+            block_mask,
             block_M=DEFAULT_BLOCK_M,
             block_N=DEFAULT_BLOCK_N,
             block_K=DEFAULT_BLOCK_K,
@@ -135,24 +156,15 @@ def main():
             thread_num=DEFAULT_THREAD_NUM,
             enable_rasteration=DEFAULT_ENABLE_RASTERIZATION,
         )
-        block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
-        print(f"Using default kernel with block size ({block_M}, {block_N}, {block_K})")
-
-    # Create block mask with desired sparsity
-    mask_shape = (M // block_M, N // block_N, K // block_K)
-    block_mask = torch.rand(mask_shape).cuda() > sparsity
-
-    # Run the compiled kernel (either tuned or default) with the inputs
-    c = kernel(a, b, block_mask)
 
     # Compute the reference result using the naive PyTorch implementation
     ref_c = ref_program(a, b, block_mask, block_M, block_N, block_K)
 
     try:
         torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
-        print("✅ Results are close! Verification successful.")
+        print("Results are close! Verification successful.")
     except AssertionError as e:
-        print("❌ Verification FAILED: Results differ significantly.")
+        print("Verification FAILED: Results differ significantly.")
         print(e)
 
 
@@ -164,10 +176,14 @@ def run_regression_perf():
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(K, N).cuda().half()
 
-    kernel = blocksparse_matmul(
-        M,
-        N,
-        K,
+    block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
+    mask_shape = (M // block_M, N // block_N, K // block_K)
+    block_mask = torch.rand(mask_shape).cuda() > sparsity
+
+    kernel = blocksparse_matmul.compile(
+        a,
+        b,
+        block_mask,
         block_M=DEFAULT_BLOCK_M,
         block_N=DEFAULT_BLOCK_N,
         block_K=DEFAULT_BLOCK_K,
@@ -175,9 +191,6 @@ def run_regression_perf():
         thread_num=DEFAULT_THREAD_NUM,
         enable_rasteration=DEFAULT_ENABLE_RASTERIZATION,
     )
-    block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
-    mask_shape = (M // block_M, N // block_N, K // block_K)
-    block_mask = torch.rand(mask_shape).cuda() > sparsity
 
     def run_kernel_only():
         kernel(a, b, block_mask)

@@ -13,17 +13,21 @@ import tilelang.language as T
         tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
     },
 )
-def mhc_post_tilelang(a, b, c, d, x, hc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024) -> tilelang.JITKernel:
+def mhc_post_tilelang(a, b, c, d, x, hc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024):
     # rename for shorter code
-    n = T.dynamic("num_tokens")
-    h = hidden
+    n, hc_a, hc_b = T.const("n hc_a hc_b")
+    _, _, h = T.const("_ _ h")
+    _, hc_c = T.const("_ hc_c")
+    n_d, h_d = T.const("n_d h_d")
+    _, _, h_x = T.const("_ _ h_x")
+
+    a: T.Tensor[[n, hc_a, hc_b], T.float32]
+    b: T.Tensor[[n, hc_c, h], T.bfloat16]
+    c: T.Tensor[[n, hc_c], T.float32]
+    d: T.Tensor[[n_d, h_d], T.bfloat16]
+    x: T.Tensor[[n, hc_a, h_x], T.bfloat16]
 
     h_blk = math.gcd(hidden, h_blk)
-    a: T.Tensor((n, hc, hc), T.float32)
-    b: T.Tensor((n, hc, h), T.bfloat16)
-    c: T.Tensor((n, hc), T.float32)
-    d: T.Tensor((n, h), T.bfloat16)
-    x: T.Tensor((n, hc, h), T.bfloat16)
     with T.Kernel(n, threads=n_thr) as i_n:
         x_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
         b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
@@ -38,7 +42,7 @@ def mhc_post_tilelang(a, b, c, d, x, hc: int, hidden: int, n_thr: int = 128, h_b
         T.copy(a[i_n, 0, 0], a_local)
         T.copy(c[i_n, 0], c_local)
 
-        for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
+        for i0_h in T.Pipelined(T.ceildiv(hidden, h_blk), num_stages=2):
             T.copy(b[i_n, 0, i0_h * h_blk], b_shared)
             T.copy(d[i_n, i0_h * h_blk], d_shared)
 

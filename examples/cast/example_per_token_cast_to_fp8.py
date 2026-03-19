@@ -5,39 +5,40 @@ from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 
 
-@tilelang.jit(out_idx=[1, 2])
-def per_token_cast_to_fp8(M, N, blk_m):
+@tilelang.jit
+def per_token_cast_to_fp8(X, blk_m: int = 8):
     dtype = T.float
     group_size = 128
     fp8_min = -448.0
     fp8_max = 448.0
 
-    @T.prim_func
-    def per_token_cast(
-        X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), T.float8_e4m3fn), X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)
-    ):
-        with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (bx, by):
-            row = bx
-            row_g_id = by
-            y_local = T.alloc_fragment((blk_m, group_size), dtype)
-            y_amax_local = T.alloc_fragment((blk_m,), dtype)
-            y_s_local = T.alloc_fragment((blk_m,), dtype)
-            y_q_local = T.alloc_fragment((blk_m, group_size), dtype)
-            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
+    M, N = T.const("M N")
+    X: T.Tensor[[M, N], dtype]
+    X_fp8 = T.empty([M, N], T.float8_e4m3fn)
+    X_amax = T.empty([M, T.ceildiv(N, group_size)], dtype)
 
-            T.copy(X[row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size], y_local)
-            T.reduce_absmax(y_local, y_amax_local, dim=1)
-            for i in T.Parallel(blk_m):
-                y_amax_local[i] = T.max(y_amax_local[i], 1e-4)
-                y_s_local[i] = y_amax_local[i] / fp8_max
-            for i, j in T.Parallel(blk_m, group_size):
-                y_q_local[i, j] = T.clamp(y_local[i, j] / y_s_local[i], fp8_min, fp8_max)
-            T.copy(y_q_local, y_q_local_fp8)
-            for i in T.Parallel(blk_m):
-                X_amax[row * blk_m + i, row_g_id] = y_s_local[i]
-            T.copy(y_q_local_fp8, X_fp8[row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size])
+    with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (bx, by):
+        row = bx
+        row_g_id = by
+        y_local = T.alloc_fragment((blk_m, group_size), dtype)
+        y_amax_local = T.alloc_fragment((blk_m,), dtype)
+        y_s_local = T.alloc_fragment((blk_m,), dtype)
+        y_q_local = T.alloc_fragment((blk_m, group_size), dtype)
+        y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
 
-    return per_token_cast
+        T.copy(X[row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size], y_local)
+        T.reduce_absmax(y_local, y_amax_local, dim=1)
+        for i in T.Parallel(blk_m):
+            y_amax_local[i] = T.max(y_amax_local[i], 1e-4)
+            y_s_local[i] = y_amax_local[i] / fp8_max
+        for i, j in T.Parallel(blk_m, group_size):
+            y_q_local[i, j] = T.clamp(y_local[i, j] / y_s_local[i], fp8_min, fp8_max)
+        T.copy(y_q_local, y_q_local_fp8)
+        for i in T.Parallel(blk_m):
+            X_amax[row * blk_m + i, row_g_id] = y_s_local[i]
+        T.copy(y_q_local_fp8, X_fp8[row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size])
+
+    return X_fp8, X_amax
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -68,13 +69,12 @@ def ref_program(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 def main(M=8192, N=8192, blk_m=8):
-    kernel = per_token_cast_to_fp8(M, N, blk_m)
-    print(kernel.get_kernel_source())
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
-
     x = torch.randn(M, N, device="cuda", dtype=torch.float32)
 
-    x_fp8, x_amax = kernel(x)
+    x_fp8, x_amax = per_token_cast_to_fp8(x, blk_m)
+    print(per_token_cast_to_fp8.compile(x, blk_m).get_kernel_source())
+    profiler = per_token_cast_to_fp8.compile(x, blk_m).get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+
     x_fp8_ref, x_amax_ref = ref_program(x)
 
     print("x_fp8:", x_fp8, x_fp8.shape)
@@ -104,12 +104,11 @@ def main(M=8192, N=8192, blk_m=8):
 
 
 def run_regression_perf(M=8192, N=8192, blk_m=8):
-    kernel = per_token_cast_to_fp8(M, N, blk_m)
     x = torch.randn(M, N, device="cuda", dtype=torch.float32)
     from tilelang.profiler import do_bench
 
     def run_kernel_only():
-        kernel(x)
+        per_token_cast_to_fp8(x, blk_m)
 
     return do_bench(run_kernel_only, backend="cupti")
 

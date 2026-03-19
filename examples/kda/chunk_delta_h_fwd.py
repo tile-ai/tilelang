@@ -76,110 +76,101 @@ def get_configs():
 
 
 @autotune(configs=get_configs(), warmup=3, rep=5)
-@tilelang.jit(out_idx=[-3, -2, -1], pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def tilelang_chunk_gated_delta_rule_fwd_h(
+    K,
+    W,
+    U,
+    GK,
+    initial_state,
     # task config
-    B,
-    S,
-    H,
-    DK,
-    DV,
-    input_dtype,
-    output_dtype,
-    accum_dtype,
-    gate_dtype,
-    state_dtype,
-    chunk_size,
-    use_gk,
-    use_initial_state,
-    store_final_state,
-    save_new_value,
+    input_dtype: str = "float16",
+    output_dtype: str = "float16",
+    accum_dtype: str = "float32",
+    gate_dtype: str = "float32",
+    state_dtype: str = "float32",
+    chunk_size: int = 64,
+    use_gk: bool = True,
+    use_initial_state: bool = True,
+    store_final_state: bool = True,
+    save_new_value: bool = True,
     # kernel config
-    block_DK=64,
-    block_DV=32,
-    threads=128,
-    num_stages=1,
+    block_DK: int = 64,
+    block_DV: int = 32,
+    threads: int = 128,
+    num_stages: int = 1,
 ):
     block_S = chunk_size
+    B, S, H, DK = T.const("B S H DK")
+    DV = T.const("DV")
     BS = (S + chunk_size - 1) // chunk_size  # ceildiv to match kernel iteration
 
-    K_shape = (B, S, H, DK)
-    V_shape = (B, S, H, DV)
-    W_shape = (B, S, H, DK)
-    U_shape = (B, S, H, DV)
-    GK_shape = (B, S, H, DK)
-    h_shape = (B, BS, H, DK, DV)
-    initial_state_shape = (B, H, DK, DV)
-    final_state_shape = (B, H, DK, DV)
+    K: T.Tensor[[B, S, H, DK], input_dtype]
+    W: T.Tensor[[B, S, H, DK], input_dtype]
+    U: T.Tensor[[B, S, H, DV], input_dtype]
+    GK: T.Tensor[[B, S, H, DK], gate_dtype]
+    initial_state: T.Tensor[[B, H, DK, DV], input_dtype]
+    h = T.empty([B, BS, H, DK, DV], output_dtype)
+    final_state = T.empty([B, H, DK, DV], state_dtype)
+    V_new = T.empty([B, S, H, DV], output_dtype)
 
-    @T.prim_func
-    def kernel(
-        K: T.Tensor(K_shape, dtype=input_dtype),
-        W: T.Tensor(W_shape, dtype=input_dtype),
-        U: T.Tensor(U_shape, dtype=input_dtype),
-        GK: T.Tensor(GK_shape, dtype=gate_dtype),
-        initial_state: T.Tensor(initial_state_shape, dtype=input_dtype),
-        h: T.Tensor(h_shape, dtype=output_dtype),
-        final_state: T.Tensor(final_state_shape, dtype=state_dtype),
-        V_new: T.Tensor(V_shape, dtype=output_dtype),
-    ):
-        with T.Kernel(T.ceildiv(DV, block_DV), B * H, threads=threads) as (bv, bbh):
-            bb, bh = bbh // H, bbh % H
+    with T.Kernel(T.ceildiv(DV, block_DV), B * H, threads=threads) as (bv, bbh):
+        bb, bh = bbh // H, bbh % H
 
-            b_h_shared = T.alloc_shared((DK, block_DV), dtype=input_dtype)
-            b_h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
+        b_h_shared = T.alloc_shared((DK, block_DV), dtype=input_dtype)
+        b_h_fragment = T.alloc_fragment((DK, block_DV), dtype=accum_dtype)
 
-            U_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
-            U_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-            W_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
-            V_new_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
-            V_new_shared = T.alloc_shared((block_S, block_DV), dtype=output_dtype)
-            K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
-            GK_last_shared = T.alloc_shared((DK), dtype=gate_dtype)
+        U_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
+        U_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+        W_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
+        V_new_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
+        V_new_shared = T.alloc_shared((block_S, block_DV), dtype=output_dtype)
+        K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
+        GK_last_shared = T.alloc_shared((DK), dtype=gate_dtype)
 
-            if use_initial_state:
-                T.copy(initial_state[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV], b_h_shared)
-                T.copy(b_h_shared, b_h_fragment)
-            else:
-                T.clear(b_h_fragment)
+        if use_initial_state:
+            T.copy(initial_state[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV], b_h_shared)
+            T.copy(b_h_shared, b_h_fragment)
+        else:
+            T.clear(b_h_fragment)
 
-            for i_s in T.Pipelined(T.ceildiv(S, block_S), num_stages=num_stages):
-                # Store previous result to the hidden tensor, like the epilogue
-                T.copy(b_h_shared, h[bb, i_s, bh, :, bv * block_DV : (bv + 1) * block_DV])
+        for i_s in T.Pipelined(T.ceildiv(S, block_S), num_stages=num_stages):
+            # Store previous result to the hidden tensor, like the epilogue
+            T.copy(b_h_shared, h[bb, i_s, bh, :, bv * block_DV : (bv + 1) * block_DV])
 
-                # Recurrence
-                T.copy(W[bb, i_s * block_S : (i_s + 1) * block_S, bh, :], W_shared)
-                T.gemm(W_shared, b_h_shared, V_new_fragment, clear_accum=True)
+            # Recurrence
+            T.copy(W[bb, i_s * block_S : (i_s + 1) * block_S, bh, :], W_shared)
+            T.gemm(W_shared, b_h_shared, V_new_fragment, clear_accum=True)
 
-                # U - W * S
-                T.copy(U[bb, i_s * block_S : (i_s + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], U_shared)
-                T.copy(U_shared, U_fragment)
-                for i_s2, i_v in T.Parallel(block_S, block_DV):
-                    V_new_fragment[i_s2, i_v] = -V_new_fragment[i_s2, i_v] + U_fragment[i_s2, i_v]
+            # U - W * S
+            T.copy(U[bb, i_s * block_S : (i_s + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV], U_shared)
+            T.copy(U_shared, U_fragment)
+            for i_s2, i_v in T.Parallel(block_S, block_DV):
+                V_new_fragment[i_s2, i_v] = -V_new_fragment[i_s2, i_v] + U_fragment[i_s2, i_v]
 
-                # Save V_new
-                if save_new_value:
-                    T.copy(V_new_fragment, dst=V_new_shared)
-                    T.copy(V_new_shared, V_new[bb, i_s * block_S : (i_s + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV])
+            # Save V_new
+            if save_new_value:
+                T.copy(V_new_fragment, dst=V_new_shared)
+                T.copy(V_new_shared, V_new[bb, i_s * block_S : (i_s + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV])
 
-                T.copy(K[bb, i_s * block_S : (i_s + 1) * block_S, bh, 0:DK], K_shared)
-                # use_gk
-                if use_gk:
-                    T.copy(GK[bb, (i_s + 1) * block_S - 1, bh, :], GK_last_shared)  # block last token
-                    for i_k, i_v in T.Parallel(DK, block_DV):
-                        b_h_fragment[i_k, i_v] *= T.exp2(GK_last_shared[i_k])
+            T.copy(K[bb, i_s * block_S : (i_s + 1) * block_S, bh, 0:DK], K_shared)
+            # use_gk
+            if use_gk:
+                T.copy(GK[bb, (i_s + 1) * block_S - 1, bh, :], GK_last_shared)  # block last token
+                for i_k, i_v in T.Parallel(DK, block_DV):
+                    b_h_fragment[i_k, i_v] *= T.exp2(GK_last_shared[i_k])
 
-                # Update intermediate results
-                T.copy(V_new_fragment, V_new_shared)
-                T.gemm(K_shared, V_new_shared, b_h_fragment, transpose_A=True)
+            # Update intermediate results
+            T.copy(V_new_fragment, V_new_shared)
+            T.gemm(K_shared, V_new_shared, b_h_fragment, transpose_A=True)
 
-                T.copy(b_h_fragment, b_h_shared)
+            T.copy(b_h_fragment, b_h_shared)
 
-            # Save final state
-            if store_final_state:
-                T.copy(b_h_fragment, final_state[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
+        # Save final state
+        if store_final_state:
+            T.copy(b_h_fragment, final_state[bb, bh, 0:DK, bv * block_DV : (bv + 1) * block_DV])
 
-    return kernel
+    return h, final_state, V_new
 
 
 def run_test(
@@ -236,24 +227,23 @@ def run_test(
     )
 
     # tilelang
-    kernel = tilelang_chunk_gated_delta_rule_fwd_h(
-        B,
-        S,
-        H,
-        DK,
-        DV,
-        input_dtype,
-        output_dtype,
-        accum_dtype,
-        gate_dtype,
-        state_dtype,
-        chunk_size,
-        use_gk,
-        use_initial_state,
-        store_final_state,
-        save_new_value,
+    h_tilelang, final_state_tilelang, V_new_tilelang = tilelang_chunk_gated_delta_rule_fwd_h(
+        K,
+        W,
+        U,
+        G,
+        initial_state,
+        input_dtype=input_dtype,
+        output_dtype=output_dtype,
+        accum_dtype=accum_dtype,
+        gate_dtype=gate_dtype,
+        state_dtype=state_dtype,
+        chunk_size=chunk_size,
+        use_gk=use_gk,
+        use_initial_state=use_initial_state,
+        store_final_state=store_final_state,
+        save_new_value=save_new_value,
     )
-    h_tilelang, final_state_tilelang, V_new_tilelang = kernel(K, W, U, G, initial_state)
 
     fla_time = do_bench(
         chunk_gated_delta_rule_fwd_h,
@@ -267,7 +257,24 @@ def run_test(
         save_new_value=save_new_value,
         use_exp2=True,
     )
-    tilelang_time = do_bench(kernel, K, W, U, G, initial_state)
+    tilelang_time = do_bench(
+        tilelang_chunk_gated_delta_rule_fwd_h,
+        K,
+        W,
+        U,
+        G,
+        initial_state,
+        input_dtype=input_dtype,
+        output_dtype=output_dtype,
+        accum_dtype=accum_dtype,
+        gate_dtype=gate_dtype,
+        state_dtype=state_dtype,
+        chunk_size=chunk_size,
+        use_gk=use_gk,
+        use_initial_state=use_initial_state,
+        store_final_state=store_final_state,
+        save_new_value=save_new_value,
+    )
 
     # check correctness
     compare_tensors("h", h_ref, h_tilelang)

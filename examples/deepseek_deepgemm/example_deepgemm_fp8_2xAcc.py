@@ -11,14 +11,22 @@ tilelang.testing.set_random_seed(42)
 
 @tilelang.jit
 def tl_gemm(
-    M,
-    N,
-    K,
-    block_N,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
+    A,
+    B,
+    scales_a,
+    scales_b,
+    block_N=128,
+    out_dtype: T.dtype = T.bfloat16,
+    accum_dtype: T.dtype = T.float32,
 ):
+    M, N, K = T.const("M N K")
+    in_dtype = A.dtype
+    A: T.Tensor[[M, K], in_dtype]
+    B: T.Tensor[[N, K], in_dtype]
+    scales_a: T.Tensor[[M, T.ceildiv(K, 128)], T.float32]
+    scales_b: T.Tensor[[T.ceildiv(N, 128), T.ceildiv(K, 128)], T.float32]
+    C = T.empty([M, N], out_dtype)
+
     assert in_dtype in [
         T.float8_e4m3fn,
     ], "Currently only float8_e4m3 is supported"
@@ -31,56 +39,44 @@ def tl_gemm(
     block_M = 128
     block_K = 128
 
-    A_shape = (M, K)
-    Scales_A_shape = (M, T.ceildiv(K, group_size))
-    B_shape = (N, K)
-    Scales_B_shape = (T.ceildiv(N, group_size), T.ceildiv(K, group_size))
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, block_K)
     C_shared_shape = (block_M, block_N)
 
-    @T.prim_func
-    def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
-        scales_a: T.Tensor(Scales_A_shape, T.float32),
-        scales_b: T.Tensor(Scales_B_shape, T.float32),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            C_shared = T.alloc_shared(C_shared_shape, out_dtype)
-            Scale_C_shared = T.alloc_shared((block_M), T.float32)
-            C_local = T.alloc_fragment(C_shared_shape, accum_dtype)
-            C_local_accum = T.alloc_fragment(C_shared_shape, accum_dtype)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+        A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+        B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+        C_shared = T.alloc_shared(C_shared_shape, out_dtype)
+        Scale_C_shared = T.alloc_shared((block_M), T.float32)
+        C_local = T.alloc_fragment(C_shared_shape, accum_dtype)
+        C_local_accum = T.alloc_fragment(C_shared_shape, accum_dtype)
 
-            # Improve L2 Cache
-            T.use_swizzle(panel_size=10)
+        # Improve L2 Cache
+        T.use_swizzle(panel_size=10)
 
+        T.clear(C_local)
+        T.clear(C_local_accum)
+        K_iters = T.ceildiv(K, block_K)
+        for k in T.Pipelined(K_iters, num_stages=4):
+            # Load A into shared memory
+            T.copy(A[by * block_M, k * block_K], A_shared)
+            # Load B into shared memory
+            T.copy(B[bx * block_N, k * block_K], B_shared)
+            # Load scale into shared memory
+            Scale_B = scales_b[bx * block_N // group_size, k]
+            for i in T.Parallel(block_M):
+                Scale_C_shared[i] = scales_a[by * block_M + i, k] * Scale_B
+
+            T.gemm(A_shared, B_shared, C_local, transpose_B=True)
+            # Promote to enable 2xAcc
+            for i, j in T.Parallel(block_M, block_N):
+                C_local_accum[i, j] += C_local[i, j] * Scale_C_shared[i]
             T.clear(C_local)
-            T.clear(C_local_accum)
-            K_iters = T.ceildiv(K, block_K)
-            for k in T.Pipelined(K_iters, num_stages=4):
-                # Load A into shared memory
-                T.copy(A[by * block_M, k * block_K], A_shared)
-                # Load B into shared memory
-                T.copy(B[bx * block_N, k * block_K], B_shared)
-                # Load scale into shared memory
-                Scale_B = scales_b[bx * block_N // group_size, k]
-                for i in T.Parallel(block_M):
-                    Scale_C_shared[i] = scales_a[by * block_M + i, k] * Scale_B
+        # TMA store
+        T.copy(C_local_accum, C_shared)
+        T.copy(C_shared, C[by * block_M, bx * block_N])
 
-                T.gemm(A_shared, B_shared, C_local, transpose_B=True)
-                # Promote to enable 2xAcc
-                for i, j in T.Parallel(block_M, block_N):
-                    C_local_accum[i, j] += C_local[i, j] * Scale_C_shared[i]
-                T.clear(C_local)
-            # TMA store
-            T.copy(C_local_accum, C_shared)
-            T.copy(C_shared, C[by * block_M, bx * block_N])
-
-    return main
+    return C
 
 
 def ceildiv(a, b):
@@ -142,26 +138,22 @@ def calc_diff(x, y):
 
 
 def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtype):
-    kernel = tl_gemm(M, N, K, block_N, in_dtype, out_dtype, accum_dtype)
-    src_code = kernel.get_kernel_source()
-
-    # src_code is the generated cuda source
-    assert src_code is not None
-
-    in_dtype = map_torch_type(in_dtype)
-    out_dtype = map_torch_type(out_dtype)
-    accum_dtype = map_torch_type(accum_dtype)
+    out_dtype_torch = map_torch_type(out_dtype)
 
     A = torch.randn(M, K).to(torch.bfloat16).cuda()
     B = torch.randn(N, K).to(torch.bfloat16).cuda()
     A_fp8, A_scale = per_token_cast_to_fp8(A.clone())
     B_fp8, B_scale = per_block_cast_to_fp8(B.clone())
 
-    C = torch.zeros(M, N, device="cuda", dtype=out_dtype)
+    kernel = tl_gemm.compile(A_fp8, B_fp8, A_scale, B_scale, block_N=block_N, out_dtype=out_dtype, accum_dtype=accum_dtype)
+    src_code = kernel.get_kernel_source()
 
-    kernel(A_fp8, B_fp8, C, A_scale, B_scale)
+    # src_code is the generated cuda source
+    assert src_code is not None
+
+    C = tl_gemm(A_fp8, B_fp8, A_scale, B_scale, block_N=block_N, out_dtype=out_dtype, accum_dtype=accum_dtype)
     # Get Reference Result
-    ref_c = ref_deepgemm_fp8(A_fp8, B_fp8, A_scale, B_scale, out_dtype)
+    ref_c = ref_deepgemm_fp8(A_fp8, B_fp8, A_scale, B_scale, out_dtype_torch)
     diff = calc_diff(C, ref_c)
     print(f"diff: {diff}")
     assert diff < 1e-3

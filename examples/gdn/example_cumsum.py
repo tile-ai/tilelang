@@ -20,57 +20,52 @@ except ImportError:
 import torch
 
 
-@tilelang.jit(
-    out_idx=[-1], pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
 def tilelang_chunk_local_cumsum_scalar(
+    G,
     # task config
-    B,
-    S,
-    H,
-    chunk_size=64,
-    is_varlen=False,
-    head_first=False,
-    reverse=False,
-    input_dtype=T.float16,
-    output_dtype=T.float32,
+    chunk_size: int = 64,
+    is_varlen: bool = False,
+    head_first: bool = False,
+    reverse: bool = False,
+    input_dtype: T.dtype = T.float16,
+    output_dtype: T.dtype = T.float32,
     # kernel config
-    block_S=64,
-    threads=256,
-    use_fragment=False,
+    block_S: int = 64,
+    threads: int = 256,
+    use_fragment: bool = False,
 ):
-    G_shape = (B, H, S) if head_first else (B, S, H)
+    B, S, H = T.const("B S H")
+    G: T.Tensor[[B, H, S] if head_first else [B, S, H], input_dtype]
+
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
     assert chunk_size == block_S, "chunk_size must be equal to block_S"
 
-    @T.prim_func
-    def kernel(
-        G: T.Tensor(G_shape, dtype=input_dtype),
-        G_new: T.Tensor(G_shape, dtype=output_dtype),
-    ):
-        with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
-            bb, bh = bbh // H, bbh % H
-            G_shared = T.alloc_shared((1, block_S), dtype=output_dtype, scope="shared")
-            if head_first:
-                T.copy(G[bb, bh, bs * block_S : (bs + 1) * block_S], G_shared)
-            else:
-                T.copy(G[bb, bs * block_S : (bs + 1) * block_S, bh], G_shared)
-            if use_fragment:
-                G_fragment = T.alloc_fragment((1, block_S), dtype=output_dtype, scope="shared")
-                T.copy(G_shared, G_fragment)
-                T.cumsum(G_fragment, dim=1, reverse=reverse)
-                if head_first:
-                    T.copy(G_fragment, G_new[bb, bh, bs * block_S : (bs + 1) * block_S])
-                else:
-                    T.copy(G_fragment, G_new[bb, bs * block_S : (bs + 1) * block_S, bh])
-            else:
-                T.cumsum(G_shared, dim=1, reverse=reverse)
-                if head_first:
-                    T.copy(G_shared, G_new[bb, bh, bs * block_S : (bs + 1) * block_S])
-                else:
-                    T.copy(G_shared, G_new[bb, bs * block_S : (bs + 1) * block_S, bh])
+    G_new = T.empty([B, H, S] if head_first else [B, S, H], output_dtype)
 
-    return kernel
+    with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
+        bb, bh = bbh // H, bbh % H
+        G_shared = T.alloc_shared((1, block_S), dtype=output_dtype, scope="shared")
+        if head_first:
+            T.copy(G[bb, bh, bs * block_S : (bs + 1) * block_S], G_shared)
+        else:
+            T.copy(G[bb, bs * block_S : (bs + 1) * block_S, bh], G_shared)
+        if use_fragment:
+            G_fragment = T.alloc_fragment((1, block_S), dtype=output_dtype, scope="shared")
+            T.copy(G_shared, G_fragment)
+            T.cumsum(G_fragment, dim=1, reverse=reverse)
+            if head_first:
+                T.copy(G_fragment, G_new[bb, bh, bs * block_S : (bs + 1) * block_S])
+            else:
+                T.copy(G_fragment, G_new[bb, bs * block_S : (bs + 1) * block_S, bh])
+        else:
+            T.cumsum(G_shared, dim=1, reverse=reverse)
+            if head_first:
+                T.copy(G_shared, G_new[bb, bh, bs * block_S : (bs + 1) * block_S])
+            else:
+                T.copy(G_shared, G_new[bb, bs * block_S : (bs + 1) * block_S, bh])
+
+    return G_new
 
 
 def prepare_cumsum_input(
@@ -116,10 +111,9 @@ def run_test(
 
     # tilelang cumsum
     block_S = chunk_size
-    kernel = tilelang_chunk_local_cumsum_scalar(
-        B=B,
-        S=S,
-        H=H,
+    torch.cuda.profiler.start()
+    G_new_tilelang = tilelang_chunk_local_cumsum_scalar(
+        G,
         chunk_size=chunk_size,
         reverse=reverse,
         head_first=head_first,
@@ -129,8 +123,6 @@ def run_test(
         threads=threads,
         use_fragment=use_fragment,
     )
-    torch.cuda.profiler.start()
-    G_new_tilelang = kernel(G)
     torch.cuda.profiler.stop()
     try:
         torch.testing.assert_close(G_new_tilelang, G_new_ref, rtol=1e-2, atol=1e-2)

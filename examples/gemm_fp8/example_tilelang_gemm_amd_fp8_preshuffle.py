@@ -35,22 +35,21 @@ def get_configs():
 @tilelang.autotune(
     configs=get_configs(),
 )
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit
 def tl_matmul(
-    M,
-    N,
-    K,
-    block_M,
-    block_N,
-    block_K,
-    num_stages,
-    k_pack=2,
-    num_threads=256,
-    in_dtype=None,
-    out_dtype=T.float32,
-    accum_dtype=T.float32,
-    a_transposed=False,
-    b_transposed=True,
+    A,
+    B,
+    block_M: int = 64,
+    block_N: int = 64,
+    block_K: int = 64,
+    num_stages: int = 0,
+    k_pack: int = 2,
+    num_threads: int = 256,
+    in_dtype: T.dtype = None,
+    out_dtype: T.dtype = T.float32,
+    accum_dtype: T.dtype = T.float32,
+    a_transposed: bool = False,
+    b_transposed: bool = True,
 ):
     if in_dtype is None:
         in_dtype = determine_fp8_type()
@@ -90,61 +89,59 @@ def tl_matmul(
     micro_size_k = mfma_emitter.micro_size_k
     pack_size_k = micro_size_k * k_pack
 
-    A_shape = (K, M) if a_transposed else (M, K)
+    M, N, K = T.const("M N K")
     A_shared_shape = (block_K, block_M) if a_transposed else (block_M, block_K)
 
+    A_shape = (K, M) if a_transposed else (M, K)
     B_shape = (
         (N // micro_size_y, K // pack_size_k, micro_size_y, pack_size_k)
         if b_transposed
         else (K // pack_size_k, N // micro_size_y, pack_size_k, micro_size_y)
     )
+    A: T.Tensor[A_shape, in_dtype]
+    B: T.Tensor[B_shape, in_dtype]
+    C = T.empty([M, N], out_dtype)
 
-    @T.prim_func
-    def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
-            A_local = T.alloc_local((warp_rows * local_size_a * k_pack), in_dtype)
-            B_local = T.alloc_local((warp_cols * local_size_b * k_pack), in_dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+    num_ko = K // block_K
+    num_ki = block_K // (k_pack * micro_size_k)
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzled_layout(A_shared),
-                    C_local: mfma_emitter.make_mfma_store_layout(C_local),
-                }
-            )
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
+        A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
+        A_local = T.alloc_local((warp_rows * local_size_a * k_pack), in_dtype)
+        B_local = T.alloc_local((warp_cols * local_size_b * k_pack), in_dtype)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            num_ko = K // block_K
-            num_ki = block_K // (k_pack * micro_size_k)
+        T.annotate_layout(
+            {
+                A_shared: make_swizzled_layout(A_shared),
+                C_local: mfma_emitter.make_mfma_store_layout(C_local),
+            }
+        )
 
-            # Improve L2 Cache
-            # T.use_swizzle(panel_size=10)
-            T.clear(C_local)
-            for ko in T.Pipelined(num_ko, num_stages=num_stages):
-                # Load A into shared memory
-                if a_transposed:
-                    T.copy(A[ko * block_K, by * block_M], A_shared)
-                else:
-                    T.copy(A[by * block_M, ko * block_K], A_shared)
+        # Improve L2 Cache
+        # T.use_swizzle(panel_size=10)
+        T.clear(C_local)
+        for ko in T.Pipelined(num_ko, num_stages=num_stages):
+            # Load A into shared memory
+            if a_transposed:
+                T.copy(A[ko * block_K, by * block_M], A_shared)
+            else:
+                T.copy(A[by * block_M, ko * block_K], A_shared)
 
-                for ki in T.serial(0, num_ki):
-                    mfma_emitter.ldmatrix_a(
-                        A_local,
-                        A_shared,
-                        ki,
-                    )
-                    mfma_emitter.ldmatrix_b(B_local, B, ki + ko * num_ki, pid_m=by, pid_n=bx)
+            for ki in T.serial(0, num_ki):
+                mfma_emitter.ldmatrix_a(
+                    A_local,
+                    A_shared,
+                    ki,
+                )
+                mfma_emitter.ldmatrix_b(B_local, B, ki + ko * num_ki, pid_m=by, pid_n=bx)
 
-                    # Perform Matrix Multiplication
-                    mfma_emitter.mfma(A_local, B_local, C_local, ki)
+                # Perform Matrix Multiplication
+                mfma_emitter.mfma(A_local, B_local, C_local, ki)
 
-            T.copy(C_local, C[by * block_M, bx * block_N])
+        T.copy(C_local, C[by * block_M, bx * block_N])
 
-    return main
+    return C
 
 
 def shuffle_weight(
@@ -170,10 +167,18 @@ def assert_tl_matmul_correctness(M, N, K, k_pack=1, a_transposed=False, b_transp
     in_dtype = determine_fp8_type()
     out_dtype = T.float32
     accum_dtype = T.float32
-    kernel = tl_matmul(
-        M,
-        N,
-        K,
+
+    A_shape = (K, M) if a_transposed else (M, K)
+    B_shape = (N, K) if b_transposed else (K, N)
+
+    A = (torch.rand(A_shape, device="cuda", dtype=torch.float16) / 10).to(getattr(torch, in_dtype))
+    B = (torch.rand(B_shape, device="cuda", dtype=torch.float16) / 10).to(getattr(torch, in_dtype))
+
+    B_preshuffle = shuffle_weight(B, k_pack=k_pack, is_transpose=b_transposed)
+
+    kernel = tl_matmul.compile(
+        A,
+        B_preshuffle,
         k_pack=k_pack,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
@@ -185,13 +190,7 @@ def assert_tl_matmul_correctness(M, N, K, k_pack=1, a_transposed=False, b_transp
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
     assert src_code is not None
-    A_shape = (K, M) if a_transposed else (M, K)
-    B_shape = (N, K) if b_transposed else (K, N)
 
-    A = (torch.rand(A_shape, device="cuda", dtype=torch.float16) / 10).to(getattr(torch, in_dtype))
-    B = (torch.rand(B_shape, device="cuda", dtype=torch.float16) / 10).to(getattr(torch, in_dtype))
-
-    B_preshuffle = shuffle_weight(B, k_pack=k_pack, is_transpose=b_transposed)
     C = kernel(A, B_preshuffle)
 
     profiler = kernel.get_profiler()

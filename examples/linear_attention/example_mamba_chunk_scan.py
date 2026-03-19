@@ -69,162 +69,161 @@ def get_configs():
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(
-    out_idx=[7],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
 def chunk_scan_fwd(
-    batch,
-    seqlen,
-    chunk_size,
-    ngroups,
-    nheads,
-    headdim,
-    dstate,
-    block_M=64,
-    block_N=64,
-    block_K=64,
-    block_Dstate=128,
-    num_stages=2,
-    threads=128,
+    cb,
+    x,
+    dt,
+    dA_cumsum,
+    C,
+    prev_states,
+    D_param,
+    block_M: int = 64,
+    block_N: int = 64,
+    block_K: int = 64,
+    block_Dstate: int = 128,
+    num_stages: int = 2,
+    threads: int = 128,
 ):
+    batch, seqlen, nheads, headdim = T.const("batch seqlen nheads headdim")
+    nchunks, chunk_size, ngroups, dstate = T.const("nchunks chunk_size ngroups dstate")
+    cb: T.Tensor[[batch, nchunks, ngroups, chunk_size, chunk_size], T.float16]
+    x: T.Tensor[[batch, seqlen, nheads, headdim], T.float16]
+    dt: T.Tensor[[batch, nheads, nchunks, chunk_size], T.float16]
+    dA_cumsum: T.Tensor[[batch, nheads, nchunks, chunk_size], T.float16]
+    C: T.Tensor[[batch, seqlen, ngroups, dstate], T.float16]
+    prev_states: T.Tensor[[batch, nchunks, nheads, headdim, dstate], T.float16]
+    D_param: T.Tensor[[nheads], T.float16]
+
     dtype = T.float16
     accum_dtype = T.float32
-    nchunks = T.ceildiv(seqlen, chunk_size)
     p = 1.44269504
 
-    @T.prim_func
-    def main(
-        cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype),  # type: ignore
-        x: T.Tensor((batch, seqlen, nheads, headdim), dtype),  # type: ignore
-        dt: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),  # type: ignore
-        dA_cumsum: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),  # type: ignore
-        C: T.Tensor((batch, seqlen, ngroups, dstate), dtype),  # type: ignore
-        prev_states: T.Tensor((batch, nchunks, nheads, headdim, dstate), dtype),  # type: ignore
-        D: T.Tensor((nheads), dtype),  # type: ignore
-        Output: T.Tensor((batch, seqlen, nheads, headdim), dtype),  # type: ignore
+    Output = T.empty([batch, seqlen, nheads, headdim], dtype)
+
+    with T.Kernel(nheads, T.ceildiv(chunk_size, block_M) * T.ceildiv(headdim, block_N), batch * nchunks, threads=threads) as (
+        bz,
+        bx,
+        by,
     ):
-        with T.Kernel(nheads, T.ceildiv(chunk_size, block_M) * T.ceildiv(headdim, block_N), batch * nchunks, threads=threads) as (
-            bz,
-            bx,
-            by,
-        ):
-            acc_o = T.alloc_fragment((block_M, block_N), accum_dtype)
-            acc_o_shared = T.alloc_shared((block_M, block_N), dtype)
-            cb_shared = T.alloc_shared((block_M, block_K), dtype)
-            cb_local = T.alloc_fragment((block_M, block_K), dtype)
-            dA_cs_k_shared = T.alloc_shared((block_K), dtype)
-            dA_cs_k_local = T.alloc_fragment((block_K), accum_dtype)
-            dA_cs_m_local = T.alloc_fragment((block_M), accum_dtype)
-            dt_shared = T.alloc_shared((block_K), dtype)
-            dt_local = T.alloc_fragment((block_K), accum_dtype)
-            x_shared = T.alloc_shared((block_K, block_N), dtype, scope="shared.dyn")
-            dA_cs_m_shared = T.alloc_shared((block_M), dtype)
-            scale_m_local = T.alloc_fragment((block_M), accum_dtype)
-            C_shared = T.alloc_shared((block_M, block_Dstate), dtype)
-            prev_state_shared = T.alloc_shared((block_N, block_Dstate), dtype)
-            D_local = T.alloc_fragment((1), accum_dtype)
-            x_residual_shared = T.alloc_shared((block_M, block_N), dtype)
-            x_residual_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        acc_o = T.alloc_fragment((block_M, block_N), accum_dtype)
+        acc_o_shared = T.alloc_shared((block_M, block_N), dtype)
+        cb_shared = T.alloc_shared((block_M, block_K), dtype)
+        cb_local = T.alloc_fragment((block_M, block_K), dtype)
+        dA_cs_k_shared = T.alloc_shared((block_K), dtype)
+        dA_cs_k_local = T.alloc_fragment((block_K), accum_dtype)
+        dA_cs_m_local = T.alloc_fragment((block_M), accum_dtype)
+        dt_shared = T.alloc_shared((block_K), dtype)
+        dt_local = T.alloc_fragment((block_K), accum_dtype)
+        x_shared = T.alloc_shared((block_K, block_N), dtype, scope="shared.dyn")
+        dA_cs_m_shared = T.alloc_shared((block_M), dtype)
+        scale_m_local = T.alloc_fragment((block_M), accum_dtype)
+        C_shared = T.alloc_shared((block_M, block_Dstate), dtype)
+        prev_state_shared = T.alloc_shared((block_N, block_Dstate), dtype)
+        D_local = T.alloc_fragment((1), accum_dtype)
+        x_residual_shared = T.alloc_shared((block_M, block_N), dtype)
+        x_residual_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            batch_idx = by % batch
-            chunk_idx = by // batch
-            # m: chunk_size
-            # n : headdim
-            m_idx = bx // T.ceildiv(headdim, block_N)
-            n_idx = bx % T.ceildiv(headdim, block_N)
+        batch_idx = by % batch
+        chunk_idx = by // batch
+        # m: chunk_size
+        # n : headdim
+        m_idx = bx // T.ceildiv(headdim, block_N)
+        n_idx = bx % T.ceildiv(headdim, block_N)
 
-            T.annotate_layout(
-                {
-                    cb_shared: tilelang.layout.make_swizzled_layout(cb_shared),
-                    x_residual_shared: tilelang.layout.make_swizzled_layout(x_residual_shared),
-                }
-            )
+        T.annotate_layout(
+            {
+                cb_shared: tilelang.layout.make_swizzled_layout(cb_shared),
+                x_residual_shared: tilelang.layout.make_swizzled_layout(x_residual_shared),
+            }
+        )
 
-            T.no_set_max_nreg()
+        T.no_set_max_nreg()
 
-            T.copy(dA_cumsum[batch_idx, bz, chunk_idx, m_idx * block_M : (m_idx + 1) * block_M], dA_cs_m_shared)
-            T.copy(dA_cs_m_shared, dA_cs_m_local)
-            T.clear(acc_o)
+        T.copy(dA_cumsum[batch_idx, bz, chunk_idx, m_idx * block_M : (m_idx + 1) * block_M], dA_cs_m_shared)
+        T.copy(dA_cs_m_shared, dA_cs_m_local)
+        T.clear(acc_o)
 
-            for i in T.Parallel(block_M):
-                scale_m_local[i] = T.exp2(dA_cs_m_local[i] * p)
+        for i in T.Parallel(block_M):
+            scale_m_local[i] = T.exp2(dA_cs_m_local[i] * p)
+        T.copy(
+            C[
+                batch_idx,
+                chunk_idx * chunk_size + m_idx * block_M : chunk_idx * chunk_size + (m_idx + 1) * block_M,
+                bz // (nheads // ngroups),
+                0:block_Dstate,
+            ],
+            C_shared,
+        )
+        T.copy(prev_states[batch_idx, chunk_idx, bz, n_idx * block_N : (n_idx + 1) * block_N, 0:block_Dstate], prev_state_shared)
+        T.gemm(C_shared, prev_state_shared, acc_o, transpose_B=True)
+        for i, j in T.Parallel(block_M, block_N):
+            acc_o[i, j] *= scale_m_local[i]
+
+        loop_range = T.ceildiv((m_idx + 1) * block_M, block_K)
+
+        for k in T.Pipelined(loop_range, num_stages=num_stages):
             T.copy(
-                C[
+                cb[
                     batch_idx,
-                    chunk_idx * chunk_size + m_idx * block_M : chunk_idx * chunk_size + (m_idx + 1) * block_M,
+                    chunk_idx,
                     bz // (nheads // ngroups),
-                    0:block_Dstate,
+                    m_idx * block_M : (m_idx + 1) * block_M,
+                    k * block_K : (k + 1) * block_K,
                 ],
-                C_shared,
+                cb_shared,
             )
-            T.copy(prev_states[batch_idx, chunk_idx, bz, n_idx * block_N : (n_idx + 1) * block_N, 0:block_Dstate], prev_state_shared)
-            T.gemm(C_shared, prev_state_shared, acc_o, transpose_B=True)
-            for i, j in T.Parallel(block_M, block_N):
-                acc_o[i, j] *= scale_m_local[i]
-
-            loop_range = T.ceildiv((m_idx + 1) * block_M, block_K)
-
-            for k in T.Pipelined(loop_range, num_stages=num_stages):
-                T.copy(
-                    cb[
-                        batch_idx,
-                        chunk_idx,
-                        bz // (nheads // ngroups),
-                        m_idx * block_M : (m_idx + 1) * block_M,
-                        k * block_K : (k + 1) * block_K,
-                    ],
-                    cb_shared,
-                )
-                T.copy(cb_shared, cb_local)
-                T.copy(dA_cumsum[batch_idx, bz, chunk_idx, k * block_K : (k + 1) * block_K], dA_cs_k_shared)
-                T.copy(dA_cs_k_shared, dA_cs_k_local)
-                for i, j in T.Parallel(block_M, block_K):
-                    cb_local[i, j] = cb_local[i, j] * T.exp2(dA_cs_m_local[i] * p - dA_cs_k_local[j] * p)
-                T.copy(dt[batch_idx, bz, chunk_idx, k * block_K : (k + 1) * block_K], dt_shared)
-                T.copy(dt_shared, dt_local)
-                for i, j in T.Parallel(block_M, block_K):
-                    cb_local[i, j] *= dt_local[j]
-                for i, j in T.Parallel(block_M, block_K):
-                    cb_local[i, j] = T.if_then_else(m_idx * block_M + i >= k * block_K + j, cb_local[i, j], 0)
-                T.copy(
-                    x[
-                        batch_idx,
-                        chunk_idx * chunk_size + k * block_K : chunk_idx * chunk_size + (k + 1) * block_K,
-                        bz,
-                        n_idx * block_N : (n_idx + 1) * block_N,
-                    ],
-                    x_shared,
-                )
-                T.gemm(cb_local, x_shared, acc_o)
-
-            D_local[0] = D[bz]
+            T.copy(cb_shared, cb_local)
+            T.copy(dA_cumsum[batch_idx, bz, chunk_idx, k * block_K : (k + 1) * block_K], dA_cs_k_shared)
+            T.copy(dA_cs_k_shared, dA_cs_k_local)
+            for i, j in T.Parallel(block_M, block_K):
+                cb_local[i, j] = cb_local[i, j] * T.exp2(dA_cs_m_local[i] * p - dA_cs_k_local[j] * p)
+            T.copy(dt[batch_idx, bz, chunk_idx, k * block_K : (k + 1) * block_K], dt_shared)
+            T.copy(dt_shared, dt_local)
+            for i, j in T.Parallel(block_M, block_K):
+                cb_local[i, j] *= dt_local[j]
+            for i, j in T.Parallel(block_M, block_K):
+                cb_local[i, j] = T.if_then_else(m_idx * block_M + i >= k * block_K + j, cb_local[i, j], 0)
             T.copy(
                 x[
                     batch_idx,
-                    chunk_idx * chunk_size + m_idx * block_M : chunk_idx * chunk_size + (m_idx + 1) * block_M,
+                    chunk_idx * chunk_size + k * block_K : chunk_idx * chunk_size + (k + 1) * block_K,
                     bz,
                     n_idx * block_N : (n_idx + 1) * block_N,
                 ],
-                x_residual_shared,
+                x_shared,
             )
-            T.copy(x_residual_shared, x_residual_local)
-            for i, j in T.Parallel(block_M, block_N):
-                acc_o[i, j] += x_residual_local[i, j] * D_local[0]
+            T.gemm(cb_local, x_shared, acc_o)
 
-            T.copy(acc_o, acc_o_shared)
-            T.copy(
-                acc_o_shared,
-                Output[
-                    batch_idx,
-                    chunk_idx * chunk_size + m_idx * block_M : chunk_idx * chunk_size + (m_idx + 1) * block_M,
-                    bz,
-                    n_idx * block_N : (n_idx + 1) * block_N,
-                ],
-            )
+        D_local[0] = D_param[bz]
+        T.copy(
+            x[
+                batch_idx,
+                chunk_idx * chunk_size + m_idx * block_M : chunk_idx * chunk_size + (m_idx + 1) * block_M,
+                bz,
+                n_idx * block_N : (n_idx + 1) * block_N,
+            ],
+            x_residual_shared,
+        )
+        T.copy(x_residual_shared, x_residual_local)
+        for i, j in T.Parallel(block_M, block_N):
+            acc_o[i, j] += x_residual_local[i, j] * D_local[0]
 
-    return main
+        T.copy(acc_o, acc_o_shared)
+        T.copy(
+            acc_o_shared,
+            Output[
+                batch_idx,
+                chunk_idx * chunk_size + m_idx * block_M : chunk_idx * chunk_size + (m_idx + 1) * block_M,
+                bz,
+                n_idx * block_N : (n_idx + 1) * block_N,
+            ],
+        )
+
+    return Output
 
 
 if __name__ == "__main__":

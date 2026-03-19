@@ -12,17 +12,6 @@ import argparse
 def get_configs():
     """
     Generate a list of hyperparameter configuration dictionaries for tuning.
-
-    Each configuration is a dict with keys: 'block_M', 'block_N', 'block_K',
-    'num_stages', 'threads', and 'split'. The function returns the Cartesian
-    product of the parameter value lists:
-    - block_M, block_N, block_K: tiling sizes
-    - num_stages: pipeline stages
-    - threads: thread counts
-    - split: K-splitting factor
-
-    Returns:
-        List[dict]: A list of configuration dictionaries covering all combinations.
     """
     import itertools
 
@@ -38,82 +27,55 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs())
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit
 def matmul(
-    M,
-    N,
-    K,
-    topk,
-    E,
-    padding_M,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
-    source_format=T.uint32,
-    num_bits=4,
-    scale_size=32,
-    fast_dequant=True,
-    with_bias=False,
-    block_M=128,
-    block_N=256,
-    block_K=128,
-    num_stages=2,
-    threads=256,
-    split=1,
+    A,
+    B,
+    Scale,
+    Bias,
+    topk_weights,
+    sorted_token_ids,
+    expert_ids,
+    topk: int = 4,
+    in_dtype: T.dtype = T.bfloat16,
+    out_dtype: T.dtype = T.bfloat16,
+    accum_dtype: T.dtype = T.float32,
+    source_format: T.dtype = T.uint32,
+    num_bits: int = 4,
+    scale_size: int = 32,
+    fast_dequant: bool = True,
+    with_bias: bool = False,
+    block_M: int = 128,
+    block_N: int = 256,
+    block_K: int = 128,
+    num_stages: int = 2,
+    threads: int = 256,
+    split: int = 1,
 ):
     """
-    Construct and return a grouped (Mixture-of-Experts) matrix-multiply TIR kernel that multiplies A (shape MxK) by a quantized, expert-grouped B (shape ExNxQK) and writes an output of shape (M, topk, N) in out_dtype.
-
-    The generated kernel accepts:
-    - A: dense matrix with element type `in_dtype` and shape (M, K).
-    - B: packed quantized matrix for all experts, stored as uint8 with `num_bits` bits per element, shape (E, N, QK), where QK = K / (8/num_bits).
-    - Scale: per-expert, per-block scale/exponent information for dequantizing B, shape (E, N, K // scale_size).
-    - Bias: per-expert, per-output bias, shape (E, N).
-    - topk_weights: router weights for the top-k experts for each token, shape (M, topk).
-    - sorted_token_ids: flattened and padded tensor of token indices, shape (padding_M,).
-    - expert_ids: expert id for each token in the padded batch, shape (padding_M // block_M,).
-    - C: output tensor, shape (M, topk, N).
-
-    The kernel dequantizes B to a working floating format (out_dtype/accum_dtype) using one of two paths:
-    - fast_dequant (True): uses an external, hardware/implementation-specific intrinsic group (twiddling) for batch dequantization.
-    - fast_dequant (False): uses a simple elementwise dequantization helper.
-
-    Parameters:
-        M, N, K (int): matrix dimensions (A is MxK, result is (M, topk, N)). K must be divisible by (block_K * split).
-        topk (int): number of experts selected per token.
-        E (int): number of experts.
-        padding_M (int): padded number of tokens after grouping and block alignment.
-        in_dtype (str): element type of A (e.g., T.bfloat16).
-        out_dtype (str): output tensor element type (e.g., T.bfloat16).
-        accum_dtype (str): accumulation type used for the inner GEMM.
-        source_format (str, optional): format string passed to intrinsic selector (default "uint").
-        num_bits (int, optional): number of bits per quantized element in B (default 4).
-        scale_size (int, optional): number of elements grouped per scale entry (default 32).
-        fast_dequant (bool, optional): choose the fast intrinsic dequantization path when available (default True).
-        block_M, block_N, block_K (int, optional): tile sizes for M, N, and K dimensions (defaults 256, 128, 128).
-        num_stages (int, optional): pipelining stages for K loop (default 2).
-        threads (int, optional): threads per block used by the kernel (default 256).
-        split (int, optional): split factor along K used by the scheduler (default 1).
-        with_bias (bool, optional): whether to add Bias to the output (default False).
-
-    Returns:
-        A T.prim_func implementing the grouped, pipelined GEMM that:
-        - loads tiled blocks of A and packed B for each expert to shared memory,
-        - dequantizes B via the chosen path into a shared dequantized tile,
-        - performs a tiled GEMM accumulating into local fragments,
-        - applies per-token topk weights and bias,
-        - writes the final (M, topk, N) block to the global output tensor.
-
-    Notes:
-        - The function queries an intrinsic group to obtain a fast dequantization implementation when fast_dequant is enabled; that intrinsic must supply a valid C source and function name.
-        - The kernel layout uses swizzled shared-memory layouts for A, B, and the shared C tile.
-        - An assertion enforces that K % (block_K * split) == 0.
+    Construct and return a grouped (Mixture-of-Experts) matrix-multiply TIR kernel.
     """
 
     num_elems_per_byte = 8 // num_bits
     storage_dtype = T.uint8
-    QK = K // num_elems_per_byte
+
+    M, K = T.const("M K")
+    E, N, _ = T.const("E N _")
+    _E, _N, _SK = T.const("_E _N _SK")
+    __E, __N = T.const("__E __N")
+    _TW = T.const("_TW")
+    _PM = T.const("_PM")
+    _EI = T.const("_EI")
+    A: T.Tensor[[M, K], in_dtype]
+    B: T.Tensor[[E, N, _], storage_dtype]
+    Scale: T.Tensor[[_E, _N, _SK], storage_dtype]
+    Bias: T.Tensor[[__E, __N], out_dtype]
+    topk_weights: T.Tensor[[_TW], out_dtype]
+    sorted_token_ids: T.Tensor[[_PM], T.int32]
+    expert_ids: T.Tensor[[_EI], T.int32]
+
     Block_QK = block_K // num_elems_per_byte
+    padding_M = _PM
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, Block_QK)
     Bias_shared_shape = block_N
@@ -138,19 +100,6 @@ def matmul(
 
     # the dequant part is the same as in dequant_gemm
     def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype=T.bfloat16):
-        """
-        Return a TileLang macro that performs fast dequantization of twiddled FP4-packed data into BF16.
-        The returned macro has signature (B_shared, B_dequantize_shared, Scale, k) and:
-        - Loads packed FP4 elements from B_shared into per-thread local registers.
-        - Calls an external fast dequantization intrinsic (provided via `import_source` / `func_name` in the outer scope) to expand packed FP4 -> BF16 values.
-        - Applies a per-block scale factor derived from the Scale tensor (using exponentiation by powers of two).
-        - Writes the scaled BF16 results into B_dequantize_shared.
-
-        Notes:
-        - This factory only supports in_dtype="fp4" and out_dtype=T.bfloat16.
-        - The macro depends on several names from the enclosing scope (e.g., import_source, func_name, DataType, num_elems_per_byte, storage_dtype, block_N, block_K, threads, scale_size); those must be defined and consistent with the kernel that will use the macro.
-        - The macro issues a T.import_source and T.call_extern to invoke the external intrinsic; ensure the external implementation matching `func_name` is available at compilation/runtime.
-        """
         assert in_dtype in ["fp4"]
         assert out_dtype in [T.bfloat16]
 
@@ -162,30 +111,6 @@ def matmul(
         @T.macro
         def fast_dequant_bf16_fp4_twiddling(B_shared, B_dequantize_shared, Scale_shared, k):
             # import fast_dequantize plugin
-            """
-            Fast dequantization kernel: convert packed 4-bit quantized values in B_shared to bfloat16
-            in B_dequantize_shared using an external intrinsic optimized for twiddled (bit-packed) FP4,
-            applying per-block scale factors from Scale.
-
-            This routine is a tiled, thread-parallel helper that:
-            - Imports and calls an external dequantization function (via `import_source`/`func_name`)
-              to expand compressed uint8-packed FP4 values into BF16 fragments in-thread.
-            - Loads the corresponding per-block scale entry, interprets it as an exponent bias
-              (applies 2^(Scale - 127)), and multiplies the dequantized BF16 fragment by that factor.
-            - Writes the scaled BF16 results back into the shared B_dequantize_shared buffer in-place.
-
-            Parameters:
-            - B_shared: read-only shared buffer containing compressed FP4 data (packed uint8 layout).
-            - B_dequantize_shared: shared output buffer that is overwritten with BF16 dequantized values.
-            - Scale_shared: per-block scale tensor; entries are interpreted such that the multiplicative scale
-              = 2^(Scale - 127).
-            - k: block index along the K dimension used to select the appropriate Scale entries.
-
-            Side effects:
-            - Mutates B_dequantize_shared in shared memory.
-            - Calls an external intrinsic function (must be provided by the environment via `import_source`
-              and `func_name`) to perform the low-level unpacking/dequantization.
-            """
             T.import_source(import_source)
 
             tx = T.get_thread_binding()
@@ -251,96 +176,86 @@ def matmul(
 
         return simple_dequant_bf16_fp4
 
-    @T.prim_func
-    def main(
-        A: T.Tensor((M, K), in_dtype),
-        B: T.Tensor((E, N, QK), storage_dtype),
-        Scale: T.Tensor((E, N, K // scale_size), storage_dtype),
-        Bias: T.Tensor((E, N), out_dtype),
-        # Add fusedmoe tensors
-        topk_weights: T.Tensor((M * topk), out_dtype),
-        sorted_token_ids: T.Tensor((padding_M), T.int32),
-        expert_ids: T.Tensor((padding_M // block_M), T.int32),
-        C: T.Tensor((M, topk, N), out_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(padding_M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
-            B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)
-            Bias_shared = T.alloc_shared(Bias_shared_shape, out_dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            C_shared = T.alloc_shared((block_M, block_N), out_dtype)
-            topk_weights_shared = T.alloc_shared((block_M), out_dtype)
-            sorted_token_ids_shared = T.alloc_shared((block_M), T.int32)
-            expert_id = T.alloc_local((1), T.int32)  # the expert id for the current block
-            # To use 1D TMA, the last dim of Scale_shared must have stride=1
-            # May use much more shared memory than necessary
-            Scale_shared = T.alloc_shared((block_N, K // scale_size), storage_dtype)
+    C = T.empty((M, topk, N), out_dtype)
 
-            T.annotate_layout(
-                {
-                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                }
-            )
-            T.use_swizzle(10)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(padding_M, block_M), threads=threads) as (bx, by):
+        A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+        B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
+        B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)
+        Bias_shared = T.alloc_shared(Bias_shared_shape, out_dtype)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        C_shared = T.alloc_shared((block_M, block_N), out_dtype)
+        topk_weights_shared = T.alloc_shared((block_M), out_dtype)
+        sorted_token_ids_shared = T.alloc_shared((block_M), T.int32)
+        expert_id = T.alloc_local((1), T.int32)  # the expert id for the current block
+        # To use 1D TMA, the last dim of Scale_shared must have stride=1
+        # May use much more shared memory than necessary
+        Scale_shared = T.alloc_shared((block_N, K // scale_size), storage_dtype)
 
-            if threads == 512:
-                T.disable_warp_group_reg_alloc()
+        T.annotate_layout(
+            {
+                B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+            }
+        )
+        T.use_swizzle(10)
 
-            T.copy(sorted_token_ids[by * block_M : (by + 1) * block_M], sorted_token_ids_shared)
-            expert_id[0] = expert_ids[by]
+        if threads == 512:
+            T.disable_warp_group_reg_alloc()
 
-            # Get the topk weights of each token in the current block
-            for i in T.Parallel(block_M):
-                if sorted_token_ids_shared[i] != -1:
-                    topk_weights_shared[i] = topk_weights[sorted_token_ids_shared[i]]
+        T.copy(sorted_token_ids[by * block_M : (by + 1) * block_M], sorted_token_ids_shared)
+        expert_id[0] = expert_ids[by]
 
-            # Get bias and scale based on the expert id
-            if with_bias:
-                T.copy(Bias[expert_id[0], bx * block_N : (bx + 1) * block_N], Bias_shared)
-            else:
-                T.clear(Bias_shared)
+        # Get the topk weights of each token in the current block
+        for i in T.Parallel(block_M):
+            if sorted_token_ids_shared[i] != -1:
+                topk_weights_shared[i] = topk_weights[sorted_token_ids_shared[i]]
 
-            T.copy(Scale[expert_id[0], bx * block_N : (bx + 1) * block_N, :], Scale_shared)
+        # Get bias and scale based on the expert id
+        if with_bias:
+            T.copy(Bias[expert_id[0], bx * block_N : (bx + 1) * block_N], Bias_shared)
+        else:
+            T.clear(Bias_shared)
 
-            for i, j in T.Parallel(block_M, block_N):
-                C_local[i, j] = Bias_shared[j]
+        T.copy(Scale[expert_id[0], bx * block_N : (bx + 1) * block_N, :], Scale_shared)
 
-            tx = T.get_thread_binding()
+        for i, j in T.Parallel(block_M, block_N):
+            C_local[i, j] = Bias_shared[j]
 
-            for k in T.Pipelined(K // block_K, num_stages=num_stages):
-                # Each thread copies 4 bytes, local size is 16
-                for copy_i in T.serial(block_M * block_K // threads // 16):
-                    base = copy_i * threads * 16 + tx * 16
-                    if sorted_token_ids_shared[base // block_K] != -1:
-                        for copy_j in T.vectorized(16):
-                            A_shared[base // block_K, base % block_K + copy_j] = A[
-                                sorted_token_ids_shared[base // block_K] // topk, k * block_K + base % block_K + copy_j
-                            ]
+        tx = T.get_thread_binding()
 
-                T.copy(B[expert_id[0], bx * block_N, k * block_K // num_elems_per_byte], B_shared)
-                if fast_dequant:
-                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared, k)
-                else:
-                    get_simple_dequant_func()(B_shared, B_dequantize_shared, Scale_shared, k)
-
-                T.gemm(A_shared, B_dequantize_shared, C_local, transpose_B=True)
-
-            for i, j in T.Parallel(block_M, block_N):
-                C_local[i, j] = C_local[i, j] * topk_weights_shared[i]
-
-            T.copy(C_local, C_shared)
-            for copy_i in T.serial(block_M * block_N // threads // 16):
+        for k in T.Pipelined(K // block_K, num_stages=num_stages):
+            # Each thread copies 4 bytes, local size is 16
+            for copy_i in T.serial(block_M * block_K // threads // 16):
                 base = copy_i * threads * 16 + tx * 16
-                if sorted_token_ids_shared[base // block_N] != -1:
+                if sorted_token_ids_shared[base // block_K] != -1:
                     for copy_j in T.vectorized(16):
-                        C[
-                            sorted_token_ids_shared[base // block_N] // topk,
-                            sorted_token_ids_shared[base // block_N] % topk,
-                            bx * block_N + base % block_N + copy_j,
-                        ] = C_shared[base // block_N, base % block_N + copy_j]
+                        A_shared[base // block_K, base % block_K + copy_j] = A[
+                            sorted_token_ids_shared[base // block_K] // topk, k * block_K + base % block_K + copy_j
+                        ]
 
-    return main
+            T.copy(B[expert_id[0], bx * block_N, k * block_K // num_elems_per_byte], B_shared)
+            if fast_dequant:
+                get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared, k)
+            else:
+                get_simple_dequant_func()(B_shared, B_dequantize_shared, Scale_shared, k)
+
+            T.gemm(A_shared, B_dequantize_shared, C_local, transpose_B=True)
+
+        for i, j in T.Parallel(block_M, block_N):
+            C_local[i, j] = C_local[i, j] * topk_weights_shared[i]
+
+        T.copy(C_local, C_shared)
+        for copy_i in T.serial(block_M * block_N // threads // 16):
+            base = copy_i * threads * 16 + tx * 16
+            if sorted_token_ids_shared[base // block_N] != -1:
+                for copy_j in T.vectorized(16):
+                    C[
+                        sorted_token_ids_shared[base // block_N] // topk,
+                        sorted_token_ids_shared[base // block_N] % topk,
+                        bx * block_N + base % block_N + copy_j,
+                    ] = C_shared[base // block_N, base % block_N + copy_j]
+
+    return C
 
 
 def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=256):
@@ -420,7 +335,7 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
     # sorted_token_ids: The final flattened and padded tensor of token indices.
     sorted_token_ids = torch.cat(padded_token_ids, dim=0).to(torch.int32)  # (padding_M,)
     # expert_ids: The final tensor of expert IDs corresponding to `sorted_token_ids`.
-    expert_ids = torch.tensor(expert_ids, dtype=torch.int32, device="cuda")  # （padding_M,）
+    expert_ids = torch.tensor(expert_ids, dtype=torch.int32, device="cuda")  # (padding_M,)
     padding_M = sorted_token_ids.shape[0]  # padding_M: token number after padding
 
     return A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M
@@ -437,21 +352,23 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
     qk = k // num_elems_per_byte
-    A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M = get_data(m, n, k, qk, scale_size, topk, E, block_M)
+    A, qB, Scale, Bias, topk_weights_t, sorted_token_ids, expert_ids_t, padding_M = get_data(m, n, k, qk, scale_size, topk, E, block_M)
 
     if tune:
-        with set_autotune_inputs([A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids]):
+        with set_autotune_inputs([A, qB, Scale, Bias, topk_weights_t, sorted_token_ids, expert_ids_t]):
             # Autotune with inputs manually composed
             kernel = matmul(
-                m,
-                n,
-                k,
-                topk,
-                E,
-                padding_M,
-                T.bfloat16,
-                T.bfloat16,
-                T.float32,
+                A,
+                qB,
+                Scale,
+                Bias,
+                topk_weights_t,
+                sorted_token_ids,
+                expert_ids_t,
+                topk=topk,
+                in_dtype=T.bfloat16,
+                out_dtype=T.bfloat16,
+                accum_dtype=T.float32,
                 num_bits=num_bits,
                 scale_size=scale_size,
                 fast_dequant=fast_dequant,
@@ -459,15 +376,17 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
             )
     else:
         kernel = matmul(
-            m,
-            n,
-            k,
-            topk,
-            E,
-            padding_M,
-            T.bfloat16,
-            T.bfloat16,
-            T.float32,
+            A,
+            qB,
+            Scale,
+            Bias,
+            topk_weights_t,
+            sorted_token_ids,
+            expert_ids_t,
+            topk=topk,
+            in_dtype=T.bfloat16,
+            out_dtype=T.bfloat16,
+            accum_dtype=T.float32,
             num_bits=num_bits,
             scale_size=scale_size,
             fast_dequant=fast_dequant,
@@ -485,15 +404,15 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
         qB,
         Scale,
         Bias,
-        topk_weights,
+        topk_weights_t,
         sorted_token_ids,
-        expert_ids,
+        expert_ids_t,
     )
     print("Tilelang kernel run finished.")
 
-    ref_output = ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)  # Maybe a little bit slow...
+    ref_output = ref_moe(A, qB, Scale, Bias, topk_weights_t, sorted_token_ids, expert_ids_t, block_M=block_M)  # Maybe a little bit slow...
 
-    latency = tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100)
+    latency = tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights_t, sorted_token_ids, expert_ids_t), warmup=100)
     print("Tilelang: {:.2f} ms".format(latency))
     print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
@@ -513,20 +432,22 @@ def run_regression_perf(m=4096, n=4096, k=4096, scale_size=32, topk=4, E=32, fas
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
     qk = k // num_elems_per_byte
-    A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M = get_data(m, n, k, qk, scale_size, topk, E, block_M)
+    A, qB, Scale, Bias, topk_weights_t, sorted_token_ids, expert_ids_t, padding_M = get_data(m, n, k, qk, scale_size, topk, E, block_M)
 
     if tune:
-        with set_autotune_inputs([A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids]):
+        with set_autotune_inputs([A, qB, Scale, Bias, topk_weights_t, sorted_token_ids, expert_ids_t]):
             kernel = matmul(
-                m,
-                n,
-                k,
-                topk,
-                E,
-                padding_M,
-                "bfloat16",
-                "bfloat16",
-                "float32",
+                A,
+                qB,
+                Scale,
+                Bias,
+                topk_weights_t,
+                sorted_token_ids,
+                expert_ids_t,
+                topk=topk,
+                in_dtype="bfloat16",
+                out_dtype="bfloat16",
+                accum_dtype="float32",
                 num_bits=num_bits,
                 scale_size=scale_size,
                 fast_dequant=fast_dequant,
@@ -534,15 +455,17 @@ def run_regression_perf(m=4096, n=4096, k=4096, scale_size=32, topk=4, E=32, fas
             )
     else:
         kernel = matmul(
-            m,
-            n,
-            k,
-            topk,
-            E,
-            padding_M,
-            "bfloat16",
-            "bfloat16",
-            "float32",
+            A,
+            qB,
+            Scale,
+            Bias,
+            topk_weights_t,
+            sorted_token_ids,
+            expert_ids_t,
+            topk=topk,
+            in_dtype="bfloat16",
+            out_dtype="bfloat16",
+            accum_dtype="float32",
             num_bits=num_bits,
             scale_size=scale_size,
             fast_dequant=fast_dequant,
@@ -555,7 +478,7 @@ def run_regression_perf(m=4096, n=4096, k=4096, scale_size=32, topk=4, E=32, fas
             split=split,
         )
 
-    return tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), backend="cupti")
+    return tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights_t, sorted_token_ids, expert_ids_t), backend="cupti")
 
 
 if __name__ == "__main__":

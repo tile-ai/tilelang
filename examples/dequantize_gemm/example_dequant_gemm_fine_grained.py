@@ -8,20 +8,19 @@ import tilelang.language as T
 tilelang.testing.set_random_seed(0)
 
 
-@tilelang.jit(out_idx=[2])
+@tilelang.jit
 def matmul(
-    M,
-    N,
-    K,
-    block_M,
-    block_N,
-    block_K,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
-    num_stages,
-    threads,
-    num_bits=4,
+    A,
+    B,
+    block_M: int = 128,
+    block_N: int = 128,
+    block_K: int = 32,
+    in_dtype: T.dtype = T.float16,
+    out_dtype: T.dtype = T.float16,
+    accum_dtype: T.dtype = T.float16,
+    num_stages: int = 3,
+    threads: int = 128,
+    num_bits: int = 4,
 ):
     from tilelang.quantize import _tir_packed_to_unsigned_convert
 
@@ -29,8 +28,12 @@ def matmul(
     storage_dtype = T.int8
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     storage_type = str("".join(c for c in storage_dtype if not c.isdigit()))
-    A_shape = (M, K)
-    B_shape = (N, K // num_elems_per_byte)
+
+    M, K = T.const("M K")
+    N, _ = T.const("N _")
+    A: T.Tensor[[M, K], in_dtype]
+    B: T.Tensor[[N, _], storage_dtype]
+
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, block_K // num_elems_per_byte)
     B_dequantize_shared_shape = (block_N, block_K)
@@ -38,51 +41,47 @@ def matmul(
     local_size = MAX_TRANSACTION_SIZE_IN_BITS // DataType(in_dtype).bits
     local_size_compressed = local_size // num_elems_per_byte
 
-    @T.prim_func
-    def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, storage_dtype),
-        C: T.Tensor((M, N), out_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
-            B_local = T.alloc_local([local_size_compressed], storage_dtype)
-            B_dequantize_local = T.alloc_local([local_size], in_dtype)
-            B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+    C = T.empty((M, N), out_dtype)
 
-            tx = T.get_thread_binding()
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+        B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
+        B_local = T.alloc_local([local_size_compressed], storage_dtype)
+        B_dequantize_local = T.alloc_local([local_size], in_dtype)
+        B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(A[by * block_M, k * block_K], A_shared)
-                T.copy(B[bx * block_N, k * block_K // num_elems_per_byte], B_shared)
+        tx = T.get_thread_binding()
 
-                for i in T.serial(block_N * block_K // num_elems_per_byte // (threads * local_size_compressed)):
-                    for v in T.vectorized(0, local_size_compressed):
-                        index = i * threads * local_size_compressed + tx * local_size_compressed + v
-                        vi = index // (block_K // num_elems_per_byte)
-                        vj = index % (block_K // num_elems_per_byte)
-                        B_local[v] = B_shared[vi, vj]
-                    for v in T.serial(0, local_size):
-                        B_dequantize_local[v] = _tir_packed_to_unsigned_convert(storage_type, storage_nbit)(
-                            num_bits,
-                            B_local[v // num_elems_per_byte],
-                            v % num_elems_per_byte,
-                            dtype=in_dtype,
-                        )
-                    for v in T.vectorized(0, local_size):
-                        index = i * threads * local_size + tx * local_size + v
-                        vi = index // block_K
-                        vj = index % block_K
-                        B_dequantize_shared[vi, vj] = B_dequantize_local[v]
+        T.clear(C_local)
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            T.copy(A[by * block_M, k * block_K], A_shared)
+            T.copy(B[bx * block_N, k * block_K // num_elems_per_byte], B_shared)
 
-                T.gemm(A_shared, B_dequantize_shared, C_local, transpose_B=True)
+            for i in T.serial(block_N * block_K // num_elems_per_byte // (threads * local_size_compressed)):
+                for v in T.vectorized(0, local_size_compressed):
+                    index = i * threads * local_size_compressed + tx * local_size_compressed + v
+                    vi = index // (block_K // num_elems_per_byte)
+                    vj = index % (block_K // num_elems_per_byte)
+                    B_local[v] = B_shared[vi, vj]
+                for v in T.serial(0, local_size):
+                    B_dequantize_local[v] = _tir_packed_to_unsigned_convert(storage_type, storage_nbit)(
+                        num_bits,
+                        B_local[v // num_elems_per_byte],
+                        v % num_elems_per_byte,
+                        dtype=in_dtype,
+                    )
+                for v in T.vectorized(0, local_size):
+                    index = i * threads * local_size + tx * local_size + v
+                    vi = index // block_K
+                    vj = index % block_K
+                    B_dequantize_shared[vi, vj] = B_dequantize_local[v]
 
-            T.copy(C_local, C[by * block_M, bx * block_N])
+            T.gemm(A_shared, B_dequantize_shared, C_local, transpose_B=True)
 
-    return main
+        T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return C
 
 
 def run_gemm(
@@ -98,18 +97,24 @@ def run_gemm(
     num_stages=3,
     num_threads=128,
 ):
+    num_bits = 4
+    num_elems_per_byte = 8 // num_bits
+    storage_dtype = T.int8
+
+    A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
+    qB = torch.randint(0, 127, (N, K // num_elems_per_byte), device="cuda", dtype=getattr(torch, storage_dtype))
+
     kernel = matmul(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        in_dtype,
-        out_dtype,
-        dtypeAccum,
-        num_stages,
-        num_threads,
+        A,
+        qB,
+        block_M=block_M,
+        block_N=block_N,
+        block_K=block_K,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        accum_dtype=dtypeAccum,
+        num_stages=num_stages,
+        threads=num_threads,
     )
 
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)

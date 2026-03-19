@@ -29,12 +29,29 @@ def get_configs():
 
 @tilelang.autotune(configs=get_configs())
 @tilelang.jit(
-    out_idx=[6],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashmla_decode(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, threads=128):
+def flashmla_decode(
+    Q,
+    Q_pe,
+    KV,
+    K_pe,
+    block_N: int = 32,
+    block_H: int = 64,
+    num_split: int = 4,
+    threads: int = 128,
+):
+    batch, heads, dim = T.const("batch heads dim")
+    _, _, pe_dim = T.const("_ _ pe_dim")
+    _, seqlen_kv, kv_head_num, _ = T.const("_ seqlen_kv kv_head_num _")
+
+    Q: T.Tensor[[batch, heads, dim], T.float16]
+    Q_pe: T.Tensor[[batch, heads, pe_dim], T.float16]
+    KV: T.Tensor[[batch, seqlen_kv, kv_head_num, dim], T.float16]
+    K_pe: T.Tensor[[batch, seqlen_kv, kv_head_num, pe_dim], T.float16]
+
     scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
     dtype = T.float16
     accum_dtype = T.float32
@@ -42,16 +59,11 @@ def flashmla_decode(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, 
     VALID_BLOCK_H = min(block_H, kv_group_num)
     assert kv_head_num == 1, "kv_head_num must be 1"
 
-    @T.prim_func
-    def main_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
-    ):
+    glse = T.empty([batch, heads, num_split], dtype)
+    Output_partial = T.empty([batch, heads, num_split, dim], dtype)
+    Output = T.empty([batch, heads, dim], dtype)
+
+    if num_split > 1:
         # flash_attn_split
         with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=threads) as (bx, by, bz):
             Q_local = T.alloc_fragment([block_H, dim], dtype)
@@ -134,17 +146,7 @@ def flashmla_decode(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, 
                     o_accum_local[i] += po_local[i] * scale_local
             for i in T.Parallel(dim):
                 Output[bz, by, i] = o_accum_local[i]
-
-    @T.prim_func
-    def main_no_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
-    ):
+    else:
         with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=threads) as (bx, by):
             Q_local = T.alloc_fragment([block_H, dim], dtype)
             Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
@@ -196,10 +198,7 @@ def flashmla_decode(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, 
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, Output[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :])
 
-    if num_split > 1:
-        return main_split
-    else:
-        return main_no_split
+    return Output
 
 
 def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
@@ -261,13 +260,21 @@ if __name__ == "__main__":
 
     print(f"Using {batch=}, {heads=}, {kv_heads=}, {kv_ctx=}, {dim=}, {pe_dim=}")
 
+    dtype = torch.float16
+    Q = torch.randn(batch, heads, dim, dtype=dtype, device="cuda")
+    Q_pe = torch.randn(batch, heads, pe_dim, dtype=dtype, device="cuda")
+    KV = torch.randn(batch, kv_ctx, kv_heads, dim, dtype=dtype, device="cuda")
+    K_pe = torch.randn(batch, kv_ctx, kv_heads, pe_dim, dtype=dtype, device="cuda")
+
     if enable_autotune:
-        kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim)
+        result = flashmla_decode(Q, Q_pe, KV, K_pe)
     else:
-        kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, threads=threads)
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+        result = flashmla_decode(Q, Q_pe, KV, K_pe, block_N=BLOCK_N, block_H=BLOCK_H, num_split=num_split, threads=threads)
+
+    compiled = flashmla_decode.compile(Q, Q_pe, KV, K_pe, block_N=BLOCK_N, block_H=BLOCK_H, num_split=num_split, threads=threads)
+    profiler = compiled.get_profiler()
     input_tensors = profiler._get_inputs()
-    tilelang_output = kernel(*input_tensors)
+    tilelang_output = compiled(*input_tensors)
     ref_output = ref_program(*input_tensors)
     torch.testing.assert_close(tilelang_output, ref_output, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)

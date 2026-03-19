@@ -9,52 +9,52 @@ dtype = T.bfloat16
 accum_dtype = T.float32
 
 
-@tilelang.jit(out_idx=[2, 3])
-def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
+@tilelang.jit
+def group_per_split_token_cast_to_fp8(X, batch_sizes, M_max: int = 2048, blk_m: int = 8):
     group_size = 128
     fp8_min = -448.0
     fp8_max = 448.0
 
-    @T.prim_func
-    def group_per_split_token_cast(
-        X: T.Tensor((M, N), dtype),
-        batch_sizes: T.Tensor((BG,), T.int32),
-        X_fp8: T.Tensor((BG, M_max, N), T.float8_e4m3fn),
-        X_amax: T.Tensor((BG, M_max, T.ceildiv(N, group_size)), accum_dtype),
-    ):
-        with T.Kernel(T.ceildiv(M_max, blk_m), T.ceildiv(N, group_size), BG, threads=128) as (bx, by, bz):
-            row = bx
-            row_g_id = by
-            bg = bz
-            y_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
-            y_amax_local = T.alloc_fragment((blk_m,), accum_dtype)
-            y_s_local = T.alloc_fragment((blk_m,), accum_dtype)
-            y_q_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
-            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
-            row_offset = T.alloc_var(dtype=T.int32)
+    M, N = T.const("M N")
+    BG = T.const("BG")
+    X: T.Tensor[[M, N], dtype]
+    batch_sizes: T.Tensor[[BG], T.int32]
+    X_fp8 = T.empty([BG, M_max, N], T.float8_e4m3fn)
+    X_amax = T.empty([BG, M_max, T.ceildiv(N, group_size)], accum_dtype)
 
-            row_offset = 0
-            for i in T.serial(bg):
-                row_offset += batch_sizes[i]
+    with T.Kernel(T.ceildiv(M_max, blk_m), T.ceildiv(N, group_size), BG, threads=128) as (bx, by, bz):
+        row = bx
+        row_g_id = by
+        bg = bz
+        y_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
+        y_amax_local = T.alloc_fragment((blk_m,), accum_dtype)
+        y_s_local = T.alloc_fragment((blk_m,), accum_dtype)
+        y_q_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
+        y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), T.float8_e4m3fn)
+        row_offset = T.alloc_var(dtype=T.int32)
 
-            T.copy(
-                X[row_offset + row * blk_m : row_offset + (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size],
-                y_local,
-            )
-            T.reduce_absmax(y_local, y_amax_local, dim=1)
-            for i in T.Parallel(blk_m):
-                y_amax_local[i] = T.max(y_amax_local[i], 1e-4)
-                y_s_local[i] = T.if_then_else(row * blk_m + i < batch_sizes[bg], y_amax_local[i] / fp8_max, 0)
-            for i, j in T.Parallel(blk_m, group_size):
-                y_q_local[i, j] = T.clamp(y_local[i, j] / y_s_local[i], fp8_min, fp8_max)
-            T.copy(y_q_local, y_q_local_fp8)
-            for i, j in T.Parallel(blk_m, group_size):
-                y_q_local_fp8[i, j] = T.if_then_else(row * blk_m + i < batch_sizes[bg], y_q_local[i, j], 0)
-            for i in T.Parallel(blk_m):
-                X_amax[bg, row * blk_m + i, row_g_id] = y_s_local[i]
-            T.copy(y_q_local_fp8, X_fp8[bg, row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size])
+        row_offset = 0
+        for i in T.serial(bg):
+            row_offset += batch_sizes[i]
 
-    return group_per_split_token_cast
+        T.copy(
+            X[row_offset + row * blk_m : row_offset + (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size],
+            y_local,
+        )
+        T.reduce_absmax(y_local, y_amax_local, dim=1)
+        for i in T.Parallel(blk_m):
+            y_amax_local[i] = T.max(y_amax_local[i], 1e-4)
+            y_s_local[i] = T.if_then_else(row * blk_m + i < batch_sizes[bg], y_amax_local[i] / fp8_max, 0)
+        for i, j in T.Parallel(blk_m, group_size):
+            y_q_local[i, j] = T.clamp(y_local[i, j] / y_s_local[i], fp8_min, fp8_max)
+        T.copy(y_q_local, y_q_local_fp8)
+        for i, j in T.Parallel(blk_m, group_size):
+            y_q_local_fp8[i, j] = T.if_then_else(row * blk_m + i < batch_sizes[bg], y_q_local[i, j], 0)
+        for i in T.Parallel(blk_m):
+            X_amax[bg, row * blk_m + i, row_g_id] = y_s_local[i]
+        T.copy(y_q_local_fp8, X_fp8[bg, row * blk_m : (row + 1) * blk_m, row_g_id * group_size : (row_g_id + 1) * group_size])
+
+    return X_fp8, X_amax
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -171,11 +171,10 @@ def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
     print("batch_sizes:", batch_sizes)
     print("M_max:", M_max)
 
-    kernel = group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m)
-    print(kernel.get_kernel_source())
-    # profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    x_fp8, x_amax = group_per_split_token_cast_to_fp8(x, batch_sizes, M_max, blk_m)
+    print(group_per_split_token_cast_to_fp8.compile(x, batch_sizes, M_max, blk_m).get_kernel_source())
+    # profiler = group_per_split_token_cast_to_fp8.compile(x, batch_sizes, M_max, blk_m).get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
-    x_fp8, x_amax = kernel(x, batch_sizes)
     x_fp8_ref, x_amax_ref = ref_program(x, batch_sizes)
 
     torch_assert_close(x_fp8.to(torch.float32), x_fp8_ref.to(torch.float32), rtol=0.01, atol=0.01)
@@ -185,7 +184,7 @@ def main(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
     from tilelang.profiler import do_bench
 
     def run_tilelang():
-        x_fp8_tilelang_, x_amax_tilelang_ = kernel(x, batch_sizes)
+        x_fp8_tilelang_, x_amax_tilelang_ = group_per_split_token_cast_to_fp8(x, batch_sizes, M_max, blk_m)
         return x_fp8_tilelang_, x_amax_tilelang_
 
     def run_torch():
@@ -213,9 +212,7 @@ def run_regression_perf(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
     batch_sizes = torch.tensor(batch_sizes, device="cuda", dtype=torch.int32)
     M_max = int(ceil_div(batch_sizes.max(), 128) * 128)
 
-    kernel = group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m)
-
-    x_fp8, x_amax = kernel(x, batch_sizes)
+    x_fp8, x_amax = group_per_split_token_cast_to_fp8(x, batch_sizes, M_max, blk_m)
     x_fp8_ref, x_amax_ref = ref_program(x, batch_sizes)
 
     torch_assert_close(x_fp8.to(torch.float32), x_fp8_ref.to(torch.float32), rtol=0.01, atol=0.01)
@@ -224,7 +221,7 @@ def run_regression_perf(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
     from tilelang.profiler import do_bench
 
     def run_tilelang():
-        kernel(x, batch_sizes)
+        group_per_split_token_cast_to_fp8(x, batch_sizes, M_max, blk_m)
 
     return do_bench(run_tilelang, backend="cupti")
 

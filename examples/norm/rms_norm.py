@@ -33,30 +33,30 @@ def rms_norm_splitk(M, N, blk_m, blk_k):
     return main
 
 
-@tilelang.jit(out_idx=[-1], pass_configs={"tl.disable_tma_lower": True})
-def rms_norm(M, N, blk_m):
-    dtype = T.float
+@tilelang.jit(pass_configs={"tl.disable_tma_lower": True})
+def rms_norm(A, blk_m: int = 1):
+    M, N = T.const("M N")
+    A: T.Tensor[[M, N], T.float]
+    B = T.empty([M, N], T.float)
 
-    @T.prim_func
-    def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
-        with T.Kernel(T.ceildiv(M, blk_m), threads=128) as bx:
-            A_shared = T.alloc_shared((blk_m, N), dtype)
-            A_pow_local = T.alloc_fragment((blk_m, N), dtype)
-            A_local = T.alloc_fragment((blk_m, N), dtype)
-            A_powsum = T.alloc_fragment((blk_m,), dtype)
+    with T.Kernel(T.ceildiv(M, blk_m), threads=128) as bx:
+        A_shared = T.alloc_shared((blk_m, N), T.float)
+        A_pow_local = T.alloc_fragment((blk_m, N), T.float)
+        A_local = T.alloc_fragment((blk_m, N), T.float)
+        A_powsum = T.alloc_fragment((blk_m,), T.float)
 
-            T.copy(A[bx * blk_m : (bx + 1) * blk_m, :], A_shared)
-            T.copy(A_shared, A_local)
-            for i, j in T.Parallel(blk_m, N):
-                A_pow_local[i, j] = A_local[i, j] * A_local[i, j]
-            T.reduce_sum(A_pow_local, A_powsum, dim=1)
-            for i in T.Parallel(blk_m):
-                A_powsum[i] = T.rsqrt(A_powsum[i] / N + 1e-12)
-            for i, j in T.Parallel(blk_m, N):
-                A_local[i, j] *= A_powsum[i]
-            T.copy(A_local, B[bx * blk_m : (bx + 1) * blk_m, :])
+        T.copy(A[bx * blk_m : (bx + 1) * blk_m, :], A_shared)
+        T.copy(A_shared, A_local)
+        for i, j in T.Parallel(blk_m, N):
+            A_pow_local[i, j] = A_local[i, j] * A_local[i, j]
+        T.reduce_sum(A_pow_local, A_powsum, dim=1)
+        for i in T.Parallel(blk_m):
+            A_powsum[i] = T.rsqrt(A_powsum[i] / N + 1e-12)
+        for i, j in T.Parallel(blk_m, N):
+            A_local[i, j] *= A_powsum[i]
+        T.copy(A_local, B[bx * blk_m : (bx + 1) * blk_m, :])
 
-    return main
+    return B
 
 
 def ref_program(x):
@@ -65,7 +65,8 @@ def ref_program(x):
 
 if __name__ == "__main__":
     M, N, blk_m, blk_k = 8192, 8192, 1, 512
-    kernel = rms_norm(M, N, blk_m)
+    a = torch.randn(M, N, dtype=torch.float32, device="cuda")
+    kernel = rms_norm.compile(a, blk_m=blk_m)
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     print("All checks pass.")

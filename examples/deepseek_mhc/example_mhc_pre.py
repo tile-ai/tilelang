@@ -31,19 +31,27 @@ def mhc_pre_big_fuse_tilelang(
     hc_mult: int = 4,
 ):
     """Deeply fused kernels, everything other than gemm & sqrsum in mHC pre block."""
-    num_tokens = T.dynamic("num_tokens")
+    n_splits_d, num_tokens, hc_mult3_d = T.const("n_splits_d num_tokens hc_mult3_d")
+    _, _ = T.const("_ _")
+    hc_scale_len = T.const("hc_scale_len")
+    hc_base_len = T.const("hc_base_len")
+    _, hc_mult_r, hidden_r = T.const("_ hc_mult_r hidden_r")
+    _, hc_mult_p = T.const("_ hc_mult_p")
+    _, hc_mult2_c = T.const("_ hc_mult2_c")
+    _, hidden_l = T.const("_ hidden_l")
+
     hc_mult3 = hc_mult * (2 + hc_mult)
     hidden_block = math.gcd(512, hidden_size)
 
-    gemm_out_mul: T.Tensor[[n_splits, num_tokens, hc_mult3], T.float32]
-    gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]
-    hc_scale: T.Tensor[[3], T.float32]
-    hc_base: T.Tensor[[hc_mult3], T.float32]
-    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]
+    gemm_out_mul: T.Tensor[[n_splits_d, num_tokens, hc_mult3_d], T.float32]
+    gemm_out_sqrsum: T.Tensor[[n_splits_d, num_tokens], T.float32]
+    hc_scale: T.Tensor[[hc_scale_len], T.float32]
+    hc_base: T.Tensor[[hc_base_len], T.float32]
+    residual: T.Tensor[[num_tokens, hc_mult_r, hidden_r], T.bfloat16]
     # outputs
-    post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]
-    comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]
-    layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]
+    post_mix: T.Tensor[[num_tokens, hc_mult_p], T.float32]
+    comb_mix: T.Tensor[[num_tokens, hc_mult2_c], T.float32]
+    layer_input: T.Tensor[[num_tokens, hidden_l], T.bfloat16]
 
     with T.Kernel(num_tokens, threads=96) as i:
         ##################################################################
@@ -145,16 +153,20 @@ def mhc_pre_gemm_sqrsum_tilelang(
     hc_hidden_size: int,
     token_block: int = 32,
     hidden_block: int = 256,
-) -> tilelang.JITKernel:
+):
     """Not highly optimized TileLang implementation of fused gemm and sqrsum in mHC pre block."""
     assert hc_mult3 <= 32  # should be 24 usually
-    num_tokens = T.dynamic("num_tokens")
+    num_tokens, hc_hidden_d = T.const("num_tokens hc_hidden_d")
+    hc_mult3_d, hc_hidden_d2 = T.const("hc_mult3_d hc_hidden_d2")
+    num_tokens_o, hc_mult3_o = T.const("num_tokens_o hc_mult3_o")
+    num_tokens_s = T.const("num_tokens_s")
+
     assert hc_hidden_size % hidden_block == 0
 
-    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)
-    fn: T.Tensor((hc_mult3, hc_hidden_size), T.float32)
-    out: T.Tensor((num_tokens, hc_mult3), T.float32)
-    sqrsum: T.Tensor((num_tokens), T.float32)
+    x: T.Tensor[[num_tokens, hc_hidden_d], T.bfloat16]
+    fn: T.Tensor[[hc_mult3_d, hc_hidden_d2], T.float32]
+    out: T.Tensor[[num_tokens_o, hc_mult3_o], T.float32]
+    sqrsum: T.Tensor[[num_tokens_s], T.float32]
 
     with T.Kernel(T.ceildiv(num_tokens, token_block)) as px:
         out_frag = T.alloc_fragment((token_block, 32), T.float32)

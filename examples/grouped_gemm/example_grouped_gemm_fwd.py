@@ -36,55 +36,67 @@ def torch_gmm(a, b, batch_sizes, batch_offsets_tensor, trans_b=False):
     return output
 
 
-@tilelang.jit(out_idx=[2])
-def grouped_gemm(batch_sizes_list, K, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype=T.float16):
+@tilelang.jit
+def grouped_gemm(
+    A,
+    B,
+    batch_sizes,
+    batch_offsets,
+    batch_padded_offsets,
+    batch_sizes_list: tuple = (),
+    block_M: int = 64,
+    block_N: int = 64,
+    block_K: int = 64,
+    num_stages: int = 2,
+    threads: int = 128,
+    dtype: T.dtype = T.float16,
+):
     """
     args:
         a (torch.Tensor): Input tensor of shape (M, K).
         b (torch.Tensor): Input tensor of shape (G, K, N).
     """
-    batch_sum = sum(batch_sizes_list)
-    batch_count = len(batch_sizes_list)
+    batch_sum, K = T.const("batch_sum K")
+    batch_count, N = T.const("batch_count N")
+    A: T.Tensor[[batch_sum, K], dtype]
+    B: T.Tensor[[batch_count, K, N], dtype]
+    batch_sizes: T.Tensor[[batch_count], T.int32]
+    batch_offsets: T.Tensor[[batch_count], T.int32]
+    batch_padded_offsets: T.Tensor[[batch_count], T.int32]
+
     accum_dtype = T.float32
     total_m_blocks = sum((size + block_M - 1) // block_M for size in batch_sizes_list)
 
-    @T.prim_func
-    def kernel(
-        A: T.Tensor([batch_sum, K], dtype),  # type: ignore
-        B: T.Tensor([batch_count, K, N], dtype),  # type: ignore
-        C: T.Tensor([batch_sum, N], dtype),  # type: ignore
-        batch_sizes: T.Tensor([batch_count], T.int32),  # type: ignore
-        batch_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
-        batch_padded_offsets: T.Tensor([batch_count], T.int32),  # type: ignore
-    ):
-        with T.Kernel(total_m_blocks, T.ceildiv(N, block_N), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared([block_M, block_K], dtype)
-            B_shared = T.alloc_shared([block_K, block_N], dtype)
-            C_local = T.alloc_fragment([block_M, block_N], accum_dtype)
-            cur_batch_idx = T.alloc_var(dtype=T.int32)
-            cur_batch_size = T.alloc_var(dtype=T.int32)
+    C = T.empty([batch_sum, N], dtype)
 
-            m_start_padded = bx * block_M
+    with T.Kernel(total_m_blocks, T.ceildiv(N, block_N), threads=threads) as (bx, by):
+        A_shared = T.alloc_shared([block_M, block_K], dtype)
+        B_shared = T.alloc_shared([block_K, block_N], dtype)
+        C_local = T.alloc_fragment([block_M, block_N], accum_dtype)
+        cur_batch_idx = T.alloc_var(dtype=T.int32)
+        cur_batch_size = T.alloc_var(dtype=T.int32)
 
-            for i in range(batch_count):
-                in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
-                cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)
+        m_start_padded = bx * block_M
 
-            cur_batch_size = batch_sizes[cur_batch_idx]
-            m_start = m_start_padded - batch_padded_offsets[cur_batch_idx] + batch_offsets[cur_batch_idx]
-            actual_rows = T.max(0, T.min(block_M, cur_batch_size + batch_padded_offsets[cur_batch_idx] - m_start_padded))
+        for i in range(batch_count):
+            in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
+            cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)
 
-            T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(A[m_start : m_start + block_M, k * block_K : (k + 1) * block_K], A_shared)
-                T.copy(B[cur_batch_idx, k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N], B_shared)
-                T.gemm(A_shared, B_shared, C_local)
+        cur_batch_size = batch_sizes[cur_batch_idx]
+        m_start = m_start_padded - batch_padded_offsets[cur_batch_idx] + batch_offsets[cur_batch_idx]
+        actual_rows = T.max(0, T.min(block_M, cur_batch_size + batch_padded_offsets[cur_batch_idx] - m_start_padded))
 
-            for i, j in T.Parallel(block_M, block_N):
-                if i < actual_rows:
-                    C[m_start + i, by * block_N + j] = C_local[i, j]
+        T.clear(C_local)
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            T.copy(A[m_start : m_start + block_M, k * block_K : (k + 1) * block_K], A_shared)
+            T.copy(B[cur_batch_idx, k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N], B_shared)
+            T.gemm(A_shared, B_shared, C_local)
 
-    return kernel
+        for i, j in T.Parallel(block_M, block_N):
+            if i < actual_rows:
+                C[m_start + i, by * block_N + j] = C_local[i, j]
+
+    return C
 
 
 def construct_inputs(batch_sizes_list, K, M, trans_b, padding_M, device, dtype):
@@ -111,14 +123,24 @@ def construct_inputs(batch_sizes_list, K, M, trans_b, padding_M, device, dtype):
 def run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M, block_N, block_K, trans_b, num_stages=2, threads=128, profile=False):
     padding_M = block_M
     batch_sum = sum(batch_sizes_list)
-    kernel = grouped_gemm(tuple(batch_sizes_list), K, M, block_M, block_N, block_K, num_stages, threads)
-    # print(kernel.get_kernel_source())
 
     device = torch.device("cuda")
     dtype = torch.float16
 
     A, B, C, batch_sizes, batch_offsets, batch_padded_offsets = construct_inputs(batch_sizes_list, K, M, trans_b, padding_M, device, dtype)
-    out = kernel(A, B, batch_sizes, batch_offsets, batch_padded_offsets)
+    out = grouped_gemm(
+        A,
+        B,
+        batch_sizes,
+        batch_offsets,
+        batch_padded_offsets,
+        batch_sizes_list=tuple(batch_sizes_list),
+        block_M=block_M,
+        block_N=block_N,
+        block_K=block_K,
+        num_stages=num_stages,
+        threads=threads,
+    )
     ref_output = torch_gmm(A, B, batch_sizes, batch_offsets, trans_b)
     # print(out)
     # print(ref_output)
@@ -128,8 +150,24 @@ def run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M, block_N, block_K,
         print("❌ Tilelang and Torch mismatch")
 
     if profile:
-        profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
-        latency = profiler.do_bench(warmup=500, input_tensors=[A, B, batch_sizes, batch_offsets, batch_padded_offsets])
+        from tilelang.profiler import do_bench
+
+        latency = do_bench(
+            lambda: grouped_gemm(
+                A,
+                B,
+                batch_sizes,
+                batch_offsets,
+                batch_padded_offsets,
+                batch_sizes_list=tuple(batch_sizes_list),
+                block_M=block_M,
+                block_N=block_N,
+                block_K=block_K,
+                num_stages=num_stages,
+                threads=threads,
+            ),
+            backend="cupti",
+        )
         print(f"Latency: {latency} ms")
         print(f"TFlops: {batch_sum * K * M * 2 / latency * 1e-9} TFlops")
 

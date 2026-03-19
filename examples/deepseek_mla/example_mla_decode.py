@@ -8,12 +8,29 @@ import argparse
 
 
 @tilelang.jit(
-    out_idx=[6],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, softmax_scale):
+def flashattn(
+    Q,
+    Q_pe,
+    KV,
+    K_pe,
+    block_N: int = 64,
+    block_H: int = 64,
+    num_split: int = 1,
+    softmax_scale: float = 1.0,
+):
+    batch, heads, dim = T.const("batch heads dim")
+    _, _, pe_dim = T.const("_ _ pe_dim")
+    _, seqlen_kv, kv_head_num, _ = T.const("_ seqlen_kv kv_head_num _")
+
+    Q: T.Tensor[[batch, heads, dim], T.float16]
+    Q_pe: T.Tensor[[batch, heads, pe_dim], T.float16]
+    KV: T.Tensor[[batch, seqlen_kv, kv_head_num, dim], T.float16]
+    K_pe: T.Tensor[[batch, seqlen_kv, kv_head_num, pe_dim], T.float16]
+
     scale = float(softmax_scale * 1.44269504)  # log2(e)
     dtype = T.float16
     accum_dtype = T.float32
@@ -21,16 +38,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     VALID_BLOCK_H = min(block_H, kv_group_num)
     assert kv_head_num == 1, "kv_head_num must be 1"
 
-    @T.prim_func
-    def main_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
-    ):
+    glse = T.empty([batch, heads, num_split], dtype)
+    Output_partial = T.empty([batch, heads, num_split, dim], dtype)
+    Output = T.empty([batch, heads, dim], dtype)
+
+    if num_split > 1:
         # flash_attn_split
         with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bid, hid, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
@@ -118,17 +130,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     o_accum_local[i] += po_local[i] * scale_local
             for i in T.Parallel(dim):
                 Output[bz, hid, i] = o_accum_local[i]
-
-    @T.prim_func
-    def main_no_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
-    ):
+    else:
         with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=256) as (hid, bid):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
@@ -179,10 +181,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             T.copy(acc_o, O_shared)
             T.copy(O_shared, Output[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :])
 
-    if num_split > 1:
-        return main_split
-    else:
-        return main_no_split
+    return Output
 
 
 def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
@@ -237,8 +236,22 @@ def main(
     num_split = 1
     softmax_scale = (dim + pe_dim) ** -0.5
 
-    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale)
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    dtype = torch.float16
+    Q = torch.randn(batch, heads, dim, dtype=dtype, device="cuda")
+    Q_pe = torch.randn(batch, heads, pe_dim, dtype=dtype, device="cuda")
+    KV = torch.randn(batch, kv_ctx, kv_heads, dim, dtype=dtype, device="cuda")
+    K_pe = torch.randn(batch, kv_ctx, kv_heads, pe_dim, dtype=dtype, device="cuda")
+
+    profiler = flashattn.compile(
+        Q,
+        Q_pe,
+        KV,
+        K_pe,
+        block_N=BLOCK_N,
+        block_H=BLOCK_H,
+        num_split=num_split,
+        softmax_scale=softmax_scale,
+    ).get_profiler()
     profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
@@ -258,8 +271,22 @@ def run_regression_perf(
     num_split = 1
     softmax_scale = (dim + pe_dim) ** -0.5
 
-    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale)
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    dtype = torch.float16
+    Q = torch.randn(batch, heads, dim, dtype=dtype, device="cuda")
+    Q_pe = torch.randn(batch, heads, pe_dim, dtype=dtype, device="cuda")
+    KV = torch.randn(batch, kv_ctx, kv_heads, dim, dtype=dtype, device="cuda")
+    K_pe = torch.randn(batch, kv_ctx, kv_heads, pe_dim, dtype=dtype, device="cuda")
+
+    profiler = flashattn.compile(
+        Q,
+        Q_pe,
+        KV,
+        K_pe,
+        block_N=BLOCK_N,
+        block_H=BLOCK_H,
+        num_split=num_split,
+        softmax_scale=softmax_scale,
+    ).get_profiler()
     profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
     return profiler.do_bench(backend="cupti")
 

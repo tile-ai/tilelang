@@ -8,12 +8,35 @@ import math
 
 
 @tilelang.jit(
-    out_idx=[8],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split, block_size, softmax_scale=None):
+def mla_decode_tilelang(
+    Q,
+    Q_pe,
+    KV,
+    K_pe,
+    block_table,
+    cache_seqlens,
+    block_N: int = 64,
+    block_H: int = 64,
+    num_split: int = 1,
+    block_size: int = 64,
+    softmax_scale: float = None,
+):
+    batch, h_q, dv = T.const("batch h_q dv")
+    batch_x_max_seqlen_pad, h_kv, _ = T.const("batch_x_max_seqlen_pad h_kv _")
+    _, _, _, dpe = T.const("_ _ _ dpe")
+    _, num_blocks_per_seq = T.const("_ num_blocks_per_seq")
+
+    Q: T.Tensor[[batch, h_q, dv], T.float16]
+    Q_pe: T.Tensor[[batch, h_q, dpe], T.float16]
+    KV: T.Tensor[[batch_x_max_seqlen_pad, h_kv, dv], T.float16]
+    K_pe: T.Tensor[[batch_x_max_seqlen_pad, h_kv, dpe], T.float16]
+    block_table: T.Tensor[[batch, num_blocks_per_seq], T.int32]
+    cache_seqlens: T.Tensor[[batch], T.int32]
+
     if softmax_scale is None:
         softmax_scale = (dv + dpe) ** -0.5
     scale = float(softmax_scale * 1.44269504)  # log2(e)
@@ -24,18 +47,11 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
     assert h_kv == 1, "h_kv must be 1"
     assert block_size >= block_N and block_size % block_N == 0, "block_size must be larger than block_N and a multiple of block_N"
 
-    @T.prim_func
-    def main_split(
-        Q: T.Tensor([batch, h_q, dv], dtype),
-        Q_pe: T.Tensor([batch, h_q, dpe], dtype),
-        KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
-        K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
-        block_table: T.Tensor([batch, max_seqlen_pad // block_size], T.int32),
-        cache_seqlens: T.Tensor([batch], T.int32),
-        glse: T.Tensor([batch, h_q, num_split], dtype),
-        Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
-        Output: T.Tensor([batch, h_q, dv], dtype),
-    ):
+    glse = T.empty([batch, h_q, num_split], dtype)
+    Output_partial = T.empty([batch, h_q, num_split, dv], dtype)
+    Output = T.empty([batch, h_q, dv], dtype)
+
+    if num_split > 1:
         # split kv
         with T.Kernel(batch, h_q // min(block_H, kv_group_num), num_split, threads=256) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_H, dv], dtype)
@@ -129,19 +145,7 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
                     o_accum_local[i] += po_local[i] * scale_local
             for i in T.Parallel(dv):
                 Output[bz, by, i] = o_accum_local[i]
-
-    @T.prim_func
-    def main_no_split(
-        Q: T.Tensor([batch, h_q, dv], dtype),
-        Q_pe: T.Tensor([batch, h_q, dpe], dtype),
-        KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
-        K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
-        block_table: T.Tensor([batch, max_seqlen_pad // block_size], T.int32),
-        cache_seqlens: T.Tensor([batch], T.int32),
-        glse: T.Tensor([batch, h_q, num_split], dtype),
-        Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
-        Output: T.Tensor([batch, h_q, dv], dtype),
-    ):
+    else:
         with T.Kernel(batch, h_q // min(block_H, kv_group_num), threads=256) as (bx, by):
             Q_shared = T.alloc_shared([block_H, dv], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
@@ -199,10 +203,7 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
             T.copy(acc_o, O_shared)
             T.copy(O_shared, Output[bx, by * VALID_BLOCK_H : (by + 1) * VALID_BLOCK_H, :])
 
-    if num_split > 1:
-        return main_split
-    else:
-        return main_no_split
+    return Output
 
 
 def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
@@ -266,25 +267,36 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
     BLOCK_H = min(64, h_q // h_kv)
     softmax_scale = d**-0.5
 
-    out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
-    glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
-    kernel = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H, num_kv_splits, block_size, softmax_scale)
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    out = mla_decode_tilelang(
+        q_nope.view(-1, h_q, dv),
+        q_pe.view(-1, h_q, dpe),
+        blocked_k_nope.view(-1, h_kv, dv),
+        blocked_k_pe.view(-1, h_kv, dpe),
+        block_table,
+        cache_seqlens,
+        block_N=BLOCK_N,
+        block_H=BLOCK_H,
+        num_split=num_kv_splits,
+        block_size=block_size,
+        softmax_scale=softmax_scale,
+    )
 
     def flash_mla_tilelang():
-        out = profiler.func(
+        return mla_decode_tilelang(
             q_nope.view(-1, h_q, dv),
             q_pe.view(-1, h_q, dpe),
             blocked_k_nope.view(-1, h_kv, dv),
             blocked_k_pe.view(-1, h_kv, dpe),
             block_table,
             cache_seqlens,
-            glse,
-            out_partial,
-        )
-        return out.view([b, s_q, h_q, dv])
+            block_N=BLOCK_N,
+            block_H=BLOCK_H,
+            num_split=num_kv_splits,
+            block_size=block_size,
+            softmax_scale=softmax_scale,
+        ).view([b, s_q, h_q, dv])
 
-    out_flash = flash_mla_tilelang()
+    out_flash = out.view([b, s_q, h_q, dv])
     t = do_bench(flash_mla_tilelang)
     out_ref = run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
     torch.testing.assert_close(out_flash, out_ref, rtol=0.01, atol=0.01)
