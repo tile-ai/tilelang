@@ -87,9 +87,7 @@ def test_tcgen05_gemm_dispatch_matches_sync_gemm_codegen():
         target="cuda",
     )
     async_kernel = tilelang.compile(
-        _make_async_tcgen05_kernel(
-            lambda A, B, C, mbar: T.tcgen05_gemm(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True)
-        ),
+        _make_async_tcgen05_kernel(lambda A, B, C, mbar: T.tcgen05_gemm(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True)),
         target="cuda",
     )
 
