@@ -109,15 +109,31 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc,
   if (acc->dtype != rhs->dtype) {
     rhs = Cast(acc->dtype, rhs);
   }
+  bool nan_propagate = true;
+  if (tvm::transform::PassContext::Current().defined()) {
+    nan_propagate = tvm::transform::PassContext::Current()
+                        ->GetConfig<Bool>(kReduceMaxMinNanPropagate, Bool(true))
+                        .value();
+  }
+  const bool is_fp16_or_bf16 = acc.dtype().is_float16() || acc.dtype().is_bfloat16();
   if (type->isSum()) {
     return acc + rhs;
   } else if (type->isAbsSum()) {
     return acc + Max(rhs, -rhs);
   } else if (type->isMax()) {
+    if (!nan_propagate && is_fp16_or_bf16) {
+      return Call(acc.dtype(), tl::max_nan(), {acc, rhs});
+    }
     return Max(acc, rhs);
   } else if (type->isMin()) {
+    if (!nan_propagate && is_fp16_or_bf16) {
+      return Call(acc.dtype(), tl::min_nan(), {acc, rhs});
+    }
     return Min(acc, rhs);
   } else if (type->isAbsMax()) {
+    if (!nan_propagate && is_fp16_or_bf16) {
+      return Call(acc.dtype(), tl::max_nan(), {acc, tvm::abs(rhs)});
+    }
     return Max(acc, tvm::abs(rhs));
   } else if (type->isBitAnd()) {
     return acc & rhs;

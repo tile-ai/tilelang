@@ -51,7 +51,7 @@ struct MaxOpNan {
   }
 
   TL_DEVICE bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {
-    return bfloat16_t(__hmax(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+    return bfloat16_t(__hmax_nan(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
   }
 
   TL_DEVICE half_t operator()(half_t const &x, half_t const &y) {
@@ -80,7 +80,7 @@ struct MinOpNan {
   }
 
   TL_DEVICE bfloat16_t operator()(bfloat16_t const &x, bfloat16_t const &y) {
-    return bfloat16_t(__hmin(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+    return bfloat16_t(__hmin_nan(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
   }
 
   TL_DEVICE half_t operator()(half_t const &x, half_t const &y) {

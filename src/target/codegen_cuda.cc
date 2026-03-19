@@ -1442,17 +1442,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
   // TODO(wt): Consider vectorized reduction and impl for other dtypes
   DataType t = op->dtype;
+  bool nan_propagate = true;
+  if (tvm::transform::PassContext::Current().defined()) {
+    nan_propagate = tvm::transform::PassContext::Current()
+                        ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
+                        .value();
+  }
+  const char *min_f16 = nan_propagate ? "__hmin" : "__hmin_nan";
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
-    os << "cutlass::bfloat16_t(__hmin("
+    os << "cutlass::bfloat16_t(" << min_f16 << "("
        << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
        << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
     return;
   }
 
   if (t.is_float16() && t.is_scalar()) {
-    os << "cutlass::half_t(__hmin("
+    os << "cutlass::half_t(" << min_f16 << "("
        << "(" << PrintExpr(op->a) << ").to_half(), "
        << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
@@ -1482,7 +1489,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   const char *max_f16 = nan_propagate ? "__hmax" : "__hmax_nan";
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
-    os << "cutlass::bfloat16_t(__hmax("
+    os << "cutlass::bfloat16_t(" << max_f16 << "("
        << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
        << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
     return;
@@ -1746,6 +1753,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+  if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
+    ICHECK_EQ(op->args.size(), 2);
+    const bool is_max = op->op.same_as(tl::max_nan());
+    const DataType t = op->dtype;
+    const char *f16_intrin = is_max ? "__hmax_nan" : "__hmin_nan";
+    const char *fallback = is_max ? "cutlass::fast_max" : "cutlass::fast_min";
+
+    if (t.is_bfloat16() && t.is_scalar()) {
+      os << "cutlass::bfloat16_t(" << f16_intrin << "("
+         << "(" << PrintExpr(op->args[0]) << ").to_nv_bfloat16(), "
+         << "(" << PrintExpr(op->args[1]) << ").to_nv_bfloat16()))";
+      return;
+    }
+    if (t.is_float16() && t.is_scalar()) {
+      os << "cutlass::half_t(" << f16_intrin << "("
+         << "(" << PrintExpr(op->args[0]) << ").to_half(), "
+         << "(" << PrintExpr(op->args[1]) << ").to_half()))";
+      return;
+    }
+    os << fallback << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+    return;
+  }
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
