@@ -571,31 +571,14 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     auto fragment = T.layout_map[buffer].as<Fragment>().value();
     std::ostringstream oss;
     bool success = true;
-
-    auto DumpFragmentDetails = [&](const Fragment &frag, const char *name) {
-      oss << "    " << name << " " << frag->DebugOutput() << "\n";
-      oss << "      thread_range: " << frag->ThreadRange() << "\n";
-      oss << "      forward_thread_raw: " << frag->GetForwardThread() << "\n";
-      // Normalize mappings with common variables to avoid placeholder/AST
-      // equality masking semantic differences.
-      Array<PrimExpr> common_vars;
-      for (size_t i = 0; i < frag->InputDim(); i++) {
-        common_vars.push_back(Var("_cmp_v" + std::to_string(i)));
-      }
-      Var common_rep("_cmp_rep");
-      oss << "      forward_index_norm: " << frag->Forward(common_vars) << "\n";
-      oss << "      forward_thread_norm: "
-          << frag->ForwardThread(common_vars, common_rep) << "\n";
-    };
-
     if (access.is_read &&
         !ProveFragmentContains(candidate, fragment, vars, access.indices,
                                analyzer_, check_forward_index)) {
       if (throw_on_error) {
         oss << "Layout infer conflict between " << buffer << " and "
-            << source_buffer << " in T.Parallel loop:" << '\n';
-        DumpFragmentDetails(candidate, "loop");
-        DumpFragmentDetails(fragment, "fragment");
+            << source_buffer << " in T.Parallel loop:" << '\n'
+            << "    loop " << candidate->DebugOutput() << '\n'
+            << "    fragment " << fragment->DebugOutput() << '\n';
       }
       success = false;
     }
@@ -604,9 +587,9 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
                                analyzer_, check_forward_index)) {
       if (throw_on_error) {
         oss << "Layout infer conflict between " << buffer << " and "
-            << source_buffer << " in T.Parallel loop:" << '\n';
-        DumpFragmentDetails(candidate, "loop");
-        DumpFragmentDetails(fragment, "fragment");
+            << source_buffer << " in T.Parallel loop:" << '\n'
+            << "    loop " << candidate->DebugOutput() << '\n'
+            << "    fragment " << fragment->DebugOutput() << '\n';
       }
       success = false;
     }
