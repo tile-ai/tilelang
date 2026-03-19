@@ -717,7 +717,10 @@ class Builder(BaseBuilder):
 
     def constexpr(self, name: str, dtype: str = "int32") -> Var:
         var = tir.Var(name, dtype)
-        self.constexpr_var.add(var)
+        # Skip tracking placeholder variables (e.g., "_") as constexpr,
+        # so they don't trigger "unused constexpr" validation errors.
+        if name != "_":
+            self.constexpr_var.add(var)
         var.orig_name = name
         return var
 
@@ -920,14 +923,18 @@ def const(name: str, dtype: str = "int32") -> Var | tuple[Var, ...]:
             return builder.constexpr(name, dtype)
     elif builder.eager_jit == "phase2":
         # in stage 2, we substitute constexpr variables with actual values
+        # Placeholder "_" variables get a dummy value (discarded by caller).
+        def _lookup(n):
+            return 0 if n == "_" else builder.eager_jit_subs[n]
+
         if "," in name:
             names = re.split(r"\s*,\s*", name)
-            return tuple(builder.eager_jit_subs[n] for n in names)
+            return tuple(_lookup(n) for n in names)
         if " " in name:
             names = re.split(r"\s+", name)
-            return tuple(builder.eager_jit_subs[n] for n in names)
+            return tuple(_lookup(n) for n in names)
         else:
-            return builder.eager_jit_subs[name]
+            return _lookup(name)
 
 
 @dataclass
