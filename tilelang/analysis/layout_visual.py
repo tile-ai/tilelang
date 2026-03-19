@@ -1,3 +1,4 @@
+from typing import Optional
 import tilelang.language as T
 from tvm import tir
 from tvm.tir import PyStmtExprVisitor
@@ -23,12 +24,7 @@ def print_fragment_format(layout: T.Fragment) -> None:
     if isinstance(layout, T.Fragment):
         input_shape = layout.get_input_shape()
         output_shape = layout.get_output_shape()
-        lines = [
-            f"  Shape: {input_shape} -> {output_shape}",
-            f"  Thread: {layout.forward_thread}",
-            f"  Index:  {layout.forward_index}",
-            f"  Replicate:  {layout.replicate_size}",
-        ]
+        lines = [f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}", f"  Index:  {layout.forward_index}", f"  Replicate:  {layout.replicate_size}"]
         print("\n".join(lines))
     else:
         raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
@@ -60,8 +56,10 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
     - "png,svg": Generate multiple formats (comma-separated)
     """
 
-    def __init__(self, formats: list[str] = None):
+    def __init__(self, formats: Optional[list[str]] = None):
         super().__init__()
+        if formats == None:
+            formats = []
         self.formats_list = [f for f in formats if f != "txt"]
 
     def visit_block_(self, op: tir.Block) -> None:
