@@ -462,7 +462,7 @@ def z3_schedule_loop_python(
                 k_vars.append(k_var)
                 r_vars.append(r_var)
             offset = min(k_vars)
-        begin = begin - offset * ii_mid
+        begin = begin - offset * best_ii
         for i in range(n):
             start_time = best_model.eval(best_start_vars[i]).as_long() - offset * best_ii
             stage = best_model.eval(best_stage_vars[i]).as_long()
