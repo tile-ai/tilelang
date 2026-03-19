@@ -1808,11 +1808,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<"
                  << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
-  } else if (op->op.same_as(tl::get_mbarrier())) {
-    // get the mbarrier injected by compiler via barrier_id
-    ICHECK_EQ(op->args.size(), 1);
-    std::string barrier_id = this->PrintExpr(op->args[0]);
-    os << mbarrier_name_ + "[" + barrier_id + "]";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();

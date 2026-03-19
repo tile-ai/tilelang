@@ -394,10 +394,9 @@ private:
         this->VisitExpr(op->args[i]);
       }
     } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
-      // The mbarrier argument can be either a BufferLoad (user-allocated
-      // barrier via T.alloc_barrier) or a Call to get_mbarrier (compiler-
-      // generated inline barrier from TMA copy lowering).  Only track
-      // mbarrier→buffer dependencies for user-allocated barriers.
+      // The mbarrier argument is a BufferLoad on a shared.barrier scope
+      // buffer.  Only track mbarrier→buffer dependencies for user-allocated
+      // barriers.
       if (auto *buf_load = args[0].as<BufferLoadNode>()) {
         Buffer mbar_buf = buf_load->buffer;
         auto buffer_reads =

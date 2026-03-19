@@ -2183,15 +2183,11 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
-      // Internal mbarrier (T.copy()): allocate one per pipeline stage
-      int num_barriers = T.pipeline_num_stages;
+      // Internal mbarrier (T.copy()): allocate a single barrier slot.
+      // MultiVersionBuffer will expand it for pipelining stages.
       barrier_base_id = T.AllocMBarrier(1);
-      for (int i = 1; i < num_barriers; i++) {
-        T.AllocMBarrier(1);
-      }
-      PrimExpr mbar_idx =
-          IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-      mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+      PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
+      mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
     }
   }
 
@@ -2469,14 +2465,11 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
-      int num_barriers = T.pipeline_num_stages;
+      // Internal mbarrier (T.copy()): allocate a single barrier slot.
+      // MultiVersionBuffer will expand it for pipelining stages.
       barrier_base_id = T.AllocMBarrier(1);
-      for (int i = 1; i < num_barriers; i++) {
-        T.AllocMBarrier(1);
-      }
-      PrimExpr mbar_idx =
-          IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-      mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+      PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
+      mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
     }
   }
 
@@ -2711,14 +2704,11 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   int barrier_base_id = -1;
   PrimExpr mbar_handle;
   if (T.AllocMBarrier) {
-    int num_barriers = T.pipeline_num_stages;
+    // Allocate a single barrier slot; MultiVersionBuffer will
+    // expand it for pipelining stages.
     barrier_base_id = T.AllocMBarrier(1);
-    for (int i = 1; i < num_barriers; i++) {
-      T.AllocMBarrier(1);
-    }
-    PrimExpr mbar_idx =
-        IntImm(DataType::Int(32), barrier_base_id) + T.mbar_stage_expr;
-    mbar_handle = Call(DataType::Handle(), get_mbarrier(), {mbar_idx});
+    PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
+    mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
   }
 
   Array<PrimExpr> args;
