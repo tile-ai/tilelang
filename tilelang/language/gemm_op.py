@@ -145,10 +145,9 @@ def gemm_v1(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     k_pack: int = 1,
-    wg_wait: int = 0,
     mbar: BarrierType | None = None,
 ) -> tir.PrimExpr:
-    """GEMM v1: use op tl.gemm."""
+    """Synchronous GEMM v1: use op tl.gemm."""
     return _gemm_impl(
         "tl.tileop.gemm",
         A,
@@ -159,7 +158,7 @@ def gemm_v1(
         policy,
         clear_accum,
         k_pack,
-        wg_wait,
+        0,
         mbar,
     )
 
@@ -174,10 +173,9 @@ def gemm_v2(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     k_pack: int = 1,
-    wg_wait: int = 0,
     mbar: BarrierType | None = None,
 ) -> tir.PrimExpr:
-    """GEMM v2: use op tl.gemm_py."""
+    """Synchronous GEMM v2: use op tl.gemm_py."""
     return _gemm_impl(
         "tl.tileop.gemm_py",
         A,
@@ -188,7 +186,129 @@ def gemm_v2(
         policy,
         clear_accum,
         k_pack,
-        wg_wait,
+        0,
+        mbar,
+    )
+
+
+def wgmma_gemm_v1(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+) -> tir.PrimExpr:
+    """Explicit Hopper WGMMA GEMM without an implicit wait.
+
+    This operator forces WGMMA lowering and emits no implicit `wgmma_wait`.
+    The user must insert `T.wait_wgmma(...)` explicitly before consuming the
+    produced accumulator values.
+    """
+
+    return _gemm_impl(
+        "tl.tileop.wgmma_gemm",
+        A,
+        B,
+        C,
+        transpose_A,
+        transpose_B,
+        policy,
+        clear_accum,
+        1,
+        -1,
+        None,
+    )
+
+
+def wgmma_gemm_v2(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+) -> tir.PrimExpr:
+    """Python-lowered explicit Hopper WGMMA GEMM without an implicit wait."""
+
+    return _gemm_impl(
+        "tl.tileop.wgmma_gemm_py",
+        A,
+        B,
+        C,
+        transpose_A,
+        transpose_B,
+        policy,
+        clear_accum,
+        1,
+        -1,
+        None,
+    )
+
+
+def tcgen05_gemm_v1(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+    *,
+    mbar: BarrierType,
+) -> tir.PrimExpr:
+    """Explicit Blackwell TCGEN05 GEMM without an implicit wait.
+
+    This operator forces TCGEN5MMA lowering and emits no implicit
+    `mbarrier_wait_parity`. The user must wait on the same barrier explicitly
+    before consuming the produced TMEM values.
+    """
+    if mbar is None:
+        raise ValueError("T.tcgen05_gemm_v1() requires an mbar barrier.")
+
+    return _gemm_impl(
+        "tl.tileop.tcgen05_gemm",
+        A,
+        B,
+        C,
+        transpose_A,
+        transpose_B,
+        policy,
+        clear_accum,
+        1,
+        0,
+        mbar,
+    )
+
+
+def tcgen05_gemm_v2(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+    *,
+    mbar: BarrierType,
+) -> tir.PrimExpr:
+    """Python-lowered explicit Blackwell TCGEN05 GEMM without an implicit wait."""
+    if mbar is None:
+        raise ValueError("T.tcgen05_gemm_v2() requires an mbar barrier.")
+
+    return _gemm_impl(
+        "tl.tileop.tcgen05_gemm_py",
+        A,
+        B,
+        C,
+        transpose_A,
+        transpose_B,
+        policy,
+        clear_accum,
+        1,
+        0,
         mbar,
     )
 
@@ -202,10 +322,18 @@ def gemm(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     k_pack: int = 1,
-    wg_wait: int = 0,
     mbar: BarrierType | None = None,
 ) -> tir.PrimExpr:
     """TileLang GEMM operator.
+
+    This is the default synchronous GEMM interface. On Hopper, if the compiler
+    selects WGMMA lowering, TileLang inserts the corresponding wait implicitly.
+    On Blackwell TCGEN5MMA, TileLang inserts the corresponding
+    `mbarrier_wait_parity(...)` implicitly after issue.
+
+    For manual asynchronous scheduling, use `T.wgmma_gemm(...)` with
+    `T.wait_wgmma(...)` on Hopper, or `T.tcgen05_gemm(...)` with
+    `T.mbarrier_wait_parity(...)` on Blackwell.
 
     Args:
         A (BufferLikeType, i.e. Buffer | BufferLoad | BufferRegion, or Var): Input buffer A.
@@ -216,11 +344,61 @@ def gemm(
         policy (GemmWarpPolicy): GEMM warp partition policy.
         clear_accum (bool): Whether to clear the accumulator.
         k_pack (int): Numbers of packed matrix cores, for ROCm only. Defaults to 1.
-        wg_wait (int): Int identifier of the warpgroup MMA batch to wait on.. Defaults to 0.
-        mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell. Defaults to None.
+        mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell.
+            Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
 
     Returns:
         tir.Call: A handle to the GEMM operation.
     """
     impl = gemm_v1 if _env.use_gemm_v1() else gemm_v2
-    return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, k_pack, wg_wait, mbar)
+    return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, k_pack, mbar)
+
+
+def wgmma_gemm(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+) -> tir.PrimExpr:
+    """Explicit Hopper WGMMA GEMM without an implicit wait.
+
+    This is the explicit asynchronous Hopper WGMMA counterpart to the default
+    synchronous `T.gemm(...)` interface, with two stricter guarantees:
+    - it always requests the WGMMA lowering path
+    - it never auto-emits an inlined `warpgroup_wait`
+
+    If the current target or operand pattern cannot use Hopper WGMMA,
+    compilation fails instead of silently falling back to MMA.
+    """
+
+    impl = wgmma_gemm_v1 if _env.use_gemm_v1() else wgmma_gemm_v2
+    return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum)
+
+
+def tcgen05_gemm(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
+    *,
+    mbar: BarrierType,
+) -> tir.PrimExpr:
+    """Explicit Blackwell TCGEN05 GEMM without an implicit wait.
+
+    This is the explicit asynchronous Blackwell TCGEN5MMA counterpart to the
+    default synchronous `T.gemm(...)` interface, with two stricter guarantees:
+    - it always requests the TCGEN5MMA lowering path
+    - it never auto-emits an inlined `mbarrier_wait_parity`
+
+    If the current target or operand pattern cannot use Blackwell TCGEN5MMA,
+    compilation fails instead of silently falling back to another GEMM path.
+    """
+
+    impl = tcgen05_gemm_v1 if _env.use_gemm_v1() else tcgen05_gemm_v2
+    return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, mbar=mbar)
