@@ -1,12 +1,3 @@
-"""Tests for ``TL_REDUCE_MAXMIN_NAN_PROPAGATE`` (reduce max/min/absmax on fp16/bf16).
-
-When ``True`` (default), CUDA uses ``__hmax`` / ``__hmin`` (NaN propagates).
-When ``False``, uses ``__hmax_nan`` / ``__hmin_nan`` and functor ``MaxOpNan`` /
-``MinOpNan`` in thread reductions.
-
-Related: GitHub issue #1844 (``testing/python/issue/test_tilelang_issue_1844.py``).
-"""
-
 import os
 
 import tilelang
