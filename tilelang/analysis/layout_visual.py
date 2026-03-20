@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Optional
 import tilelang.language as T
 from tvm import tir
@@ -56,11 +58,16 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
     - "png,svg": Generate multiple formats (comma-separated)
     """
 
-    def __init__(self, formats: Optional[list[str]] = None):
+    def __init__(self, formats: str = ""):
         super().__init__()
-        if formats == None:
-            formats = []
-        self.formats_list = [f for f in formats if f != "txt"]
+        formats = (formats or "").strip()
+        if formats == "":
+            parsed = []
+        elif formats == "all":
+            parsed = ["pdf", "png", "svg"]
+        else:
+            parsed = [f.strip() for f in formats.split(",") if f.strip()]
+        self.formats_list = [f for f in parsed if f != "txt"]
 
     def visit_block_(self, op: tir.Block) -> None:
         if "layout_map" in op.annotations:
