@@ -63,12 +63,8 @@ def _make_async_tcgen05_kernel(gemm_op):
     ("sync_api", "async_api"),
     [
         (
-            lambda A, B, C, mbar: T.gemm_v1(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True),
-            lambda A, B, C, mbar: T.tcgen05_gemm_v1(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True),
-        ),
-        (
-            lambda A, B, C, mbar: T.gemm_v2(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True),
-            lambda A, B, C, mbar: T.tcgen05_gemm_v2(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True),
+            lambda A, B, C, mbar: T.gemm(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True),
+            lambda A, B, C, mbar: T.tcgen05_gemm(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True),
         ),
     ],
 )

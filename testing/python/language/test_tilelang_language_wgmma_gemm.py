@@ -31,7 +31,7 @@ def _make_wgmma_kernel(gemm_op):
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @pytest.mark.parametrize(
     "gemm_api",
-    [T.wgmma_gemm_v1, T.wgmma_gemm_v2],
+    [T.wgmma_gemm],
 )
 def test_wgmma_gemm_has_no_implicit_wait(gemm_api):
     kernel = tilelang.compile(_make_wgmma_kernel(lambda A, B, C: gemm_api(A, B, C, clear_accum=True)), target="cuda")
