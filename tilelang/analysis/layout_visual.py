@@ -1,3 +1,6 @@
+from collections.abc import Sequence
+import warnings
+
 import tilelang.language as T
 from tvm import tir
 from tvm.tir import PyStmtExprVisitor
@@ -60,15 +63,20 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
     - "png,svg": Generate multiple formats (comma-separated)
     """
 
-    def __init__(self, formats: str = ""):
+    def __init__(self, formats: str | Sequence[str] = ""):
         super().__init__()
-        formats = (formats or "").strip()
-        if formats == "":
-            parsed = []
-        elif formats == "all":
-            parsed = ["pdf", "png", "svg"]
+        if formats is None:
+            parsed: list[str] = []
+        elif isinstance(formats, str):
+            formats_str = formats.strip()
+            if formats_str == "":
+                parsed = []
+            elif formats_str == "all":
+                parsed = ["pdf", "png", "svg"]
+            else:
+                parsed = [f.strip() for f in formats_str.split(",") if f.strip()]
         else:
-            parsed = [f.strip() for f in formats.split(",") if f.strip()]
+            parsed = [str(f).strip() for f in formats if str(f).strip()]
         self.formats_list = [f for f in parsed if f != "txt"]
 
     def visit_block_(self, op: tir.Block) -> None:
@@ -77,13 +85,20 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
 
             for key, layout in layout_map.items():
                 if isinstance(layout, T.Fragment):
-                    print(f"{key} inferenced layout:")
+                    print(f"{key} inferred layout:")
                     print_fragment_format(layout)
                     for fmt in self.formats_list:
+                        input_shape = layout.get_input_shape()
+                        if len(input_shape) != 2:
+                            warnings.warn(
+                                f"Skip plotting {key} layout: input_shape={input_shape} is not 2D.",
+                                stacklevel=2,
+                            )
+                            continue
                         plot_layout(layout, name=f"{key}_layout", formats=fmt)
 
 
-def LayoutVisual(formats: str = ""):
+def LayoutVisual(formats: str | Sequence[str] = ""):
     def pass_fn(func: tir.PrimFunc, mod, ctx):
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func
