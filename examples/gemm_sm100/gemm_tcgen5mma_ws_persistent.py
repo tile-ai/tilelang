@@ -34,7 +34,7 @@ def gemm_persistent(
     k_blocks = T.ceildiv(K, block_K)
     waves = T.ceildiv(m_blocks * n_blocks, sm_num)
     group_size = 8
-    assert N % (2 * group_size) == 0  # Please adjust group_size if not satisfied
+    assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
 
     with T.Kernel(sm_num, threads=256) as (block_id):
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
@@ -61,10 +61,15 @@ def gemm_persistent(
                     for k in T.serial(k_blocks):
                         phase = w * k_blocks + k
                         T.mbarrier_wait_parity(consumed[phase % num_stages], ((phase // num_stages) & 1) ^ 1)
-                        T.copy(
+                        T.tma_copy(
                             A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[phase % num_stages, :, :]
-                        )  # cannot use BufferLoad here
-                        T.copy(B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N], B_shared[phase % num_stages, :, :])
+                            barrier=loaded[phase % num_stages],
+                        )
+                        T.tma_copy(
+                            B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N],
+                            B_shared[phase % num_stages, :, :],
+                            barrier=loaded[phase % num_stages],
+                        )
                         T.mbarrier_arrive(loaded[phase % num_stages])
 
         elif tx < 64:  # warp 1: issue tcgen5
@@ -156,7 +161,7 @@ def gemm_persistent_2cta(
     k_blocks = T.ceildiv(K, block_K)
     waves = T.ceildiv(m_blocks * n_blocks, sm_num)
     group_size = 8  # in cluster
-    assert N % (2 * group_size) == 0  # Please adjust group_size if not satisfied
+    assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
 
     with T.Kernel(sm_num, threads=256, cluster_dims=2) as (block_id):
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
@@ -188,12 +193,14 @@ def gemm_persistent_2cta(
                     for k in T.serial(k_blocks):
                         phase = w * k_blocks + k
                         T.mbarrier_wait_parity(consumed[phase % num_stages], ((phase // num_stages) & 1) ^ 1)
-                        T.copy(
-                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[phase % num_stages, :, :]
-                        )  # cannot use BufferLoad here
-                        T.copy(
+                        T.tma_copy(
+                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[phase % num_stages, :, :],
+                            barrier=loaded[phase % num_stages],
+                        )
+                        T.tma_copy(
                             B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * block_N // 2 : (by * 2 + cta_id + 1) * block_N // 2],
                             B_shared[phase % num_stages, :, :],
+                            barrier=loaded[phase % num_stages],
                         )
                         T.mbarrier_arrive(loaded[phase % num_stages], 0)
 

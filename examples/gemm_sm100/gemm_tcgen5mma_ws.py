@@ -34,8 +34,16 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
         if tx < 32:  # warp 0: issue tma
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
-                T.copy(A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[k % num_stages, :, :])
-                T.copy(B[k * block_K : (k + 1) * block_K, bx * block_N : (bx + 1) * block_N], B_shared[k % num_stages, :, :])
+                T.tma_copy(
+                    A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K],
+                    A_shared[k % num_stages, :, :],
+                    barrier=loaded[k % num_stages],
+                )
+                T.tma_copy(
+                    B[k * block_K : (k + 1) * block_K, bx * block_N : (bx + 1) * block_N],
+                    B_shared[k % num_stages, :, :],
+                    barrier=loaded[k % num_stages],
+                )
                 T.mbarrier_arrive(loaded[k % num_stages])
         elif tx < 64:  # warp 1: issue tcgen5
             for k in T.serial(k_iters):
