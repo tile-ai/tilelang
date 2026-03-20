@@ -481,40 +481,6 @@ static void RewriteGemmMbar(TaskNode *task, PrimExpr mbar_expr) {
   }
 }
 
-static bool IsTMALoad(TaskNode *task) {
-  static const auto copy_op = Op::Get("tl.tileop.copy");
-
-  class TMALoadDetector : public StmtExprVisitor {
-  public:
-    TMALoadDetector() : has_tma_load(false) {}
-
-    bool has_tma_load;
-
-  private:
-    void VisitExpr_(const CallNode *op) override {
-      if (op->op.same_as(copy_op)) {
-        auto region = Downcast<Call>(op->args[0]);
-        if (const auto *buffer_load = region->args[0].as<BufferLoadNode>()) {
-          Buffer buffer = buffer_load->buffer;
-          String scope = buffer.scope();
-          MemoryType mem_type = GetMemoryTypeFromScope(scope);
-          if (mem_type == MemoryType::kGlobal) {
-            has_tma_load = true;
-          }
-        }
-        return;
-      }
-      StmtExprVisitor::VisitExpr_(op);
-    }
-  };
-
-  TMALoadDetector detector;
-  for (const auto &stmt : task->stmts) {
-    detector(stmt);
-  }
-  return detector.has_tma_load;
-}
-
 static void RewriteCopyMbar(TaskNode *task, PrimExpr mbar_expr) {
   static const auto copy_op = Op::Get("tl.tileop.copy");
   static const auto tma_copy_op = Op::Get("tl.tileop.tma_copy");
@@ -639,7 +605,7 @@ AnalyzeSequenceNodeBarriers(SequenceNode *seq, int &next_barrier_id,
     // Allocate barrier for TMA
     if (task->isInnerTask() && task->UsesTMACore()) {
       auto child = static_cast<TaskNode *>(task->child.get());
-      if (IsTMALoad(child)) {
+      if (child->HasTMALoad()) {
         int wg_id = child->GetWarpgroupId();
         if (wg_id != -1) {
           int barrier_id = next_barrier_id++;
@@ -942,7 +908,7 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
         // Allocate barrier for TMA
         if (iter == 0 && task->isInnerTask() && task->UsesTMACore()) {
           auto child = static_cast<TaskNode *>(task->child.get());
-          if (IsTMALoad(child)) {
+          if (child->HasTMALoad()) {
             int wg_id = child->GetWarpgroupId();
             ICHECK(wg_id != -1) << "TMA loads must have valid warpgroup id";
             int barrier_id = next_barrier_id++;

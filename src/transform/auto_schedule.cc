@@ -1294,6 +1294,8 @@ private:
       bool found_tensor{false};
       bool found_cuda{false};
 
+      bool found_tma_load{false};
+
       // Tensor Core shape information (multiple shapes possible)
       struct TensorCoreShape {
         int64_t m;
@@ -1344,6 +1346,9 @@ private:
               MemoryType mem_type = GetMemoryTypeFromScope(scope);
               if (mem_type == MemoryType::kGlobal) {
                 found_global = true;
+                if (idx == 0) {
+                  found_tma_load = true;
+                }
               }
             }
           }
@@ -1426,6 +1431,9 @@ private:
     // Set task node flags based on what was found
     if (analyzer.found_tma) {
       task_node->SetUsesTMACore(true);
+      if (analyzer.found_tma_load) {
+        task_node->SetHasTMALoad(true);
+      }
     }
     if (analyzer.found_tensor) {
       task_node->SetUsesTensorCore(true);
