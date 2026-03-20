@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-from typing import Optional
 import tilelang.language as T
 from tvm import tir
 from tvm.tir import PyStmtExprVisitor
@@ -26,7 +23,12 @@ def print_fragment_format(layout: T.Fragment) -> None:
     if isinstance(layout, T.Fragment):
         input_shape = layout.get_input_shape()
         output_shape = layout.get_output_shape()
-        lines = [f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}", f"  Index:  {layout.forward_index}", f"  Replicate:  {layout.replicate_size}"]
+        lines = [
+            f"  Shape: {input_shape} -> {output_shape}",
+            f"  Thread: {layout.forward_thread}",
+            f"  Index:  {layout.forward_index}",
+            f"  Replicate:  {layout.replicate_size}",
+        ]
         print("\n".join(lines))
     else:
         raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
