@@ -7,14 +7,17 @@ This directory contains examples for TileLang's experimental SM100 architecture 
 ### 1. Manual TCGEN5.MMA Management
 Users must manually handle TCGEN5MMA operations using:
 - `T.alloc_tmem()` - Allocate Tensor Memory
-- `T.gemm()` with `wg_wait=-1` - Launch TCGEN5MMA without waiting
+- `T.tcgen05_gemm()` - Launch TCGEN5MMA without an implicit wait
 - Manual synchronization with mbarrier
+
+For the default synchronous path, `T.gemm(..., mbar=...)` now inserts the
+matching `mbarrier_wait_parity(...)` automatically after TCGEN5MMA issue.
 
 ### 2. Manual mbarrier Synchronization
 TCGEN5MMA is asynchronous and requires explicit synchronization:
 ```python
 mbar = T.alloc_barrier(1)  # expect-arrive-count = 1
-T.gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, mbar=mbar, wg_wait=-1, clear_accum=k==0)
+T.tcgen05_gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, mbar=mbar, clear_accum=k==0)
 T.mbarrier_wait_parity(mbar, k%2)  # Manual phase calculation required
 ```
 
@@ -61,8 +64,8 @@ def main(
             T.copy(B[bx * block_N, k * block_K], B_shared)
 
             # TCGEN5MMA computation: asynchronous launch, output to Tensor Memory
-            T.gemm(A_shared, B_shared, C_tmem, trans_A=False, trans_B=True,
-                   mbar=mbar, wg_wait=-1, clear_accum=k==0)
+            T.tcgen05_gemm(A_shared, B_shared, C_tmem, trans_A=False, trans_B=True,
+                           mbar=mbar, clear_accum=k==0)
 
             # Critical: wait for TCGEN5MMA completion
             T.mbarrier_wait_parity(mbar, k%2)

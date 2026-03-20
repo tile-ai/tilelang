@@ -35,6 +35,8 @@ public:
   // only will be enabled under cdna mfma instructions
   int kPack_ = 1;
   int wgWait_ = 0;
+  bool isWgmma_ = false;
+  bool isTcgen05_ = false;
   mutable GemmWarpPolicy policy_;
   Map<String, ObjectRef> annotations_;
 
@@ -63,6 +65,8 @@ public:
         .def_ro("cCoords", &GemmPyNode::cCoords_)
         .def_ro("kPack", &GemmPyNode::kPack_)
         .def_ro("wgWait", &GemmPyNode::wgWait_)
+        .def_ro("isWgmma", &GemmPyNode::isWgmma_)
+        .def_ro("isTcgen05", &GemmPyNode::isTcgen05_)
         .def_ro("policy", &GemmPyNode::policy_)
         .def_ro("annotations", &GemmPyNode::annotations_);
   }
