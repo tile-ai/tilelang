@@ -81,19 +81,19 @@ GemmPy::GemmPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
   if (auto val = annotations.Get("is_wgmma")) {
-    if (const auto *int_val = val->as<IntImmNode>()) {
-      node->isWgmma_ = int_val->value != 0;
-    }
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "is_wgmma annotation must be IntImmNode";
+    node->isWgmma_ = int_val->value != 0;
   }
   if (auto val = annotations.Get("is_tcgen05")) {
-    if (const auto *int_val = val->as<IntImmNode>()) {
-      node->isTcgen05_ = int_val->value != 0;
-    }
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
+    node->isTcgen05_ = int_val->value != 0;
   }
   if (args.size() > 16) {
-    if (const auto *load = args[16].as<BufferLoadNode>()) {
-      node->mbar_ = Downcast<BufferLoad>(args[16]);
-    }
+    ICHECK(args[16]->IsInstance<BufferLoadNode>())
+        << "mbar for tcgen5mma must be a tir.BufferLoad";
+    node->mbar_ = Downcast<BufferLoad>(args[16]);
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
