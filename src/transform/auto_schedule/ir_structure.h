@@ -163,6 +163,10 @@ public:
   void SetWarpgroupId(int warpgroup_id) { warpgroup_id_ = warpgroup_id; }
   int GetWarpgroupId() const override { return warpgroup_id_; }
 
+  // TMA load flag
+  void SetHasTMALoad(bool value) { has_tma_load_ = value; }
+  bool HasTMALoad() const { return has_tma_load_; }
+
   // Tensor Core shape information structure
   struct TensorCoreShape {
     int64_t m;
@@ -290,6 +294,9 @@ private:
   int64_t ii_{0};      // Initiation interval in cycles
   int warpgroup_id_{
       -1}; // Warpgroup id for warpgroup specialization (-1 means unassigned)
+
+  // TMA information
+  bool has_tma_load_{false};
 
   // Tensor Core shape information (M, N, K dimensions)
   // A task may contain multiple Tensor Core operations with different shapes
