@@ -181,22 +181,18 @@ class GemmTCGEN5(GemmBase):
         def _gemm_ss_cond() -> None:
             if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
-
-        @T.prim_func
-        def _gemm_ss() -> None:
-            mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
             if not self.is_tcgen05:
                 T.mbarrier_wait_parity(mbar, mbar_phase)
 
         @T.prim_func
-        def _gemm_ss_cond() -> None:
+        def _gemm_ss() -> None:
             if cluster_cond:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
             if not self.is_tcgen05:
                 T.mbarrier_wait_parity(mbar, mbar_phase)
 
         return (
-            _Simplify(_gemm, inline_let=True)
+            _Simplify(_gemm_ss, inline_let=True)
             if analyzer.can_prove(thread_bounds.extent == warp_size)
-            else _Simplify(_gemm_elect_one_thread, inline_let=True)
+            else _Simplify(_gemm_ss_cond, inline_let=True)
         )

@@ -62,7 +62,7 @@ def gemm_persistent(
                         phase = w * k_blocks + k
                         T.mbarrier_wait_parity(consumed[phase % num_stages], ((phase // num_stages) & 1) ^ 1)
                         T.tma_copy(
-                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[phase % num_stages, :, :]
+                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[phase % num_stages, :, :],
                             barrier=loaded[phase % num_stages],
                         )
                         T.tma_copy(
