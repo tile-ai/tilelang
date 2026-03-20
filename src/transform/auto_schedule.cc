@@ -74,7 +74,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map, const bool enable_epi,
     PrimExpr thread_count[2], bool producer_consumer,
-    const WarpSpecializeConfig &config);
+    const WarpSpecializeConfig &config, Buffer neutral_sync_shared_barrier);
 
 Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi);
 
@@ -1610,9 +1610,15 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     }
     LoopNestingInfo loop_info;
     std::vector<MultiVersionBufferInfo> buffer_infos;
-    AnalyzeAndInsertBarriers(ir_structure.get(), next_barrier_id,
-                             barrier_buffers, barrier_map, thread_count,
-                             loop_info, buffer_infos);
+    PrimExpr barrier_count = config.enable_thread_extend
+                                 ? thread_count[0] + thread_count[1]
+                                 : thread_var->dom->extent;
+    Buffer neutral_sync_shared_barrier =
+        makeBarrierBuffer(barrier_count, "neutral_sync_shared_barrier", 1,
+                          barrier_buffers, barrier_map);
+    AnalyzeAndInsertBarriers(
+        ir_structure.get(), next_barrier_id, barrier_buffers, barrier_map,
+        thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
 
     // Print the modified summary view
     // PrintIRStructure(ir_structure.get());
@@ -1620,7 +1626,8 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     // Apply warpgroup partition to entire IRStructure
     Stmt new_body = ApplyWarpgroupPartitionToIRStructure(
         ir_structure.get(), thread_var, barrier_buffers, barrier_map,
-        enable_epi, thread_count, double_thread, config);
+        enable_epi, thread_count, double_thread, config,
+        neutral_sync_shared_barrier);
 
     if (config.enable_thread_extend) {
       // sm_90: may need to update thread extent
@@ -2053,7 +2060,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
     Map<ObjectRef, ObjectRef> &barrier_map, const bool outer_enable_epi,
     PrimExpr thread_count[2], bool producer_consumer,
-    const WarpSpecializeConfig &config) {
+    const WarpSpecializeConfig &config, Buffer neutral_sync_shared_barrier) {
   if (!root)
     return Evaluate(0);
 
@@ -2063,7 +2070,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     if (wrapper->child) {
       body = ApplyWarpgroupPartitionToIRStructure(
           wrapper->child.get(), thread_var, barrier_buffers, barrier_map,
-          outer_enable_epi, thread_count, producer_consumer, config);
+          outer_enable_epi, thread_count, producer_consumer, config,
+          neutral_sync_shared_barrier);
     }
     if (const auto *let = wrapper->wrapper.as<LetStmtNode>()) {
       return LetStmt(let->var, let->value, body);
@@ -2601,7 +2609,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       // synchronization
       pro_and_warpgroup_stmt = InsertBarriersForNeutralSync(
           pro_neutral_body, if_then_else, barrier_buffers, barrier_map,
-          barrier_count);
+          barrier_count, neutral_sync_shared_barrier);
     } else if (!IsEvaluateZero(if_then_else) ||
                !IsEvaluateZero(pro_neutral_body)) {
       // Only one has actual statements
@@ -2649,7 +2657,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     combined_stmt = InsertBarriersForNeutralSyncWithDependency(
         pro_and_warpgroup_stmt, epi_neutral_body, barrier_buffers, barrier_map,
         barrier_count, need_shared_barrier_for_epi, need_tmem_barrier_for_epi,
-        thread_var->var, 0, thread_count[0]);
+        Buffer(), thread_var->var, 0, thread_count[0]);
   } else if (!IsEvaluateZero(epi_neutral_body)) {
     combined_stmt = epi_neutral_body;
   } else {
