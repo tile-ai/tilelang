@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .gemm_base import GemmBase
 from .inst import GemmInst
 from tilelang.layout import (
@@ -80,7 +82,14 @@ class GemmWGMMA(GemmBase):
         else:
             raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
         warp_row_tiles = int(self.M // m_warp)

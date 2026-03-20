@@ -132,6 +132,8 @@ public:
   // only will be enabled under cdna mfma instructions
   int kPack_ = 1;
   int wgWait_ = 0;
+  bool isWgmma_ = false;
+  bool isTcgen05_ = false;
   tir::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   mutable GemmWarpPolicy policy_;
@@ -158,6 +160,8 @@ public:
         .def_ro("clearAccum", &GemmNode::clearAccum_)
         .def_ro("kPack", &GemmNode::kPack_)
         .def_ro("wgWait", &GemmNode::wgWait_)
+        .def_ro("isWgmma", &GemmNode::isWgmma_)
+        .def_ro("isTcgen05", &GemmNode::isTcgen05_)
         .def_ro("mbar", &GemmNode::mbar_)
         .def_ro("cCoords", &GemmNode::cCoords_)
         .def_ro("policy", &GemmNode::policy_);

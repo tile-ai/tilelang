@@ -83,25 +83,23 @@ def gemm(
                     for k in T.serial(k_blocks):
                         T.mbarrier_wait_parity(loaded[k % num_stages], (k // num_stages) & 1)
                         if w & 1 == 0:
-                            T.gemm(
+                            T.tcgen05_gemm(
                                 A_shared[k % num_stages, :, :],
                                 B_shared[k % num_stages, :, :],
                                 C_tmem_0,
                                 False,
                                 False,
                                 mbar=consumed[k % num_stages],
-                                wg_wait=-1,
                                 clear_accum=k == 0,
                             )
                         else:
-                            T.gemm(
+                            T.tcgen05_gemm(
                                 A_shared[k % num_stages, :, :],
                                 B_shared[k % num_stages, :, :],
                                 C_tmem_1,
                                 False,
                                 False,
                                 mbar=consumed[k % num_stages],
-                                wg_wait=-1,
                                 clear_accum=k == 0,
                             )
                     T.tcgen05_mma_arrive(tmem_full[w & 1])

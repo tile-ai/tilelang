@@ -31,7 +31,7 @@ using namespace tir;
  * - matrix dimensions M, N, K,
  * - warp allocation policy and clear_accum flag,
  * - strides and memory offsets for A and B,
- * - optional kPack (must be 1 or 2) and optional wg_wait.
+ * - optional kPack (must be 1 or 2) and optional internal wg_wait.
  *
  * The populated GemmNode is stored into the wrapper's internal `data_`.
  *
@@ -40,7 +40,7 @@ using namespace tir;
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
- *      (optional) kPack (Int), (optional) wg_wait (Int)]
+ *      (optional) kPack (Int), (optional) internal wg_wait (Int)]
  *
  * @note If `kPack` is provided it must be 1; otherwise the constructor
  *       fails with an ICHECK (runtime assertion). No other validation is
@@ -80,10 +80,20 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   if (args.size() > 15) {
     node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
+  if (auto val = annotations.Get("is_wgmma")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "is_wgmma annotation must be IntImmNode";
+    node->isWgmma_ = int_val->value != 0;
+  }
+  if (auto val = annotations.Get("is_tcgen05")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
+    node->isTcgen05_ = int_val->value != 0;
+  }
   if (args.size() > 16) {
-    if (const auto *load = args[16].as<BufferLoadNode>()) {
-      node->mbar_ = Downcast<BufferLoad>(args[16]);
-    }
+    ICHECK(args[16]->IsInstance<BufferLoadNode>())
+        << "mbar for tcgen5mma must be a tir.BufferLoad";
+    node->mbar_ = Downcast<BufferLoad>(args[16]);
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
@@ -104,10 +114,12 @@ TileOperator GemmNode::Clone() const {
 }
 
 bool GemmNode::allowTcgen5Mma(Target target) const {
-  return TargetIsSm100(target) &&
-         ((IsSharedBuffer(a_) || a_.scope() == "shared.tmem") &&
-          IsSharedBuffer(b_) && c_.scope() == "shared.tmem") &&
-         GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype).first;
+  bool scope_ok = (IsSharedBuffer(a_) || a_.scope() == "shared.tmem") &&
+                  IsSharedBuffer(b_) && c_.scope() == "shared.tmem";
+  if (!TargetIsSm100(target) || !scope_ok)
+    return false;
+  DataType ab_dtype = (a_.scope() == "shared.tmem") ? b_->dtype : a_->dtype;
+  return GetTCGEN5MMAMeta(m_, n_, k_, ab_dtype, c_->dtype).first;
 }
 
 bool GemmNode::allowWgmma(int block_size, Target target) const {
@@ -121,6 +133,30 @@ bool GemmNode::allowWgmma(int block_size, Target target) const {
 }
 
 GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
+  if (isWgmma_) {
+    if (!allowWgmma(block_size, target)) {
+      LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
+                    "constraints were not satisfied. Got target="
+                 << target << ", A(scope=" << a_.scope()
+                 << ", dtype=" << a_->dtype << "), B(scope=" << b_.scope()
+                 << ", dtype=" << b_->dtype << "), C(scope=" << c_.scope()
+                 << ", dtype=" << c_->dtype << "), M=" << m_ << ", N=" << n_
+                 << ", K=" << k_ << ".";
+    }
+    return GemmInst::kWGMMA;
+  }
+  if (isTcgen05_) {
+    if (!allowTcgen5Mma(target)) {
+      LOG(FATAL) << "T.tcgen05_gemm() requires Blackwell TCGEN5MMA lowering, "
+                    "but constraints were not satisfied. Got target="
+                 << target << ", A(scope=" << a_.scope()
+                 << ", dtype=" << a_->dtype << "), B(scope=" << b_.scope()
+                 << ", dtype=" << b_->dtype << "), C(scope=" << c_.scope()
+                 << ", dtype=" << c_->dtype << "), M=" << m_ << ", N=" << n_
+                 << ", K=" << k_ << ".";
+    }
+    return GemmInst::kTCGEN5MMA;
+  }
   if (allowTcgen5Mma(target)) {
     return GemmInst::kTCGEN5MMA;
   } else if (allowWgmma(block_size, target)) {
@@ -450,8 +486,9 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   std::string op_name;
 
   if (gemm_inst == GemmInst::kTCGEN5MMA) {
+    DataType ab_dtype = (a_.scope() == "shared.tmem") ? b_->dtype : a_->dtype;
     auto [can_use_tcgen5mma, meta] =
-        GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype);
+        GetTCGEN5MMAMeta(m_, n_, k_, ab_dtype, c_->dtype);
     ICHECK(can_use_tcgen5mma);
     ICHECK(IsSharedBuffer(b_));
     ICHECK(c_.scope() == "shared.tmem");
@@ -465,10 +502,10 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           << "Unsupported A scope for TCGEN5MMA: "
           << a_.scope(); // If this is triggered, it means Tilelang has bugs.
     }
-    ICHECK(wgWait_ == -1)
-        << "Currently only wg_wait == -1 is supported for TCGEN5MMA. Please "
-           "use "
-           "wg_wait = -1 and manually synchronize with mbarrier.";
+    ICHECK(wgWait_ == 0 || wgWait_ == -1)
+        << "TCGEN5MMA only accepts internal wg_wait values 0 or -1. "
+           "Public T.gemm() uses 0 and synchronization is still managed "
+           "manually via mbarrier.";
 
     std::string accum_dtype = "";
     if (c_->dtype.is_float()) {
@@ -504,17 +541,22 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                 0))
         << "TCGEN5MMA requires thread bounds to be multiples of warp size (32) "
            "and aligned to warps.";
+    Stmt tcgen5mma_call;
     if (analyzer->CanProveEqual(T.thread_bounds->extent, warp_size)) {
       // If the thread bounds is exactly one warp, we can use the original call
-      return Evaluate(new_call);
+      tcgen5mma_call = Evaluate(new_call);
     } else {
       // Add an if-else clause
-      auto tcgen5mma_call =
-          IfThenElse(EQ(FloorDiv(T.thread_var, warp_size),
-                        FloorDiv(T.thread_bounds->min, warp_size)),
-                     Evaluate(new_call));
+      tcgen5mma_call = IfThenElse(EQ(FloorDiv(T.thread_var, warp_size),
+                                     FloorDiv(T.thread_bounds->min, warp_size)),
+                                  Evaluate(new_call));
+    }
+    if (isTcgen05_) {
       return tcgen5mma_call;
     }
+    Stmt wait_stmt = Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
+                                   {mbar_, T.mbar_phase_expr}));
+    return SeqStmt({tcgen5mma_call, wait_stmt});
   }
 
   if (IsFragmentBuffer(a_)) {
@@ -547,7 +589,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ss << ", " << (gemm_inst == GemmInst::kWGMMA ? "true" : "false");
   }
 
-  // Emit wg_wait if necessary
+  // Emit internal wg_wait only for Hopper WGMMA lowering.
   if (TargetIsHopper(T.target)) {
     if (wgWait_ != 0) {
       ss << ", " << wgWait_;
@@ -716,8 +758,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
         << "TCGEN5MMA only supports C in shared.tmem scope, got " << c_.scope();
     ICHECK(IsSharedBuffer(a_))
         << "Current TCGEN5MMA only supports A in shared.dyn scope";
+    DataType ab_dtype = (a_.scope() == "shared.tmem") ? b_->dtype : a_->dtype;
     auto [can_use_tcgen5mma, meta] =
-        GetTCGEN5MMAMeta(m_, n_, k_, a_->dtype, c_->dtype);
+        GetTCGEN5MMAMeta(m_, n_, k_, ab_dtype, c_->dtype);
     ICHECK(can_use_tcgen5mma);
     {
       int dim_A = a_->shape.size();
@@ -816,6 +859,34 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TIR_REGISTER_TL_TILE_OP(Gemm, gemm)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.tileop.wgmma_gemm")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "wgmma_gemm")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_wgmma",
+                                       IntImm(DataType::Int(32), 1));
+                               return Gemm(args, ann);
+                             })
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.tileop.tcgen05_gemm")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "tcgen05_gemm")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_tcgen05",
+                                       IntImm(DataType::Int(32), 1));
+                               return Gemm(args, ann);
+                             })
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
