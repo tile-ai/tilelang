@@ -38,6 +38,22 @@ def PipelinePlanning():
     return _ffi_api.PipelinePlanning()  # type: ignore
 
 
+def InstructionAnnotation():
+    """Annotate tile operations with coarse-grained instruction kind.
+
+    This pass runs before LayoutInference and LowerTileOp.  It adds a
+    ``tl_instruction_kind`` annotation to each tile-op Call node indicating
+    the instruction category ("tma", "cp_async", "sync", "wgmma", etc.)
+    that will be selected during lowering.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InstructionAnnotation()  # type: ignore
+
+
 def LayoutInference():
     """LayoutInference
 

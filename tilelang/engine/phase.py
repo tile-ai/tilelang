@@ -189,6 +189,10 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
+    # Annotate tile ops with coarse instruction kind (tma / cp_async / sync / wgmma / ...)
+    # before layout inference so that later passes (e.g. warp specialization) can
+    # reason about the instruction mix without depending on lowered IR.
+    mod = tilelang.transform.InstructionAnnotation()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout

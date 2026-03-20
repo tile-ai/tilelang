@@ -169,8 +169,9 @@ public:
 
   TileOperator Clone() const;
 
-private:
   GemmInst getGemmInst(int block_size, Target target) const;
+
+private:
   bool allowTcgen5Mma(Target target) const;
   bool allowWgmma(int block_size, Target target) const;
 
