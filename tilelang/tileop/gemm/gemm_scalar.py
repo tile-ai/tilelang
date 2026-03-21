@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang import language as T
 from tvm.target import Target
@@ -11,7 +13,14 @@ class GemmScalar(GemmBase):
     def infer_layout(self, target: Target, thread_nums: int):
         return {}
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         M, N, K = self.M, self.N, self.K
         A_buf = self.ARegion.buffer
         B_buf = self.BRegion.buffer

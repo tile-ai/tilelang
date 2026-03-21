@@ -35,7 +35,7 @@ using namespace tir;
  * - matrix dimensions M, N, K,
  * - warp allocation policy and clear_accum flag,
  * - strides and memory offsets for A and B,
- * - optional kPack (must be 1 or 2) and optional wg_wait.
+ * - optional kPack (must be 1 or 2) and optional internal wg_wait.
  *
  * The populated GemmPyNode is stored into the wrapper's internal `data_`.
  *
@@ -44,7 +44,7 @@ using namespace tir;
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
- *      (optional) kPack (Int), (optional) wg_wait (Int)]
+ *      (optional) kPack (Int), (optional) internal wg_wait (Int)]
  *
  * @note If `kPack` is provided it must be 1 or 2; otherwise the constructor
  *       fails with an ICHECK (runtime assertion). No other validation is
@@ -80,10 +80,18 @@ GemmPy::GemmPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   if (args.size() > 15) {
     node->wgWait_ = args[15].as<IntImm>().value()->value;
   }
-  if (args.size() > 16) {
-    if (const auto *load = args[16].as<BufferLoadNode>()) {
-      node->mbar_ = Downcast<BufferLoad>(args[16]);
-    }
+  if (auto val = annotations.Get("is_wgmma")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "is_wgmma annotation must be IntImmNode";
+    node->isWgmma_ = int_val->value != 0;
+  }
+  if (auto val = annotations.Get("is_tcgen05")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
+    node->isTcgen05_ = int_val->value != 0;
+  }
+  if (args.size() > 16 && args[16]->IsInstance<BufferLoadNode>()) {
+    node->mbar_ = Downcast<BufferLoad>(args[16]);
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
@@ -124,6 +132,30 @@ bool GemmPyNode::allowWgmma(int block_size, Target target) const {
 }
 
 GemmInst GemmPyNode::getGemmInst(int block_size, Target target) const {
+  if (isWgmma_) {
+    if (!allowWgmma(block_size, target)) {
+      LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
+                    "constraints were not satisfied. Got target="
+                 << target << ", A(scope=" << a_.scope()
+                 << ", dtype=" << a_->dtype << "), B(scope=" << b_.scope()
+                 << ", dtype=" << b_->dtype << "), C(scope=" << c_.scope()
+                 << ", dtype=" << c_->dtype << "), M=" << m_ << ", N=" << n_
+                 << ", K=" << k_ << ".";
+    }
+    return GemmInst::kWGMMA;
+  }
+  if (isTcgen05_) {
+    if (!allowTcgen5Mma(target)) {
+      LOG(FATAL) << "T.tcgen05_gemm() requires Blackwell TCGEN5MMA lowering, "
+                    "but constraints were not satisfied. Got target="
+                 << target << ", A(scope=" << a_.scope()
+                 << ", dtype=" << a_->dtype << "), B(scope=" << b_.scope()
+                 << ", dtype=" << b_->dtype << "), C(scope=" << c_.scope()
+                 << ", dtype=" << c_->dtype << "), M=" << m_ << ", N=" << n_
+                 << ", K=" << k_ << ".";
+    }
+    return GemmInst::kTCGEN5MMA;
+  }
   bool allow_tcgen5mma = allowTcgen5Mma(target);
   bool allow_wgmma = allowWgmma(block_size, target);
   if (allow_tcgen5mma) {
@@ -246,9 +278,9 @@ static int GetArchInt(Target target) {
 Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     // NOTE(wt): Decide GemmInst and compute warp partition on Python side
-    auto prim_func =
-        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmPy>(this), T.layout_map,
-                                T.target, T.thread_bounds, T.thread_var));
+    auto prim_func = Downcast<PrimFunc>(
+        (*f)(tvm::ffi::GetRef<GemmPy>(this), T.layout_map, T.target,
+             T.thread_bounds, T.thread_var, T.mbar_phase_expr));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol =
         prim_func->attrs.GetAttr<tvm::ffi::String>("global_symbol");
@@ -303,6 +335,34 @@ LayoutMap GemmPyNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TIR_REGISTER_TL_TILE_OP(GemmPy, gemm_py)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.tileop.wgmma_gemm_py")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "wgmma_gemm_py")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_wgmma",
+                                       IntImm(DataType::Int(32), 1));
+                               return GemmPy(args, ann);
+                             })
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.tileop.tcgen05_gemm_py")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "tcgen05_gemm_py")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_tcgen05",
+                                       IntImm(DataType::Int(32), 1));
+                               return GemmPy(args, ann);
+                             })
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
