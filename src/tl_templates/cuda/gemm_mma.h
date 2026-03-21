@@ -1,10 +1,10 @@
 #pragma once
 
 #include <cute/algorithm/clear.hpp>
+#include <cute/arch/mma_sm120.hpp>
 #include <cute/arch/mma_sm75.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
-#include <cute/arch/mma_sm120.hpp>
 #include <cute/atom/mma_atom.hpp>
 #include <cute/underscore.hpp>
 
