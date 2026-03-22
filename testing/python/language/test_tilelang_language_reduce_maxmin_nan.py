@@ -16,9 +16,6 @@ def _compile_cuda(prim_func, *, pass_configs=None):
     )
 
 
-# --- reduce_max ---
-
-
 def _kernel_reduce_max(length: int, dtype):
     @T.prim_func
     def kernel(a: T.Tensor((length,), dtype), out: T.Tensor((1,), dtype)):
@@ -38,8 +35,8 @@ def test_reduce_max_fp16_nan_propagate_default():
     if _PRINT:
         print(k.adapter.prim_func.script())
         print(src)
-    assert "tl::MaxOp" in src
-    assert "MaxOpNan" not in src
+    assert "tl::MaxOpNan" in src
+    assert "__hmax_nan" in src
 
 
 def test_reduce_max_fp16_nan_propagate_false():
@@ -48,15 +45,16 @@ def test_reduce_max_fp16_nan_propagate_false():
         pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
     )
     src = k.get_kernel_source()
-    assert "tl::MaxOpNan" in src
-    assert "__hmax_nan" in src
+    assert "tl::MaxOp" in src
+    assert "MaxOpNan" not in src
+    assert "__hmax(" in src
 
 
 def test_reduce_max_bf16_nan_propagate_default():
     k = _compile_cuda(_kernel_reduce_max(64, T.bfloat16))
     src = k.get_kernel_source()
-    assert "tl::MaxOp" in src
-    assert "__hmax(" in src
+    assert "tl::MaxOpNan" in src
+    assert "__hmax_nan" in src
 
 
 def test_reduce_max_bf16_nan_propagate_false():
@@ -65,11 +63,8 @@ def test_reduce_max_bf16_nan_propagate_false():
         pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
     )
     src = k.get_kernel_source()
-    assert "tl::MaxOpNan" in src
-    assert "__hmax_nan" in src
-
-
-# --- reduce_min ---
+    assert "tl::MaxOp" in src
+    assert "__hmax(" in src
 
 
 def _kernel_reduce_min(length: int, dtype):
@@ -88,8 +83,8 @@ def _kernel_reduce_min(length: int, dtype):
 def test_reduce_min_fp16_nan_propagate_default():
     k = _compile_cuda(_kernel_reduce_min(64, T.float16))
     src = k.get_kernel_source()
-    assert "tl::MinOp" in src
-    assert "MinOpNan" not in src
+    assert "tl::MinOpNan" in src
+    assert "__hmin_nan" in src
 
 
 def test_reduce_min_fp16_nan_propagate_false():
@@ -98,8 +93,9 @@ def test_reduce_min_fp16_nan_propagate_false():
         pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
     )
     src = k.get_kernel_source()
-    assert "tl::MinOpNan" in src
-    assert "__hmin_nan" in src
+    assert "tl::MinOp" in src
+    assert "MinOpNan" not in src
+    assert "__hmin(" in src
 
 
 def test_reduce_min_bf16_nan_propagate_false():
@@ -108,11 +104,8 @@ def test_reduce_min_bf16_nan_propagate_false():
         pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
     )
     src = k.get_kernel_source()
-    assert "tl::MinOpNan" in src
-    assert "__hmin_nan" in src
-
-
-# --- reduce_absmax (uses MaxOp / MaxOpNan like reduce_max) ---
+    assert "tl::MinOp" in src
+    assert "__hmin(" in src
 
 
 def _kernel_reduce_absmax(length: int, dtype):
@@ -131,7 +124,8 @@ def _kernel_reduce_absmax(length: int, dtype):
 def test_reduce_absmax_fp16_nan_propagate_default():
     k = _compile_cuda(_kernel_reduce_absmax(64, T.float16))
     src = k.get_kernel_source()
-    assert "tl::MaxOp" in src
+    assert "tl::MaxOpNan" in src
+    assert "__hmax_nan" in src
 
 
 def test_reduce_absmax_fp16_nan_propagate_false():
@@ -140,8 +134,8 @@ def test_reduce_absmax_fp16_nan_propagate_false():
         pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
     )
     src = k.get_kernel_source()
-    assert "tl::MaxOpNan" in src
-    assert "__hmax_nan" in src
+    assert "tl::MaxOp" in src
+    assert "__hmax(" in src
 
 
 if __name__ == "__main__":

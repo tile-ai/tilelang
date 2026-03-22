@@ -121,17 +121,17 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc,
   } else if (type->isAbsSum()) {
     return acc + Max(rhs, -rhs);
   } else if (type->isMax()) {
-    if (!nan_propagate && is_fp16_or_bf16) {
+    if (nan_propagate && is_fp16_or_bf16) {
       return Call(acc.dtype(), tl::max_nan(), {acc, rhs});
     }
     return Max(acc, rhs);
   } else if (type->isMin()) {
-    if (!nan_propagate && is_fp16_or_bf16) {
+    if (nan_propagate && is_fp16_or_bf16) {
       return Call(acc.dtype(), tl::min_nan(), {acc, rhs});
     }
     return Min(acc, rhs);
   } else if (type->isAbsMax()) {
-    if (!nan_propagate && is_fp16_or_bf16) {
+    if (nan_propagate && is_fp16_or_bf16) {
       return Call(acc.dtype(), tl::max_nan(), {acc, tvm::abs(rhs)});
     }
     return Max(acc, tvm::abs(rhs));
@@ -158,11 +158,11 @@ std::string ReduceOpNode::MakeCodegenReducer() const {
   } else if (type->isAbsSum()) {
     return "tl::SumOp";
   } else if (type->isMax()) {
-    return nan_propagate ? "tl::MaxOp" : "tl::MaxOpNan";
+    return nan_propagate ? "tl::MaxOpNan" : "tl::MaxOp";
   } else if (type->isMin()) {
-    return nan_propagate ? "tl::MinOp" : "tl::MinOpNan";
+    return nan_propagate ? "tl::MinOpNan" : "tl::MinOp";
   } else if (type->isAbsMax()) {
-    return nan_propagate ? "tl::MaxOp" : "tl::MaxOpNan";
+    return nan_propagate ? "tl::MaxOpNan" : "tl::MaxOp";
   } else if (type->isBitAnd()) {
     return "tl::BitAndOp";
   } else if (type->isBitOr()) {

@@ -165,8 +165,8 @@ class PassConfigKey(str, Enum):
 
     TL_REDUCE_MAXMIN_NAN_PROPAGATE = "tl.reduce_maxmin_nan_propagate"
     """For T.max/min and T.reduce_max/min (bfloat16/float16): when True (default),
-    use __hmax/__hmin (NaN propagates). When False, use __hmax_nan/__hmin_nan
-    (NaN is ignored in comparison). See CUDA Math API half2 comparison."""
+    use __hmax_nan/__hmin_nan (NaNs pass through per CUDA). When False, use
+    __hmax/__hmin (if one operand is NaN, the other is returned). See CUDA Math API."""
 
     TL_AST_PRINT_ENABLE = "tl.ast_print_enable"
     """Enable TIR AST printing for debugging purposes. Default: False"""

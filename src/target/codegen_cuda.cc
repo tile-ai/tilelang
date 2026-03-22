@@ -1448,7 +1448,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
                         ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
                         .value();
   }
-  const char *min_f16 = nan_propagate ? "__hmin" : "__hmin_nan";
+  const char *min_f16 = nan_propagate ? "__hmin_nan" : "__hmin";
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
@@ -1486,7 +1486,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
                         ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
                         .value();
   }
-  const char *max_f16 = nan_propagate ? "__hmax" : "__hmax_nan";
+  const char *max_f16 = nan_propagate ? "__hmax_nan" : "__hmax";
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
     os << "cutlass::bfloat16_t(" << max_f16 << "("
