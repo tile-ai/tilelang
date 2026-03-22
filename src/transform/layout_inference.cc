@@ -37,6 +37,18 @@ namespace tl {
 
 using namespace tir;
 
+namespace {
+
+int64_t GetElementStorageBits(DataType dtype) {
+  // Layout aliasing must be reasoned about in logical storage bits per element,
+  // not in bytes.  For sub-byte dtypes such as fp4, `dtype.bytes()` rounds up
+  // to 1 and loses the "two fp4 values share one byte" relationship that
+  // subtype-changing views rely on.
+  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+}
+
+} // namespace
+
 /*!
  * \brief collect the mapping from the buffer var to it allocated buffer
  */
@@ -89,6 +101,7 @@ public:
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
     arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     auto buffer_oob = buffer_oob_vec_[cur_infer_id];
+    bool in_pipeline = in_pipeline_vec_[cur_infer_id];
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
                            << "] is null inside run_infer_step.";
@@ -115,7 +128,8 @@ public:
                                                      cur_analyzer,
                                                      buffer_oob,
                                                      {},
-                                                     let_var_to_expr_},
+                                                     let_var_to_expr_,
+                                                     in_pipeline},
                                      level);
 
     // Process the returned updates
@@ -147,9 +161,15 @@ public:
           Layout target_layout =
               shapes_equal
                   ? src_layout
-                  : src_layout->Reshape(sib->shape, &analyzer_,
-                                        Integer(src_buffer->dtype.bytes()),
-                                        Integer(sib->dtype.bytes()));
+                  // Alias buffers may reinterpret the same storage with a
+                  // different element width.  Reshape the inferred layout using
+                  // the old/new storage bit ratio so that layout inference
+                  // keeps the physical storage footprint unchanged while
+                  // allowing the logical element count to change.
+                  : src_layout->Reshape(
+                        sib->shape, &analyzer_,
+                        Integer(GetElementStorageBits(src_buffer->dtype)),
+                        Integer(GetElementStorageBits(sib->dtype)));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -292,6 +312,9 @@ public:
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
+    ICHECK_EQ(in_pipeline_vec_.size(), infer_list_.size())
+        << "Size mismatch: in_pipeline_vec_ and infer_list_ must match in "
+           "length.";
 
     DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
     for (int i = 0; i < infer_list_stmt_.size(); ++i) {
@@ -379,12 +402,13 @@ public:
             }
           }
 
-          Layout reshaped = shapes_equal
-                                ? rep_layout.value()
-                                : rep_layout.value()->Reshape(
-                                      buf->shape, &analyzer_,
-                                      Integer(rep.value()->dtype.bytes()),
-                                      Integer(buf->dtype.bytes()));
+          Layout reshaped =
+              shapes_equal
+                  ? rep_layout.value()
+                  : rep_layout.value()->Reshape(
+                        buf->shape, &analyzer_,
+                        Integer(GetElementStorageBits(rep.value()->dtype)),
+                        Integer(GetElementStorageBits(buf->dtype)));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -560,6 +584,7 @@ private:
       // Add the tile operator to infer_list_
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
+      in_pipeline_vec_.push_back(pipelined_depth_ > 0);
     }
   }
 
@@ -623,6 +648,17 @@ private:
   }
 
   void VisitStmt_(const ForNode *op) final {
+    bool enter_pipelined = false;
+    if (auto num_stages_anno = op->annotations.Get("num_stages")) {
+      const auto *imm = num_stages_anno->as<IntImmNode>();
+      ICHECK(imm) << "For annotation num_stages must be IntImm, but got "
+                  << num_stages_anno.value();
+      enter_pipelined = imm->value > 0;
+    }
+    if (enter_pipelined) {
+      ++pipelined_depth_;
+    }
+
     if (op->kind == ForKind::kParallel) {
       auto infer = ParallelOp(tvm::ffi::GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
@@ -695,6 +731,7 @@ private:
       });
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
+      in_pipeline_vec_.push_back(pipelined_depth_ > 0);
       thread_var_vec_.push_back(thread_var_);
       if (thread_var_.defined() &&
           analyzer_.const_int_bound.IsBound(thread_var_->var)) {
@@ -711,6 +748,11 @@ private:
       buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
+    }
+
+    if (enter_pipelined) {
+      ICHECK_GT(pipelined_depth_, 0);
+      --pipelined_depth_;
     }
   }
 
@@ -760,10 +802,10 @@ private:
             annotated_layout_map_.Set(buffer, layout);
           } else {
             // Use the first buffer sharing this var as the base for dtype ratio
-            int base_bytes = buffers[0]->dtype.bytes();
+            int64_t base_bits = GetElementStorageBits(buffers[0]->dtype);
             auto reshaped_layout =
-                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bytes),
-                                Integer(buffer->dtype.bytes()));
+                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bits),
+                                Integer(GetElementStorageBits(buffer->dtype)));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }
         }
@@ -975,6 +1017,10 @@ private:
   Map<Var, PrimExpr> let_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
+  // Whether the corresponding op was observed inside a pipelined loop
+  // (i.e., a surrounding For annotated with num_stages > 0).
+  std::vector<bool> in_pipeline_vec_;
+  int pipelined_depth_{0};
   // Fragment buffers that have accesses outside of TileOps.
   // These "floating" buffers need fully replicated layouts since their
   // access patterns cannot be inferred from TileOp semantics.

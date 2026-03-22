@@ -8,7 +8,7 @@ import os
 import subprocess
 import warnings
 import contextlib
-from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
+from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 import shutil
 import tempfile
 import tvm_ffi
@@ -17,6 +17,18 @@ from tvm.target import Target
 
 from tvm.base import py_str
 from tvm.contrib import utils
+
+
+def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=None):
+    if kernels_output_dir is None:
+        return temp.relpath(f"{file_name}.cu"), temp.relpath(f"{file_name}.{target_format}")
+
+    os.makedirs(kernels_output_dir, exist_ok=True)
+    fd, temp_code = tempfile.mkstemp(prefix=f"{file_name}_", suffix=".cu", dir=kernels_output_dir)
+    os.close(fd)
+    file_stem, _ = os.path.splitext(os.path.basename(temp_code))
+    temp_target = os.path.join(kernels_output_dir, f"{file_stem}.{target_format}")
+    return temp_code, temp_target
 
 
 def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False):
@@ -55,20 +67,13 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         target_arch = get_target_arch(compute_version)
         arch = ["-gencode", f"arch=compute_{target_arch},code=sm_{target_arch}"]
 
-    temp = utils.tempdir()
+    temp = utils.tempdir(keep_for_debug=not env.should_cleanup_temp_files())
     file_name = "tvm_kernels"
     if target_format not in ["cubin", "ptx", "fatbin"]:
         raise ValueError("target_format must be in cubin, ptx, fatbin")
-    temp_code = temp.relpath(f"{file_name}.cu")
-    temp_target = temp.relpath(f"{file_name}.{target_format}")
-
     pass_context = tvm.get_global_func("transform.GetCurrentPassContext")()
     kernels_output_dir = pass_context.config.get("cuda.kernels_output_dir", None)
-    if kernels_output_dir is not None:
-        if not os.path.isdir(kernels_output_dir):
-            os.makedirs(kernels_output_dir)
-        temp_code = os.path.join(kernels_output_dir, f"{file_name}.cu")
-        temp_target = os.path.join(kernels_output_dir, f"{file_name}.{target_format}")
+    temp_code, temp_target = _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=kernels_output_dir)
 
     with open(temp_code, "w") as out_file:
         out_file.write(code)

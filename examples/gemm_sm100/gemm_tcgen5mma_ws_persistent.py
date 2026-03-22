@@ -34,6 +34,7 @@ def gemm(
     k_blocks = T.ceildiv(K, block_K)
     waves = T.ceildiv(m_blocks * n_blocks, sm_num)
     group_size = 8
+    assert n_blocks % group_size == 0
 
     with T.Kernel(sm_num, threads=256) as (block_id):
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
@@ -59,10 +60,16 @@ def gemm(
                 if bx * block_M < M and by * block_N < N:
                     for k in T.serial(k_blocks):
                         T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
-                        T.copy(
-                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[k % num_stages, :, :]
-                        )  # cannot use BufferLoad here
-                        T.copy(B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N], B_shared[k % num_stages, :, :])
+                        T.tma_copy(
+                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
+                            A_shared[k % num_stages, :, :],
+                            barrier=loaded[k % num_stages],
+                        )
+                        T.tma_copy(
+                            B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N],
+                            B_shared[k % num_stages, :, :],
+                            barrier=loaded[k % num_stages],
+                        )
                         T.mbarrier_arrive(loaded[k % num_stages])
 
         elif tx < 64:  # warp 1: issue tcgen5
@@ -76,25 +83,23 @@ def gemm(
                     for k in T.serial(k_blocks):
                         T.mbarrier_wait_parity(loaded[k % num_stages], (k // num_stages) & 1)
                         if w & 1 == 0:
-                            T.gemm(
+                            T.tcgen05_gemm(
                                 A_shared[k % num_stages, :, :],
                                 B_shared[k % num_stages, :, :],
                                 C_tmem_0,
                                 False,
                                 False,
                                 mbar=consumed[k % num_stages],
-                                wg_wait=-1,
                                 clear_accum=k == 0,
                             )
                         else:
-                            T.gemm(
+                            T.tcgen05_gemm(
                                 A_shared[k % num_stages, :, :],
                                 B_shared[k % num_stages, :, :],
                                 C_tmem_1,
                                 False,
                                 False,
                                 mbar=consumed[k % num_stages],
-                                wg_wait=-1,
                                 clear_accum=k == 0,
                             )
                     T.tcgen05_mma_arrive(tmem_full[w & 1])

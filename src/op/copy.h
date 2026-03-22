@@ -15,17 +15,18 @@ using namespace tir;
 
 /// Copy instruction types for different memory access patterns
 enum class CopyInst : uint8_t {
-  kNormal = 0,    // utilize ldg/stg or cpasync or any buffer copy
+  kNormal = 0,    // utilize plain buffer copy
   kLDSM = 1,      // ldmatrix memory copy
   kSTSM = 2,      // stmatrix memory copy
   kBulkLoad = 3,  // utilize tma load
   kBulkStore = 4, // utilize tma store
+  kCPAsync = 5,   // cp.async global->shared copy
   // we should separate the bulk load and store for 1d and multi-dim
   // as they have different memory access patterns
-  kBulkLoad1D = 5,  // utilize tma load 1d
-  kBulkStore1D = 6, // utilize tma store 1d
-  kTMemLoad = 7,    // tcgen05.ld (tensor memory -> register)
-  kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
+  kBulkLoad1D = 6,  // utilize tma load 1d
+  kBulkStore1D = 7, // utilize tma store 1d
+  kTMemLoad = 8,    // tcgen05.ld (tensor memory -> register)
+  kTMemStore = 9,   // tcgen05.st (register -> tensor memory)
 };
 
 /// Convert CopyInst enum to string for debugging
@@ -41,6 +42,8 @@ inline const char *CopyInstToString(CopyInst inst) {
     return "BulkLoad";
   case CopyInst::kBulkStore:
     return "BulkStore";
+  case CopyInst::kCPAsync:
+    return "CPAsync";
   case CopyInst::kBulkLoad1D:
     return "BulkLoad1D";
   case CopyInst::kBulkStore1D:
@@ -149,6 +152,15 @@ public:
     return false;
   }
 
+  bool GetIsTmaCopy() const {
+    if (auto val = annotations.Get("is_tma_copy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
   int GetEvictionPolicy() const {
     if (auto val = annotations.Get("eviction_policy")) {
       if (auto int_val = val->as<IntImmNode>()) {
@@ -156,6 +168,21 @@ public:
       }
     }
     return 0; // default: evict_normal
+  }
+
+  bool GetIsAsyncCopy() const {
+    if (auto val = annotations.Get("is_async_copy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    // Backward-compatibility with historical annotation key.
+    if (auto val = annotations.Get("force_cp_async")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
   }
 
   /*!
@@ -227,11 +254,17 @@ public:
   bool CheckTMemStore(Target target) const;
 
   /*!
+   * \brief Check if cp.async copy is supported.
+   */
+  bool CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
+                        arith::Analyzer *analyzer) const;
+
+  /*!
    * \brief Get the copy instruction type.
    */
   CopyInst GetCopyInst(Target target, bool disable_tma_lower,
                        const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                       bool buffer_oob) const;
+                       bool buffer_oob = false, bool in_pipeline = false) const;
 
 protected:
   /*!
@@ -262,6 +295,11 @@ protected:
    * \brief Generate lowering for normal copy.
    */
   Stmt LowerNormalCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Generate lowering for cp.async global->shared copy.
+   */
+  Stmt LowerCPAsyncCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.

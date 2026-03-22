@@ -1,5 +1,6 @@
 import torch
 from tilelang import language as T
+import tilelang.testing
 
 B = 1
 S = 1024  # small but for test only.
@@ -50,6 +51,7 @@ def test_example_wy_fast_compilation():
     )
     print(kernel.get_kernel_source())
     W_tilelang, U_tilelang = kernel(K, V, Beta, G, A)
+    torch.cuda.synchronize()
 
 
 def test_example_wy_fast_bwd_split_compilation():
@@ -316,5 +318,4 @@ def test_example_chunk_delta_bwd_compilation():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_example_chunk_delta_bwd_compilation()
+    tilelang.testing.main()

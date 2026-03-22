@@ -186,7 +186,6 @@ def mhc_pre_gemm_sqrsum_tilelang(
                 out_frag,
                 transpose_A=False,
                 transpose_B=True,
-                wg_wait=0,
                 clear_accum=False,
             )
         sqrsum_l = T.alloc_fragment(token_block, T.float32)
@@ -406,6 +405,112 @@ def test(n: int, hidden_size: int, hc_mult: int) -> None:
     torch.testing.assert_close(post_mix_fused, post_mix_ref)
     torch.testing.assert_close(comb_mix_fused, comb_mix_ref)
     torch.testing.assert_close(layer_input_fused, layer_input_ref)
+
+
+def run_regression_perf(
+    n: int = 2048,
+    hidden_size: int = 4096,
+    hc_mult: int = 4,
+    rms_eps: float = 1e-6,
+    hc_pre_eps: float = 1e-6,
+    hc_sinkhorn_eps: float = 1e-6,
+    hc_post_mult_value: float = 1.0,
+    sinkhorn_repeat: int = 10,
+    n_splits: int = 1,
+) -> float:
+    assert n_splits == 1, "The simple TileLang version gemm_sqrsum doesn't support split-k"
+
+    test_data = generate_test_data(
+        n=n,
+        hc_mult=hc_mult,
+        hidden_size=hidden_size,
+        rms_eps=rms_eps,
+        hc_pre_eps=hc_pre_eps,
+        hc_sinkhorn_eps=hc_sinkhorn_eps,
+        hc_post_mult_value=hc_post_mult_value,
+        sinkhorn_repeat=sinkhorn_repeat,
+    )
+
+    residual = test_data["residual"]
+    fn = test_data["fn"]
+    hc_scale = test_data["hc_scale"]
+    hc_base = test_data["hc_base"]
+
+    num_tokens = residual.shape[0]
+    hc_mult2 = hc_mult * hc_mult
+    hc_mult3 = hc_mult * 2 + hc_mult2
+
+    residual_flat = residual.view(num_tokens, hc_mult, hidden_size)
+    post_mix = torch.empty(num_tokens, hc_mult, dtype=torch.float32, device=residual.device)
+    comb_mix = torch.empty(num_tokens, hc_mult2, dtype=torch.float32, device=residual.device)
+    layer_input = torch.empty(num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device)
+    gemm_out_mul = torch.empty(n_splits, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device)
+    gemm_out_sqrsum = torch.empty(n_splits, num_tokens, dtype=torch.float32, device=residual.device)
+    print(
+        mhc_pre_gemm_sqrsum_tilelang.get_kernel_source(
+            residual_flat.view(num_tokens, hc_mult * hidden_size),
+            fn,
+            gemm_out_mul.squeeze(0),
+            gemm_out_sqrsum.squeeze(0),
+            hc_mult3,
+            hc_mult * hidden_size,
+        )
+    )
+    print(
+        mhc_pre_big_fuse_tilelang.get_kernel_source(
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            hc_scale,
+            hc_base,
+            residual_flat,
+            post_mix,
+            comb_mix,
+            layer_input,
+            hidden_size,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            n_splits,
+            hc_mult,
+        )
+    )
+
+    def run_kernel_only():
+        mhc_pre_gemm_sqrsum_tilelang(
+            residual_flat.view(num_tokens, hc_mult * hidden_size),
+            fn,
+            gemm_out_mul.squeeze(0),
+            gemm_out_sqrsum.squeeze(0),
+            hc_mult3,
+            hc_mult * hidden_size,
+        )
+
+        mhc_pre_big_fuse_tilelang(
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            hc_scale,
+            hc_base,
+            residual_flat,
+            post_mix,
+            comb_mix,
+            layer_input,
+            hidden_size,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            n_splits,
+            hc_mult,
+        )
+
+    run_kernel_only()
+
+    from tilelang.profiler import do_bench
+
+    return do_bench(run_kernel_only, backend="cupti")
 
 
 def main():

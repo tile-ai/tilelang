@@ -4,7 +4,7 @@ This page summarizes the core TileLang “instructions” available at the DSL
 level, how they map to hardware concepts, and how to use them correctly.
 
 ## Quick Categories
-- Data movement: `T.copy`, `T.c2d_im2col`, staging Global ↔ Shared ↔ Fragment
+- Data movement: `T.copy`, `T.async_copy`, `T.c2d_im2col`, staging Global ↔ Shared ↔ Fragment
 - Compute primitives: `T.gemm`/`T.gemm_sp`, elementwise math (`T.exp`, `T.max`),
   reductions (`T.reduce_sum`, `T.cumsum`, warp reducers)
 - Control helpers: `T.clear`/`T.fill`, `T.reshape`/`T.view`
@@ -32,6 +32,52 @@ Semantics
   vectorization is not required in HL mode.
 - Safety: the LegalizeSafeMemoryAccess pass inserts boundary guards when an
   access may be out‑of‑bounds and drops them when proven safe.
+
+### `T.copy` vs `T.async_copy`
+
+TileLang supports both synchronous and explicitly-asynchronous copies.
+
+`T.copy(src, dst, ...)` (synchronous semantics)
+- Intended default for most TileLang programs.
+- The compiler is free to lower it to different mechanisms (SIMT copy, `ldmatrix`,
+  TMA, `cp.async`, etc.) depending on target/hints, but the observable semantics
+  are *synchronous*: after the statement, it is safe to use `dst`.
+- If `T.copy` lowers to `cp.async`, TileLang will still preserve synchronous
+  semantics by emitting the required `commit`/`wait` (and any required
+  synchronization) so that consuming `dst` is correct.
+
+`T.async_copy(src, dst, ...)` (explicit async semantics)
+- Intended for writing manual pipelines or warp-specialized code where you want
+  to overlap global->shared copies with compute.
+- Lowers through `cp.async` and emits:
+  - `ptx_cp_async(...)`
+  - `ptx_commit_group()`
+  - No `ptx_wait_group(...)` is auto-inserted.
+- You must explicitly insert `T.ptx_wait_group(...)` before consuming `dst`.
+- A barrier is still required when `dst` is produced cooperatively and consumed
+  across threads. In most TileLang programs you do not need to write it
+  manually: `ThreadSync("shared")` will insert the required
+  `T.tvm_storage_sync("shared")` before the first read from `dst`. If you want
+  explicit control (or if you're writing very low-level code), you can insert
+  `T.tvm_storage_sync("shared")` yourself (or `T.tvm_storage_sync("warp")` for
+  warp-local consumption).
+- This op is intentionally strict: if the copy cannot be lowered to `cp.async`
+  (e.g., wrong scopes, unsupported vector width), compilation fails instead of
+  silently falling back to a synchronous copy.
+
+Example (manual async prefetch)
+```python
+# Prefetch into shared asynchronously (emits cp.async + commit).
+T.async_copy(A[by * BM, ko * BK], A_s)
+
+# ... independent work here ...
+
+# Before consuming A_s, ensure the async copies are completed.
+T.ptx_wait_group(0)
+# The required shared-memory barrier will be inserted automatically before the
+# first read from A_s by ThreadSync("shared") in the default lowering pipeline.
+T.gemm(A_s, B_s, C_f)
+```
 
 Other helpers
 - `T.c2d_im2col(img, col, ...)`: convenience for conv‑style transforms.
@@ -98,6 +144,7 @@ signatures, behaviors, constraints, and examples, refer to API Reference
 
 Data movement
 - `T.copy(src, dst, ...)`: Move tiles between Global/Shared/Fragment.
+- `T.async_copy(src, dst, ...)`: Explicit async global→shared copy via `cp.async`.
 - `T.c2d_im2col(img, col, ...)`: 2D im2col transform for conv.
 
 Memory allocation and descriptors

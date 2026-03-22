@@ -427,6 +427,27 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       stream << "tl.cp_async_gs_conditional(" << size << ", " << dst << ", "
              << src << ", " << condition << ")\n";
     }
+  } else if (op->op.same_as(tl::ptx_cp_async())) {
+    // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
+    // args[2] = bytes, args[3] = predicate (optional)
+    ICHECK(op->args.size() == 3 || op->args.size() == 4)
+        << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+           "src_access_ptr, bytes, [predicate])";
+
+    std::string dst = PrintExpr_(op->args[0]);
+    std::string src = PrintExpr_(op->args[1]);
+    std::string size = PrintExpr_(op->args[2]);
+
+    if (op->args.size() == 3) {
+      this->PrintIndent();
+      stream << "tl.cp_async_gs(" << size << ", " << dst << ", " << src
+             << ")\n";
+    } else {
+      std::string condition = PrintExpr_(op->args[3]);
+      this->PrintIndent();
+      stream << "tl.cp_async_gs_conditional(" << size << ", " << dst << ", "
+             << src << ", " << condition << ")\n";
+    }
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
     print_extern_call_stmt("tl.cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
@@ -437,10 +458,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     stream << mbarrier_name_
            << " = tl.alloc_smem(cutlass.Uint64, size_in_elems=" << barrier_count
            << ")\n";
-  } else if (op->op.same_as(tl::get_mbarrier())) {
-    ICHECK_EQ(op->args.size(), 1);
-    std::string barrier_id = PrintExpr_(op->args[0]);
-    os << "(" << mbarrier_name_ << "+" << barrier_id << ")";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
     ICHECK_EQ(op->args.size(), 1);
     PrintIndent();

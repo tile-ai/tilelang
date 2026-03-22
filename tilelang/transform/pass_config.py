@@ -6,7 +6,8 @@ from enum import Enum
 class PassConfigKey(str, Enum):
     """Pass configuration keys for TileLang compiler."""
 
-    # TileLang specific configs
+    # TileLang specific configs: TL_XX
+
     TL_SIMPLIFY = "tl.Simplify"
     """Configuration for TileLang simplification passes.
 
@@ -88,6 +89,31 @@ class PassConfigKey(str, Enum):
 
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
+
+    TL_ENABLE_ASYNC_COPY = "tl.enable_async_copy"
+    """Enable lowering eligible global->shared copies to PTX `cp.async`.
+
+    When True (default), TileLang may lower:
+    - `T.copy(global -> shared, ...)` to `ptx_cp_async + commit + wait`
+    - `T.async_copy(global -> shared, ...)` to `ptx_cp_async + commit` (no wait)
+    - plain user-written global->shared copy stores (e.g. in `T.Parallel`) to
+      `ptx_cp_async + commit + wait`
+
+    Important: Automatic cp.async lowering is gated by the surrounding loop
+    context. TileLang will only auto-enable cp.async when the copy is observed
+    inside a software-pipelined loop annotated with `num_stages > 0`
+    (e.g. created by `T.Pipelined(..., num_stages=...)` or by pipeline planning).
+    Outside such loops, TileLang will prefer synchronous copy lowering even when
+    this flag is True.
+    You can request local cp.async injection on a specific parallel loop via
+    `T.Parallel(..., prefer_async=True)`.
+
+    When False, TileLang will avoid the cp.async lowering path for `T.copy`.
+    Explicit `T.async_copy` still requires cp.async support and may error if
+    it cannot be lowered.
+
+    Default: True
+    """
 
     TL_ENABLE_LOWER_LDGSTG = "tl.enable_lower_ldgstg"
     """Enable non-predicated LDG/STG lowering for global memory access.
@@ -189,7 +215,8 @@ class PassConfigKey(str, Enum):
     ```
     """
 
-    # TIR related configs
+    # TIR related configs: TIR_XX
+
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"
     """Enable equivalent terms in TIR Common Subexpression Elimination. Default: True"""
 
@@ -220,8 +247,16 @@ class PassConfigKey(str, Enum):
     TIR_NOALIAS = "tir.noalias"
     """Enable pointer non-aliasing assumptions. Default: True"""
 
+    # Output debugging options
+
     CUDA_KERNELS_OUTPUT_DIR = "cuda.kernels_output_dir"
     """Output directory for generated CUDA kernels. Default: empty string"""
 
     TL_DISABLE_OUT_OF_BOUND_WARNING = "tl.disable_out_of_bound_warning"
     """Disable out-of-bound access warnings in safe memory access legalization. Default: False"""
+
+    TL_ENABLE_DUMP_IR = "tl.enable_dump_ir"
+    """Enable dumping IR during lowering between passes. Default: False"""
+
+    TL_DUMP_IR_DIR = "tl.dump_ir_path"
+    """Path to the directory where IR will be dumped. Default: ./dump_ir/"""

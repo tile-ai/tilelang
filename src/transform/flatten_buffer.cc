@@ -294,30 +294,41 @@ private:
       under_address_of = false;
       return result;
     }
-    return StmtExprMutator::VisitExpr_(op);
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (call->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK_GE(call->args.size(), 3)
+          << "tvm_access_ptr must have at least 3 arguments";
+      PrimExpr offset = call->args[2];
+      if (NeedsInt64Promotion(offset)) {
+        Int64Promoter promoter;
+        call.CopyOnWrite()->args.Set(2, promoter(offset));
+      }
+    }
+    return std::move(call);
+  }
+
+  bool NeedsInt64Promotion(const PrimExpr &index) {
+    DataType dtype = index->dtype;
+    if (!dtype.is_int() || dtype.bits() >= 64) {
+      return false;
+    }
+
+    auto int_bound = analyzer_->const_int_bound(index);
+    int64_t max_value = int_bound->max_value;
+    int64_t min_value = int_bound->min_value;
+    const int64_t type_max = (1LL << (dtype.bits() - 1));
+    const int64_t type_min = -(1LL << (dtype.bits() - 1));
+    return max_value >= (type_max - 1) || min_value < type_min;
   }
 
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
                                           const Array<PrimExpr> &indices) {
     auto flattened_indices = buffer->ElemOffset(indices);
     Array<PrimExpr> safe_indices;
-    for (auto index : flattened_indices) {
-      auto int_bound = analyzer_->const_int_bound(index);
-      DataType dtype = index->dtype;
-      if (dtype.is_int() && dtype.bits() < 64) {
-        int64_t max_value = int_bound->max_value;
-        int64_t min_value = int_bound->min_value;
-        const int64_t type_max = (1LL << (dtype.bits() - 1));
-        const int64_t type_min = -(1LL << (dtype.bits() - 1));
-
-        if (max_value >= (type_max - 1) || min_value < type_min) {
-          Int64Promoter promoter;
-          for (auto &index : flattened_indices) {
-            safe_indices.push_back(promoter(index));
-          }
-        } else {
-          safe_indices.push_back(index);
-        }
+    Int64Promoter promoter;
+    for (const auto &index : flattened_indices) {
+      if (NeedsInt64Promotion(index)) {
+        safe_indices.push_back(promoter(index));
       } else {
         safe_indices.push_back(index);
       }

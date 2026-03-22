@@ -48,13 +48,11 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             bz: T.int32,
             by: T.int32,
         ):
-            with T.attr("default", "async_scope", 1):
-                for i, j in T.Parallel(block_N, dim):
-                    K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
+            for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
+                K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
 
-            with T.attr("default", "async_scope", 1):
-                for i, j in T.Parallel(block_N, dim):
-                    V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
+            for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
+                V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
 
             T.ptx_commit_group()
 

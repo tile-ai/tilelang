@@ -1,6 +1,14 @@
+from __future__ import annotations
+
 from .gemm_base import GemmBase
 from .inst import GemmInst
-from tilelang.layout import make_tcgen05mma_swizzled_layout
+from tilelang.layout import (
+    Layout,
+    make_full_bank_swizzled_layout,
+    make_half_bank_swizzled_layout,
+    make_quarter_bank_swizzled_layout,
+    make_linear_layout,
+)
 from tilelang.intrinsics.tcgen05_macro_generator import (
     TensorCoreIntrinEmitter,
 )
@@ -11,6 +19,7 @@ from tvm import tir
 from tvm.target import Target
 from tvm.ir import Range
 from tvm.arith import Analyzer
+from typing import Callable
 
 
 _FLOAT8_DTYPES = {
@@ -30,6 +39,18 @@ class GemmTCGEN5(GemmBase):
     Layout inference and lowering are dispatched based on the memory scopes
     of operands A and B.
     """
+
+    def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
+        """Infer a standard shared-memory swizzle layout for TCGEN05 operands."""
+        vectorized_size = 128 // self.in_dtype.bits
+        if continuity % (vectorized_size * 8) == 0:
+            return make_full_bank_swizzled_layout
+        elif continuity % (vectorized_size * 4) == 0:
+            return make_half_bank_swizzled_layout
+        elif continuity % (vectorized_size * 2) == 0:
+            return make_quarter_bank_swizzled_layout
+        else:
+            return make_linear_layout
 
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer swizzled layouts for operands and accumulator.
@@ -60,21 +81,28 @@ class GemmTCGEN5(GemmBase):
             b_continuity = self.K if b_is_k_major else self.N // n_warp
 
             return {
-                self.A: make_tcgen05mma_swizzled_layout(self.A, continuity=a_continuity, k_major=a_is_k_major),
-                self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.A: self.infer_shared_layout(a_continuity)(self.A),
+                self.B: self.infer_shared_layout(b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
             b_continuity = self.K if b_is_k_major else self.N // n_warp
             layouts = {
                 self.A: mma_emitter.make_mma_store_layout(self.A),
-                self.B: make_tcgen05mma_swizzled_layout(self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.B: self.infer_shared_layout(b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
             return layouts
         return {}
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
@@ -109,8 +137,8 @@ class GemmTCGEN5(GemmBase):
             raise ValueError(f"Unsupported B scope for TCGEN5MMA: {self.B.scope()}")
         if self.C.scope() != "shared.tmem":
             raise ValueError(f"TCGEN5MMA expects C in shared.tmem, got {self.C.scope()}")
-        if self.wg_wait != -1:
-            raise ValueError("TCGEN5MMA currently requires wg_wait == -1")
+        if self.wg_wait not in (0, -1):
+            raise ValueError("TCGEN5MMA only accepts wg_wait in {0, -1}")
 
         mbar = self.mbar
         if mbar is None:
@@ -130,6 +158,7 @@ class GemmTCGEN5(GemmBase):
         B_shared = self.BRegion
         C_local = self.C
         clear_accum = self.clear_accum
+        mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
 
         # Since TCGEN5MMA atoms provided by CUTLASS always have an internal
         # `elect_one_sync()`, we check if we are calling it using full warps
@@ -148,8 +177,26 @@ class GemmTCGEN5(GemmBase):
         def _gemm_ss() -> None:
             mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
+        @T.prim_func
+        def _gemm_ss_cond_sync() -> None:
+            if thread_var // 32 == thread_bounds.min // warp_size:
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            T.mbarrier_wait_parity(mbar, mbar_phase)
+
+        @T.prim_func
+        def _gemm_ss_sync() -> None:
+            mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            T.mbarrier_wait_parity(mbar, mbar_phase)
+
+        if self.is_tcgen05:
+            return (
+                _Simplify(_gemm_ss, inline_let=True)
+                if analyzer.can_prove(thread_bounds.extent == warp_size)
+                else _Simplify(_gemm_ss_cond, inline_let=True)
+            )
+
         return (
-            _Simplify(_gemm_ss, inline_let=True)
+            _Simplify(_gemm_ss_sync, inline_let=True)
             if analyzer.can_prove(thread_bounds.extent == warp_size)
-            else _Simplify(_gemm_ss_cond, inline_let=True)
+            else _Simplify(_gemm_ss_cond_sync, inline_let=True)
         )

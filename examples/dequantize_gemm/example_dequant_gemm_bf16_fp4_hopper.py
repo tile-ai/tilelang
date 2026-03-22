@@ -449,6 +449,7 @@ def run_regression_perf(m=4096, n=4096, k=4096, fast_dequant=True):
         threads=256,
         split=1,
     )
+    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     return profiler.do_bench(backend="cupti")
 

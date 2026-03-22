@@ -27,6 +27,13 @@ static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
+// Loop annotation key controlling whether PTX async-copy rewriting is enabled
+// in the annotated loop subtree. Value should be Bool (False/True).
+static constexpr const char *kLoopPreferAsync = "parallel_prefer_async";
+// Loop annotation key controlling whether async commit/wait should be omitted
+// for injected cp.async in this parallel loop subtree. Value should be Bool.
+static constexpr const char *kParallelAsyncWithoutAsyncCommitWait =
+    "parallel_async_without_async_commit_wait";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.
@@ -51,6 +58,7 @@ static constexpr const char *kPtxasRegisterUsageLevel =
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
 static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
+static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
@@ -118,8 +126,23 @@ static constexpr const char *kDisableThreadStorageSync =
  */
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
 
+/*!
+ * \brief Disable out of bound warning in LegalizeSafeMemoryAccess pass.
+ *
+ * kDisableOutOfBoundWarning = "tl.disable_out_of_bound_warning"
+ *
+ */
 static constexpr const char *kDisableOutOfBoundWarning =
     "tl.disable_out_of_bound_warning";
+
+/*!
+ * \brief Enable dumping IR during lowering between passes.
+ *
+ * kEnableDumpIR = "tl.enable_dump_ir"
+ *
+ */
+static constexpr const char *kEnableDumpIR = "tl.enable_dump_ir";
+static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 
 /*!
  * \brief Get the type of the CUDA tensor map
@@ -217,22 +240,6 @@ TVM_DLL const Op &create_tma_descriptor();
  *
  */
 TVM_DLL const Op &create_tma_im2col_descriptor();
-
-/*!
- * \brief Create a list of mbarrier with arrive_counts for each barrier
- *
- * create_list_of_mbarrier(arrive_counts0, arrive_counts1, ...)
- *
- */
-TVM_DLL const Op &create_list_of_mbarrier();
-
-/*!
- * \brief Get the mbarrier injected by compiler via barrier_id
- *
- * int64_t* get_mbarrier(barrier_id)
- *
- */
-TVM_DLL const Op &get_mbarrier();
 
 /*!
  * \brief tvm intrinsics for loading data from global tensor descriptor to

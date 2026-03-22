@@ -21,6 +21,7 @@
 
 import pytest
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import tvm_ffi
 import torch
@@ -137,7 +138,7 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
 
     # Use UUID in global_symbol to ensure unique cache key per test run
     unique_id = uuid.uuid4().hex[:8]
-    M, N = 1024, 1024
+    M, N = 256, 256
 
     @T.prim_func
     def vector_add(
@@ -207,7 +208,7 @@ def test_cache_miss_detection(clean_cache_env, backend):
     counter = PostProcCounter()
     counter.register_callback(backend)
 
-    M, N = 512, 512
+    M, N = 128, 128
 
     # Kernel 1: A + 1.0
     @T.prim_func

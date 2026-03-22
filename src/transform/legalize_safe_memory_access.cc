@@ -242,29 +242,164 @@ private:
            op == atomic_min_elem_op() || op == atomic_min_ret_elem_op();
   }
 
+  bool IsCPAsyncOp(const Op &op) {
+    return op == builtin::ptx_cp_async() || op == tl::ptx_cp_async();
+  }
+
+  static constexpr int kCPAsyncDstPtrArg = 0;
+  static constexpr int kCPAsyncSrcPtrArg = 1;
+
+  BufferLoad GetBaseLoadFromAccessPtrExpr(const PrimExpr &expr) {
+    const auto *ptr_call = expr.as<CallNode>();
+    ICHECK(ptr_call) << "cp.async expects access_ptr arguments, but got "
+                     << expr;
+
+    if (ptr_call->op.same_as(tl::access_ptr())) {
+      ICHECK_EQ(ptr_call->args.size(), 3U)
+          << "tl.access_ptr expects 3 arguments, but got " << ptr_call->args;
+      const auto *base_load = ptr_call->args[0].as<BufferLoadNode>();
+      ICHECK(base_load) << "tl.access_ptr base must be BufferLoad, but got "
+                        << ptr_call->args[0];
+      return Downcast<BufferLoad>(ptr_call->args[0]);
+    }
+
+    ICHECK(ptr_call->op.same_as(builtin::tvm_access_ptr()))
+        << "cp.async expects tl.access_ptr or tvm_access_ptr, but got "
+        << ptr_call->op;
+    ICHECK_EQ(ptr_call->args.size(), 5U)
+        << "tvm_access_ptr expects 5 arguments, but got " << ptr_call->args;
+    const auto *var = ptr_call->args[1].as<VarNode>();
+    ICHECK(var) << "tvm_access_ptr buffer data must be Var, but got "
+                << ptr_call->args[1];
+    Var buffer_data = Downcast<Var>(ptr_call->args[1]);
+    ICHECK(buffer_data_to_buffer_.count(buffer_data))
+        << "Buffer data var " << buffer_data
+        << " is not registered in buffer_data_to_buffer_.";
+    Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
+    return BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]});
+  }
+
+  bool NeedsEvaluateBoundaryCheck(const Call &call) {
+    return call->op == builtin::call_extern() ||
+           (call->op.as<OpNode>() && IsAtomicOp(Downcast<Op>(call->op)));
+  }
+
+  Array<PrimExpr> CollectCPAsyncConditions(const Call &call) {
+    ICHECK_GE(call->args.size(), 3U)
+        << "cp.async expects at least 3 arguments, but got " << call->args;
+    Array<PrimExpr> conditions;
+    BufferLoad src_base_load =
+        GetBaseLoadFromAccessPtrExpr(call->args[kCPAsyncSrcPtrArg]);
+
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+    checker.CheckBufferIndices(src_base_load->buffer, src_base_load->indices,
+                               /*is_load=*/true, /*throw_warning=*/false);
+    return checker.GetConditions();
+  }
+
+  Buffer GetCPAsyncSourceBuffer(const Call &call) {
+    ICHECK_GE(call->args.size(), 3U)
+        << "cp.async expects at least 3 arguments, but got " << call->args;
+    BufferLoad src_base_load =
+        GetBaseLoadFromAccessPtrExpr(call->args[kCPAsyncSrcPtrArg]);
+    return src_base_load->buffer;
+  }
+
+  PrimExpr CombineConditions(const Array<PrimExpr> &conditions) {
+    ICHECK(!conditions.empty());
+    PrimExpr combined = conditions[0];
+    for (size_t i = 1; i < conditions.size(); ++i) {
+      combined = tir::And(combined, conditions[i]);
+    }
+    return analyzer_->Simplify(combined);
+  }
+
+  Optional<PrimExpr> GetCPAsyncPredicate(const Call &call) {
+    if (call->args.size() >= 4U) {
+      return call->args[3];
+    }
+    return Optional<PrimExpr>();
+  }
+
+  Stmt RewriteCPAsync(const Evaluate &evaluate, const Call &call,
+                      const Array<PrimExpr> &conditions) {
+    if (conditions.empty()) {
+      return evaluate;
+    }
+
+    ICHECK_GE(call->args.size(), 3U)
+        << "cp.async expects at least 3 arguments, but got " << call->args;
+    BufferLoad dst_base_load =
+        GetBaseLoadFromAccessPtrExpr(call->args[kCPAsyncDstPtrArg]);
+    Buffer src_buffer = GetCPAsyncSourceBuffer(call);
+
+    PrimExpr combined = CombineConditions(conditions);
+    Optional<PrimExpr> existing_predicate = GetCPAsyncPredicate(call);
+
+    PrimExpr safe_value = GetSafeValue(src_buffer);
+    DataType dst_dtype = dst_base_load->buffer->dtype;
+    if (safe_value.dtype() != dst_dtype) {
+      safe_value = Cast(dst_dtype, safe_value);
+    }
+    safe_value = analyzer_->Simplify(safe_value);
+
+    // Predicated cp.async zero-fills on the false path. Use that form when the
+    // buffer's safe value is zero so downstream codegen can emit the native
+    // conditional intrinsic instead of materializing an explicit fallback
+    // store.
+    if (analyzer_->CanProveEqual(safe_value, make_zero(dst_dtype))) {
+      PrimExpr predicate = existing_predicate.defined()
+                               ? analyzer_->Simplify(tir::And(
+                                     existing_predicate.value(), combined))
+                               : combined;
+      Array<PrimExpr> new_args{call->args[0], call->args[1], call->args[2]};
+      new_args.push_back(predicate);
+      return Evaluate(
+          Call(call->dtype, call->op, new_args, call->annotations, call->span));
+    }
+
+    Stmt else_case =
+        BufferStore(dst_base_load->buffer, safe_value, dst_base_load->indices);
+    return IfThenElse(combined, evaluate, else_case);
+  }
+
+  Stmt WrapEvaluateWithConditions(const Evaluate &evaluate,
+                                  const Array<PrimExpr> &conditions) {
+    if (conditions.empty()) {
+      return evaluate;
+    }
+    Stmt evaluate_with_conditions = evaluate;
+    for (auto cond : conditions) {
+      evaluate_with_conditions = IfThenElse(cond, evaluate_with_conditions);
+    }
+    return evaluate_with_conditions;
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     auto evaluate = Downcast<Evaluate>(op);
 
-    if (const CallNode *call_op = op->value.as<CallNode>()) {
-      auto call = Downcast<Call>(op->value);
-      if (call->op == builtin::call_extern() ||
-          (call->op.as<OpNode>() && IsAtomicOp(Downcast<Op>(call->op)))) {
-        // For CallExtern and atomic ops, we recursively collect conditions
-        // from all children. Since we cannot rewrite any BufferLoad in its
-        // children (Rewrite will cause potential Nullptr exception).
+    if (const CallNode *call_node = op->value.as<CallNode>()) {
+      Call call = Downcast<Call>(op->value);
+      if (call->op.as<OpNode>() && IsCPAsyncOp(Downcast<Op>(call->op))) {
+        Array<PrimExpr> conditions = CollectCPAsyncConditions(call);
+        if (conditions.empty()) {
+          // Fallback when we cannot recover the underlying buffer access
+          // directly from the access_ptr arguments.
+          SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
+          checker(call);
+          conditions = checker.GetConditions();
+        }
+        return RewriteCPAsync(evaluate, call, conditions);
+      }
+
+      if (NeedsEvaluateBoundaryCheck(call)) {
+        // For side-effect calls (extern/atomic), recursively collect
+        // conditions from all children. We avoid rewriting BufferLoad in call
+        // arguments directly to prevent nullptr issues in downstream lowering.
         SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();
-
-        if (conditions.empty()) {
-          return evaluate;
-        }
-
-        Stmt evaluate_with_conditions = evaluate;
-        for (auto cond : conditions) {
-          evaluate_with_conditions = IfThenElse(cond, evaluate_with_conditions);
-        }
-        return evaluate_with_conditions;
+        return WrapEvaluateWithConditions(evaluate, conditions);
       }
     }
 
@@ -285,6 +420,7 @@ private:
             << buffer_data_to_buffer_;
         auto buffer = buffer_data_to_buffer_[var];
         annotated_safe_value_map_.Set(buffer, safe_value);
+        annotated_safe_value_by_data_.Set(var, safe_value);
       }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
@@ -295,11 +431,15 @@ private:
     if (annotated_safe_value_map_.count(buffer)) {
       return annotated_safe_value_map_[buffer];
     }
+    if (annotated_safe_value_by_data_.count(buffer->data)) {
+      return annotated_safe_value_by_data_[buffer->data];
+    }
     return make_zero(buffer->dtype);
   }
 
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, PrimExpr> annotated_safe_value_map_;
+  Map<Var, PrimExpr> annotated_safe_value_by_data_;
 };
 
 // Create a pass that legalizes vectorized loops in the IRModule
