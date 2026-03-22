@@ -8,16 +8,15 @@ import itertools
 import argparse
 from functools import partial
 
+
 def IsRDNA():
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name().strip()
-        if "Radeon" in gpu_name :
-            return True
-        else:
-            return False
+        return "Radeon" in gpu_name
     else:
-        print(f"Error: GPU Device is not detected")
+        print("Error: GPU Device is not detected")
         sys.exit(1)
+
 
 def supply_tensors_gpu(params):
     """Supply function that creates tensors on GPU for ROCm/HIP."""
@@ -55,7 +54,7 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 def get_configs():
     """Generates configurations for the autotuner.
-    
+
     For RDNA (gfx11xx/gfx12xx) GPUs using WMMA instructions, block sizes
     are limited to 32x32 due to a layout mismatch between WMMA D output and A input
     registers when block_M > 16 * num_warps_per_32_threads. Larger blocks cause

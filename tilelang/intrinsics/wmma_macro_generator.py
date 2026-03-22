@@ -7,14 +7,14 @@ Thread-data mapping (per AMDGPU ISA):
   B[K=16][16]: same mapping as A for the transposed dimension
   C/D[16][16]: thread t holds D[t//2][(t%2)*8 : (t%2)*8+8]  (8 f32 per thread)
 """
+
 from __future__ import annotations
 
-import warnings
-from typing import Callable, Literal
+from typing import Literal
 
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tvm import DataType, tir
+from tvm import tir
 from tvm.ir import Range
 from tvm.target import Target
 from tvm.tir import Buffer, BufferLoad, BufferRegion, IndexMap, PrimExpr, Var
@@ -26,11 +26,9 @@ from .wmma_layout import (
     shared_16x16_to_local_32x8_layout_A,
     shared_16x16_to_local_32x8_layout_B,
     shared_16x16_to_local_32x8_layout_B_colmajor,
-    shared_16x16_to_local_32x8_layout_C,
     thread_id_shared_access_32x8_to_16x16_layout_A,
     thread_id_shared_access_32x8_to_16x16_layout_B,
     thread_id_shared_access_32x8_to_16x16_layout_B_colmajor,
-    thread_id_shared_access_32x8_to_16x16_layout_C,
     wmma_store_index_map,
 )
 
@@ -167,7 +165,6 @@ class WMMAIntrinEmitter:
         The inverse map is (i, j) -> (thread_id, local_id).
         """
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
-        M_DIM, N_DIM = self.M_DIM, self.N_DIM
         # forward: (thread_id, local_id) -> (row, col)
         index_map = IndexMap.from_func(wmma_store_index_map, index_dtype=T.int32)
         if not inverse:
@@ -358,7 +355,7 @@ class WMMAIntrinEmitter:
     # Layout inference helpers (used by GemmWMMA.infer_layout)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def make_wmma_load_layout(self, local_buf: Buffer, matrix: Literal["A", "B"] = "A") -> "T.Fragment":
+    def make_wmma_load_layout(self, local_buf: Buffer, matrix: Literal["A", "B"] = "A") -> T.Fragment:
         assert is_fragment(local_buf), "local_buf must be a fragment"
         assert matrix in ("A", "B")
 
@@ -414,14 +411,14 @@ class WMMAIntrinEmitter:
 
         return block_fragment
 
-    def make_wmma_store_layout(self, local_buf: Buffer) -> "T.Fragment":
+    def make_wmma_store_layout(self, local_buf: Buffer) -> T.Fragment:
         assert is_fragment(local_buf), "local_buf must be a fragment"
         shape = local_buf.shape
         # inverse_store_layout: (row, col) -> (thread_id, local_id) within 16x16 atom
         inverse_store_layout = self.get_store_index_map(inverse=True)
         micro_size_x, micro_size_y = self.micro_size_x, self.micro_size_y
         local_size_out = self.local_size_out
-        block_row_warps, block_col_warps = self.block_row_warps, self.block_col_warps
+        block_row_warps, _ = self.block_row_warps, self.block_col_warps
         warp_rows, warp_cols = self.warp_rows, self.warp_cols
         warp_size = self.WARP_SIZE
 

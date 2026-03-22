@@ -993,22 +993,23 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     // arg 10: C data pointer
     // arg 11: C element index
     ICHECK(op->args.size() == 12U) << "tvm_rdna_wmma expects 12 arguments";
-    std::string shape    = Downcast<StringImm>(op->args[0])->value;
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
     std::string A_layout = Downcast<StringImm>(op->args[1])->value;
     std::string B_layout = Downcast<StringImm>(op->args[2])->value;
-    std::string A_dtype  = Downcast<StringImm>(op->args[3])->value;
-    std::string B_dtype  = Downcast<StringImm>(op->args[4])->value;
-    std::string C_dtype  = Downcast<StringImm>(op->args[5])->value;
-    std::string a_ref    = this->PrintExpr(op->args[6]);
-    std::string a_bias   = this->PrintExpr(op->args[7]);
-    std::string b_ref    = this->PrintExpr(op->args[8]);
-    std::string b_bias   = this->PrintExpr(op->args[9]);
-    std::string c_ref    = this->PrintExpr(op->args[10]);
-    std::string c_bias   = this->PrintExpr(op->args[11]);
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_ref = this->PrintExpr(op->args[6]);
+    std::string a_bias = this->PrintExpr(op->args[7]);
+    std::string b_ref = this->PrintExpr(op->args[8]);
+    std::string b_bias = this->PrintExpr(op->args[9]);
+    std::string c_ref = this->PrintExpr(op->args[10]);
+    std::string c_bias = this->PrintExpr(op->args[11]);
 
     // Determine wmma builtin name from shape
-    // shape = "f32_16x16x16_f16_w32" -> "__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12"
-    // For gfx12 targets use the _gfx12 suffix variant.
+    // shape = "f32_16x16x16_f16_w32" ->
+    // "__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12" For gfx12 targets use
+    // the _gfx12 suffix variant.
     std::string wmma_builtin = "__builtin_amdgcn_wmma_" + shape + "_gfx12";
 
     // Emit the WMMA call.
@@ -1018,8 +1019,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     // Each element index accesses a packed vector of 8 elements.
     //
     // Using typedef'd vector types for the cast:
-    //   typedef __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16 tl_v8f16;
-    //   typedef __attribute__((__vector_size__(8 * sizeof(float)))) float tl_v8f32;
+    //   typedef __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16
+    //   tl_v8f16; typedef __attribute__((__vector_size__(8 * sizeof(float))))
+    //   float tl_v8f32;
     std::string call_wmma_code = R"({
       typedef __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16 tl_v8f16;
       typedef __attribute__((__vector_size__(8 * sizeof(float)))) float tl_v8f32;

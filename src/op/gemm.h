@@ -39,7 +39,14 @@ inline const char *GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
 }
 
 // Target GEMM instruction
-enum class GemmInst : uint8_t { kMMA, kWGMMA, kTCGEN5MMA, kMFMA, kScalar, kWMMA };
+enum class GemmInst : uint8_t {
+  kMMA,
+  kWGMMA,
+  kTCGEN5MMA,
+  kMFMA,
+  kScalar,
+  kWMMA
+};
 
 /// Convert GemmInst enum to string for debugging
 inline const char *GemmInstToString(GemmInst inst) {

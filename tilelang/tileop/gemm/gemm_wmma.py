@@ -92,6 +92,7 @@ class GemmWMMA(GemmBase):
         assert is_full_region(C_region), "Fragment output C must be a full region"
 
         if self.is_gemm_ss():
+
             @T.prim_func
             def _gemm_ssr() -> None:
                 A_local = T.alloc_local((warp_rows * local_size_a * k_pack), in_dtype)

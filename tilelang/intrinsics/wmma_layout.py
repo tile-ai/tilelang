@@ -36,10 +36,11 @@ from tvm.runtime import convert
 # A[M=t%16][K=(t//16)*8+l] -> vectorized load from row M=t%16, consecutive K
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def shared_16x16_to_local_32x8_layout_A(i, j):
     """Forward: A[i=M, j=K] -> (thread=(j//8)*16+i, local=j%8)."""
     thread_id = (j // 8) * 16 + i  # (K//8)*16 + M
-    local_id = j % 8                # K%8
+    local_id = j % 8  # K%8
     return thread_id, local_id
 
 
@@ -53,10 +54,11 @@ def thread_id_shared_access_32x8_to_16x16_layout_A(thread_id, local_id):
 # B[K=(t//16)*8+l][N=t%16]
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def shared_16x16_to_local_32x8_layout_B(i, j):
     """Forward: B[i=K, j=N] -> (thread=(i//8)*16+j, local=i%8)."""
     thread_id = (i // 8) * 16 + j  # (K//8)*16 + N
-    local_id = i % 8                # K%8
+    local_id = i % 8  # K%8
     return thread_id, local_id
 
 
@@ -70,10 +72,11 @@ def thread_id_shared_access_32x8_to_16x16_layout_B(thread_id, local_id):
 # B_T[N=t%16][K=(t//16)*8+l] -> vectorized load from row N=t%16, consecutive K
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def shared_16x16_to_local_32x8_layout_B_colmajor(i, j):
     """Forward: B_T[i=N, j=K] -> (thread=(j//8)*16+i, local=j%8)."""
     thread_id = (j // 8) * 16 + i  # (K//8)*16 + N
-    local_id = j % 8                # K%8
+    local_id = j % 8  # K%8
     return thread_id, local_id
 
 
@@ -87,10 +90,11 @@ def thread_id_shared_access_32x8_to_16x16_layout_B_colmajor(thread_id, local_id)
 # D[M=(t//16)*8+l][N=t%16] -- hardware native
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def shared_16x16_to_local_32x8_layout_C(i, j):
     """Forward: D[i=M, j=N] -> (thread=(i//8)*16+j, local=i%8)."""
     thread_id = (i // 8) * 16 + j  # (M//8)*16 + N
-    local_id = i % 8                # M%8
+    local_id = i % 8  # M%8
     return thread_id, local_id
 
 
@@ -104,8 +108,9 @@ def thread_id_shared_access_32x8_to_16x16_layout_C(thread_id, local_id):
 # D[M=(t//16)*8+local][N=t%16] -- affine, invertible
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def wmma_store_index_map(thread_id, local_id):
     """(thread, local) -> (M, N) in D.  Hardware D layout."""
-    i = (thread_id // 16) * 8 + local_id   # M
-    j = thread_id % 16                       # N
+    i = (thread_id // 16) * 8 + local_id  # M
+    j = thread_id % 16  # N
     return convert([i, j])
