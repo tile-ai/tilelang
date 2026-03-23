@@ -172,7 +172,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """
     mod = tir.transform.BindTarget(target)(mod)
-    tilelang.analysis.ASTPrinter()(mod)
 
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
@@ -247,11 +246,13 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     else:
         mod = tilelang.transform.LowerSharedBarrier()(mod)
         mod = tilelang.transform.IfStmtBinding()(mod)
-        # print(mod)
-        # mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        # print(mod)
+        print(mod)
+        mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+        print(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
+    print(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.OptimizeCPAsyncSync()(mod)
@@ -320,7 +321,5 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
 
     # Transform threadblock to persistent threadblock
     mod = tilelang.transform.PersistThreadblock()(mod)
-
-    print(mod)
 
     return mod

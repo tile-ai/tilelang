@@ -189,9 +189,9 @@ def run_alloc_global(
     program = alloc_global(N, block_N, dtype)
 
     kernel = tilelang.compile(program, out_idx=[1])
-    print(kernel.get_host_source())
-    code = kernel.get_kernel_source()
-    print(code)
+    # print(kernel.get_host_source())
+    # code = kernel.get_kernel_source()
+    # print(code)
     A = torch.randn(N, device="cuda", dtype=getattr(torch, dtype))
     B = kernel(A)
     torch.testing.assert_close(B, A, rtol=1e-2, atol=1e-2)

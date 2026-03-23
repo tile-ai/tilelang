@@ -28,6 +28,7 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/var.h>
 
+#include "../op/utils.h"
 #include "tir/transforms/ir_utils.h"
 
 // Forward-declare tir's var-level LCA helper which has no public header.
@@ -154,9 +155,12 @@ public:
         }
       }
       if (stmt != nullptr || vit != var_lca.end()) {
+        // Skip moving allocations that are already bound to func arguments.
         if (arg_buffer_vars.count(buffer->data.get())) {
           continue;
         }
+        // Only allocate managed allocations (a.k.a ignore the ones that are not
+        // allocated outside of the block)
         if (managed_allocations_.count(buffer->data.get())) {
           alloc_buffers_[stmt].push_back(buffer);
         }
