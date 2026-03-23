@@ -90,10 +90,9 @@ void *TryLoadLibCudart() {
   for (const char *path : kLibCudartPaths) {
     handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
     if (handle != nullptr) {
-      break;
+      return handle;
     }
   }
-  return handle;
 
   fprintf(stderr,
           "TileLang Error: libcudart symbols not found. "
