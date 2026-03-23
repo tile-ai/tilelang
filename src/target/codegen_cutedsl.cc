@@ -1702,17 +1702,19 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
     std::string func_name;
     int panel_size = 0;
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tir::builtin::tvm_tuple()) && call->args.size() >= 2) {
+      if (call->op.same_as(tir::builtin::tvm_tuple()) &&
+          call->args.size() >= 2) {
         const auto *name_node = call->args[0].as<StringImmNode>();
         const auto *size_node = call->args[1].as<IntImmNode>();
-        ICHECK(name_node && size_node)
-            << "threadblock_swizzle_pattern expects tvm_tuple(device_func, panel_size)";
+        ICHECK(name_node && size_node) << "threadblock_swizzle_pattern expects "
+                                          "tvm_tuple(device_func, panel_size)";
         func_name = name_node->value;
         panel_size = static_cast<int>(size_node->value);
       }
     }
     ICHECK(!func_name.empty() && panel_size > 0)
-        << "threadblock_swizzle_pattern: failed to extract func_name and panel_size";
+        << "threadblock_swizzle_pattern: failed to extract func_name and "
+           "panel_size";
     this->stream << "blockIdx = tl." << func_name << "(" << panel_size << ")\n";
     this->VisitStmt(op->body);
   } else if (op->attr_key == "pragma_unroll_factor") {
