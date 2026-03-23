@@ -64,9 +64,6 @@ _TORCH_DTYPE_TO_STR = {
     torch.int32: "int32",
     torch.int64: "int64",
     torch.uint8: "uint8",
-    torch.uint16: "uint16",
-    torch.uint32: "uint32",
-    torch.uint64: "uint64",
     torch.float16: "float16",
     torch.float32: "float32",
     torch.float64: "float64",
@@ -74,6 +71,10 @@ _TORCH_DTYPE_TO_STR = {
 }
 
 _extended_torch_dtypes = [
+    # Some dtypes are not provided by old torch versions
+    ("uint16",),
+    ("uint32",),
+    ("uint64",),
     ("float8_e4m3fn",),
     ("float8_e4m3fnuz",),
     ("float8_e5m2",),
