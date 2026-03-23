@@ -323,8 +323,8 @@ private:
     }
     // Extract cluster_size from cluster_dims annotation
     if (op->annotations.count("cluster_dims")) {
-      if (auto arr = op->annotations.Get("cluster_dims")
-                         ->try_cast<Array<Integer>>()) {
+      if (auto arr =
+              op->annotations.Get("cluster_dims")->try_cast<Array<Integer>>()) {
         int sz = 1;
         for (auto d : arr.value())
           sz *= static_cast<int>(d->value);

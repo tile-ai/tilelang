@@ -135,10 +135,6 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_WGMMA = "tl.disable_wgmma"
     """Disable usage of Hopper WGMMA. Default: False"""
 
-    TL_DISABLE_2CTA_TCGEN5MMA = "tl.disable_2cta_tcgen5mma"
-    """Disable 2-CTA (cluster) mode for Blackwell tcgen05.mma instructions.
-    When set, forces single-CTA execution even when the shape allows 2-CTA mode.
-    Default: False"""
 
     TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS = "tl.debug_merge_shared_memory_allocations"
     """Enable debug information for merge shared memory allocations. Default: False"""

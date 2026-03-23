@@ -20,10 +20,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../op/builtin.h"
 #include "../op/gemm_py.h"
 #include "../op/operator.h"
-#include "../op/tcgen5_meta.h"
 #include "../target/utils.h"
 
 namespace tvm {
@@ -70,36 +68,27 @@ static bool HasValidClusterDimsFor2Cta(const Stmt &body) {
  */
 class Tcgen5_2SmLower : public StmtExprMutator {
 public:
-  Tcgen5_2SmLower(Target target, bool cluster_dims_valid)
-      : target_(std::move(target)), cluster_dims_valid_(cluster_dims_valid) {}
+  Tcgen5_2SmLower(bool cluster_dims_valid)
+      : cluster_dims_valid_(cluster_dims_valid) {}
   bool has_2sm_tcgen5mma() const { return has_2sm_tcgen5mma_; }
 
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
       TileOperator tile_op = ParseOperator(ffi::GetRef<Stmt>(op));
-      if (tile_op.defined()) {
-        if (Optional<GemmPy> opt_gemm_py = tile_op.as<GemmPy>()) {
-          const GemmPyNode *node = opt_gemm_py.value().get();
-          if (node->allowTcgen5Mma(target_)) {
-            auto [ok, meta] =
-                GetTCGEN5MMAMeta(node->m_, node->n_, node->k_,
-                                 node->a_->dtype, node->c_->dtype);
-            if (ok && meta.enable_2cta) {
+      if (tile_op.defined() && tile_op.as<GemmPy>()) {
+        // Check if the user explicitly requested 2CTA via the use_2cta
+        // annotation on the Call node (set by T.tcgen05_gemm(use_2cta=True)).
+        if (call->annotations.count(attr::kUse2Cta)) {
+          auto val = call->annotations.Get(attr::kUse2Cta).value();
+          if (const auto *imm = val.as<IntImmNode>()) {
+            if (imm->value) {
               if (!cluster_dims_valid_) {
                 LOG(WARNING) << "Invalid cluster_dims disables 2CTA "
                                 "TCGEN5MMA, use 1CTA variant instead.";
                 return StmtExprMutator::VisitStmt_(op);
               }
-              // LOG(INFO) << "Found 2SM TCGEN5MMA!";
               has_2sm_tcgen5mma_ = true;
-              // Annotate the GemmPy CallNode with use_2cta so that
-              // Python lower code can read it and pass disable_2cta=False.
-              auto new_annotations = call->annotations;
-              new_annotations.Set(attr::kUse2Cta, IntImm(DataType::Int(32), 1));
-              auto new_call = Call(call->dtype, call->op, call->args,
-                                   new_annotations, call->span);
-              return Evaluate(new_call);
             }
           }
         }
@@ -108,7 +97,6 @@ private:
     return StmtExprMutator::VisitStmt_(op);
   }
 
-  Target target_;
   bool cluster_dims_valid_;
   bool has_2sm_tcgen5mma_ = false;
 };
@@ -145,14 +133,9 @@ tvm::transform::Pass LowerBlackwell2SM() {
     if (!opt_target.defined() || !TargetIsSm100(opt_target.value())) {
       return f;
     }
-    if (ctx->GetConfig(kDisable2CTATcgen5MMA, Optional<Bool>())
-            .value_or(false)) {
-      LOG(INFO) << "2CTA TCGEN5MMA is disabled by pass config";
-      return f;
-    }
     Stmt body = f->body;
     bool cluster_dims_valid = HasValidClusterDimsFor2Cta(body);
-    Tcgen5_2SmLower lower(opt_target.value(), cluster_dims_valid);
+    Tcgen5_2SmLower lower(cluster_dims_valid);
     body = lower(std::move(body));
     if (lower.has_2sm_tcgen5mma()) {
       // Annotate block attr for using 2cta tcgen5

@@ -7,7 +7,7 @@ from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_2CTA_TCGEN5MMA: True})
+@tilelang.jit
 def gemm_persistent(
     A,
     B,
@@ -62,7 +62,8 @@ def gemm_persistent(
                         phase = w * k_blocks + k
                         T.mbarrier_wait_parity(consumed[phase % num_stages], ((phase // num_stages) & 1) ^ 1)
                         T.tma_copy(
-                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[phase % num_stages, :, :],
+                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
+                            A_shared[phase % num_stages, :, :],
                             barrier=loaded[phase % num_stages],
                         )
                         T.tma_copy(
@@ -192,7 +193,8 @@ def gemm_persistent_2cta(
                         phase = w * k_blocks + k
                         T.mbarrier_wait_parity(consumed[phase % num_stages], ((phase // num_stages) & 1) ^ 1)
                         T.tma_copy(
-                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[phase % num_stages, :, :],
+                            A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
+                            A_shared[phase % num_stages, :, :],
                             barrier=loaded[phase % num_stages],
                         )
 
@@ -224,6 +226,7 @@ def gemm_persistent_2cta(
                                 C_tmem_0,
                                 mbar=consumed[phase % num_stages],
                                 clear_accum=k == 0,
+                                use_2cta=True,
                             )
                         else:
                             T.tcgen05_gemm(
@@ -232,6 +235,7 @@ def gemm_persistent_2cta(
                                 C_tmem_1,
                                 mbar=consumed[phase % num_stages],
                                 clear_accum=k == 0,
+                                use_2cta=True,
                             )
                     T.tcgen05_mma_arrive(tmem_full[w & 1], arrive_2cta=True)
 

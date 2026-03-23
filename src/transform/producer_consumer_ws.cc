@@ -2757,8 +2757,7 @@ private:
                            bool drop_arrive, bool is_cluster_barrier,
                            int cluster_size)
           : barrier_buf_(barrier_buf), barrier_id_(std::move(barrier_id)),
-            drop_arrive_(drop_arrive),
-            is_cluster_barrier_(is_cluster_barrier),
+            drop_arrive_(drop_arrive), is_cluster_barrier_(is_cluster_barrier),
             cluster_size_(cluster_size) {}
 
       Stmt VisitStmt_(const EvaluateNode *op) final {
@@ -2773,10 +2772,10 @@ private:
               call->args.size() == 2) {
             PrimExpr new_bytes =
                 call->args[1] * IntImm(DataType::Int(32), cluster_size_);
-            auto new_call = Call(
-                call->dtype, call->op,
-                {makeGetBarrier(barrier_buf_, barrier_id_), new_bytes},
-                call->annotations, call->span);
+            auto new_call =
+                Call(call->dtype, call->op,
+                     {makeGetBarrier(barrier_buf_, barrier_id_), new_bytes},
+                     call->annotations, call->span);
             PrimExpr rank =
                 Call(DataType::Int(32), tl::block_rank_in_cluster(), {});
             return IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)),
@@ -2936,10 +2935,10 @@ private:
               call->args.size() == 2) {
             PrimExpr new_bytes =
                 call->args[1] * IntImm(DataType::Int(32), cluster_size_);
-            auto new_call = Call(
-                call->dtype, mbarrier_expect_tx(),
-                {makeGetBarrier(barrier_buf_, barrier_id_), new_bytes},
-                call->annotations, call->span);
+            auto new_call =
+                Call(call->dtype, mbarrier_expect_tx(),
+                     {makeGetBarrier(barrier_buf_, barrier_id_), new_bytes},
+                     call->annotations, call->span);
             PrimExpr rank =
                 Call(DataType::Int(32), tl::block_rank_in_cluster(), {});
             return IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)),
@@ -2996,9 +2995,8 @@ private:
 
     // Rebind the producer-side barrier id and finish the stage with a normal
     // barrier arrival. Pure-TMA pipelines do not need cp.async.mbarrier.arrive.
-    Stmt rewritten = MergeAdjacentEquivalentIfs(
-        TmaForwardBarrierStmtRewriter(barrier_buf_, barrier_id,
-                                      is_cluster_barrier_, cluster_size_)(stmt));
+    Stmt rewritten = MergeAdjacentEquivalentIfs(TmaForwardBarrierStmtRewriter(
+        barrier_buf_, barrier_id, is_cluster_barrier_, cluster_size_)(stmt));
     if (!append_arrive) {
       return rewritten;
     }

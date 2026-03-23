@@ -6,7 +6,7 @@ import tilelang.language as T
 from tilelang.profiler import do_bench
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_2CTA_TCGEN5MMA: True})
+@tilelang.jit
 def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_stages, use_tma_store=True):
     M, N, K = T.const("M, N, K")
 
@@ -99,8 +99,16 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
         if tx < 32:  # warp 0: issue tma
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
-                T.tma_copy(A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[k % num_stages, :, :], barrier=loaded[k % num_stages])
-                T.tma_copy(B[k * block_K : (k + 1) * block_K, (bx * 2 + cta_id) * (block_N // 2) : (bx * 2 + cta_id + 1) * (block_N // 2)], B_shared[k % num_stages, :, :], barrier=loaded[k % num_stages])
+                T.tma_copy(
+                    A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K],
+                    A_shared[k % num_stages, :, :],
+                    barrier=loaded[k % num_stages],
+                )
+                T.tma_copy(
+                    B[k * block_K : (k + 1) * block_K, (bx * 2 + cta_id) * (block_N // 2) : (bx * 2 + cta_id + 1) * (block_N // 2)],
+                    B_shared[k % num_stages, :, :],
+                    barrier=loaded[k % num_stages],
+                )
                 T.mbarrier_arrive(loaded[k % num_stages], 0)  # arrive on leader cta's barrier
         elif cta_id == 0 and tx < 64:  # Only warp 1 on leader cta issues tcgen5
             for k in T.serial(k_iters):
@@ -111,6 +119,7 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
                     C_tmem,
                     mbar=consumed[k % num_stages],
                     clear_accum=k == 0,
+                    use_2cta=True,
                 )
             T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)
 

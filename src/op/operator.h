@@ -76,8 +76,9 @@ struct LowerArgs {
   // Points to the LowerTileOpPass member so copy.cc sees the buffer
   // even when created lazily by the AllocMBarrier callback.
   Optional<Buffer> *mbarrier_buffer = nullptr;
-  // Product of cluster_dims (from block annotation). Defaults to 1 (no cluster).
-  // Used by TMA copy lowering to scale expect_tx bytes for cluster barriers.
+  // Product of cluster_dims (from block annotation). Defaults to 1 (no
+  // cluster). Used by TMA copy lowering to scale expect_tx bytes for cluster
+  // barriers.
   int cluster_size = 1;
 };
 

@@ -1701,8 +1701,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       barrier_base_id = 0;
       // Detect cluster barrier by checking the buffer scope
       if (auto bl = mbar_handle.as<BufferLoadNode>()) {
-        is_cluster_barrier =
-            bl->buffer.scope() == "shared.cluster_barrier";
+        is_cluster_barrier = bl->buffer.scope() == "shared.cluster_barrier";
       }
     } else if (GetIsTmaCopy()) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
@@ -1809,10 +1808,9 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
         Stmt expect_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
                           {mbar_handle, cluster_total_bytes}));
-        PrimExpr rank =
-            Call(DataType::Int(32), block_rank_in_cluster(), {});
-        barrier_before_tma_stmt = IfThenElse(
-            EQ(rank, IntImm(DataType::Int(32), 0)), expect_stmt);
+        PrimExpr rank = Call(DataType::Int(32), block_rank_in_cluster(), {});
+        barrier_before_tma_stmt =
+            IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)), expect_stmt);
       } else {
         barrier_before_tma_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
