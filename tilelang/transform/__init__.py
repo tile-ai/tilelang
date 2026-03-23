@@ -225,15 +225,21 @@ def LoopUnswitching():
     return _ffi_api.LoopUnswitching()  # type: ignore
 
 
-def MultiVersionBuffer():
-    """WarpSpecializedPipeline
+def MultiVersionBuffer(barrier_only: bool = False):
+    """MultiVersionBuffer
+
+    Parameters
+    ----------
+    barrier_only : bool
+        If True, only version barrier buffers (shared.barrier scope).
+        Data buffer versioning is left to InjectSoftwarePipeline.
 
     Returns
     -------
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MultiVersionBuffer()  # type: ignore
+    return _ffi_api.MultiVersionBuffer(barrier_only)  # type: ignore
 
 
 def ProducerConsumerWarpSpecialized():

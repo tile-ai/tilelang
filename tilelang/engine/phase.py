@@ -221,35 +221,29 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
     # which may be introduced by the LegalizeSafeMemoryAccess
-    if allow_tma_lower(pass_ctx=pass_ctx, target=target):
-        mod = tilelang.transform.IfStmtBinding()(mod)
-        # MultiVersionBuffer before LowerSharedBarrier so barrier buffers
-        # (shared.barrier scope) can be expanded for pipelining.
+    mod = tilelang.transform.IfStmtBinding()(mod)
+    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
+        # WS path: MultiVersionBuffer versions all buffers (barriers + data).
+        # ProducerConsumerWarpSpecialized handles the pipeline overlap,
+        # so InjectSoftwarePipeline won't re-version data buffers.
         mod = tilelang.transform.MultiVersionBuffer()(mod)
-        if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-            # Producer-Consumer Warp Specialization:
-            # Splits TMA pipeline loops into producer (TMA loads) and consumer
-            # (compute) warps with mbarrier-based synchronization.
-            # When WS succeeds, it handles the pipeline overlap directly,
-            # so PipelinePlanning + InjectSoftwarePipeline are skipped.
-            # NOTE: LowerSharedBarrier runs ONLY after WS, not before.
-            # Running it before would generate barrier init calls that
-            # WS cannot clean up when it replaces the barriers.
-            mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
-        mod = tilelang.transform.LowerSharedBarrier()(mod)
-        mod = tilelang.transform.PipelinePlanning()(mod)
-        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
-        mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
-        mod = tilelang.transform.LowerOpaqueBlock()(mod)
-        if is_hopper(target):
-            mod = tilelang.transform.RewriteWgmmaSync()(mod)
+        mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    elif allow_tma_lower(pass_ctx=pass_ctx, target=target):
+        # TMA without WS: only version barrier buffers for mbarrier
+        # parity rewriting. Data buffer versioning is handled by
+        # InjectSoftwarePipeline.
+        mod = tilelang.transform.MultiVersionBuffer(barrier_only=True)(mod)
     else:
-        mod = tilelang.transform.LowerSharedBarrier()(mod)
-        mod = tilelang.transform.IfStmtBinding()(mod)
+        # Non-TMA path (pre-Hopper): no barrier versioning needed.
         mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        mod = tilelang.transform.PipelinePlanning()(mod)
-        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    mod = tilelang.transform.LowerSharedBarrier()(mod)
+    mod = tilelang.transform.PipelinePlanning()(mod)
+    mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    if allow_tma_lower(pass_ctx=pass_ctx, target=target):
+        mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
+    if is_hopper(target):
+        mod = tilelang.transform.RewriteWgmmaSync()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.OptimizeCPAsyncSync()(mod)
     mod = tilelang.transform.Simplify()(mod)
