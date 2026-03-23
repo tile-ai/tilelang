@@ -56,8 +56,8 @@ public:
         } else {
           new_alloc_buffers.push_back(buf);
         }
-        node.CopyOnWrite()->alloc_buffers = std::move(new_alloc_buffers);
       }
+      node.CopyOnWrite()->alloc_buffers = std::move(new_alloc_buffers);
     }
 
     return node;

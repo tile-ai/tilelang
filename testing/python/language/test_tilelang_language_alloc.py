@@ -237,5 +237,4 @@ def test_alloc_global():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_alloc_global()
+    tilelang.testing.main()
