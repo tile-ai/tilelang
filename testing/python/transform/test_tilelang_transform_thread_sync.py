@@ -57,6 +57,44 @@ def test_no_sync_between_atomic_adds_to_shared():
 
 
 @tilelang.testing.requires_cuda
+def test_thread_sync_handles_int64_tvm_access_ptr_offset():
+    """Regression: shared/shared.dyn pointer offsets may be int64.
+
+    ThreadSync used to reconstruct multidimensional indices with hardcoded
+    int32 temporaries, which crashed on expressions like FloorDiv(int64, int32)
+    while analyzing tvm_access_ptr from lowered atomic ops.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        A_shared = T.alloc_buffer((128,), dtype="float32", scope="shared.dyn")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        T.evaluate(
+            T.call_intrin(
+                "float32",
+                tvm.tir.op.Op.get("tl.atomic_add_elem_op"),
+                T.tvm_access_ptr(
+                    T.type_annotation("float32"),
+                    A_shared.data,
+                    T.Cast("int64", tx),
+                    1,
+                    3,
+                ),
+                T.float32(1),
+                T.int32(0),
+            )
+        )
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod)
+    assert 'T.tvm_storage_sync("shared.dyn")' not in s, f"Unexpected sync inserted for single atomic op:\n{s}"
+
+
+@tilelang.testing.requires_cuda
 def test_sync_if_with_same_index():
     @T.prim_func(check_well_formed=False)
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:

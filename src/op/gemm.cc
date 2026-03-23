@@ -90,9 +90,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
     node->isTcgen05_ = int_val->value != 0;
   }
-  if (args.size() > 16) {
-    ICHECK(args[16]->IsInstance<BufferLoadNode>())
-        << "mbar for tcgen5mma must be a tir.BufferLoad";
+  if (args.size() > 16 && args[16]->IsInstance<BufferLoadNode>()) {
     node->mbar_ = Downcast<BufferLoad>(args[16]);
   }
   node->cCoords_ = Array<PrimExpr>(
