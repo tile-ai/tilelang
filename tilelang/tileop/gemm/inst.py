@@ -1,7 +1,6 @@
 from enum import IntEnum
 
 
-# TODO(lei): support Volta and WMMA?
 # same definition with src/op/gemm.h
 class GemmInst(IntEnum):
     MMA = 0
@@ -9,6 +8,7 @@ class GemmInst(IntEnum):
     TCGEN5MMA = 2
     MFMA = 3
     Scalar = 4
+    WMMA = 5  # AMD RDNA WMMA (gfx11/gfx12)
 
     def is_mma(self) -> bool:
         return self == GemmInst.MMA
@@ -24,6 +24,9 @@ class GemmInst(IntEnum):
 
     def is_scalar(self) -> bool:
         return self == GemmInst.Scalar
+
+    def is_wmma(self) -> bool:
+        return self == GemmInst.WMMA
 
     def __repr__(self) -> str:
         return self.name

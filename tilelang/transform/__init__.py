@@ -502,6 +502,17 @@ def PlanAndUpdateBufferAllocationLocation():
     return _ffi_api.PlanAndUpdateBufferAllocationLocation()  # type: ignore
 
 
+def HoistGlobalBufferAllocations():
+    """Hoist global buffer allocations to the top of the block (host side).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.HoistGlobalBufferAllocations()  # type: ignore
+
+
 def HoistNonRestrictParams():
     return _ffi_api.HoistNonRestrictParams()  # type: ignore
 

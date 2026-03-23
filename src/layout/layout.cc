@@ -275,12 +275,25 @@ Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
 
 } // namespace
 
+static constexpr size_t kMaxPlaceholders = 16;
+
 static Var getPlaceholder(const std::string &s) {
-  static std::unordered_map<std::string, Var> map;
-  if (map.find(s) == map.end()) {
-    map[s] = Var(s);
-  }
-  return map[s];
+  // Pre-allocate all possible placeholders so the map is immutable after init.
+  // C++11 guarantees thread-safe initialization of function-local statics,
+  // so concurrent reads are safe without a mutex.
+  static const std::unordered_map<std::string, Var> map = []() {
+    std::unordered_map<std::string, Var> m;
+    m.reserve(kMaxPlaceholders + 1);
+    m["_rep"] = Var("_rep");
+    for (size_t i = 0; i < kMaxPlaceholders; ++i) {
+      std::string key{'_', char('i' + i)};
+      m[key] = Var(key);
+    }
+    return m;
+  }();
+  auto it = map.find(s);
+  ICHECK(it != map.end()) << "Unknown placeholder: " << s;
+  return it->second;
 }
 
 Var ReplicationPlaceholder() { return getPlaceholder("_rep"); }
