@@ -44,7 +44,7 @@ public:
   Stmt VisitStmt_(const BlockNode *op) final {
     auto node = Downcast<Block>(StmtMutator::VisitStmt_(op));
 
-    if (isHostMainBlock(op)) {
+    if (IsHostMainBlock(op)) {
       for (const auto &buf : global_buffers_) {
         node.CopyOnWrite()->alloc_buffers.push_back(buf);
       }

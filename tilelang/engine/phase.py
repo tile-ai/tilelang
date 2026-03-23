@@ -246,13 +246,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     else:
         mod = tilelang.transform.LowerSharedBarrier()(mod)
         mod = tilelang.transform.IfStmtBinding()(mod)
-        print(mod)
         mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        print(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
-    print(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.OptimizeCPAsyncSync()(mod)

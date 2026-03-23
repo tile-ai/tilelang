@@ -150,7 +150,7 @@ private:
 
     // NOTE(chaofan): We only inject assumes from function arguments in the
     // root block.
-    if (isHostMainBlock(op)) {
+    if (IsHostMainBlock(op)) {
       for (auto item : f->buffer_map) {
         c.addBuffer(item.second);
       }

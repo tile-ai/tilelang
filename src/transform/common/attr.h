@@ -12,11 +12,11 @@ constexpr const char *HostMainBlockName = "root";
 
 constexpr const char *DeviceMainBlockName = "tilelang_root";
 
-inline bool isHostMainBlock(const tir::BlockNode *node) {
+inline bool IsHostMainBlock(const tir::BlockNode *node) {
   return node->name_hint == HostMainBlockName;
 }
 
-inline bool isDeviceMainBlock(const tir::BlockNode *node) {
+inline bool IsDeviceMainBlock(const tir::BlockNode *node) {
   return node->name_hint == DeviceMainBlockName;
 }
 
