@@ -99,11 +99,8 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
         if tx < 32:  # warp 0: issue tma
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
-                T.copy(A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[k % num_stages, :, :])
-                T.copy(
-                    B[k * block_K : (k + 1) * block_K, (bx * 2 + cta_id) * (block_N // 2) : (bx * 2 + cta_id + 1) * (block_N // 2)],
-                    B_shared[k % num_stages, :, :],
-                )
+                T.tma_copy(A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K], A_shared[k % num_stages, :, :], barrier=loaded[k % num_stages])
+                T.tma_copy(B[k * block_K : (k + 1) * block_K, (bx * 2 + cta_id) * (block_N // 2) : (bx * 2 + cta_id + 1) * (block_N // 2)], B_shared[k % num_stages, :, :], barrier=loaded[k % num_stages])
                 T.mbarrier_arrive(loaded[k % num_stages], 0)  # arrive on leader cta's barrier
         elif cta_id == 0 and tx < 64:  # Only warp 1 on leader cta issues tcgen5
             for k in T.serial(k_iters):
@@ -133,7 +130,7 @@ def main():
     M, N, K = 8192, 8192, 8192
     block_M, block_N, block_K = 128, 256, 64
     in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
-    enable_2cta_tcgen5mma = False
+    enable_2cta_tcgen5mma = True
     num_stages = 6 if enable_2cta_tcgen5mma else 4  # Each cta only needs to load half of B, enabling larger stages
     kernel = gemm_2cta if enable_2cta_tcgen5mma else gemm
 

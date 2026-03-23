@@ -321,6 +321,16 @@ private:
         layout_map_.Set(buffer, layout);
       }
     }
+    // Extract cluster_size from cluster_dims annotation
+    if (op->annotations.count("cluster_dims")) {
+      if (auto arr = op->annotations.Get("cluster_dims")
+                         ->try_cast<Array<Integer>>()) {
+        int sz = 1;
+        for (auto d : arr.value())
+          sz *= static_cast<int>(d->value);
+        cluster_size_ = sz;
+      }
+    }
     // Begin a new workspace collection frame for this block scope
     workspace_stack_.emplace_back();
 
@@ -1097,7 +1107,8 @@ private:
                   mbarrier_callback, layout_map_, buffer_remap_,
                   let_var_to_expr,
                   /*in_pipeline=*/pipelined_depth_ > 0, mbar_phase_expr,
-                  pipeline_num_stages, mbar_stage_expr, &mbarrier_buffer_},
+                  pipeline_num_stages, mbar_stage_expr, &mbarrier_buffer_,
+                  cluster_size_},
         analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
@@ -1368,6 +1379,8 @@ private:
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
   size_t thread_block_size_ = 0;
+  // Product of cluster_dims from block annotation (default 1).
+  int cluster_size_ = 1;
   // Stack of per-Block workspace buffers gathered while visiting children
   std::vector<Array<Buffer>> workspace_stack_;
   // Counter and arrive-counts for mbarrier allocation via

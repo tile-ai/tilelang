@@ -77,34 +77,29 @@ public:
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      // Tilelang gemm defaults to v2 (GemmPy); we only support v2, not v1
-      // (Gemm).
-      if (call->op.same_as(GemmPy::Get())) {
-        TileOperator tile_op = ParseOperator(ffi::GetRef<Stmt>(op));
-        if (tile_op.defined()) {
-          if (Optional<GemmPy> opt_gemm_py = tile_op.as<GemmPy>()) {
-            const GemmPyNode *node = opt_gemm_py.value().get();
-            if (node->allowTcgen5Mma(target_)) {
-              auto [ok, meta] =
-                  GetTCGEN5MMAMeta(node->m_, node->n_, node->k_,
-                                   node->a_->dtype, node->c_->dtype);
-              if (ok && meta.enable_2cta) {
-                if (!cluster_dims_valid_) {
-                  LOG(WARNING) << "Invalid cluster_dims disables 2CTA "
-                                  "TCGEN5MMA, use 1CTA variant instead.";
-                  return StmtExprMutator::VisitStmt_(op);
-                }
-                // LOG(INFO) << "Found 2SM TCGEN5MMA!";
-                has_2sm_tcgen5mma_ = true;
-                // Annotate the GemmPy CallNode with use_2cta so that
-                // Python lower code can read it and pass disable_2cta=False.
-                auto new_annotations = call->annotations;
-                new_annotations.Set(attr::kUse2Cta,
-                                    IntImm(DataType::Int(32), 1));
-                auto new_call = Call(call->dtype, call->op, call->args,
-                                     new_annotations, call->span);
-                return Evaluate(new_call);
+      TileOperator tile_op = ParseOperator(ffi::GetRef<Stmt>(op));
+      if (tile_op.defined()) {
+        if (Optional<GemmPy> opt_gemm_py = tile_op.as<GemmPy>()) {
+          const GemmPyNode *node = opt_gemm_py.value().get();
+          if (node->allowTcgen5Mma(target_)) {
+            auto [ok, meta] =
+                GetTCGEN5MMAMeta(node->m_, node->n_, node->k_,
+                                 node->a_->dtype, node->c_->dtype);
+            if (ok && meta.enable_2cta) {
+              if (!cluster_dims_valid_) {
+                LOG(WARNING) << "Invalid cluster_dims disables 2CTA "
+                                "TCGEN5MMA, use 1CTA variant instead.";
+                return StmtExprMutator::VisitStmt_(op);
               }
+              // LOG(INFO) << "Found 2SM TCGEN5MMA!";
+              has_2sm_tcgen5mma_ = true;
+              // Annotate the GemmPy CallNode with use_2cta so that
+              // Python lower code can read it and pass disable_2cta=False.
+              auto new_annotations = call->annotations;
+              new_annotations.Set(attr::kUse2Cta, IntImm(DataType::Int(32), 1));
+              auto new_call = Call(call->dtype, call->op, call->args,
+                                   new_annotations, call->span);
+              return Evaluate(new_call);
             }
           }
         }
