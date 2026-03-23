@@ -170,14 +170,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         a_elem_bits = DataType(self.a_dtype).bits
         b_elem_bits = DataType(self.b_dtype).bits
+        a_elem_bytes = max(1, a_elem_bits // 8)
+        b_elem_bytes = max(1, b_elem_bits // 8)
 
-        # Sub-byte types: non-TMA copies cannot apply swizzle permutation,
-        # so force NONE to keep copy layout and MMA descriptor consistent.
-        a_swizzle_mode = SwizzleMode.NONE if a_elem_bits < 8 else self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
-        b_swizzle_mode = SwizzleMode.NONE if b_elem_bits < 8 else self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
+        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
 
-        a_swizzle_atom_elems = (k_dim if a_is_k_major else m_dim) if a_swizzle_mode.is_none() else a_swizzle_mode.swizzle_byte_size() * 8 // a_elem_bits
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() * 8 // b_elem_bits
+        a_swizzle_atom_elems = (k_dim if a_is_k_major else m_dim) if a_swizzle_mode.is_none() else a_swizzle_mode.swizzle_byte_size() // a_elem_bytes
+        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // b_elem_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
         meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
@@ -188,27 +188,28 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             )
         atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
 
+        # When the warp-specialization pass is disabled (e.g. T.Pipelined
+        # mode), the runtime infrastructure for .ws MMA is absent.  Fall back
+        # to the non-ws instruction which is valid for the same atom dims.
+        import tilelang.transform as _tl_transform
+        _pass_ctx = _tl_transform.get_pass_context()
+        if _pass_ctx.config.get("tl.disable_warp_specialized", False):
+            enable_ws = 0
         # No-Swizzle (non-TMA / cp.async path): data in SMEM is row-major.
         # LBO = row stride in bytes (leading dimension offset between rows).
         # SBO = 8 * row stride (distance between consecutive 8-row groups).
         # C++ operator+ already does >>4, so K-step offsets are in BYTES.
         if a_swizzle_mode.is_none():
-            # Non-TMA row-major: use absolute LBO mode for exact row stride.
             a_lbo_absolute = True
-            a_leading_byte_offset = (k_dim * a_elem_bits // 8) if a_is_k_major else (m_dim * a_elem_bits // 8)
-            a_stride_byte_offset = (8 * k_dim * a_elem_bits // 8) if a_is_k_major else (8 * m_dim * a_elem_bits // 8)
-            print(f"[DESCRIPTOR-DEBUG] a_lbo={a_leading_byte_offset} ({a_leading_byte_offset>>4} units, absolute), a_sbo={a_stride_byte_offset} ({a_stride_byte_offset>>4} units), k_dim={k_dim}, a_elem_bits={a_elem_bits}")
+            a_leading_byte_offset = (k_dim * a_elem_bytes) if a_is_k_major else (m_dim * a_elem_bytes)
+            a_stride_byte_offset = (8 * k_dim * a_elem_bytes) if a_is_k_major else (8 * m_dim * a_elem_bytes)
         else:
             a_lbo_absolute = False
-        else:
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
             if a_is_k_major:
                 a_leading_byte_offset = 16
                 a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
             else:
-                # MN Major
-                # LBO represents the distance between two atoms along the M dimension
-                # SBO represents the distance between two atoms along the K dimension
                 a_m_axis_atoms = m_dim // a_swizzle_atom_elems
                 if a_m_axis_atoms <= 1:
                     a_leading_byte_offset = 0
@@ -216,14 +217,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     a_leading_byte_offset = k_dim * a_swizzle_mode.swizzle_byte_size()
 
                 if a_m_axis_atoms <= 1:
-                    a_stride_byte_offset = 8 * m_dim * a_elem_bits // 8
+                    a_stride_byte_offset = 8 * m_dim * a_elem_bytes
                 else:
-                    a_stride_byte_offset = 8 * a_swizzle_atom_elems * a_elem_bits // 8
+                    a_stride_byte_offset = 8 * a_swizzle_atom_elems * a_elem_bytes
 
         if b_swizzle_mode.is_none():
             b_lbo_absolute = True
-            b_leading_byte_offset = (k_dim * b_elem_bits // 8) if b_is_k_major else (n_dim * b_elem_bits // 8)
-            b_stride_byte_offset = (8 * k_dim * b_elem_bits // 8) if b_is_k_major else (0 if n_dim == 8 else (8 * n_dim * b_elem_bits // 8))
+            b_leading_byte_offset = (k_dim * b_elem_bytes) if b_is_k_major else (n_dim * b_elem_bytes)
+            b_stride_byte_offset = (8 * k_dim * b_elem_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * n_dim * b_elem_bytes))
         else:
             b_lbo_absolute = False
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
@@ -231,18 +232,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 b_leading_byte_offset = 16
                 b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
             else:
-                # MN Major, K * N
-                # LBO represents the distance between two atoms along the N dimension
-                # SBO represents the distance between two atoms along the K dimension
                 b_n_axis_atoms = n_dim // b_swizzle_atom_elems
                 if b_n_axis_atoms <= 1:
                     b_leading_byte_offset = 0
                 else:
-                    b_leading_byte_offset = 8 * 8 * k_dim * b_elem_bits // 8
+                    b_leading_byte_offset = 8 * 8 * k_dim * b_elem_bytes
                 if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * n_dim * b_elem_bits // 8
+                    b_stride_byte_offset = 8 * n_dim * b_elem_bytes
                 else:
-                    b_stride_byte_offset = 8 * b_swizzle_atom_elems * b_elem_bits // 8
+                    b_stride_byte_offset = 8 * b_swizzle_atom_elems * b_elem_bytes
 
         # for example, if [n, k] where k is 128, we should split it into 2 atoms
         # where max specially handles the case when n_dim is 8.
@@ -346,8 +344,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             )
                         )
 
-                        A_byte_offset = A_elem_offset * a_elem_bits // 8
-                        B_byte_offset = B_elem_offset * b_elem_bits // 8
+                        A_byte_offset = A_elem_offset * a_elem_bytes
+                        B_byte_offset = B_elem_offset * b_elem_bytes
                         C_offset = (i * n_dim + j * tmem_col_step) * accum_dtype_in_bits // 32  # 32 bits per tmem bank
 
                         T.ptx_tcgen05_mma_ss(
@@ -405,8 +403,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_elem_bits = DataType(self.a_dtype).bits
         b_elem_bits = DataType(self.b_dtype).bits
 
-        b_swizzle_mode = SwizzleMode.NONE if b_elem_bits < 8 else self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() * 8 // b_elem_bits
+        b_elem_bytes = max(1, b_elem_bits // 8)
+
+        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // b_elem_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
         meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
@@ -418,11 +418,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         atom_m, atom_n, atom_k, _enable_ws, _enable_2cta = (int(x) for x in meta)
 
         # B descriptor parameters (same as SS)
-        b_lbo_absolute = False
         if b_swizzle_mode.is_none():
-            b_leading_byte_offset = 16
-            b_stride_byte_offset = (8 * k_dim * b_elem_bits // 8) if b_is_k_major else (0 if n_dim == 8 else (8 * n_dim * b_elem_bits // 8))
+            b_lbo_absolute = True
+            b_leading_byte_offset = (k_dim * b_elem_bytes) if b_is_k_major else (n_dim * b_elem_bytes)
+            b_stride_byte_offset = (8 * k_dim * b_elem_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * n_dim * b_elem_bytes))
         else:
+            b_lbo_absolute = False
             if b_is_k_major:
                 b_leading_byte_offset = 16
                 b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
@@ -431,11 +432,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 if b_n_axis_atoms <= 1:
                     b_leading_byte_offset = 0
                 else:
-                    b_leading_byte_offset = 8 * 8 * k_dim * b_elem_bits // 8
+                    b_leading_byte_offset = 8 * 8 * k_dim * b_elem_bytes
                 if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * n_dim * b_elem_bits // 8
+                    b_stride_byte_offset = 8 * n_dim * b_elem_bytes
                 else:
-                    b_stride_byte_offset = 8 * b_swizzle_atom_elems * b_elem_bits // 8
+                    b_stride_byte_offset = 8 * b_swizzle_atom_elems * b_elem_bytes
 
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
 
@@ -532,7 +533,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                                 ki * b_swizzle_atom_elems * micro_size_k + j * atom_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
                             )
                         )
-                        B_byte_offset = B_elem_offset * b_elem_bits // 8
+                        B_byte_offset = B_elem_offset * b_elem_bytes
 
                         # C: TMEM column offset (same as SS)
                         C_offset = (i * n_dim + j * tmem_col_step) * accum_dtype_in_bits // 32

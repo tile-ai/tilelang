@@ -734,14 +734,9 @@ bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
   // last dim of src * dtype.bits() must be a multiple of 16
   // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
   // now we check src (gmem) as tma box dim is deduced from src
-  // For sub-byte types (e.g., FP4, 4 bits), use bits-based byte calculation
-  // so the alignment check reflects the packed memory layout.
   int src_elem_byte_num = src->dtype.bytes();
-  int src_elem_bit_width = src->dtype.bits();
   PrimExpr last_extent = src_range[src_range.size() - 1]->extent;
-  PrimExpr last_dim_bytes = (src_elem_bit_width < 8)
-      ? floordiv(last_extent * src_elem_bit_width, 8)
-      : last_extent * src_elem_byte_num;
+  PrimExpr last_dim_bytes = last_extent * src_elem_byte_num;
   if (check_last_dim &&
       analyzer->CanProve(FloorMod(last_dim_bytes, 16) != 0,
                          arith::ProofStrength::kSymbolicBound)) {
@@ -749,7 +744,7 @@ bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
         << "src range must have last dim multiple of 16 bytes for tma bulk "
            "load "
         << src->name << " range " << last_extent << " * "
-        << src_elem_bit_width << " bits / 8 % 16 != 0";
+        << src_elem_byte_num << " bytes % 16 != 0";
     return false;
   }
 
@@ -854,12 +849,9 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
   // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
   // now we check dst (gmem) as tma box dim is deduced from dst
   {
-    int dst_elem_bit_width = dst->dtype.bits();
     int dst_elem_byte_num = dst->dtype.bytes();
     PrimExpr dst_last_extent = dst_range[dst_range.size() - 1]->extent;
-    PrimExpr dst_last_bytes = (dst_elem_bit_width < 8)
-        ? floordiv(dst_last_extent * dst_elem_bit_width, 8)
-        : dst_last_extent * dst_elem_byte_num;
+    PrimExpr dst_last_bytes = dst_last_extent * dst_elem_byte_num;
     if (check_last_dim &&
         analyzer->CanProve(FloorMod(dst_last_bytes, 16) != 0,
                            arith::ProofStrength::kSymbolicBound)) {
@@ -867,7 +859,7 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
           << "dst range must have last dim multiple of 16 bytes for tma bulk "
              "store "
           << dst->name << " range " << dst_last_extent << " * "
-          << dst_elem_bit_width << " bits / 8 % 16 != 0";
+          << dst_elem_byte_num << " bytes % 16 != 0";
       return false;
     }
   }
@@ -1775,24 +1767,11 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     return LowerNormalCopy(T, analyzer);
   }
   int instruction_dim = *inner_box_dim;
-  // For sub-byte types (e.g., FP4), element_size_bytes is the packed size
-  // per element (bits/8). Since bits/8 < 1, we compute the swizzle-based
-  // instruction_dim as swizzle_bytes * 8 / bits to get element count.
-  int elem_bits = src->dtype.bits();
   int elem_bytes_for_swizzle = src->dtype.bytes();  // >= 1
-  if (elem_bits < 8) {
-    // e.g., FP4: 64B swizzle → 64*8/4 = 128 elements, 128B → 256 elements
-    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-      instruction_dim = 64 * 8 / elem_bits;
-    } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-      instruction_dim = 128 * 8 / elem_bits;
-    }
-  } else {
-    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-      instruction_dim = 64 / elem_bytes_for_swizzle;
-    } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-      instruction_dim = 128 / elem_bytes_for_swizzle;
-    }
+  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+    instruction_dim = 64 / elem_bytes_for_swizzle;
+  } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
+    instruction_dim = 128 / elem_bytes_for_swizzle;
   }
   if (instruction_dim > 256) {
     ICHECK((*inner_box_dim) % 256 == 0)
@@ -1804,10 +1783,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       << " is not divisible by instruction_dim: " << instruction_dim;
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
-  // inner_box_dim_ in bytes: for sub-byte types use packed size
-  int inner_box_dim_ = (elem_bits < 8)
-      ? instruction_dim * elem_bits / 8
-      : instruction_dim * shared_tensor->dtype.bytes();
+  int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
 
   // Check inner_box_dim_ for each swizzle type in a cleaner way
   struct SwizzleCheck {
@@ -1913,7 +1889,6 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   // The producer is annotated with the shared buffer so PipelinePlanning can
   // detect it as a copy stage and schedule it at pipeline stage 0.
   if (is_load && barrier_base_id >= 0) {
-    // Compute total bytes for all TMA sub-copies in this operation
     PrimExpr total_bytes;
     if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
