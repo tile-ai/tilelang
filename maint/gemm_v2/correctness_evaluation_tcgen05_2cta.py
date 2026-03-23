@@ -45,25 +45,27 @@ def matmul_2cta(
             if tx < 32:  # warp 0: issue TMA loads
                 for k in T.serial(T.ceildiv(K, block_K)):
                     T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
-                    T.copy(
+                    T.tma_copy(
                         A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
                         A_shared[k % num_stages, :, :],
+                        barrier=loaded[k % num_stages],
                     )
-                    T.copy(
+                    T.tma_copy(
                         B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * (block_N // 2) : (by * 2 + cta_id + 1) * (block_N // 2)],
                         B_shared[k % num_stages, :, :],
+                        barrier=loaded[k % num_stages],
                     )
                     T.mbarrier_arrive(loaded[k % num_stages], 0)  # arrive on leader CTA's barrier
             elif cta_id == 0 and tx < 64:  # warp 1 on leader CTA: issue tcgen5 MMA
                 for k in T.serial(T.ceildiv(K, block_K)):
                     T.mbarrier_wait_parity(loaded[k % num_stages], (k // num_stages) & 1)
-                    T.gemm(
+                    T.tcgen05_gemm(
                         A_shared[k % num_stages, :, :],
                         B_shared[k % num_stages, :, :],
                         C_tmem,
                         mbar=consumed[k % num_stages],
-                        wg_wait=-1,
                         clear_accum=k == 0,
+                        use_2cta=True,
                     )
                 T.tcgen05_mma_arrive(tmem_full, arrive_2cta=True)
 
