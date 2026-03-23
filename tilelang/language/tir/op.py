@@ -7,7 +7,7 @@ from tvm.runtime import const
 from tvm.tir.expr import IntImm, PrimExprWithOp
 import tvm.tir.op as _tvm_op
 
-from tilelang.language.dtypes import AnyDType
+from tilelang.language.dtypes import _is_any_dtype
 from tilelang.utils.deprecated import deprecated_warning
 
 
@@ -2054,7 +2054,7 @@ def reinterpret(value, dtype, span: Span | None = None) -> Any:
     """
 
     # NOTE(chaofan): For compatibility, we allow the old API where dtype comes first
-    if isinstance(value, AnyDType):
+    if _is_any_dtype(value):
         deprecated_warning("T.reinterpret(dtype, value)", "reinterpret(value, dtype)")
         value, dtype = dtype, value
     return _tvm_op.reinterpret(dtype, value, span)

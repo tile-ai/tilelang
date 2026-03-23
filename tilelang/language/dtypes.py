@@ -23,6 +23,13 @@ else:
 # Python 3.9 compatibility: avoid PEP 604 unions at runtime
 AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
 
+
+def _is_any_dtype(obj: object) -> bool:
+    """Check if obj is a dtype-like value. Use instead of isinstance(obj, AnyDType)
+    because Union types cannot be used with isinstance in Python 3.9."""
+    return isinstance(obj, (ir.Type, str, type, torch.dtype, dtype))
+
+
 _PYTHON_DTYPE_TO_STR = {
     bool: "bool",
     int: "int32",
