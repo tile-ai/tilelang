@@ -248,12 +248,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # Running it before would generate barrier init calls that
             # WS cannot clean up when it replaces the barriers.
             mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
-            mod = tilelang.transform.LowerSharedBarrier()(mod)
-        else:
-            mod = tilelang.transform.LowerSharedBarrier()(mod)
-            mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-            mod = tilelang.transform.PipelinePlanning()(mod)
-            mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        mod = tilelang.transform.LowerSharedBarrier()(mod)
+        mod = tilelang.transform.PipelinePlanning()(mod)
+        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
         if is_hopper(target):

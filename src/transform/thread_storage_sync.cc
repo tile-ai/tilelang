@@ -26,6 +26,7 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
+#include <algorithm>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
@@ -1199,14 +1200,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
               buffer_data_to_buffer_.at(tvm::ffi::GetRef<Var>(buffer_var));
           auto buffer_shape = buffer->shape;
           // convert 1d offset to multi-dimensional index
-          auto linear_to_indices = [this](PrimExpr offset,
-                                          const Array<PrimExpr> &shape) {
+          auto linear_to_indices = [](PrimExpr offset,
+                                      const Array<PrimExpr> &shape) {
             Array<PrimExpr> indices;
+            DataType index_dtype = offset.dtype();
+            ICHECK(index_dtype.is_int() || index_dtype.is_uint())
+                << "Expected integer offset dtype in tvm_access_ptr, but got "
+                << index_dtype;
             PrimExpr remaining = std::move(offset);
             for (size_t i = 0; i < shape.size(); ++i) {
-              PrimExpr stride = make_const(DataType::Int(32), 1);
+              PrimExpr stride = make_const(index_dtype, 1);
               for (size_t j = i + 1; j < shape.size(); ++j) {
-                stride = stride * shape[j];
+                PrimExpr dim = shape[j];
+                if (dim.dtype() != index_dtype) {
+                  dim = tir::Cast(index_dtype, dim);
+                }
+                stride = stride * dim;
               }
               PrimExpr idx = FloorDiv(remaining, stride);
               remaining = FloorMod(remaining, stride);
@@ -1846,13 +1855,16 @@ private:
 
       // Handle Ramp expressions by creating a new index variable
       if (const RampNode *prev_ramp = prev_indice_bytes.as<RampNode>()) {
-        Var prev_idx("prev_idx", DataType::Int(32));
+        DataType prev_index_dtype = prev_ramp->base.dtype();
+        Var prev_idx("prev_idx", prev_index_dtype);
         analyzer.Bind(prev_idx, Range::FromMinExtent(0, prev_ramp->lanes));
+
         prev_indice_bytes = prev_ramp->base + prev_idx * prev_ramp->stride;
       }
 
       if (const RampNode *curr_ramp = curr_indice_bytes.as<RampNode>()) {
-        Var curr_idx("curr_idx", DataType::Int(32));
+        DataType curr_index_dtype = curr_ramp->base.dtype();
+        Var curr_idx("curr_idx", curr_index_dtype);
         analyzer.Bind(curr_idx, Range::FromMinExtent(0, curr_ramp->lanes));
         curr_indice_bytes = curr_ramp->base + curr_idx * curr_ramp->stride;
       }

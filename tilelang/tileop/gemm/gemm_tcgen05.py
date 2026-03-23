@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .gemm_base import GemmBase
 from .inst import GemmInst
 from tilelang.layout import (
@@ -93,7 +95,14 @@ class GemmTCGEN5(GemmBase):
             return layouts
         return {}
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
@@ -128,8 +137,8 @@ class GemmTCGEN5(GemmBase):
             raise ValueError(f"Unsupported B scope for TCGEN5MMA: {self.B.scope()}")
         if self.C.scope() != "shared.tmem":
             raise ValueError(f"TCGEN5MMA expects C in shared.tmem, got {self.C.scope()}")
-        if self.wg_wait != -1:
-            raise ValueError("TCGEN5MMA currently requires wg_wait == -1")
+        if self.wg_wait not in (0, -1):
+            raise ValueError("TCGEN5MMA only accepts wg_wait in {0, -1}")
 
         mbar = self.mbar
         if mbar is None:
@@ -149,6 +158,7 @@ class GemmTCGEN5(GemmBase):
         B_shared = self.BRegion
         C_local = self.C
         clear_accum = self.clear_accum
+        mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
 
         # Since TCGEN5MMA atoms provided by CUTLASS always have an internal
         # `elect_one_sync()`, we check if we are calling it using full warps
@@ -167,8 +177,26 @@ class GemmTCGEN5(GemmBase):
         def _gemm_ss() -> None:
             mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
 
+        @T.prim_func
+        def _gemm_ss_cond_sync() -> None:
+            if thread_var // 32 == thread_bounds.min // warp_size:
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            T.mbarrier_wait_parity(mbar, mbar_phase)
+
+        @T.prim_func
+        def _gemm_ss_sync() -> None:
+            mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            T.mbarrier_wait_parity(mbar, mbar_phase)
+
+        if self.is_tcgen05:
+            return (
+                _Simplify(_gemm_ss, inline_let=True)
+                if analyzer.can_prove(thread_bounds.extent == warp_size)
+                else _Simplify(_gemm_ss_cond, inline_let=True)
+            )
+
         return (
-            _Simplify(_gemm_ss, inline_let=True)
+            _Simplify(_gemm_ss_sync, inline_let=True)
             if analyzer.can_prove(thread_bounds.extent == warp_size)
-            else _Simplify(_gemm_ss_cond, inline_let=True)
+            else _Simplify(_gemm_ss_cond_sync, inline_let=True)
         )

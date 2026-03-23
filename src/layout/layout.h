@@ -83,12 +83,15 @@ public:
 
   // Reshape the layout to a new logical shape. When aliasing buffers of
   // different dtypes, the element count may change while the underlying
-  // byte-size stays equal. Use rescale_num/rescale_den to represent the
-  // ratio between the old element size and the new element size in bytes.
+  // storage footprint stays equal. Use rescale_num/rescale_den to represent
+  // the ratio between the old element size and the new element size in bits.
   // Specifically, define factor = rescale_num / rescale_den where:
   //   new_num_elems = old_num_elems * factor
-  // For example, f32->i8 (4B -> 1B) uses rescale_num=4, rescale_den=1.
-  // i8->f32 (1B -> 4B) uses rescale_num=1, rescale_den=4.
+  // For example, f32->i8 (32b -> 8b) uses rescale_num=32, rescale_den=8.
+  // i8->f32 (8b -> 32b) uses rescale_num=8, rescale_den=32.
+  // For sub-byte subtype views, the output layout may temporarily gain or drop
+  // a trailing "pack lane" dimension so that the layout still describes how
+  // multiple logical elements share the same physical storage slot.
   virtual Layout Reshape(const Array<PrimExpr> &shape,
                          arith::Analyzer *analyzer = nullptr,
                          const PrimExpr rescale_num = Integer(1),

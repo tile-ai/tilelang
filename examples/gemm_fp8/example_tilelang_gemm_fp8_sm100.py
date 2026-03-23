@@ -41,14 +41,13 @@ def matmul(
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B[bx * block_N, k * block_K], B_shared)
-                T.gemm_v2(
+                T.tcgen05_gemm(
                     A_shared,
                     B_shared,
                     C_tmem,
                     trans_A,
                     trans_B,
                     mbar=mbar,
-                    wg_wait=-1,
                     clear_accum=(k == 0),
                 )
                 T.mbarrier_wait_parity(mbar, k % 2)
