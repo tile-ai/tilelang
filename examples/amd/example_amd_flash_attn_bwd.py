@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -8,6 +9,15 @@ import argparse
 from functools import partial
 import numpy as np
 import time
+
+
+def IsRDNA():
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name().strip()
+        return "Radeon" in gpu_name
+    else:
+        print("Error: GPU Device is not detected")
+        sys.exit(1)
 
 
 def ref_program(Q, K, V, is_causal, groups=1):
@@ -30,58 +40,49 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 
 def get_fwd_configs():
-    block_M = [32, 64, 128, 256]
-    block_N = [32, 64, 128, 256]
-    threads = [128, 256, 512]
-    num_split_q = [64, 128, 256]
-    num_stages = [0, 1]
+    if IsRDNA():
+        block_M = [16, 32]
+        block_N = [16, 32]
+        threads = [32, 64]
+        num_split_q = [16, 32, 64]
+        num_stages = [0]
+        # k_pack=2 is broken for RDNA WMMA; use k_pack=1 only.
+        k_pack = [1]
+    else:
+        block_M = [32, 64, 128, 256]
+        block_N = [32, 64, 128, 256]
+        threads = [128, 256, 512]
+        num_split_q = [64, 128, 256]
+        num_stages = [0, 1]
+        k_pack = [2]
     enable_rasterization = [True]
-    k_pack = [2]
     panel_size = [7, 8, 9, 10]
     qk_coalesced_width = [8]
     v_coalesced_width = [4]
 
     valid_configs = []
-
     for m, n, s, t, stages, r, k, p, qkw, vw in itertools.product(
-        block_M, block_N, num_split_q, threads, num_stages, enable_rasterization, k_pack, panel_size, qk_coalesced_width, v_coalesced_width
+        block_M, block_N, num_split_q, threads, num_stages, enable_rasterization,
+        k_pack, panel_size, qk_coalesced_width, v_coalesced_width
     ):
-        valid_configs.append(
-            {
-                "block_M": m,
-                "block_N": n,
-                "num_split_q": s,
-                "threads": t,
-                "num_stages": stages,
-                "enable_rasterization": r,
-                "k_pack": k,
-                "panel_size": p,
-                "qk_coalesced_width": qkw,
-                "v_coalesced_width": vw,
-            }
-        )
+        # RDNA constraint: block_M <= 16 * (threads // 32)
+        if IsRDNA() and m > 16 * (t // 32):
+            continue
+        valid_configs.append({
+            "block_M": m, "block_N": n, "num_split_q": s, "threads": t,
+            "num_stages": stages, "enable_rasterization": r, "k_pack": k,
+            "panel_size": p, "qk_coalesced_width": qkw, "v_coalesced_width": vw,
+        })
     return valid_configs
 
 
 @tilelang.autotune(configs=get_fwd_configs(), cache_input_tensors=True)
 @tilelang.jit(out_idx=[3, 4])
 def fast_flashattn(
-    batch,
-    heads,
-    seq_len,
-    dim,
-    is_causal,
-    groups,
-    block_M: int,
-    block_N: int,
-    num_split_q: int,
-    threads: int,
-    num_stages: int,
-    enable_rasterization: bool,
-    k_pack: int,
-    panel_size: int,
-    qk_coalesced_width: int,
-    v_coalesced_width: int,
+    batch, heads, seq_len, dim, is_causal, groups,
+    block_M: int, block_N: int, num_split_q: int, threads: int,
+    num_stages: int, enable_rasterization: bool, k_pack: int,
+    panel_size: int, qk_coalesced_width: int, v_coalesced_width: int,
 ):
     scale = (1.0 / dim) ** 0.5
     head_kv = heads // groups
@@ -89,7 +90,6 @@ def fast_flashattn(
     kv_shape = [batch, seq_len, head_kv, dim]
     dtype = T.float16
     accum_dtype = T.float32
-
     vec_size = qk_coalesced_width
     v_vec_size = v_coalesced_width
 
@@ -127,6 +127,10 @@ def fast_flashattn(
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
+                # On RDNA, WMMA D-layout (acc_s output) != A-layout (acc_s_cast input).
+                # Route through shared memory to correctly re-distribute registers.
+                if IsRDNA():
+                    P_shared = T.alloc_shared([block_M, block_N], dtype)
                 acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
 
                 acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -151,12 +155,8 @@ def fast_flashattn(
                     else:
                         T.clear(acc_s)
                     T.gemm(
-                        Q_shared,
-                        K_shared,
-                        acc_s,
-                        transpose_B=True,
-                        k_pack=k_pack,
-                        policy=GemmWarpPolicy.FullRow,
+                        Q_shared, K_shared, acc_s,
+                        transpose_B=True, k_pack=k_pack, policy=GemmWarpPolicy.FullRow,
                     )
 
                     for i, j in T.Parallel(block_M, block_N):
@@ -172,7 +172,6 @@ def fast_flashattn(
                             scale_factor[i] = 0.0
                         else:
                             scale_factor[i] = T.exp(m_prev[i] - m_i[i])
-
                         l_i[i] *= scale_factor[i]
 
                     for i, j in T.Parallel(block_M, dim):
@@ -188,7 +187,12 @@ def fast_flashattn(
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
 
-                    T.copy(acc_s, acc_s_cast)
+                    if IsRDNA():
+                        for i, j in T.Parallel(block_M, block_N):
+                            P_shared[i, j] = T.cast(acc_s[i, j], dtype)
+                        T.copy(P_shared, acc_s_cast)
+                    else:
+                        T.copy(acc_s, acc_s_cast)
 
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
 
@@ -211,26 +215,32 @@ def fast_flashattn(
 
 
 def get_bwd_configs():
-    block_M = [16, 32, 64, 128, 256]
-    block_N = [16, 32, 64, 128, 256]
-    threads = [64, 128, 256, 512, 1024]
-    num_stages = [0, 1, 2]
+    if IsRDNA():
+        # RDNA WMMA constraints: D/A layout mismatch limits block sizes;
+        # pipelining and k_pack > 1 are broken on RDNA.
+        block_M = [16, 32]
+        block_N = [16, 32]
+        threads = [32, 64]
+        num_stages = [0]
+    else:
+        block_M = [16, 32, 64, 128, 256]
+        block_N = [16, 32, 64, 128, 256]
+        threads = [64, 128, 256, 512, 1024]
+        num_stages = [0, 1, 2]
     enable_rasterization = [True]
     panel_size = [7, 8, 9, 10]
 
     configs = []
-    for m, n, stages, t, r, p in itertools.product(block_M, block_N, num_stages, threads, enable_rasterization, panel_size):
-        configs.append(
-            {
-                "block_M": m,
-                "block_N": n,
-                "num_stages": stages,
-                "threads": t,
-                "enable_rasterization": r,
-                "panel_size": p,
-            }
-        )
-
+    for m, n, stages, t, r, p in itertools.product(
+        block_M, block_N, num_stages, threads, enable_rasterization, panel_size
+    ):
+        # RDNA constraint: block_M <= 16 * (threads // 32)
+        if IsRDNA() and m > 16 * (t // 32):
+            continue
+        configs.append({
+            "block_M": m, "block_N": n, "num_stages": stages,
+            "threads": t, "enable_rasterization": r, "panel_size": p,
+        })
     return configs
 
 
@@ -242,7 +252,11 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     blk = 32
 
     @T.prim_func
-    def flash_bwd_prep(O: T.Tensor(shape, dtype), dO: T.Tensor(shape, dtype), Delta: T.Tensor([batch, heads, seq_len], accum_dtype)):
+    def flash_bwd_prep(
+        O: T.Tensor(shape, dtype),
+        dO: T.Tensor(shape, dtype),
+        Delta: T.Tensor([batch, heads, seq_len], accum_dtype),
+    ):
         with T.Kernel(batch, heads, T.ceildiv(seq_len, blk)) as (bz, bx, by):
             o = T.alloc_fragment([blk, blk], dtype)
             do = T.alloc_fragment([blk, blk], dtype)
@@ -263,18 +277,9 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 @tilelang.autotune(configs=get_bwd_configs(), cache_input_tensors=True)
 @tilelang.jit
 def flashattn_bwd(
-    batch,
-    heads,
-    seq_len,
-    dim,
-    is_causal,
-    groups,
-    block_M: int,
-    block_N: int,
-    num_stages: int,
-    threads: int,
-    enable_rasterization: bool,
-    panel_size: int,
+    batch, heads, seq_len, dim, is_causal, groups,
+    block_M: int, block_N: int, num_stages: int,
+    threads: int, enable_rasterization: bool, panel_size: int,
 ):
     sm_scale = (1.0 / dim) ** 0.5
     head_kv = heads // groups
@@ -305,6 +310,13 @@ def flashattn_bwd(
             lse_shared = T.alloc_shared([block_N], accum_dtype)
             delta_shared = T.alloc_shared([block_N], accum_dtype)
             ds_shared = T.alloc_shared([block_M, block_N], dtype)
+
+            # On RDNA, WMMA D-layout (fragment output) != A-layout (gemm input).
+            # Bridge P_acc and dS through shared memory to correctly re-distribute registers.
+            if IsRDNA():
+                P_smem = T.alloc_shared([block_M, block_N], dtype)
+                dS_smem = T.alloc_shared([block_M, block_N], dtype)
+                dS_T_shared = T.alloc_shared([block_N, block_M], dtype)
 
             p_cast = T.alloc_fragment([block_M, block_N], dtype)
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -343,19 +355,42 @@ def flashattn_bwd(
 
                 T.gemm(V_shared, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
-                T.copy(P_acc, p_cast)
+                # Bridge P_acc (D-layout, f32) → p_cast (A-layout, f16) via shared mem on RDNA
+                if IsRDNA():
+                    for i, j in T.Parallel(block_M, block_N):
+                        P_smem[i, j] = T.cast(P_acc[i, j], dtype)
+                    T.copy(P_smem, p_cast)
+                else:
+                    T.copy(P_acc, p_cast)
                 T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(Delta[bz, bx, k * block_N : (k + 1) * block_N], delta_shared)
 
                 for i, j in T.Parallel(block_M, block_N):
-                    p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+                    P_acc[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+
+                # Bridge dS (D-layout, f32) → p_cast (A-layout, f16) via shared mem on RDNA
+                if IsRDNA():
+                    for i, j in T.Parallel(block_M, block_N):
+                        dS_smem[i, j] = T.cast(P_acc[i, j], dtype)
+                    T.copy(dS_smem, p_cast)
+                else:
+                    for i, j in T.Parallel(block_M, block_N):
+                        p_cast[i, j] = T.cast(P_acc[i, j], dtype)
 
                 T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
 
-                T.copy(p_cast, ds_shared)
-                T.clear(dq)
-                T.gemm(ds_shared, K_shared, dq, transpose_A=True)
+                # Compute dQ: dS^T @ K. On RDNA, transpose_A is broken;
+                # pre-transpose dS into dS_T_shared then gemm without transpose.
+                if IsRDNA():
+                    for i, j in T.Parallel(block_M, block_N):
+                        dS_T_shared[j, i] = dS_smem[i, j]
+                    T.clear(dq)
+                    T.gemm(dS_T_shared, K_shared, dq, policy=T.GemmWarpPolicy.FullRow)
+                else:
+                    T.copy(p_cast, ds_shared)
+                    T.clear(dq)
+                    T.gemm(ds_shared, K_shared, dq, transpose_A=True)
                 for i, j in T.Parallel(block_N, dim):
                     T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
 
@@ -445,7 +480,8 @@ def benchmark_function(func, *args, warmup=10, repeat=100):
     return np.median(times)
 
 
-def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is_causal: bool = False, groups: int = 1):
+def main(batch: int = 1, heads: int = 8, seq_len: int = 1024, dim: int = 64,
+         is_causal: bool = False, groups: int = 1):
     device = "cuda"
     dtype = torch.float16
 
@@ -532,11 +568,8 @@ def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is
         q_ref_bench = q.clone().detach().requires_grad_()
         k_ref_bench = k.clone().detach().requires_grad_()
         v_ref_bench = v.clone().detach().requires_grad_()
-
         o_ref_bench, _ = ref_program(q_ref_bench, k_ref_bench, v_ref_bench, is_causal, groups)
-
         o_ref_bench.backward(dO)
-
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
@@ -545,23 +578,17 @@ def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is
 
     def run_complete_fwd_bwd():
         o_tl_bench, lse_tl_bench = fwd_kernel(q, k, v)
-
         delta_tl_bench = bwd_prep(o_tl_bench, dO)
-
         dQ_bench = torch.zeros_like(q, dtype=torch.float32)
         dK_bench = torch.zeros_like(k, dtype=torch.float32)
         dV_bench = torch.zeros_like(v, dtype=torch.float32)
         bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_bench, dK_bench, dV_bench)
-
         post_kernel(dQ_bench)
-
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
     tile_latency = benchmark_function(run_complete_fwd_bwd, warmup=10, repeat=100)
-    print(
-        f"Complete Flash Attention V2 Forward+Backward (Tile-lang): {tile_latency:.2f} ms | {total_flops / tile_latency * 1e-9:.2f} TFlops"
-    )
+    print(f"Complete Flash Attention V2 Forward+Backward (Tile-lang): {tile_latency:.2f} ms | {total_flops / tile_latency * 1e-9:.2f} TFlops")
 
     speedup = ref_latency / tile_latency
     print(f"Speedup: {speedup:.2f}x")

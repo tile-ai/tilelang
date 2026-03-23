@@ -1290,7 +1290,7 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < 4; ++i) {
       if (i != 0)
         os << ", ";
-      os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+      os << "({ float2 _f2tmp = make_float2(" << v << ", " << v << "); *(unsigned long long*)&_f2tmp; })";
     }
     os << ')';
     return;
