@@ -92,9 +92,7 @@ def _gemm_impl(
     use_2cta = annotations is not None and annotations.get("use_2cta", 0)
     if use_2cta:
         # In 2CTA mode each CTA holds half of B along N, so N_B should be N // 2
-        assert prim_expr_equal(N_B * 2, N), (
-            f"T.gemm N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
-        )
+        assert prim_expr_equal(N_B * 2, N), f"T.gemm N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
     else:
         assert prim_expr_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
 
