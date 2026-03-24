@@ -95,6 +95,7 @@ GemmPy::GemmPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  node->annotations_ = annotations;
   data_ = std::move(node);
 }
 
@@ -164,6 +165,8 @@ GemmInst GemmPyNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
+  } else if (TargetIsRDNA(target)) {
+    return GemmInst::kWMMA;
   } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else if (TargetIsCPU(target)) {
@@ -378,9 +381,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def(
-      "tl.get_tcgen5_mma_meta",
-      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype);
+      "tl.get_tcgen5_mma_meta", [](int M, int N, int K, DataType ab_dtype,
+                                   DataType c_dtype, bool disable_2cta) {
+        auto [success, meta] =
+            GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype, disable_2cta);
         Array<Integer> result;
         if (success) {
           result.push_back(Integer(meta.atom_m));

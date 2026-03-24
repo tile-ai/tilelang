@@ -5,6 +5,7 @@
  */
 
 #include "common/assume.h"
+#include "common/attr.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ffi/optional.h"
 #include "tvm/ir/expr.h"
@@ -149,7 +150,7 @@ private:
 
     // NOTE(chaofan): We only inject assumes from function arguments in the
     // root block.
-    if (op->name_hint == "root") {
+    if (IsHostMainBlock(op)) {
       for (auto item : f->buffer_map) {
         c.addBuffer(item.second);
       }

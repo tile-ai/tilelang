@@ -130,8 +130,8 @@ private:
 
 class MultiVersionBufferRewriter : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f) {
-    auto rewriter = MultiVersionBufferRewriter();
+  static PrimFunc Substitute(PrimFunc &f, bool barrier_only = false) {
+    auto rewriter = MultiVersionBufferRewriter(barrier_only);
     rewriter.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : rewriter.buffer_lca_) {
       Var buffer_var = buffer->data;
@@ -142,7 +142,8 @@ public:
   }
 
 private:
-  MultiVersionBufferRewriter() = default;
+  explicit MultiVersionBufferRewriter(bool barrier_only = false)
+      : barrier_only_(barrier_only) {}
 
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
@@ -487,6 +488,18 @@ private:
       }
     }
 
+    // In barrier_only mode, only version barrier buffers.
+    // Data buffer versioning is left to InjectSoftwarePipeline.
+    if (barrier_only_) {
+      Array<Buffer> filtered;
+      for (auto buffer : versioned_buffers) {
+        if (buffer.scope() == "shared.barrier") {
+          filtered.push_back(buffer);
+        }
+      }
+      versioned_buffers = filtered;
+    }
+
     for (auto buffer : versioned_buffers) {
       Var buffer_var = buffer->data;
       Buffer new_buffer = RewriteAllocBuffer(buffer, num_stages);
@@ -661,6 +674,7 @@ private:
     return Call(call->dtype, call->op, new_args, call->annotations, call->span);
   }
 
+  bool barrier_only_;
   PrimExpr version_index_;
   PrimExpr parity_cycle_; // (k / num_stages) % 2 for mbarrier parity rewriting
   Var pipeline_loop_var_; // loop variable of the pipelined loop
@@ -679,9 +693,9 @@ private:
 
 using namespace tir::transform;
 
-tvm::transform::Pass MultiVersionBuffer() {
+tvm::transform::Pass MultiVersionBuffer(bool barrier_only) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return MultiVersionBufferRewriter::Substitute(f);
+    return MultiVersionBufferRewriter::Substitute(f, barrier_only);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MultiVersionBuffer", {});
 }

@@ -108,6 +108,8 @@ GemmInst GemmSPPyNode::GetGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
+  } else if (TargetIsRDNA(target)) {
+    return GemmInst::kWMMA;
   } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else {

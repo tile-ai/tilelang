@@ -72,7 +72,8 @@ private:
   static bool MatchArrive(const Stmt &stmt, const PrimExpr &barrier) {
     Optional<Call> call = GetEvaluateCall(stmt);
     return call.defined() &&
-           call.value()->op.same_as(builtin::ptx_arrive_barrier()) &&
+           (call.value()->op.same_as(builtin::ptx_arrive_barrier()) ||
+            call.value()->op.same_as(tl::ptx_arrive_cluster_barrier())) &&
            ExprDeepEqual()(call.value()->args[0], barrier);
   }
 

@@ -276,6 +276,18 @@ def tma_load(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args)
 
 
+def tma_load_2sm(*args):
+    """Perform a Tensor Memory Access (TMA) load operation with 2SM on Blackwell.
+
+    Args:
+        *args: Variable arguments specifying the TMA load parameters
+
+    Returns:
+        tir.Call: A handle to the TMA load operation
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args, annotations={"use_2cta": 1})
+
+
 def fence_proxy_async(*args):
     """Create a fence for asynchronous proxy operations.
 
@@ -995,17 +1007,21 @@ def cp_async_barrier_noinc(barrier: BarrierType):
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
-def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr):
+def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr, arrive_2cta: bool = False):
     """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
 
     Parameters
     ----------
     mbar: tir.Buffer | BufferLoad | PrimExpr
         The mbarrier object in shared memory (e.g., Barrier*) or its address.
+    arrive_2cta: bool
+        Whether to also arrive at the peer CTA's barrier.
+        If set, will be lowered to umma_arrive_multicast_2x1SM.
     """
     if isinstance(mbar, (tir.Buffer, BufferLoad)):
         mbar = retrieve_ptr(mbar, access_type="rw")
-    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar)
+    ann = {"use_2cta": 1} if arrive_2cta else {}
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann)
 
 
 def ptx_mma_sm70(

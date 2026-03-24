@@ -155,11 +155,39 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         """
         if is_tensor_memory(A_buf):
             return self.tcgen05mma_ts(A_buf, B_buf, C_local_buf, mbar, clear_accum)
+        return self.tcgen05mma_ss(A_buf, B_buf, C_local_buf, mbar, clear_accum)
 
+    def tcgen05mma_ss(self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, mbar, clear_accum: PrimExpr = False):
+        """Emit the SS (Shared-Shared) variant of TCGEN5MMA.
+
+        Reads operand A and B from shared memory via a descriptor.
+
+        Parameters
+        ----------
+        A_buf : Buffer
+            Operand A in shared memory.
+        B_buf : Buffer
+            Operand B in shared memory.
+        C_local_buf : Buffer
+            Accumulator buffer in tensor memory.
+        mbar : PrimExpr
+            Memory barrier for MMA completion signalling.
+        clear_accum : PrimExpr
+            Whether to zero the accumulator before the first MMA.
+        """
         accum_dtype = self.accum_dtype
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
+        meta = self.meta
+        if len(meta) != 5:
+            raise ValueError(
+                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
+                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
+            )
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
         scale_in_a = 1
         scale_in_b = 1
 
@@ -173,16 +201,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         elems_in_bits = DataType(self.a_dtype).bits
         elems_in_bytes = elems_in_bits // 8
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
-
-        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
-        if len(meta) != 5:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
-                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
 
         # by default, we utilize non-swizzle layout offset
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
@@ -209,8 +229,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 else:
                     a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
 
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
         if not b_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
@@ -221,18 +241,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 # MN Major, K * N
                 # LBO represents the distance between two atoms along the N dimension
                 # SBO represents the distance between two atoms along the K dimension
-                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
+                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
                 if b_n_axis_atoms <= 1:
                     b_leading_byte_offset = 0
                 else:
                     b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
                 if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
+                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim_per_cta
                 else:
                     b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
 
         # for example, if [n, k] where k is 128, we should split it into 2 atoms
-        # where max specially handles the case when n_dim is 8.
+        # where max specially handles the case when n_dim_per_cta is 8.
         ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
 
@@ -251,7 +271,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
         # TCGEN05 only has one warp group
-        num_inst_m = self.block_row_warps * self.warp_row_tiles // atom_m
+        num_inst_m = self.block_row_warps * self.warp_row_tiles // atom_m_per_cta
         num_inst_n = self.block_col_warps * self.warp_col_tiles // atom_n
 
         # Helper to allow BufferRegion/BufferLoad as inputs
@@ -284,7 +304,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
 
         @T.macro
-        def _warp_mma(A_buf, B_buf, C_local_buf, mbar):
+        def _warp_mma_ss(A_buf, B_buf, C_local_buf, mbar):
             # Allocate SMEM descriptors for A and B
             desc_a = T.alloc_tcgen05_smem_desc()
             desc_b = T.alloc_tcgen05_smem_desc()
@@ -310,26 +330,27 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 int(b_swizzle_mode),
             )
 
-            tmem_col_step = atom_n // (128 // atom_m)
+            tmem_col_step = atom_n // (128 // atom_m_per_cta)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, (k_dim // micro_size_k)):
                         scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
                         A_elem_offset = (
                             (ki % ak_atom_size) * micro_size_k
-                            + i * atom_m * a_swizzle_atom_elems
+                            + i * atom_m_per_cta * a_swizzle_atom_elems
                             + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
                             if a_is_k_major
-                            else i * atom_m * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                            else i * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
                         )
 
                         B_elem_offset = (
-                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                            (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
                             + (ki % bk_atom_size) * micro_size_k
                             + j * atom_n * b_swizzle_atom_elems
                             if b_is_k_major
                             else (
-                                ki * b_swizzle_atom_elems * micro_size_k + j * atom_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                                ki * b_swizzle_atom_elems * micro_size_k
+                                + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
                             )
                         )
 
@@ -352,10 +373,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             mask2,
                             mask3,
                             enable_ws,
+                            enable_2cta,
                         )
-            T.tcgen05_mma_arrive(mbar)
+            T.tcgen05_mma_arrive(mbar, arrive_2cta=enable_2cta)
 
-        return _warp_mma(A_buf, B_buf, C_local_buf, mbar)
+        return _warp_mma_ss(A_buf, B_buf, C_local_buf, mbar)
 
     def tcgen05mma_ts(self, A_buf, B_buf, C_local_buf, mbar, clear_accum: PrimExpr = False):
         """Emit the TS (TensorMemory-Shared) variant of TCGEN5MMA.
@@ -382,6 +404,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
+        meta = self.meta
+        if len(meta) != 5:
+            raise ValueError(
+                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
+                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
+            )
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
         scale_in_a = 1
         scale_in_b = 1
 
@@ -393,32 +424,24 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_dtype_in_bits = DataType(self.a_dtype).bits
         elems_in_bits = a_dtype_in_bits
         elems_in_bytes = elems_in_bits // 8
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
-        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
-        if len(meta) != 5:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration for TS: M={m_dim}, N={n_dim}, "
-                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
-        atom_m, atom_n, atom_k, _enable_ws, _enable_2cta = (int(x) for x in meta)
-
         # B descriptor parameters (same as SS)
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
         if not b_swizzle_mode.is_none():
             if b_is_k_major:
                 b_leading_byte_offset = 16
                 b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
             else:
-                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
+                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
                 if b_n_axis_atoms <= 1:
                     b_leading_byte_offset = 0
                 else:
                     b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
                 if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
+                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim_per_cta
                 else:
                     b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
 
@@ -438,7 +461,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         mask_zero = T.cast(0, T.int32)
         mask0 = mask1 = mask2 = mask3 = mask_zero
 
-        num_inst_m = m_dim // atom_m
+        num_inst_m = m_dim // atom_m_per_cta
         num_inst_n = n_dim // atom_n
 
         # TMEM column geometry for A operand
@@ -498,7 +521,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 int(b_swizzle_mode),
             )
 
-            tmem_col_step = atom_n // (128 // atom_m)
+            tmem_col_step = atom_n // (128 // atom_m_per_cta)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, (k_dim // micro_size_k)):
@@ -509,12 +532,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
                         # B: SMEM byte offset (same as SS)
                         B_elem_offset = (
-                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                            (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
                             + (ki % bk_atom_size) * micro_size_k
                             + j * atom_n * b_swizzle_atom_elems
                             if b_is_k_major
                             else (
-                                ki * b_swizzle_atom_elems * micro_size_k + j * atom_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                                ki * b_swizzle_atom_elems * micro_size_k
+                                + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
                             )
                         )
                         B_byte_offset = B_elem_offset * elems_in_bytes
@@ -537,7 +561,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                             mask2,
                             mask3,
                         )
-            T.tcgen05_mma_arrive(mbar)
+            T.tcgen05_mma_arrive(mbar, arrive_2cta=enable_2cta)
 
         return _warp_mma_ts(a_tmem_data, B_buf, C_local_buf, mbar)
 
@@ -572,27 +596,44 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         n = int(tmem_buf.shape[1])
         k = int(self.chunk)
 
-        meta = self.get_tcgen5_mma_meta(m, n, k)
+        meta = self.meta
         if len(meta) != 5:
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration: M={m}, N={n}, K={k}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
             )
-        atom_m, atom_n, _, _, _ = (int(x) for x in meta)
+        atom_m, atom_n, _, _, enable_2cta = (int(x) for x in meta)
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
 
-        if m % atom_m != 0 or n % atom_n != 0:
+        if m % atom_m_per_cta != 0 or n % atom_n != 0:
             raise ValueError(f"Invalid TCGEN5MMA store layout for shape ({m}, {n}) with atoms ({atom_m}, {atom_n})")
 
         def forward(i: PrimExpr, j: PrimExpr):
-            atom_idx = (i // atom_m) + (j // atom_n) * (m // atom_m)
-            ai = i % atom_m
+            atom_idx = (i // atom_m_per_cta) + (j // atom_n) * (m // atom_m_per_cta)
+            ai = i % atom_m_per_cta
             aj = j % atom_n
 
-            if atom_m == 128:
-                # Layout D
+            # NOTE: Currently not all 7 layout are supported
+            if atom_m == 256:
+                # Layout A (2 cta)
+                assert enable_2cta, "atom_m=256 for TCGEN5MMA must use 2cta"
                 return [
-                    ai,
+                    ai % 128,
                     aj + atom_idx * atom_n,
                 ]
+            if atom_m == 128:
+                if enable_2cta:
+                    # Layout B
+                    half_atom_n = atom_n // 2
+                    return [
+                        ai + (aj // half_atom_n) * 64,
+                        (aj % half_atom_n) + atom_idx * half_atom_n,
+                    ]
+                else:
+                    # Layout D
+                    return [
+                        ai,
+                        aj + atom_idx * atom_n,
+                    ]
             if atom_m == 64:
                 # Layout E (.ws variant)
                 half_atom_n = atom_n // 2
@@ -612,9 +653,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         return Layout([m, n], forward)
 
-    def get_tcgen5_mma_meta(self, m: int, n: int, k: int):
-        """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta)."""
-        return _ffi_api.get_tcgen5_mma_meta(int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype))
+    def get_tcgen5_mma_meta(self, m: int, n: int, k: int, disable_2cta: bool):
+        """Query the FFI for TCGEN5MMA atom metadata (atom_m, atom_n, atom_k, enable_ws, enable_2cta), and record them in `self.meta`."""
+        self.meta = _ffi_api.get_tcgen5_mma_meta(
+            int(m), int(n), int(k), DataType(self.a_dtype), DataType(self.accum_dtype), bool(disable_2cta)
+        )
 
     def get_tcgen5_instr_desc(
         self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool, b_is_k_major: bool, scale_in_a: int, scale_in_b: int

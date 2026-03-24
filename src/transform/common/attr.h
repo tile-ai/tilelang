@@ -3,10 +3,22 @@
  * \brief Check attributes of the IR
  */
 
+#include "tvm/tir/stmt.h"
+
 namespace tvm {
 namespace tl {
 
-constexpr const char *MainBlockName = "tilelang_root";
+constexpr const char *HostMainBlockName = "root";
+
+constexpr const char *DeviceMainBlockName = "tilelang_root";
+
+inline bool IsHostMainBlock(const tir::BlockNode *node) {
+  return node->name_hint == HostMainBlockName;
+}
+
+inline bool IsDeviceMainBlock(const tir::BlockNode *node) {
+  return node->name_hint == DeviceMainBlockName;
+}
 
 constexpr const char *tilelang_is_cpu_kernel_frame =
     "tilelang.is_cpu_kernel_frame";
