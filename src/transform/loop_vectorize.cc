@@ -653,8 +653,7 @@ private:
       int source_lanes = vector_load_bits_max_ / source_bits;
       max_lanes = std::min(target_lanes, source_lanes);
     }
-    int cast_vector_size =
-        arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
+    int cast_vector_size = arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
     // Record cast constraint (use empty buffer to indicate cast)
     buffer_vector_infos_.push_back({Buffer(), cast_vector_size, false, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
