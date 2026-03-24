@@ -568,7 +568,7 @@ TVM_DLL const Op &cluster_sync();
 /*!
  * \brief Return the 1-D rank of the calling CTA within its cluster
  *
- * uint32_t block_rank_in_cluster()
+ * int block_rank_in_cluster()
  *
  */
 TVM_DLL const Op &block_rank_in_cluster();

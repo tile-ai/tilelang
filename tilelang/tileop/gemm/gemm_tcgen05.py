@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .gemm_base import GemmBase
 from .inst import GemmInst
 from tilelang.layout import (
@@ -74,9 +76,13 @@ class GemmTCGEN5(GemmBase):
         a_is_k_major = not self.trans_A
         b_is_k_major = self.trans_B
 
+        annotations = getattr(self.gemm_node, "annotations", {})
+        use_2cta = bool(annotations.get("use_2cta", 0))
+        mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
+
         if self.is_gemm_ss():
-            a_continuity = self.M if a_is_k_major else 4 * self.K // m_warp
-            b_continuity = self.K if b_is_k_major else self.N // n_warp
+            a_continuity = self.K if a_is_k_major else self.M
+            b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])  # don't use N, as it may be for 2cta
 
             return {
                 self.A: self.infer_shared_layout(a_continuity)(self.A),
@@ -84,7 +90,7 @@ class GemmTCGEN5(GemmBase):
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
-            b_continuity = self.K if b_is_k_major else self.N // n_warp
+            b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
             layouts = {
                 self.A: mma_emitter.make_mma_store_layout(self.A),
                 self.B: self.infer_shared_layout(b_continuity)(self.B),
@@ -93,7 +99,14 @@ class GemmTCGEN5(GemmBase):
             return layouts
         return {}
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
@@ -120,7 +133,10 @@ class GemmTCGEN5(GemmBase):
         if not (self.is_gemm_ss() or self.is_gemm_ts()):
             raise ValueError(f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}")
 
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K)
+        annotations = getattr(self.gemm_node, "annotations", {})
+        use_2cta = bool(annotations.get("use_2cta", 0))
+        mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
+        atom_m, atom_n, atom_k, enable_ws, enable_2cta = mma_emitter.meta
 
         if self.A.scope() not in {"shared", "shared.dyn", "shared.tmem"}:
             raise ValueError(f"Unsupported A scope for TCGEN5MMA: {self.A.scope()}")
@@ -128,8 +144,8 @@ class GemmTCGEN5(GemmBase):
             raise ValueError(f"Unsupported B scope for TCGEN5MMA: {self.B.scope()}")
         if self.C.scope() != "shared.tmem":
             raise ValueError(f"TCGEN5MMA expects C in shared.tmem, got {self.C.scope()}")
-        if self.wg_wait != -1:
-            raise ValueError("TCGEN5MMA currently requires wg_wait == -1")
+        if self.wg_wait not in (0, -1):
+            raise ValueError("TCGEN5MMA only accepts wg_wait in {0, -1}")
 
         mbar = self.mbar
         if mbar is None:
@@ -149,6 +165,7 @@ class GemmTCGEN5(GemmBase):
         B_shared = self.BRegion
         C_local = self.C
         clear_accum = self.clear_accum
+        mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
 
         # Since TCGEN5MMA atoms provided by CUTLASS always have an internal
         # `elect_one_sync()`, we check if we are calling it using full warps
@@ -158,14 +175,21 @@ class GemmTCGEN5(GemmBase):
             "TCGEN5MMA requires thread bounds to be multiples of warp size (32) and aligned to warps."
         )
 
+        cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0
+
         @T.prim_func
         def _gemm_ss_cond() -> None:
-            if thread_var // 32 == thread_bounds.min // warp_size:
+            if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            if not self.is_tcgen05:
+                T.mbarrier_wait_parity(mbar, mbar_phase)
 
         @T.prim_func
         def _gemm_ss() -> None:
-            mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            if cluster_cond:
+                mma_emitter.tcgen05mma(A_shared, B_shared, C_local, mbarptr, clear_accum)
+            if not self.is_tcgen05:
+                T.mbarrier_wait_parity(mbar, mbar_phase)
 
         return (
             _Simplify(_gemm_ss, inline_let=True)

@@ -38,13 +38,12 @@ def matmul_ss(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype, threads):
             for k in T.Pipelined(T.ceildiv(K, bK), num_stages=1):
                 T.copy(A[by * bM, k * bK], A_shared)
                 T.copy(B[bx * bN, k * bK], B_shared)
-                T.gemm(
+                T.tcgen05_gemm(
                     A_shared,
                     B_shared,
                     C_tmem,
                     transpose_B=True,
                     mbar=mbar,
-                    wg_wait=-1,
                     clear_accum=k == 0,
                 )
                 T.mbarrier_wait_parity(mbar, k % 2)
@@ -101,13 +100,12 @@ def chained_gemm(
             for k in T.Pipelined(T.ceildiv(K, bK), num_stages=1):
                 T.copy(A[by * bM, k * bK], A_shared)
                 T.copy(B1[0, k * bK], B1_shared)
-                T.gemm(
+                T.tcgen05_gemm(
                     A_shared,
                     B1_shared,
                     S_tmem,
                     transpose_B=True,
                     mbar=mbar1,
-                    wg_wait=-1,
                     clear_accum=k == 0,
                 )
                 T.mbarrier_wait_parity(mbar1, k % 2)
@@ -119,13 +117,12 @@ def chained_gemm(
 
             # Stage 2: MMA TS -- D_tmem = P_tmem * B2^T
             T.copy(B2[bx * bN2, 0], B2_shared)
-            T.gemm(
+            T.tcgen05_gemm(
                 P_tmem,
                 B2_shared,
                 D_tmem,
                 transpose_B=True,
                 mbar=mbar2,
-                wg_wait=-1,
                 clear_accum=True,
             )
             T.mbarrier_wait_parity(mbar2, 0)

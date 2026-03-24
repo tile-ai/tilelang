@@ -5,7 +5,7 @@ from typing import Callable
 from tilelang.layout import Fragment, Layout
 from tilelang.utils.language import is_fragment
 from tvm.script.parser.tir import attr, block_attr
-from tvm.tir import FloatImm
+from tvm.tir import FloatImm, tvm_tuple
 
 __all__ = [
     "use_swizzle",
@@ -21,7 +21,7 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     device_func = "rasterization2DRow" if order == "row" else "rasterization2DColumn"
     if not enable:
         return None
-    return attr(None, "threadblock_swizzle_pattern", f"tl::{device_func}<{panel_size}>")
+    return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
 
 
 def annotate_layout(layout_map: dict):

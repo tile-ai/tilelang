@@ -1438,14 +1438,6 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
       }
 
       // All checks passed, we can use this instruction
-      PrimExpr relative_wg_idx =
-          FloorDiv(Sub(T.thread_var, T.thread_bounds->min), WARPGROUP_SIZE);
-      PrimExpr col_offset =
-          num_useful_threads == WARPGROUP_SIZE
-              ? PrimExpr(0)
-              : relative_wg_idx * (num_chunks_each_wg * meta.width);
-      have_succeeded = true;
-      Array<PrimExpr> args;
       // For tcgen05_st, bf16 data should be stored packed (without
       // unpack::16b) so MMA TS reads correctly packed bf16 from TMEM columns.
       // For tcgen05_ld, pack::16b is still needed when reading unpacked data.
@@ -1453,6 +1445,14 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
       const char *bool_str = use_pack_unpack_modifier ? "true" : "false";
       int effective_chunks =
           needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
+      PrimExpr relative_wg_idx =
+          FloorDiv(Sub(T.thread_var, T.thread_bounds->min), WARPGROUP_SIZE);
+      PrimExpr col_offset =
+          num_useful_threads == WARPGROUP_SIZE
+              ? PrimExpr(0)
+              : relative_wg_idx * (effective_chunks * meta.width);
+      have_succeeded = true;
+      Array<PrimExpr> args;
       args.push_back(StringImm(meta.intrinsics_name + "<" +
                                std::to_string(effective_chunks) + ", " +
                                bool_str + ">"));
@@ -2174,11 +2174,16 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   // T.copy(): allocates internal mbarrier via AllocMBarrier
   int barrier_base_id = -1;
   PrimExpr mbar_handle;
+  bool is_cluster_barrier = false;
   if (is_load) {
     if (auto user_barrier = annotations.Get("barrier")) {
       // User-provided barrier (T.tma_copy): use directly
       mbar_handle = Downcast<PrimExpr>(user_barrier.value());
       barrier_base_id = 0;
+      // Detect cluster barrier by checking the buffer scope
+      if (auto bl = mbar_handle.as<BufferLoadNode>()) {
+        is_cluster_barrier = bl->buffer.scope() == "shared.cluster_barrier";
+      }
     } else if (GetIsTmaCopy()) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
@@ -2236,8 +2241,12 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     if (!is_load)
       args.push_back(need_reduce);
     args.push_back(GetEvictionPolicy());
+    Map<String, ObjectRef> ann_loop;
+    if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
+      ann_loop.Set("use_2cta", IntImm(DataType::Int(32), 1));
+    }
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-                   Evaluate(Call(DataType::Handle(), op, args)));
+                   Evaluate(Call(DataType::Handle(), op, args, ann_loop)));
 
     if (use_multicast) {
       // Build multicast args using the same loop_var (safe since branches are
@@ -2275,7 +2284,13 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     if (!is_load)
       args.push_back(need_reduce);
     args.push_back(GetEvictionPolicy());
-    tma_copy = Evaluate(Call(DataType::Handle(), op, args));
+    Map<String, ObjectRef> ann;
+    if (TargetIsSm100(T.target) && is_load &&
+        (annotations.find("use_2cta") != annotations.end() ||
+         is_cluster_barrier)) {
+      ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+    }
+    tma_copy = Evaluate(Call(DataType::Handle(), op, args, ann));
 
     if (use_multicast) {
       Array<PrimExpr> mc_args = build_multicast_args(args);
@@ -2333,9 +2348,23 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       // T.tma_copy(): only expect_tx (no arrive). User must call
       // T.barrier_arrive() explicitly. This allows multiple tma_copy operations
       // to share a single arrive.
-      barrier_before_tma_stmt =
-          Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
-                        {mbar_handle, total_bytes}));
+      if (is_cluster_barrier) {
+        // For cluster barriers in 2CTA mode: all CTAs' TMA arrivals go to
+        // CTA 0's barrier (via tma_load_2sm peer-bit clearing). So expect_tx
+        // must account for ALL CTAs' bytes and only execute on CTA 0.
+        PrimExpr cluster_total_bytes =
+            total_bytes * IntImm(DataType::Int(32), T.cluster_size);
+        Stmt expect_stmt =
+            Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                          {mbar_handle, cluster_total_bytes}));
+        PrimExpr rank = Call(DataType::Int(32), block_rank_in_cluster(), {});
+        barrier_before_tma_stmt =
+            IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)), expect_stmt);
+      } else {
+        barrier_before_tma_stmt =
+            Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
+                          {mbar_handle, total_bytes}));
+      }
     } else {
       // T.copy() with TMA: keep expect_tx and arrive as separate control ops.
       // This lets downstream WS/barrier passes reason about the arrival

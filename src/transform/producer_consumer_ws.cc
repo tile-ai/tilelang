@@ -953,6 +953,26 @@ private:
     int num_stages =
         static_cast<int>(Downcast<Integer>(num_stages_anno.value())->value);
     ICHECK_GE(num_stages, 1);
+
+    // Detect cluster barriers and compute cluster size from block annotations.
+    is_cluster_barrier_ = false;
+    cluster_size_ = 1;
+    for (const auto &buf : orig_block->alloc_buffers) {
+      if (buf.scope() == "shared.cluster_barrier") {
+        is_cluster_barrier_ = true;
+        break;
+      }
+    }
+    if (is_cluster_barrier_ && orig_block->annotations.count("cluster_dims")) {
+      if (auto arr = orig_block->annotations.Get("cluster_dims")
+                         ->try_cast<Array<Integer>>()) {
+        int sz = 1;
+        for (auto d : arr.value())
+          sz *= static_cast<int>(d->value);
+        cluster_size_ = sz;
+      }
+    }
+
     // Flatten the loop body
     Array<Stmt> flat_stmts;
     Stmt loop_body_root = pipeline_loop->body;
@@ -1994,6 +2014,7 @@ private:
     return call->op.same_as(mbarrier_wait_parity()) ||
            call->op.same_as(mbarrier_expect_tx()) ||
            call->op.same_as(builtin::ptx_arrive_barrier()) ||
+           call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
            call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
            call->op.same_as(builtin::ptx_cp_async_barrier()) ||
            call->op.same_as(tl::ptx_cp_async_barrier_noinc()) ||
@@ -2733,19 +2754,51 @@ private:
     class TmaBarrierIdRewriter : public StmtExprMutator {
     public:
       TmaBarrierIdRewriter(const Buffer &barrier_buf, PrimExpr barrier_id,
-                           bool drop_arrive)
+                           bool drop_arrive, bool is_cluster_barrier,
+                           int cluster_size)
           : barrier_buf_(barrier_buf), barrier_id_(std::move(barrier_id)),
-            drop_arrive_(drop_arrive) {}
+            drop_arrive_(drop_arrive), is_cluster_barrier_(is_cluster_barrier),
+            cluster_size_(cluster_size) {}
+
+      Stmt VisitStmt_(const EvaluateNode *op) final {
+        if (!is_cluster_barrier_) {
+          return StmtExprMutator::VisitStmt_(op);
+        }
+        // For cluster barriers, intercept mbarrier_expect_tx: multiply bytes
+        // by cluster_size and wrap in if (block_rank_in_cluster() == 0).
+        if (const auto *call = op->value.as<CallNode>()) {
+          if ((call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+               call->op.same_as(mbarrier_expect_tx())) &&
+              call->args.size() == 2) {
+            PrimExpr new_bytes =
+                call->args[1] * IntImm(DataType::Int(32), cluster_size_);
+            auto new_call =
+                Call(call->dtype, call->op,
+                     {makeGetBarrier(barrier_buf_, barrier_id_), new_bytes},
+                     call->annotations, call->span);
+            PrimExpr rank =
+                Call(DataType::Int(32), tl::block_rank_in_cluster(), {});
+            return IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)),
+                              Evaluate(new_call), Stmt());
+          }
+        }
+        return StmtExprMutator::VisitStmt_(op);
+      }
 
       PrimExpr VisitExpr_(const CallNode *op) final {
         auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
         if ((call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
              call->op.same_as(mbarrier_expect_tx())) &&
             call->args.size() == 2) {
-          return Call(
-              call->dtype, call->op,
-              {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
-              call->annotations, call->span);
+          // For non-cluster barriers, just rewrite the barrier arg.
+          // Cluster barriers are handled in VisitStmt_ above.
+          if (!is_cluster_barrier_) {
+            return Call(
+                call->dtype, call->op,
+                {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
+                call->annotations, call->span);
+          }
+          return call;
         }
         if (call->op.same_as(tma_load()) ||
             call->op.same_as(tma_load_im2col())) {
@@ -2757,9 +2810,16 @@ private:
           auto new_call = call.CopyOnWrite();
           new_call->args.Set(is_1d_tma_load ? 2 : 1,
                              makeGetBarrier(barrier_buf_, barrier_id_));
+          // For cluster barriers, add use_2cta annotation
+          if (is_cluster_barrier_) {
+            Map<String, ObjectRef> new_annotations = call->annotations;
+            new_annotations.Set("use_2cta", Bool(true));
+            new_call->annotations = new_annotations;
+          }
           return call;
         }
-        if (call->op.same_as(builtin::ptx_arrive_barrier()) &&
+        if ((call->op.same_as(builtin::ptx_arrive_barrier()) ||
+             call->op.same_as(tl::ptx_arrive_cluster_barrier())) &&
             !call->args.empty()) {
           if (drop_arrive_) {
             return IntImm(DataType::Int(32), 0);
@@ -2775,10 +2835,13 @@ private:
       Buffer barrier_buf_;
       PrimExpr barrier_id_;
       bool drop_arrive_;
+      bool is_cluster_barrier_;
+      int cluster_size_;
     };
 
     return MergeAdjacentEquivalentIfs(
-        TmaBarrierIdRewriter(barrier_buf_, barrier_id, drop_arrive)(stmt));
+        TmaBarrierIdRewriter(barrier_buf_, barrier_id, drop_arrive,
+                             is_cluster_barrier_, cluster_size_)(stmt));
   }
 
   Stmt MergeAdjacentEquivalentIfs(const Stmt &stmt) {
@@ -2855,19 +2918,48 @@ private:
                                      bool append_arrive) {
     class TmaForwardBarrierStmtRewriter : public StmtExprMutator {
     public:
-      explicit TmaForwardBarrierStmtRewriter(const Buffer &barrier_buf,
-                                             PrimExpr barrier_id)
-          : barrier_buf_(barrier_buf), barrier_id_(std::move(barrier_id)) {}
+      TmaForwardBarrierStmtRewriter(const Buffer &barrier_buf,
+                                    PrimExpr barrier_id,
+                                    bool is_cluster_barrier, int cluster_size)
+          : barrier_buf_(barrier_buf), barrier_id_(std::move(barrier_id)),
+            is_cluster_barrier_(is_cluster_barrier),
+            cluster_size_(cluster_size) {}
+
+      Stmt VisitStmt_(const EvaluateNode *op) final {
+        if (!is_cluster_barrier_) {
+          return StmtExprMutator::VisitStmt_(op);
+        }
+        if (const auto *call = op->value.as<CallNode>()) {
+          if ((call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+               call->op.same_as(mbarrier_expect_tx())) &&
+              call->args.size() == 2) {
+            PrimExpr new_bytes =
+                call->args[1] * IntImm(DataType::Int(32), cluster_size_);
+            auto new_call =
+                Call(call->dtype, mbarrier_expect_tx(),
+                     {makeGetBarrier(barrier_buf_, barrier_id_), new_bytes},
+                     call->annotations, call->span);
+            PrimExpr rank =
+                Call(DataType::Int(32), tl::block_rank_in_cluster(), {});
+            return IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)),
+                              Evaluate(new_call), Stmt());
+          }
+        }
+        return StmtExprMutator::VisitStmt_(op);
+      }
 
       PrimExpr VisitExpr_(const CallNode *op) final {
         auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
         if ((call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
              call->op.same_as(mbarrier_expect_tx())) &&
             call->args.size() == 2) {
-          return Call(
-              call->dtype, mbarrier_expect_tx(),
-              {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
-              call->annotations, call->span);
+          if (!is_cluster_barrier_) {
+            return Call(
+                call->dtype, mbarrier_expect_tx(),
+                {makeGetBarrier(barrier_buf_, barrier_id_), call->args[1]},
+                call->annotations, call->span);
+          }
+          return call;
         }
         if (call->op.same_as(tma_load()) ||
             call->op.same_as(tma_load_im2col())) {
@@ -2879,9 +2971,15 @@ private:
           auto new_call = call.CopyOnWrite();
           new_call->args.Set(is_1d_tma_load ? 2 : 1,
                              makeGetBarrier(barrier_buf_, barrier_id_));
+          if (is_cluster_barrier_) {
+            Map<String, ObjectRef> new_annotations = call->annotations;
+            new_annotations.Set("use_2cta", Bool(true));
+            new_call->annotations = new_annotations;
+          }
           return call;
         }
-        if (call->op.same_as(builtin::ptx_arrive_barrier()) &&
+        if ((call->op.same_as(builtin::ptx_arrive_barrier()) ||
+             call->op.same_as(tl::ptx_arrive_cluster_barrier())) &&
             !call->args.empty()) {
           return IntImm(DataType::Int(32), 0);
         }
@@ -2891,12 +2989,14 @@ private:
     private:
       Buffer barrier_buf_;
       PrimExpr barrier_id_;
+      bool is_cluster_barrier_;
+      int cluster_size_;
     };
 
     // Rebind the producer-side barrier id and finish the stage with a normal
     // barrier arrival. Pure-TMA pipelines do not need cp.async.mbarrier.arrive.
-    Stmt rewritten = MergeAdjacentEquivalentIfs(
-        TmaForwardBarrierStmtRewriter(barrier_buf_, barrier_id)(stmt));
+    Stmt rewritten = MergeAdjacentEquivalentIfs(TmaForwardBarrierStmtRewriter(
+        barrier_buf_, barrier_id, is_cluster_barrier_, cluster_size_)(stmt));
     if (!append_arrive) {
       return rewritten;
     }
@@ -3419,6 +3519,8 @@ private:
   int pure_tma_preloop_fwd_count_ = 0;
   int pure_tma_preloop_fwd_cursor_ = 0;
   VarBindingMap current_loop_guard_bindings_;
+  bool is_cluster_barrier_ = false;
+  int cluster_size_ = 1;
 };
 
 // ---------------------------------------------------------------------------
