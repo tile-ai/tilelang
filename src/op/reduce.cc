@@ -11,12 +11,12 @@
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/stmt_functor.h>
 
-#include "builtin.h"
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/parallel.h"
 #include "../target/utils.h"
 #include "../transform/loop_partition.h"
+#include "builtin.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
 #include "tvm/tir/expr.h"
@@ -115,7 +115,8 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc,
                         ->GetConfig<Bool>(kReduceMaxMinNanPropagate, Bool(true))
                         .value();
   }
-  const bool is_fp16_or_bf16 = acc.dtype().is_float16() || acc.dtype().is_bfloat16();
+  const bool is_fp16_or_bf16 =
+      acc.dtype().is_float16() || acc.dtype().is_bfloat16();
   if (type->isSum()) {
     return acc + rhs;
   } else if (type->isAbsSum()) {

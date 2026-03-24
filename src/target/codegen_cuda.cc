@@ -1444,9 +1444,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
   DataType t = op->dtype;
   bool nan_propagate = true;
   if (tvm::transform::PassContext::Current().defined()) {
-    nan_propagate = tvm::transform::PassContext::Current()
-                        ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
-                        .value();
+    nan_propagate =
+        tvm::transform::PassContext::Current()
+            ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
+            .value();
   }
   const char *min_f16 = nan_propagate ? "__hmin_nan" : "__hmin";
 
@@ -1482,9 +1483,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   DataType t = op->dtype;
   bool nan_propagate = true;
   if (tvm::transform::PassContext::Current().defined()) {
-    nan_propagate = tvm::transform::PassContext::Current()
-                        ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
-                        .value();
+    nan_propagate =
+        tvm::transform::PassContext::Current()
+            ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
+            .value();
   }
   const char *max_f16 = nan_propagate ? "__hmax_nan" : "__hmax";
   // Standard min/max functions don't support bfloat16 or float16
