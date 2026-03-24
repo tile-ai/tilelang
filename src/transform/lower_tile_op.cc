@@ -222,15 +222,11 @@ public:
         RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
     fptr->body =
         LayoutRemapRewriter::Substitute(fptr->body, substituter.layout_remap_);
-    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-    Optional<Bool> opt_disable_tma_lower =
-        ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
-
-    if (!opt_disable_tma_lower.value_or(Bool(false))) {
-      // @lei: this is a workaround, as if we don't disable tma lower,
-      // cp async lowering won't be generated.
-      ctxt->config.Set(kDisableTMALower, Bool(!substituter.has_tma_));
-    }
+    // Record whether TMA was actually used as a PrimFunc attribute so that
+    // later phases (OptimizeForTarget) can choose the right pass pipeline
+    // without relying on pass-context side-channel mutation.
+    f = WithAttr(std::move(f), kHasTMA, Bool(substituter.has_tma_));
+    fptr = f.CopyOnWrite();
 
     // If any TMA copies allocated mbarriers, inject the barrier buffer
     // into the tilelang_root block with a barrier_init annotation.
