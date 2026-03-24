@@ -642,8 +642,19 @@ private:
   }
 
   PrimExpr VisitExpr_(const CastNode *node) final {
-    int cast_vector_size = arith::ZeroAwareGCD(
-        vector_load_bits_max_ / node->dtype.bits(), initial_vector_size_);
+    // Consider both source and target types to ensure all intermediate
+    // vector types can be represented. For example, casting int32 to
+    // float8_e4m3fn: target allows 128/8=16 lanes but int32 only supports
+    // up to 128/32=4 lanes in CUDA vector types.
+    int target_lanes = vector_load_bits_max_ / node->dtype.bits();
+    int source_bits = node->value.dtype().bits();
+    int max_lanes = target_lanes;
+    if (source_bits > 0) {
+      int source_lanes = vector_load_bits_max_ / source_bits;
+      max_lanes = std::min(target_lanes, source_lanes);
+    }
+    int cast_vector_size =
+        arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
     // Record cast constraint (use empty buffer to indicate cast)
     buffer_vector_infos_.push_back({Buffer(), cast_vector_size, false, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
