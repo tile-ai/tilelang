@@ -193,6 +193,13 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # before layout inference so that later passes (e.g. warp specialization) can
     # reason about the instruction mix without depending on lowered IR.
     mod = tilelang.transform.InstructionAnnotation()(mod)
+    # Tile-level warp specialization: runs before layout inference so that
+    # producer/consumer split happens at the high-level tile-op IR.
+    # NOTE: MultiVersionBuffer is called inside ProducerConsumerWarpSpecializedTiled
+    # only for functions where the tiled WS transformation actually applies,
+    # because running it unconditionally would break manually annotated layouts.
+    if allow_warp_specialized(target=target):
+        mod = tilelang.transform.ProducerConsumerWarpSpecializedTiled()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout
@@ -227,19 +234,13 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # which may be introduced by the LegalizeSafeMemoryAccess
     if allow_tma_lower(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
-        # MultiVersionBuffer before LowerSharedBarrier so barrier buffers
-        # (shared.barrier scope) can be expanded for pipelining.
+        # MultiVersionBuffer expands shared buffers for pipelining.
+        # ProducerConsumerWarpSpecialized handles WS for kernels not covered
+        # by the tile-level pass (mixed TMA+SIMT, sparse gemm, etc.).
+        # For functions already transformed by ProducerConsumerWarpSpecializedTiled
+        # (num_stages stripped), both are no-ops.
         mod = tilelang.transform.MultiVersionBuffer()(mod)
-        if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-            # Producer-Consumer Warp Specialization:
-            # Splits TMA pipeline loops into producer (TMA loads) and consumer
-            # (compute) warps with mbarrier-based synchronization.
-            # When WS succeeds, it handles the pipeline overlap directly,
-            # so PipelinePlanning + InjectSoftwarePipeline are skipped.
-            # NOTE: LowerSharedBarrier runs ONLY after WS, not before.
-            # Running it before would generate barrier init calls that
-            # WS cannot clean up when it replaces the barriers.
-            mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+        mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
         mod = tilelang.transform.LowerSharedBarrier()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)

@@ -266,6 +266,23 @@ def ProducerConsumerWarpSpecialized():
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 
+def ProducerConsumerWarpSpecializedTiled():
+    """Producer-Consumer Warp Specialization at the tile-op level.
+
+    This pass runs before LayoutInference and LowerTileOp.  It reads
+    ``tl_instruction_kind`` annotations and splits pipelined loops into
+    warp-specialized producer/consumer branches with explicit barrier
+    synchronization.  TMA-annotated copies are converted to
+    ``tl.tileop.tma_copy`` with barrier references.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.ProducerConsumerWarpSpecializedTiled()  # type: ignore
+
+
 def AnnotateWarpGroupRegAlloc():
     """Inject set_max_nreg calls into warp-specialized functions.
 

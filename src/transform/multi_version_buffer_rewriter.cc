@@ -16,6 +16,8 @@
 #include <utility>
 
 #include "../op/builtin.h"
+#include "../op/operator.h"
+#include "../op/region.h"
 #include "../op/utils.h"
 
 namespace tvm {
@@ -182,8 +184,42 @@ private:
       Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
                   /*name_hint=*/"", /*body*/ stmt);
       auto access = GetBlockAccessRegion(block, buffer_data_to_buffer_);
-      reads.push_back(access[0]);
-      writes.push_back(access[1]);
+      Array<BufferRegion> stmt_reads = access[0];
+      Array<BufferRegion> stmt_writes = access[1];
+
+      // Supplement with tile-op region analysis.
+      // GetBlockAccessRegion misses buffer references that are encoded as
+      // tl.tileop.region Call args (they contain BufferLoad but not
+      // BufferStore, so writes are invisible).  Parse tile-op regions to
+      // recover the missing read/write information.
+      if (auto *eval = stmt.as<EvaluateNode>()) {
+        if (auto *call = eval->value.as<CallNode>()) {
+          auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+          if (tile_op.defined()) {
+            // Scan all region args of the tile op.
+            for (const auto &arg : call->args) {
+              if (auto *region_call = arg.as<CallNode>()) {
+                if (region_call->op.same_as(RegionOp::Get())) {
+                  auto region_op = ParseOperator(ffi::GetRef<Call>(region_call));
+                  if (auto *rn = region_op.as<RegionOpNode>()) {
+                    int mask = rn->GetAccessMask();
+                    auto br = BufferRegion(rn->GetBuffer(), rn->GetRanges());
+                    if (mask & 1) { // read
+                      stmt_reads.push_back(br);
+                    }
+                    if (mask & 2) { // write
+                      stmt_writes.push_back(br);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      reads.push_back(stmt_reads);
+      writes.push_back(stmt_writes);
       roles.push_back(marker.GetRole(stmt));
     }
 
@@ -524,6 +560,34 @@ private:
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
+    }
+    // Rewrite tl.tileop.region Calls for versioned buffers.
+    // The region encoding is:
+    //   region(BufferLoad(buf, [min_0, ..., min_N]), access_mask, ext_0, ...,
+    //   ext_N)
+    // After the recursive visit, VisitExpr_(BufferLoadNode*) prepends a
+    // version_index to the BufferLoad indices, yielding [version_index,
+    // min_0, ..., min_N].  We must also insert a matching extent (1) for the
+    // new leading dimension so that RegionOp's ndim == indices.size()
+    // invariant is preserved.
+    //
+    // Detection: if the BufferLoad has more indices than the number of extent
+    // args (args.size() - 2), a version index was prepended.
+    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+      if (auto load = call->args[0].as<BufferLoadNode>()) {
+        size_t num_extents = call->args.size() - 2; // args = [load, mask, ext...]
+        if (load->indices.size() == num_extents + 1) {
+          // Version index was prepended.  Insert a unit extent to match.
+          Array<PrimExpr> new_args;
+          new_args.push_back(call->args[0]); // rewritten BufferLoad
+          new_args.push_back(call->args[1]); // access_mask
+          new_args.push_back(IntImm(DataType::Int(32), 1)); // stage extent
+          for (size_t i = 2; i < call->args.size(); ++i) {
+            new_args.push_back(call->args[i]);
+          }
+          return Call(call->dtype, call->op, new_args, call->annotations);
+        }
+      }
     }
     // Rewrite parity for mbarrier_wait_parity on versioned barrier buffers.
     // The user writes single-barrier parity (e.g. k % 2 or (k+1) % 2).
