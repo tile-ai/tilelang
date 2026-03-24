@@ -253,21 +253,21 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 
     @T.prim_func
     def flash_bwd_prep(
-        O: T.Tensor(shape, dtype),
-        dO: T.Tensor(shape, dtype),
+        Out: T.Tensor(shape, dtype),
+        dOut: T.Tensor(shape, dtype),
         Delta: T.Tensor([batch, heads, seq_len], accum_dtype),
     ):
         with T.Kernel(batch, heads, T.ceildiv(seq_len, blk)) as (bz, bx, by):
-            o = T.alloc_fragment([blk, blk], dtype)
-            do = T.alloc_fragment([blk, blk], dtype)
+            out_tmp = T.alloc_fragment([blk, blk], dtype)
+            dout_tmp = T.alloc_fragment([blk, blk], dtype)
             acc = T.alloc_fragment([blk, blk], accum_dtype)
             delta = T.alloc_fragment([blk], accum_dtype)
             T.clear(acc)
             for k in range(T.ceildiv(dim, blk)):
-                T.copy(O[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], o)
-                T.copy(dO[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], do)
+                T.copy(Out[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], out_tmp)
+                T.copy(dOut[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], dout_tmp)
                 for i, j in T.Parallel(blk, blk):
-                    acc[i, j] += o[i, j] * do[i, j]
+                    acc[i, j] += out_tmp[i, j] * dout_tmp[i, j]
             T.reduce_sum(acc, delta, 1)
             T.copy(delta, Delta[bz, bx, by * blk : (by + 1) * blk])
 
