@@ -326,8 +326,8 @@ void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
       }
       // Tolerate any stride value when dim size is 1 (torch 2.1 DLPack bug:
       // forces stride=1 for size-1 dims regardless of logical stride).
-      PrimExpr cond =
-          (expected == logical_stride_val) || (expected == 0) || (dim_shape == 1);
+      PrimExpr cond = (expected == logical_stride_val) || (expected == 0) ||
+                      (dim_shape == 1);
       BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_,
                       is_null);
     } else {
