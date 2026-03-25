@@ -58,13 +58,15 @@ using VarBindingMap =
     std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
 
 struct LocalAccessSummary {
-  BufferSet read_buffers;
-  BufferSet write_buffers;
+  BufferSet all_read_buffers;
+  BufferSet all_write_buffers;
+  BufferSet branch_private_read_buffers;
+  BufferSet branch_private_write_buffers;
   VarSet read_vars;
   VarSet def_vars;
 
   bool HasTrackedDefs() const {
-    return !write_buffers.empty() || !def_vars.empty();
+    return !branch_private_write_buffers.empty() || !def_vars.empty();
   }
 };
 
@@ -73,7 +75,7 @@ struct LocalLiveSet {
   VarSet vars;
 
   bool NeedsAnyDef(const LocalAccessSummary &summary) const {
-    for (const auto &buf : summary.write_buffers) {
+    for (const auto &buf : summary.branch_private_write_buffers) {
       if (buffers.count(buf)) {
         return true;
       }
@@ -87,7 +89,7 @@ struct LocalLiveSet {
   }
 
   void KillDefs(const LocalAccessSummary &summary) {
-    for (const auto &buf : summary.write_buffers) {
+    for (const auto &buf : summary.branch_private_write_buffers) {
       buffers.erase(buf);
     }
     for (const auto &var : summary.def_vars) {
@@ -96,7 +98,8 @@ struct LocalLiveSet {
   }
 
   void AddUses(const LocalAccessSummary &summary) {
-    buffers.insert(summary.read_buffers.begin(), summary.read_buffers.end());
+    buffers.insert(summary.branch_private_read_buffers.begin(),
+                   summary.branch_private_read_buffers.end());
     vars.insert(summary.read_vars.begin(), summary.read_vars.end());
   }
 };
@@ -217,6 +220,13 @@ public:
   }
 
 private:
+  void VisitStmt_(const DeclBufferNode *op) final {
+    if (op->buffer.defined()) {
+      result_.emplace(op->buffer->data, op->buffer);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   void VisitStmt_(const BlockRealizeNode *op) final {
     CollectBuffers(op->block);
     StmtExprVisitor::VisitStmt_(op);
@@ -253,6 +263,41 @@ public:
   }
 
 private:
+  static bool IsTrackedBranchPrivateBuffer(const Buffer &buffer) {
+    return IsLocalBuffer(buffer, /*allow_var=*/true) ||
+           IsFragmentBuffer(buffer);
+  }
+
+  void MarkBufferAccess(const Buffer &buffer, int rw_mask) {
+    if (!buffer.defined()) {
+      return;
+    }
+    if (rw_mask & 1) {
+      summary_.all_read_buffers.insert(buffer);
+      if (IsTrackedBranchPrivateBuffer(buffer)) {
+        summary_.branch_private_read_buffers.insert(buffer);
+      }
+    }
+    if (rw_mask & 2) {
+      summary_.all_write_buffers.insert(buffer);
+      if (IsTrackedBranchPrivateBuffer(buffer)) {
+        summary_.branch_private_write_buffers.insert(buffer);
+      }
+    }
+  }
+
+  void MarkRawBufferVarArg(const PrimExpr &expr, int rw_mask) {
+    const auto *var = expr.as<VarNode>();
+    if (!var) {
+      return;
+    }
+    auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+    if (it == buffer_data_to_buffer_.end()) {
+      return;
+    }
+    MarkBufferAccess(it->second, rw_mask);
+  }
+
   explicit LocalAccessCollector(const BufferDataToBufferMap &buffer_map)
       : buffer_data_to_buffer_(buffer_map) {}
 
@@ -273,16 +318,12 @@ private:
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsLocalBuffer(op->buffer, true)) {
-      summary_.read_buffers.insert(op->buffer);
-    }
+    MarkBufferAccess(op->buffer, /*rw_mask=*/1);
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsLocalBuffer(op->buffer, true)) {
-      summary_.write_buffers.insert(op->buffer);
-    }
+    MarkBufferAccess(op->buffer, /*rw_mask=*/2);
     StmtExprVisitor::VisitStmt_(op);
   }
 
@@ -299,15 +340,8 @@ private:
       ICHECK_EQ(op->args.size(), 3);
       const auto *base_load = op->args[0].as<BufferLoadNode>();
       ICHECK(base_load);
-      if (IsLocalBuffer(base_load->buffer, true)) {
-        int rw_mask = GetConstAccessMask(op->args[2]);
-        if (rw_mask & 1) {
-          summary_.read_buffers.insert(base_load->buffer);
-        }
-        if (rw_mask & 2) {
-          summary_.write_buffers.insert(base_load->buffer);
-        }
-      }
+      int rw_mask = GetConstAccessMask(op->args[2]);
+      MarkBufferAccess(base_load->buffer, rw_mask);
       for (const auto &index : base_load->indices) {
         VisitExpr(index);
       }
@@ -320,19 +354,26 @@ private:
       const auto *var = op->args[1].as<VarNode>();
       ICHECK(var);
       auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
-      if (it != buffer_data_to_buffer_.end() &&
-          IsLocalBuffer(it->second, true)) {
+      if (it != buffer_data_to_buffer_.end()) {
         int rw_mask = GetConstAccessMask(op->args[4]);
-        if (rw_mask & 1) {
-          summary_.read_buffers.insert(it->second);
-        }
-        if (rw_mask & 2) {
-          summary_.write_buffers.insert(it->second);
-        }
+        MarkBufferAccess(it->second, rw_mask);
       }
       VisitExpr(op->args[2]);
       VisitExpr(op->args[3]);
       return;
+    }
+
+    if (op->op.same_as(tl::warpgroup_fence_operand())) {
+      ICHECK_EQ(op->args.size(), 4);
+      MarkRawBufferVarArg(op->args[1], /*rw_mask=*/1);
+    } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
+      ICHECK_EQ(op->args.size(), 15);
+      // WGMMA accumulates into C registers in place.
+      MarkRawBufferVarArg(op->args[10], /*rw_mask=*/3);
+    } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
+      ICHECK_EQ(op->args.size(), 14);
+      MarkRawBufferVarArg(op->args[5], /*rw_mask=*/1);
+      MarkRawBufferVarArg(op->args[9], /*rw_mask=*/3);
     }
 
     StmtExprVisitor::VisitExpr_(op);
@@ -1230,6 +1271,16 @@ private:
         extractor.blocks.size());
     std::vector<bool> moved_compute_stmts(extractor.compute_stmts.size(),
                                           false);
+    std::vector<LocalAccessSummary> compute_stmt_summaries;
+    compute_stmt_summaries.reserve(extractor.compute_stmts.size());
+    for (const auto &stmt : extractor.compute_stmts) {
+      compute_stmt_summaries.push_back(
+          LocalAccessCollector::Collect(stmt, buffer_data_to_buffer));
+    }
+
+    std::vector<int> prefix_begin(extractor.blocks.size(), -1);
+    std::vector<int> prefix_end(extractor.blocks.size(), -1);
+    std::vector<int> first_group_indices;
     int compute_cursor = 0;
     for (size_t ti = 0; ti < extractor.blocks.size(); ++ti) {
       bool is_first_in_group =
@@ -1238,24 +1289,52 @@ private:
         continue;
       }
       int wait_pos = wait_insert_pos[ti];
-      if (wait_pos <= compute_cursor) {
-        compute_cursor = std::max(compute_cursor, wait_pos);
+      prefix_begin[ti] = compute_cursor;
+      prefix_end[ti] = wait_pos;
+      first_group_indices.push_back(static_cast<int>(ti));
+      compute_cursor = std::max(compute_cursor, wait_pos);
+    }
+
+    // Move only the longest leading prefix that is producer-safe.  We walk
+    // groups backwards so later slices can first mark which compute stmts stay
+    // in the consumer branch; the current slice may only hoist definitions
+    // that do not escape into that future consumer live set.
+    for (auto it = first_group_indices.rbegin();
+         it != first_group_indices.rend(); ++it) {
+      int ti = *it;
+      int begin = prefix_begin[ti];
+      int end = prefix_end[ti];
+      if (begin < 0 || end <= begin) {
         continue;
       }
-      bool all_movable = true;
-      for (int ci = compute_cursor; ci < wait_pos; ++ci) {
-        if (!IsProducerMovableLoopPrefixStmt(extractor.compute_stmts[ci])) {
-          all_movable = false;
+
+      LocalLiveSet future_consumer_live;
+      for (int ci = end; ci < static_cast<int>(extractor.compute_stmts.size());
+           ++ci) {
+        if (!moved_compute_stmts[ci]) {
+          future_consumer_live.AddUses(compute_stmt_summaries[ci]);
+        }
+      }
+
+      BufferSet prefix_defined_buffers;
+      int movable_end = begin;
+      for (int ci = begin; ci < end; ++ci) {
+        if (!IsProducerMovableLoopPrefixStmt(
+                extractor.compute_stmts[ci], compute_stmt_summaries[ci],
+                future_consumer_live, prefix_defined_buffers)) {
           break;
         }
-      }
-      if (all_movable) {
-        for (int ci = compute_cursor; ci < wait_pos; ++ci) {
-          producer_loop_prefix_stmts[ti].push_back(extractor.compute_stmts[ci]);
-          moved_compute_stmts[ci] = true;
+        for (const auto &buf :
+             compute_stmt_summaries[ci].branch_private_write_buffers) {
+          prefix_defined_buffers.insert(buf);
         }
+        movable_end = ci + 1;
       }
-      compute_cursor = wait_pos;
+
+      for (int ci = begin; ci < movable_end; ++ci) {
+        producer_loop_prefix_stmts[ti].push_back(extractor.compute_stmts[ci]);
+        moved_compute_stmts[ci] = true;
+      }
     }
 
     auto stmt_has_lowered_simt_copy = [&](const Stmt &stmt) {
@@ -2057,8 +2136,15 @@ private:
     return !has_disallowed;
   }
 
-  bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt) {
-    bool has_allowed_work = false;
+  bool
+  IsProducerMovableLoopPrefixStmt(const Stmt &stmt,
+                                  const LocalAccessSummary &summary,
+                                  const LocalLiveSet &future_consumer_live,
+                                  const BufferSet &prefix_defined_buffers) {
+    auto is_branch_private_buffer = [](const Buffer &buffer) {
+      return IsLocalBuffer(buffer, /*allow_var=*/true) ||
+             IsFragmentBuffer(buffer);
+    };
     bool has_disallowed = false;
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (has_disallowed) {
@@ -2067,37 +2153,48 @@ private:
       if (const auto *call = node.as<CallNode>()) {
         if (call->op.same_as(builtin::tvm_storage_sync())) {
           const auto *scope = call->args[0].as<StringImmNode>();
-          if (!scope ||
-              (scope->value != "shared" && scope->value != "shared.dyn")) {
-            has_disallowed = true;
+          if (scope &&
+              (scope->value == "shared" || scope->value == "shared.dyn")) {
             return;
           }
-          has_allowed_work = true;
-          return;
         }
         if (IsBarrierOrTmaControlCall(call)) {
           has_disallowed = true;
-          return;
         }
-      }
-      if (const auto *ld = node.as<BufferLoadNode>()) {
-        if (IsSharedBuffer(ld->buffer) || IsLocalBuffer(ld->buffer, true)) {
-          has_disallowed = true;
-          return;
-        }
-        if (IsGlobalBuffer(ld->buffer)) {
-          has_allowed_work = true;
-        }
-      }
-      if (const auto *st = node.as<BufferStoreNode>()) {
-        if (IsSharedBuffer(st->buffer)) {
-          has_allowed_work = true;
-          return;
-        }
-        has_disallowed = true;
       }
     });
-    return has_allowed_work && !has_disallowed;
+    if (has_disallowed) {
+      return false;
+    }
+
+    for (const auto &buf : summary.all_read_buffers) {
+      if (IsGlobalBuffer(buf)) {
+        continue;
+      }
+      if (is_branch_private_buffer(buf) && prefix_defined_buffers.count(buf)) {
+        continue;
+      }
+      return false;
+    }
+
+    for (const auto &buf : summary.all_write_buffers) {
+      if (IsSharedBuffer(buf)) {
+        continue;
+      }
+      if (is_branch_private_buffer(buf) &&
+          !future_consumer_live.buffers.count(buf)) {
+        continue;
+      }
+      return false;
+    }
+
+    for (const auto &var : summary.def_vars) {
+      if (future_consumer_live.vars.count(var)) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   Optional<Stmt> TryPrependToConsumerBranch(const Stmt &stmt,
