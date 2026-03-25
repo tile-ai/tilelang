@@ -1515,6 +1515,16 @@ public:
     // vectorized pointer types (e.g. float16x4*).  Once they do, this if
     // statement should instead be replaced by the below ICHECK_EQ.
     if (index_lanes * var_info.element_dtype.lanes() != value_dtype.lanes()) {
+      // If the total element sizes differ (e.g. a bfloat16 view of a
+      // bfloat16x2 buffer where each bfloat16x2 = 4 bytes but bfloat16 = 2
+      // bytes), this is a reinterpret-cast view access with a finer-grained
+      // element type.  The buffer's declared element dtype must not be
+      // downgraded in this case; just skip lane tracking for this access.
+      int declared_bytes = var_info.element_dtype.bits() * var_info.element_dtype.lanes() / 8;
+      int access_bytes = value_dtype.bits() * value_dtype.lanes() / 8;
+      if (access_bytes != declared_bytes) {
+        return;
+      }
       ICHECK_EQ(index_lanes, value_dtype.lanes());
       lanes_used = 1;
       var_info.element_dtype = var_info.element_dtype.with_lanes(1);
