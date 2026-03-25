@@ -797,12 +797,8 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
   if (ctrl->child->IsSequence()) {
     auto seq = static_cast<SequenceNode *>(ctrl->child.get());
 
-    // Separate promoted and non-promoted tasks
-    std::vector<ScheduleUnit *> promoted_tasks;
-    std::vector<ScheduleUnit *> non_promoted_tasks;
-
     // Collect all tasks from the sequence
-    std::vector<ScheduleUnit *> all_tasks;
+    std::vector<ScheduleUnit *> ordered_tasks;
     for (auto &child : seq->children) {
       auto task = static_cast<ScheduleUnit *>(child.get());
       if (task->child->IsSequence() || task->child->IsControl()) {
@@ -811,25 +807,14 @@ AnalyzeControlNodeBarriers(ControlNode *ctrl, int &next_barrier_id,
             task->child.get(), next_barrier_id, barrier_buffers, barrier_map,
             thread_count, loop_info, buffer_infos, neutral_sync_shared_barrier);
       }
-      all_tasks.push_back(task);
+      ordered_tasks.push_back(task);
     }
 
-    // Separate by promote flag
-    for (ScheduleUnit *task : all_tasks) {
-      if (task->GetPromote()) {
-        promoted_tasks.push_back(task);
-      } else {
-        non_promoted_tasks.push_back(task);
-      }
-    }
-
-    // Process in order: promoted tasks first, then non-promoted tasks
+    // Process in order: sort by stage
     // This matches the software pipelining order
-    std::vector<ScheduleUnit *> ordered_tasks;
-    ordered_tasks.insert(ordered_tasks.end(), promoted_tasks.begin(),
-                         promoted_tasks.end());
-    ordered_tasks.insert(ordered_tasks.end(), non_promoted_tasks.begin(),
-                         non_promoted_tasks.end());
+    std::stable_sort(
+        ordered_tasks.begin(), ordered_tasks.end(),
+        [](ScheduleUnit *a, ScheduleUnit *b) { return a->stage > b->stage; });
 
     // Map from (buffer, warpgroup_id) to task
     std::unordered_map<Buffer, std::pair<ScheduleUnit *, int>, ObjectPtrHash,
