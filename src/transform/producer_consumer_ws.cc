@@ -1207,12 +1207,13 @@ private:
             wait_insert_pos[i] == wait_insert_pos[i - 1] &&
             arrive_insert_pos[i] == arrive_insert_pos[i - 1] &&
             same_guard(i - 1, i);
-        if (merge_with_prev && !remap_pure_tma_barriers_ &&
-            current_group_has_tma &&
+        if (merge_with_prev && current_group_has_tma &&
             extractor.blocks[i].kind == AsyncProducerKind::kTma) {
-          // Mixed groups can safely share one TMA barrier with cp.async
-          // arrive-on notifications, but keeping multiple TMA producers on the
-          // same preserved protocol would over-arrive the barrier.
+          // The current WS rewrite only supports one TMA producer per merged
+          // group. Reusing a forward barrier for multiple TMA producers would
+          // require group-level handling of:
+          // - mixed TMA/cp.async preserved-protocol arrive semantics; and
+          // - pure-TMA rewrite of multiple expect/load pairs onto one release.
           merge_with_prev = false;
         }
         block_group[i] = merge_with_prev ? block_group[i - 1] : next_group++;
@@ -1900,6 +1901,15 @@ private:
       }
       return nullptr;
     }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (auto *result = FindAnnotatedPipelineLoop(if_stmt->then_case)) {
+        return result;
+      }
+      if (if_stmt->else_case.defined()) {
+        return FindAnnotatedPipelineLoop(if_stmt->else_case.value());
+      }
+      return nullptr;
+    }
     if (auto *realize = stmt.as<BlockRealizeNode>()) {
       return FindAnnotatedPipelineLoop(realize->block->body);
     }
@@ -1984,13 +1994,35 @@ private:
       }
 
       int local_count = 0;
-      for (size_t i = 0; i + 1 < movable_begin; ++i) {
-        if (ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
+      for (size_t i = 0; i < movable_begin; ++i) {
+        if (ExtractTmaProducerWaitPair(pre_loop_stmts[i]).has_value()) {
+          ++local_count;
+          continue;
+        }
+        if (ExtractFlatTmaProducerClusterBeforeWait(pre_loop_stmts,
+                                                    static_cast<int>(i))
+                .has_value()) {
+          ++local_count;
+          continue;
+        }
+        if (i + 1 < movable_begin && ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
             IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1])) {
           ++local_count;
+          ++i;
         }
       }
       return nested_count + local_count;
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      int then_count =
+          CountRewrittenPureTmaPreloopForwardPairs(if_stmt->then_case,
+                                                   target_loop);
+      if (if_stmt->else_case.defined()) {
+        return then_count +
+               CountRewrittenPureTmaPreloopForwardPairs(
+                   if_stmt->else_case.value(), target_loop);
+      }
+      return then_count;
     }
     if (auto *attr = stmt.as<AttrStmtNode>()) {
       return CountRewrittenPureTmaPreloopForwardPairs(attr->body, target_loop);
@@ -2154,11 +2186,27 @@ private:
       return std::nullopt;
     }
     if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
-      if (!if_stmt->else_case.defined()) {
+      if (!if_stmt->else_case.defined() ||
+          !IsThreadOnlyPredicate(if_stmt->condition)) {
+        auto nested_then =
+            TryPrependToConsumerBranch(if_stmt->then_case, prepend_stmt);
+        if (nested_then.defined()) {
+          return IfThenElse(if_stmt->condition, nested_then.value(),
+                            if_stmt->else_case, if_stmt->span);
+        }
+        if (if_stmt->else_case.defined()) {
+          auto nested_else = TryPrependToConsumerBranch(if_stmt->else_case.value(),
+                                                        prepend_stmt);
+          if (nested_else.defined()) {
+            return IfThenElse(if_stmt->condition, if_stmt->then_case,
+                              nested_else.value(), if_stmt->span);
+          }
+        }
         return std::nullopt;
       }
       Stmt new_else = SeqStmt({prepend_stmt, if_stmt->else_case.value()});
-      return IfThenElse(if_stmt->condition, if_stmt->then_case, new_else);
+      return IfThenElse(if_stmt->condition, if_stmt->then_case, new_else,
+                        if_stmt->span);
     }
     return std::nullopt;
   }
@@ -2217,8 +2265,27 @@ private:
       return std::nullopt;
     }
     if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined() ||
+          !IsThreadOnlyPredicate(if_stmt->condition)) {
+        auto nested_then =
+            TryPrependToProducerBranch(if_stmt->then_case, prepend_stmt);
+        if (nested_then.defined()) {
+          return IfThenElse(if_stmt->condition, nested_then.value(),
+                            if_stmt->else_case, if_stmt->span);
+        }
+        if (if_stmt->else_case.defined()) {
+          auto nested_else = TryPrependToProducerBranch(if_stmt->else_case.value(),
+                                                        prepend_stmt);
+          if (nested_else.defined()) {
+            return IfThenElse(if_stmt->condition, if_stmt->then_case,
+                              nested_else.value(), if_stmt->span);
+          }
+        }
+        return std::nullopt;
+      }
       Stmt new_then = SeqStmt({prepend_stmt, if_stmt->then_case});
-      return IfThenElse(if_stmt->condition, new_then, if_stmt->else_case);
+      return IfThenElse(if_stmt->condition, new_then, if_stmt->else_case,
+                        if_stmt->span);
     }
     return std::nullopt;
   }
@@ -2277,13 +2344,28 @@ private:
       return std::nullopt;
     }
     if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
-      auto nested = TryAppendToProducerBranch(if_stmt->then_case, append_stmt);
-      if (nested.defined()) {
-        return IfThenElse(if_stmt->condition, nested.value(),
-                          if_stmt->else_case);
+      if (!if_stmt->else_case.defined() ||
+          !IsThreadOnlyPredicate(if_stmt->condition)) {
+        auto nested_then =
+            TryAppendToProducerBranch(if_stmt->then_case, append_stmt);
+        if (nested_then.defined()) {
+          return IfThenElse(if_stmt->condition, nested_then.value(),
+                            if_stmt->else_case, if_stmt->span);
+        }
+        if (if_stmt->else_case.defined()) {
+          auto nested_else =
+              TryAppendToProducerBranch(if_stmt->else_case.value(),
+                                        append_stmt);
+          if (nested_else.defined()) {
+            return IfThenElse(if_stmt->condition, if_stmt->then_case,
+                              nested_else.value(), if_stmt->span);
+          }
+        }
+        return std::nullopt;
       }
       Stmt new_then = SeqStmt({if_stmt->then_case, append_stmt});
-      return IfThenElse(if_stmt->condition, new_then, if_stmt->else_case);
+      return IfThenElse(if_stmt->condition, new_then, if_stmt->else_case,
+                        if_stmt->span);
     }
     return std::nullopt;
   }
@@ -2342,11 +2424,28 @@ private:
       return std::nullopt;
     }
     if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
-      if (!if_stmt->else_case.defined()) {
+      if (!if_stmt->else_case.defined() ||
+          !IsThreadOnlyPredicate(if_stmt->condition)) {
+        auto nested_then =
+            TryAppendToConsumerBranch(if_stmt->then_case, append_stmt);
+        if (nested_then.defined()) {
+          return IfThenElse(if_stmt->condition, nested_then.value(),
+                            if_stmt->else_case, if_stmt->span);
+        }
+        if (if_stmt->else_case.defined()) {
+          auto nested_else =
+              TryAppendToConsumerBranch(if_stmt->else_case.value(),
+                                        append_stmt);
+          if (nested_else.defined()) {
+            return IfThenElse(if_stmt->condition, if_stmt->then_case,
+                              nested_else.value(), if_stmt->span);
+          }
+        }
         return std::nullopt;
       }
       Stmt new_else = SeqStmt({if_stmt->else_case.value(), append_stmt});
-      return IfThenElse(if_stmt->condition, if_stmt->then_case, new_else);
+      return IfThenElse(if_stmt->condition, if_stmt->then_case, new_else,
+                        if_stmt->span);
     }
     return std::nullopt;
   }
@@ -2401,6 +2500,161 @@ private:
       }
     }
     return std::nullopt;
+  }
+
+  struct TmaProducerWaitPair {
+    Stmt producer_stmt;
+    Stmt wait_stmt;
+  };
+
+  std::optional<TmaProducerWaitPair> ExtractTmaProducerWaitPair(
+      const Stmt &stmt) {
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return ExtractTmaProducerWaitPair(seq->seq[0]);
+      }
+      if (seq->seq.size() == 2 && ContainsTmaLoadStmt(seq->seq[0]) &&
+          IsMbarrierWaitParityStmt(seq->seq[1])) {
+        return TmaProducerWaitPair{seq->seq[0], seq->seq[1]};
+      }
+      return std::nullopt;
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined() ||
+          IsTrivialNoOpStmt(if_stmt->else_case.value())) {
+        auto inner = ExtractTmaProducerWaitPair(if_stmt->then_case);
+        if (!inner.has_value()) {
+          return std::nullopt;
+        }
+        return TmaProducerWaitPair{
+            IfThenElse(if_stmt->condition, inner->producer_stmt, std::nullopt,
+                       if_stmt->span),
+            IfThenElse(if_stmt->condition, inner->wait_stmt, std::nullopt,
+                       if_stmt->span)};
+      }
+      return std::nullopt;
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      auto inner = ExtractTmaProducerWaitPair(attr->body);
+      if (!inner.has_value()) {
+        return std::nullopt;
+      }
+      if (attr->attr_key == "tl.tma_copy_write_buffer") {
+        return TmaProducerWaitPair{
+            AttrStmt(attr->node, attr->attr_key, attr->value,
+                     inner->producer_stmt, attr->span),
+            inner->wait_stmt};
+      }
+      return TmaProducerWaitPair{
+          AttrStmt(attr->node, attr->attr_key, attr->value,
+                   inner->producer_stmt, attr->span),
+          AttrStmt(attr->node, attr->attr_key, attr->value, inner->wait_stmt,
+                   attr->span)};
+    }
+    if (auto *let_stmt = stmt.as<LetStmtNode>()) {
+      auto inner = ExtractTmaProducerWaitPair(let_stmt->body);
+      if (!inner.has_value()) {
+        return std::nullopt;
+      }
+      return TmaProducerWaitPair{
+          LetStmt(let_stmt->var, let_stmt->value, inner->producer_stmt),
+          LetStmt(let_stmt->var, let_stmt->value, inner->wait_stmt)};
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      auto inner = ExtractTmaProducerWaitPair(block->body);
+      if (!inner.has_value()) {
+        return std::nullopt;
+      }
+      return TmaProducerWaitPair{
+          Block(block->iter_vars, block->reads, block->writes,
+                block->name_hint, inner->producer_stmt, block->init,
+                block->alloc_buffers, block->match_buffers,
+                block->annotations),
+          Block(block->iter_vars, block->reads, block->writes,
+                block->name_hint, inner->wait_stmt, block->init,
+                block->alloc_buffers, block->match_buffers,
+                block->annotations)};
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (!is_one(realize->predicate)) {
+        return std::nullopt;
+      }
+      auto inner = ExtractTmaProducerWaitPair(realize->block->body);
+      if (!inner.has_value()) {
+        return std::nullopt;
+      }
+      const Block &orig = realize->block;
+      Block producer_block(orig->iter_vars, orig->reads, orig->writes,
+                           orig->name_hint, inner->producer_stmt, orig->init,
+                           orig->alloc_buffers, orig->match_buffers,
+                           orig->annotations);
+      Block wait_block(orig->iter_vars, orig->reads, orig->writes,
+                       orig->name_hint, inner->wait_stmt, orig->init,
+                       orig->alloc_buffers, orig->match_buffers,
+                       orig->annotations);
+      return TmaProducerWaitPair{
+          BlockRealize(realize->iter_values, realize->predicate, producer_block),
+          BlockRealize(realize->iter_values, realize->predicate, wait_block)};
+    }
+    return std::nullopt;
+  }
+
+  bool IsTmaProducerPrefixStmt(const Stmt &stmt) {
+    bool has_prefix_ops = false;
+    bool has_wait = false;
+    bool has_disallowed = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (const auto *attr = node.as<AttrStmtNode>()) {
+        if (attr->attr_key == "tl.tma_copy_write_buffer") {
+          has_prefix_ops = true;
+        }
+        return;
+      }
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      if (call->op.same_as(mbarrier_wait_parity())) {
+        has_wait = true;
+        return;
+      }
+      if (call->op.same_as(mbarrier_expect_tx()) ||
+          call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+          call->op.same_as(builtin::ptx_arrive_barrier()) ||
+          call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
+          call->op.same_as(tma_load()) ||
+          call->op.same_as(tma_load_im2col())) {
+        has_prefix_ops = true;
+        return;
+      }
+      if (IsBarrierOrTmaControlCall(call)) {
+        has_disallowed = true;
+      }
+    });
+    return has_prefix_ops && !has_wait && !has_disallowed;
+  }
+
+  std::optional<std::pair<int, Stmt>> ExtractFlatTmaProducerClusterBeforeWait(
+      const Array<Stmt> &stmts, int wait_idx) {
+    if (wait_idx < 0 || wait_idx >= static_cast<int>(stmts.size()) ||
+        !IsMbarrierWaitParityStmt(stmts[wait_idx])) {
+      return std::nullopt;
+    }
+    int start = wait_idx;
+    while (start > 0 && IsTmaProducerPrefixStmt(stmts[start - 1])) {
+      --start;
+    }
+    if (start == wait_idx) {
+      return std::nullopt;
+    }
+    Array<Stmt> producer_parts;
+    producer_parts.reserve(wait_idx - start);
+    for (int i = start; i < wait_idx; ++i) {
+      producer_parts.push_back(stmts[i]);
+    }
+    Stmt producer_stmt =
+        producer_parts.size() == 1 ? producer_parts[0] : SeqStmt(producer_parts);
+    return std::make_pair(start, producer_stmt);
   }
 
   Stmt NormalizeForwardWaitParity(const Stmt &wait_stmt,
@@ -3018,6 +3272,25 @@ private:
         Array<Stmt> new_seq;
         bool changed = false;
         for (size_t i = 0; i < op->seq.size(); ++i) {
+          if (auto pair = parent_->ExtractTmaProducerWaitPair(op->seq[i]);
+              pair.has_value()) {
+            ICHECK_GE(parent_->pure_tma_preloop_fwd_base_, 0);
+            ICHECK_LT(parent_->pure_tma_preloop_fwd_cursor_,
+                      parent_->pure_tma_preloop_fwd_count_);
+            PrimExpr barrier_id = IntImm(
+                DataType::Int(32), parent_->pure_tma_preloop_fwd_base_ +
+                                       parent_->pure_tma_preloop_fwd_cursor_++);
+            Stmt producer_stmt = parent_->MergeAdjacentEquivalentIfs(
+                parent_->RewriteTmaStmtBarrierIdPreserveProtocol(
+                    StripTmaCopyWriteBufferAttr(pair->producer_stmt),
+                    barrier_id));
+            Stmt wait_stmt =
+                parent_->RewriteWaitBarrier(pair->wait_stmt, barrier_id);
+            new_seq.push_back(producer_stmt);
+            new_seq.push_back(wait_stmt);
+            changed = true;
+            continue;
+          }
           if (i + 1 < op->seq.size() &&
               parent_->ContainsTmaLoadStmt(op->seq[i]) &&
               parent_->IsMbarrierWaitParityStmt(op->seq[i + 1])) {
@@ -3204,6 +3477,26 @@ private:
                                                             std::nullopt);
       std::vector<Optional<Stmt>> rewritten_consumer_wait(movable_begin,
                                                           std::nullopt);
+      std::vector<int> flat_tma_wait_for_start(movable_begin, -1);
+      std::vector<bool> flat_tma_cluster_member(movable_begin, false);
+
+      for (size_t wait_idx = 0; wait_idx < movable_begin; ++wait_idx) {
+        if (ExtractTmaProducerWaitPair(pre_loop_stmts[wait_idx]).has_value()) {
+          continue;
+        }
+        auto cluster = ExtractFlatTmaProducerClusterBeforeWait(
+            pre_loop_stmts, static_cast<int>(wait_idx));
+        if (!cluster.has_value()) {
+          continue;
+        }
+        int start = cluster->first;
+        flat_tma_wait_for_start[start] = static_cast<int>(wait_idx);
+        rewritten_producer_prefix[start] = cluster->second;
+        rewritten_consumer_wait[start] = pre_loop_stmts[wait_idx];
+        for (int j = start + 1; j <= static_cast<int>(wait_idx); ++j) {
+          flat_tma_cluster_member[j] = true;
+        }
+      }
 
       auto apply_to_live = [](LocalLiveSet *live,
                               const LocalAccessSummary &summary) {
@@ -3223,18 +3516,67 @@ private:
       }
 
       for (int i = static_cast<int>(movable_begin) - 1; i >= 0; --i) {
+        if (flat_tma_cluster_member[i]) {
+          prefix_roles[i] = PrefixRole::kSkip;
+          continue;
+        }
+
+        if (flat_tma_wait_for_start[i] >= 0) {
+          Stmt producer_prefix_stmt =
+              StripTmaCopyWriteBufferAttr(rewritten_producer_prefix[i].value());
+          Stmt consumer_wait_stmt = rewritten_consumer_wait[i].value();
+          if (remap_pure_tma_barriers_) {
+            ICHECK_GE(pure_tma_preloop_fwd_base_, 0);
+            ICHECK_LT(pure_tma_preloop_fwd_cursor_,
+                      pure_tma_preloop_fwd_count_);
+            PrimExpr barrier_id =
+                IntImm(DataType::Int(32), pure_tma_preloop_fwd_base_ +
+                                              pure_tma_preloop_fwd_cursor_++);
+            producer_prefix_stmt =
+                RewriteTmaForwardProducerStmt(producer_prefix_stmt, barrier_id,
+                                              /*append_arrive=*/true);
+            consumer_wait_stmt =
+                RewriteWaitBarrier(consumer_wait_stmt, barrier_id);
+          } else if (use_full_tma_forward_barrier_protocol_) {
+            auto barrier_id = ExtractWaitBarrierId(consumer_wait_stmt);
+            ICHECK(barrier_id.defined())
+                << "ProducerConsumerWS: failed to extract pre-loop TMA "
+                   "forward barrier id";
+            producer_prefix_stmt = RewriteTmaForwardProducerStmt(
+                producer_prefix_stmt, barrier_id.value(),
+                /*append_arrive=*/true);
+          }
+          producer_prefix_stmt =
+              MergeAdjacentEquivalentIfs(producer_prefix_stmt);
+          rewritten_producer_prefix[i] = producer_prefix_stmt;
+          rewritten_consumer_wait[i] = consumer_wait_stmt;
+          prefix_roles[i] = PrefixRole::kSpecialTmaStart;
+          apply_to_live(&producer_live,
+                        LocalAccessCollector::Collect(producer_prefix_stmt,
+                                                      buffer_data_to_buffer));
+          apply_to_live(&consumer_live,
+                        LocalAccessCollector::Collect(consumer_wait_stmt,
+                                                      buffer_data_to_buffer));
+          continue;
+        }
+
         if (i > 0 && ContainsTmaLoadStmt(pre_loop_stmts[i - 1]) &&
             IsMbarrierWaitParityStmt(pre_loop_stmts[i])) {
           prefix_roles[i] = PrefixRole::kSkip;
           continue;
         }
 
-        if (static_cast<size_t>(i + 1) < movable_begin &&
-            ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
-            IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1])) {
-          Stmt producer_prefix_stmt =
-              StripTmaCopyWriteBufferAttr(pre_loop_stmts[i]);
-          Stmt consumer_wait_stmt = pre_loop_stmts[i + 1];
+        auto standalone_pair = ExtractTmaProducerWaitPair(pre_loop_stmts[i]);
+        if (standalone_pair.has_value() ||
+            (static_cast<size_t>(i + 1) < movable_begin &&
+             ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
+             IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1]))) {
+          Stmt producer_prefix_stmt = StripTmaCopyWriteBufferAttr(
+              standalone_pair.has_value() ? standalone_pair->producer_stmt
+                                          : pre_loop_stmts[i]);
+          Stmt consumer_wait_stmt = standalone_pair.has_value()
+                                        ? standalone_pair->wait_stmt
+                                        : pre_loop_stmts[i + 1];
           if (remap_pure_tma_barriers_) {
             ICHECK_GE(pure_tma_preloop_fwd_base_, 0);
             ICHECK_LT(pure_tma_preloop_fwd_cursor_,
@@ -3261,7 +3603,9 @@ private:
           rewritten_producer_prefix[i] = producer_prefix_stmt;
           rewritten_consumer_wait[i] = consumer_wait_stmt;
           prefix_roles[i] = PrefixRole::kSpecialTmaStart;
-          prefix_roles[i + 1] = PrefixRole::kSkip;
+          if (!standalone_pair.has_value()) {
+            prefix_roles[i + 1] = PrefixRole::kSkip;
+          }
           apply_to_live(&producer_live,
                         LocalAccessCollector::Collect(producer_prefix_stmt,
                                                       buffer_data_to_buffer));
@@ -3461,6 +3805,28 @@ private:
     }
 
     // Walk through wrapper nodes
+    if (auto *if_stmt = body.as<IfThenElseNode>()) {
+      bool then_has_loop = ContainsLoop(if_stmt->then_case, target_loop);
+      bool else_has_loop =
+          if_stmt->else_case.defined() &&
+          ContainsLoop(if_stmt->else_case.value(), target_loop);
+      if (then_has_loop || else_has_loop) {
+        Stmt new_then = if_stmt->then_case;
+        Optional<Stmt> new_else = if_stmt->else_case;
+        if (then_has_loop) {
+          new_then = RebuildBlockBody(if_stmt->then_case, target_loop, ws_body,
+                                      buffer_data_to_buffer,
+                                      producer_live_seed, consumer_live_seed);
+        }
+        if (else_has_loop) {
+          new_else = RebuildBlockBody(if_stmt->else_case.value(), target_loop,
+                                      ws_body, buffer_data_to_buffer,
+                                      producer_live_seed, consumer_live_seed);
+        }
+        return IfThenElse(if_stmt->condition, new_then, new_else,
+                          if_stmt->span);
+      }
+    }
     if (auto *attr = body.as<AttrStmtNode>()) {
       if (ContainsLoop(attr->body, target_loop)) {
         Stmt new_body = RebuildBlockBody(
@@ -3490,6 +3856,15 @@ private:
         if (ContainsLoop(s, target))
           return true;
       }
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (ContainsLoop(if_stmt->then_case, target)) {
+        return true;
+      }
+      if (if_stmt->else_case.defined()) {
+        return ContainsLoop(if_stmt->else_case.value(), target);
+      }
+      return false;
     }
     if (auto *attr = stmt.as<AttrStmtNode>()) {
       return ContainsLoop(attr->body, target);
