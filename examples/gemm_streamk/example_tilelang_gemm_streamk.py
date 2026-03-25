@@ -54,7 +54,7 @@ print(f"{iters_per_tile=} ")
 sm_patition_factor = max(blocking_tiles // total_sm, 1)
 
 
-@tilelang.jit
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False})
 def tl_matmul_streamk(
     M,
     N,
@@ -158,7 +158,7 @@ def main():
         False,
         True,
         T.float16,
-        T.float16,
+        T.float32,  # fp32 for atom add
         T.float32,
         2,
         64,
@@ -166,9 +166,10 @@ def main():
 
     print(kernel.get_kernel_source())
 
-    b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)
+    b_c = torch.zeros((m, n), device="cuda", dtype=torch.float32)
 
     kernel(A, B, b_c)
+    b_c = b_c.to(torch.float16)
 
     C = torch.matmul(A, B.T)
 

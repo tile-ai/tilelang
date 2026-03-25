@@ -226,15 +226,21 @@ def LoopUnswitching():
     return _ffi_api.LoopUnswitching()  # type: ignore
 
 
-def MultiVersionBuffer():
-    """WarpSpecializedPipeline
+def MultiVersionBuffer(barrier_only: bool = False):
+    """MultiVersionBuffer
+
+    Parameters
+    ----------
+    barrier_only : bool
+        If True, only version barrier buffers (shared.barrier scope).
+        Data buffer versioning is left to InjectSoftwarePipeline.
 
     Returns
     -------
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MultiVersionBuffer()  # type: ignore
+    return _ffi_api.MultiVersionBuffer(barrier_only)  # type: ignore
 
 
 def ProducerConsumerWarpSpecialized():
@@ -497,6 +503,17 @@ def PlanAndUpdateBufferAllocationLocation():
     return _ffi_api.PlanAndUpdateBufferAllocationLocation()  # type: ignore
 
 
+def HoistGlobalBufferAllocations():
+    """Hoist global buffer allocations to the top of the block (host side).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.HoistGlobalBufferAllocations()  # type: ignore
+
+
 def HoistNonRestrictParams():
     return _ffi_api.HoistNonRestrictParams()  # type: ignore
 
@@ -600,3 +617,13 @@ def LowerLDGSTG():
         The result pass
     """
     return _ffi_api.LowerLDGSTG()  # type: ignore
+
+
+def LowerBlackwell2SM():
+    """Lower 2SM TCGEN5MMA and related on Blackwell target
+
+    Returns:
+        fpass : tvm.transform.Pass
+            The result pass
+    """
+    return _ffi_api.LowerBlackwell2SM()  # type: ignore

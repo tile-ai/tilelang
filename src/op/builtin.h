@@ -44,6 +44,9 @@ static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
     "tl.debug_merge_shared_memory_allocations";
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
+// PrimFunc attribute: set by LowerTileOp to indicate TMA operations were
+// actually generated.  Read by OptimizeForTarget to pick the right pipeline.
+static constexpr const char *kHasTMA = "tl.has_tma";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
 static constexpr const char *kDisableWarpSpecialized =
@@ -549,7 +552,7 @@ TVM_DLL const Op &cluster_sync();
 /*!
  * \brief Return the 1-D rank of the calling CTA within its cluster
  *
- * uint32_t block_rank_in_cluster()
+ * int block_rank_in_cluster()
  *
  */
 TVM_DLL const Op &block_rank_in_cluster();
