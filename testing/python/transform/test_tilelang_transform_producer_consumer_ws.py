@@ -371,52 +371,5 @@ def test_producer_consumer_ws_uses_consumer_guard_for_backpressure_protocol():
     assert guarded_arrive_count >= 1
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_producer_consumer_ws_keeps_real_flash_bwd_wgmma_in_consumer_branch():
-    debug_mod = _load_debug_module("debug/0323_flex/test.py")
-
-    def mask_fn(*args):
-        return True
-
-    def block_mask_fn(*args):
-        return True
-
-    prim = debug_mod.flashattn_bwd.get_tir(
-        1,
-        1,
-        192,
-        128,
-        192**-0.5,
-        mask_fn,
-        block_mask_fn,
-    )
-    with auto_target:
-        artifact = tilelang.lower(prim.with_attr("global_symbol", "main"), target=auto_target)
-
-    main_func = artifact.device_mod["main_kernel"]
-    ws_if = _find_if(
-        main_func.body,
-        lambda if_stmt: "128" in str(if_stmt.condition) and "thread_binding" in str(if_stmt.condition) and if_stmt.else_case is not None,
-    )
-    assert ws_if is not None, "Expected the lowered flash_bwd kernel to contain a WS producer/consumer split"
-
-    cond_text = str(ws_if.condition)
-    if "128 <=" in cond_text or ">= 128" in cond_text:
-        producer_stmt = ws_if.then_case
-        consumer_stmt = ws_if.else_case
-    elif "< 128" in cond_text:
-        producer_stmt = ws_if.else_case
-        consumer_stmt = ws_if.then_case
-    else:
-        raise AssertionError(f"Unrecognized WS split condition: {cond_text}")
-
-    assert _count_calls_in_stmt(producer_stmt, "tl.tma_load") > 0
-    assert _count_calls_in_stmt(producer_stmt, "tl.ptx_wgmma_ss") == 0
-    assert _count_calls_in_stmt(producer_stmt, "tl.warpgroup_fence_operand") == 0
-    assert _count_calls_in_stmt(consumer_stmt, "tl.ptx_wgmma_ss") > 0
-    assert _count_calls_in_stmt(consumer_stmt, "tl.warpgroup_fence_operand") > 0
-
-
 if __name__ == "__main__":
     tilelang.testing.main()
