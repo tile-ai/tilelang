@@ -432,6 +432,11 @@ class Builder(BaseBuilder):
         #   c = tl.alloc_var('float32')  # bind var `c`
         #   c = a                        # get and assign `c[0] = a_1[0]`
         #   ```
+        # Convert deferred comparison ops to PrimExpr so that Ref/alloc_var
+        # store paths below can recognise them as assignable values.
+        if isinstance(value, (EqualOp, NotEqualOp)):
+            value = value.asobject()
+
         if isinstance(orig_value, Ref) and isinstance(value, (int, float, PrimExpr)):
             orig_value.store(value)
             return orig_value
