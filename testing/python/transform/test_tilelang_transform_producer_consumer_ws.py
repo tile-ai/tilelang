@@ -1,9 +1,5 @@
 # ruff: noqa
-import importlib.util
-from pathlib import Path
-
 from tilelang import tvm as tvm
-import tilelang
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -34,13 +30,6 @@ def _collect_ifs(stmt):
 
     tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
     return ifs
-
-
-def _find_if(stmt, predicate):
-    for if_stmt in _collect_ifs(stmt):
-        if predicate(if_stmt):
-            return if_stmt
-    return None
 
 
 def _stmt_contains_call(stmt, op_name: str) -> bool:
@@ -77,16 +66,6 @@ def _collect_buffer_loads(stmt, scope: str):
 
     tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
     return loads
-
-
-def _load_debug_module(rel_path: str):
-    repo_root = Path(__file__).resolve().parents[3]
-    module_path = repo_root / rel_path
-    spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier():
