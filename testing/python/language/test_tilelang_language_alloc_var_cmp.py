@@ -8,14 +8,14 @@ import torch
 
 @tilelang.jit
 def kernel_alloc_var_eq(data):
-    N = T.dynamic('N')
+    N = T.dynamic("N")
     data: T.Tensor[[N], T.int32]
     out = T.empty([N], T.int32)
 
     with T.Kernel(1) as _:
         for i in T.serial(N):
             cond = T.alloc_var(T.bool)
-            cond = (data[i] == 2)
+            cond = data[i] == 2
             if cond:
                 out[i] = 1
             else:
@@ -25,7 +25,7 @@ def kernel_alloc_var_eq(data):
 
 @tilelang.jit
 def kernel_alloc_var_ne(data):
-    N = T.dynamic('N')
+    N = T.dynamic("N")
     data: T.Tensor[[N], T.int32]
     out = T.empty([N], T.int32)
 
