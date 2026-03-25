@@ -28,6 +28,7 @@ class IRStructure;
 class TaskNode;
 class ControlNode;
 class SequenceNode;
+class WrapperNode;
 
 // Structure to store region access information with warpgroup id
 struct RegionAccessInfo {
@@ -65,7 +66,7 @@ public:
 
   virtual ~IRStructure() = default;
   virtual Kind GetKind() const = 0;
-  virtual std::unique_ptr<IRStructure> Clone() const = 0;
+  virtual std::shared_ptr<IRStructure> Clone() const = 0;
 
   // Helper methods for safe casting
   bool IsTask() const { return GetKind() == Kind::kTask; }
@@ -83,6 +84,10 @@ public:
   virtual std::vector<BufferRegion> GetReadRegions() const = 0;
   virtual std::vector<BufferRegion> GetWriteRegions() const = 0;
 
+  // Variable access (used for dependency analysis)
+  virtual std::vector<Var> GetReadVars() const = 0;
+  virtual std::vector<Var> GetWriteVars() const = 0;
+
   // Latency estimation
   virtual int64_t GetLatency() const = 0; // Estimated latency in cycles
   virtual int64_t GetII() const = 0;      // Initiation interval in cycles
@@ -99,6 +104,10 @@ public:
   // Helper methods to add regions (for incremental analysis)
   virtual void AddReadRegion(const BufferRegion &region) = 0;
   virtual void AddWriteRegion(const BufferRegion &region) = 0;
+
+  // Helper methods to add variables
+  virtual void AddReadVar(const Var &var) = 0;
+  virtual void AddWriteVar(const Var &var) = 0;
 
   // Recursive region collection method
   virtual void CollectRegions(
@@ -141,6 +150,12 @@ public:
   }
   std::vector<BufferRegion> GetWriteRegions() const override {
     return write_regions_;
+  }
+  std::vector<Var> GetReadVars() const override {
+    return read_vars_;
+  }
+  std::vector<Var> GetWriteVars() const override {
+    return write_vars_;
   }
   // Latency estimation
   int64_t GetLatency() const override { return latency_; }
@@ -245,7 +260,7 @@ public:
   }
 
   // Clone method
-  std::unique_ptr<IRStructure> Clone() const override;
+  std::shared_ptr<IRStructure> Clone() const override;
 
   // Helper methods to add regions (for incremental analysis)
   void AddReadRegion(const BufferRegion &region) override {
@@ -270,6 +285,9 @@ public:
     write_regions_.push_back(region);
   }
 
+  void AddReadVar(const Var &var) override { read_vars_.push_back(var); }
+  void AddWriteVar(const Var &var) override { write_vars_.push_back(var); }
+
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
@@ -288,6 +306,9 @@ private:
   // Memory access regions (collected during analysis)
   std::vector<BufferRegion> read_regions_;
   std::vector<BufferRegion> write_regions_;
+
+  std::vector<Var> read_vars_;
+  std::vector<Var> write_vars_;
 
   // Latency estimation
   int64_t latency_{0}; // Estimated latency in cycles
@@ -315,11 +336,7 @@ private:
 class ControlNode : public IRStructure {
 public:
   For control; // The For operation
-  std::unique_ptr<IRStructure> child;
-
-  // Wrapper Stmts (LetStmt/AttrStmt) that originally wrapped the For loop body.
-  // Stored outermost-first. Re-applied in reverse order during IR conversion.
-  std::vector<Stmt> wrappers;
+  std::shared_ptr<IRStructure> child;
 
   Kind GetKind() const override { return Kind::kControl; }
 
@@ -342,6 +359,14 @@ public:
     return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
   }
 
+  // Variable access (aggregate from child)
+  std::vector<Var> GetReadVars() const override {
+    return child ? child->GetReadVars() : std::vector<Var>{};
+  }
+  std::vector<Var> GetWriteVars() const override {
+    return child ? child->GetWriteVars() : std::vector<Var>{};
+  }
+
   // Latency estimation (aggregate from child)
   int64_t GetLatency() const override { return latency_; }
   int64_t GetII() const override { return ii_; }
@@ -380,6 +405,13 @@ public:
       child->AddWriteRegion(region);
   }
 
+  void AddReadVar(const Var &var) override {
+    // ignore
+  }
+  void AddWriteVar(const Var &var) override {
+    // ignore
+  }
+
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
@@ -389,7 +421,7 @@ public:
   void SetPromote(bool promote) { has_promote_ = promote; }
 
   // Clone method
-  std::unique_ptr<IRStructure> Clone() const override;
+  std::shared_ptr<IRStructure> Clone() const override;
 
   bool containWarpgroupId(int id) const override {
     return child->containWarpgroupId(id);
@@ -407,7 +439,8 @@ private:
 class WrapperNode : public IRStructure {
 public:
   Stmt wrapper;
-  std::unique_ptr<IRStructure> child;
+  std::shared_ptr<IRStructure> child;
+  std::shared_ptr<TaskNode> task;
 
   Kind GetKind() const override { return Kind::kWrapper; }
 
@@ -430,6 +463,14 @@ public:
     return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
   }
 
+  // Variable access (aggregate from child)
+  std::vector<Var> GetReadVars() const override {
+    return child ? child->GetReadVars() : std::vector<Var>{};
+  }
+  std::vector<Var> GetWriteVars() const override {
+    return child ? child->GetWriteVars() : std::vector<Var>{};
+  }
+
   // Latency estimation (aggregate from child)
   int64_t GetLatency() const override { return latency_; }
   int64_t GetII() const override { return ii_; }
@@ -468,12 +509,19 @@ public:
       child->AddWriteRegion(region);
   }
 
+  void AddReadVar(const Var &var) override {
+    // ignore
+  }
+  void AddWriteVar(const Var &var) override {
+    // ignore
+  }
+
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
   // Clone method
-  std::unique_ptr<IRStructure> Clone() const override;
+  std::shared_ptr<IRStructure> Clone() const override;
 
   bool containWarpgroupId(int id) const override {
     return child->containWarpgroupId(id);
@@ -489,7 +537,7 @@ class ScheduleUnit : public IRStructure {
 public:
   int stage;
   std::vector<std::vector<Stmt>> before, after;
-  std::unique_ptr<IRStructure> child;
+  std::shared_ptr<IRStructure> child;
 
   ScheduleUnit() {
     for (unsigned idx = 0; idx != 2; ++idx) {
@@ -519,6 +567,13 @@ public:
     return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
   }
 
+  std::vector<Var> GetReadVars() const override {
+    return child ? child->GetReadVars() : std::vector<Var>{};
+  }
+  std::vector<Var> GetWriteVars() const override {
+    return child ? child->GetWriteVars() : std::vector<Var>{};
+  }
+
   // Latency estimation (aggregate from child)
   int64_t GetLatency() const override { return latency_; }
   int64_t GetII() const override { return ii_; }
@@ -557,6 +612,15 @@ public:
       child->AddWriteRegion(region);
   }
 
+  void AddReadVar(const Var &var) override {
+    if (child)
+      child->AddReadVar(var);
+  }
+  void AddWriteVar(const Var &var) override {
+    if (child)
+      child->AddWriteVar(var);
+  }
+
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
@@ -570,7 +634,7 @@ public:
   }
 
   // Clone method
-  std::unique_ptr<IRStructure> Clone() const override;
+  std::shared_ptr<IRStructure> Clone() const override;
 
   bool containWarpgroupId(int id) const override {
     return child->containWarpgroupId(id);
@@ -585,7 +649,7 @@ private:
 // Sequence node: contains a vector of child IRStructures
 class SequenceNode : public IRStructure {
 public:
-  std::vector<std::unique_ptr<IRStructure>> children;
+  std::vector<std::shared_ptr<IRStructure>> children;
 
   Kind GetKind() const override { return Kind::kSequence; }
 
@@ -597,6 +661,9 @@ public:
   // Memory access regions (aggregate from all children)
   std::vector<BufferRegion> GetReadRegions() const override;
   std::vector<BufferRegion> GetWriteRegions() const override;
+
+  std::vector<Var> GetReadVars() const override;
+  std::vector<Var> GetWriteVars() const override;
 
   // Latency estimation (aggregate from all children)
   int64_t GetLatency() const override;
@@ -615,12 +682,19 @@ public:
   void AddReadRegion(const BufferRegion &region) override;
   void AddWriteRegion(const BufferRegion &region) override;
 
+  void AddReadVar(const Var &var) override {
+    // ignore
+  }
+  void AddWriteVar(const Var &var) override {
+    // ignore
+  }
+
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
   // Clone method
-  std::unique_ptr<IRStructure> Clone() const override;
+  std::shared_ptr<IRStructure> Clone() const override;
 
   bool containWarpgroupId(int id) const override {
     for (auto &child : children) {
@@ -800,13 +874,6 @@ inline void PrintAllStmts(const IRStructure *node, int indent = 0) {
     LOG(INFO) << indent_str << "  For statement:";
     LOG(INFO) << indent_str + "    " << control->control;
 
-    if (!control->wrappers.empty()) {
-      LOG(INFO) << indent_str << "  Wrappers: " << control->wrappers.size();
-      for (size_t w = 0; w < control->wrappers.size(); w++) {
-        LOG(INFO) << indent_str << "    Wrapper " << w << ": "
-                  << control->wrappers[w];
-      }
-    }
     // Recursively print child statements
     if (control->child) {
       LOG(INFO) << indent_str << "  Loop body:";
@@ -851,6 +918,20 @@ inline void PrintAllStmts(const IRStructure *node, int indent = 0) {
   }
 }
 
+inline Stmt GetLetDecl(const LetStmtNode *let_node) {
+  if (let_node == nullptr) {
+    return Stmt();
+  }
+  return LetStmt(let_node->var, let_node->value, Evaluate(0));
+}
+
+inline Stmt GetAttrDecl(const AttrStmtNode *attr_node) {
+  if (attr_node == nullptr) {
+    return Stmt();
+  }
+  return AttrStmt(attr_node->node, attr_node->attr_key, attr_node->value, Evaluate(0));
+}
+
 // Original helper function to print IRStructure (kept for backward
 // compatibility)
 inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
@@ -882,13 +963,6 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
   } else if (node->IsControl()) {
     const ControlNode *control = static_cast<const ControlNode *>(node);
     LOG(INFO) << indent_str << "ControlNode (For loop):";
-    if (!control->wrappers.empty()) {
-      LOG(INFO) << indent_str << "  Wrappers: " << control->wrappers.size();
-      for (size_t w = 0; w < control->wrappers.size(); w++) {
-        LOG(INFO) << indent_str << "    Wrapper " << w << ": "
-                  << control->wrappers[w];
-      }
-    }
     if (control->child) {
       LOG(INFO) << indent_str << "  Child:";
       PrintIRStructure(control->child.get(), indent + 2);
@@ -905,6 +979,8 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
     const WrapperNode *wrapper = static_cast<const WrapperNode *>(node);
     LOG(INFO) << indent_str << "WrapperNode:";
     LOG(INFO) << indent_str << "  Wrapper: " << wrapper->wrapper;
+    LOG(INFO) << indent_str << "  Task:";
+    PrintIRStructure(wrapper->task.get(), indent + 4);
     if (wrapper->child) {
       LOG(INFO) << indent_str << "  Child:";
       PrintIRStructure(wrapper->child.get(), indent + 2);

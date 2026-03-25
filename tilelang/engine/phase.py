@@ -196,9 +196,12 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     if allow_autoschedule():
         # Auto schedule for high-level operations
-        mod = tilelang.transform.IfStmtBinding()(mod)
+        mod = tilelang.transform.IfConditionExtract()(mod)
+        # print("IfConditionExtract done")
+        # print(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
         mod = tilelang.transform.Simplify()(mod)
+        print(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
@@ -329,5 +332,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
 
     # Transform threadblock to persistent threadblock
     mod = tilelang.transform.PersistThreadblock()(mod)
+
+    print(mod)
 
     return mod
