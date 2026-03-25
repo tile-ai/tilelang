@@ -1207,13 +1207,12 @@ private:
             wait_insert_pos[i] == wait_insert_pos[i - 1] &&
             arrive_insert_pos[i] == arrive_insert_pos[i - 1] &&
             same_guard(i - 1, i);
-        if (merge_with_prev && current_group_has_tma &&
+        if (merge_with_prev && !remap_pure_tma_barriers_ &&
+            current_group_has_tma &&
             extractor.blocks[i].kind == AsyncProducerKind::kTma) {
-          // The current WS rewrite only supports one TMA producer per merged
-          // group. Reusing a forward barrier for multiple TMA producers would
-          // require group-level handling of:
-          // - mixed TMA/cp.async preserved-protocol arrive semantics; and
-          // - pure-TMA rewrite of multiple expect/load pairs onto one release.
+          // Mixed groups can safely share one TMA barrier with cp.async
+          // arrive-on notifications, but keeping multiple TMA producers on the
+          // same preserved protocol would over-arrive the barrier.
           merge_with_prev = false;
         }
         block_group[i] = merge_with_prev ? block_group[i - 1] : next_group++;
