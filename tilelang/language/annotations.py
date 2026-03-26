@@ -72,10 +72,11 @@ def annotate_min_blocks_per_sm(n: int):
     -------
     >>> @T.prim_func
     ... def my_kernel(...):
-    ...     T.annotate_min_blocks_per_sm(2)
-    ...     with T.Kernel(...) as pid:
+    ...     with T.Kernel(...):
+                T.annotate_min_blocks_per_sm(2)
     ...         ...
     """
+    assert isinstance(n, int) and n > 0, "n must be a positive integer"
     return attr(None, "tl.min_blocks_per_sm", n)
 
 
