@@ -1520,7 +1520,8 @@ public:
       // bytes), this is a reinterpret-cast view access with a finer-grained
       // element type.  The buffer's declared element dtype must not be
       // downgraded in this case; just skip lane tracking for this access.
-      int declared_bytes = var_info.element_dtype.bits() * var_info.element_dtype.lanes() / 8;
+      int declared_bytes =
+          var_info.element_dtype.bits() * var_info.element_dtype.lanes() / 8;
       int access_bytes = value_dtype.bits() * value_dtype.lanes() / 8;
       if (access_bytes != declared_bytes) {
         return;

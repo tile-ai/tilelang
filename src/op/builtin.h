@@ -207,13 +207,14 @@ TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
 
-// Packed FP32x2 math (PTX `.f32x2` family; may lower to FADD2/FMUL2/FFMA2)
-// fadd2(x, y) - packed FP32x2 add
-TVM_DLL const Op &fadd2();
-// fmul2(x, y) - packed FP32x2 multiply
-TVM_DLL const Op &fmul2();
-// fma2(x, y, z) - packed FP32x2 fused multiply-add
+// Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
+TVM_DLL const Op &add2();
+TVM_DLL const Op &sub2();
+TVM_DLL const Op &mul2();
 TVM_DLL const Op &fma2();
+TVM_DLL const Op &max2();
+TVM_DLL const Op &min2();
+TVM_DLL const Op &abs2();
 
 // random op
 TVM_DLL const Op &rng_init();
