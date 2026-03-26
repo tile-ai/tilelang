@@ -11,6 +11,14 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/atomic_add.h"
+#include "../op/atomic_reduce.h"
+#include "../op/copy.h"
+#include "../op/fill.h"
+#include "../op/finalize_reducer.h"
+#include "../op/gemm.h"
+#include "../op/operator.h"
+#include "../op/reduce.h"
 #include "../op/region.h"
 #include "common/tma_copy_utils.h"
 #include "support/utils.h"
@@ -35,6 +43,96 @@ struct IfWrapper {
   PrimExpr condition;
   Span span;
 };
+
+Optional<Integer> GetPipelineNumStages(const ForNode *loop) {
+  if (auto num_stages = loop->annotations.Get("num_stages")) {
+    if (const auto *imm = num_stages->as<IntImmNode>()) {
+      return Integer(static_cast<int>(imm->value));
+    }
+  }
+  if (auto num_stages = loop->annotations.Get("tl_pipelined_num_stages")) {
+    if (const auto *imm = num_stages->as<IntImmNode>()) {
+      return Integer(static_cast<int>(imm->value));
+    }
+  }
+  if (auto stages_anno = loop->annotations.Get(tir::attr::software_pipeline_stage)) {
+    auto stages = Downcast<Array<Integer>>(stages_anno.value());
+    int max_stage = -1;
+    for (const auto &stage : stages) {
+      max_stage = std::max(max_stage, static_cast<int>(stage->value));
+    }
+    if (max_stage >= 0) {
+      return Integer(max_stage + 1);
+    }
+  }
+  return Optional<Integer>();
+}
+
+void AddReadsWritesForTileOp(const TileOperator &tile_op,
+                             Array<BufferRegion> *reads,
+                             Array<BufferRegion> *writes) {
+  auto add_reads = [&](const Array<BufferRegion> &regions) {
+    reads->insert(reads->end(), regions.begin(), regions.end());
+  };
+  auto add_writes = [&](const Array<BufferRegion> &regions) {
+    writes->insert(writes->end(), regions.begin(), regions.end());
+  };
+  if (const auto *copy = tile_op.as<CopyNode>()) {
+    add_reads({BufferRegion(copy->src, copy->src_range)});
+    add_writes({BufferRegion(copy->dst, copy->dst_range)});
+    return;
+  }
+  if (const auto *gemm = tile_op.as<GemmNode>()) {
+    add_reads({gemm->aRegion_, gemm->bRegion_});
+    if (!is_one(gemm->clearAccum_)) {
+      add_reads({gemm->cRegion_});
+    }
+    add_writes({gemm->cRegion_});
+    return;
+  }
+  if (const auto *reduce = tile_op.as<ReduceOpNode>()) {
+    add_reads({reduce->srcRegion_});
+    if (!reduce->clear) {
+      add_reads({reduce->dstRegion_});
+    }
+    add_writes({reduce->dstRegion_});
+    return;
+  }
+  if (const auto *cumsum = tile_op.as<CumSumOpNode>()) {
+    add_reads({cumsum->srcRegion_});
+    add_writes({cumsum->dstRegion_});
+    return;
+  }
+  if (const auto *fill = tile_op.as<FillNode>()) {
+    add_writes({BufferRegion(fill->dst, fill->region)});
+    return;
+  }
+  auto handle_atomic = [&](const auto *atomic) {
+    if (atomic->src.defined()) {
+      add_reads({BufferRegion(atomic->src, atomic->src_range)});
+    }
+    BufferRegion dst_region(atomic->dst, atomic->dst_range);
+    add_reads({dst_region});
+    add_writes({dst_region});
+  };
+  if (const auto *atomic = tile_op.as<AtomicAddNode>()) {
+    handle_atomic(atomic);
+    return;
+  }
+  if (const auto *atomic = tile_op.as<AtomicMaxNode>()) {
+    handle_atomic(atomic);
+    return;
+  }
+  if (const auto *atomic = tile_op.as<AtomicMinNode>()) {
+    handle_atomic(atomic);
+    return;
+  }
+  if (const auto *finalize = tile_op.as<FinalizeReducerOpNode>()) {
+    BufferRegion region = BufferRegion::FullRegion(finalize->reducer);
+    add_reads({region});
+    add_writes({region});
+  }
+}
 
 /*!
  * \brief Collector to find all buffers used in a statement.
@@ -72,6 +170,19 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
+    if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
+        tile_op.defined()) {
+      Array<BufferRegion> reads, writes;
+      AddReadsWritesForTileOp(tile_op, &reads, &writes);
+      for (const auto &region : reads) {
+        AddBuffer(region->buffer);
+      }
+      for (const auto &region : writes) {
+        AddBuffer(region->buffer);
+      }
+      StmtExprVisitor::VisitExpr_(op);
+      return;
+    }
     // Handle tvm_access_ptr which also accesses buffers
     if (op->op.same_as(builtin::tvm_access_ptr())) {
       if (op->args.size() > 1) {
@@ -107,6 +218,27 @@ private:
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> used_buffers_;
 };
 
+class TileOpAccessCollector : public StmtExprVisitor {
+public:
+  Array<BufferRegion> GetReads() const { return reads_; }
+
+  Array<BufferRegion> GetWrites() const { return writes_; }
+
+private:
+  void VisitExpr_(const CallNode *op) final {
+    if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
+        tile_op.defined()) {
+      AddReadsWritesForTileOp(tile_op, &reads_, &writes_);
+      StmtExprVisitor::VisitExpr_(op);
+      return;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  Array<BufferRegion> reads_;
+  Array<BufferRegion> writes_;
+};
+
 /*!
  * \brief Create a block and infer the access region with the given body.
  *
@@ -120,19 +252,27 @@ private:
  */
 Block MakeBlock(const Stmt &body,
                 const Map<Var, Buffer> &buffer_data_to_buffer) {
+  Block block;
   if (const BlockRealizeNode *block_realize = body.as<BlockRealizeNode>()) {
     if (is_one(block_realize->predicate)) {
-      // no need to create a new block
-      return block_realize->block;
+      block = block_realize->block;
     }
   }
-  Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-              /*body*/ body);
+  if (!block.defined()) {
+    block = Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                  /*name_hint=*/"", /*body*/ body);
+  }
   Array<Array<BufferRegion>> access =
       GetBlockReadWriteRegion(block, buffer_data_to_buffer);
+  TileOpAccessCollector collector;
+  collector(block->body);
+  Array<BufferRegion> tile_reads = collector.GetReads();
+  Array<BufferRegion> tile_writes = collector.GetWrites();
   BlockNode *n = block.CopyOnWrite();
   n->reads = access[0];
+  n->reads.insert(n->reads.end(), tile_reads.begin(), tile_reads.end());
   n->writes = access[1];
+  n->writes.insert(n->writes.end(), tile_writes.begin(), tile_writes.end());
   return block;
 }
 
@@ -559,6 +699,7 @@ private:
                 bool need_bound_check) {
     PrimExpr new_loop_var;
     PrimExpr extent = end - start;
+    Optional<Integer> pipeline_num_stages = GetPipelineNumStages(pipeline_loop_.get());
     auto make_nop = []() {
       return BlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
@@ -671,10 +812,14 @@ private:
         if (kv.first != tir::attr::software_pipeline_stage &&
             kv.first != tir::attr::software_pipeline_order &&
             kv.first != tir::attr::software_pipeline_async_stages &&
-            kv.first != "num_stages" &&
-            kv.first != "tl_pipelined_num_stages") {
+            kv.first != "num_stages") {
           preserved_annotations.Set(key, kv.second);
         }
+      }
+      if (pipeline_num_stages &&
+          preserved_annotations.find("tl_pipelined_num_stages") ==
+              preserved_annotations.end()) {
+        preserved_annotations.Set("tl_pipelined_num_stages", pipeline_num_stages.value());
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
@@ -682,9 +827,10 @@ private:
     }
     Stmt result =
         BlockRealize({}, Bool(true), MakeBlock(new_loop, buffer_data_to_buffer_));
-    if (auto num_stages = pipeline_loop_->annotations.Get("num_stages")) {
+    if (pipeline_num_stages) {
       result = AttrStmt(Integer(0), kPipelineContextNumStages,
-                        Downcast<PrimExpr>(num_stages.value()), result);
+                        Downcast<PrimExpr>(pipeline_num_stages.value()),
+                        result);
     }
     return result;
   }
