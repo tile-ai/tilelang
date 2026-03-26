@@ -429,7 +429,7 @@ public:
   PrimExpr threadIdx_x_ext = Integer(1);
   PrimExpr threadIdx_y_ext = Integer(1);
   PrimExpr threadIdx_z_ext = Integer(1);
-  int64_t min_blocks_per_sm = 1;  // default to 1
+  int64_t min_blocks_per_sm = 1; // default to 1
 };
 
 class ClusterInfoExtractor : public tir::StmtVisitor {
@@ -478,7 +478,8 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", " << extractor.min_blocks_per_sm << ")";
+    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
+           << extractor.min_blocks_per_sm << ")";
   }
 }
 
