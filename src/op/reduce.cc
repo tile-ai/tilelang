@@ -362,6 +362,9 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     // Determine whether batched AllReduce is beneficial.
     // Batching reduces all per-thread values in a single butterfly pass,
     // sharing synchronization barriers across values.
+    // ROCm wavefronts are 64-wide; cross-warp reduction only kicks in above
+    // the native warp/wavefront size.
+    const int warp_size = TargetIsRocm(T.target) ? 64 : 32;
     int64_t batch_size = 1;
     for (const auto &s : clear_buffer->shape) {
       const int64_t *p = as_const_int(s);
@@ -379,7 +382,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         if (mark && mark.value().same_as(src_vars[this->dim]->var)) {
           auto ext = as_const_int(iter_split->extent);
           auto sc = as_const_int(iter_split->scale);
-          if (ext && sc && *ext > 1 && (*ext) * (*sc) > 32) {
+          if (ext && sc && *ext > 1 && (*ext) * (*sc) > warp_size) {
             has_cross_warp_reduce = true;
             break;
           }
@@ -452,7 +455,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         auto thread_offset = T.thread_bounds->min;
         std::stringstream ss;
 
-        if (reducing_threads > 32) {
+        if (reducing_threads > warp_size) {
           // Cross-warp: emit batched AllReduce sharing barriers.
           if (TargetHasSMVersionGE(T.target, 90)) {
             auto all_threads = T.thread_bounds->extent;
@@ -594,7 +597,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           }
           Array<PrimExpr> thread_reduce_args = {
               StringImm(ss.str()), BufferLoad(clear_buffer, red_indices)};
-          if (reducing_threads > 32) {
+          if (reducing_threads > warp_size) {
             int workspace_size =
                 static_cast<int>(*as_const_int(T.thread_bounds->extent));
             PrimExpr workspace =

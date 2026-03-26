@@ -110,7 +110,9 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
     batch_size *= *p;
   }
 
-  bool use_batch = batch_size > 1 && reducing_threads > 32;
+  // ROCm wavefronts are 64-wide; only batch when reducing across warps.
+  const int warp_size = TargetIsRocm(T.target) ? 64 : 32;
+  bool use_batch = batch_size > 1 && reducing_threads > warp_size;
 
   if (use_batch) {
     // Batched AllReduce: single butterfly pass for all output elements.

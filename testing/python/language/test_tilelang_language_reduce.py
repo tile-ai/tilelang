@@ -370,7 +370,9 @@ def test_batched_allreduce_codegen(op, dtype, M, N, threads):
         f"Expected batched AllReduce (with batch_size, workspace_stride) in generated source, but not found.\nGenerated source:\n{src}"
     )
     batch_size = int(match.group(1))
-    assert batch_size > 1, f"Expected batch_size > 1, got {batch_size}.\nGenerated source:\n{src}"
+    assert batch_size > 1, (
+        f"Expected batch_size > 1, got {batch_size}.\nGenerated source:\n{src}"
+    )
 
 
 if __name__ == "__main__":
