@@ -113,6 +113,7 @@ from .annotations import (  # noqa: F401
     annotate_safe_value,
     annotate_l2_hit_ratio,
     annotate_restrict_buffers,
+    annotate_min_blocks_per_sm,
 )
 
 from .random import (

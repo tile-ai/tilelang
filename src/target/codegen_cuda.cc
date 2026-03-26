@@ -417,6 +417,10 @@ private:
                  iv->thread_tag == "threadIdx.z") {
         threadIdx_z_ext = op->value;
       }
+    } else if (op->attr_key == tl::attr::kMinBlocksPerSM) {
+      if (const IntImmNode *v = op->value.as<IntImmNode>()) {
+        min_blocks_per_sm = v->value;
+      }
     }
     StmtVisitor::VisitStmt_(op);
   }
@@ -425,6 +429,7 @@ public:
   PrimExpr threadIdx_x_ext = Integer(1);
   PrimExpr threadIdx_y_ext = Integer(1);
   PrimExpr threadIdx_z_ext = Integer(1);
+  int64_t min_blocks_per_sm = -1;  // -1 means not set
 };
 
 class ClusterInfoExtractor : public tir::StmtVisitor {
@@ -473,7 +478,9 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", 1)";
+    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
+           << (extractor.min_blocks_per_sm > 0 ? extractor.min_blocks_per_sm : 1)
+           << ")";
   }
 }
 

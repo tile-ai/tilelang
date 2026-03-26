@@ -13,6 +13,7 @@ __all__ = [
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
     "annotate_restrict_buffers",
+    "annotate_min_blocks_per_sm",
 ]
 
 
@@ -55,6 +56,27 @@ def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
         assert buffer.scope() == "global", "persistent L2 can only be applied to global buffers"
         _l2_hit_ratio_map[buffer.data] = FloatImm("float32", float(hit_ratio))
     return block_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
+
+
+def annotate_min_blocks_per_sm(n: int):
+    """Annotate the minimum number of thread blocks per SM (multiprocessor).
+
+    When set, this value is passed as the second argument of
+    ``__launch_bounds__(maxThreadsPerBlock, minBlocksPerMultiprocessor)`` in
+    the generated CUDA kernel.  A larger value hints the compiler to limit
+    register usage so that more blocks can reside on each SM simultaneously,
+    which can improve occupancy at the cost of potentially more register
+    spilling.
+
+    Example
+    -------
+    >>> @T.prim_func
+    ... def my_kernel(...):
+    ...     T.annotate_min_blocks_per_sm(2)
+    ...     with T.Kernel(...) as pid:
+    ...         ...
+    """
+    return attr(None, "tl.min_blocks_per_sm", n)
 
 
 def annotate_restrict_buffers(*buffers):

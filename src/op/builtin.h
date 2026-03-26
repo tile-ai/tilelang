@@ -39,6 +39,11 @@ static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // that must NOT be marked with the restrict qualifier in codegen.
 // Type: Array<tir::Var>
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
+// A PrimFunc-level attribute carrying the minimum number of thread blocks
+// per SM (multiprocessor).  When present it is emitted as the second
+// argument of __launch_bounds__(maxThreads, minBlocksPerMultiprocessor).
+// Type: Integer
+static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
