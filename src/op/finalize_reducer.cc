@@ -122,6 +122,11 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
       ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
          << ", " << thread_offset << ", tl::NamedBarrier<" << all_threads
          << ">, " << batch_size << ", " << workspace_stride << ">::run";
+    } else if (TargetIsRocm(T.target)) {
+      // HIP AllReduce has no Barrier type parameter.
+      ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
+         << ", " << thread_offset << ", " << batch_size << ", "
+         << workspace_stride << ">::run";
     } else {
       ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
          << ", " << thread_offset << ", tl::SyncThreadsBarrier, " << batch_size

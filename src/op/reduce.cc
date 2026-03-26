@@ -460,6 +460,11 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                << reducing_threads << ", " << (*scale) << ", " << thread_offset
                << ", tl::NamedBarrier<" << all_threads << ">, " << batch_size
                << ", " << workspace_stride << ">::run";
+          } else if (TargetIsRocm(T.target)) {
+            // HIP AllReduce has no Barrier type parameter.
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+               << reducing_threads << ", " << (*scale) << ", " << thread_offset
+               << ", " << batch_size << ", " << workspace_stride << ">::run";
           } else {
             ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
                << reducing_threads << ", " << (*scale) << ", " << thread_offset
