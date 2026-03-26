@@ -87,13 +87,15 @@ struct SharedReduceWarp {
   }
 };
 
-template <class Reducer, int threads, int scale, int thread_offset = 0>
+template <class Reducer, int threads, int scale, int thread_offset = 0,
+          int batch_size = 1, int workspace_stride = 0>
 struct AllReduce {
   static_assert(threads == 1024 || threads == 512 || threads == 256 ||
                 threads == 128 || threads == 64 || threads == 32 ||
                 threads == 16 || threads == 8 || threads == 4 || threads == 2);
   static_assert(threads % scale == 0);
 
+  // Scalar interface (backward-compatible).
   template <typename T> static __device__ T run(T x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
     constexpr int warpSize = 64;
@@ -109,7 +111,37 @@ struct AllReduce {
     if constexpr (offset == scale) {
       return x;
     } else {
-      return AllReduce<Reducer, offset, scale, thread_offset>::run(x, red_buf);
+      return AllReduce<Reducer, offset, scale, thread_offset, batch_size,
+                       workspace_stride>::run(x, red_buf);
+    }
+  }
+
+  // Batch interface: reduces batch_size values in parallel.
+  template <typename T> static __device__ void run(T *x, T *red_buf = nullptr) {
+    constexpr int offset = threads / 2;
+    constexpr int warpSize = 64;
+
+    if constexpr (offset >= warpSize) {
+      __syncthreads();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
+      __syncthreads();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        x[i] =
+            Reducer()(x[i], red_buf[((threadIdx.x - thread_offset) ^ offset) +
+                                    i * workspace_stride]);
+    } else {
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        x[i] = Reducer()(x[i], tl::shfl_xor(x[i], offset));
+    }
+    if constexpr (offset == scale) {
+      return;
+    } else {
+      AllReduce<Reducer, offset, scale, thread_offset, batch_size,
+                workspace_stride>::run(x, red_buf);
     }
   }
 };

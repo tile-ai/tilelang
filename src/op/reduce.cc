@@ -358,20 +358,90 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
     auto iter_sum =
         arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
-    for (const auto &iter_split : iter_sum->args) {
-      auto mark = iter_split->source->source.as<Var>();
-      ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
-      if (mark.value().same_as(src_vars[this->dim]->var)) {
-        // `scale` is the stride of participating threads in the thread index
-        // space.  When the thread-to-data mapping for the reduce dimension is
-        // normalized as  threadIdx = source * scale + ...,
-        //   * scale == 1  means threads are contiguous (0, 1, 2, ...),
-        //   * scale  > 1  means threads are interleaved (0, scale, 2*scale,
-        //     ...).
-        // Both cases use the recursive XOR-butterfly reduce.
-        // `extent` is the number of distinct thread positions along the reduce
-        // dimension, so reducing_threads = extent * scale covers the full
-        // thread index range that participates in the reduction.
+
+    // Determine whether batched AllReduce is beneficial.
+    // Batching reduces all per-thread values in a single butterfly pass,
+    // sharing synchronization barriers across values.
+    int64_t batch_size = 1;
+    for (const auto &s : clear_buffer->shape) {
+      const int64_t *p = as_const_int(s);
+      if (p == nullptr) {
+        batch_size = -1;
+        break;
+      }
+      batch_size *= *p;
+    }
+
+    bool has_cross_warp_reduce = false;
+    if (batch_size > 1 && dst_layout->InputDim() > 0) {
+      for (const auto &iter_split : iter_sum->args) {
+        auto mark = iter_split->source->source.as<Var>();
+        if (mark && mark.value().same_as(src_vars[this->dim]->var)) {
+          auto ext = as_const_int(iter_split->extent);
+          auto sc = as_const_int(iter_split->scale);
+          if (ext && sc && *ext > 1 && (*ext) * (*sc) > 32) {
+            has_cross_warp_reduce = true;
+            break;
+          }
+        }
+      }
+    }
+
+    bool use_batch = batch_size > 1 && has_cross_warp_reduce;
+
+    // Helper: wrap a body in the dst_vars loops with partitioning & unrolling.
+    auto make_dst_loop = [&](Stmt body, const Array<IterVar> &vars) -> Stmt {
+      for (int i = static_cast<int>(vars.size()) - 1; i >= 0; --i) {
+        body = For(vars[i]->var, 0, vars[i]->dom->extent, ForKind::kParallel,
+                   body);
+      }
+      body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
+                           red_layout);
+      body = PragmaUnrollLoop(Downcast<For>(body));
+      return body;
+    };
+
+    // Helper: create fresh dst loop variables (needed so that pre/post loops
+    // do not reuse the same Var objects).
+    auto make_fresh_dst_vars = [&](const std::string &suffix)
+        -> std::tuple<Array<IterVar>, Array<PrimExpr>, Array<PrimExpr>> {
+      Array<IterVar> vars;
+      for (size_t i = 0; i < dst_dim; ++i) {
+        Var v(std::string{char('i' + i)} + suffix);
+        vars.push_back(IterVar(Range(0, dst_layout->InputShape()[i]), v,
+                               IterVarType::kDataPar));
+      }
+      auto d_idx = dst_layout->Forward(
+          vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
+      auto r_idx = red_layout->Forward(
+          vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
+      return {vars, d_idx, r_idx};
+    };
+
+    if (use_batch) {
+      // ================================================================
+      // Batched AllReduce path — three phases:
+      //   1. Loop: init + thread-local reduce
+      //   2. Flat: batched AllReduce (single butterfly pass for all values)
+      //   3. Loop: copy-back (only when need_duplicate)
+      // ================================================================
+
+      // Phase 1: pre-reduce loop
+      Stmt pre_body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
+      pre_body = make_dst_loop(pre_body, dst_vars);
+
+      Array<Stmt> phases;
+      phases.push_back(pre_body);
+
+      // Phase 2: batched AllReduce call(s)
+      int workspace_stride =
+          static_cast<int>(*as_const_int(T.thread_bounds->extent));
+
+      for (const auto &iter_split : iter_sum->args) {
+        auto mark = iter_split->source->source.as<Var>();
+        ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
+        if (!mark.value().same_as(src_vars[this->dim]->var))
+          continue;
         auto scale = as_const_int(iter_split->scale);
         auto extent = as_const_int(iter_split->extent);
         ICHECK(scale != nullptr && extent != nullptr);
@@ -379,113 +449,222 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           continue;
 
         int reducing_threads = (*extent) * (*scale);
+        auto thread_offset = T.thread_bounds->min;
         std::stringstream ss;
 
-        auto thread_offset = T.thread_bounds->min;
-        if (TargetHasSMVersionGE(T.target, 90)) {
-          auto all_threads = T.thread_bounds->extent;
-          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-             << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ", tl::NamedBarrier<" << all_threads << ">>::run";
-        } else {
-          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-             << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ">::run";
-        }
-        Array<PrimExpr> thread_reduce_args = {
-            StringImm(ss.str()), BufferLoad(clear_buffer, red_indices)};
-        // The butterfly reduce path needs one shared-memory slot per
-        // thread in the block.
         if (reducing_threads > 32) {
-          int workspace_size =
-              static_cast<int>(*as_const_int(T.thread_bounds->extent));
-          PrimExpr workspace =
-              T.AddWorkspace(workspace_size, clear_buffer->dtype);
-          thread_reduce_args.push_back(workspace);
-        }
-        auto call = Call(clear_buffer->dtype, builtin::call_extern(),
-                         thread_reduce_args);
-        stmts.push_back(BufferStore(clear_buffer, call, red_indices));
-      }
-    }
-
-    // Layout status in the loop:
-    //     clear_buffer: red_layout
-    //     dst_buffer:   dst_layout
-    //     loop_layout:  red_layout
-    // At each step of the loop, we do reduction on
-    // `clear_buffer[red_layout(loop_idx)]`
-    //   and then transfer it to `dst_buffer[dst_layout(loop_idx)]`
-    // However, since the red_layout is larger than dst_layout, not all write
-    // operations are valid We need to add predicate to guard the write
-    // operations
-    PrimExpr predicate = Bool(true);
-    {
-      // dst_indices is the same as loop_indices
-      auto dst_th_indices = dst_indices;
-      dst_th_indices.push_back(T.thread_var);
-      // 1. compute loop_idx based on thread: [dst_indices, T.thread_var] =>
-      // [loop_indices]
-      auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
-      inv.pop_back(); // remove replicate var
-      // 2. ensure computed loop_idx maps back to the same [loop_indices]
-      for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
-        predicate = predicate && (inv[i] == dst_vars[i]->var);
-      }
-      // 3. simplify predicate
-      predicate = analyzer->Simplify(predicate);
-    }
-    if (need_duplicate) {
-      PrimExpr update;
-      if (need_update) {
-        auto src_val = BufferLoad(clear_buffer, red_indices);
-        auto dst_val = BufferLoad(dst_buffer, dst_indices);
-        if (this->type->isSum() || this->type->isAbsSum()) {
-          update = dst_val + src_val;
-        } else if (this->type->isBitAnd()) {
-          update = this->clear ? src_val : bitwise_and(dst_val, src_val);
-        } else if (this->type->isBitOr()) {
-          update = bitwise_or(dst_val, src_val);
-        } else if (this->type->isBitXor()) {
-          update = bitwise_xor(dst_val, src_val);
-        } else if (this->type->isMax() || this->type->isAbsMax()) {
-          update = Max(dst_val, src_val);
-        } else if (this->type->isMin()) {
-          update = Min(dst_val, src_val);
+          // Cross-warp: emit batched AllReduce sharing barriers.
+          if (TargetHasSMVersionGE(T.target, 90)) {
+            auto all_threads = T.thread_bounds->extent;
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+               << reducing_threads << ", " << (*scale) << ", " << thread_offset
+               << ", tl::NamedBarrier<" << all_threads << ">, " << batch_size
+               << ", " << workspace_stride << ">::run";
+          } else {
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+               << reducing_threads << ", " << (*scale) << ", " << thread_offset
+               << ", tl::SyncThreadsBarrier, " << batch_size << ", "
+               << workspace_stride << ">::run";
+          }
+          int ws_size = workspace_stride * static_cast<int>(batch_size);
+          PrimExpr workspace = T.AddWorkspace(ws_size, clear_buffer->dtype);
+          Array<PrimExpr> args = {StringImm(ss.str()), clear_buffer->data,
+                                  workspace};
+          phases.push_back(
+              Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
         } else {
-          LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
+          // Warp-only: no sync savings from batching; use scalar AllReduce
+          // inside a loop.
+          if (TargetHasSMVersionGE(T.target, 90)) {
+            auto all_threads = T.thread_bounds->extent;
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+               << reducing_threads << ", " << (*scale) << ", " << thread_offset
+               << ", tl::NamedBarrier<" << all_threads << ">>::run";
+          } else {
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+               << reducing_threads << ", " << (*scale) << ", " << thread_offset
+               << ">::run";
+          }
+          Array<PrimExpr> ar_args = {StringImm(ss.str()),
+                                     BufferLoad(clear_buffer, red_indices)};
+          auto call =
+              Call(clear_buffer->dtype, builtin::call_extern(), ar_args);
+          Stmt ar_body = BufferStore(clear_buffer, call, red_indices);
+          // Create fresh vars for this warp-only loop to avoid collisions
+          // with the pre-reduce loop.
+          auto [warp_vars, warp_dst_idx, warp_red_idx] =
+              make_fresh_dst_vars("_w");
+          // Substitute dst_vars → warp_vars in ar_body.
+          Map<Var, PrimExpr> vmap;
+          for (size_t i = 0; i < dst_dim; ++i)
+            vmap.Set(dst_vars[i]->var, warp_vars[i]->var);
+          ar_body = Substitute(ar_body, vmap);
+          phases.push_back(make_dst_loop(ar_body, warp_vars));
         }
-      } else {
-        update = BufferLoad(clear_buffer, red_indices);
       }
-      auto store = BufferStore(dst_buffer, update, dst_indices);
-      if (analyzer->CanProve(predicate)) {
-        stmts.push_back(store);
-      } else {
-        stmts.push_back(IfThenElse(predicate, store));
+
+      // Phase 3: copy-back (only when a temp buffer was used)
+      if (need_duplicate) {
+        auto [post_vars, post_dst_idx, post_red_idx] =
+            make_fresh_dst_vars("_p");
+
+        // Recompute predicate with post_vars.
+        PrimExpr predicate = Bool(true);
+        {
+          auto dst_th = post_dst_idx;
+          dst_th.push_back(T.thread_var);
+          auto inv = dst_layout->Inverse()->Forward(dst_th);
+          inv.pop_back();
+          for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++)
+            predicate = predicate && (inv[i] == post_vars[i]->var);
+          predicate = analyzer->Simplify(predicate);
+        }
+
+        PrimExpr update;
+        if (need_update) {
+          auto src_val = BufferLoad(clear_buffer, post_red_idx);
+          auto dst_val = BufferLoad(dst_buffer, post_dst_idx);
+          if (this->type->isSum() || this->type->isAbsSum()) {
+            update = dst_val + src_val;
+          } else if (this->type->isBitAnd()) {
+            update = this->clear ? src_val : bitwise_and(dst_val, src_val);
+          } else if (this->type->isBitOr()) {
+            update = bitwise_or(dst_val, src_val);
+          } else if (this->type->isBitXor()) {
+            update = bitwise_xor(dst_val, src_val);
+          } else if (this->type->isMax() || this->type->isAbsMax()) {
+            update = Max(dst_val, src_val);
+          } else if (this->type->isMin()) {
+            update = Min(dst_val, src_val);
+          } else {
+            LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
+          }
+        } else {
+          update = BufferLoad(clear_buffer, post_red_idx);
+        }
+        auto store = BufferStore(dst_buffer, update, post_dst_idx);
+        Stmt post_body;
+        if (analyzer->CanProve(predicate)) {
+          post_body = store;
+        } else {
+          post_body = IfThenElse(predicate, store);
+        }
+        phases.push_back(make_dst_loop(post_body, post_vars));
       }
-    }
 
-    auto body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
-    for (int i = static_cast<int>(dst_layout->InputDim()) - 1; i >= 0; --i) {
-      body = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
-                 ForKind::kParallel, body);
-    }
+      Stmt body = phases.size() > 1 ? SeqStmt(phases) : phases[0];
+      if (need_duplicate) {
+        body = Allocate(clear_buffer->data, clear_buffer->dtype,
+                        clear_buffer->shape, const_true(), body);
+      }
+      return body;
 
-    if (dst_layout->InputDim() > 0) {
-      body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
-                           red_layout);
-      body = PragmaUnrollLoop(Downcast<For>(body));
     } else {
-      auto guard = (T.thread_var == T.thread_bounds->min);
-      body = IfThenElse(guard, body);
-    }
+      // ================================================================
+      // Original scalar AllReduce path (unchanged).
+      // ================================================================
+      for (const auto &iter_split : iter_sum->args) {
+        auto mark = iter_split->source->source.as<Var>();
+        ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
+        if (mark.value().same_as(src_vars[this->dim]->var)) {
+          auto scale = as_const_int(iter_split->scale);
+          auto extent = as_const_int(iter_split->extent);
+          ICHECK(scale != nullptr && extent != nullptr);
+          if (*extent == 1)
+            continue;
 
-    if (need_duplicate) {
-      body = Allocate(clear_buffer->data, clear_buffer->dtype,
-                      clear_buffer->shape, const_true(), body);
+          int reducing_threads = (*extent) * (*scale);
+          std::stringstream ss;
+
+          auto thread_offset = T.thread_bounds->min;
+          if (TargetHasSMVersionGE(T.target, 90)) {
+            auto all_threads = T.thread_bounds->extent;
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+               << reducing_threads << ", " << (*scale) << ", " << thread_offset
+               << ", tl::NamedBarrier<" << all_threads << ">>::run";
+          } else {
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+               << reducing_threads << ", " << (*scale) << ", " << thread_offset
+               << ">::run";
+          }
+          Array<PrimExpr> thread_reduce_args = {
+              StringImm(ss.str()), BufferLoad(clear_buffer, red_indices)};
+          if (reducing_threads > 32) {
+            int workspace_size =
+                static_cast<int>(*as_const_int(T.thread_bounds->extent));
+            PrimExpr workspace =
+                T.AddWorkspace(workspace_size, clear_buffer->dtype);
+            thread_reduce_args.push_back(workspace);
+          }
+          auto call = Call(clear_buffer->dtype, builtin::call_extern(),
+                           thread_reduce_args);
+          stmts.push_back(BufferStore(clear_buffer, call, red_indices));
+        }
+      }
+
+      PrimExpr predicate = Bool(true);
+      {
+        auto dst_th_indices = dst_indices;
+        dst_th_indices.push_back(T.thread_var);
+        auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
+        inv.pop_back();
+        for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
+          predicate = predicate && (inv[i] == dst_vars[i]->var);
+        }
+        predicate = analyzer->Simplify(predicate);
+      }
+      if (need_duplicate) {
+        PrimExpr update;
+        if (need_update) {
+          auto src_val = BufferLoad(clear_buffer, red_indices);
+          auto dst_val = BufferLoad(dst_buffer, dst_indices);
+          if (this->type->isSum() || this->type->isAbsSum()) {
+            update = dst_val + src_val;
+          } else if (this->type->isBitAnd()) {
+            update = this->clear ? src_val : bitwise_and(dst_val, src_val);
+          } else if (this->type->isBitOr()) {
+            update = bitwise_or(dst_val, src_val);
+          } else if (this->type->isBitXor()) {
+            update = bitwise_xor(dst_val, src_val);
+          } else if (this->type->isMax() || this->type->isAbsMax()) {
+            update = Max(dst_val, src_val);
+          } else if (this->type->isMin()) {
+            update = Min(dst_val, src_val);
+          } else {
+            LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
+          }
+        } else {
+          update = BufferLoad(clear_buffer, red_indices);
+        }
+        auto store = BufferStore(dst_buffer, update, dst_indices);
+        if (analyzer->CanProve(predicate)) {
+          stmts.push_back(store);
+        } else {
+          stmts.push_back(IfThenElse(predicate, store));
+        }
+      }
+
+      auto body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
+      for (int i = static_cast<int>(dst_layout->InputDim()) - 1; i >= 0; --i) {
+        body = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
+                   ForKind::kParallel, body);
+      }
+
+      if (dst_layout->InputDim() > 0) {
+        body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
+                             red_layout);
+        body = PragmaUnrollLoop(Downcast<For>(body));
+      } else {
+        auto guard = (T.thread_var == T.thread_bounds->min);
+        body = IfThenElse(guard, body);
+      }
+
+      if (need_duplicate) {
+        body = Allocate(clear_buffer->data, clear_buffer->dtype,
+                        clear_buffer->shape, const_true(), body);
+      }
+      return body;
     }
-    return body;
   }
 
   LOG(FATAL) << "Reduce for buffers in scope (" << src_scope << ", "

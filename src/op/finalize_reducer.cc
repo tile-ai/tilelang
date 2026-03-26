@@ -97,8 +97,44 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
 
   // adopted from ReduceOp
   int reducing_threads = extent;
-  std::stringstream ss;
   auto thread_offset = T.thread_bounds->min;
+
+  // Compute batch_size (product of output shape).
+  int64_t batch_size = 1;
+  for (int i = 0; i < layout->OutputDim(); ++i) {
+    const int64_t *p = as_const_int(layout->OutputShape()[i]);
+    if (p == nullptr) {
+      batch_size = -1;
+      break;
+    }
+    batch_size *= *p;
+  }
+
+  bool use_batch = batch_size > 1 && reducing_threads > 32;
+
+  if (use_batch) {
+    // Batched AllReduce: single butterfly pass for all output elements.
+    int workspace_stride =
+        static_cast<int>(*as_const_int(T.thread_bounds->extent));
+    std::stringstream ss;
+    if (TargetHasSMVersionGE(T.target, 90)) {
+      auto all_threads = T.thread_bounds->extent;
+      ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
+         << ", " << thread_offset << ", tl::NamedBarrier<" << all_threads
+         << ">, " << batch_size << ", " << workspace_stride << ">::run";
+    } else {
+      ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
+         << ", " << thread_offset << ", tl::SyncThreadsBarrier, " << batch_size
+         << ", " << workspace_stride << ">::run";
+    }
+    int ws_size = workspace_stride * static_cast<int>(batch_size);
+    PrimExpr workspace = T.AddWorkspace(ws_size, buffer->dtype);
+    Array<PrimExpr> args = {StringImm(ss.str()), buffer->data, workspace};
+    return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
+  }
+
+  // Scalar AllReduce path (original).
+  std::stringstream ss;
   if (TargetHasSMVersionGE(T.target, 90)) {
     auto all_threads = T.thread_bounds->extent;
     ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
