@@ -602,6 +602,21 @@ template <> struct to_cute_type<tl::float_e5m2_t> {
 // dispatches to the right overload without ambiguous uint1 bridges.
 // =========================================================================
 
+// Cast helpers between uint1 and native packed types.
+// Used by the CUDA codegen to convert between TVM's uint1 representation
+// and the native __nv_bfloat162 / __half2 types.
+template <typename T> TL_DEVICE T from_uint1(uint1 v) {
+  T r;
+  memcpy(&r, &v, sizeof(T));
+  return r;
+}
+
+template <typename T> TL_DEVICE uint1 to_uint1(T v) {
+  uint1 r;
+  memcpy(&r, &v, sizeof(uint1));
+  return r;
+}
+
 // --- add2 ----------------------------------------------------------------
 
 TL_DEVICE float2 add2(float2 a, float2 b) {

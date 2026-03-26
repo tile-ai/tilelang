@@ -878,10 +878,12 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         std::string rhs_str = PrintExpr(rhs);
 
         if (need_cast) {
-          std::string cast_lhs = "(*(" + native_type + "*)&(" + lhs_str + "))";
-          std::string cast_rhs = "(*(" + native_type + "*)&(" + rhs_str + "))";
-          os << "({auto __tl_r = tl::" << tl_func << "(" << cast_lhs << ", "
-             << cast_rhs << "); *(uint1*)&__tl_r;})";
+          std::string cast_lhs =
+              "tl::from_uint1<" + native_type + ">(" + lhs_str + ")";
+          std::string cast_rhs =
+              "tl::from_uint1<" + native_type + ">(" + rhs_str + ")";
+          os << "tl::to_uint1(tl::" << tl_func << "(" << cast_lhs << ", "
+             << cast_rhs << "))";
         } else {
           os << "tl::" << tl_func << "(" << lhs_str << ", " << rhs_str << ")";
         }
@@ -3214,15 +3216,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto print_arg = [&](int idx) -> std::string {
       std::string arg_str = PrintExpr(op->args[idx]);
       if (need_cast) {
-        return "(*(" + native_type + "*)&(" + arg_str + "))";
+        return "tl::from_uint1<" + native_type + ">(" + arg_str + ")";
       }
       return arg_str;
     };
 
     if (need_cast) {
-      // Wrap: *(uint1*)&(tl::op(...))
-      // We use a compound expression to avoid evaluating args multiple times.
-      os << "({auto __tl_r = tl::" << op_name << "(";
+      os << "tl::to_uint1(tl::" << op_name << "(";
     } else {
       os << "tl::" << op_name << "(";
     }
@@ -3234,7 +3234,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
 
     if (need_cast) {
-      os << "; *(uint1*)&__tl_r;})";
+      os << ")";
     }
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
