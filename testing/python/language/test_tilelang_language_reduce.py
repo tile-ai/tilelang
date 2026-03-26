@@ -317,5 +317,61 @@ def test_reduce_sum_clear_AB_shared():
     run_reduce_sum_clear(32, 32, T.float32, reduce_sum_test_clear_AB_shared)
 
 
+BATCHED_REDUCE_CASES = [
+    ("max", T.bfloat16, 128, 64, 256),
+    ("sum", T.float32, 128, 64, 256),
+    ("min", T.float32, 64, 128, 128),
+]
+
+
+@pytest.mark.parametrize(
+    ("op", "dtype", "M", "N", "threads"),
+    BATCHED_REDUCE_CASES,
+    ids=[f"{op}-{dtype}-{M}x{N}-t{threads}" for op, dtype, M, N, threads in BATCHED_REDUCE_CASES],
+)
+def test_batched_allreduce_codegen(op, dtype, M, N, threads):
+    """Verify that the batched AllReduce path is emitted when each thread
+    holds multiple values to reduce across warps."""
+    import re
+
+    reduce_fn = {
+        "sum": T.reduce_sum,
+        "max": T.reduce_max,
+        "min": T.reduce_min,
+    }[op]
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, N), dtype), B: T.Tensor((N,), dtype)):
+        with T.Kernel(1, threads=threads):
+            A_shared = T.alloc_shared((M, N), dtype)
+            frag = T.alloc_fragment((N,), dtype)
+            T.copy(A, A_shared)
+            reduce_fn(A_shared, frag, dim=0)
+            T.copy(frag, B)
+
+    mod = tl.compile(
+        kernel,
+        out_idx=-1,
+        pass_configs={
+            tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+            tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        },
+    )
+    src = mod.get_kernel_source()
+
+    # The batched path emits AllReduce with extra batch_size and
+    # workspace_stride template arguments (last two integers before
+    # >::run) and passes an array pointer instead of a scalar.
+    # Match ", <batch_size>, <workspace_stride>>::run(" at the end of
+    # the template instantiation.
+    pattern = r",\s*(\d+)\s*,\s*(\d+)\s*>::run\("
+    match = re.search(pattern, src)
+    assert match is not None, (
+        f"Expected batched AllReduce (with batch_size, workspace_stride) in generated source, but not found.\nGenerated source:\n{src}"
+    )
+    batch_size = int(match.group(1))
+    assert batch_size > 1, f"Expected batch_size > 1, got {batch_size}.\nGenerated source:\n{src}"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
