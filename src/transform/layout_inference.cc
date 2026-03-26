@@ -47,6 +47,9 @@ int64_t GetElementStorageBits(DataType dtype) {
   return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
 }
 
+static constexpr const char *kPipelineContextNumStages =
+    "tl.pipeline_context_num_stages";
+
 } // namespace
 
 /*!
@@ -814,6 +817,15 @@ private:
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
+    bool enter_pipelined = false;
+    if (op->attr_key == kPipelineContextNumStages) {
+      if (const auto *imm = op->value.as<IntImmNode>()) {
+        if (imm->value > 0) {
+          ++pipelined_depth_;
+          enter_pipelined = true;
+        }
+      }
+    }
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
@@ -822,6 +834,10 @@ private:
       }
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
+    if (enter_pipelined) {
+      ICHECK_GT(pipelined_depth_, 0);
+      --pipelined_depth_;
+    }
   }
 
   void VisitStmt_(const LetStmtNode *op) final {

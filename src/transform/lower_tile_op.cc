@@ -30,6 +30,13 @@
 namespace tvm {
 namespace tl {
 
+namespace {
+
+static constexpr const char *kPipelineContextNumStages =
+    "tl.pipeline_context_num_stages";
+
+} // namespace
+
 using namespace tir;
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
@@ -1095,6 +1102,9 @@ private:
       mbar_phase_expr =
           FloorMod(FloorDiv(loop_var, ns), IntImm(DataType::Int(32), 2));
     } else {
+      if (!pipeline_context_num_stages_stack_.empty()) {
+        pipeline_num_stages = pipeline_context_num_stages_stack_.back();
+      }
       mbar_phase_expr = IntImm(DataType::Int(32), 0);
     }
 
@@ -1111,6 +1121,17 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    bool enter_pipeline_context = false;
+    if (op->attr_key == kPipelineContextNumStages) {
+      if (const auto *imm = op->value.as<IntImmNode>()) {
+        if (imm->value > 0) {
+          pipeline_context_num_stages_stack_.push_back(
+              static_cast<int>(imm->value));
+          ++pipelined_depth_;
+          enter_pipeline_context = true;
+        }
+      }
+    }
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
@@ -1120,7 +1141,13 @@ private:
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
       }
     }
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (enter_pipeline_context) {
+      ICHECK_GT(pipelined_depth_, 0);
+      --pipelined_depth_;
+      pipeline_context_num_stages_stack_.pop_back();
+    }
+    return stmt;
   }
 
   /**
@@ -1148,10 +1175,14 @@ private:
     // Track enclosing loop variables for mbarrier parity computation.
     loop_var_stack_.push_back(op->loop_var);
     // Track pipeline num_stages from the loop's annotation.
-    int num_stages = 1;
+    int num_stages = pipeline_context_num_stages_stack_.empty()
+                         ? 1
+                         : pipeline_context_num_stages_stack_.back();
+    bool has_num_stages_anno = false;
     if (auto ns_anno = op->annotations.Get("num_stages")) {
       if (auto *ns_int = ns_anno.value().as<IntImmNode>()) {
         num_stages = static_cast<int>(ns_int->value);
+        has_num_stages_anno = true;
       }
     }
     pipeline_num_stages_stack_.push_back(num_stages);
@@ -1164,8 +1195,11 @@ private:
                          .value();
     }
 
-    bool enter_pipelined = false;
-    if (auto num_stages_anno = op->annotations.Get("num_stages")) {
+    bool enter_pipelined =
+        (!pipeline_context_num_stages_stack_.empty() &&
+         pipeline_context_num_stages_stack_.back() > 0);
+    if (has_num_stages_anno) {
+      auto num_stages_anno = op->annotations.Get("num_stages");
       const auto *imm = num_stages_anno->as<IntImmNode>();
       ICHECK(imm) << "For annotation num_stages must be IntImm, but got "
                   << num_stages_anno.value();
@@ -1390,6 +1424,8 @@ private:
   std::vector<Var> loop_var_stack_;
   // Stack of pipeline num_stages values from enclosing loop annotations.
   std::vector<int> pipeline_num_stages_stack_;
+  // Stack of explicit pipeline contexts injected before LowerTileOp.
+  std::vector<int> pipeline_context_num_stages_stack_;
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.
   bool is_ptx_{false};

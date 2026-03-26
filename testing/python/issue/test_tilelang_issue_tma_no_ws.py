@@ -259,6 +259,50 @@ def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_num_stages_one_cp_async_only_keeps_non_ws_launch_shape():
+    """Stage-1 cp.async-only loops should stay non-WS on Hopper."""
+
+    bytes_per_copy = 16
+    threads = 32
+
+    @T.prim_func
+    def cp_async_only_num_stages_one(
+        x: T.Tensor((4 * bytes_per_copy,), T.uint8),
+        y: T.Tensor((4 * bytes_per_copy,), T.uint8),
+    ):
+        with T.Kernel(1, threads=threads):
+            x_shared = T.alloc_shared((bytes_per_copy,), dtype=T.uint8)
+            for ko in T.Pipelined(4, num_stages=1):
+                T.ptx_cp_async(
+                    T.access_ptr(x_shared[0], "w", bytes_per_copy),
+                    T.access_ptr(x[ko * bytes_per_copy], "r", bytes_per_copy),
+                    bytes_per_copy,
+                )
+                T.ptx_commit_group()
+                T.ptx_wait_group(0)
+                for i in T.serial(bytes_per_copy):
+                    y[ko * bytes_per_copy + i] = x_shared[i]
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+    }
+    kernel = _compile_tvm_ffi(cp_async_only_num_stages_one, pass_configs, out_idx=[1])
+
+    src = kernel.get_kernel_source()
+    assert "cp_async_gs<16>" in src
+    assert "__launch_bounds__(32, 1)" in src
+    assert "__launch_bounds__(160, 1)" not in src
+    assert "if (32 <= ((int)threadIdx.x))" not in src
+
+    x = torch.randint(0, 256, (4 * bytes_per_copy,), device="cuda", dtype=torch.uint8)
+    y = kernel(x)
+    torch.testing.assert_close(y, x)
+    torch.cuda.synchronize()
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
     """Mixed TMA+cp.async loops should auto-WS when num_stages is enabled."""
 

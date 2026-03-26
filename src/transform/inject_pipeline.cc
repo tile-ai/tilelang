@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/region.h"
 #include "common/tma_copy_utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
@@ -21,6 +22,9 @@ namespace tl {
 using namespace tir;
 using namespace ffi;
 namespace software_pipeline {
+
+static constexpr const char *kPipelineContextNumStages =
+    "tl.pipeline_context_num_stages";
 
 struct LetWrapper {
   Var var;
@@ -282,6 +286,22 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
+    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+      if (auto load = call->args[0].as<BufferLoadNode>()) {
+        size_t num_extents = call->args.size() - 2;
+        if (load->indices.size() == num_extents + 1) {
+          Array<PrimExpr> new_args;
+          new_args.push_back(call->args[0]);
+          new_args.push_back(call->args[1]);
+          new_args.push_back(IntImm(DataType::Int(32), 1));
+          for (size_t i = 2; i < call->args.size(); ++i) {
+            new_args.push_back(call->args[i]);
+          }
+          return Call(call->dtype, call->op, new_args, call->annotations,
+                      call->span);
+        }
+      }
+    }
     return call;
   }
 
@@ -528,12 +548,6 @@ private:
     return Buffer(new_buffer);
   }
 
-  /*! Structure holding intermediate information for pipeline loop rewriting. */
-  struct RewrittenBlockInfo {
-    PrimExpr predicate;
-    Block block;
-  };
-
   /*!
    * \brief Emit the pipeline loop in the given range.
    * \param start The start of the range
@@ -570,7 +584,7 @@ private:
           new With<arith::ConstraintContext>(&analyzer_, loop_iter < end));
     }
 
-    std::vector<RewrittenBlockInfo> new_blocks;
+    std::vector<Stmt> new_blocks;
 
     for (const Block &block : ordered_stmts_) {
       int stage = pipeline_info_.at(block).stage;
@@ -601,53 +615,41 @@ private:
       new_block = Downcast<Block>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
 
-      // If there were Let-wrappers outside the original pipeline body that
-      // depended on the pipeline loop var, push them into each rewritten
-      // block with the correct per-block substitution.
-      // We iterate in reverse order so that earlier definitions scope over
-      // later ones. For example, if we have:
-      //   id = ids[i]       # depends on loop var
-      //   id2 = ids2[id]    # depends on id
-      // We want to produce:
-      //   LetStmt(id, ids[...],
-      //     LetStmt(id2, ids2[id],
-      //       body))
-      // So that id2's definition can reference id.
-      if (!loop_var_let_wrappers_.empty()) {
-        BlockNode *n = new_block.CopyOnWrite();
-        Stmt inner = n->body;
-        for (auto it = loop_var_let_wrappers_.rbegin();
-             it != loop_var_let_wrappers_.rend(); ++it) {
-          const auto &lw = *it;
-          PrimExpr substituted = Substitute(
-              lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
-          inner = LetStmt(lw.var, substituted, inner);
-        }
-        n->body = inner;
+      Stmt rewritten_stmt = BlockRealize({}, inbound, new_block);
+
+      // Re-attach loop-dependent If/Let wrappers outside the block realize so
+      // their bindings also scope the block metadata (reads/writes/predicate).
+      // The original structure is:
+      //   LetStmt(...):
+      //     LetStmt(...):
+      //       IfThenElse(cond):
+      //         block
+      // Rebuild it from the inside out. We place If wrappers first and Let
+      // wrappers last so loop-dependent Let bindings remain visible to both
+      // the block body and the lifted If conditions.
+      for (auto it = loop_var_if_wrappers_.rbegin();
+           it != loop_var_if_wrappers_.rend(); ++it) {
+        const auto &iw = *it;
+        PrimExpr substituted_condition =
+            Substitute(iw.condition,
+                       {{pipeline_loop_->loop_var, normalized_access_index}});
+        rewritten_stmt =
+            IfThenElse(substituted_condition, rewritten_stmt, Stmt(), iw.span);
+      }
+      for (auto it = loop_var_let_wrappers_.rbegin();
+           it != loop_var_let_wrappers_.rend(); ++it) {
+        const auto &lw = *it;
+        PrimExpr substituted = Substitute(
+            lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
+        rewritten_stmt = LetStmt(lw.var, substituted, rewritten_stmt);
       }
 
-      // Similarly, handle If-wrappers whose conditions depend on the
-      // pipeline loop var.
-      if (!loop_var_if_wrappers_.empty()) {
-        BlockNode *n = new_block.CopyOnWrite();
-        Stmt inner = n->body;
-        for (auto it = loop_var_if_wrappers_.rbegin();
-             it != loop_var_if_wrappers_.rend(); ++it) {
-          const auto &iw = *it;
-          PrimExpr substituted_condition =
-              Substitute(iw.condition,
-                         {{pipeline_loop_->loop_var, normalized_access_index}});
-          inner = IfThenElse(substituted_condition, inner, Stmt(), iw.span);
-        }
-        n->body = inner;
-      }
-
-      new_blocks.push_back({inbound, new_block});
+      new_blocks.push_back(std::move(rewritten_stmt));
     }
 
     Array<Stmt> stmts;
-    for (const auto &block_info : new_blocks) {
-      stmts.push_back(BlockRealize({}, block_info.predicate, block_info.block));
+    for (const auto &stmt : new_blocks) {
+      stmts.push_back(stmt);
     }
 
     Stmt new_loop{nullptr};
@@ -668,7 +670,9 @@ private:
         const String &key = kv.first;
         if (kv.first != tir::attr::software_pipeline_stage &&
             kv.first != tir::attr::software_pipeline_order &&
-            kv.first != tir::attr::software_pipeline_async_stages) {
+            kv.first != tir::attr::software_pipeline_async_stages &&
+            kv.first != "num_stages" &&
+            kv.first != "tl_pipelined_num_stages") {
           preserved_annotations.Set(key, kv.second);
         }
       }
@@ -676,8 +680,13 @@ private:
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
                      std::move(new_loop), std::nullopt, preserved_annotations);
     }
-    return BlockRealize({}, Bool(true),
-                        MakeBlock(new_loop, buffer_data_to_buffer_));
+    Stmt result =
+        BlockRealize({}, Bool(true), MakeBlock(new_loop, buffer_data_to_buffer_));
+    if (auto num_stages = pipeline_loop_->annotations.Get("num_stages")) {
+      result = AttrStmt(Integer(0), kPipelineContextNumStages,
+                        Downcast<PrimExpr>(num_stages.value()), result);
+    }
+    return result;
   }
 
   arith::Analyzer analyzer_;
