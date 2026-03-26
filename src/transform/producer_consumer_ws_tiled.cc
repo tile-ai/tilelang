@@ -62,9 +62,6 @@ void FlattenSeqStmt(const Stmt &s, Array<Stmt> *out) {
   }
 }
 
-/// Annotation key written by InstructionAnnotation.
-static constexpr const char *kInstructionKind = "tl_instruction_kind";
-
 /// Annotation key marking that this function was transformed by the tiled WS
 /// pass, so downstream passes can skip redundant transformations.
 static constexpr const char *kTiledWSApplied = "tl_tiled_ws_applied";
@@ -74,8 +71,8 @@ static constexpr const char *kTiledWSApplied = "tl_tiled_ws_applied";
 // ---------------------------------------------------------------------------
 
 enum class TileStmtKind {
-  kTmaProducer,     // TMA copy tile op (annotated "tma")
-  kCpAsyncProducer, // cp.async copy tile op (annotated "cp_async")
+  kTmaProducer,     // TMA load producer (global->shared)
+  kCpAsyncProducer, // Explicit cp.async / commit / wait_group producer stmt
   kSimtProducer,    // Non-tile-op SIMT copy: For loop writing shared from global
   kConsumer,        // Compute (gemm, reduce, element-wise, etc.)
   kOther            // Unclassified
@@ -94,13 +91,11 @@ public:
 
 private:
   void VisitStmt_(const BufferStoreNode *op) final {
-    // Check: store to shared, value is a direct BufferLoad from global
-    // (no computation on the value).
     if (IsSharedBuffer(op->buffer)) {
       if (auto *load = op->value.as<BufferLoadNode>()) {
         if (IsGlobalBuffer(load->buffer)) {
           is_pure_copy_ = true;
-          return; // Don't recurse further
+          return;
         }
       }
     }
@@ -110,30 +105,108 @@ private:
   bool is_pure_copy_{false};
 };
 
+static const CallNode *GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
+  if (const auto *eval = stmt.as<EvaluateNode>()) {
+    return eval->value.as<CallNode>();
+  }
+  if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+    if (!if_stmt->else_case.defined()) {
+      return GetEvaluateCallInSimpleWrapper(if_stmt->then_case);
+    }
+    return nullptr;
+  }
+  if (const auto *attr = stmt.as<AttrStmtNode>()) {
+    return GetEvaluateCallInSimpleWrapper(attr->body);
+  }
+  if (const auto *let = stmt.as<LetStmtNode>()) {
+    return GetEvaluateCallInSimpleWrapper(let->body);
+  }
+  if (const auto *block = stmt.as<BlockNode>()) {
+    return GetEvaluateCallInSimpleWrapper(block->body);
+  }
+  if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+    return GetEvaluateCallInSimpleWrapper(realize->block->body);
+  }
+  return nullptr;
+}
+
+static bool ContainsPtxCpAsync(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (found) {
+      return;
+    }
+    if (const auto *call = node.as<CallNode>()) {
+      if (call->op.same_as(builtin::ptx_cp_async()) ||
+          call->op.same_as(tl::ptx_cp_async())) {
+        found = true;
+      }
+    }
+  });
+  return found;
+}
+
+static bool IsPtxCommitGroup(const Stmt &stmt) {
+  const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
+  return call && call->op.same_as(builtin::ptx_commit_group());
+}
+
+static bool IsPtxWaitGroup(const Stmt &stmt) {
+  const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
+  return call && call->op.same_as(builtin::ptx_wait_group());
+}
+
+/// Classify a tile-op copy as TMA load producer, cp.async producer, or consumer.
+/// Replicates the coarse checks from InstructionAnnotation inline so that
+/// the tiled WS pass does not depend on a prior annotation pass.
+static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
+  // Explicit T.tma_copy() is a load-side primitive: only treat valid
+  // global->shared TMA loads as producers.  TMA stores consume previously
+  // produced shared data and must stay on the consumer side to preserve
+  // per-iteration ordering.
+  if (copy->GetIsTmaCopy()) {
+    arith::Analyzer analyzer;
+    if (copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/false)) {
+      return TileStmtKind::kTmaProducer;
+    }
+    return TileStmtKind::kConsumer; // target doesn't support TMA
+  }
+  // Explicit T.async_copy()
+  if (copy->GetIsAsyncCopy()) {
+    return TileStmtKind::kCpAsyncProducer;
+  }
+  // Generic T.copy(): check if TMA is possible
+  {
+    arith::Analyzer analyzer;
+    if (copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/true)) {
+      return TileStmtKind::kTmaProducer;
+    }
+  }
+  return TileStmtKind::kConsumer;
+}
+
 /// Classify a single statement in the pipeline loop body.
-TileStmtKind ClassifyStmt(const Stmt &stmt) {
-  // Tile-op Calls: use InstructionAnnotation.
+TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
+  // Tile-op Calls: classify directly via CopyNode checks.
   if (auto *eval = stmt.as<EvaluateNode>()) {
     if (auto *call = eval->value.as<CallNode>()) {
-      if (auto kind_anno = call->annotations.Get(kInstructionKind)) {
-        if (auto *str_imm = kind_anno->as<StringImmNode>()) {
-          if (str_imm->value == "tma")
-            return TileStmtKind::kTmaProducer;
-          if (str_imm->value == "cp_async")
-            return TileStmtKind::kCpAsyncProducer;
+      auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+      if (tile_op.defined()) {
+        if (auto *copy = tile_op.as<CopyNode>()) {
+          return ClassifyCopy(copy, target);
         }
-      }
-      // Tile-op with no producer annotation → consumer.
-      if (ParseOperator(ffi::GetRef<Call>(call)).defined()) {
-        return TileStmtKind::kConsumer;
+        return TileStmtKind::kConsumer; // non-copy tile-op
       }
     }
   }
-  // Non-tile-op statements (SIMT loops, scalar ops, etc.) are treated as
-  // consumer.  SIMT global-to-shared copies are NOT promoted to producer
-  // at this stage — they remain in the consumer branch and the old WS pass
-  // (ProducerConsumerWarpSpecialized in OptimizeForTarget) can convert them
-  // to cp.async if appropriate.
+  // Explicit cp.async producer-side statements are already low-level builtins.
+  if (ContainsPtxCpAsync(stmt) || IsPtxCommitGroup(stmt) || IsPtxWaitGroup(stmt)) {
+    return TileStmtKind::kCpAsyncProducer;
+  }
+  // Non-tile-op: check for SIMT global-to-shared copy.
+  if (SimtProducerDetector::Detect(stmt)) {
+    return TileStmtKind::kSimtProducer;
+  }
   return TileStmtKind::kConsumer;
 }
 
@@ -174,26 +247,8 @@ static PrimExpr RewriteCopyToTmaCopy(const Call &copy_call,
   auto new_annotations = copy_call->annotations;
   new_annotations.Set("barrier", MakeBarrierRef(barrier_buf, barrier_id));
   new_annotations.Set("is_tma_copy", IntImm(DataType::Int(32), 1));
-  // Remove the instruction annotation — it has been consumed.
-  new_annotations.erase(kInstructionKind);
   return Call(copy_call->dtype, tma_copy_op, copy_call->args, new_annotations,
               copy_call->span);
-}
-
-/// Strip `tl_instruction_kind` from a statement's Call annotations.
-static Stmt StripInstructionKind(const Stmt &stmt) {
-  if (auto *eval = stmt.as<EvaluateNode>()) {
-    if (auto *call = eval->value.as<CallNode>()) {
-      if (call->annotations.count(kInstructionKind)) {
-        auto new_annotations = call->annotations;
-        new_annotations.erase(kInstructionKind);
-        auto new_call =
-            Call(call->dtype, call->op, call->args, new_annotations, call->span);
-        return Evaluate(new_call);
-      }
-    }
-  }
-  return stmt;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +268,10 @@ public:
 
     if (T.ws_transformed_) {
       f = WithAttr(std::move(f), kTiledWSApplied, IntImm(DataType::Int(32), 1));
+      if (T.ws_total_threads_.defined()) {
+        f = WithAttr(std::move(f), "tl_ws_total_threads",
+                     T.ws_total_threads_.value());
+      }
     }
     return f;
   }
@@ -279,39 +338,18 @@ private:
     // Classify statements into producer (TMA/SIMT copy) and consumer.
     std::vector<TileStmtKind> kinds;
     int num_tma = 0;
-    int num_cp_async = 0;
     int num_simt = 0;
     for (const Stmt &s : flat_stmts) {
-      auto k = ClassifyStmt(s);
+      auto k = ClassifyStmt(s, target_);
       kinds.push_back(k);
       if (k == TileStmtKind::kTmaProducer)
         ++num_tma;
-      if (k == TileStmtKind::kCpAsyncProducer)
-        ++num_cp_async;
       if (k == TileStmtKind::kSimtProducer)
         ++num_simt;
     }
 
-    // Check that all consumer stmts are tile-op Calls.  If the pipeline
-    // body contains non-tile-op consumer statements (SIMT parallel loops,
-    // scalar ops, etc.), fall back to the old WS path which runs after
-    // LowerTileOp and can handle arbitrary lowered IR.
-    bool has_non_tileop_consumer = false;
-    for (size_t i = 0; i < flat_stmts.size(); ++i) {
-      if (kinds[i] == TileStmtKind::kConsumer) {
-        if (auto *eval = flat_stmts[i].as<EvaluateNode>()) {
-          if (auto *call = eval->value.as<CallNode>()) {
-            if (ParseOperator(ffi::GetRef<Call>(call)).defined()) {
-              continue; // tile-op consumer — OK
-            }
-          }
-        }
-        has_non_tileop_consumer = true;
-      }
-    }
-
-    // Require at least one TMA producer, no cp.async, no non-tile-op consumers.
-    if (num_tma == 0 || num_cp_async > 0 || has_non_tileop_consumer)
+    // Require at least one TMA producer.
+    if (num_tma == 0)
       return StmtExprMutator::VisitStmt_(op);
 
     // --- Build the WS transformation ---
@@ -340,12 +378,15 @@ private:
     PrimExpr producer_extent = IntImm(DataType::Int(32), 128);
 
     bool has_simt_producer = false;
+    bool has_cp_async_producer = false;
     int num_producer_groups = 0;
     for (auto k : kinds) {
       if (k == TileStmtKind::kTmaProducer)
         ++num_producer_groups;
       if (k == TileStmtKind::kSimtProducer)
         has_simt_producer = true;
+      if (k == TileStmtKind::kCpAsyncProducer)
+        has_cp_async_producer = true;
     }
 
     // --- Barrier allocation ---
@@ -361,11 +402,12 @@ private:
 
     // Forward arrive_count:
     //   - Pure TMA: 1 (leader thread only issues expect_tx + tma_load + arrive)
-    //   - Mixed TMA+SIMT: producer_extent (128) — all producer threads arrive
-    //     after both TMA and SIMT copies complete
+    //   - Mixed TMA with SIMT/cp.async producers: producer_extent (128) —
+    //     all producer threads arrive after all producer-side work completes.
     PrimExpr fwd_arrive_count =
-        has_simt_producer ? producer_extent  // 128
-                          : IntImm(DataType::Int(32), 1);
+        (has_simt_producer || has_cp_async_producer)
+            ? producer_extent  // 128
+            : IntImm(DataType::Int(32), 1);
     Array<PrimExpr> arrive_counts;
     for (int i = 0; i < num_fwd; ++i) {
       arrive_counts.push_back(fwd_arrive_count);
@@ -376,8 +418,8 @@ private:
 
     // --- Build producer body ---
     // Producer structure:
-    //   bp_wait → TMA copies (leader gated) → SIMT copies (all threads) → fwd arrive
-    // We group all producers under the LAST TMA group's barrier.
+    //   bp_wait → TMA copies (leader gated) → SIMT/cp.async producers
+    //   (all threads) → fwd arrive.
     Array<Stmt> producer_stmts;
     int tma_idx = 0;
     int last_tma_idx = num_producer_groups - 1;
@@ -410,11 +452,14 @@ private:
       } else if (kinds[i] == TileStmtKind::kSimtProducer) {
         // SIMT copy goes directly into producer body (all threads)
         producer_stmts.push_back(flat_stmts[i]);
+      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer) {
+        producer_stmts.push_back(flat_stmts[i]);
       }
       // Consumer/Other statements are skipped in producer.
     }
-    // When SIMT producers present: all producer threads arrive on all fwd barriers
-    if (has_simt_producer) {
+    // When any producer-side work is not single-threaded pure-TMA, all
+    // producer threads arrive on all forward barriers after finishing it.
+    if (has_simt_producer || has_cp_async_producer) {
       for (int g = 0; g < num_producer_groups; ++g) {
         int fwd_base = g * num_stages;
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + stage_expr;
@@ -434,7 +479,7 @@ private:
     // Consumer statements (everything not a producer)
     for (size_t i = 0; i < flat_stmts.size(); ++i) {
       if (!IsProducer(kinds[i])) {
-        consumer_stmts.push_back(StripInstructionKind(flat_stmts[i]));
+        consumer_stmts.push_back(flat_stmts[i]);
       }
     }
     // Back-pressure arrives
@@ -456,6 +501,9 @@ private:
     Stmt consumer_body = wrap_lets(SeqStmt(consumer_stmts));
 
     // --- Build loops (strip pipeline annotations) ---
+    // WS handles pipeline overlap via barriers, so strip all pipeline-
+    // related annotations to prevent PipelinePlanning / InjectSoftware-
+    // Pipeline from re-pipelining the already WS-transformed loops.
     Map<String, Any> loop_annos;
     for (const auto &[key, value] : pipeline_loop->annotations) {
       if (key != "num_stages" && key != "tl_pipeline_order" &&
@@ -482,36 +530,14 @@ private:
     Stmt ws_body = IfThenElse(GE(thread_iv_->var, consumer_extent),
                               rewritten_producer, rewritten_consumer);
 
-    // --- Handle pre-loop and post-loop statements ---
-    // Split the block body into pre-loop, loop, post-loop.
-    Array<Stmt> pre_loop, post_loop;
-    bool found_loop = false;
-    Array<Stmt> block_stmts;
-    FlattenSeqStmt(orig_block->body, &block_stmts);
-    for (const Stmt &s : block_stmts) {
-      if (s.get() == pipeline_loop) {
-        found_loop = true;
-      } else if (!found_loop) {
-        pre_loop.push_back(s);
-      } else {
-        post_loop.push_back(s);
-      }
-    }
-
-    // Post-loop runs on consumer threads only.
-    Array<Stmt> final_stmts;
-    for (const auto &s : pre_loop) {
-      final_stmts.push_back(s);
-    }
-    final_stmts.push_back(ws_body);
-    if (!post_loop.empty()) {
-      Stmt post = post_loop.size() == 1 ? post_loop[0] : SeqStmt(post_loop);
-      final_stmts.push_back(
-          IfThenElse(LT(thread_iv_->var, consumer_extent), post));
-    }
-
-    Stmt new_block_body =
-        final_stmts.size() == 1 ? final_stmts[0] : SeqStmt(final_stmts);
+    // Replace the original pipeline loop in-place so outer Let/Seq wrappers
+    // are preserved.  Any statements after the replaced subtree run on the
+    // consumer threads only.
+    ReplaceResult replaced = ReplacePipelineLoopInStmt(
+        orig_block->body, pipeline_loop, ws_body, consumer_extent);
+    ICHECK(replaced.found)
+        << "ProducerConsumerWSTiled: failed to replace pipeline loop";
+    Stmt new_block_body = replaced.stmt;
 
     // --- Update block ---
     Block new_block = orig_block;
@@ -535,8 +561,10 @@ private:
     ann.Set("barrier_init", barrier_init_map);
     block_ptr->annotations = std::move(ann);
 
-    // --- Update thread extent ---
+    // Update thread extent at the tiled WS level so LayoutInference sees
+    // the producer branch as live and can analyze explicit TMA copies.
     num_threads_ = consumer_extent + producer_extent;
+    ws_total_threads_ = consumer_extent + producer_extent;
     ws_transformed_ = true;
 
     // Rebuild BlockRealize.
@@ -566,7 +594,90 @@ private:
     if (auto *realize = stmt.as<BlockRealizeNode>()) {
       return FindPipelineLoop(realize->block->body);
     }
+    if (auto *block = stmt.as<BlockNode>()) {
+      return FindPipelineLoop(block->body);
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      return FindPipelineLoop(attr->body);
+    }
     return nullptr;
+  }
+
+  struct ReplaceResult {
+    Stmt stmt;
+    bool found{false};
+  };
+
+  Stmt GuardConsumerOnly(const Stmt &stmt, PrimExpr consumer_extent) {
+    return IfThenElse(LT(thread_iv_->var, consumer_extent), stmt);
+  }
+
+  ReplaceResult ReplacePipelineLoopInStmt(const Stmt &stmt,
+                                          const ForNode *pipeline_loop,
+                                          const Stmt &ws_body,
+                                          PrimExpr consumer_extent) {
+    if (stmt.get() == pipeline_loop) {
+      return {ws_body, true};
+    }
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      Array<Stmt> new_seq;
+      bool found = false;
+      for (const Stmt &child : seq->seq) {
+        if (!found) {
+          ReplaceResult result = ReplacePipelineLoopInStmt(
+              child, pipeline_loop, ws_body, consumer_extent);
+          new_seq.push_back(result.stmt);
+          found = result.found;
+        } else {
+          new_seq.push_back(GuardConsumerOnly(child, consumer_extent));
+        }
+      }
+      if (!found) {
+        return {stmt, false};
+      }
+      return {new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq), true};
+    }
+    if (auto *let = stmt.as<LetStmtNode>()) {
+      ReplaceResult result = ReplacePipelineLoopInStmt(
+          let->body, pipeline_loop, ws_body, consumer_extent);
+      if (!result.found) {
+        return {stmt, false};
+      }
+      return {LetStmt(let->var, let->value, result.stmt), true};
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      ReplaceResult result = ReplacePipelineLoopInStmt(
+          realize->block->body, pipeline_loop, ws_body, consumer_extent);
+      if (!result.found) {
+        return {stmt, false};
+      }
+      Block block = realize->block;
+      block.CopyOnWrite()->body = result.stmt;
+      BlockRealize new_realize = GetRef<BlockRealize>(realize);
+      new_realize.CopyOnWrite()->block = block;
+      return {new_realize, true};
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      ReplaceResult result = ReplacePipelineLoopInStmt(
+          block->body, pipeline_loop, ws_body, consumer_extent);
+      if (!result.found) {
+        return {stmt, false};
+      }
+      Block new_block = GetRef<Block>(block);
+      new_block.CopyOnWrite()->body = result.stmt;
+      return {new_block, true};
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      ReplaceResult result = ReplacePipelineLoopInStmt(
+          attr->body, pipeline_loop, ws_body, consumer_extent);
+      if (!result.found) {
+        return {stmt, false};
+      }
+      AttrStmt new_attr = GetRef<AttrStmt>(attr);
+      new_attr.CopyOnWrite()->body = result.stmt;
+      return {new_attr, true};
+    }
+    return {stmt, false};
   }
 
   // --- PCThreadIdxRewriter (simplified for tile-op level) ---
@@ -601,7 +712,8 @@ private:
   // State
   Target target_;
   IterVar thread_iv_;
-  Optional<PrimExpr> num_threads_;
+  Optional<PrimExpr> num_threads_;          // total (consumer + producer)
+  Optional<PrimExpr> ws_total_threads_;     // same, stored as func attr
   bool ws_transformed_{false};
 };
 
@@ -619,7 +731,10 @@ public:
 
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == attr::kWarpSpecializationScope) {
+    // Detect both the T.ws() language-level attr ("warp_specialize") and
+    // the compiler-level attr (kWarpSpecializationScope).
+    if (op->attr_key == "warp_specialize" ||
+        op->attr_key == attr::kWarpSpecializationScope) {
       found_ = true;
       return;
     }
@@ -630,12 +745,13 @@ private:
 };
 
 /// Quick pre-scan: check if the function contains a pipelined loop (num_stages
-/// > 1) with at least one TMA-annotated tile op and no manual layout
+/// >= 1) with at least one TMA load producer tile op and no manual layout
 /// annotations (which are incompatible with early MVB expansion).
 class TiledWSCandidate : public StmtExprVisitor {
 public:
-  static bool Check(const Stmt &stmt) {
+  static bool Check(const Stmt &stmt, Target target) {
     TiledWSCandidate c;
+    c.target_ = target;
     c(stmt);
     return c.has_pipeline_loop_ && c.has_tma_tile_op_ &&
            !c.has_manual_layout_;
@@ -646,7 +762,7 @@ private:
     bool old = in_pipeline_;
     if (auto anno = op->annotations.Get("num_stages")) {
       if (auto *imm = anno->as<IntImmNode>()) {
-        if (imm->value > 1) {
+        if (imm->value >= 1) {
           has_pipeline_loop_ = true;
           in_pipeline_ = true;
         }
@@ -657,12 +773,11 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
-    if (in_pipeline_) {
-      if (auto kind = op->annotations.Get(kInstructionKind)) {
-        if (auto *str = kind->as<StringImmNode>()) {
-          if (str->value == "tma") {
-            has_tma_tile_op_ = true;
-          }
+    if (in_pipeline_ && !has_tma_tile_op_) {
+      auto tile_op = ParseOperator(ffi::GetRef<Call>(op));
+      if (auto *copy = tile_op.as<CopyNode>()) {
+        if (ClassifyCopy(copy, target_) == TileStmtKind::kTmaProducer) {
+          has_tma_tile_op_ = true;
         }
       }
     }
@@ -676,6 +791,7 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  Target target_;
   bool in_pipeline_{false};
   bool has_pipeline_loop_{false};
   bool has_tma_tile_op_{false};
@@ -685,7 +801,7 @@ private:
 } // namespace
 
 // Forward-declare MultiVersionBuffer (defined in multi_version_buffer_rewriter.cc).
-tvm::transform::Pass MultiVersionBuffer();
+tvm::transform::Pass MultiVersionBuffer(bool barrier_only = false);
 
 // ---------------------------------------------------------------------------
 // Pass registration
@@ -708,21 +824,15 @@ tvm::transform::Pass ProducerConsumerWarpSpecializedTiled() {
     if (!target.defined() || !TargetHasBulkCopy(target.value())) {
       return f;
     }
-    // Only apply MultiVersionBuffer + WS if the function actually has a
-    // pipelined loop with TMA-annotated tile ops.  Running MultiVersionBuffer
-    // on other functions would break manually annotated layouts.
-    if (!TiledWSCandidate::Check(f->body)) {
+    // Only apply MVB + WS if the function is a tiled WS candidate.
+    if (!TiledWSCandidate::Check(f->body, target.value())) {
+      LOG(WARNING) << "[TiledWS] skipped: not a candidate";
       return f;
     }
+    LOG(WARNING) << "[TiledWS] candidate found, applying MVB + WS";
     // Expand shared buffers for pipelining before the WS split.
-    // We call MultiVersionBuffer here (not at the pipeline level) to avoid
-    // expanding buffers in functions that won't be WS-transformed.
-    //
-    // Keep the original function so we can fall back if the WS
-    // transformation doesn't actually fire (e.g. the loop body has
-    // statements the rewriter can't handle).  Returning a
-    // multi-versioned-but-not-WS-transformed function would cause
-    // OptimizeForTarget's MultiVersionBuffer to double-expand buffers.
+    // Keep the original so we can fall back if the WS rewriter
+    // doesn't fire (e.g. non-tile-op consumers in the loop body).
     PrimFunc original_f = f;
     {
       IRModule tmp_mod;
@@ -732,20 +842,73 @@ tvm::transform::Pass ProducerConsumerWarpSpecializedTiled() {
     }
     PrimFunc result =
         ProducerConsumerWSTiledRewriter::Substitute(std::move(f));
-    // Check if the rewriter actually transformed the function.
     if (!result->HasNonzeroAttr(kTiledWSApplied)) {
+      LOG(WARNING) << "[TiledWS] rewriter did not fire, falling back";
       return original_f;
     }
+    LOG(WARNING) << "[TiledWS] transformation applied successfully";
     return result;
   };
   return CreatePrimFuncPass(pass_func, 0,
                             "tl.ProducerConsumerWarpSpecializedTiled", {});
 }
 
+// ---------------------------------------------------------------------------
+// RestoreWSThreadExtent: update AttrStmt(threadIdx.x) to the WS total.
+// Must run after LowerTileOp but before the first Simplify in
+// OptimizeForTarget, otherwise the analyzer proves the producer branch
+// (threadIdx.x >= consumer_extent) is dead code.
+// ---------------------------------------------------------------------------
+
+tvm::transform::Pass RestoreWSThreadExtent() {
+  using namespace tir::transform;
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    auto attr = f->GetAttr<PrimExpr>("tl_ws_total_threads");
+    if (!attr.defined())
+      return f;
+    auto *imm = attr.value().as<IntImmNode>();
+    if (!imm)
+      return f;
+
+    int64_t total = imm->value;
+
+    // Walk the body:
+    // 1. Update threadIdx.x AttrStmt extent to the WS total.
+    // 2. Strip tl_ws_split wrapper (no longer needed after lowering).
+    class Updater : public StmtExprMutator {
+    public:
+      int64_t total_;
+      explicit Updater(int64_t t) : total_(t) {}
+      Stmt VisitStmt_(const AttrStmtNode *op) final {
+        if (op->attr_key == tir::attr::thread_extent) {
+          IterVar iv = Downcast<IterVar>(op->node);
+          if (iv->thread_tag == "threadIdx.x") {
+            AttrStmt a =
+                Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+            PrimExpr nt = IntImm(DataType::Int(32), total_);
+            iv.CopyOnWrite()->dom = {0, nt};
+            a.CopyOnWrite()->node = iv;
+            a.CopyOnWrite()->value = nt;
+            return a;
+          }
+        }
+        return StmtExprMutator::VisitStmt_(op);
+      }
+    };
+
+    Updater u(total);
+    f.CopyOnWrite()->body = u(f->body);
+    return f;
+  };
+  return CreatePrimFuncPass(pass_func, 0, "tl.RestoreWSThreadExtent", {});
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.ProducerConsumerWarpSpecializedTiled",
                         ProducerConsumerWarpSpecializedTiled);
+  refl::GlobalDef().def("tl.transform.RestoreWSThreadExtent",
+                        RestoreWSThreadExtent);
 }
 
 } // namespace tl

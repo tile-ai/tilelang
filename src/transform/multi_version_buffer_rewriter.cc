@@ -488,9 +488,12 @@ private:
       }
     }
 
-    // In barrier_only mode, only version barrier buffers.
-    // Data buffer versioning is left to InjectSoftwarePipeline.
-    if (barrier_only_) {
+    // Stage-1 pipelines do not need data-buffer multi-versioning: there is no
+    // overlap across distinct stages, and expanding shared tensors to `(1, ...)`
+    // breaks some downstream tile-op lowerings that expect the original rank.
+    // Keep barrier versioning intact so parity rewriting still works where
+    // barriers are present.
+    if (num_stages <= 1 || barrier_only_) {
       Array<Buffer> filtered;
       for (auto buffer : versioned_buffers) {
         if (buffer.scope() == "shared.barrier") {

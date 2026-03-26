@@ -1613,14 +1613,13 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     ICHECK(stride != nullptr && continuous != nullptr);
     // We also need to check if the shape satisfies the following doc:
     // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
-    if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(
-                                             shared_tensor_unmapped))) {
+    SwizzleMode swizzle_mode =
+        DetectSwizzleMode(shared_layout, shared_tensor_unmapped);
+    if (swizzle_mode == SwizzleMode::kQuarter) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (StructuralEqual()(shared_layout, makeHalfBankSwizzleLayout(
-                                                    shared_tensor_unmapped))) {
+    } else if (swizzle_mode == SwizzleMode::kHalf) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (StructuralEqual()(shared_layout, makeFullBankSwizzleLayout(
-                                                    shared_tensor_unmapped))) {
+    } else if (swizzle_mode == SwizzleMode::kFull) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else if (StructuralEqual()(
                    shared_layout,

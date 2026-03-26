@@ -175,15 +175,12 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
-    # Annotate tile ops with coarse instruction kind (tma / cp_async / sync / wgmma / ...)
-    # before layout inference so that later passes (e.g. warp specialization) can
-    # reason about the instruction mix without depending on lowered IR.
-    mod = tilelang.transform.InstructionAnnotation()(mod)
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
-    # NOTE: MultiVersionBuffer is called inside ProducerConsumerWarpSpecializedTiled
-    # only for functions where the tiled WS transformation actually applies,
-    # because running it unconditionally would break manually annotated layouts.
+    # The pass classifies copy ops as TMA/cp.async/sync inline (no prior
+    # InstructionAnnotation pass needed).  MultiVersionBuffer is called
+    # internally only for functions where the tiled WS transformation
+    # actually applies.
     if allow_warp_specialized(target=target):
         mod = tilelang.transform.ProducerConsumerWarpSpecializedTiled()(mod)
     # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
@@ -195,6 +192,10 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
+    # Now that LayoutInference + LowerTileOp have seen the original consumer
+    # thread count, restore threadIdx.x extent to the WS total so that
+    # downstream passes (Simplify, codegen) see the correct launch config.
+    mod = tilelang.transform.RestoreWSThreadExtent()(mod)
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
     # Decouple type cast vectorization constraints before vectorization
@@ -223,18 +224,12 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # which may be introduced by the LegalizeSafeMemoryAccess
     mod = tilelang.transform.IfStmtBinding()(mod)
     has_tma = module_has_tma(mod)
-    use_ws = has_tma and allow_warp_specialized(pass_ctx=pass_ctx, target=target)
     if has_tma:
-        # In WS mode, version all buffers (barriers + data) because
-        # ProducerConsumerWarpSpecialized handles pipeline overlap and
-        # InjectSoftwarePipeline won't re-version data buffers.
-        # Without WS, only version barrier buffers for mbarrier parity
-        # rewriting; data buffer versioning is left to InjectSoftwarePipeline.
         # For functions already transformed by ProducerConsumerWarpSpecializedTiled
-        # (num_stages stripped), MultiVersionBuffer + old WS are no-ops.
-        mod = tilelang.transform.MultiVersionBuffer(barrier_only=not use_ws)(mod)
-        if use_ws:
-            mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+        # (num_stages stripped), MultiVersionBuffer is a no-op.
+        # For remaining TMA functions, version barrier buffers only;
+        # data buffer versioning is handled by InjectSoftwarePipeline.
+        mod = tilelang.transform.MultiVersionBuffer(barrier_only=True)(mod)
     else:
         # Non-TMA: MultiVersionBuffer is not used, so buffer allocation
         # locations must be planned explicitly.  In TMA paths this is

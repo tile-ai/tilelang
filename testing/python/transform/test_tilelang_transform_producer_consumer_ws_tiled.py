@@ -38,8 +38,19 @@ def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="floa
     return main
 
 
-def matmul_no_pipeline(M, N, K, block_M, block_K, block_N, dtype="float16"):
-    """A simple non-pipelined GEMM (won't trigger tiled WS)."""
+def matmul_windowed_pipelined(
+    M,
+    N,
+    K,
+    block_M,
+    block_K,
+    block_N,
+    num_stages,
+    window_tiles=2,
+    dtype="float16",
+    threads=128,
+):
+    """A pipelined GEMM whose K-loop has a dynamic lower bound."""
 
     @T.prim_func
     def main(
@@ -47,7 +58,7 @@ def matmul_no_pipeline(M, N, K, block_M, block_K, block_N, dtype="float16"):
         B: T.Buffer((K, N), dtype),
         C: T.Buffer((M, N), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
             bx,
             by,
         ):
@@ -57,7 +68,9 @@ def matmul_no_pipeline(M, N, K, block_M, block_K, block_N, dtype="float16"):
 
             T.clear(C_local)
 
-            for ko in T.serial(T.ceildiv(K, block_K)):
+            start = T.max(0, bx - (window_tiles - 1))
+            end = T.min(T.ceildiv(K, block_K), bx + 1)
+            for ko in T.Pipelined(start, end, num_stages=num_stages):
                 T.copy(A[by * block_M, ko * block_K], A_shared)
                 T.copy(B[ko * block_K, bx * block_N], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
@@ -69,38 +82,46 @@ def matmul_no_pipeline(M, N, K, block_M, block_K, block_N, dtype="float16"):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_baseline_no_pipeline():
-    """Baseline: non-pipelined GEMM should still compile and run correctly."""
+def test_tiled_ws_stage1_dynamic_loop_start():
+    """Stage-1 tiled WS should handle dynamic pipeline loop bounds."""
     import torch
 
-    M, N, K = 256, 256, 256
-    func = matmul_no_pipeline(M, N, K, 128, 64, 128)
+    M, N, K = 64, 128, 64
+    block_M, block_K, block_N = 64, 32, 64
+    func = matmul_windowed_pipelined(
+        M,
+        N,
+        K,
+        block_M,
+        block_K,
+        block_N,
+        num_stages=1,
+        window_tiles=2,
+    )
     target = determine_target()
     kernel = tilelang.compile(func, target=target, out_idx=[2])
+    source = kernel.get_kernel_source()
+
+    assert "__launch_bounds__(256, 1)" in source
 
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")
     B = torch.randn(K, N, dtype=torch.float16, device="cuda")
     C = kernel(A, B)
 
-    ref = A.float() @ B.float()
+    ref = torch.zeros(M, N, dtype=torch.float32, device="cuda")
+    num_k_tiles = (K + block_K - 1) // block_K
+    num_n_tiles = (N + block_N - 1) // block_N
+    for bx in range(num_n_tiles):
+        start = max(0, bx - 1)
+        end = min(num_k_tiles, bx + 1)
+        n_slice = slice(bx * block_N, min((bx + 1) * block_N, N))
+        acc = torch.zeros(M, n_slice.stop - n_slice.start, dtype=torch.float32, device="cuda")
+        for ko in range(start, end):
+            k_slice = slice(ko * block_K, min((ko + 1) * block_K, K))
+            acc += A[:, k_slice].float() @ B[k_slice, n_slice].float()
+        ref[:, n_slice] = acc
+
     torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_tiled_ws_compiles():
-    """The tiled WS pass should produce compilable code for a simple pipelined GEMM."""
-    func = matmul_pipelined(256, 256, 256, 128, 64, 128, num_stages=2)
-    target = determine_target()
-    from tilelang.transform import PassConfigKey
-    kernel = tilelang.compile(func, target=target, out_idx=[2],
-                              pass_configs={
-                                  PassConfigKey.TL_ENABLE_DUMP_IR: True,
-                                  PassConfigKey.TL_DUMP_IR_DIR: "/tmp/tiled_ws_dump",
-                              })
-    source = kernel.get_kernel_source()
-    assert source is not None
-    assert len(source) > 0
 
 
 @tilelang.testing.requires_cuda
@@ -109,7 +130,6 @@ def test_tiled_ws_correctness():
     """End-to-end correctness test: pipelined GEMM via tiled WS."""
     import torch
 
-    # Use smaller block sizes to keep shared memory under 48KB
     M, N, K = 256, 256, 256
     func = matmul_pipelined(M, N, K, 64, 32, 64, num_stages=2)
     target = determine_target()
@@ -143,7 +163,6 @@ def test_tiled_ws_stage3():
 
 
 if __name__ == "__main__":
-    test_baseline_no_pipeline()
-    test_tiled_ws_compiles()
+    test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()
     test_tiled_ws_stage3()
