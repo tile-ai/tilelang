@@ -906,38 +906,13 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         tl_func = "max2";
 
       if (!tl_func.empty()) {
-        if (lanes == 2) {
-          // Original path: single x2 operation for exactly 2 lanes.
-          bool need_cast = is_bf16x2 || is_fp16x2;
-          std::string native_type;
-          if (is_bf16x2)
-            native_type = "__nv_bfloat162";
-          else if (is_fp16x2)
-            native_type = "__half2";
-
-          std::string lhs_str = PrintExpr(lhs);
-          std::string rhs_str = PrintExpr(rhs);
-
-          if (need_cast) {
-            std::string cast_lhs =
-                "tl::from_uint1<" + native_type + ">(" + lhs_str + ")";
-            std::string cast_rhs =
-                "tl::from_uint1<" + native_type + ">(" + rhs_str + ")";
-            os << "tl::to_uint1(tl::" << tl_func << "(" << cast_lhs << ", "
-               << cast_rhs << "))";
-          } else {
-            os << "tl::" << tl_func << "(" << lhs_str << ", " << rhs_str << ")";
-          }
-          return;
-        }
-
-        // lanes > 2: decompose into lanes/2 independent x2 operations.
+        // Decompose into lanes/2 independent x2 packed operations.
         //
-        // The vector type maps to a CUDA struct with multiple fields:
-        //   bf16x4 -> uint2 {.x, .y}     (each field holds an nv_bfloat162)
-        //   bf16x8 -> uint4 {.x,.y,.z,.w} (each field holds an nv_bfloat162)
-        //   fp16x4 -> uint2 {.x, .y}     (each field holds a __half2)
-        //   f32x4  -> float4 {.x,.y,.z,.w} (pairs: (.x,.y), (.z,.w))
+        // Vector type → CUDA struct mapping:
+        //   bf16x2 -> uint1 {.x}          bf16x4 -> uint2 {.x, .y}
+        //   bf16x8 -> uint4 {.x,.y,.z,.w} (each field = one nv_bfloat162)
+        //   fp16x2 -> uint1 {.x}          fp16x4 -> uint2 {.x, .y}  ...
+        //   f32x2  -> float2 {.x, .y}     f32x4  -> float4 {.x,.y,.z,.w}
         //
         // For bf16/fp16: each 32-bit field already packs a pair of elements,
         //   so we apply tl::*2 on each field directly.
@@ -956,9 +931,6 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
           std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
 
           if (is_bf16x2 || is_fp16x2) {
-            // bf16/fp16: uint{N/2} representation.
-            // Each .x/.y/.z/.w field is a 32-bit word holding two packed
-            // elements. Apply tl::*2 on each field independently.
             std::string native_type = is_bf16x2 ? "__nv_bfloat162" : "__half2";
             for (int p = 0; p < num_pairs; ++p) {
               std::string field(1, access[p]);
@@ -974,8 +946,7 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
                      << ", " << pair_rhs << "));\n";
             }
           } else {
-            // f32: float{N} representation.
-            // Apply tl::*2 on each consecutive pair of float fields,
+            // f32: apply tl::*2 on each consecutive pair of float fields,
             // reinterpreted as float2.
             for (int p = 0; p < num_pairs; ++p) {
               std::string field(1, access[p * 2]);
