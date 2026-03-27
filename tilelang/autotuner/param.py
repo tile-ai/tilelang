@@ -13,6 +13,7 @@ from pathlib import Path
 from tilelang.jit import JITKernel
 import cloudpickle
 import os
+import shutil
 from tilelang.engine.param import KernelParam
 from tilelang import logger
 import json
@@ -193,7 +194,7 @@ class AutotuneResult:
             - kernel_lib.so: The compiled kernel library
             - params.pkl: The serialized kernel parameters
         """
-        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
+        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists (no-op when called from save_to_disk)
 
         # Save device kernel source code
         try:
@@ -366,50 +367,72 @@ class AutotuneResult:
             return None
 
     def save_to_disk(self, path: Path, verbose: bool = False):
-        if not os.path.exists(path):
-            os.makedirs(path)
+        """Persist autotune result to disk using atomic directory rename.
 
-        # save best config (atomic)
-        if verbose:
-            logger.debug(f"Saving best config to file: {path / BEST_CONFIG_PATH}")
-        self._safe_write_file(str(path / BEST_CONFIG_PATH), "w", lambda f: json.dump(self.config, f))
+        All files are written into a temporary staging directory next to the
+        final *path*.  Once complete, the staging directory is atomically
+        renamed to *path* so that concurrent readers never see a half-written
+        result.
+        """
+        # Already saved (e.g. another process won the race).
+        if os.path.isdir(path):
+            return
 
-        # save function (atomic)
-        if verbose:
-            logger.debug(f"Saving function to file: {path / FUNCTION_PATH}")
-        self._safe_write_file(str(path / FUNCTION_PATH), "wb", lambda f: cloudpickle.dump(self.func, f))
+        parent = path.parent if isinstance(path, Path) else Path(path).parent
+        staging_path = parent / f".staging_{Path(path).name}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        os.makedirs(staging_path)
 
-        # save out idx (atomic)
-        if verbose:
-            logger.debug(f"Saving out idx to file: {path / OUT_IDX_PATH}")
-        self._safe_write_file(
-            str(path / OUT_IDX_PATH),
-            "w",
-            lambda f: json.dump(
-                {
-                    "out_idx": getattr(self.func, "out_idx_override", None),
-                },
-                f,
-            ),
-        )
+        try:
+            # save best config
+            if verbose:
+                logger.debug(f"Saving best config to file: {staging_path / BEST_CONFIG_PATH}")
+            self._safe_write_file(str(staging_path / BEST_CONFIG_PATH), "w", lambda f: json.dump(self.config, f))
 
-        # save ref latency (atomic)
-        if verbose:
-            logger.debug(f"Saving latency to file: {path / LATENCY_PATH}")
-        self._safe_write_file(
-            str(path / LATENCY_PATH),
-            "w",
-            lambda f: json.dump(
-                {
-                    "latency": self.latency,
-                    "ref_latency": self.ref_latency,
-                },
-                f,
-            ),
-        )
+            # save function
+            if verbose:
+                logger.debug(f"Saving function to file: {staging_path / FUNCTION_PATH}")
+            self._safe_write_file(str(staging_path / FUNCTION_PATH), "wb", lambda f: cloudpickle.dump(self.func, f))
 
-        # save kernel
-        self._save_kernel_to_disk(path, self.kernel)
+            # save out idx
+            if verbose:
+                logger.debug(f"Saving out idx to file: {staging_path / OUT_IDX_PATH}")
+            self._safe_write_file(
+                str(staging_path / OUT_IDX_PATH),
+                "w",
+                lambda f: json.dump(
+                    {
+                        "out_idx": getattr(self.func, "out_idx_override", None),
+                    },
+                    f,
+                ),
+            )
+
+            # save latency
+            if verbose:
+                logger.debug(f"Saving latency to file: {staging_path / LATENCY_PATH}")
+            self._safe_write_file(
+                str(staging_path / LATENCY_PATH),
+                "w",
+                lambda f: json.dump(
+                    {
+                        "latency": self.latency,
+                        "ref_latency": self.ref_latency,
+                    },
+                    f,
+                ),
+            )
+
+            # save kernel
+            self._save_kernel_to_disk(staging_path, self.kernel, verbose)
+
+            # Atomic rename — directory becomes visible in one step.
+            os.rename(str(staging_path), str(path))
+        except OSError:
+            # Race: another process already created the final path.
+            shutil.rmtree(str(staging_path), ignore_errors=True)
+        except Exception:
+            shutil.rmtree(str(staging_path), ignore_errors=True)
+            logger.exception("Error during atomic autotune result save")
 
     @classmethod
     def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> AutotuneResult:

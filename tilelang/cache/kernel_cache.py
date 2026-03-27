@@ -131,6 +131,27 @@ class KernelCache:
     def _create_dirs():
         os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
         os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
+        KernelCache._cleanup_stale_staging_dirs()
+
+    @staticmethod
+    def _cleanup_stale_staging_dirs(max_age_seconds: int = 3600):
+        """Remove staging directories older than *max_age_seconds* (default 1 h).
+
+        These are left behind when a process crashes mid-save.
+        """
+        import time
+
+        try:
+            now = time.time()
+            for entry in os.scandir(env.TILELANG_CACHE_DIR):
+                if entry.name.startswith(".staging_") and entry.is_dir(follow_symlinks=False):
+                    try:
+                        if now - entry.stat().st_mtime > max_age_seconds:
+                            shutil.rmtree(entry.path, ignore_errors=True)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 
     def _generate_key(
         self,
@@ -334,52 +355,68 @@ class KernelCache:
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):
         """
-        Persists a compiled kernel to disk cache.
+        Persists a compiled kernel to disk cache using atomic directory rename.
+
+        All files are first written into a temporary staging directory under
+        TILELANG_CACHE_DIR.  Once every file is in place, the staging directory
+        is atomically renamed to the final cache path so that other processes
+        never observe an incomplete cache entry.
 
         Args:
             key (str): The hash key identifying the kernel.
             kernel (JITKernel): The compiled kernel to be saved.
             func (Callable, optional): The original function.
             verbose (bool): Enable verbose log messages.
-
-        Note:
-            Saves the following files:
-            - kernel.cu: The compiled kernel source code
-            - wrapped_kernel.cu: The wrapped kernel source code
-            - kernel_lib.so: The compiled kernel library
-            - params.pkl: The serialized kernel parameters
         """
         cache_path = self._get_cache_path(key)
-        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
 
-        # Save kernel source code
+        # Another process already wrote this entry — nothing to do.
+        if os.path.isdir(cache_path):
+            return
+
+        # Staging dir lives under CACHE_DIR (same filesystem) so os.rename works.
+        staging_path = os.path.join(
+            env.TILELANG_CACHE_DIR,
+            f".staging_{key}_{os.getpid()}_{uuid.uuid4().hex[:8]}",
+        )
+        os.makedirs(staging_path)
+
         try:
-            self._save_kernel_source_code_to_disk(kernel, cache_path, verbose)
-        except Exception:
-            self.logger.exception("Error saving kernel source code to disk")
+            # Save kernel source code
+            try:
+                self._save_kernel_source_code_to_disk(kernel, staging_path, verbose)
+            except Exception:
+                self.logger.exception("Error saving kernel source code to disk")
 
-        # Save wrapped kernel source code
-        try:
-            self._save_wrapper_kernel_code_to_disk(kernel, cache_path, verbose)
-        except Exception:
-            self.logger.exception("Error saving host kernel source code to disk")
+            # Save wrapped kernel source code
+            try:
+                self._save_wrapper_kernel_code_to_disk(kernel, staging_path, verbose)
+            except Exception:
+                self.logger.exception("Error saving host kernel source code to disk")
 
-        # Save the kernel library
-        try:
-            # Save CUBIN or SO file
-            self._save_so_cubin_to_disk(kernel, cache_path, verbose)
+            # Save the kernel library
+            try:
+                self._save_so_cubin_to_disk(kernel, staging_path, verbose)
+            except Exception:
+                self.logger.exception("Error saving kernel library to disk")
 
-        except Exception:
-            self.logger.exception("Error saving kernel library to disk")
+            # Save kernel parameters
+            try:
+                params_path = os.path.join(staging_path, self.params_path)
+                if verbose:
+                    self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
+                KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
+            except Exception:
+                self.logger.exception("Error saving kernel parameters to disk")
 
-        # Save kernel parameters
-        try:
-            params_path = os.path.join(cache_path, self.params_path)
-            if verbose:
-                self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
-            KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
+            # Atomic rename — makes the complete directory visible in one step.
+            os.rename(staging_path, cache_path)
+        except OSError:
+            # Race: another process already created cache_path; clean up staging.
+            shutil.rmtree(staging_path, ignore_errors=True)
         except Exception:
-            self.logger.exception("Error saving kernel parameters to disk")
+            shutil.rmtree(staging_path, ignore_errors=True)
+            self.logger.exception("Error during atomic cache save")
 
     def _load_kernel_from_disk(
         self,
