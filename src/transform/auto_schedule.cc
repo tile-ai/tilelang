@@ -1971,12 +1971,12 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
         }
         Map<Var, PrimExpr> substitution;
         PrimExpr condition =
-            And(loop_var < loop_extent, loop_var >= loop_start);
+            And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
         if (unit->stage == min_stages) {
           condition = loop_var >= loop_start;
         }
         if (unit->stage == max_stages) {
-          condition = loop_var < loop_extent;
+          condition = loop_var < loop_start + loop_extent;
         }
         Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
         substitution.Set(loop_var,
@@ -2300,12 +2300,12 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
         }
         Map<Var, PrimExpr> substitution;
         PrimExpr condition =
-            And(loop_var < loop_extent, loop_var >= loop_start);
+            And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
         if (unit->stage == min_stages) {
           condition = loop_var >= loop_start;
         }
         if (unit->stage == max_stages) {
-          condition = loop_var < loop_extent;
+          condition = loop_var < loop_start + loop_extent;
         }
         Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
         substitution.Set(loop_var,
