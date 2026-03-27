@@ -9,7 +9,7 @@ from tvm.tir.expr import IntImm, Var, Not, Or
 from tvm.tir import all as tir_all
 from tilelang.language.dtypes import _all_dtypes
 
-ALL_DTYPE_NAMES = tuple(_all_dtypes)
+ALL_DTYPE_NAMES = tuple(sorted(_all_dtypes))
 
 
 def test_argument():
