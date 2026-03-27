@@ -834,7 +834,7 @@ public:
 
           if (!HasDependency(node_i, node_j)) continue;
 
-          LOG(INFO) << "[ScheduleRecursive] Conflict var detection between " << i << " and " << j;
+          // LOG(INFO) << "[ScheduleRecursive] Conflict var detection between " << i << " and " << j;
           
           if (stage_map[node_j] == stage_map[node_i]) continue;
 
@@ -869,7 +869,7 @@ public:
             }
           }
 
-          LOG(INFO) << "Cloned task: " << cloned_task->stmts[0];
+          // LOG(INFO) << "Cloned task: " << cloned_task->stmts[0];
 
           seq_body->children.insert(seq_body->children.begin() + j, std::move(cloned_task));
           n += 1;
@@ -1732,7 +1732,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     ICHECK(ir_structure) << "IRStructure is null (empty body?)";
 
     // First print the summary view
-    PrintIRStructure(ir_structure.get());
+    // PrintIRStructure(ir_structure.get());
 
     // Then print all statements
     // PrintAllStmts(ir_structure.get());

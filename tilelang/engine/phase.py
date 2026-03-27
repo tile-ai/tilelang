@@ -201,7 +201,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         # print(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
         mod = tilelang.transform.Simplify()(mod)
-        print(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
@@ -332,7 +331,5 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
 
     # Transform threadblock to persistent threadblock
     mod = tilelang.transform.PersistThreadblock()(mod)
-
-    # print(mod)
 
     return mod
