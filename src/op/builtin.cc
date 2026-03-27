@@ -257,7 +257,7 @@ TIR_DEFINE_TL_BUILTIN(tma_store_arrive)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(tma_store_wait)
-    .set_num_inputs(0)
+    .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 TIR_DEFINE_TL_BUILTIN(set_max_nreg)
