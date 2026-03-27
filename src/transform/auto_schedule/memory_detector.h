@@ -40,7 +40,6 @@ public:
     let_bindings_.clear();
     read_vars_.clear();
     write_vars_.clear();
-    let_defined_vars_.clear();
     operator()(stmt);
   }
 
@@ -55,7 +54,6 @@ public:
     let_bindings_.clear();
     read_vars_.clear();
     write_vars_.clear();
-    let_defined_vars_.clear();
     operator()(expr);
   }
 
@@ -98,8 +96,6 @@ private:
   std::vector<Var> read_vars_;
   /*! \brief The set of variables that are written in the current block.  */
   std::vector<Var> write_vars_;
-  /*! \brief The set of variables defined by let bindings in the current scope.  */
-  std::set<const VarNode*> let_defined_vars_;
 
   /*!
    * \brief Update read/write buffers and regions with provided buffer and
@@ -267,16 +263,13 @@ private:
 
   void VisitStmt_(const LetStmtNode *op) override {
     let_bindings_[op->var.get()] = op->value;
-    let_defined_vars_.insert(op->var.get());
     UpdateWriteVar(op->var);
     StmtExprVisitor::VisitStmt(op->body);
     let_bindings_.erase(op->var.get());
   }
 
   void VisitExpr_(const VarNode *op) override {
-    if (let_defined_vars_.count(op)) {
-      UpdateReadVar(tvm::ffi::GetRef<Var>(op));
-    }
+    UpdateReadVar(tvm::ffi::GetRef<Var>(op));
     StmtExprVisitor::VisitExpr_(op);
   }
 

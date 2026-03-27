@@ -160,7 +160,7 @@ public:
   // Latency estimation
   int64_t GetLatency() const override { return latency_; }
   int64_t GetII() const override { return ii_; }
-
+  
   // Setters
   void SetUsesCUDACore(bool value) override { uses_cuda_core_ = value; }
   void SetUsesTMACore(bool value) override { uses_tma_core_ = value; }
@@ -170,6 +170,24 @@ public:
   }
   void SetWriteRegions(const std::vector<BufferRegion> &regions) override {
     write_regions_ = regions;
+  }
+  void SetReadVars(const std::vector<Var> &vars) {
+    read_vars_ = vars;
+  }
+  void SetWriteVars(const std::vector<Var> &vars) {
+    write_vars_ = vars;
+  }
+  void SubstituteVar(const Var &old_var, const Var &new_var) {
+    for (auto &var : read_vars_) {
+      if (var.same_as(old_var)) {
+        var = new_var;
+      }
+    }
+    for (auto &var : write_vars_) {
+      if (var.same_as(old_var)) {
+        var = new_var;
+      }
+    }
   }
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
@@ -953,6 +971,12 @@ inline void PrintIRStructure(const IRStructure *node, int indent = 0) {
     }
     for (auto &region : task->GetWriteRegions()) {
       LOG(INFO) << indent_str << "  Write Region: " << region;
+    }
+    for (auto &var : task->GetReadVars()) {
+      LOG(INFO) << indent_str << "  Read Var: " << var;
+    }
+    for (auto &var : task->GetWriteVars()) {
+      LOG(INFO) << indent_str << "  Write Var: " << var;
     }
     LOG(INFO) << indent_str << "  uses_cuda_core: " << task->UsesCUDACore();
     LOG(INFO) << indent_str << "  uses_tma_core: " << task->UsesTMACore();

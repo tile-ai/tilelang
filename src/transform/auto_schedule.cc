@@ -808,6 +808,79 @@ public:
       seq_body->children = std::move(reordered_children);
     }
 
+    // Reorder & Copy Let-defined variables
+    auto IsVarDecl = [&] (IRStructure *node) -> bool {
+      if (!node) return false;
+
+      if (node->IsTask()) {
+        auto task = static_cast<TaskNode *>(node);
+        if (task->stmts.size() == 1) {
+          return task->stmts[0].as<LetStmtNode>() != nullptr;
+        }
+      }
+      return false;
+    };
+    auto SolveConflictVar = [&] () -> bool {
+      // LOG(INFO) << "Solving conflict variable...";
+      // for (int i = 0; i < n; ++ i) PrintIRStructure(seq_body->children[i].get());
+      // LOG(INFO) << "---------------------------";
+      for (int i = 0; i < n; ++ i) if (IsVarDecl(seq_body->children[i].get())) {
+        for (int j = 0; j < n; ++ j) {
+          if (i == j) continue;
+          
+          auto node_i = seq_body->children[i].get();
+          auto node_j = seq_body->children[j].get();
+          int rem_stage_j = stage_map[node_j];
+
+          if (!HasDependency(node_i, node_j)) continue;
+
+          LOG(INFO) << "[ScheduleRecursive] Conflict var detection between " << i << " and " << j;
+          
+          if (stage_map[node_j] == stage_map[node_i]) continue;
+
+          auto node_i_task = static_cast<TaskNode *>(node_i);
+          auto node_i_let_stmt = node_i_task->stmts[0].as<LetStmtNode>();
+
+          auto iter = ctrl->control->loop_var;
+          auto step = ctrl->control->step.has_value() ? ctrl->control->step.value() : 1;
+          auto cloned_value = node_i_let_stmt->value;
+          auto cloned_let_stmt = LetStmt(
+            node_i_let_stmt->var.copy_with_suffix(""),
+            cloned_value,
+            Evaluate(0)
+          );
+          auto cloned_task = std::make_shared<TaskNode>();
+          cloned_task->stmts.push_back(cloned_let_stmt);
+          stage_map[cloned_task.get()] = rem_stage_j;
+
+          for (int k = j; k < n; ++ k) {
+            auto node_k = seq_body->children[k].get();
+            auto task_k = static_cast<TaskNode *>(node_k);
+            if (rem_stage_j != stage_map[node_k]) continue;
+            if (HasDependency(node_i, node_k)) {
+              for (size_t id = 0; id < task_k->stmts.size(); ++ id) {
+                task_k->stmts[id] = Substitute(
+                  task_k->stmts[id],
+                  {{node_i_let_stmt->var, cloned_let_stmt->var}}
+                );
+              }
+              task_k->SubstituteVar(node_i_let_stmt->var, cloned_let_stmt->var);
+              stage_map[node_k] = rem_stage_j;
+            }
+          }
+
+          LOG(INFO) << "Cloned task: " << cloned_task->stmts[0];
+
+          seq_body->children.insert(seq_body->children.begin() + j, std::move(cloned_task));
+          n += 1;
+          return true; // Conflict resolved, restart the loop
+        }
+      }
+      return false;
+    };
+    int conflict_count = 0;
+    while (SolveConflictVar() && ++ conflict_count < 100);
+
     for (auto &node : seq_body->children) {
       auto unit = std::make_shared<ScheduleUnit>();
       unit->stage = stage_map[node.get()];
@@ -926,16 +999,6 @@ private:
         if (SameVar(write_var_a, read_var_b))
           return true;
       }
-      for (const auto &write_var_b : b->GetWriteVars()) {
-        if (SameVar(write_var_a, write_var_b))
-          return true;
-      }
-    }
-    for (const auto &read_var_a : a->GetReadVars()) {
-      for (const auto &write_var_b : b->GetWriteVars()) {
-        if (SameVar(read_var_a, write_var_b))
-          return true;
-      }
     }
     return false;
   }
@@ -987,22 +1050,6 @@ private:
         continue;
       for (const auto &write_region_b : b->GetWriteRegions()) {
         if (SameBuffer(read_region_a, write_region_b))
-          return true;
-      }
-    }
-    for (const auto &write_var_a : a->GetWriteVars()) {
-      for (const auto &read_var_b : b->GetReadVars()) {
-        if (SameVar(write_var_a, read_var_b))
-          return true;
-      }
-      for (const auto &write_var_b : b->GetWriteVars()) {
-        if (SameVar(write_var_a, write_var_b))
-          return true;
-      }
-    }
-    for (const auto &read_var_a : a->GetReadVars()) {
-      for (const auto &write_var_b : b->GetWriteVars()) {
-        if (SameVar(read_var_a, write_var_b))
           return true;
       }
     }
@@ -1316,6 +1363,7 @@ protected:
     task_node->stmts.push_back(GetRef<Stmt>(op));
 
     AnalyzeMemoryExpr(op->condition, task_node.get());
+    AnalyzeResourceUsage(Evaluate(op->condition), task_node.get(), true);
 
     // Analyze both branches for resource usage
     AnalyzeResourceUsage(op->then_case, task_node.get());
@@ -1390,7 +1438,7 @@ private:
   int64_t thread_count_ = 1;
   Target target_;
 
-  void AnalyzeResourceUsage(const Stmt &stmt, TaskNode *task_node) {
+  void AnalyzeResourceUsage(const Stmt &stmt, TaskNode *task_node, bool only_variables = false) {
     // Recursively analyze statements to determine resource usage
     struct ResourceAnalyzer : public StmtExprVisitor {
       TaskNode *task_node;
@@ -1440,7 +1488,8 @@ private:
 
         // Check if this is a TMA copy operation
         if (op->op.same_as(copy_op)) {
-          bool found_global = false;
+          bool found_global = false, found_shared = false;
+          int idx_global = -1, idx_shared = -1;
           for (unsigned idx = 0; idx != 2; ++idx) {
             auto region = Downcast<Call>(op->args[idx]);
             if (const auto *buffer_load =
@@ -1450,13 +1499,21 @@ private:
               MemoryType mem_type = GetMemoryTypeFromScope(scope);
               if (mem_type == MemoryType::kGlobal) {
                 found_global = true;
-                if (idx == 0) {
-                  found_tma_load = true;
-                }
+                idx_global = idx;
+              }
+              if (mem_type == MemoryType::kShared) {
+                found_shared = true;
+                idx_shared = idx;
               }
             }
           }
-          found_tma |= found_global;
+          found_tma = false;
+          if (found_global && found_shared) {
+            if (idx_global == 0 && idx_shared == 1)
+              found_tma = true;
+            if (idx_global == 1 && idx_shared == 0)
+              found_tma = true;
+          }
         } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op)) {
           found_tensor = true;
 
@@ -1532,30 +1589,32 @@ private:
     ResourceAnalyzer analyzer(task_node, target_, thread_count_);
     analyzer(stmt);
 
-    // Set task node flags based on what was found
-    if (analyzer.found_tma) {
-      task_node->SetUsesTMACore(true);
-      if (analyzer.found_tma_load) {
-        task_node->SetHasTMALoad(true);
-      }
-    }
-    if (analyzer.found_tensor) {
-      task_node->SetUsesTensorCore(true);
-      // Set Tensor Core shape information if available
-      for (const auto &shape : analyzer.tensor_core_shapes) {
-        if (shape.m > 0 && shape.n > 0 && shape.k > 0) {
-          task_node->AddTensorCoreShape(shape.m, shape.n, shape.k);
+    if (!only_variables) {
+      // Set task node flags based on what was found
+      if (analyzer.found_tma) {
+        task_node->SetUsesTMACore(true);
+        if (analyzer.found_tma_load) {
+          task_node->SetHasTMALoad(true);
         }
       }
-      // Set GemmInst information
-      if (analyzer.has_gemm_inst) {
-        task_node->SetGemmInst(analyzer.gemm_inst);
+      if (analyzer.found_tensor) {
+        task_node->SetUsesTensorCore(true);
+        // Set Tensor Core shape information if available
+        for (const auto &shape : analyzer.tensor_core_shapes) {
+          if (shape.m > 0 && shape.n > 0 && shape.k > 0) {
+            task_node->AddTensorCoreShape(shape.m, shape.n, shape.k);
+          }
+        }
+        // Set GemmInst information
+        if (analyzer.has_gemm_inst) {
+          task_node->SetGemmInst(analyzer.gemm_inst);
+        }
       }
-    }
-    // If neither TMA nor Tensor core was used, and CUDA operations were found,
-    // set CUDA core flag
-    if (!analyzer.found_tma && !analyzer.found_tensor) {
-      task_node->SetUsesCUDACore(true);
+      // If neither TMA nor Tensor core was used, and CUDA operations were found,
+      // set CUDA core flag
+      if (!analyzer.found_tma && !analyzer.found_tensor) {
+        task_node->SetUsesCUDACore(true);
+      }
     }
 
     // Analyze memory access regions
@@ -1673,7 +1732,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     ICHECK(ir_structure) << "IRStructure is null (empty body?)";
 
     // First print the summary view
-    // PrintIRStructure(ir_structure.get());
+    PrintIRStructure(ir_structure.get());
 
     // Then print all statements
     // PrintAllStmts(ir_structure.get());
@@ -1696,9 +1755,6 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     unit_builder.SetEnableWarpPartition(config.enable_warp_partition);
     bool double_thread = unit_builder.Build(ir_structure.get());
 
-    PrintIRStructure(ir_structure.get());
-    LOG(FATAL) << "Early exit for debugging purposes\n";
-
     if (!config.enable_warpgroup_partition) {
       Stmt new_body = ConvertIRStructureToStmt(ir_structure.get(), enable_epi);
 
@@ -1716,7 +1772,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     }
 
     // Print the modified summary view
-    PrintIRStructure(ir_structure.get());
+    // PrintIRStructure(ir_structure.get());
 
     // Analyze buffer dependencies and insert barriers before warpgroup
     // partition
@@ -1833,52 +1889,301 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
   return CreatePrimFuncPass(pass_func, 0, "tl.AutoSchedule", {});
 }
 
-// Helper function to clone IRStructure with warpgroup filter
+// Helper: check if a TaskNode is a LetDecl (single LetStmt with empty body)
+static bool IsLetDeclTask(const TaskNode *task) {
+  return task->stmts.size() == 1 &&
+         task->stmts[0].as<LetStmtNode>() != nullptr;
+}
+
+// Helper: check if an IRStructure node is a LetDecl task (or a ScheduleUnit
+// wrapping one)
+static bool IsLetDeclNode(const IRStructure *node) {
+  if (!node) return false;
+  if (node->IsTask()) {
+    return IsLetDeclTask(static_cast<const TaskNode *>(node));
+  }
+  if (node->IsScheduleUnit()) {
+    auto unit = static_cast<const ScheduleUnit *>(node);
+    return unit->child && unit->child->IsTask() &&
+           IsLetDeclTask(static_cast<const TaskNode *>(unit->child.get()));
+  }
+  return false;
+}
+
+// Helper: check if an IRStructure subtree contains any LetDecl tasks
+static bool ContainsLetDecl(const IRStructure *node) {
+  if (!node) return false;
+  if (IsLetDeclNode(node)) return true;
+  if (node->IsSequence()) {
+    auto seq = static_cast<const SequenceNode *>(node);
+    for (const auto &child : seq->children) {
+      if (ContainsLetDecl(child.get())) return true;
+    }
+  } else if (node->IsControl()) {
+    auto ctrl = static_cast<const ControlNode *>(node);
+    return ContainsLetDecl(ctrl->child.get());
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<const WrapperNode *>(node);
+    return ContainsLetDecl(wrapper->child.get());
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<const ScheduleUnit *>(node);
+    return ContainsLetDecl(unit->child.get());
+  }
+  return false;
+}
+
+// Helper function to clone IRStructure with warpgroup filter.
 std::shared_ptr<IRStructure>
-CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
-  if (!node || !node->containWarpgroupId(warpgroup_id))
-    return nullptr;
+CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
+                                    Map<Var, PrimExpr> &var_remap) {
+  if (!node) return nullptr;
 
   if (node->IsTask()) {
     auto task = static_cast<TaskNode *>(node);
-    return task->Clone();
+
+    // LetDecl tasks are always included in every warp group clone.
+    // Create a fresh variable copy so the two warp groups use different names.
+    if (IsLetDeclTask(task)) {
+      const auto *let = task->stmts[0].as<LetStmtNode>();
+      auto new_var = let->var.copy_with_suffix("");
+      // Substitute previously renamed variables in the value expression.
+      PrimExpr new_value = var_remap.empty()
+                               ? let->value
+                               : Substitute(let->value, var_remap);
+      var_remap.Set(let->var, new_var);
+      auto new_task = std::make_shared<TaskNode>();
+      new_task->stmts.push_back(LetStmt(new_var, new_value, Evaluate(0)));
+      return new_task;
+    }
+
+    // Non-LetDecl tasks: only include if warp group matches
+    if (!node->containWarpgroupId(warpgroup_id)) return nullptr;
+    auto cloned = task->Clone();
+    // Substitute renamed LetDecl variables in task statements
+    if (!var_remap.empty()) {
+      auto ct = static_cast<TaskNode *>(cloned.get());
+      for (size_t i = 0; i < ct->stmts.size(); ++i) {
+        ct->stmts[i] = Substitute(ct->stmts[i], var_remap);
+      }
+    }
+    return cloned;
   } else if (node->IsSequence()) {
+    // A SequenceNode is included if it contains the target warp group
+    // OR if it contains LetDecl tasks (which are always needed).
+    if (!node->containWarpgroupId(warpgroup_id) && !ContainsLetDecl(node))
+      return nullptr;
     auto seq = static_cast<SequenceNode *>(node);
     auto new_seq = std::make_shared<SequenceNode>();
     for (const auto &child : seq->children) {
-      auto new_child =
-          CloneIRStructureWithWarpgroupFilter(child.get(), warpgroup_id);
+      auto new_child = CloneIRStructureWithWarpgroupFilter(
+          child.get(), warpgroup_id, var_remap);
       if (new_child) {
         new_seq->children.push_back(std::move(new_child));
       }
     }
+    if (new_seq->children.empty()) return nullptr;
     return new_seq;
   } else if (node->IsControl()) {
+    // A ControlNode is included if it contains the target warp group
+    // OR if it contains LetDecl tasks.
+    if (!node->containWarpgroupId(warpgroup_id) && !ContainsLetDecl(node))
+      return nullptr;
     auto ctrl = static_cast<ControlNode *>(node);
     auto new_ctrl = std::make_shared<ControlNode>();
     new_ctrl->control = ctrl->control;
     new_ctrl->SetPromote(ctrl->hasPromote());
-    new_ctrl->child =
-        CloneIRStructureWithWarpgroupFilter(ctrl->child.get(), warpgroup_id);
+    new_ctrl->child = CloneIRStructureWithWarpgroupFilter(
+        ctrl->child.get(), warpgroup_id, var_remap);
     return new_ctrl;
   } else if (node->IsWrapper()) {
+    if (!node->containWarpgroupId(warpgroup_id) && !ContainsLetDecl(node))
+      return nullptr;
     auto wrapper = static_cast<WrapperNode *>(node);
     auto new_wrapper = std::make_shared<WrapperNode>();
+    // Keep the wrapper statement as-is (do NOT rename LetStmt wrappers here;
+    // only LetDecl TaskNodes get renamed).
     new_wrapper->wrapper = wrapper->wrapper;
-    new_wrapper->child =
-        CloneIRStructureWithWarpgroupFilter(wrapper->child.get(), warpgroup_id);
+    new_wrapper->child = CloneIRStructureWithWarpgroupFilter(
+        wrapper->child.get(), warpgroup_id, var_remap);
     return new_wrapper;
   } else if (node->IsScheduleUnit()) {
     auto unit = static_cast<ScheduleUnit *>(node);
+    bool child_is_let_decl = IsLetDeclNode(unit->child.get());
+
+    // Include the ScheduleUnit if the child is a LetDecl or the warp group
+    // matches.
+    if (!child_is_let_decl && !node->containWarpgroupId(warpgroup_id))
+      return nullptr;
+
     auto new_unit = std::make_shared<ScheduleUnit>();
-    new_unit->before[warpgroup_id] = unit->before[warpgroup_id];
-    new_unit->after[warpgroup_id] = unit->after[warpgroup_id];
     new_unit->stage = unit->stage;
-    new_unit->child =
-        CloneIRStructureWithWarpgroupFilter(unit->child.get(), warpgroup_id);
+    new_unit->child = CloneIRStructureWithWarpgroupFilter(
+        unit->child.get(), warpgroup_id, var_remap);
+
+    if (!child_is_let_decl) {
+      // Copy before/after for the target warp group
+      new_unit->before[warpgroup_id] = unit->before[warpgroup_id];
+      new_unit->after[warpgroup_id] = unit->after[warpgroup_id];
+      // Substitute renamed LetDecl variables in before/after stmts
+      if (!var_remap.empty()) {
+        for (auto &s : new_unit->before[warpgroup_id]) {
+          s = Substitute(s, var_remap);
+        }
+        for (auto &s : new_unit->after[warpgroup_id]) {
+          s = Substitute(s, var_remap);
+        }
+      }
+    }
     return new_unit;
   }
   LOG(FATAL);
+}
+
+// Entry point overload — creates a fresh var_remap per call
+std::shared_ptr<IRStructure>
+CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
+  Map<Var, PrimExpr> var_remap;
+  return CloneIRStructureWithWarpgroupFilter(node, warpgroup_id, var_remap);
+}
+
+// Simple visitor to collect all Var references from statements/expressions
+class VarRefCollector : public StmtExprVisitor {
+public:
+  std::unordered_set<const VarNode *> vars;
+  void VisitExpr_(const VarNode *op) override { vars.insert(op); }
+};
+
+// Remove LetDecl definitions whose variables are not referenced by any
+// non-LetDecl task in the IR tree.  After warp-group partitioning some
+// LetDecl values may access out-of-bounds indices because the consumer
+// tasks that used them ended up in the other warp group.
+std::shared_ptr<IRStructure>
+RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
+  if (!root) return nullptr;
+
+  // Phase 1: Collect LetDecl definitions and variable references from
+  // non-LetDecl nodes (task stmts and ScheduleUnit before/after).
+  struct LetDeclEntry {
+    const VarNode *var;
+    PrimExpr value;
+  };
+  std::vector<LetDeclEntry> let_decls;
+  std::unordered_set<const VarNode *> referenced_vars;
+
+  std::function<void(const IRStructure *)> collect =
+      [&](const IRStructure *node) {
+        if (!node) return;
+        if (node->IsTask()) {
+          auto task = static_cast<const TaskNode *>(node);
+          if (IsLetDeclTask(task)) {
+            const auto *let = task->stmts[0].as<LetStmtNode>();
+            let_decls.push_back({let->var.get(), let->value});
+          } else {
+            VarRefCollector collector;
+            for (const auto &stmt : task->stmts) {
+              collector(stmt);
+            }
+            referenced_vars.insert(collector.vars.begin(),
+                                   collector.vars.end());
+          }
+        } else if (node->IsSequence()) {
+          for (const auto &child :
+               static_cast<const SequenceNode *>(node)->children) {
+            collect(child.get());
+          }
+        } else if (node->IsControl()) {
+          collect(static_cast<const ControlNode *>(node)->child.get());
+        } else if (node->IsWrapper()) {
+          collect(static_cast<const WrapperNode *>(node)->child.get());
+        } else if (node->IsScheduleUnit()) {
+          auto unit = static_cast<const ScheduleUnit *>(node);
+          collect(unit->child.get());
+          VarRefCollector collector;
+          for (const auto &stmts : unit->before) {
+            for (const auto &s : stmts) collector(s);
+          }
+          for (const auto &stmts : unit->after) {
+            for (const auto &s : stmts) collector(s);
+          }
+          referenced_vars.insert(collector.vars.begin(),
+                                 collector.vars.end());
+        }
+      };
+  collect(root.get());
+
+  // Phase 2: Transitive closure — if a LetDecl var is referenced,
+  // all vars in its value expression are transitively referenced too.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto &entry : let_decls) {
+      if (referenced_vars.count(entry.var)) {
+        VarRefCollector collector;
+        collector(entry.value);
+        for (const auto *v : collector.vars) {
+          if (!referenced_vars.count(v)) {
+            referenced_vars.insert(v);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  // Phase 3: Filter the tree — remove LetDecl tasks for unused vars.
+  std::function<std::shared_ptr<IRStructure>(
+      const std::shared_ptr<IRStructure> &)>
+      filter_tree = [&](const std::shared_ptr<IRStructure> &node)
+      -> std::shared_ptr<IRStructure> {
+    if (!node) return nullptr;
+    if (node->IsTask()) {
+      if (IsLetDeclTask(static_cast<const TaskNode *>(node.get()))) {
+        const auto *let =
+            static_cast<const TaskNode *>(node.get())
+                ->stmts[0]
+                .as<LetStmtNode>();
+        if (!referenced_vars.count(let->var.get())) {
+          return nullptr; // Remove unused LetDecl
+        }
+      }
+      return node;
+    } else if (node->IsSequence()) {
+      auto seq = static_cast<const SequenceNode *>(node.get());
+      auto new_seq = std::make_shared<SequenceNode>();
+      for (const auto &child : seq->children) {
+        auto filtered = filter_tree(child);
+        if (filtered) new_seq->children.push_back(std::move(filtered));
+      }
+      if (new_seq->children.empty()) return nullptr;
+      return new_seq;
+    } else if (node->IsControl()) {
+      auto ctrl = static_cast<const ControlNode *>(node.get());
+      auto new_ctrl = std::make_shared<ControlNode>();
+      new_ctrl->control = ctrl->control;
+      new_ctrl->SetPromote(ctrl->hasPromote());
+      new_ctrl->child = filter_tree(ctrl->child);
+      if (!new_ctrl->child) return nullptr;
+      return new_ctrl;
+    } else if (node->IsWrapper()) {
+      auto wrapper = static_cast<const WrapperNode *>(node.get());
+      auto new_wrapper = std::make_shared<WrapperNode>();
+      new_wrapper->wrapper = wrapper->wrapper;
+      new_wrapper->child = filter_tree(wrapper->child);
+      return new_wrapper;
+    } else if (node->IsScheduleUnit()) {
+      auto unit = static_cast<const ScheduleUnit *>(node.get());
+      auto new_unit = std::make_shared<ScheduleUnit>();
+      new_unit->stage = unit->stage;
+      new_unit->before = unit->before;
+      new_unit->after = unit->after;
+      new_unit->child = filter_tree(unit->child);
+      if (!new_unit->child) return nullptr;
+      return new_unit;
+    }
+    return node;
+  };
+
+  return filter_tree(root);
 }
 
 class SimtCopyDetector : public StmtExprVisitor {
@@ -2083,19 +2388,26 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
             stmts.push_back(stmt);
           }
         }
-        Map<Var, PrimExpr> substitution;
-        PrimExpr condition =
-            And(loop_var < loop_extent, loop_var >= loop_start);
-        if (unit->stage == min_stages) {
-          condition = loop_var >= loop_start;
-        }
-        if (unit->stage == max_stages) {
-          condition = loop_var < loop_extent;
-        }
-        Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+        Map<Var, PrimExpr> substitution, substitution_cond;
         substitution.Set(loop_var,
                          loop_var - loop_step * (max_stages - unit->stage));
-        steady.push_back(Substitute(stmt, substitution));
+        substitution_cond.Set(loop_var,
+                              Max(loop_start, Min(loop_start + loop_extent - loop_step, loop_var - loop_step * (max_stages - unit->stage))));
+        if (IsLetDeclNode(unit->child.get())) {
+          Stmt stmt = SeqStmt::Flatten(stmts);
+          steady.push_back(Substitute(stmt, substitution_cond));
+        } else {
+          PrimExpr condition =
+              And(loop_var < loop_extent, loop_var >= loop_start);
+          if (unit->stage == min_stages) {
+            condition = loop_var >= loop_start;
+          }
+          if (unit->stage == max_stages) {
+            condition = loop_var < loop_extent;
+          }
+          Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+          steady.push_back(Substitute(stmt, substitution));
+        }
       }
       Stmt new_body = SeqStmt::Flatten(steady);
       auto new_var = loop_var.copy_with_suffix("");
@@ -2391,19 +2703,26 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
             stmts.push_back(stmt);
           }
         }
-        Map<Var, PrimExpr> substitution;
-        PrimExpr condition =
-            And(loop_var < loop_extent, loop_var >= loop_start);
-        if (unit->stage == min_stages) {
-          condition = loop_var >= loop_start;
-        }
-        if (unit->stage == max_stages) {
-          condition = loop_var < loop_extent;
-        }
-        Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+        Map<Var, PrimExpr> substitution, substitution_cond;
         substitution.Set(loop_var,
                          loop_var - loop_step * (max_stages - unit->stage));
-        steady.push_back(Substitute(stmt, substitution));
+        substitution_cond.Set(loop_var,
+                              Max(loop_start, Min(loop_start + loop_extent - loop_step, loop_var - loop_step * (max_stages - unit->stage))));
+        if (IsLetDeclNode(unit->child.get())) {
+          Stmt stmt = SeqStmt::Flatten(stmts);
+          steady.push_back(Substitute(stmt, substitution_cond));
+        } else {
+          PrimExpr condition =
+              And(loop_var < loop_extent, loop_var >= loop_start);
+          if (unit->stage == min_stages) {
+            condition = loop_var >= loop_start;
+          }
+          if (unit->stage == max_stages) {
+            condition = loop_var < loop_extent;
+          }
+          Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+          steady.push_back(Substitute(stmt, substitution));
+        }
       }
       Stmt new_body = SeqStmt::Flatten(steady);
       auto new_var = loop_var.copy_with_suffix("");
@@ -2626,8 +2945,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
                                             root, is_epi_top_level_index, -1)
                                       : nullptr;
 
-  auto wg0_structure = CloneIRStructureWithWarpgroupFilter(root, 0);
-  auto wg1_structure = CloneIRStructureWithWarpgroupFilter(root, 1);
+  auto wg0_structure =
+      RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, 0));
+  auto wg1_structure =
+      RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, 1));
 
   bool wg_pro_neutral_has_stmts =
       wg_pro_neutral_structure
