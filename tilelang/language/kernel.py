@@ -232,6 +232,7 @@ def Kernel(
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
     is_cpu: bool = False,
     prelude: str | None = None,
+    attrs: dict | None = None,
 ):
     """Tools to quickly construct a GPU kernel launch frame.
 
@@ -295,7 +296,7 @@ def Kernel(
     if Builder.current() is None:
         raise JITNoBuilderError("T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
-    attrs: dict = {}
+    attrs = {} if attrs is None else dict(attrs)
 
     if not is_cpu and threads is None:
         threads = 128  # default thread number
@@ -327,6 +328,14 @@ def Kernel(
             attrs["cluster_dims"] = cluster_dims
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
+
+
+def PersistentKernel(*args, **kwargs):
+    attrs = kwargs.pop("attrs", None)
+    attrs = {} if attrs is None else dict(attrs)
+    attrs["tilelang.is_persistent_kernel"] = True
+    kwargs["attrs"] = attrs
+    return Kernel(*args, **kwargs)
 
 
 def get_thread_binding(dim: int = 0) -> Var:

@@ -561,6 +561,26 @@ def LowerSharedTmem():
     return _ffi_api.LowerSharedTmem()  # type: ignore
 
 
+def TileSchedule(num_persistent_blocks: int):
+    """Persistent tile schedule for kernels using ``T.PersistentKernel``.
+
+    When ``tilelang_root`` carries ``tilelang.is_persistent_kernel``, rewrites a
+    2D block grid into a 1D launch (``num_persistent_blocks`` CTAs) plus a wave
+    loop over output tiles.
+
+    Parameters
+    ----------
+    num_persistent_blocks : int
+        Number of thread blocks in the persistent launch (often SM count from
+        ``driver.get_num_sms()``).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+    """
+    return _ffi_api.TileSchedule(num_persistent_blocks)  # type: ignore
+
+
 def LayoutReducer():
     """
     Return a TVM transform pass that performs layout reduction/normalization.

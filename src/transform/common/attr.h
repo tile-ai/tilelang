@@ -27,6 +27,9 @@ namespace attr {
 // Attributes to mark CUDA sync calls
 constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";
 constexpr const char *kHasGridSync = "has_cuda_pdl_sync";
+// Marks serial outer loops that continue the same software-pipeline phase.
+constexpr const char *kPipelinePhaseContinuation =
+    "tl.pipeline_phase_continuation";
 } // namespace attr
 
 } // namespace tl
