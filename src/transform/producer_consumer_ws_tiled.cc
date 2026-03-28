@@ -67,6 +67,94 @@ void FlattenSeqStmt(const Stmt &s, Array<Stmt> *out) {
 static constexpr const char *kTiledWSApplied = "tl_tiled_ws_applied";
 
 // ---------------------------------------------------------------------------
+// PhaseCounter: local counter for correct barrier parity in guarded loops
+// ---------------------------------------------------------------------------
+struct PhaseCounter {
+  Buffer buf;
+
+  static PhaseCounter Create(const std::string &name) {
+    return {decl_buffer({IntImm(DataType::Int(32), 1)}, DataType::Int(32), name,
+                        "local")};
+  }
+
+  PrimExpr Load() const {
+    return BufferLoad(buf, {IntImm(DataType::Int(32), 0)});
+  }
+
+  Stmt Init() const {
+    return BufferStore(buf, IntImm(DataType::Int(32), 0),
+                       {IntImm(DataType::Int(32), 0)});
+  }
+
+  Stmt Increment() const {
+    return BufferStore(buf, Load() + 1, {IntImm(DataType::Int(32), 0)});
+  }
+
+  Stmt WrapLoopWithAlloc(Stmt loop) const {
+    Stmt body = SeqStmt({Init(), std::move(loop)});
+    body = DeclBuffer(buf, body);
+    return Allocate(buf->data, buf->dtype, buf->shape, const_true(), body);
+  }
+
+  PrimExpr StageExpr(int num_stages) const {
+    if (num_stages == 1)
+      return IntImm(DataType::Int(32), 0);
+    return FloorMod(Load(), num_stages);
+  }
+
+  PrimExpr ParityExpr(int num_stages) const {
+    if (num_stages == 1)
+      return FloorMod(Load(), 2);
+    return FloorMod(FloorDiv(Load(), num_stages), 2);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// StageExprReplacer: rewrite loop-var-based stage indexing to counter-based
+// ---------------------------------------------------------------------------
+class StageExprReplacer : public StmtExprMutator {
+public:
+  static Stmt Replace(const Stmt &stmt, Var loop_var, PrimExpr loop_min,
+                      int num_stages, PrimExpr replacement) {
+    StageExprReplacer r(std::move(loop_var), std::move(loop_min), num_stages,
+                        std::move(replacement));
+    return r.VisitStmt(stmt);
+  }
+
+private:
+  StageExprReplacer(Var loop_var, PrimExpr loop_min, int num_stages,
+                    PrimExpr replacement)
+      : loop_var_(std::move(loop_var)), loop_min_(std::move(loop_min)),
+        num_stages_(num_stages), replacement_(std::move(replacement)) {}
+
+  PrimExpr VisitExpr_(const FloorModNode *op) final {
+    if (is_const_int(op->b, num_stages_) && MatchLinearIdx(op->a)) {
+      return replacement_;
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  bool MatchLinearIdx(const PrimExpr &expr) const {
+    if (expr.same_as(loop_var_))
+      return true;
+    if (const auto *sub = expr.as<SubNode>()) {
+      if (sub->a.same_as(loop_var_)) {
+        if (is_const_int(sub->b, 0))
+          return true;
+        if (sub->b.same_as(loop_min_))
+          return true;
+      }
+    }
+    return false;
+  }
+
+  Var loop_var_;
+  PrimExpr loop_min_;
+  int num_stages_;
+  PrimExpr replacement_;
+};
+
+// ---------------------------------------------------------------------------
 // Statement classification
 // ---------------------------------------------------------------------------
 
@@ -333,6 +421,15 @@ private:
       let_bindings.emplace_back(let->var, let->value);
       loop_body = let->body;
     }
+    // Unwrap a single IfThenElse wrapper (no else branch) so that
+    // TMA producers inside conditional loop bodies can be classified.
+    Optional<PrimExpr> loop_body_condition;
+    if (const auto *if_stmt = loop_body.as<IfThenElseNode>()) {
+      if (!if_stmt->else_case.defined()) {
+        loop_body_condition = if_stmt->condition;
+        loop_body = if_stmt->then_case;
+      }
+    }
     FlattenSeqStmt(loop_body, &flat_stmts);
 
     // Classify statements into producer (TMA/SIMT copy) and consumer.
@@ -354,21 +451,41 @@ private:
 
     // --- Build the WS transformation ---
     return BuildWSBlock(op, orig_block, pipeline_loop, num_stages, flat_stmts,
-                        kinds, let_bindings);
+                        kinds, let_bindings, loop_body_condition);
   }
 
   Stmt BuildWSBlock(const BlockRealizeNode *orig_realize,
                     const Block &orig_block, const ForNode *pipeline_loop,
                     int num_stages, const Array<Stmt> &flat_stmts,
                     const std::vector<TileStmtKind> &kinds,
-                    const std::vector<std::pair<Var, PrimExpr>> &let_bindings) {
+                    const std::vector<std::pair<Var, PrimExpr>> &let_bindings,
+                    Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>()) {
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_min = pipeline_loop->min;
     PrimExpr loop_extent = pipeline_loop->extent;
     PrimExpr linear_idx = loop_var - loop_min;
 
-    PrimExpr stage_expr = FloorMod(linear_idx, num_stages);
-    PrimExpr parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
+    PrimExpr base_stage_expr = FloorMod(linear_idx, num_stages);
+    PrimExpr base_parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
+
+    // When the loop body is conditionally guarded, use PhaseCounters
+    // instead of the loop variable for barrier stage/parity.  This
+    // ensures parity stays correct when iterations are skipped.
+    bool needs_phase_counter = loop_body_condition.defined();
+    Optional<PhaseCounter> producer_phase_counter;
+    Optional<PhaseCounter> consumer_phase_counter;
+    PrimExpr p_stage_expr = base_stage_expr;
+    PrimExpr p_parity_expr = base_parity_expr;
+    PrimExpr c_stage_expr = base_stage_expr;
+    PrimExpr c_parity_expr = base_parity_expr;
+    if (needs_phase_counter) {
+      producer_phase_counter = PhaseCounter::Create("producer_phase_cnt");
+      consumer_phase_counter = PhaseCounter::Create("consumer_phase_cnt");
+      p_stage_expr = producer_phase_counter.value().StageExpr(num_stages);
+      p_parity_expr = producer_phase_counter.value().ParityExpr(num_stages);
+      c_stage_expr = consumer_phase_counter.value().StageExpr(num_stages);
+      c_parity_expr = consumer_phase_counter.value().ParityExpr(num_stages);
+    }
 
     PrimExpr consumer_extent = thread_iv_->dom->extent;
     // Producer warp group is always 128 threads (one warp group).
@@ -427,13 +544,13 @@ private:
       if (kinds[i] == TileStmtKind::kTmaProducer) {
         int fwd_base = tma_idx * num_stages;
         int bp_base = num_fwd + tma_idx * num_stages;
-        PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + stage_expr;
-        PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + stage_expr;
+        PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
+        PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + p_stage_expr;
 
         // Back-pressure wait
         producer_stmts.push_back(MakeParityWait(
             barrier_buf, bp_id,
-            bitwise_xor(parity_expr, IntImm(DataType::Int(32), 1))));
+            bitwise_xor(p_parity_expr, IntImm(DataType::Int(32), 1))));
         // Convert copy → tma_copy with barrier
         const auto *eval = flat_stmts[i].as<EvaluateNode>();
         ICHECK(eval);
@@ -462,9 +579,13 @@ private:
     if (has_simt_producer || has_cp_async_producer) {
       for (int g = 0; g < num_producer_groups; ++g) {
         int fwd_base = g * num_stages;
-        PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + stage_expr;
+        PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
         producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
       }
+    }
+    // Phase counter increment at end of producer guarded iteration
+    if (needs_phase_counter) {
+      producer_stmts.push_back(producer_phase_counter.value().Increment());
     }
 
     // --- Build consumer body ---
@@ -472,9 +593,9 @@ private:
     // Forward waits before first consumer stmt.
     for (int g = 0; g < num_producer_groups; ++g) {
       int fwd_base = g * num_stages;
-      PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + stage_expr;
+      PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + c_stage_expr;
       consumer_stmts.push_back(
-          MakeParityWait(barrier_buf, fwd_id, parity_expr));
+          MakeParityWait(barrier_buf, fwd_id, c_parity_expr));
     }
     // Consumer statements (everything not a producer)
     for (size_t i = 0; i < flat_stmts.size(); ++i) {
@@ -485,11 +606,15 @@ private:
     // Back-pressure arrives
     for (int g = 0; g < num_producer_groups; ++g) {
       int bp_base = num_fwd + g * num_stages;
-      PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + stage_expr;
+      PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + c_stage_expr;
       consumer_stmts.push_back(MakeArriveBarrier(barrier_buf, bp_id));
     }
+    // Phase counter increment at end of consumer guarded iteration
+    if (needs_phase_counter) {
+      consumer_stmts.push_back(consumer_phase_counter.value().Increment());
+    }
 
-    // --- Wrap with let bindings ---
+    // --- Wrap with let bindings and optional condition ---
     auto wrap_lets = [&](Stmt body) -> Stmt {
       for (auto it = let_bindings.rbegin(); it != let_bindings.rend(); ++it) {
         body = LetStmt(it->first, it->second, body);
@@ -499,6 +624,23 @@ private:
 
     Stmt producer_body = wrap_lets(SeqStmt(producer_stmts));
     Stmt consumer_body = wrap_lets(SeqStmt(consumer_stmts));
+
+    // Wrap in original condition if the loop body was guarded.
+    if (loop_body_condition.defined()) {
+      producer_body = IfThenElse(loop_body_condition.value(), producer_body);
+      consumer_body = IfThenElse(loop_body_condition.value(), consumer_body);
+    }
+
+    // Rewrite shared-buffer stage indices from loop-var-based to
+    // counter-based so they stay in sync with barrier parity.
+    if (needs_phase_counter) {
+      producer_body = StageExprReplacer::Replace(
+          producer_body, loop_var, loop_min, num_stages,
+          producer_phase_counter.value().StageExpr(num_stages));
+      consumer_body = StageExprReplacer::Replace(
+          consumer_body, loop_var, loop_min, num_stages,
+          consumer_phase_counter.value().StageExpr(num_stages));
+    }
 
     // --- Build loops (strip pipeline annotations) ---
     // WS handles pipeline overlap via barriers, so strip all pipeline-
@@ -518,13 +660,23 @@ private:
     For consumer_loop(loop_var, loop_min, loop_extent, ForKind::kSerial,
                       consumer_body, Optional<IterVar>(), loop_annos);
 
+    // Wrap loops with phase counter allocation when needed.
+    Stmt final_producer_loop = producer_loop;
+    Stmt final_consumer_loop = consumer_loop;
+    if (needs_phase_counter) {
+      final_producer_loop =
+          producer_phase_counter.value().WrapLoopWithAlloc(producer_loop);
+      final_consumer_loop =
+          consumer_phase_counter.value().WrapLoopWithAlloc(consumer_loop);
+    }
+
     // --- Rewrite threadIdx.x for producer partition ---
     // Producer: threadIdx.x - consumer_extent (maps to [0, producer_extent))
     Stmt rewritten_producer = PCThreadIdxRewriter::Rewrite(
-        producer_loop, thread_iv_->var,
+        final_producer_loop, thread_iv_->var,
         thread_iv_->var - consumer_extent, producer_extent, false);
     // Consumer: threadIdx.x stays, but extent is consumer_extent
-    Stmt rewritten_consumer = consumer_loop;
+    Stmt rewritten_consumer = final_consumer_loop;
 
     // --- WS if/else structure ---
     Stmt ws_body = IfThenElse(GE(thread_iv_->var, consumer_extent),
