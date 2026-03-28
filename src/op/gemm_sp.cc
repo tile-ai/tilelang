@@ -175,16 +175,16 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ss << ", " << wgWait_;
   }
   ss << ">";
-  auto A_buffer = T.buffer_remap.count(a_) ? T.buffer_remap[a_] : a_;
-  auto B_buffer = T.buffer_remap.count(b_) ? T.buffer_remap[b_] : b_;
-  auto C_buffer = T.buffer_remap[c_];
-  auto E_buffer = T.buffer_remap.count(e_) ? T.buffer_remap[e_] : e_;
+  // Build access pointers from regions to preserve stage-specific offsets
+  // from pipeline multi-versioning (matching dense GemmNode::Lower pattern).
+  PrimExpr Aptr = MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Bptr = MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Cptr = MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
+  PrimExpr Eptr = MakeAccessPtrFromRegion(eRegion_, /*r*/ 1, /*require_2d*/ false);
 
   auto new_call =
       Call(DataType::Handle(), tl::tl_gemm_sp(),
-           Array<PrimExpr>{StringImm(ss.str()), A_buffer.access_ptr(1),
-                           B_buffer.access_ptr(1), C_buffer.access_ptr(3),
-                           E_buffer.access_ptr(1)});
+           Array<PrimExpr>{StringImm(ss.str()), Aptr, Bptr, Cptr, Eptr});
   return Evaluate(new_call);
 }
 
