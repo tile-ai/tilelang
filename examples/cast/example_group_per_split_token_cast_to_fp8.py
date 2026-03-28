@@ -230,5 +230,4 @@ def run_regression_perf(M=8192, N=8192, BG=2, blk_m=8, batch_sizes=None):
 
 
 if __name__ == "__main__":
-    tilelang.disable_cache()
     main()
