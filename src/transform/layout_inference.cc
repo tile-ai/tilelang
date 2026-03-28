@@ -161,6 +161,25 @@ public:
               }
             }
           }
+          // After InjectSoftwarePipeline, multi-versioned buffers share
+          // the same data Var as the original but have an extra leading
+          // dimension (num_stages).  Reshape requires matching total
+          // element counts, so skip siblings whose storage size differs
+          // (e.g., multi-versioned buffers).
+          if (!shapes_equal) {
+            PrimExpr src_product = Integer(1);
+            for (const auto &d : src_layout->InputShape())
+              src_product = src_product * d;
+            PrimExpr sib_product = Integer(1);
+            for (const auto &d : sib->shape) sib_product = sib_product * d;
+            if (!analyzer_.CanProveEqual(
+                    src_product *
+                        Integer(GetElementStorageBits(src_buffer->dtype)),
+                    sib_product *
+                        Integer(GetElementStorageBits(sib->dtype)))) {
+              continue;
+            }
+          }
           Layout target_layout =
               shapes_equal
                   ? src_layout
@@ -405,6 +424,21 @@ public:
             }
           }
 
+          if (!shapes_equal) {
+            PrimExpr src_product = Integer(1);
+            for (const auto &d : rep_layout.value()->InputShape())
+              src_product = src_product * d;
+            PrimExpr buf_product = Integer(1);
+            for (const auto &d : buf->shape)
+              buf_product = buf_product * d;
+            if (!analyzer_.CanProveEqual(
+                    src_product *
+                        Integer(GetElementStorageBits(rep.value()->dtype)),
+                    buf_product *
+                        Integer(GetElementStorageBits(buf->dtype)))) {
+              continue;
+            }
+          }
           Layout reshaped =
               shapes_equal
                   ? rep_layout.value()
@@ -806,6 +840,20 @@ private:
           } else {
             // Use the first buffer sharing this var as the base for dtype ratio
             int64_t base_bits = GetElementStorageBits(buffers[0]->dtype);
+            // Skip multi-versioned buffers whose total storage size
+            // doesn't match the layout (e.g., extra stage dimension).
+            PrimExpr layout_product = Integer(1);
+            for (const auto &d : layout->InputShape())
+              layout_product = layout_product * d;
+            PrimExpr buf_product = Integer(1);
+            for (const auto &d : buffer->shape)
+              buf_product = buf_product * d;
+            if (!analyzer_.CanProveEqual(
+                    layout_product * Integer(base_bits),
+                    buf_product *
+                        Integer(GetElementStorageBits(buffer->dtype)))) {
+              continue;
+            }
             auto reshaped_layout =
                 layout->Reshape(buffer->shape, &analyzer_, Integer(base_bits),
                                 Integer(GetElementStorageBits(buffer->dtype)));
