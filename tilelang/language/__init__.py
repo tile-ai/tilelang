@@ -136,6 +136,15 @@ from .cluster import (
 )
 
 
+tfloat32 = "tfloat32"
+tf32 = tfloat32
+dtype_registry = {
+    "float32": float32,
+    "tfloat32": tfloat32,
+    "tf32": tf32,
+}
+
+
 def import_source(source: str | None = None):
     # source is the source code to be imported
     return block_attr({"pragma_import_c": source}) if source is not None else None
