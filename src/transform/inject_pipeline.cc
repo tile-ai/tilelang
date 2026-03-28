@@ -1153,6 +1153,7 @@ private:
                               pipeline_info, loop_var_let_wrappers,
                               loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
+    subtree_modified_ = true;
 
     // Store the buffer remapping for updating outer block alloc_buffers
     for (const auto &kv : rewriter.GetBufferRemap()) {
@@ -1196,28 +1197,43 @@ private:
       allocated_buffers_.insert(buffer);
     }
 
+    bool outer_flag = subtree_modified_;
+    subtree_modified_ = false;
     Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
+    bool children_modified = subtree_modified_;
+    // Propagate to parent: if this subtree was modified, parent should know.
+    subtree_modified_ = outer_flag || children_modified;
 
     // Update alloc_buffers with any pending buffer remaps from pipeline
     // rewriting. This handles buffers allocated in this block but
     // multi-versioned during pipeline rewriting of inner loops.
+    bool allocs_changed = false;
     Array<Buffer> new_alloc_buffers;
     for (const auto &buffer : block->alloc_buffers) {
       if (auto remapped = pending_buffer_remap_.Get(buffer)) {
         new_alloc_buffers.push_back(remapped.value());
-        // Remove from pending after applying
         pending_buffer_remap_.erase(buffer);
+        allocs_changed = true;
       } else {
         new_alloc_buffers.push_back(buffer);
       }
     }
 
-    Array<Array<BufferRegion>> access =
-        GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
-    BlockNode *n = block.CopyOnWrite();
-    n->reads = access[0];
-    n->writes = access[1];
-    n->alloc_buffers = std::move(new_alloc_buffers);
+    bool modified = children_modified || allocs_changed;
+    if (modified) {
+      // Recalculate reads/writes only when the block was actually
+      // modified by pipeline rewriting.  Unconditional recalculation
+      // with the (incomplete) buffer_data_to_buffer_ map can embed
+      // references to inner-block buffers (e.g. local.var) into outer
+      // block annotations, which misleads downstream LCA analysis and
+      // causes those buffers to be promoted to kernel parameters.
+      Array<Array<BufferRegion>> access =
+          GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+      BlockNode *n = block.CopyOnWrite();
+      n->reads = access[0];
+      n->writes = access[1];
+      n->alloc_buffers = std::move(new_alloc_buffers);
+    }
 
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.erase(buffer->data);
@@ -1253,6 +1269,10 @@ private:
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>
       buffers_used_in_pipeline_;
   Optional<String> global_symbol_;
+  // Track whether any pipeline was actually injected in the current
+  // subtree.  Used to avoid unnecessary reads/writes recalculation
+  // on blocks whose descendants were not modified.
+  bool subtree_modified_ = false;
 };
 } // namespace software_pipeline
 
