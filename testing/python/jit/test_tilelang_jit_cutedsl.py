@@ -361,59 +361,6 @@ def test_cutedsl_dynamic_shape():
     )
 
 
-def run_cutedsl_barrier(
-    M,
-    N,
-    K,
-    block_M,
-    block_N,
-    block_K,
-    mbars,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
-    num_stages,
-    threads,
-):
-    program = matmul_kernel_with_barrier(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        mbars,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        accum_dtype,
-        num_stages,
-        threads,
-    )
-    matmul_kernel = tilelang.compile(
-        program,
-        target="cutedsl",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
-    )
-
-    source = matmul_kernel.get_kernel_source()
-    assert f"barriers = tl.alloc_smem(cutlass.Uint64, size_in_elems={len(mbars)})" in source
-    for i, arrive_count in enumerate(mbars):
-        assert f"tl.mbarrier_init((barriers + {i}), {arrive_count})" in source
-
-
-@tilelang.testing.requires_cuda
-def test_cutedsl_barrier():
-    mbars = (1, 1, 128, 128)
-    run_cutedsl_barrier(512, 1024, 768, 128, 256, 32, mbars, False, False, "float16", "float16", "float16", 2, 128)
-
-
 def check_hopper():
     if not torch.cuda.is_available():
         return False

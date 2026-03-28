@@ -417,6 +417,10 @@ private:
                  iv->thread_tag == "threadIdx.z") {
         threadIdx_z_ext = op->value;
       }
+    } else if (op->attr_key == tl::attr::kMinBlocksPerSM) {
+      if (const IntImmNode *v = op->value.as<IntImmNode>()) {
+        min_blocks_per_sm = v->value;
+      }
     }
     StmtVisitor::VisitStmt_(op);
   }
@@ -425,6 +429,39 @@ public:
   PrimExpr threadIdx_x_ext = Integer(1);
   PrimExpr threadIdx_y_ext = Integer(1);
   PrimExpr threadIdx_z_ext = Integer(1);
+  int64_t min_blocks_per_sm = 1; // default to 1
+};
+
+class ClusterInfoExtractor : public tir::StmtVisitor {
+private:
+  void VisitStmt(const PrimFunc &f) {
+    if (f->GetAttr<Array<PrimExpr>>("cluster_dims").has_value()) {
+      launch_with_cluster = true;
+      auto cluster_dims = f->GetAttr<Array<PrimExpr>>("cluster_dims").value();
+      cluster_grid_x_ext = cluster_dims[0].as<IntImmNode>()->value;
+      cluster_grid_y_ext = cluster_dims[1].as<IntImmNode>()->value;
+      cluster_grid_z_ext = cluster_dims[2].as<IntImmNode>()->value;
+      ICHECK(cluster_grid_x_ext > 0 && cluster_grid_y_ext > 0 &&
+             cluster_grid_z_ext > 0);
+    }
+    StmtVisitor::VisitStmt(f->body);
+  }
+
+  bool launch_with_cluster = false;
+  int64_t cluster_grid_x_ext = 1;
+  int64_t cluster_grid_y_ext = 1;
+  int64_t cluster_grid_z_ext = 1;
+
+public:
+  std::optional<std::tuple<int64_t, int64_t, int64_t>>
+  extract(const PrimFunc &f) {
+    this->VisitStmt(f);
+    if (launch_with_cluster) {
+      return std::make_tuple(cluster_grid_x_ext, cluster_grid_y_ext,
+                             cluster_grid_z_ext);
+    }
+    return std::nullopt;
+  }
 };
 
 void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
@@ -441,7 +478,8 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", 1)";
+    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
+           << extractor.min_blocks_per_sm << ")";
   }
 }
 
@@ -825,25 +863,70 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
-  // Fast-path for packed FP32x2 arithmetic.
+  // Fast-path for packed x2 arithmetic (float32x2, bfloat16x2, float16x2).
   //
-  // PTX packed `.f32x2` arithmetic is only available on SM100+.
-  // Guard emission here so older targets keep the default per-lane lowering.
-  // (The `tl::f*2` helpers also have their own compile-time guards and
-  // fallbacks, but we avoid calling them in generated code when the target
-  // cannot use the instructions.)
-  Target cur_target = Target::Current(/*allow_not_defined=*/true);
-  bool target_supports_f32x2_packed =
-      cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100);
-  if (target_supports_f32x2_packed && t.is_float() && t.bits() == 32 &&
-      t.lanes() == 2) {
-    if (op == "+") {
-      os << "tl::fadd2(" << PrintExpr(lhs) << ", " << PrintExpr(rhs) << ")";
-      return;
+  // For float32x2: PTX `.f32x2` instructions are available on SM100+.
+  // For bfloat16x2 / float16x2: native packed half-precision instructions
+  // (__hadd2, __hsub2, etc.) are available on SM80+ (bf16) / SM53+ (fp16).
+  // The tl::*2 C++ helpers have compile-time arch guards with scalar
+  // fallbacks, so we can emit them unconditionally for 16-bit types.
+  if (t.lanes() == 2) {
+    bool is_f32x2 = t.is_float() && t.bits() == 32;
+    bool is_bf16x2 = t.is_bfloat16();
+    bool is_fp16x2 = t.is_float16();
+
+    // For f32x2, only emit packed ops on SM100+ (no native instructions
+    // before that). For bf16x2/fp16x2, the C++ helpers always have fallbacks.
+    bool should_emit = false;
+    if (is_bf16x2 || is_fp16x2) {
+      should_emit = true;
+    } else if (is_f32x2) {
+      Target cur_target = Target::Current(/*allow_not_defined=*/true);
+      should_emit =
+          cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100);
     }
-    if (op == "*") {
-      os << "tl::fmul2(" << PrintExpr(lhs) << ", " << PrintExpr(rhs) << ")";
-      return;
+
+    if (should_emit) {
+      // Map TIR binary-op strings to tl:: packed helpers.
+      // Note: fma (ternary) and abs (unary) cannot appear here.
+      std::string tl_func;
+      if (op == "+")
+        tl_func = "add2";
+      else if (op == "-")
+        tl_func = "sub2";
+      else if (op == "*")
+        tl_func = "mul2";
+      else if (op == "min")
+        tl_func = "min2";
+      else if (op == "max")
+        tl_func = "max2";
+
+      if (!tl_func.empty()) {
+        // For bfloat16x2 / float16x2 both map to uint1 in generated CUDA,
+        // so we must cast arguments to the correct native type and cast the
+        // result back to uint1.
+        bool need_cast = is_bf16x2 || is_fp16x2;
+        std::string native_type;
+        if (is_bf16x2)
+          native_type = "__nv_bfloat162";
+        else if (is_fp16x2)
+          native_type = "__half2";
+
+        std::string lhs_str = PrintExpr(lhs);
+        std::string rhs_str = PrintExpr(rhs);
+
+        if (need_cast) {
+          std::string cast_lhs =
+              "tl::from_uint1<" + native_type + ">(" + lhs_str + ")";
+          std::string cast_rhs =
+              "tl::from_uint1<" + native_type + ">(" + rhs_str + ")";
+          os << "tl::to_uint1(tl::" << tl_func << "(" << cast_lhs << ", "
+             << cast_rhs << "))";
+        } else {
+          os << "tl::" << tl_func << "(" << lhs_str << ", " << rhs_str << ")";
+        }
+        return;
+      }
     }
   }
 
@@ -984,8 +1067,8 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
   ICHECK(i >= 0 && i < 256 / t.bits());
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
-      stream << vec << '.' << access[i % t.lanes()] << "="
-             << "(" << value << ");\n";
+      stream << vec << '.' << access[i % t.lanes()] << "=" << "(" << value
+             << ");\n";
     } else if (t.lanes() <= 16) {
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       stream << ac << "=";
@@ -1444,16 +1527,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
-    os << "cutlass::bfloat16_t(__hmin("
-       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
-       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
+    os << "cutlass::bfloat16_t(__hmin(" << "(" << PrintExpr(op->a)
+       << ").to_nv_bfloat16(), " << "(" << PrintExpr(op->b)
+       << ").to_nv_bfloat16()))";
     return;
   }
 
   if (t.is_float16() && t.is_scalar()) {
-    os << "cutlass::half_t(__hmin("
-       << "(" << PrintExpr(op->a) << ").to_half(), "
-       << "(" << PrintExpr(op->b) << ").to_half()))";
+    os << "cutlass::half_t(__hmin(" << "(" << PrintExpr(op->a)
+       << ").to_half(), " << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -1475,16 +1557,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
-    os << "cutlass::bfloat16_t(__hmax("
-       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
-       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
+    os << "cutlass::bfloat16_t(__hmax(" << "(" << PrintExpr(op->a)
+       << ").to_nv_bfloat16(), " << "(" << PrintExpr(op->b)
+       << ").to_nv_bfloat16()))";
     return;
   }
 
   if (t.is_float16() && t.is_scalar()) {
-    os << "cutlass::half_t(__hmax("
-       << "(" << PrintExpr(op->a) << ").to_half(), "
-       << "(" << PrintExpr(op->b) << ").to_half()))";
+    os << "cutlass::half_t(__hmax(" << "(" << PrintExpr(op->a)
+       << ").to_half(), " << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -1859,9 +1940,21 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto phase = this->PrintExpr(op->args[1]);
     this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
   } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
-    print_extern_call_stmt("tl::tmem_allocate");
+    std::ostringstream ss;
+    ss << "tl::tmem_allocate";
+    if (op->annotations.find("use_2cta") != op->annotations.end() &&
+        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
-    print_extern_call_stmt("tl::tmem_deallocate");
+    std::ostringstream ss;
+    ss << "tl::tmem_deallocate";
+    if (op->annotations.find("use_2cta") != op->annotations.end() &&
+        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
@@ -1871,7 +1964,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
     // Simplify the code by using the default eviction policy
-    if (eviction_policy != "EVICT_NORMAL") {
+    if (op->annotations.find("use_2cta") != op->annotations.end() &&
+        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      if (eviction_policy != "EVICT_NORMAL") {
+        ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy
+           << ">(";
+      } else {
+        ss << "tl::tma_load_2sm(";
+      }
+    } else if (eviction_policy != "EVICT_NORMAL") {
       ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
     } else {
       ss << "tl::tma_load(";
@@ -1933,7 +2034,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl::tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
-    print_extern_call_stmt("tl::tma_store_wait<0>");
+    int count = Downcast<IntImm>(op->args[0])->value;
+    this->PrintIndent();
+    this->stream << "tl::tma_store_wait<" << count << ">();\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
     print_extern_call_stmt("tl::warpgroup_arrive");
   } else if (op->op.same_as(tl::warpgroup_commit_batch())) {
@@ -2402,7 +2505,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     wgmma_call = replacer.rewrite(wgmma_call);
     this->stream << wgmma_call;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
-    ICHECK_EQ(op->args.size(), 14U)
+    ICHECK_EQ(op->args.size(), 15U)
         << "ptx_tcgen05_mma_ss args is " << op->args;
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_desc = this->PrintExpr(op->args[1]);
@@ -2418,20 +2521,30 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask2 = this->PrintExpr(op->args[11]);
     std::string mask3 = this->PrintExpr(op->args[12]);
     bool enable_ws = Downcast<Bool>(op->args[13])->value;
+    bool enable_2cta = Downcast<Bool>(op->args[14])->value;
 
+    std::string use_2cta_suffix;
+    if (enable_ws) {
+      ICHECK(!enable_2cta)
+          << "enable_ws and enable_2cta cannot be true at the same time";
+    } else {
+      use_2cta_suffix = std::string(", ") + (enable_2cta ? "true" : "false");
+    }
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
+    std::string ab_type_str = tl::codegen::ptx::DTypeEnumToString(dtype_enum);
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::(tcgen05_name)<(ABType)>(uint64_t((desc_a) + (A_offset)), "
+        "tl::(tcgen05_name)<(ABType)(USE_2CTA_SUFFIX)>(uint64_t((desc_a) + "
+        "(A_offset)), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), (mask0), (mask1), "
         "(mask2), (mask3));\n";
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(ABType)",
-                           tl::codegen::ptx::DTypeEnumToString(dtype_enum));
+    replacer.register_rule("(ABType)", ab_type_str);
+    replacer.register_rule("(USE_2CTA_SUFFIX)", use_2cta_suffix);
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
@@ -2450,7 +2563,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << tcgen05_call;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
     // TS: A from TMEM, B from SMEM (desc)
-    ICHECK_EQ(op->args.size(), 13U)
+    ICHECK_EQ(op->args.size(), 14U)
         << "ptx_tcgen05_mma_ts args is " << op->args;
     std::string kind_dtype = Downcast<StringImm>(op->args[0])->value;
     std::string a_ref = this->PrintExpr(op->args[1]);
@@ -2465,13 +2578,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mask1 = this->PrintExpr(op->args[10]);
     std::string mask2 = this->PrintExpr(op->args[11]);
     std::string mask3 = this->PrintExpr(op->args[12]);
+    bool enable_2cta = Downcast<Bool>(op->args[13])->value;
 
     auto dtype_enum = tl::codegen::ptx::DTypeFromString(kind_dtype);
+    std::string use_2cta_suffix =
+        std::string(", ") + (enable_2cta ? "true" : "false");
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::tcgen05mma_ts<(ABType)>( (*reinterpret_cast<uint32_t*>((A))) + "
+        "tl::tcgen05mma_ts<(ABType)(USE_2CTA_SUFFIX)>( "
+        "(*reinterpret_cast<uint32_t*>((A))) + "
         "(A_offset), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
@@ -2480,6 +2597,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     tl::codegen::Replacer replacer;
     replacer.register_rule("(ABType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_enum));
+    replacer.register_rule("(USE_2CTA_SUFFIX)", use_2cta_suffix);
     replacer.register_rule("(A)", a_ref);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
@@ -2497,9 +2615,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;
-    this->PrintIndent();
-    this->stream << "tl::tcgen05_mma_arrive(" << this->PrintExpr(op->args[0])
-                 << ");\n";
+    std::ostringstream ss;
+    ss << "tl::tcgen05_mma_arrive";
+    if (op->annotations.find("use_2cta") != op->annotations.end() &&
+        Downcast<Bool>(op->annotations["use_2cta"])->value) {
+      ss << "<true>";
+    }
+    print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -2598,8 +2720,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (op->dtype.bits() == 16) {
       os << "for (int local_id = 0; local_id < 8; local_id+=2) {\n";
       os << "*((uint *)&" << dst << "[" + this->PrintExpr(dst_ind) + "])"
-         << " = "
-         << "*((uint *)&" << src << "[" << src_offset << " + local_id]);\n";
+         << " = " << "*((uint *)&" << src << "[" << src_offset
+         << " + local_id]);\n";
       os << "}\n";
     } else {
       os << "for (int local_id = 0; local_id < 8; ++local_id) {\n";
@@ -2691,8 +2813,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "\" @!p mov.b32 %0, 0;\\n\"\n";
     this->stream << "\" @p ld.global.nc.f32 %0, [%1];}\\n\"\n";
     // stream << "\" @p ld.global.nc.L2::128B.f32 %0, [%1];}\\n\"\n" ;
-    stream << ": \"=f\"(" << reg << "[" << local_addr << "]"
-           << ")\n";
+    stream << ": \"=f\"(" << reg << "[" << local_addr << "]" << ")\n";
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
@@ -3134,18 +3255,66 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
-  } else if (op->op.same_as(tl::fadd2())) {
-    ICHECK_EQ(op->args.size(), 2U);
-    os << "tl::fadd2(" << PrintExpr(op->args[0]) << ", "
-       << PrintExpr(op->args[1]) << ")";
-  } else if (op->op.same_as(tl::fmul2())) {
-    ICHECK_EQ(op->args.size(), 2U);
-    os << "tl::fmul2(" << PrintExpr(op->args[0]) << ", "
-       << PrintExpr(op->args[1]) << ")";
-  } else if (op->op.same_as(tl::fma2())) {
-    ICHECK_EQ(op->args.size(), 3U);
-    os << "tl::fma2(" << PrintExpr(op->args[0]) << ", "
-       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
+  } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
+             op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
+             op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
+             op->op.same_as(tl::abs2())) {
+    // Packed x2 element-wise math intrinsics.
+    //
+    // For float32x2 the CUDA type is float2 and C++ overload resolution
+    // works directly.  For bfloat16x2 / float16x2 the CUDA type is uint1
+    // (both map to the same 32-bit struct), so we must cast arguments to
+    // the correct native type (__nv_bfloat162 or __half2) and cast the
+    // result back to uint1 to avoid the ambiguous uint1 bridge overload.
+    std::string op_name;
+    if (op->op.same_as(tl::add2()))
+      op_name = "add2";
+    else if (op->op.same_as(tl::sub2()))
+      op_name = "sub2";
+    else if (op->op.same_as(tl::mul2()))
+      op_name = "mul2";
+    else if (op->op.same_as(tl::fma2()))
+      op_name = "fma2";
+    else if (op->op.same_as(tl::max2()))
+      op_name = "max2";
+    else if (op->op.same_as(tl::min2()))
+      op_name = "min2";
+    else
+      op_name = "abs2";
+
+    DataType dtype = op->dtype;
+    bool need_cast = dtype.is_bfloat16() || dtype.is_float16();
+    std::string native_type;
+    if (dtype.is_bfloat16()) {
+      native_type = "__nv_bfloat162";
+    } else if (dtype.is_float16()) {
+      native_type = "__half2";
+    }
+
+    // Helper lambda to print a casted argument expression.
+    auto print_arg = [&](int idx) -> std::string {
+      std::string arg_str = PrintExpr(op->args[idx]);
+      if (need_cast) {
+        return "tl::from_uint1<" + native_type + ">(" + arg_str + ")";
+      }
+      return arg_str;
+    };
+
+    if (need_cast) {
+      os << "tl::to_uint1(tl::" << op_name << "(";
+    } else {
+      os << "tl::" << op_name << "(";
+    }
+
+    os << print_arg(0);
+    for (size_t i = 1; i < op->args.size(); ++i) {
+      os << ", " << print_arg(i);
+    }
+    os << ")";
+
+    if (need_cast) {
+      os << ")";
+    }
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
     this->curand_random_generator_state =
@@ -3306,9 +3475,35 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     return;
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
-    const StringImmNode *pattern = op->value.as<StringImmNode>();
-    ICHECK(pattern);
-    this->stream << "const dim3 blockIdx = " << pattern->value << "();\n";
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tir::builtin::tvm_tuple()) &&
+          call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        ICHECK(name_node && size_node) << "threadblock_swizzle_pattern expects "
+                                          "tvm_tuple(device_func, panel_size)";
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    }
+    ICHECK(!func_name.empty() && panel_size > 0);
+    if (this->cluster_dims.has_value()) {
+      auto [cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext] =
+          this->cluster_dims.value();
+      ICHECK(cluster_grid_y_ext == 1 && cluster_grid_z_ext == 1)
+          << "Only support annotate threadblock swizzle for cluster on X "
+             "dimension for now!";
+      ICHECK(panel_size % cluster_grid_x_ext == 0)
+          << "panel_size must be divisible by clusterDim.x";
+      this->stream << "const dim3 blockIdx = tl::" << func_name
+                   << "WithCluster<" << panel_size / cluster_grid_x_ext << ", "
+                   << cluster_grid_x_ext << ">();\n";
+    } else {
+      this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
+                   << panel_size << ">();\n";
+    }
     this->VisitStmt(op->body);
     return;
   } else if (op->attr_key == "pragma_unroll_factor") {
@@ -3457,8 +3652,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   PrintType(op->dtype, os);
   os << "(";
   for (int i = 0; i < lanes; i++) {
-    os << "(" << PrintExpr(op->base) << ")"
-       << "+(" << PrintExpr(op->stride) << "*" << i << ")";
+    os << "(" << PrintExpr(op->base) << ")" << "+(" << PrintExpr(op->stride)
+       << "*" << i << ")";
     if (i != lanes - 1)
       os << ", ";
   }
@@ -3606,6 +3801,39 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       EndScope(vec_scope);
     }
   }
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
+                                     std::ostream &os) { // NOLINT(*)
+  // For bfloat16x2 / float16x2 construction from two scalar lanes, emit a
+  // proper pack intrinsic instead of the generic `uint1(a, b)` produced by
+  // the base CodeGenC which is not valid CUDA.
+  DataType t = op->dtype;
+  bool is_bf16x2 = t.is_bfloat16() && t.lanes() == 2;
+  bool is_fp16x2 = t.is_float16() && t.lanes() == 2;
+  if ((is_bf16x2 || is_fp16x2) && op->vectors.size() == 2 &&
+      op->vectors[0].dtype().lanes() == 1 &&
+      op->vectors[1].dtype().lanes() == 1) {
+    // Collect the two scalar element expressions.
+    std::string e0 = PrintExpr(op->vectors[0]);
+    std::string e1 = PrintExpr(op->vectors[1]);
+    if (is_bf16x2) {
+      enable_bf16_ = true;
+      // __pack_nv_bfloat162(bfloat16_t, bfloat16_t) -> unsigned (32-bit).
+      // Use aggregate initialisation of uint1 (struct { unsigned x; })
+      // to avoid taking the address of a temporary.
+      os << "uint1{__pack_nv_bfloat162(" << e0 << ", " << e1 << ")}";
+    } else {
+      enable_fp16_ = true;
+      // __pack_half2 returns __half2 which is 32-bit.
+      // Reinterpret via aggregate initialisation.
+      os << "uint1{*(unsigned*)&(__pack_half2((__half)(" << e0 << "), (__half)("
+         << e1 << ")))}";
+    }
+    return;
+  }
+  // Default path for all other types.
+  CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
@@ -4138,6 +4366,9 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
   this->PrintExtraAttrs(f);
+
+  // Record cluster dimensions for usage in threadblock swizzle codegen
+  this->cluster_dims = ClusterInfoExtractor().extract(f);
 
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
 
