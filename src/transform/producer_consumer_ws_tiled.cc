@@ -844,6 +844,30 @@ tvm::transform::Pass ProducerConsumerWarpSpecializedTiled() {
         ProducerConsumerWSTiledRewriter::Substitute(std::move(f));
     if (!result->HasNonzeroAttr(kTiledWSApplied)) {
       LOG(WARNING) << "[TiledWS] rewriter did not fire, falling back";
+      // The TMA kernel needs warp specialization for correct pipelined
+      // execution.  Since the tiled rewriter could not apply WS (e.g.
+      // conditional loop body), strip pipeline annotations so that
+      // PipelinePlanning / InjectSoftwarePipeline do not generate
+      // broken non-WS TMA pipeline code.
+      class StripPipelineAnnotation : public tir::StmtExprMutator {
+       public:
+        tir::Stmt VisitStmt_(const tir::ForNode *op) final {
+          auto stmt = tir::StmtExprMutator::VisitStmt_(op);
+          const auto *for_node = stmt.as<tir::ForNode>();
+          ICHECK(for_node);
+          if (for_node->annotations.count("num_stages")) {
+            tir::For new_for = Downcast<tir::For>(stmt);
+            auto *n = new_for.CopyOnWrite();
+            n->annotations.erase("num_stages");
+            return std::move(new_for);
+          }
+          return stmt;
+        }
+      };
+      StripPipelineAnnotation stripper;
+      auto stripped = stripper(original_f->body);
+      auto *fn = original_f.CopyOnWrite();
+      fn->body = stripped;
       return original_f;
     }
     LOG(WARNING) << "[TiledWS] transformation applied successfully";
