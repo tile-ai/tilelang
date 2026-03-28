@@ -62,9 +62,12 @@ def tl_indexer_topk_reducesum_impl(
                 for i in T.Parallel(N):
                     ascending = (i & (1 << (i1 + 1))) != 0
                     j = i ^ (1 << (i1 - i2))
-                    if i < j and (
-                        (ascending and topk_value_shared[i] > topk_value_shared[j])
-                        or (not ascending and topk_value_shared[i] < topk_value_shared[j])
+                    if T.all(
+                        i < j,
+                        T.any(
+                            T.all(ascending, topk_value_shared[i] > topk_value_shared[j]),
+                            T.all((i & (1 << (i1 + 1))) == 0, topk_value_shared[i] < topk_value_shared[j]),
+                        ),
                     ):
                         val = topk_value_shared[i]
                         topk_value_shared[i] = topk_value_shared[j]
@@ -150,7 +153,7 @@ def tl_indexer_topk_reducesum_impl(
                     topk_value_shared[j] = logits_sum[i]
                 T.sync_threads()
 
-                if k_ed > topk and k_ed % topk == 0:
+                if T.all(k_ed > topk, k_ed % topk == 0):
                     bitonic_sort(topk_index_shared, topk_value_shared)
 
             bitonic_sort(topk_index_shared, topk_value_shared)
