@@ -12,6 +12,7 @@ from utils import get_abs_err, get_err_ratio
 
 BF16 = T.bfloat16
 FP32 = T.float32
+TF32 = T.tfloat32
 INT32 = T.int32
 
 pass_configs = {
