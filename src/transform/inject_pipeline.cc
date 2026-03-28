@@ -17,6 +17,7 @@
 #include "../op/fill.h"
 #include "../op/finalize_reducer.h"
 #include "../op/gemm.h"
+#include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/reduce.h"
 #include "../op/region.h"
@@ -88,6 +89,14 @@ void AddReadsWritesForTileOp(const TileOperator &tile_op,
       add_reads({gemm->cRegion_});
     }
     add_writes({gemm->cRegion_});
+    return;
+  }
+  if (const auto *gemm_sp = tile_op.as<GemmSPNode>()) {
+    add_reads({gemm_sp->aRegion_, gemm_sp->bRegion_, gemm_sp->eRegion_});
+    if (!gemm_sp->clearAccum_) {
+      add_reads({gemm_sp->cRegion_});
+    }
+    add_writes({gemm_sp->cRegion_});
     return;
   }
   if (const auto *reduce = tile_op.as<ReduceOpNode>()) {
