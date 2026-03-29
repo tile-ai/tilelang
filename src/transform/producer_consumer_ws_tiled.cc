@@ -940,7 +940,7 @@ private:
     bool old = in_pipeline_;
     if (auto anno = op->annotations.Get("num_stages")) {
       if (auto *imm = anno->as<IntImmNode>()) {
-        if (imm->value >= 2) {
+        if (imm->value >= 1) {
           has_pipeline_loop_ = true;
           in_pipeline_ = true;
         }
