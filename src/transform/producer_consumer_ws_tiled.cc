@@ -428,33 +428,15 @@ private:
     Optional<PrimExpr> loop_body_condition;
     if (const auto *if_stmt = loop_body.as<IfThenElseNode>()) {
       if (!if_stmt->else_case.defined()) {
-        // Peel LetStmt chain from inside the conditional body.
+        // Peel LetStmt chain from inside the conditional body so
+        // they're in scope for both WS branches.
         Stmt inner = if_stmt->then_case;
-        std::vector<std::pair<Var, PrimExpr>> inner_lets;
         while (const auto *let = inner.as<LetStmtNode>()) {
-          inner_lets.emplace_back(let->var, let->value);
+          let_bindings.emplace_back(let->var, let->value);
           inner = let->body;
         }
-        // After peeling, check if the remaining body is a simple
-        // flat sequence of tile-op Evaluate calls.
-        auto is_simple_body = [](const Stmt &s) -> bool {
-          if (s.as<EvaluateNode>()) return true;
-          if (const auto *seq = s.as<SeqStmtNode>()) {
-            for (const auto &sub : seq->seq) {
-              if (!sub.as<EvaluateNode>()) return false;
-            }
-            return true;
-          }
-          return false;
-        };
-        if (is_simple_body(inner)) {
-          loop_body_condition = if_stmt->condition;
-          loop_body = inner;
-          // Append inner let bindings so they wrap both WS branches.
-          for (auto &p : inner_lets) {
-            let_bindings.emplace_back(std::move(p));
-          }
-        }
+        loop_body_condition = if_stmt->condition;
+        loop_body = inner;
       }
     }
     FlattenSeqStmt(loop_body, &flat_stmts);
