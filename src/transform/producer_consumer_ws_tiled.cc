@@ -818,37 +818,19 @@ private:
         return {stmt, false};
       }
       // Sink pre-loop statements that are consumer-only fragment init
-      // (T.fill, T.clear on fragment buffers). Keep everything else in
-      // the shared prelude — including block_mask setup, TMA copies,
-      // and anything that could be read by the producer branch.
+      // Sink consumer-only pre-loop Evaluate statements (tile-op calls
+      // like T.fill/T.clear on fragments) into the consumer branch.
+      // Keep producer-classified stmts (TMA/SIMT/cp.async copies),
+      // For loops (block_mask setup), and other control flow in the
+      // shared prelude so both branches can access them.
       for (int i = 0; i < loop_idx; ++i) {
         auto kind = ClassifyStmt(seq->seq[i], target_);
-        bool is_fragment_init = false;
-        if (!IsProducer(kind)) {
-          // Check if the statement is a tile-op that writes only to
-          // fragment/local.var buffers (never shared).
-          if (auto *eval = seq->seq[i].as<EvaluateNode>()) {
-            if (auto *call = eval->value.as<CallNode>()) {
-              auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
-              if (tile_op.defined()) {
-                // Check if the tile-op writes only to local/fragment buffers
-                // by examining the parsed tile op's write regions.
-                bool all_writes_local = false;
-                // FillNode and ClearNode write to their target region.
-                if (auto *fill = tile_op.as<FillNode>()) {
-                  all_writes_local =
-                      (fill->dst.scope() == "local" ||
-                       fill->dst.scope() == "local.fragment");
-                }
-                if (all_writes_local) is_fragment_init = true;
-              }
-            }
-          }
-        }
-        if (is_fragment_init) {
+        bool sink = (kind == TileStmtKind::kConsumer &&
+                     seq->seq[i].as<EvaluateNode>() != nullptr);
+        if (sink) {
           new_seq.push_back(GuardConsumerOnly(seq->seq[i], consumer_extent));
         } else {
-          new_seq.push_back(seq->seq[i]);  // keep in shared prelude
+          new_seq.push_back(seq->seq[i]);
         }
       }
       // Replace the pipeline loop itself.
