@@ -423,11 +423,28 @@ private:
     }
     // Unwrap a single IfThenElse wrapper (no else branch) so that
     // TMA producers inside conditional loop bodies can be classified.
+    // Only unwrap when the then-branch is a simple flat sequence of
+    // tile-op Evaluate calls — skip for complex bodies with LetStmt,
+    // For, or other control flow that could break variable scoping
+    // when the body is split into producer/consumer for WS.
     Optional<PrimExpr> loop_body_condition;
     if (const auto *if_stmt = loop_body.as<IfThenElseNode>()) {
       if (!if_stmt->else_case.defined()) {
-        loop_body_condition = if_stmt->condition;
-        loop_body = if_stmt->then_case;
+        // Check: inner body must be only Evaluate or SeqStmt of Evaluate
+        auto is_simple_body = [](const Stmt &s) -> bool {
+          if (s.as<EvaluateNode>()) return true;
+          if (const auto *seq = s.as<SeqStmtNode>()) {
+            for (const auto &sub : seq->seq) {
+              if (!sub.as<EvaluateNode>()) return false;
+            }
+            return true;
+          }
+          return false;
+        };
+        if (is_simple_body(if_stmt->then_case)) {
+          loop_body_condition = if_stmt->condition;
+          loop_body = if_stmt->then_case;
+        }
       }
     }
     FlattenSeqStmt(loop_body, &flat_stmts);
