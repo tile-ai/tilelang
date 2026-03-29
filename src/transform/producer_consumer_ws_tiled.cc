@@ -34,6 +34,7 @@
 
 #include "../op/builtin.h"
 #include "../op/copy.h"
+#include "../op/fill.h"
 #include "../op/gemm.h"
 #include "../op/operator.h"
 #include "../op/region.h"
@@ -585,13 +586,17 @@ private:
     }
     // When any producer-side work is not single-threaded pure-TMA, all
     // producer threads arrive on all forward barriers after finishing it.
-    // For mixed groups with cp.async, use cp_async_barrier_noinc to let
-    // the async copy own the arrival count (matching reference protocol).
+    // For groups that contain cp.async, use cp_async_barrier_noinc to let
+    // the async copy own the arrival count (matching reference per-group
+    // protocol). Other groups use generic MakeArriveBarrier.
     if (has_simt_producer || has_cp_async_producer) {
+      // Build per-group cp.async flag (single group for now since the
+      // tiled pass doesn't yet split multiple producer groups).
+      bool group_has_cp_async = has_cp_async_producer;
       for (int g = 0; g < num_producer_groups; ++g) {
         int fwd_base = g * num_stages;
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
-        if (has_cp_async_producer) {
+        if (group_has_cp_async) {
           auto call = Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
                            {MakeBarrierRef(barrier_buf, fwd_id)});
           producer_stmts.push_back(Evaluate(call));
@@ -812,15 +817,38 @@ private:
       if (loop_idx < 0) {
         return {stmt, false};
       }
-      // Guard pre-loop consumer-only statements (fragment init, etc.).
-      // Statements that classify as TMA/SIMT/cp.async producers are
-      // shared (needed by producer); everything else is consumer-only.
+      // Sink pre-loop statements that are consumer-only fragment init
+      // (T.fill, T.clear on fragment buffers). Keep everything else in
+      // the shared prelude — including block_mask setup, TMA copies,
+      // and anything that could be read by the producer branch.
       for (int i = 0; i < loop_idx; ++i) {
         auto kind = ClassifyStmt(seq->seq[i], target_);
-        if (IsProducer(kind)) {
-          new_seq.push_back(seq->seq[i]);  // shared
-        } else {
+        bool is_fragment_init = false;
+        if (!IsProducer(kind)) {
+          // Check if the statement is a tile-op that writes only to
+          // fragment/local.var buffers (never shared).
+          if (auto *eval = seq->seq[i].as<EvaluateNode>()) {
+            if (auto *call = eval->value.as<CallNode>()) {
+              auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+              if (tile_op.defined()) {
+                // Check if the tile-op writes only to local/fragment buffers
+                // by examining the parsed tile op's write regions.
+                bool all_writes_local = false;
+                // FillNode and ClearNode write to their target region.
+                if (auto *fill = tile_op.as<FillNode>()) {
+                  all_writes_local =
+                      (fill->dst.scope() == "local" ||
+                       fill->dst.scope() == "local.fragment");
+                }
+                if (all_writes_local) is_fragment_init = true;
+              }
+            }
+          }
+        }
+        if (is_fragment_init) {
           new_seq.push_back(GuardConsumerOnly(seq->seq[i], consumer_extent));
+        } else {
+          new_seq.push_back(seq->seq[i]);  // keep in shared prelude
         }
       }
       // Replace the pipeline loop itself.
@@ -974,6 +1002,10 @@ private:
       }
     }
     StmtExprVisitor::VisitStmt_(op);
+    // After visiting, check if any TMA copy targets manual-layout buffers.
+    if (in_pipeline_ && !layout_map_vars_.empty()) {
+      CheckTmaCopyTargetsManualLayout(op->body);
+    }
     in_pipeline_ = old;
   }
 
@@ -991,9 +1023,60 @@ private:
 
   void VisitStmt_(const BlockNode *op) final {
     if (op->annotations.count("layout_map")) {
-      has_manual_layout_ = true;
+      // Only reject manual layout if a manually-laid-out shared buffer
+      // is also a TMA copy target in the pipeline.  SIMT-copied buffers
+      // with manual layouts (sparse metadata) are handled by
+      // Layout::Expand and don't need the rejection.
+      // Collect the layout_map Var keys for later TMA-target checks.
+      // The map is stored as Map<Var, Layout> in the annotation.
+      auto anno = op->annotations.Get("layout_map");
+      try {
+        auto map = Downcast<Map<Var, Layout>>(anno.value());
+        for (const auto &[key, val] : map) {
+          layout_map_vars_.push_back({key, val});
+        }
+      } catch (...) {
+        // If the annotation isn't a valid Map<Var, Layout>,
+        // conservatively reject.
+        has_manual_layout_ = true;
+      }
+      // Don't set has_manual_layout_ here — defer to TMA-target check.
     }
     StmtExprVisitor::VisitStmt_(op);
+  }
+
+  // Note: TMA + manual-layout conflict detection happens via the
+  // pipeline loop body visitor which checks if TMA copy destinations
+  // match layout_map_vars_.
+  void CheckTmaCopyTargetsManualLayout(const Stmt &pipeline_body) {
+    class TmaDstChecker : public StmtExprVisitor {
+     public:
+      TmaDstChecker(Target target,
+                    const std::vector<std::pair<Var, Layout>> &vars)
+          : target_(target), vars_(vars) {}
+      bool found{false};
+
+     private:
+      void VisitExpr_(const CallNode *op) final {
+        auto tile_op = ParseOperator(ffi::GetRef<Call>(op));
+        if (tile_op.defined()) {
+          if (auto *copy = tile_op.as<CopyNode>()) {
+            if (ClassifyCopy(copy, target_) == TileStmtKind::kTmaProducer) {
+              Buffer dst = copy->dst;
+              for (const auto &[var, layout] : vars_) {
+                if (var.same_as(dst->data)) found = true;
+              }
+            }
+          }
+        }
+        StmtExprVisitor::VisitExpr_(op);
+      }
+      Target target_;
+      const std::vector<std::pair<Var, Layout>> &vars_;
+    };
+    TmaDstChecker checker(target_, layout_map_vars_);
+    checker(pipeline_body);
+    if (checker.found) has_manual_layout_ = true;
   }
 
   Target target_;
@@ -1001,6 +1084,7 @@ private:
   bool has_pipeline_loop_{false};
   bool has_tma_tile_op_{false};
   bool has_manual_layout_{false};
+  std::vector<std::pair<Var, Layout>> layout_map_vars_;
 };
 
 } // namespace
