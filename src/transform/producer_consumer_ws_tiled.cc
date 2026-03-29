@@ -708,15 +708,53 @@ private:
     // Consumer: threadIdx.x stays, but extent is consumer_extent
     Stmt rewritten_consumer = final_consumer_loop;
 
-    // --- WS if/else structure ---
-    Stmt ws_body = IfThenElse(GE(thread_iv_->var, consumer_extent),
-                              rewritten_producer, rewritten_consumer);
+    // Prepend any consumer-only pre-loop init (T.fill on fragments)
+    // into the consumer branch so it's inside the WS else block.
+    // These will be extracted by ReplacePipelineLoopInStmt from the
+    // shared prelude into extracted_consumer_init_.
+    extracted_consumer_init_ = {};
 
-    // Replace the original pipeline loop in-place so outer Let/Seq wrappers
-    // are preserved.  Any statements after the replaced subtree run on the
-    // consumer threads only.
+    // First pass: find and extract consumer-only pre-loop statements
+    // by doing a dry replacement that populates extracted_consumer_init_.
+    Stmt dummy_ws = IfThenElse(GE(thread_iv_->var, consumer_extent),
+                                rewritten_producer, rewritten_consumer);
     ReplaceResult replaced = ReplacePipelineLoopInStmt(
-        orig_block->body, pipeline_loop, ws_body, consumer_extent);
+        orig_block->body, pipeline_loop, dummy_ws, consumer_extent);
+
+    // If consumer init was extracted, rebuild with it inside consumer.
+    if (!extracted_consumer_init_.empty()) {
+      Array<Stmt> consumer_parts;
+      for (const auto &s : extracted_consumer_init_) {
+        consumer_parts.push_back(s);
+      }
+      consumer_parts.push_back(rewritten_consumer);
+      Stmt enriched_consumer =
+          consumer_parts.size() == 1 ? consumer_parts[0]
+                                      : SeqStmt(consumer_parts);
+      Stmt ws_body = IfThenElse(GE(thread_iv_->var, consumer_extent),
+                                 rewritten_producer, enriched_consumer);
+      // Second pass: replace again with the enriched WS body.
+      // extracted_consumer_init_ is already empty (stmts were removed
+      // from the prelude in the first pass result).
+      // We need to replace in the ALREADY-modified body from pass 1.
+      // But ReplacePipelineLoopInStmt finds the pipeline_loop by
+      // pointer comparison, which won't match in the modified tree.
+      // Instead, just substitute the dummy_ws in the replaced result.
+      // Since dummy_ws appears exactly once in replaced.stmt, do a
+      // simple statement replacement.
+      class SubstWsBody : public StmtExprMutator {
+       public:
+        SubstWsBody(const Stmt &old_ws, const Stmt &new_ws)
+            : old_(old_ws), new_(new_ws) {}
+        Stmt VisitStmt_(const IfThenElseNode *op) final {
+          if (GetRef<Stmt>(op).same_as(old_)) return new_;
+          return StmtExprMutator::VisitStmt_(op);
+        }
+        Stmt old_, new_;
+      };
+      SubstWsBody subst(dummy_ws, ws_body);
+      replaced.stmt = subst(replaced.stmt);
+    }
     ICHECK(replaced.found)
         << "ProducerConsumerWSTiled: failed to replace pipeline loop";
     Stmt new_block_body = replaced.stmt;
@@ -825,10 +863,12 @@ private:
       // shared prelude so both branches can access them.
       for (int i = 0; i < loop_idx; ++i) {
         auto kind = ClassifyStmt(seq->seq[i], target_);
-        bool sink = (kind == TileStmtKind::kConsumer &&
-                     seq->seq[i].as<EvaluateNode>() != nullptr);
-        if (sink) {
-          new_seq.push_back(GuardConsumerOnly(seq->seq[i], consumer_extent));
+        bool is_consumer_eval = (kind == TileStmtKind::kConsumer &&
+                                 seq->seq[i].as<EvaluateNode>() != nullptr);
+        if (is_consumer_eval) {
+          // Extract consumer-only Evaluate stmts for sinking into
+          // the consumer branch of the WS body.
+          extracted_consumer_init_.push_back(seq->seq[i]);
         } else {
           new_seq.push_back(seq->seq[i]);
         }
@@ -921,6 +961,7 @@ private:
   Optional<PrimExpr> num_threads_;          // total (consumer + producer)
   Optional<PrimExpr> ws_total_threads_;     // same, stored as func attr
   bool ws_transformed_{false};
+  Array<Stmt> extracted_consumer_init_;
 };
 
 // ---------------------------------------------------------------------------
