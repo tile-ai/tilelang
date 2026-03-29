@@ -664,8 +664,16 @@ private:
       }
     }
 
+    // Wrap the producer body in a pipeline-context AttrStmt so that
+    // LowerTileOp enables cp.async injection for SIMT producers
+    // (pipelined_depth_ > 0) without triggering re-pipelining.
+    Stmt producer_body_with_ctx = AttrStmt(
+        StringImm("tl.pipeline_context_num_stages"),
+        "tl.pipeline_context_num_stages", IntImm(DataType::Int(32), num_stages),
+        producer_body);
+
     For producer_loop(loop_var, loop_min, loop_extent, ForKind::kSerial,
-                      producer_body, Optional<IterVar>(), loop_annos);
+                      producer_body_with_ctx, Optional<IterVar>(), loop_annos);
     For consumer_loop(loop_var, loop_min, loop_extent, ForKind::kSerial,
                       consumer_body, Optional<IterVar>(), loop_annos);
 
