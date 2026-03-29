@@ -423,14 +423,20 @@ private:
     }
     // Unwrap a single IfThenElse wrapper (no else branch) so that
     // TMA producers inside conditional loop bodies can be classified.
-    // Only unwrap when the then-branch is a simple flat sequence of
-    // tile-op Evaluate calls — skip for complex bodies with LetStmt,
-    // For, or other control flow that could break variable scoping
-    // when the body is split into producer/consumer for WS.
+    // Also peel LetStmt chains inside the conditional and append them
+    // to let_bindings so they're in scope for both WS branches.
     Optional<PrimExpr> loop_body_condition;
     if (const auto *if_stmt = loop_body.as<IfThenElseNode>()) {
       if (!if_stmt->else_case.defined()) {
-        // Check: inner body must be only Evaluate or SeqStmt of Evaluate
+        // Peel LetStmt chain from inside the conditional body.
+        Stmt inner = if_stmt->then_case;
+        std::vector<std::pair<Var, PrimExpr>> inner_lets;
+        while (const auto *let = inner.as<LetStmtNode>()) {
+          inner_lets.emplace_back(let->var, let->value);
+          inner = let->body;
+        }
+        // After peeling, check if the remaining body is a simple
+        // flat sequence of tile-op Evaluate calls.
         auto is_simple_body = [](const Stmt &s) -> bool {
           if (s.as<EvaluateNode>()) return true;
           if (const auto *seq = s.as<SeqStmtNode>()) {
@@ -441,9 +447,13 @@ private:
           }
           return false;
         };
-        if (is_simple_body(if_stmt->then_case)) {
+        if (is_simple_body(inner)) {
           loop_body_condition = if_stmt->condition;
-          loop_body = if_stmt->then_case;
+          loop_body = inner;
+          // Append inner let bindings so they wrap both WS branches.
+          for (auto &p : inner_lets) {
+            let_bindings.emplace_back(std::move(p));
+          }
         }
       }
     }
@@ -922,10 +932,8 @@ public:
     TiledWSCandidate c;
     c.target_ = target;
     c(stmt);
-    // Manual layout annotations are now handled by LayoutInference
-    // via Layout::Expand for MVB-expanded buffers, so they no longer
-    // block WS candidacy.
-    return c.has_pipeline_loop_ && c.has_tma_tile_op_;
+    return c.has_pipeline_loop_ && c.has_tma_tile_op_ &&
+           !c.has_manual_layout_;
   }
 
   /// Check if the function has TMA copies in a pipeline loop (even if
