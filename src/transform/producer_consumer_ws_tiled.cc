@@ -922,8 +922,10 @@ public:
     TiledWSCandidate c;
     c.target_ = target;
     c(stmt);
-    return c.has_pipeline_loop_ && c.has_tma_tile_op_ &&
-           !c.has_manual_layout_;
+    // Manual layout annotations are now handled by LayoutInference
+    // via Layout::Expand for MVB-expanded buffers, so they no longer
+    // block WS candidacy.
+    return c.has_pipeline_loop_ && c.has_tma_tile_op_;
   }
 
   /// Check if the function has TMA copies in a pipeline loop (even if
