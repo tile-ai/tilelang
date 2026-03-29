@@ -909,12 +909,21 @@ public:
            !c.has_manual_layout_;
   }
 
+  /// Check if the function has TMA copies in a pipeline loop (even if
+  /// other conditions prevent full WS candidacy).
+  static bool HasTmaPipeline(const Stmt &stmt, Target target) {
+    TiledWSCandidate c;
+    c.target_ = target;
+    c(stmt);
+    return c.has_pipeline_loop_ && c.has_tma_tile_op_;
+  }
+
 private:
   void VisitStmt_(const ForNode *op) final {
     bool old = in_pipeline_;
     if (auto anno = op->annotations.Get("num_stages")) {
       if (auto *imm = anno->as<IntImmNode>()) {
-        if (imm->value >= 1) {
+        if (imm->value >= 2) {
           has_pipeline_loop_ = true;
           in_pipeline_ = true;
         }
@@ -979,6 +988,30 @@ tvm::transform::Pass ProducerConsumerWarpSpecializedTiled() {
     // Only apply MVB + WS if the function is a tiled WS candidate.
     if (!TiledWSCandidate::Check(f->body, target.value())) {
       LOG(WARNING) << "[TiledWS] skipped: not a candidate";
+      // If the function has TMA copies in a pipeline loop but was
+      // rejected (e.g., manual layout annotations), strip pipeline
+      // annotations to prevent InjectSoftwarePipeline from generating
+      // broken non-WS TMA pipeline code.
+      if (TiledWSCandidate::HasTmaPipeline(f->body, target.value())) {
+        LOG(WARNING) << "[TiledWS] stripping pipeline for rejected TMA kernel";
+        class StripAnnotation : public tir::StmtExprMutator {
+         public:
+          tir::Stmt VisitStmt_(const tir::ForNode *op) final {
+            auto stmt = tir::StmtExprMutator::VisitStmt_(op);
+            const auto *n = stmt.as<tir::ForNode>();
+            ICHECK(n);
+            if (n->annotations.count("num_stages")) {
+              tir::For new_for = Downcast<tir::For>(stmt);
+              new_for.CopyOnWrite()->annotations.erase("num_stages");
+              return std::move(new_for);
+            }
+            return stmt;
+          }
+        };
+        StripAnnotation stripper;
+        auto *fn = f.CopyOnWrite();
+        fn->body = stripper(f->body);
+      }
       return f;
     }
     LOG(WARNING) << "[TiledWS] candidate found, applying MVB + WS";
