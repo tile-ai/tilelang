@@ -1003,8 +1003,8 @@ private:
     }
     StmtExprVisitor::VisitStmt_(op);
     // After visiting, check if any TMA copy targets manual-layout buffers.
-    if (in_pipeline_ && !layout_map_buffers_.empty()) {
-      CheckTmaCopyTargetsManualLayout(op->body);
+    if (in_pipeline_ && !layout_map_entries_.empty()) {
+      CheckManualLayoutMVBCompat(op->body);
     }
     in_pipeline_ = old;
   }
@@ -1035,15 +1035,15 @@ private:
       bool parsed = false;
       if (auto gmap = anno->as<Map<ObjectRef, ObjectRef>>(); gmap.has_value()) {
         for (const auto &[key, val] : gmap.value()) {
-          // Key can be Buffer (after LayoutInference) or Var (before).
-          // Try Buffer first, then Var → find matching alloc_buffer.
+          Layout layout;
+          if (auto l = val.as<Layout>(); l.has_value()) layout = l.value();
+          // Key can be Buffer or Var. Resolve to Buffer.
           if (auto buf = key.as<Buffer>(); buf.has_value()) {
-            layout_map_buffers_.push_back(buf.value());
+            layout_map_entries_.push_back({buf.value(), layout});
           } else if (auto var = key.as<Var>(); var.has_value()) {
-            // Find the alloc_buffer that owns this data var.
             for (const auto &buf : op->alloc_buffers) {
               if (buf->data.same_as(var.value())) {
-                layout_map_buffers_.push_back(buf);
+                layout_map_entries_.push_back({buf, layout});
                 break;
               }
             }
@@ -1060,41 +1060,35 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  // Check if any TMA copy destination is also a manually-laid-out buffer.
-  void CheckTmaCopyTargetsManualLayout(const Stmt &pipeline_body) {
-    class TmaDstChecker : public StmtExprVisitor {
+  // Check if any producer copy destination is a manually-laid-out buffer
+  // whose layout can NOT survive MVB expansion via Layout::Expand.
+  void CheckManualLayoutMVBCompat(const Stmt &pipeline_body) {
+    class CopyDstChecker : public StmtExprVisitor {
      public:
-      TmaDstChecker(Target target, const std::vector<Buffer> &bufs,
-                    const std::vector<Layout> &layouts)
-          : target_(target), bufs_(bufs), layouts_(layouts) {}
-      bool found{false};
+      CopyDstChecker(Target target,
+                     const std::vector<std::pair<Buffer, Layout>> &entries)
+          : target_(target), entries_(entries) {}
+      bool incompatible{false};
 
      private:
       void VisitExpr_(const CallNode *op) final {
         auto tile_op = ParseOperator(ffi::GetRef<Call>(op));
         if (tile_op.defined()) {
           if (auto *copy = tile_op.as<CopyNode>()) {
-            auto kind = ClassifyCopy(copy, target_);
-            if (IsProducer(kind)) {
+            if (IsProducer(ClassifyCopy(copy, target_))) {
               Buffer dst = copy->dst;
-              for (size_t bi = 0; bi < bufs_.size(); ++bi) {
-                LOG(WARNING) << "[TiledWS-check] copy dst=" << dst->name
-                             << " layout_buf=" << bufs_[bi]->name
-                             << " kind=" << static_cast<int>(kind);
-                if (bufs_[bi].same_as(dst) ||
-                    bufs_[bi]->data.same_as(dst->data)) {
-                  // Check if the layout can be expanded for MVB.
-                  // Layout::Expand works for simple layouts whose
-                  // InputShape matches the buffer shape. Try it:
-                  // if the layout dims + 1 leading dim would succeed,
-                  // it's safe; otherwise reject.
-                  if (layouts_[bi].defined()) {
-                    size_t ldim = layouts_[bi]->InputShape().size();
-                    size_t bdim = dst->shape.size();
-                    // If layout dims don't match buffer dims, Expand
-                    // would need to add leading dims — risky for
-                    // swizzled layouts. Reject conservatively.
-                    if (ldim != bdim) found = true;
+              for (const auto &[buf, layout] : entries_) {
+                if (buf.same_as(dst) || buf->data.same_as(dst->data)) {
+                  if (!layout.defined()) {
+                    incompatible = true;
+                    break;
+                  }
+                  // Swizzled layouts (kQuarter/kHalf/kFull) are NOT
+                  // compatible with MVB expansion. Non-swizzled
+                  // layouts (kNone, like sparse metadata) are safe.
+                  auto mode = DetectSwizzleMode(layout, buf);
+                  if (mode != SwizzleMode::kNone) {
+                    incompatible = true;
                   }
                 }
               }
@@ -1104,12 +1098,11 @@ private:
         StmtExprVisitor::VisitExpr_(op);
       }
       Target target_;
-      const std::vector<Buffer> &bufs_;
-      const std::vector<Layout> &layouts_;
+      const std::vector<std::pair<Buffer, Layout>> &entries_;
     };
-    TmaDstChecker checker(target_, layout_map_buffers_, layout_map_layouts_);
+    CopyDstChecker checker(target_, layout_map_entries_);
     checker(pipeline_body);
-    if (checker.found) has_manual_layout_ = true;
+    if (checker.incompatible) has_manual_layout_ = true;
   }
 
   Target target_;
@@ -1117,8 +1110,7 @@ private:
   bool has_pipeline_loop_{false};
   bool has_tma_tile_op_{false};
   bool has_manual_layout_{false};
-  std::vector<Buffer> layout_map_buffers_;
-  std::vector<Layout> layout_map_layouts_;
+  std::vector<std::pair<Buffer, Layout>> layout_map_entries_;
 };
 
 } // namespace
