@@ -585,11 +585,19 @@ private:
     }
     // When any producer-side work is not single-threaded pure-TMA, all
     // producer threads arrive on all forward barriers after finishing it.
+    // For mixed groups with cp.async, use cp_async_barrier_noinc to let
+    // the async copy own the arrival count (matching reference protocol).
     if (has_simt_producer || has_cp_async_producer) {
       for (int g = 0; g < num_producer_groups; ++g) {
         int fwd_base = g * num_stages;
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
-        producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
+        if (has_cp_async_producer) {
+          auto call = Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
+                           {MakeBarrierRef(barrier_buf, fwd_id)});
+          producer_stmts.push_back(Evaluate(call));
+        } else {
+          producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
+        }
       }
     }
     // Phase counter increment at end of producer guarded iteration
@@ -791,18 +799,37 @@ private:
     if (auto *seq = stmt.as<SeqStmtNode>()) {
       Array<Stmt> new_seq;
       bool found = false;
-      for (const Stmt &child : seq->seq) {
-        if (!found) {
-          ReplaceResult result = ReplacePipelineLoopInStmt(
-              child, pipeline_loop, ws_body, consumer_extent);
-          new_seq.push_back(result.stmt);
-          found = result.found;
-        } else {
-          new_seq.push_back(GuardConsumerOnly(child, consumer_extent));
+      // First pass: find which child contains the pipeline loop.
+      int loop_idx = -1;
+      for (int i = 0; i < static_cast<int>(seq->seq.size()); ++i) {
+        ReplaceResult probe = ReplacePipelineLoopInStmt(
+            seq->seq[i], pipeline_loop, ws_body, consumer_extent);
+        if (probe.found) {
+          loop_idx = i;
+          break;
         }
       }
-      if (!found) {
+      if (loop_idx < 0) {
         return {stmt, false};
+      }
+      // Guard pre-loop consumer-only statements (fragment init, etc.).
+      // Statements that classify as TMA/SIMT/cp.async producers are
+      // shared (needed by producer); everything else is consumer-only.
+      for (int i = 0; i < loop_idx; ++i) {
+        auto kind = ClassifyStmt(seq->seq[i], target_);
+        if (IsProducer(kind)) {
+          new_seq.push_back(seq->seq[i]);  // shared
+        } else {
+          new_seq.push_back(GuardConsumerOnly(seq->seq[i], consumer_extent));
+        }
+      }
+      // Replace the pipeline loop itself.
+      ReplaceResult result = ReplacePipelineLoopInStmt(
+          seq->seq[loop_idx], pipeline_loop, ws_body, consumer_extent);
+      new_seq.push_back(result.stmt);
+      // Guard post-loop siblings.
+      for (int i = loop_idx + 1; i < static_cast<int>(seq->seq.size()); ++i) {
+        new_seq.push_back(GuardConsumerOnly(seq->seq[i], consumer_extent));
       }
       return {new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq), true};
     }
