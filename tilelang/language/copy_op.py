@@ -243,7 +243,7 @@ def transpose(
         dst: Destination buffer or region of shape (..., N, M).
 
     Returns:
-        tir.Call: A handle to the transpose (copy with transposed indices) operation.
+        tir.Call: A handle to the transpose operation.
     """
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
@@ -258,10 +258,9 @@ def transpose(
 
     return tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.copy"),
+        tir.op.Op.get("tl.tileop.transpose"),
         src,
         dst,
-        annotations={"transpose": 1},
     )
 
 

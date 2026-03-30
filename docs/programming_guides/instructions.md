@@ -145,6 +145,7 @@ signatures, behaviors, constraints, and examples, refer to API Reference
 Data movement
 - `T.copy(src, dst, ...)`: Move tiles between Global/Shared/Fragment.
 - `T.async_copy(src, dst, ...)`: Explicit async global→shared copy via `cp.async`.
+- `T.transpose(src, dst)`: Transpose a 2D shared buffer: `dst[j, i] = src[i, j]`.
 - `T.c2d_im2col(img, col, ...)`: 2D im2col transform for conv.
 
 Memory allocation and descriptors
