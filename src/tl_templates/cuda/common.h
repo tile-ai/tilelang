@@ -608,80 +608,208 @@ template <> struct to_cute_type<tl::float_e5m2_t> {
   using type = cute::float_e5m2_t;
 };
 
-// Packed FP32x2 math helpers
+// =========================================================================
+// Packed x2 element-wise math helpers
 //
-// PTX ISA 8.6 introduced packed FP32x2 arithmetic instructions (e.g.
-// `add.rn.f32x2`, `mul.rn.f32x2`, `fma.rn.f32x2`) that may lower to SASS
-// instructions like FADD2/FMUL2/FFMA2 on supported architectures.
+// Each operation (add2, sub2, mul2, fma2, max2, min2, abs2) is provided for
+// three dtype families:
+//   1. float2           (FP32x2)
+//   2. __nv_bfloat162   (BF16x2)
+//   3. __half2          (FP16x2)
 //
-// We expose these as `tl::f*2(float2, float2, ...)` device helpers.
-// When unsupported (older arch/toolchain), we fall back to per-lane scalar
-// operations to preserve correctness.
-namespace detail {
-union __align__(8) F32x2Bitcast {
-  unsigned long long u64;
-  float2 f2;
-};
-} // namespace detail
+// TVM stores bfloat16x2 and float16x2 as ``uint1`` in generated CUDA code.
+// The CUDA codegen emits explicit casts from uint1 to __nv_bfloat162 or
+// __half2 based on the TIR dtype, so C++ overload resolution correctly
+// dispatches to the right overload without ambiguous uint1 bridges.
+// =========================================================================
 
-TL_DEVICE float2 fadd2(float2 a, float2 b) {
+// Cast helpers between uint1 and native packed types.
+// Used by the CUDA codegen to convert between TVM's uint1 representation
+// and the native __nv_bfloat162 / __half2 types.
+template <typename T> TL_DEVICE T from_uint1(uint1 v) {
+  T r;
+  memcpy(&r, &v, sizeof(T));
+  return r;
+}
+
+template <typename T> TL_DEVICE uint1 to_uint1(T v) {
+  uint1 r;
+  memcpy(&r, &v, sizeof(uint1));
+  return r;
+}
+
+// --- add2 ----------------------------------------------------------------
+
+TL_DEVICE float2 add2(float2 a, float2 b) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
     ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
      (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8))
-  detail::F32x2Bitcast ua;
-  detail::F32x2Bitcast ub;
-  detail::F32x2Bitcast ur;
-  ua.f2 = a;
-  ub.f2 = b;
-  asm("add.rn.f32x2 %0, %1, %2;\n" : "=l"(ur.u64) : "l"(ua.u64), "l"(ub.u64));
-  return ur.f2;
+  return __fadd2_rn(a, b);
 #else
-  float2 out;
-  out.x = a.x + b.x;
-  out.y = a.y + b.y;
-  return out;
+  return make_float2(a.x + b.x, a.y + b.y);
 #endif
 }
 
-TL_DEVICE float2 fmul2(float2 a, float2 b) {
+TL_DEVICE __nv_bfloat162 add2(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hadd2(a, b);
+#else
+  return __nv_bfloat162{__hadd(a.x, b.x), __hadd(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 add2(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hadd2(a, b);
+#else
+  return __half2{__hadd(a.x, b.x), __hadd(a.y, b.y)};
+#endif
+}
+
+// Note: uint1 bridge overloads removed -- the CUDA codegen now emits
+// explicit casts to __nv_bfloat162 or __half2 based on the TIR dtype,
+// so C++ overload resolution correctly dispatches to the right overload.
+
+// --- sub2 ----------------------------------------------------------------
+
+TL_DEVICE float2 sub2(float2 a, float2 b) {
+  return make_float2(a.x - b.x, a.y - b.y);
+}
+
+TL_DEVICE __nv_bfloat162 sub2(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hsub2(a, b);
+#else
+  return __nv_bfloat162{__hsub(a.x, b.x), __hsub(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 sub2(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hsub2(a, b);
+#else
+  return __half2{__hsub(a.x, b.x), __hsub(a.y, b.y)};
+#endif
+}
+
+// --- mul2 ----------------------------------------------------------------
+
+TL_DEVICE float2 mul2(float2 a, float2 b) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
     ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
      (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8))
-  detail::F32x2Bitcast ua;
-  detail::F32x2Bitcast ub;
-  detail::F32x2Bitcast ur;
-  ua.f2 = a;
-  ub.f2 = b;
-  asm("mul.rn.f32x2 %0, %1, %2;\n" : "=l"(ur.u64) : "l"(ua.u64), "l"(ub.u64));
-  return ur.f2;
+  return __fmul2_rn(a, b);
 #else
-  float2 out;
-  out.x = a.x * b.x;
-  out.y = a.y * b.y;
-  return out;
+  return make_float2(a.x * b.x, a.y * b.y);
 #endif
 }
+
+TL_DEVICE __nv_bfloat162 mul2(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hmul2(a, b);
+#else
+  return __nv_bfloat162{__hmul(a.x, b.x), __hmul(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 mul2(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hmul2(a, b);
+#else
+  return __half2{__hmul(a.x, b.x), __hmul(a.y, b.y)};
+#endif
+}
+
+// --- fma2 ----------------------------------------------------------------
 
 TL_DEVICE float2 fma2(float2 a, float2 b, float2 c) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
     ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
      (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8))
-  detail::F32x2Bitcast ua;
-  detail::F32x2Bitcast ub;
-  detail::F32x2Bitcast uc;
-  detail::F32x2Bitcast ur;
-  ua.f2 = a;
-  ub.f2 = b;
-  uc.f2 = c;
-  asm("fma.rn.f32x2 %0, %1, %2, %3;\n"
-      : "=l"(ur.u64)
-      : "l"(ua.u64), "l"(ub.u64), "l"(uc.u64));
-  return ur.f2;
+  return __ffma2_rn(a, b, c);
 #else
-  float2 out;
-  out.x = a.x * b.x + c.x;
-  out.y = a.y * b.y + c.y;
-  return out;
+  return make_float2(a.x * b.x + c.x, a.y * b.y + c.y);
+#endif
+}
+
+TL_DEVICE __nv_bfloat162 fma2(__nv_bfloat162 a, __nv_bfloat162 b,
+                              __nv_bfloat162 c) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hfma2(a, b, c);
+#else
+  return __nv_bfloat162{__hfma(a.x, b.x, c.x), __hfma(a.y, b.y, c.y)};
+#endif
+}
+
+TL_DEVICE __half2 fma2(__half2 a, __half2 b, __half2 c) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hfma2(a, b, c);
+#else
+  return __half2{__hfma(a.x, b.x, c.x), __hfma(a.y, b.y, c.y)};
+#endif
+}
+
+// --- max2 ----------------------------------------------------------------
+
+TL_DEVICE float2 max2(float2 a, float2 b) {
+  return make_float2(fmaxf(a.x, b.x), fmaxf(a.y, b.y));
+}
+
+TL_DEVICE __nv_bfloat162 max2(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hmax2(a, b);
+#else
+  return __nv_bfloat162{__hmax(a.x, b.x), __hmax(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 max2(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hmax2(a, b);
+#else
+  return __half2{__hmax(a.x, b.x), __hmax(a.y, b.y)};
+#endif
+}
+
+// --- min2 ----------------------------------------------------------------
+
+TL_DEVICE float2 min2(float2 a, float2 b) {
+  return make_float2(fminf(a.x, b.x), fminf(a.y, b.y));
+}
+
+TL_DEVICE __nv_bfloat162 min2(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hmin2(a, b);
+#else
+  return __nv_bfloat162{__hmin(a.x, b.x), __hmin(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 min2(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hmin2(a, b);
+#else
+  return __half2{__hmin(a.x, b.x), __hmin(a.y, b.y)};
+#endif
+}
+
+// --- abs2 ----------------------------------------------------------------
+
+TL_DEVICE float2 abs2(float2 a) { return make_float2(fabsf(a.x), fabsf(a.y)); }
+
+TL_DEVICE __nv_bfloat162 abs2(__nv_bfloat162 a) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __habs2(a);
+#else
+  return __nv_bfloat162{__habs(a.x), __habs(a.y)};
+#endif
+}
+
+TL_DEVICE __half2 abs2(__half2 a) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __habs2(a);
+#else
+  return __half2{__habs(a.x), __habs(a.y)};
 #endif
 }
 

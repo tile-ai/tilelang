@@ -530,7 +530,8 @@ private:
     if (barrier_only_) {
       Array<Buffer> filtered;
       for (auto buffer : versioned_buffers) {
-        if (buffer.scope() == "shared.barrier") {
+        if (buffer.scope() == "shared.barrier" ||
+            buffer.scope() == "shared.cluster_barrier") {
           filtered.push_back(buffer);
         }
       }
