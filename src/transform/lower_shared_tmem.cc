@@ -150,6 +150,14 @@ private:
       ICHECK(old_buffer->shape.size() == 2);
 
       auto analyzer = std::make_shared<arith::Analyzer>();
+      arith::ConstIntBound phy_row_bounds =
+          analyzer->const_int_bound(old_buffer->shape[0]);
+      int num_rows_required = phy_row_bounds->max_value;
+      ICHECK(num_rows_required <= 128)
+          << "The number of rows required for tmem buffer "
+          << old_buffer->name << " is " << num_rows_required
+          << ", which exceeds the maximum of 128 rows";
+
       arith::ConstIntBound phy_col_bounds =
           analyzer->const_int_bound(old_buffer->shape[1]);
       int num_cols_required = phy_col_bounds->max_value;
