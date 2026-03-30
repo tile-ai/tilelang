@@ -821,9 +821,6 @@ public:
       return false;
     };
     auto SolveConflictVar = [&] () -> bool {
-      // LOG(INFO) << "Solving conflict variable...";
-      // for (int i = 0; i < n; ++ i) PrintIRStructure(seq_body->children[i].get());
-      // LOG(INFO) << "---------------------------";
       for (int i = 0; i < n; ++ i) if (IsVarDecl(seq_body->children[i].get())) {
         for (int j = 0; j < n; ++ j) {
           if (i == j) continue;
@@ -869,8 +866,6 @@ public:
             }
           }
 
-          // LOG(INFO) << "Cloned task: " << cloned_task->stmts[0];
-
           seq_body->children.insert(seq_body->children.begin() + j, std::move(cloned_task));
           n += 1;
           return true; // Conflict resolved, restart the loop
@@ -878,6 +873,7 @@ public:
       }
       return false;
     };
+    // Resolve conflicts until no more conflicts exist or max iterations reached (to avoid infinite loop)
     int conflict_count = 0;
     while (SolveConflictVar() && ++ conflict_count < 100);
 

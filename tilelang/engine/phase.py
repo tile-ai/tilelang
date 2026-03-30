@@ -183,8 +183,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     if allow_autoschedule():
         # Auto schedule for high-level operations
         mod = tilelang.transform.IfConditionExtract()(mod)
-        # print("IfConditionExtract done")
-        # print(mod)
         mod = tilelang.transform.AutoSchedule(False)(mod)
         mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
