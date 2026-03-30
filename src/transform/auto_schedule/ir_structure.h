@@ -101,13 +101,6 @@ public:
   virtual void SetLatency(int64_t latency) = 0;
   virtual void SetII(int64_t ii) = 0;
 
-  // Helper methods to add regions (for incremental analysis)
-  virtual void AddReadRegion(const BufferRegion &region) = 0;
-  virtual void AddWriteRegion(const BufferRegion &region) = 0;
-
-  // Helper methods to add variables
-  virtual void AddReadVar(const Var &var) = 0;
-  virtual void AddWriteVar(const Var &var) = 0;
 
   // Recursive region collection method
   virtual void CollectRegions(
@@ -281,7 +274,7 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   // Helper methods to add regions (for incremental analysis)
-  void AddReadRegion(const BufferRegion &region) override {
+  void AddReadRegion(const BufferRegion &region) {
     // Check for duplicate regions
     for (const auto &existing : read_regions_) {
       if (existing->buffer.same_as(region->buffer) &&
@@ -292,7 +285,7 @@ public:
     read_regions_.push_back(region);
   }
 
-  void AddWriteRegion(const BufferRegion &region) override {
+  void AddWriteRegion(const BufferRegion &region) {
     // Check for duplicate regions
     for (const auto &existing : write_regions_) {
       if (existing->buffer.same_as(region->buffer) &&
@@ -303,8 +296,8 @@ public:
     write_regions_.push_back(region);
   }
 
-  void AddReadVar(const Var &var) override { read_vars_.push_back(var); }
-  void AddWriteVar(const Var &var) override { write_vars_.push_back(var); }
+  void AddReadVar(const Var &var) { read_vars_.push_back(var); }
+  void AddWriteVar(const Var &var) { write_vars_.push_back(var); }
 
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
@@ -413,23 +406,6 @@ public:
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
 
-  // Helper methods to add regions (delegate to child)
-  void AddReadRegion(const BufferRegion &region) override {
-    if (child)
-      child->AddReadRegion(region);
-  }
-  void AddWriteRegion(const BufferRegion &region) override {
-    if (child)
-      child->AddWriteRegion(region);
-  }
-
-  void AddReadVar(const Var &var) override {
-    // ignore
-  }
-  void AddWriteVar(const Var &var) override {
-    // ignore
-  }
-
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
@@ -517,23 +493,6 @@ public:
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
 
-  // Helper methods to add regions (delegate to child)
-  void AddReadRegion(const BufferRegion &region) override {
-    if (child)
-      child->AddReadRegion(region);
-  }
-  void AddWriteRegion(const BufferRegion &region) override {
-    if (child)
-      child->AddWriteRegion(region);
-  }
-
-  void AddReadVar(const Var &var) override {
-    // ignore
-  }
-  void AddWriteVar(const Var &var) override {
-    // ignore
-  }
-
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
@@ -620,25 +579,6 @@ public:
   void SetLatency(int64_t latency) override { latency_ = latency; }
   void SetII(int64_t ii) override { ii_ = ii; }
 
-  // Helper methods to add regions (delegate to child)
-  void AddReadRegion(const BufferRegion &region) override {
-    if (child)
-      child->AddReadRegion(region);
-  }
-  void AddWriteRegion(const BufferRegion &region) override {
-    if (child)
-      child->AddWriteRegion(region);
-  }
-
-  void AddReadVar(const Var &var) override {
-    if (child)
-      child->AddReadVar(var);
-  }
-  void AddWriteVar(const Var &var) override {
-    if (child)
-      child->AddWriteVar(var);
-  }
-
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
@@ -695,17 +635,6 @@ public:
   void SetWriteRegions(const std::vector<BufferRegion> &regions) override;
   void SetLatency(int64_t latency) override;
   void SetII(int64_t ii) override;
-
-  // Helper methods to add regions (delegate to first child if exists)
-  void AddReadRegion(const BufferRegion &region) override;
-  void AddWriteRegion(const BufferRegion &region) override;
-
-  void AddReadVar(const Var &var) override {
-    // ignore
-  }
-  void AddWriteVar(const Var &var) override {
-    // ignore
-  }
 
   void CollectRegions(
       std::vector<RegionAccessInfo> &result,

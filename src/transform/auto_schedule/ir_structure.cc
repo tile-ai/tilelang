@@ -208,18 +208,6 @@ void SequenceNode::SetLatency(int64_t latency) { latency_ = latency; }
 
 void SequenceNode::SetII(int64_t ii) { ii_ = ii; }
 
-void SequenceNode::AddReadRegion(const BufferRegion &region) {
-  if (!children.empty() && children[0]) {
-    children[0]->AddReadRegion(region);
-  }
-}
-
-void SequenceNode::AddWriteRegion(const BufferRegion &region) {
-  if (!children.empty() && children[0]) {
-    children[0]->AddWriteRegion(region);
-  }
-}
-
 std::shared_ptr<IRStructure> SequenceNode::Clone() const {
   auto new_seq = std::make_shared<SequenceNode>();
   new_seq->children.reserve(children.size());
