@@ -154,8 +154,8 @@ private:
           analyzer->const_int_bound(old_buffer->shape[0]);
       int num_rows_required = phy_row_bounds->max_value;
       ICHECK(num_rows_required <= 128)
-          << "The number of rows required for tmem buffer "
-          << old_buffer->name << " is " << num_rows_required
+          << "The number of rows required for tmem buffer " << old_buffer->name
+          << " is " << num_rows_required
           << ", which exceeds the maximum of 128 rows";
 
       arith::ConstIntBound phy_col_bounds =

@@ -295,7 +295,7 @@ def flashattn_wasp(
                             S_tmem,
                             transpose_B=True,
                             mbar=mbar_bmm1_full[stage_id],
-                                    clear_accum=True,
+                            clear_accum=True,
                         )
                     else:
                         T.tcgen05_gemm(
@@ -304,7 +304,7 @@ def flashattn_wasp(
                             S_tmem,
                             transpose_B=True,
                             mbar=mbar_bmm1_full[stage_id],
-                                    clear_accum=True,
+                            clear_accum=True,
                         )
                     T.mbarrier_arrive(mbar_dma1_empty[stage_id])
 
@@ -317,7 +317,7 @@ def flashattn_wasp(
                             V_shared_0,
                             O_tmem,
                             mbar=mbar_bmm2_full[stage_id],
-                                    clear_accum=is_clear_accum,
+                            clear_accum=is_clear_accum,
                         )
                     else:
                         T.tcgen05_gemm(
@@ -325,7 +325,7 @@ def flashattn_wasp(
                             V_shared_1,
                             O_tmem,
                             mbar=mbar_bmm2_full[stage_id],
-                                    clear_accum=is_clear_accum,
+                            clear_accum=is_clear_accum,
                         )
 
                     T.mbarrier_arrive(mbar_softmax_empty[stage_id])
