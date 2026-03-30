@@ -126,7 +126,8 @@ private:
    */
   void UpdateReadVar(const Var &var) {
     for (const auto &v : read_vars_) {
-      if (v.same_as(var)) return;
+      if (v.same_as(var))
+        return;
     }
     read_vars_.push_back(var);
   }
@@ -137,7 +138,8 @@ private:
    */
   void UpdateWriteVar(const Var &var) {
     for (const auto &v : write_vars_) {
-      if (v.same_as(var)) return;
+      if (v.same_as(var))
+        return;
     }
     write_vars_.push_back(var);
   }

@@ -122,7 +122,8 @@ std::vector<Var> SequenceNode::GetReadVars() const {
   for (const auto &child : children) {
     if (child) {
       auto child_read_vars = child->GetReadVars();
-      all_vars.insert(all_vars.end(), child_read_vars.begin(), child_read_vars.end());
+      all_vars.insert(all_vars.end(), child_read_vars.begin(),
+                      child_read_vars.end());
     }
   }
   return all_vars;
@@ -160,7 +161,8 @@ std::vector<Var> SequenceNode::GetWriteVars() const {
   for (const auto &child : children) {
     if (child) {
       auto child_write_vars = child->GetWriteVars();
-      all_vars.insert(all_vars.end(), child_write_vars.begin(), child_write_vars.end());
+      all_vars.insert(all_vars.end(), child_write_vars.begin(),
+                      child_write_vars.end());
     }
   }
   return all_vars;

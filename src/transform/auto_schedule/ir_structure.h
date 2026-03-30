@@ -101,7 +101,6 @@ public:
   virtual void SetLatency(int64_t latency) = 0;
   virtual void SetII(int64_t ii) = 0;
 
-
   // Recursive region collection method
   virtual void CollectRegions(
       std::vector<RegionAccessInfo> &result,
@@ -144,16 +143,12 @@ public:
   std::vector<BufferRegion> GetWriteRegions() const override {
     return write_regions_;
   }
-  std::vector<Var> GetReadVars() const override {
-    return read_vars_;
-  }
-  std::vector<Var> GetWriteVars() const override {
-    return write_vars_;
-  }
+  std::vector<Var> GetReadVars() const override { return read_vars_; }
+  std::vector<Var> GetWriteVars() const override { return write_vars_; }
   // Latency estimation
   int64_t GetLatency() const override { return latency_; }
   int64_t GetII() const override { return ii_; }
-  
+
   // Setters
   void SetUsesCUDACore(bool value) override { uses_cuda_core_ = value; }
   void SetUsesTMACore(bool value) override { uses_tma_core_ = value; }
@@ -164,12 +159,8 @@ public:
   void SetWriteRegions(const std::vector<BufferRegion> &regions) override {
     write_regions_ = regions;
   }
-  void SetReadVars(const std::vector<Var> &vars) {
-    read_vars_ = vars;
-  }
-  void SetWriteVars(const std::vector<Var> &vars) {
-    write_vars_ = vars;
-  }
+  void SetReadVars(const std::vector<Var> &vars) { read_vars_ = vars; }
+  void SetWriteVars(const std::vector<Var> &vars) { write_vars_ = vars; }
   void SubstituteVar(const Var &old_var, const Var &new_var) {
     for (auto &var : read_vars_) {
       if (var.same_as(old_var)) {
@@ -303,7 +294,9 @@ public:
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
-  bool containWarpgroupId(int id) const override { return ContainsLoopBreak() || warpgroup_id_ == id; }
+  bool containWarpgroupId(int id) const override {
+    return ContainsLoopBreak() || warpgroup_id_ == id;
+  }
 
   // Check if this task contains loop_break call
   bool ContainsLoopBreak() const;
@@ -876,7 +869,8 @@ inline Stmt GetAttrDecl(const AttrStmtNode *attr_node) {
   if (attr_node == nullptr) {
     return Stmt();
   }
-  return AttrStmt(attr_node->node, attr_node->attr_key, attr_node->value, Evaluate(0));
+  return AttrStmt(attr_node->node, attr_node->attr_key, attr_node->value,
+                  Evaluate(0));
 }
 
 // Original helper function to print IRStructure (kept for backward

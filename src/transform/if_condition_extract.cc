@@ -1,6 +1,7 @@
 /*!
  * \file if_condition_extract.cc
- * \brief Extract if conditions into temporary LetStmt variables, then expand if statements to all branches.
+ * \brief Extract if conditions into temporary LetStmt variables, then expand if
+ * statements to all branches.
  */
 
 #include <tvm/ffi/reflection/registry.h>
@@ -58,13 +59,15 @@ private:
     auto bind_cond_var = [](const Stmt &sentence, const Var &cond) -> Stmt {
       if (auto if_sentence = sentence.as<IfThenElseNode>()) {
         PrimExpr new_cond = cond & if_sentence->condition;
-        return IfThenElse(new_cond, if_sentence->then_case, if_sentence->else_case);
+        return IfThenElse(new_cond, if_sentence->then_case,
+                          if_sentence->else_case);
       } else {
         return IfThenElse(cond, sentence);
       }
     };
 
-    auto bind_cond_var_body = [&](const Optional<Stmt> &body, const Var &cond) -> Stmt {
+    auto bind_cond_var_body = [&](const Optional<Stmt> &body,
+                                  const Var &cond) -> Stmt {
       if (!body.defined()) {
         return Stmt();
       }
@@ -81,9 +84,13 @@ private:
 
     Array<Stmt> new_seq;
     new_seq.insert(new_seq.end(), bind_cond_var_body(then_case, cond_var));
-    if (else_case.defined()) new_seq.insert(new_seq.end(), bind_cond_var_body(else_case, cond_var));
+    if (else_case.defined())
+      new_seq.insert(new_seq.end(), bind_cond_var_body(else_case, cond_var));
 
-    Stmt body = new_seq.empty() ? Stmt() : (new_seq.size() == 1 ? new_seq[0] : SeqStmt(std::move(new_seq)));
+    Stmt body =
+        new_seq.empty()
+            ? Stmt()
+            : (new_seq.size() == 1 ? new_seq[0] : SeqStmt(std::move(new_seq)));
     if (is_simple) {
       return body;
     } else {
@@ -95,7 +102,8 @@ private:
     Array<Stmt> seq;
     for (auto stmt : op->seq) {
       auto new_stmt = VisitStmt(stmt);
-      if (!new_stmt.defined()) continue;
+      if (!new_stmt.defined())
+        continue;
       if (auto seq_node = new_stmt.as<SeqStmtNode>()) {
         seq.insert(seq.end(), seq_node->seq.begin(), seq_node->seq.end());
       } else {
