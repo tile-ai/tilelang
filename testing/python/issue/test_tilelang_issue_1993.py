@@ -48,7 +48,7 @@ def test_issue_1993_dynamic_zero_grid_dim():
 
     # Zero case: should raise an error, not crash with illegal memory access
     out_empty = torch.zeros(0, dtype=torch.float32, device="cuda")
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         kernel(out_empty)
         torch.cuda.synchronize()
 
@@ -64,7 +64,7 @@ def test_issue_1993_static_zero_grid_dim():
     kernel = _issue1993_static_grid()
 
     out = torch.zeros(4, dtype=torch.float32, device="cuda")
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         kernel(out)
         torch.cuda.synchronize()
 
