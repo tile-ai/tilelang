@@ -117,6 +117,29 @@ private:
   ffi::Array<Buffer> buffer_alloc_recorder_;
 };
 
+/*! \brief Map each allocated buffer var to the Block that first declares it. */
+class FirstOwningBlockCollector : public StmtExprVisitor {
+public:
+  static std::unordered_map<const VarNode *, const BlockNode *>
+  Collect(const Stmt &root) {
+    FirstOwningBlockCollector visitor;
+    visitor(root);
+    return std::move(visitor.owning_block_);
+  }
+
+private:
+  void VisitStmt_(const BlockNode *op) final {
+    for (const Buffer &buf : op->alloc_buffers) {
+      if (!owning_block_.count(buf->data.get())) {
+        owning_block_[buf->data.get()] = op;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  std::unordered_map<const VarNode *, const BlockNode *> owning_block_;
+};
+
 class BufferAllocationLocator : public StmtExprMutator {
 public:
   explicit BufferAllocationLocator(const PrimFunc &func) {
@@ -130,6 +153,8 @@ public:
     // order since the buffer_lca Map is unordered.
     ffi::Array<Buffer> buffer_alloc_recorder =
         BufferAllocateOrderCollector::Collect(func);
+    std::unordered_map<const VarNode *, const BlockNode *> owning_block =
+        FirstOwningBlockCollector::Collect(func->body);
     std::unordered_set<const VarNode *> arg_buffer_vars;
     CollectManagedAllocations collector;
     collector(func->body);
@@ -142,6 +167,25 @@ public:
     }
     // create buffers to be allocated at each stmts
     for (const auto &buffer : buffer_alloc_recorder) {
+      // Skip moving allocations that are already bound to func arguments.
+      if (arg_buffer_vars.count(buffer->data.get())) {
+        continue;
+      }
+      // shared.barrier / cluster_barrier must stay on the declaring Block, not
+      // the access LCA inside a pipelined For. Otherwise each iteration runs
+      // inside an opaque child block and LowerSharedBarrier re-issues
+      // mbarrier.init, breaking MMA sync (e.g. tcgen05 GEMM correctness).
+      if (buffer.scope() == "shared.barrier" ||
+          buffer.scope() == "shared.cluster_barrier") {
+        if (managed_allocations_.count(buffer->data.get())) {
+          auto ob = owning_block.find(buffer->data.get());
+          ICHECK(ob != owning_block.end())
+              << "PlanAndUpdateBufferAllocationLocation: barrier buffer "
+              << buffer->name << " has no owning Block";
+          alloc_buffers_[ob->second].push_back(buffer);
+        }
+        continue;
+      }
       // Prefer the LCA derived from the underlying data var. If missing, fall
       // back to Buffer LCA.
       const StmtNode *stmt = nullptr;
@@ -155,10 +199,6 @@ public:
         }
       }
       if (stmt != nullptr || vit != var_lca.end()) {
-        // Skip moving allocations that are already bound to func arguments.
-        if (arg_buffer_vars.count(buffer->data.get())) {
-          continue;
-        }
         // Only allocate managed allocations (a.k.a ignore the ones that are not
         // allocated outside of the block)
         if (managed_allocations_.count(buffer->data.get())) {
