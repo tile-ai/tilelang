@@ -7,7 +7,7 @@ from tvm.runtime import const
 from tvm.tir.expr import IntImm, PrimExprWithOp
 import tvm.tir.op as _tvm_op
 
-from tilelang.language.dtypes import AnyDType
+from tilelang.language.dtypes import _is_any_dtype
 from tilelang.utils.deprecated import deprecated_warning
 
 
@@ -1155,13 +1155,14 @@ def ptx_tcgen05_mma_ss(
     mask2,
     mask3,
     enable_ws=False,
+    enable_2cta=False,
     ws=None,
     warp_specialized=None,
     variant=None,
 ):
-    """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
+    """TVM intrinsic for tcgen05.mma shared-memory x shared-memory instructions.
 
-    Expects 13 or 14 positional arguments:
+    Expects 14 or 15 positional arguments:
     (kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
      desc_val, scale_out, mask0, mask1, mask2, mask3[, enable_ws]).
     Aliases: you can also pass `ws` or `warp_specialized` (booleans) instead of `enable_ws`.
@@ -1204,6 +1205,7 @@ def ptx_tcgen05_mma_ss(
         mask2,
         mask3,
         enable_ws,
+        enable_2cta,
     )
 
 
@@ -1221,8 +1223,9 @@ def ptx_tcgen05_mma_ts(
     mask1,
     mask2,
     mask3,
+    enable_2cta=False,
 ):
-    """TVM intrinsic for tcgen05.mma tensor-memory × shared-memory instructions.
+    """TVM intrinsic for tcgen05.mma tensor-memory x shared-memory instructions.
 
     Expects 13 positional arguments:
     (kind_dtype, A_ptr, A_offset, desc_b, B_offset, C_ptr, C_offset,
@@ -1246,6 +1249,7 @@ def ptx_tcgen05_mma_ts(
         mask1,
         mask2,
         mask3,
+        enable_2cta,
     )
 
 
@@ -2054,7 +2058,7 @@ def reinterpret(value, dtype, span: Span | None = None) -> Any:
     """
 
     # NOTE(chaofan): For compatibility, we allow the old API where dtype comes first
-    if isinstance(value, AnyDType):
+    if _is_any_dtype(value):
         deprecated_warning("T.reinterpret(dtype, value)", "reinterpret(value, dtype)")
         value, dtype = dtype, value
     return _tvm_op.reinterpret(dtype, value, span)

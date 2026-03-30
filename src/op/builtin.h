@@ -39,11 +39,19 @@ static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // that must NOT be marked with the restrict qualifier in codegen.
 // Type: Array<tir::Var>
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
+// A PrimFunc-level attribute carrying the minimum number of thread blocks
+// per SM (multiprocessor).  When present it is emitted as the second
+// argument of __launch_bounds__(maxThreads, minBlocksPerMultiprocessor).
+// Type: Integer
+static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
     "tl.debug_merge_shared_memory_allocations";
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
+// PrimFunc attribute: set by LowerTileOp to indicate TMA operations were
+// actually generated.  Read by OptimizeForTarget to pick the right pipeline.
+static constexpr const char *kHasTMA = "tl.has_tma";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
 static constexpr const char *kDisableWarpSpecialized =
@@ -208,13 +216,14 @@ TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
 
-// Packed FP32x2 math (PTX `.f32x2` family; may lower to FADD2/FMUL2/FFMA2)
-// fadd2(x, y) - packed FP32x2 add
-TVM_DLL const Op &fadd2();
-// fmul2(x, y) - packed FP32x2 multiply
-TVM_DLL const Op &fmul2();
-// fma2(x, y, z) - packed FP32x2 fused multiply-add
+// Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
+TVM_DLL const Op &add2();
+TVM_DLL const Op &sub2();
+TVM_DLL const Op &mul2();
 TVM_DLL const Op &fma2();
+TVM_DLL const Op &max2();
+TVM_DLL const Op &min2();
+TVM_DLL const Op &abs2();
 
 // random op
 TVM_DLL const Op &rng_init();
@@ -549,7 +558,7 @@ TVM_DLL const Op &cluster_sync();
 /*!
  * \brief Return the 1-D rank of the calling CTA within its cluster
  *
- * uint32_t block_rank_in_cluster()
+ * int block_rank_in_cluster()
  *
  */
 TVM_DLL const Op &block_rank_in_cluster();

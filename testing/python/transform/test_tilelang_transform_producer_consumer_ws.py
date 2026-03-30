@@ -350,5 +350,143 @@ def test_producer_consumer_ws_uses_consumer_guard_for_backpressure_protocol():
     assert guarded_arrive_count >= 1
 
 
+def test_producer_consumer_ws_finds_pipeline_loop_under_if_wrapper():
+    @T.prim_func
+    def before(A: T.Tensor((512, 512), T.float16)):
+        bx = T.launch_thread("blockIdx.x", 1)
+        by = T.launch_thread("blockIdx.y", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+
+        with T.block(""):
+            T.reads(A[0:128, 0:64])
+            T.writes()
+
+            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
+            C_local = T.alloc_buffer((1,), "float32", scope="local")
+
+            mbarrier = T.alloc_barrier([1, 1])
+
+            if bx < 1:
+                for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
+                    with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
+                        if tx == 0:
+                            T.call_intrin(
+                                "handle",
+                                tir.op.Op.get("tl.mbarrier_expect_tx"),
+                                mbarrier[k % 2],
+                                4096,
+                            )
+                        if tx == 0:
+                            T.tma_load(
+                                T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                                mbarrier[k % 2],
+                                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
+                                k * 32,
+                                by * 64,
+                            )
+                    T.call_intrin(
+                        "handle",
+                        tir.op.Op.get("tl.mbarrier_wait_parity"),
+                        mbarrier[k % 2],
+                        k // 2 % 2,
+                    )
+                    C_local[0] = C_local[0] + T.float32(1)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tir.transform.LowerOpaqueBlock()(mod)
+
+    main_func = mod["main"]
+    body_text = main_func.script()
+    assert 'threadIdx.x", 256' in body_text
+    assert "num_stages" not in body_text
+    assert "software_pipeline_stage" not in body_text
+    assert "software_pipeline_order" not in body_text
+
+
+def test_producer_consumer_ws_moves_preloop_tma_prefix_inside_wrapped_ws_split():
+    @T.prim_func
+    def before(A: T.Tensor((512, 512), T.float16)):
+        bx = T.launch_thread("blockIdx.x", 1)
+        by = T.launch_thread("blockIdx.y", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+
+        with T.block(""):
+            T.reads(A[0:128, 0:64])
+            T.writes()
+
+            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
+            C_local = T.alloc_buffer((1,), "float32", scope="local")
+
+            mbarrier = T.alloc_barrier([1, 1, 1])
+
+            if bx < 1:
+                with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
+                    if tx == 0:
+                        T.call_intrin(
+                            "handle",
+                            tir.op.Op.get("tl.mbarrier_expect_tx"),
+                            mbarrier[0],
+                            4096,
+                        )
+                    if tx == 0:
+                        T.tma_load(
+                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                            mbarrier[0],
+                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 2),
+                            0,
+                            by * 64,
+                        )
+                T.call_intrin(
+                    "handle",
+                    tir.op.Op.get("tl.mbarrier_wait_parity"),
+                    mbarrier[0],
+                    0,
+                )
+
+                for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
+                    with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
+                        if tx == 0:
+                            T.call_intrin(
+                                "handle",
+                                tir.op.Op.get("tl.mbarrier_expect_tx"),
+                                mbarrier[k % 2 + 1],
+                                4096,
+                            )
+                        if tx == 0:
+                            T.tma_load(
+                                T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                                mbarrier[k % 2 + 1],
+                                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
+                                k * 32,
+                                by * 64,
+                            )
+                    T.call_intrin(
+                        "handle",
+                        tir.op.Op.get("tl.mbarrier_wait_parity"),
+                        mbarrier[k % 2 + 1],
+                        k // 2 % 2,
+                    )
+                    C_local[0] = C_local[0] + T.Cast("float32", A_shared[k % 2, 0, 0, 0])
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MultiVersionBuffer(barrier_only=False)(mod)
+    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
+    mod = tir.transform.LowerOpaqueBlock()(mod)
+
+    main_func = mod["main"]
+    body_text = main_func.script()
+
+    scope_idx = body_text.find("kWarpSpecializationScope")
+    first_tma_idx = body_text.find("T.tma_load(")
+    first_producer_elect_idx = body_text.find("T.tl_shuffle_elect(128)")
+
+    assert scope_idx != -1
+    assert first_tma_idx > scope_idx
+    assert first_producer_elect_idx > scope_idx
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

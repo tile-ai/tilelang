@@ -23,6 +23,13 @@ else:
 # Python 3.9 compatibility: avoid PEP 604 unions at runtime
 AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
 
+
+def _is_any_dtype(obj: object) -> bool:
+    """Check if obj is a dtype-like value. Use instead of isinstance(obj, AnyDType)
+    because Union types cannot be used with isinstance in Python 3.9."""
+    return isinstance(obj, (ir.Type, str, type, torch.dtype, dtype))
+
+
 _PYTHON_DTYPE_TO_STR = {
     bool: "bool",
     int: "int32",
@@ -64,9 +71,6 @@ _TORCH_DTYPE_TO_STR = {
     torch.int32: "int32",
     torch.int64: "int64",
     torch.uint8: "uint8",
-    torch.uint16: "uint16",
-    torch.uint32: "uint32",
-    torch.uint64: "uint64",
     torch.float16: "float16",
     torch.float32: "float32",
     torch.float64: "float64",
@@ -74,6 +78,10 @@ _TORCH_DTYPE_TO_STR = {
 }
 
 _extended_torch_dtypes = [
+    # Some dtypes are not provided by old torch versions
+    ("uint16",),
+    ("uint32",),
+    ("uint64",),
     ("float8_e4m3fn",),
     ("float8_e4m3fnuz",),
     ("float8_e5m2",),
@@ -135,7 +143,12 @@ _STR_TO_TVM_DTYPE_CALL = {
 int_ = int
 
 
-def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var:
+def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
+    # When called with multiple args, pack the scalars into a vector via Shuffle.
+    # e.g. T.bfloat16x2(a, b) -> tir.Shuffle([a, b], [0, 1]) : bfloat16x2
+    if len(args) > 1:
+        return tir.Shuffle(list(args), list(range(len(args))))
+    expr = args[0] if args else None
     if isinstance(expr, int_):
         return tvm.tir.const(expr, dtype=self)
     if self in _STR_TO_TVM_DTYPE_CALL:
@@ -407,6 +420,8 @@ if TYPE_CHECKING:
     class float4_e2m1fnx32(dtype): ...
     class float4_e2m1fnx64(dtype): ...
     class bfloat16(dtype): ...
+    class bfloat16x2(dtype): ...
+
     # yapf: enable
 
 else:
@@ -574,6 +589,7 @@ else:
     float4_e2m1fnx32 = dtype("float4_e2m1fnx32")
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
     bfloat16 = dtype("bfloat16")
+    bfloat16x2 = dtype("bfloat16x2")
 
 _all_dtypes = {
     "bool",
@@ -740,6 +756,7 @@ _all_dtypes = {
     "float4_e2m1fnx32",
     "float4_e2m1fnx64",
     "bfloat16",
+    "bfloat16x2",
 }
 
 __all__ = list(_all_dtypes) + [

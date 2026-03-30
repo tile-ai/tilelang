@@ -303,7 +303,7 @@ public:
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
-  bool containWarpgroupId(int id) const override { return warpgroup_id_ == id; }
+  bool containWarpgroupId(int id) const override { return ContainsLoopBreak() || warpgroup_id_ == id; }
 
   // Check if this task contains loop_break call
   bool ContainsLoopBreak() const;

@@ -1019,14 +1019,42 @@ private:
           }
           // start from current statement and find the last statement at
           // gen_level
+          //
+          // Additionally, stop if the next statement generates (births) a
+          // different shared-memory buffer.  Without this check the
+          // reordered kill can land *past* another buffer's gen, creating
+          // a false liveness overlap that blocks memory reuse even when the
+          // two buffers' true lifetimes are disjoint (e.g., Q_shared and
+          // O_shared in Flash Attention can share the same shared memory
+          // region).
+          //
+          // This is safe because shared-memory allocations (T.alloc_shared)
+          // are always placed *outside* pipelined loop bodies — no new
+          // shared buffer is born inside the deep scope where kills are
+          // being reordered from.
 
           for (; stmt_it != gen_kill_seq.end(); ++stmt_it) {
-            // Check if next statement has different level
             auto next_it = stmt_it + 1;
             if (next_it == gen_kill_seq.end() ||
                 stmt_attrs.at(next_it->stmt).level == gen_level) {
               last_stmt_at_level = stmt_it->stmt;
               break;
+            }
+            // Stop if the next statement births a different shared buffer.
+            auto next_event_it = event_map_.find(next_it->stmt);
+            if (next_event_it != event_map_.end() &&
+                !next_event_it->second.gen.empty()) {
+              bool has_other_gen = false;
+              for (const VarNode *gen_buf : next_event_it->second.gen) {
+                if (gen_buf != buffer) {
+                  has_other_gen = true;
+                  break;
+                }
+              }
+              if (has_other_gen) {
+                last_stmt_at_level = stmt_it->stmt;
+                break;
+              }
             }
           }
           if (last_stmt_at_level) {
