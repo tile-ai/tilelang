@@ -15,7 +15,6 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <unordered_set>
 
 namespace tvm {
 namespace tl {
@@ -31,87 +30,6 @@ public:
   }
 
 private:
-  using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-
-  struct FallthroughDeallocInfo {
-    VarSet deallocated_buffers;
-    bool can_fallthrough{true};
-  };
-
-  FallthroughDeallocInfo AnalyzeFallthroughDeallocs(const Stmt &stmt) const {
-    if (!stmt.defined()) {
-      return {};
-    }
-
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      FallthroughDeallocInfo result;
-      for (const Stmt &child : seq->seq) {
-        auto child_info = AnalyzeFallthroughDeallocs(child);
-        if (!child_info.can_fallthrough) {
-          return FallthroughDeallocInfo{{}, false};
-        }
-        result.deallocated_buffers.insert(
-            child_info.deallocated_buffers.begin(),
-            child_info.deallocated_buffers.end());
-      }
-      return result;
-    }
-
-    if (const auto *iff = stmt.as<IfThenElseNode>()) {
-      auto then_info = AnalyzeFallthroughDeallocs(iff->then_case);
-      auto else_info = iff->else_case.defined()
-                           ? AnalyzeFallthroughDeallocs(iff->else_case.value())
-                           : FallthroughDeallocInfo{};
-
-      FallthroughDeallocInfo result;
-      result.can_fallthrough =
-          then_info.can_fallthrough || else_info.can_fallthrough;
-      if (then_info.can_fallthrough) {
-        result.deallocated_buffers.insert(then_info.deallocated_buffers.begin(),
-                                          then_info.deallocated_buffers.end());
-      }
-      if (else_info.can_fallthrough) {
-        result.deallocated_buffers.insert(else_info.deallocated_buffers.begin(),
-                                          else_info.deallocated_buffers.end());
-      }
-      return result;
-    }
-
-    if (const auto *eval = stmt.as<EvaluateNode>()) {
-      if (const auto *call = eval->value.as<CallNode>()) {
-        if (call->op.same_as(tl::deallocate_tmem())) {
-          ICHECK_EQ(call->args.size(), 1U);
-          const auto *buffer_data = call->args[0].as<VarNode>();
-          ICHECK(buffer_data) << "tl.deallocate_tmem expects a buffer data Var";
-          return FallthroughDeallocInfo{{tvm::ffi::GetRef<Var>(buffer_data)},
-                                        true};
-        }
-        if (call->op.same_as(builtin::thread_return())) {
-          return FallthroughDeallocInfo{{}, false};
-        }
-      }
-      return {};
-    }
-
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return AnalyzeFallthroughDeallocs(let->body);
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      return AnalyzeFallthroughDeallocs(attr->body);
-    }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      return AnalyzeFallthroughDeallocs(block->body);
-    }
-    if (const auto *block_realize = stmt.as<BlockRealizeNode>()) {
-      return AnalyzeFallthroughDeallocs(block_realize->block->body);
-    }
-    if (const auto *for_node = stmt.as<ForNode>()) {
-      return AnalyzeFallthroughDeallocs(for_node->body);
-    }
-
-    return {};
-  }
-
   int GetNumColsAllocated(const Buffer &buffer) const {
     ICHECK_EQ(buffer->shape.size(), 2U);
 
@@ -164,9 +82,6 @@ private:
     }
 
     ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
-
-    VarSet explicitly_deallocated_on_fallthrough =
-        AnalyzeFallthroughDeallocs(op->body).deallocated_buffers;
 
     for (auto buffer : tmem_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -260,12 +175,10 @@ private:
                              {new_buffer_access, PrimExpr(num_cols_allocated)},
                              tmem_call_ann);
       init_mtmem_calls_.push_back(Evaluate(alloc_call));
-      if (!explicitly_deallocated_on_fallthrough.count(data)) {
-        auto dealloc_call = Call(
-            DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
-            {new_buffer_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
-        dealloc_tmem_calls_.push_back(Evaluate(dealloc_call));
-      }
+      auto dealloc_call = Call(
+          DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
+          {new_buffer_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
+      dealloc_tmem_calls_.push_back(Evaluate(dealloc_call));
     }
     auto compare_by_buffer_name = [&](const Stmt &a, const Stmt &b) {
       auto call_a = a.as<EvaluateNode>()->value.as<CallNode>();
