@@ -255,8 +255,14 @@ def access_ptr(
 def create_tma_descriptor(*args):
     """Create a Tensor Memory Access (TMA) descriptor.
 
-    Args:
-        *args: Variable arguments defining the TMA descriptor configuration
+    This is an internal API used by copy lowering. The argument list depends on
+    the tensor rank and encodes the full TMA descriptor configuration:
+
+        create_tma_descriptor(data_type, rank, global_addr,
+            global_shape..., global_stride..., smem_box..., smem_stride...,
+            interleave, swizzle, l2_promotion, oob_fill)
+
+    Total arguments: 7 + 4 * rank.
 
     Returns:
         tir.Call: A handle to the created TMA descriptor
@@ -267,8 +273,9 @@ def create_tma_descriptor(*args):
 def tma_load(*args):
     """Perform a Tensor Memory Access (TMA) load operation.
 
-    Args:
-        *args: Variable arguments specifying the TMA load parameters
+    This is an internal API used by copy lowering. Arguments:
+
+        tma_load(descriptor, mbarrier, smem_addr, coord_0, ..., coord_n, eviction_policy)
 
     Returns:
         tir.Call: A handle to the TMA load operation
@@ -277,10 +284,10 @@ def tma_load(*args):
 
 
 def tma_load_2sm(*args):
-    """Perform a Tensor Memory Access (TMA) load operation with 2SM on Blackwell.
+    """Perform a TMA load with 2SM (two Streaming Multiprocessors) on Blackwell.
 
-    Args:
-        *args: Variable arguments specifying the TMA load parameters
+    This is an internal API. Same arguments as :func:`tma_load`, but with
+    the ``use_2cta`` annotation enabled for 2-CTA cooperative loading.
 
     Returns:
         tir.Call: A handle to the TMA load operation
@@ -288,40 +295,44 @@ def tma_load_2sm(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args, annotations={"use_2cta": 1})
 
 
-def fence_proxy_async(*args):
-    """Create a fence for asynchronous proxy operations.
+def fence_proxy_async():
+    """Issue a shared memory fence for asynchronous proxy operations.
 
-    Args:
-        *args: Variable arguments for fence configuration
+    Ensures that prior asynchronous operations (e.g. TMA stores) are visible
+    to subsequent memory accesses. Maps to ``fence.proxy.async.shared::cta``.
 
     Returns:
         tir.Call: A handle to the fence operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_proxy_async"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_proxy_async"))
 
 
-def tma_store_arrive(*args):
+def tma_store_arrive():
     """Signal the arrival of a TMA store operation.
 
-    Args:
-        *args: Variable arguments for the store arrival operation
+    Commits the current group of outstanding TMA store operations.
+    Maps to ``cp.async.bulk.commit_group``.
 
     Returns:
         tir.Call: A handle to the store arrive operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_arrive"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_arrive"))
 
 
-def tma_store_wait(*args):
+def tma_store_wait(count: int = 0):
     """Wait for completion of TMA store operations.
 
+    Waits until the number of outstanding TMA store groups is at most ``count``.
+    Maps to the PTX instruction ``cp.async.bulk.wait_group.read <count>``.
+
     Args:
-        *args: Variable arguments specifying which store operations to wait for
+        count (int): The maximum number of outstanding store groups allowed
+            to remain in flight. Defaults to 0 (wait for all stores to complete).
 
     Returns:
         tir.Call: A handle to the store wait operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_wait"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_wait"), count)
 
 
 def set_max_nreg(reg_count: int, is_inc: int):

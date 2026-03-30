@@ -638,8 +638,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl.tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
+    int count = Downcast<IntImm>(op->args[0])->value;
     PrintIndent();
-    stream << "tl.tma_store_wait(0)\n";
+    stream << "tl.tma_store_wait(" << count << ")\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
     PrintIndent();
     stream << "tl.warpgroup_arrive()\n";
