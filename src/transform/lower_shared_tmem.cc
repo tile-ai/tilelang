@@ -15,11 +15,85 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <unordered_set>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+
+/*!
+ * \brief Collect TMEM buffers explicitly deallocated on fallthrough paths.
+ *
+ * A "fallthrough path" is one that reaches the end of the statement without
+ * hitting thread_return().  Buffers deallocated on every such path already
+ * have an explicit dealloc, so we can skip the auto-dealloc at block end.
+ *
+ * \return {buffers deallocated on fallthrough, whether the stmt can
+ * fallthrough}
+ */
+static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
+  if (!stmt.defined())
+    return {{}, true};
+
+  // Unwrap transparent wrapper nodes
+  if (auto *n = stmt.as<LetStmtNode>())
+    return CollectFallthroughDeallocs(n->body);
+  if (auto *n = stmt.as<AttrStmtNode>())
+    return CollectFallthroughDeallocs(n->body);
+  if (auto *n = stmt.as<BlockNode>())
+    return CollectFallthroughDeallocs(n->body);
+  if (auto *n = stmt.as<BlockRealizeNode>())
+    return CollectFallthroughDeallocs(n->block->body);
+  if (auto *n = stmt.as<ForNode>())
+    return CollectFallthroughDeallocs(n->body);
+
+  // Sequential: accumulate deallocs; stop if any child doesn't fallthrough
+  if (auto *seq = stmt.as<SeqStmtNode>()) {
+    VarSet deallocs;
+    for (const auto &child : seq->seq) {
+      auto [d, ft] = CollectFallthroughDeallocs(child);
+      if (!ft)
+        return {{}, false};
+      deallocs.insert(d.begin(), d.end());
+    }
+    return {std::move(deallocs), true};
+  }
+
+  // Branch: collect deallocs only from branches that can fallthrough
+  if (auto *iff = stmt.as<IfThenElseNode>()) {
+    auto [then_d, then_ft] = CollectFallthroughDeallocs(iff->then_case);
+    auto [else_d, else_ft] =
+        iff->else_case.defined()
+            ? CollectFallthroughDeallocs(iff->else_case.value())
+            : std::pair<VarSet, bool>{{}, true};
+    VarSet deallocs;
+    if (then_ft)
+      deallocs.insert(then_d.begin(), then_d.end());
+    if (else_ft)
+      deallocs.insert(else_d.begin(), else_d.end());
+    return {std::move(deallocs), then_ft || else_ft};
+  }
+
+  // Leaf: detect deallocate_tmem and thread_return
+  if (auto *eval = stmt.as<EvaluateNode>()) {
+    if (auto *call = eval->value.as<CallNode>()) {
+      if (call->op.same_as(tl::deallocate_tmem())) {
+        ICHECK_EQ(call->args.size(), 1U);
+        auto *buf = call->args[0].as<VarNode>();
+        ICHECK(buf) << "tl.deallocate_tmem expects a buffer data Var";
+        return {{tvm::ffi::GetRef<Var>(buf)}, true};
+      }
+      if (call->op.same_as(builtin::thread_return())) {
+        return {{}, false};
+      }
+    }
+  }
+
+  return {{}, true};
+}
 
 class SharedTmemRewriter : public StmtExprMutator {
 public:
@@ -82,6 +156,8 @@ private:
     }
 
     ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
+
+    auto [fallthrough_deallocs, _] = CollectFallthroughDeallocs(op->body);
 
     for (auto buffer : tmem_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -175,10 +251,12 @@ private:
                              {new_buffer_access, PrimExpr(num_cols_allocated)},
                              tmem_call_ann);
       init_mtmem_calls_.push_back(Evaluate(alloc_call));
-      auto dealloc_call = Call(
-          DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
-          {new_buffer_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
-      dealloc_tmem_calls_.push_back(Evaluate(dealloc_call));
+      if (!fallthrough_deallocs.count(data)) {
+        auto dealloc_call = Call(
+            DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
+            {new_buffer_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
+        dealloc_tmem_calls_.push_back(Evaluate(dealloc_call));
+      }
     }
     auto compare_by_buffer_name = [&](const Stmt &a, const Stmt &b) {
       auto call_a = a.as<EvaluateNode>()->value.as<CallNode>();

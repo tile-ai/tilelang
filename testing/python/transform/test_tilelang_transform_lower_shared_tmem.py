@@ -26,7 +26,9 @@ def _collect_calls(stmt, op_name: str):
     return calls
 
 
-def test_explicit_deallocate_tmem_lowers_to_single_runtime_dealloc():
+def test_explicit_deallocate_tmem_suppresses_auto_dealloc():
+    """Explicit T.deallocate_tmem on fallthrough suppresses auto-dealloc."""
+
     @T.prim_func
     def func():
         with T.Kernel(1, threads=128):
@@ -35,7 +37,6 @@ def test_explicit_deallocate_tmem_lowers_to_single_runtime_dealloc():
 
     mod = _apply(func)
     body = mod["main"].body
-
     assert len(_collect_calls(body, "tl.ptx_init_tensor_memory")) == 1
     assert len(_collect_calls(body, "tl.ptx_deallocate_tensor_memory")) == 1
     assert len(_collect_calls(body, "tl.deallocate_tmem")) == 0
@@ -44,7 +45,9 @@ def test_explicit_deallocate_tmem_lowers_to_single_runtime_dealloc():
     assert dealloc_call.args[1].value == 128
 
 
-def test_explicit_deallocate_tmem_only_suppresses_matching_auto_dealloc():
+def test_explicit_deallocate_only_suppresses_matching_buffer():
+    """Only the explicitly-deallocated buffer skips auto-dealloc; others keep it."""
+
     @T.prim_func
     def func():
         with T.Kernel(1, threads=128):
@@ -56,13 +59,16 @@ def test_explicit_deallocate_tmem_only_suppresses_matching_auto_dealloc():
     body = mod["main"].body
 
     dealloc_calls = _collect_calls(body, "tl.ptx_deallocate_tensor_memory")
+    # A_tmem: 1 explicit (auto suppressed); B_tmem: 1 auto = 2 total
     assert len(dealloc_calls) == 2
 
     dealloc_num_cols = sorted(call.args[1].value for call in dealloc_calls)
     assert dealloc_num_cols == [64, 128]
 
 
-def test_explicit_deallocate_before_thread_return_keeps_tail_auto_dealloc():
+def test_dealloc_before_thread_return_keeps_auto_dealloc():
+    """Dealloc on non-fallthrough path (before thread_return) does NOT suppress auto-dealloc."""
+
     @T.prim_func
     def func():
         with T.Kernel(1, threads=128):
@@ -77,9 +83,12 @@ def test_explicit_deallocate_before_thread_return_keeps_tail_auto_dealloc():
     body = mod["main"].body
 
     dealloc_calls = _collect_calls(body, "tl.ptx_deallocate_tensor_memory")
+    # 1 explicit (non-fallthrough) + 1 auto (block end) = 2
     assert len(dealloc_calls) == 2
     assert [call.args[1].value for call in dealloc_calls] == [128, 128]
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    test_explicit_deallocate_tmem_suppresses_auto_dealloc()
+    test_explicit_deallocate_only_suppresses_matching_buffer()
+    test_dealloc_before_thread_return_keeps_auto_dealloc()
