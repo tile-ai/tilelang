@@ -7,12 +7,13 @@ import shlex
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from tvm.target import Target
 
 from tilelang import tvm
 from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
+from .callback import register_cuda_postproc_callback
 from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.utils.target import determine_target
 
@@ -45,6 +46,12 @@ class CUDARunner:
         Keep transformed temp source files.
     auto_compile : bool
         Compile and load during initialization.
+    cuda_postproc_callback : Callable[[str, Target], str] | None
+        Optional CUDA post-processing callback registered via
+        `register_cuda_postproc_callback`.
+    cuda_postproc_override : bool
+        Whether to override existing CUDA post-processing callback when
+        `cuda_postproc_callback` is provided.
     """
 
     def __init__(
@@ -58,11 +65,14 @@ class CUDARunner:
         apply_postproc: bool = True,
         keep_temporary_sources: bool = False,
         auto_compile: bool = True,
+        cuda_postproc_callback: Callable[[str, Target], str] | None = None,
+        cuda_postproc_override: bool = True,
     ):
         self.host_code_path = Path(host_code_path).expanduser().resolve()
         self.cuda_source_path = Path(cuda_source_path).expanduser().resolve()
         self.verbose = verbose
         self.apply_postproc = apply_postproc
+        self.cuda_postproc_callback = cuda_postproc_callback
         self.keep_temporary_sources = keep_temporary_sources
         self.compile_flags = compile_flags or []
         self.target = Target.canon_target(determine_target(target, return_object=True))
@@ -84,6 +94,9 @@ class CUDARunner:
         self._processed_host_source: str | None = None
         self._processed_cuda_source: str | None = None
         self.last_compile_command: list[str] | None = None
+
+        if self.cuda_postproc_callback is not None:
+            register_cuda_postproc_callback(self.cuda_postproc_callback, override=cuda_postproc_override)
 
         if auto_compile:
             self.compile()
