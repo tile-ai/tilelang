@@ -288,71 +288,31 @@ Array<IterVar> CopyNode::MakeIterVars() const {
 
 // Generates index expressions for accessing src (src_dst=0) or dst (src_dst=1)
 // buffers.
-// When the "transpose" annotation is set and we are generating dst indices
-// (src_dst=1), the loop variable assignments to non-trivial dimensions are
-// reversed so that dst[j, i] = src[i, j].
 Array<PrimExpr> CopyNode::MakeIndices(const Array<IterVar> &ivs,
                                       int src_dst) const {
-  bool do_transpose = (src_dst == 1) && GetTranspose();
-
   Array<PrimExpr> indices;
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
-
-  if (do_transpose) {
-    // Collect indices of non-trivial (extent > 1) dimensions.
-    std::vector<size_t> nontrivial;
-    for (size_t i = 0; i < ranges.size(); i++) {
-      if (!is_one(ranges[i]->extent))
-        nontrivial.push_back(i);
+  size_t idx = 0;
+  for (size_t i = 0; i < ranges.size(); i++) {
+    if (is_one(ranges[i]->extent))
+      indices.push_back(ranges[i]->min);
+    else {
+      indices.push_back(ranges[i]->min + ivs[idx]->var);
+      idx++;
     }
-    ICHECK(nontrivial.size() == ivs.size())
-        << "Transpose: nontrivial dims (" << nontrivial.size()
-        << ") != ivs size (" << ivs.size() << ") for dst=" << dst->name;
-    // Build a reversed mapping: nontrivial dim k gets ivs[N-1-k].
-    size_t N = nontrivial.size();
-    size_t nt_idx = 0;
-    for (size_t i = 0; i < ranges.size(); i++) {
-      if (is_one(ranges[i]->extent)) {
-        indices.push_back(ranges[i]->min);
-      } else {
-        size_t rev = N - 1 - nt_idx;
-        indices.push_back(ranges[i]->min + ivs[rev]->var);
-        nt_idx++;
-      }
-    }
-  } else {
-    size_t idx = 0;
-    for (size_t i = 0; i < ranges.size(); i++) {
-      if (is_one(ranges[i]->extent))
-        indices.push_back(ranges[i]->min);
-      else {
-        indices.push_back(ranges[i]->min + ivs[idx]->var);
-        idx++;
-      }
-    }
-    ICHECK(idx == ivs.size())
-        << "idx = " << idx << ", ivs.size() = " << ivs.size()
-        << "src name = " << src->name << ", dst name = " << dst->name;
   }
+  ICHECK(idx == ivs.size())
+      << "idx = " << idx << ", ivs.size() = " << ivs.size()
+      << "src name = " << src->name << ", dst name = " << dst->name;
   return indices;
 }
 
 // Builds a boundary predicate for memory accesses.
 // Returns a conjunction of bounds checks, or empty PrimExpr if all checks pass.
-// When the "transpose" annotation is set and src_dst == 1, the loop variable
-// assignment is reversed to match the transposed index mapping.
 PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
                                  const Array<IterVar> &ivs,
                                  Array<PrimExpr> extents, int src_dst) const {
-  bool do_transpose = (src_dst == 1) && GetTranspose();
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
-
-  // Build the mapping from non-trivial dimension index to ivs index.
-  size_t num_nontrivial = 0;
-  for (size_t i = 0; i < ranges.size(); i++) {
-    if (!is_one(ranges[i]->extent))
-      num_nontrivial++;
-  }
 
   Array<PrimExpr> cond_list;
   ICHECK(extents.size() == ranges.size()) << extents << " " << ranges;
@@ -360,12 +320,11 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
   for (size_t i = 0; i < ranges.size(); i++) {
     if (is_one(ranges[i]->extent))
       continue;
-    size_t iv_idx = do_transpose ? (num_nontrivial - 1 - idx) : idx;
-    PrimExpr cond = ranges[i]->min + ivs[iv_idx]->var < extents[i];
+    PrimExpr cond = ranges[i]->min + ivs[idx]->var < extents[i];
     if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
-    cond = ranges[i]->min + ivs[iv_idx]->var >= 0;
+    cond = ranges[i]->min + ivs[idx]->var >= 0;
     if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
@@ -868,11 +827,6 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
                                const LayoutMap &layout_map,
                                arith::Analyzer *analyzer, bool buffer_oob,
                                bool in_pipeline) const {
-  // Transpose copies are always lowered as normal SIMT loops.
-  if (GetTranspose()) {
-    return CopyInst::kNormal;
-  }
-
   // disable_tma_lower is from pass_configs
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
   // we will not use tma for bulk load/store

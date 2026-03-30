@@ -170,15 +170,6 @@ public:
     return 0; // default: evict_normal
   }
 
-  bool GetTranspose() const {
-    if (auto val = annotations.Get("transpose")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
-  }
-
   bool GetIsAsyncCopy() const {
     if (auto val = annotations.Get("is_async_copy")) {
       if (auto int_val = val->as<IntImmNode>()) {
