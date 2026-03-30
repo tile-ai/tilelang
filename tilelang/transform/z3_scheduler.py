@@ -283,6 +283,8 @@ def z3_schedule_loop_python(
     resource_flags: list[int],
     data_deps: list[tuple[int, int, int]],  # (i, j, distance)
     resource_deps: list[tuple[int, int]],
+    buffer_sizes: list[int],
+    memory_limit: int,
     verbose: bool = False,
 ) -> tuple[list[int], list[int], int]:
     """Z3-based scheduler for loops with distance-aware dependencies.
@@ -384,12 +386,26 @@ def z3_schedule_loop_python(
                 ii_i = iis[i]
                 solver.add(start_vars[i] + ii_i + stage_vars[i] * ii_mid - begin <= ii_mid)
 
+            buffer_vars = [z3.Int(f"buf_{i}") for i in range(len(buffer_sizes))]
+            for i in range(len(buffer_sizes)):
+                solver.add(buffer_vars[i] >= 1)
+                solver.add(buffer_vars[i] <= num_stages)
+            solver.add(z3.Sum([buffer_vars[i] * buffer_sizes[i] for i in range(len(buffer_sizes))]) <= memory_limit)
+
             # Add data dependency constraints with distance
             for u, v, distance in data_deps:
                 latency_u = latencies[u]
-                if verbose:
-                    print(f"[Python Z3 Loop] Data dependency: task {v} - task {u} >= {latency_u} - {ii_mid}*{distance}")
-                solver.add(start_vars[v] - start_vars[u] >= latency_u - ii_mid * distance)
+                if distance >= 0:
+                    if verbose:
+                        print(f"[Python Z3 Loop] Data dependency: task {v} - task {u} >= {latency_u} - {ii_mid}*{distance}")
+                    solver.add(start_vars[v] - start_vars[u] >= latency_u - ii_mid * distance)
+                else:
+                    buffer_var_id = -distance - 1  # Convert to 0-based index
+                    if verbose:
+                        print(
+                            f"[Python Z3 Loop] Data dependency with negative distance: task {v} - task {u} >= {latency_u} - {ii_mid}*buf_{buffer_var_id}"
+                        )
+                    solver.add(start_vars[v] - start_vars[u] >= latency_u - ii_mid * buffer_vars[buffer_var_id])
 
             # Add resource dependency constraints
             # For tasks i and j that use same resource, they cannot execute simultaneously
@@ -431,6 +447,7 @@ def z3_schedule_loop_python(
                     best_k_vars = k_vars
                     best_r_vars = r_vars
                 best_stage_vars = stage_vars
+                best_buffer_vars = buffer_vars
                 # Try smaller II
                 ii_upper = ii_mid
             else:
@@ -468,6 +485,10 @@ def z3_schedule_loop_python(
             stage = best_model.eval(best_stage_vars[i]).as_long()
             start_times.append(start_time)
             stages.append(stage)
+        buffer_vars = []
+        for i in range(len(buffer_sizes)):
+            buffer_var = best_model.eval(best_buffer_vars[i]).as_long()
+            buffer_vars.append(buffer_var)
 
         # Sort tasks by start time (and by index as tie-breaker)
         task_indices = list(range(n))
@@ -483,6 +504,9 @@ def z3_schedule_loop_python(
                     f"latency={latencies[idx]}, II={iis[idx]}, stage={stages[idx]}, "
                     f"resource_flags={resource_flags[idx]:03b}"
                 )
+        if verbose:
+            for i in range(len(buffer_sizes)):
+                print(f"[Python Z3 Loop]   Buffer {i}: size={buffer_sizes[i]}, num_versions={buffer_vars[i]}")
 
         # Save schedule visualization when verbose is True
         if verbose:
@@ -715,7 +739,7 @@ def z3_schedule_loop_python(
 
 # FFI-exposed function for loop scheduling
 @tvm_ffi.register_global_func("tl.transform.z3_schedule_loop_python")
-def z3_schedule_loop_ffi(num_stages, latencies, iis, resource_flags, data_deps, resource_deps):
+def z3_schedule_loop_ffi(num_stages, latencies, iis, resource_flags, data_deps, resource_deps, buffer_sizes, memory_limit):
     """FFI wrapper for z3_schedule_loop_python.
 
     This function accepts TVM containers and converts them to Python lists.
@@ -725,7 +749,7 @@ def z3_schedule_loop_ffi(num_stages, latencies, iis, resource_flags, data_deps, 
     latencies_list = list(latencies)
     iis_list = list(iis)
     resource_flags_list = list(resource_flags)
-
+    buffer_sizes_list = list(buffer_sizes)
     # Convert data dependencies (triples)
     data_deps_list = []
     if data_deps is not None:
@@ -743,7 +767,7 @@ def z3_schedule_loop_ffi(num_stages, latencies, iis, resource_flags, data_deps, 
 
     # Call the actual scheduler
     start_times, stages, best_ii = z3_schedule_loop_python(
-        num_stages, latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list
+        num_stages, latencies_list, iis_list, resource_flags_list, data_deps_list, resource_deps_list, buffer_sizes_list, memory_limit
     )
 
     # Return start_times and promotes as separate arrays for easier FFI handling
