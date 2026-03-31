@@ -200,7 +200,9 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
 
     Key properties and requirements:
         - The number of columns allocated must be a power of 2 and at least 32.
-        - TMEM allocations are dynamic and must be explicitly deallocated.
+        - TMEM allocations are dynamic. TileLang deallocates them automatically at
+          the end of the allocation block unless you call ``T.deallocate_tmem`` to
+          take manual control of the lifetime.
         - Both allocation and deallocation must be performed by the same warp.
         - The base address of the TMEM allocation is stored in shared memory and used as the offset for TCGEN5.MMA accumulator tensors.
         - Only TCGEN5.MMA and specific TMEM load/store instructions can access TMEM; all pre-processing must occur before data is loaded into TMEM, and all post-processing after data is retrieved.
@@ -214,7 +216,8 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
 
     Note:
         - TMEM is only available on supported architectures (e.g., Hopper and later).
-        - The buffer returned should be used according to TMEM access restrictions and deallocated appropriately.
+        - The buffer returned should be used according to TMEM access restrictions.
+          Use ``T.deallocate_tmem`` only when you need an earlier, explicit release.
     """
 
     assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"

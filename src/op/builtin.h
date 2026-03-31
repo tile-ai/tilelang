@@ -39,6 +39,11 @@ static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // that must NOT be marked with the restrict qualifier in codegen.
 // Type: Array<tir::Var>
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
+// A PrimFunc-level attribute carrying the minimum number of thread blocks
+// per SM (multiprocessor).  When present it is emitted as the second
+// argument of __launch_bounds__(maxThreads, minBlocksPerMultiprocessor).
+// Type: Integer
+static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
@@ -210,13 +215,14 @@ TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
 
-// Packed FP32x2 math (PTX `.f32x2` family; may lower to FADD2/FMUL2/FFMA2)
-// fadd2(x, y) - packed FP32x2 add
-TVM_DLL const Op &fadd2();
-// fmul2(x, y) - packed FP32x2 multiply
-TVM_DLL const Op &fmul2();
-// fma2(x, y, z) - packed FP32x2 fused multiply-add
+// Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
+TVM_DLL const Op &add2();
+TVM_DLL const Op &sub2();
+TVM_DLL const Op &mul2();
 TVM_DLL const Op &fma2();
+TVM_DLL const Op &max2();
+TVM_DLL const Op &min2();
+TVM_DLL const Op &abs2();
 
 // random op
 TVM_DLL const Op &rng_init();
@@ -335,6 +341,16 @@ TVM_DLL const Op &ptx_tcgen05_mma_ss();
  * \brief tvm intrinsic for tcgen05 mma tensor-shared instructions.
  */
 TVM_DLL const Op &ptx_tcgen05_mma_ts();
+
+/*!
+ * \brief Frontend TMEM deallocation marker.
+ *
+ * deallocate_tmem(tmem_buffer_data)
+ *
+ * This op is produced by the TileLang Python frontend and must be lowered by
+ * LowerSharedTmem into ptx_deallocate_tensor_memory(access_ptr, num_cols).
+ */
+TVM_DLL const Op &deallocate_tmem();
 
 /*!
  * \brief tvm intrinsics for initializing tensor memory
@@ -688,6 +704,19 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
  *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
  */
 TVM_DLL const Op &tcgen05_mma_arrive();
+
+/*!
+ * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
+ * bar.sync). Matches PTX \c tcgen05.fence::before_thread_sync (DeepGEMM /
+ * Blackwell UMMA sequencing).
+ */
+TVM_DLL const Op &tcgen05_before_thread_sync();
+
+/*!
+ * \brief TCGEN05 fence after a thread-block-wide sync. Matches PTX \c
+ * tcgen05.fence::after_thread_sync.
+ */
+TVM_DLL const Op &tcgen05_after_thread_sync();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor

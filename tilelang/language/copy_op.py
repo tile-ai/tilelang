@@ -168,20 +168,28 @@ def tma_copy(
     src: BufferLikeType,
     dst: BufferLikeType,
     *,
-    barrier,
+    barrier=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
 ) -> tir.PrimExpr | tir.Stmt:
-    """TMA copy — issues arrive_and_expect_tx + tma_load, no wait.
+    """TMA copy with user-managed synchronization.
 
+    For **loads** (global -> shared): issues expect_tx + tma_load (no wait).
     Unlike T.copy() which emits a full synchronous TMA sequence (arrive + load + wait),
-    T.tma_copy() emits only the producer part (arrive_and_expect_tx + tma_load).
-    The user manages synchronization explicitly via T.mbarrier_wait_parity().
+    T.tma_copy() emits only the producer part (expect_tx + tma_load).
+    The user manages synchronization explicitly via T.barrier_arrive() and
+    T.mbarrier_wait_parity(). ``barrier`` is required for loads.
+
+    For **stores** (shared -> global): issues tma_store + tma_store_arrive (no wait).
+    Unlike T.copy() which emits tma_store + tma_store_arrive + tma_store_wait,
+    T.tma_copy() omits the wait so the user can batch multiple stores before
+    calling T.tma_store_wait() explicitly. ``barrier`` is not needed for stores.
 
     Args:
         src: Source memory region (global or shared)
         dst: Destination memory region (shared or global)
-        barrier: Mbarrier (from T.alloc_barrier()) for TMA synchronization.
+        barrier: Mbarrier (from T.alloc_barrier()) for TMA load synchronization.
+            Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
         eviction_policy: Cache eviction policy. Defaults to None.
@@ -209,15 +217,51 @@ def tma_copy(
 
     ann = annotations.copy() if annotations else {}
 
-    from .builtin import _mbar_to_buffer_load
+    if barrier is not None:
+        from .builtin import _mbar_to_buffer_load
 
-    ann["barrier"] = _mbar_to_buffer_load(barrier)
+        ann["barrier"] = _mbar_to_buffer_load(barrier)
 
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
 
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
+
+
+def transpose(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+) -> tir.PrimExpr:
+    """Transpose a 2D buffer in shared memory: dst[j, i] = src[i, j].
+
+    Both src and dst should be shared memory buffers.
+    If src has shape (M, N), dst should have shape (N, M).
+
+    Args:
+        src: Source buffer or region of shape (..., M, N).
+        dst: Destination buffer or region of shape (..., N, M).
+
+    Returns:
+        tir.Call: A handle to the transpose operation.
+    """
+    src_extent = get_extent(src)
+    dst_extent = get_extent(dst)
+
+    assert src_extent is not None, "Cannot deduce extent for transpose src."
+    assert dst_extent is not None, "Cannot deduce extent for transpose dst."
+    assert len(src_extent) >= 2, "Transpose requires at least 2D buffers."
+    assert len(dst_extent) >= 2, "Transpose requires at least 2D buffers."
+
+    src = to_buffer_region(src, access_type="r")
+    dst = to_buffer_region(dst, access_type="w")
+
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.transpose"),
+        src,
+        dst,
+    )
 
 
 def c2d_im2col(

@@ -143,7 +143,12 @@ _STR_TO_TVM_DTYPE_CALL = {
 int_ = int
 
 
-def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var:
+def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
+    # When called with multiple args, pack the scalars into a vector via Shuffle.
+    # e.g. T.bfloat16x2(a, b) -> tir.Shuffle([a, b], [0, 1]) : bfloat16x2
+    if len(args) > 1:
+        return tir.Shuffle(list(args), list(range(len(args))))
+    expr = args[0] if args else None
     if isinstance(expr, int_):
         return tvm.tir.const(expr, dtype=self)
     if self in _STR_TO_TVM_DTYPE_CALL:
@@ -415,6 +420,8 @@ if TYPE_CHECKING:
     class float4_e2m1fnx32(dtype): ...
     class float4_e2m1fnx64(dtype): ...
     class bfloat16(dtype): ...
+    class bfloat16x2(dtype): ...
+
     # yapf: enable
 
 else:
@@ -582,8 +589,9 @@ else:
     float4_e2m1fnx32 = dtype("float4_e2m1fnx32")
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
     bfloat16 = dtype("bfloat16")
+    bfloat16x2 = dtype("bfloat16x2")
 
-_all_dtypes = {
+_all_dtypes = [
     "bool",
     "short",
     "int",
@@ -748,7 +756,8 @@ _all_dtypes = {
     "float4_e2m1fnx32",
     "float4_e2m1fnx64",
     "bfloat16",
-}
+    "bfloat16x2",
+]
 
 __all__ = list(_all_dtypes) + [
     "dtype",

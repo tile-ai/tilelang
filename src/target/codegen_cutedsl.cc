@@ -638,8 +638,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl.tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
+    int count = Downcast<IntImm>(op->args[0])->value;
     PrintIndent();
-    stream << "tl.tma_store_wait(0)\n";
+    stream << "tl.tma_store_wait(" << count << ")\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
     PrintIndent();
     stream << "tl.warpgroup_arrive()\n";
@@ -902,6 +903,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     PrintIndent();
     stream << "tl.tcgen05_mma_arrive(" << PrintExpr_(op->args[0]) << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_before_thread_sync())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_before_thread_sync expects no arguments";
+    PrintIndent();
+    stream << "tl.tcgen05_before_thread_sync()\n";
+  } else if (op->op.same_as(tl::tcgen05_after_thread_sync())) {
+    ICHECK_EQ(op->args.size(), 0U)
+        << "tcgen05_after_thread_sync expects no arguments";
+    PrintIndent();
+    stream << "tl.tcgen05_after_thread_sync()\n";
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
