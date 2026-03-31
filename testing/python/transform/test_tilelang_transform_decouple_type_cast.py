@@ -318,14 +318,16 @@ def test_e2e_fp8_global_to_frag():
     kernel = kernel_fn()
     source = kernel.get_kernel_source()
     assert "fp8_e4_16_t" in source, (
-        "Expected fp8_e4_16_t (128-bit) loads/stores for N=1024. "
-        "Cast constraints may be polluting layout decisions."
+        "Expected fp8_e4_16_t (128-bit) loads/stores for N=1024. Cast constraints may be polluting layout decisions."
     )
 
     a = (torch.randn(1024, device="cuda", dtype=torch.float32) * 0.5).to(torch.float8_e4m3fn)
     b = kernel(a)
     torch.testing.assert_close(
-        b.to(torch.float32), a.to(torch.float32), rtol=0, atol=0,
+        b.to(torch.float32),
+        a.to(torch.float32),
+        rtol=0,
+        atol=0,
     )
 
 
@@ -366,7 +368,10 @@ def test_e2e_fp8_manual_decouple():
     a = (torch.randn(1024, device="cuda", dtype=torch.float32) * 0.5).to(torch.float8_e4m3fn)
     b = kernel(a)
     torch.testing.assert_close(
-        b.to(torch.float32), a.to(torch.float32), rtol=0, atol=0,
+        b.to(torch.float32),
+        a.to(torch.float32),
+        rtol=0,
+        atol=0,
     )
 
 
