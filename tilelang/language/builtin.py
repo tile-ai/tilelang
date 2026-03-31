@@ -1061,6 +1061,14 @@ def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr, arrive_2cta: bo
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann)
 
 
+def tcgen05_before_thread_sync():
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_before_thread_sync"))
+
+
+def tcgen05_after_thread_sync():
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
+
+
 def ptx_mma_sm70(
     shape,
     A_layout,

@@ -722,6 +722,19 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
 TVM_DLL const Op &tcgen05_mma_arrive();
 
 /*!
+ * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
+ * bar.sync). Matches PTX \c tcgen05.fence::before_thread_sync (DeepGEMM /
+ * Blackwell UMMA sequencing).
+ */
+TVM_DLL const Op &tcgen05_before_thread_sync();
+
+/*!
+ * \brief TCGEN05 fence after a thread-block-wide sync. Matches PTX \c
+ * tcgen05.fence::after_thread_sync.
+ */
+TVM_DLL const Op &tcgen05_after_thread_sync();
+
+/*!
  * \brief tilelang intrinsic for setting the start address of a descriptor
  * buffer for wgmma/utcmma.
  *
