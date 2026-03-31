@@ -287,6 +287,18 @@ def InjectFenceProxy():
     return _ffi_api.InjectFenceProxy()  # type: ignore
 
 
+def InjectTcgen05Fence():
+    """Inject tcgen05.fence::before_thread_sync / after_thread_sync around
+    __syncthreads() calls on Blackwell (SM100+) targets that use tensor memory.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InjectTcgen05Fence()  # type: ignore
+
+
 def LegalizeVectorizedLoop():
     """LegalizeLoopVectorize
 

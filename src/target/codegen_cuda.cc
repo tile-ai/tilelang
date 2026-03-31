@@ -2031,6 +2031,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(func_name, 2);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
+  } else if (op->op.same_as(tl::tcgen05_before_thread_sync())) {
+    need_tcgen05_common_h_ = true;
+    print_extern_call_stmt("tl::tcgen05_before_thread_sync");
+  } else if (op->op.same_as(tl::tcgen05_after_thread_sync())) {
+    need_tcgen05_common_h_ = true;
+    print_extern_call_stmt("tl::tcgen05_after_thread_sync");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl::tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {

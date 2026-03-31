@@ -256,6 +256,16 @@ TIR_DEFINE_TL_BUILTIN(fence_proxy_async)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tcgen05_before_thread_sync)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_after_thread_sync)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(tma_store_arrive)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
