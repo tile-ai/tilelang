@@ -117,29 +117,6 @@ private:
   ffi::Array<Buffer> buffer_alloc_recorder_;
 };
 
-/*! \brief Map each allocated buffer var to the Block that first declares it. */
-class FirstOwningBlockCollector : public StmtExprVisitor {
-public:
-  static std::unordered_map<const VarNode *, const BlockNode *>
-  Collect(const Stmt &root) {
-    FirstOwningBlockCollector visitor;
-    visitor(root);
-    return std::move(visitor.owning_block_);
-  }
-
-private:
-  void VisitStmt_(const BlockNode *op) final {
-    for (const Buffer &buf : op->alloc_buffers) {
-      if (!owning_block_.count(buf->data.get())) {
-        owning_block_[buf->data.get()] = op;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  std::unordered_map<const VarNode *, const BlockNode *> owning_block_;
-};
-
 class BufferAllocationLocator : public StmtExprMutator {
 public:
   explicit BufferAllocationLocator(const PrimFunc &func) {
@@ -153,8 +130,6 @@ public:
     // order since the buffer_lca Map is unordered.
     ffi::Array<Buffer> buffer_alloc_recorder =
         BufferAllocateOrderCollector::Collect(func);
-    std::unordered_map<const VarNode *, const BlockNode *> owning_block =
-        FirstOwningBlockCollector::Collect(func->body);
     std::unordered_set<const VarNode *> arg_buffer_vars;
     CollectManagedAllocations collector;
     collector(func->body);
@@ -167,23 +142,11 @@ public:
     }
     // create buffers to be allocated at each stmts
     for (const auto &buffer : buffer_alloc_recorder) {
-      // Skip moving allocations that are already bound to func arguments.
-      if (arg_buffer_vars.count(buffer->data.get())) {
-        continue;
-      }
-      // shared.barrier / cluster_barrier must stay on the declaring Block, not
-      // the access LCA inside a pipelined For. Otherwise each iteration runs
-      // inside an opaque child block and LowerSharedBarrier re-issues
-      // mbarrier.init, breaking MMA sync (e.g. tcgen05 GEMM correctness).
-      if (buffer.scope() == "shared.barrier" ||
-          buffer.scope() == "shared.cluster_barrier") {
-        if (managed_allocations_.count(buffer->data.get())) {
-          auto ob = owning_block.find(buffer->data.get());
-          ICHECK(ob != owning_block.end())
-              << "PlanAndUpdateBufferAllocationLocation: barrier buffer "
-              << buffer->name << " has no owning Block";
-          alloc_buffers_[ob->second].push_back(buffer);
-        }
+      // Shared barriers must stay in their original block so the accompanying
+      // barrier_init annotation remains attached to the block that owns the
+      // initialization. Moving them into injected opaque blocks causes
+      // LowerSharedBarrier to see barrier buffers without local annotations.
+      if (IsBarrierBuffer(buffer)) {
         continue;
       }
       // Prefer the LCA derived from the underlying data var. If missing, fall
@@ -199,6 +162,10 @@ public:
         }
       }
       if (stmt != nullptr || vit != var_lca.end()) {
+        // Skip moving allocations that are already bound to func arguments.
+        if (arg_buffer_vars.count(buffer->data.get())) {
+          continue;
+        }
         // Only allocate managed allocations (a.k.a ignore the ones that are not
         // allocated outside of the block)
         if (managed_allocations_.count(buffer->data.get())) {
@@ -290,10 +257,18 @@ private:
   Stmt VisitStmt_(const BlockNode *op) final {
     ICHECK(!op->init.defined());
     ffi::Array<Buffer> alloc_buffers;
+    ffi::Array<Buffer> preserved_barrier_buffers;
+    for (const Buffer &buf : op->alloc_buffers) {
+      if (IsBarrierBuffer(buf)) {
+        alloc_buffers.push_back(buf);
+        preserved_barrier_buffers.push_back(buf);
+        PushBinding(buf->data, buf);
+      }
+    }
     auto it = alloc_buffers_.find(op);
     if (it != alloc_buffers_.end()) {
-      alloc_buffers = it->second;
       for (const Buffer &buf : it->second) {
+        alloc_buffers.push_back(buf);
         PushBinding(buf->data, buf);
       }
     }
@@ -319,6 +294,9 @@ private:
       for (const Buffer &buf : it->second) {
         PopBinding(buf->data);
       }
+    }
+    for (const Buffer &buf : preserved_barrier_buffers) {
+      PopBinding(buf->data);
     }
 
     ObjectPtr<BlockNode> n = CopyOnWrite(op);
@@ -372,6 +350,11 @@ private:
   ffi::Map<Var, ffi::Array<Buffer>> buffer_data_to_buffers_;
   /*! \brief Buffers that are allocated within a BlockNode, and may be moved. */
   std::unordered_set<const VarNode *> managed_allocations_;
+
+  static bool IsBarrierBuffer(const Buffer &buffer) {
+    String scope = buffer.scope();
+    return scope == "shared.barrier" || scope == "shared.cluster_barrier";
+  }
 };
 
 PrimFunc PlanAndUpdateBufferAllocationLocation(PrimFunc func) {

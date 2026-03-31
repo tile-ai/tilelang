@@ -252,6 +252,32 @@ def access_ptr(
     )
 
 
+def deallocate_tmem(tmem: tir.Buffer) -> None:
+    """Explicitly deallocate a TMEM buffer allocated by ``T.alloc_tmem``.
+
+    By default, TileLang inserts a TMEM deallocation automatically at the end
+    of the allocation block. Calling ``T.deallocate_tmem(buf)`` suppresses that
+    automatic tail deallocation for ``buf`` and lowers an explicit deallocation
+    at the call site instead.
+
+    Notes:
+    - The deallocation must obey the hardware TMEM rules: it should be issued by
+      the same warp that performed the allocation.
+    - Once this API is used, the buffer lifetime is user-managed for the current
+      block; deallocating too early or conditionally is the user's responsibility.
+
+    Args:
+        tmem: A TMEM buffer previously returned by ``T.alloc_tmem``.
+    """
+
+    if not isinstance(tmem, tir.Buffer):
+        raise TypeError(f"T.deallocate_tmem expects a tvm.tir.Buffer, but got {type(tmem)}.")
+    if tmem.scope() != "shared.tmem":
+        raise ValueError(f"T.deallocate_tmem expects a shared.tmem buffer, but got scope={tmem.scope()}.")
+
+    return evaluate(tir.call_intrin("handle", tir.op.Op.get("tl.deallocate_tmem"), tmem.data))
+
+
 def create_tma_descriptor(*args):
     """Create a Tensor Memory Access (TMA) descriptor.
 

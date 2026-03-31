@@ -145,6 +145,7 @@ signatures, behaviors, constraints, and examples, refer to API Reference
 Data movement
 - `T.copy(src, dst, ...)`: Move tiles between Global/Shared/Fragment.
 - `T.async_copy(src, dst, ...)`: Explicit async global→shared copy via `cp.async`.
+- `T.transpose(src, dst)`: Transpose a 2D shared buffer: `dst[j, i] = src[i, j]`.
 - `T.c2d_im2col(img, col, ...)`: 2D im2col transform for conv.
 
 Memory allocation and descriptors
@@ -153,6 +154,7 @@ Memory allocation and descriptors
 - `T.alloc_var(dtype, [init], scope='local.var')`: Scalar var buffer (1 elem).
 - `T.alloc_barrier(arrive_count)`: Allocate and initialize one or more mbarriers.
 - `T.alloc_tmem(shape, dtype)`: Tensor memory (TMEM) buffer (Hopper+).
+- `T.deallocate_tmem(buffer)`: Explicitly release a TMEM buffer at the current site.
 - `T.alloc_reducer(shape, dtype, op='sum', replication=None)`: Reducer buf.
 - `T.alloc_descriptor(kind, dtype)`: Generic descriptor allocator.
   - `T.alloc_wgmma_desc(dtype='uint64')`

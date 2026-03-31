@@ -229,6 +229,41 @@ def tma_copy(
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
 
 
+def transpose(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+) -> tir.PrimExpr:
+    """Transpose a 2D buffer in shared memory: dst[j, i] = src[i, j].
+
+    Both src and dst should be shared memory buffers.
+    If src has shape (M, N), dst should have shape (N, M).
+
+    Args:
+        src: Source buffer or region of shape (..., M, N).
+        dst: Destination buffer or region of shape (..., N, M).
+
+    Returns:
+        tir.Call: A handle to the transpose operation.
+    """
+    src_extent = get_extent(src)
+    dst_extent = get_extent(dst)
+
+    assert src_extent is not None, "Cannot deduce extent for transpose src."
+    assert dst_extent is not None, "Cannot deduce extent for transpose dst."
+    assert len(src_extent) >= 2, "Transpose requires at least 2D buffers."
+    assert len(dst_extent) >= 2, "Transpose requires at least 2D buffers."
+
+    src = to_buffer_region(src, access_type="r")
+    dst = to_buffer_region(dst, access_type="w")
+
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.transpose"),
+        src,
+        dst,
+    )
+
+
 def c2d_im2col(
     img: BufferLikeType,
     col: BufferLikeType,
