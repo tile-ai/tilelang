@@ -620,55 +620,56 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   auto layout_map = par_op_->InferLayout(T, level);
   return layout_map;
 }
+// Shared stride validation for TMA bulk load/store.
+bool CopyNode::CheckGlobalStrides(const Buffer &buffer,
+                                  arith::Analyzer *analyzer) {
+  Array<PrimExpr> strides = buffer->strides;
+  if (strides.empty()) {
+    PrimExpr stride = 1;
+    strides.resize(buffer->shape.size());
+    for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
+      strides.Set(i, stride);
+      stride *= buffer->shape[i];
+    }
+  }
+
+  if (!strides.empty() &&
+      analyzer->CanProve(strides[strides.size() - 1] != 1,
+                         arith::ProofStrength::kSymbolicBound)) {
+    LOG(WARNING) << "TMA bulk copy requires contiguous innermost global stride"
+                 << ", but got " << strides[strides.size() - 1]
+                 << " for buffer " << buffer->name
+                 << ", fallback to normal copy.";
+    return false;
+  }
+
+  for (size_t i = 0; i + 1 < strides.size(); ++i) {
+    PrimExpr stride_bytes =
+        cast(DataType::Int(64), strides[i]) * buffer->dtype.bytes();
+    if (analyzer->CanProve(
+            FloorMod(stride_bytes, IntImm(DataType::Int(64), 16)) != 0,
+            arith::ProofStrength::kSymbolicBound)) {
+      LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
+                   << stride_bytes << " for buffer " << buffer->name
+                   << ", fallback to normal copy.";
+      return false;
+    }
+    if (const auto *stride = stride_bytes.as<IntImmNode>()) {
+      if (stride->value >= (1ULL << 40)) {
+        LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
+                     << stride_bytes << " for buffer " << buffer->name
+                     << ", fallback to normal copy.";
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 // Checks if this copy can be lowered to a Bulk Load (TMA) instruction.
 // Requires: TMA support, global->shared scope, matching dtypes.
 bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
                              bool check_last_dim) const {
-  auto check_global_strides = [&](const Buffer &buffer,
-                                  const char *copy_kind) -> bool {
-    Array<PrimExpr> strides = buffer->strides;
-    if (strides.empty()) {
-      PrimExpr stride = 1;
-      strides.resize(buffer->shape.size());
-      for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
-        strides.Set(i, stride);
-        stride *= buffer->shape[i];
-      }
-    }
-
-    if (!strides.empty() &&
-        analyzer->CanProve(strides[strides.size() - 1] != 1,
-                           arith::ProofStrength::kSymbolicBound)) {
-      LOG(WARNING) << "TMA bulk " << copy_kind
-                   << " requires contiguous innermost global stride, but got "
-                   << strides[strides.size() - 1] << " for buffer "
-                   << buffer->name << ", fallback to normal copy.";
-      return false;
-    }
-
-    for (size_t i = 0; i + 1 < strides.size(); ++i) {
-      PrimExpr stride_bytes =
-          cast(DataType::Int(64), strides[i]) * buffer->dtype.bytes();
-      if (analyzer->CanProve(
-              FloorMod(stride_bytes, IntImm(DataType::Int(64), 16)) != 0,
-              arith::ProofStrength::kSymbolicBound)) {
-        LOG(WARNING) << "TMA bulk " << copy_kind
-                     << " cannot support a global stride of " << stride_bytes
-                     << ", fallback to normal copy.";
-        return false;
-      }
-      if (const auto *stride = stride_bytes.as<IntImmNode>()) {
-        if (stride->value >= (1ULL << 40)) {
-          LOG(WARNING) << "TMA bulk " << copy_kind
-                       << " cannot support a global stride of " << stride_bytes
-                       << ", fallback to normal copy.";
-          return false;
-        }
-      }
-    }
-    return true;
-  };
-
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
@@ -699,7 +700,7 @@ bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
                  << " vs. " << dst->dtype << " will be fallback to normal copy";
     return false;
   }
-  if (!check_global_strides(src, "load"))
+  if (!CheckGlobalStrides(src, analyzer))
     return false;
   return true;
 }
@@ -783,51 +784,6 @@ bool CopyNode::CheckBulkStore1D(Target target, const LayoutMap &layout_map,
 // Requires: TMA support, shared->global scope, matching dtypes.
 bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
                               bool check_last_dim) const {
-  auto check_global_strides = [&](const Buffer &buffer,
-                                  const char *copy_kind) -> bool {
-    Array<PrimExpr> strides = buffer->strides;
-    if (strides.empty()) {
-      PrimExpr stride = 1;
-      strides.resize(buffer->shape.size());
-      for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
-        strides.Set(i, stride);
-        stride *= buffer->shape[i];
-      }
-    }
-
-    if (!strides.empty() &&
-        analyzer->CanProve(strides[strides.size() - 1] != 1,
-                           arith::ProofStrength::kSymbolicBound)) {
-      LOG(WARNING) << "TMA bulk " << copy_kind
-                   << " requires contiguous innermost global stride, but got "
-                   << strides[strides.size() - 1] << " for buffer "
-                   << buffer->name << ", fallback to normal copy.";
-      return false;
-    }
-
-    for (size_t i = 0; i + 1 < strides.size(); ++i) {
-      PrimExpr stride_bytes =
-          cast(DataType::Int(64), strides[i]) * buffer->dtype.bytes();
-      if (analyzer->CanProve(
-              FloorMod(stride_bytes, IntImm(DataType::Int(64), 16)) != 0,
-              arith::ProofStrength::kSymbolicBound)) {
-        LOG(WARNING) << "TMA bulk " << copy_kind
-                     << " cannot support a global stride of " << stride_bytes
-                     << ", fallback to normal copy.";
-        return false;
-      }
-      if (const auto *stride = stride_bytes.as<IntImmNode>()) {
-        if (stride->value >= (1ULL << 40)) {
-          LOG(WARNING) << "TMA bulk " << copy_kind
-                       << " cannot support a global stride of " << stride_bytes
-                       << ", fallback to normal copy.";
-          return false;
-        }
-      }
-    }
-    return true;
-  };
-
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
@@ -857,7 +813,7 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
                  << " vs. " << dst->dtype << " will be fallback to normal copy";
     return false;
   }
-  if (!check_global_strides(dst, "store"))
+  if (!CheckGlobalStrides(dst, analyzer))
     return false;
   return true;
 }

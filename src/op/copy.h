@@ -353,6 +353,18 @@ protected:
    */
   TileOperator Clone() const;
 
+  /*!
+   * \brief Check that a global buffer's strides satisfy TMA requirements.
+   *
+   * Validates: contiguous innermost stride, 16-byte alignment for outer
+   * strides, and stride < 2^40.  The copy direction (load/store) for warning
+   * messages is inferred from the buffer's scope relative to src/dst.
+   *
+   * \return true if all stride checks pass.
+   */
+  static bool CheckGlobalStrides(const Buffer &buffer,
+                                 arith::Analyzer *analyzer);
+
 private:
   /*!
    * \brief Collect fragment buffers from expression and create fully replicated
