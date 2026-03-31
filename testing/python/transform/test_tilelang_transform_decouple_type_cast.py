@@ -232,7 +232,7 @@ def test_e2e_bf16_global_to_frag():
             A: T.Tensor((1024,), dtype=T.bfloat16),
             B: T.Tensor((1024,), dtype=T.bfloat16),
         ):
-            with T.Kernel(1, 1, threads=64) as (bx, by):
+            with T.Kernel(1, threads=64):
                 a_frag = T.alloc_fragment((1024,), dtype=T.float32)
                 T.copy(A, a_frag)
                 T.copy(a_frag, B)
@@ -267,7 +267,7 @@ def test_e2e_bf16_global_shared_frag():
             A: T.Tensor((1024,), dtype=T.bfloat16),
             B: T.Tensor((1024,), dtype=T.bfloat16),
         ):
-            with T.Kernel(1, 1, threads=64) as (bx, by):
+            with T.Kernel(1, threads=64):
                 a_shared = T.alloc_shared((1024,), dtype=T.bfloat16)
                 a_frag = T.alloc_fragment((1024,), dtype=T.float32)
                 T.copy(A, a_shared)
@@ -310,7 +310,7 @@ def test_e2e_fp8_global_to_frag():
             A: T.Tensor((1024,), dtype=T.float8_e4m3fn),
             B: T.Tensor((1024,), dtype=T.float8_e4m3fn),
         ):
-            with T.Kernel(1, 1, threads=64) as (bx, by):
+            with T.Kernel(1, threads=64):
                 a_frag = T.alloc_fragment((1024,), dtype=T.float32)
                 T.copy(A, a_frag)
                 T.copy(a_frag, B)
@@ -338,7 +338,7 @@ def test_e2e_fp8_global_to_frag():
             A: T.Tensor((2048,), dtype=T.float8_e4m3fn),
             B: T.Tensor((2048,), dtype=T.float8_e4m3fn),
         ):
-            with T.Kernel(1, 1, threads=64) as (bx, by):
+            with T.Kernel(1, threads=64):
                 a_frag = T.alloc_fragment((2048,), dtype=T.float32)
                 T.copy(A, a_frag)
                 T.copy(a_frag, B)
@@ -377,7 +377,7 @@ def test_e2e_fp8_manual_decouple():
             A: T.Tensor((1024,), dtype=T.float8_e4m3fn),
             B: T.Tensor((1024,), dtype=T.float8_e4m3fn),
         ):
-            with T.Kernel(1, 1, threads=64) as (bx, by):
+            with T.Kernel(1, threads=64):
                 a_frag = T.alloc_fragment((1024,), dtype=T.float8_e4m3fn)
                 b_frag = T.alloc_fragment((1024,), dtype=T.float32)
                 c_frag = T.alloc_fragment((1024,), dtype=T.float8_e4m3fn)
