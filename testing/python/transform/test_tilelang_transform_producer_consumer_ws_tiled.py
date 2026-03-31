@@ -1,6 +1,5 @@
 """Tests for the tile-level warp-specialized producer/consumer pass."""
 
-import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -8,8 +7,7 @@ from tilelang import tvm as tvm
 from tilelang.utils.target import determine_target
 
 
-def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16",
-                     threads=128):
+def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16", threads=128):
     """A simple pipelined GEMM using T.copy + T.gemm tile ops."""
 
     @T.prim_func

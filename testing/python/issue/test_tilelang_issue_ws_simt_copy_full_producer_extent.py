@@ -66,7 +66,7 @@ def test_ws_keeps_full_producer_extent_for_lowered_simt_copy():
 
     assert "__launch_bounds__(512, 1)" in src
     assert "if (256 <= ((int)threadIdx.x)) {" in flat_src
-    assert "tl::tl_shuffle_elect<256>()" in src
+    assert "tl::tl_shuffle_elect<256>()" in src or "if (((int)threadIdx.x) == 256) {" in src
     assert re.search(r"tl::__sync_thread_partial<\d+, 256>\(\);", src), src
 
 

@@ -61,9 +61,8 @@ def test_simple_pipeline():
             for ko in T.serial(
                 32,
                 annotations={
-                    "software_pipeline_async_stages": [T.int32(0)],
                     "software_pipeline_order": [T.int32(0), T.int32(1), T.int32(2)],
-                    "software_pipeline_stage": [T.int32(3), T.int32(3), T.int32(3)],
+                    "software_pipeline_stage": [T.int32(0), T.int32(0), T.int32(2)],
                     "tl_pipelined_num_stages": T.int32(3),
                 },
             ):

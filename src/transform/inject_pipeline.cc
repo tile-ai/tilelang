@@ -34,6 +34,12 @@ namespace software_pipeline {
 
 static constexpr const char *kPipelineContextNumStages =
     "tl.pipeline_context_num_stages";
+static constexpr const char *kPipelineMVBContextNumStages =
+    "tl.pipeline_mvb_num_stages";
+static constexpr const char *kPipelineMVBStageExpr =
+    "tl.pipeline_mvb_stage_expr";
+static constexpr const char *kPipelineMVBParityExpr =
+    "tl.pipeline_mvb_parity_expr";
 
 struct LetWrapper {
   Var var;
@@ -56,7 +62,8 @@ Optional<Integer> GetPipelineNumStages(const ForNode *loop) {
       return Integer(static_cast<int>(imm->value));
     }
   }
-  if (auto stages_anno = loop->annotations.Get(tir::attr::software_pipeline_stage)) {
+  if (auto stages_anno =
+          loop->annotations.Get(tir::attr::software_pipeline_stage)) {
     auto stages = Downcast<Array<Integer>>(stages_anno.value());
     int max_stage = -1;
     for (const auto &stage : stages) {
@@ -708,7 +715,8 @@ private:
                 bool need_bound_check) {
     PrimExpr new_loop_var;
     PrimExpr extent = end - start;
-    Optional<Integer> pipeline_num_stages = GetPipelineNumStages(pipeline_loop_.get());
+    Optional<Integer> pipeline_num_stages =
+        GetPipelineNumStages(pipeline_loop_.get());
     auto make_nop = []() {
       return BlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
@@ -794,6 +802,20 @@ private:
         rewritten_stmt = LetStmt(lw.var, substituted, rewritten_stmt);
       }
 
+      if (pipeline_num_stages && pipeline_num_stages.value()->value > 1) {
+        PrimExpr ns =
+            IntImm(DataType::Int(32), pipeline_num_stages.value()->value);
+        PrimExpr stage_expr =
+            analyzer_.Simplify(FloorMod(normalized_access_index, ns));
+        PrimExpr parity_expr =
+            analyzer_.Simplify(FloorMod(FloorDiv(normalized_access_index, ns),
+                                        IntImm(DataType::Int(32), 2)));
+        rewritten_stmt = AttrStmt(Integer(0), kPipelineMVBParityExpr,
+                                  parity_expr, rewritten_stmt);
+        rewritten_stmt = AttrStmt(Integer(0), kPipelineMVBStageExpr, stage_expr,
+                                  rewritten_stmt);
+      }
+
       new_blocks.push_back(std::move(rewritten_stmt));
     }
 
@@ -828,18 +850,24 @@ private:
       if (pipeline_num_stages &&
           preserved_annotations.find("tl_pipelined_num_stages") ==
               preserved_annotations.end()) {
-        preserved_annotations.Set("tl_pipelined_num_stages", pipeline_num_stages.value());
+        preserved_annotations.Set("tl_pipelined_num_stages",
+                                  pipeline_num_stages.value());
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
                      std::move(new_loop), std::nullopt, preserved_annotations);
     }
-    Stmt result =
-        BlockRealize({}, Bool(true), MakeBlock(new_loop, buffer_data_to_buffer_));
+    Stmt result = BlockRealize({}, Bool(true),
+                               MakeBlock(new_loop, buffer_data_to_buffer_));
     if (pipeline_num_stages) {
-      result = AttrStmt(Integer(0), kPipelineContextNumStages,
-                        Downcast<PrimExpr>(pipeline_num_stages.value()),
-                        result);
+      if (pipeline_num_stages.value()->value > 1) {
+        result =
+            AttrStmt(Integer(0), kPipelineMVBContextNumStages,
+                     Downcast<PrimExpr>(pipeline_num_stages.value()), result);
+      }
+      result =
+          AttrStmt(Integer(0), kPipelineContextNumStages,
+                   Downcast<PrimExpr>(pipeline_num_stages.value()), result);
     }
     return result;
   }
@@ -1232,15 +1260,89 @@ private:
     if (modified) {
       // Recalculate reads/writes only when the block was actually
       // modified by pipeline rewriting.  Unconditional recalculation
-      // with the (incomplete) buffer_data_to_buffer_ map can embed
-      // references to inner-block buffers (e.g. local.var) into outer
-      // block annotations, which misleads downstream LCA analysis and
-      // causes those buffers to be promoted to kernel parameters.
+      // can embed references to block-local buffers (e.g. local.var)
+      // into the block's own read/write annotations, which misleads
+      // downstream LCA analysis and causes those buffers to be
+      // promoted to kernel parameters.
+      //
+      // After recalculation:
+      // 1. Drop BufferRegions whose buffer is allocated in this block.
+      // 2. Widen to full-region any BufferRegion whose index
+      //    expressions reference a data var of any buffer allocated
+      //    in this block or any nested block. This prevents
+      //    downstream LCA analysis from seeing those vars at the
+      //    outer scope and promoting them to kernel parameters.
+      std::unordered_set<const BufferNode *> local_bufs;
+      std::unordered_set<const VarNode *> local_data_vars;
+      for (const auto &buf : block->alloc_buffers) {
+        local_bufs.insert(buf.get());
+        local_data_vars.insert(buf->data.get());
+      }
+      // Also collect data vars from all nested blocks.
+      PostOrderVisit(block->body, [&](const ObjectRef &obj) {
+        if (auto *inner = obj.as<BlockNode>()) {
+          for (const auto &buf : inner->alloc_buffers) {
+            local_data_vars.insert(buf->data.get());
+          }
+        }
+      });
+      auto region_uses_local_var = [&](const BufferRegion &br) -> bool {
+        for (const auto &range : br->region) {
+          bool found = false;
+          PostOrderVisit(range->min, [&](const ObjectRef &obj) {
+            if (found)
+              return;
+            if (auto *load = obj.as<BufferLoadNode>()) {
+              if (local_data_vars.count(load->buffer->data.get())) {
+                found = true;
+              }
+            }
+            if (auto *var = obj.as<VarNode>()) {
+              if (local_data_vars.count(var)) {
+                found = true;
+              }
+            }
+          });
+          if (found)
+            return true;
+          PostOrderVisit(range->extent, [&](const ObjectRef &obj) {
+            if (found)
+              return;
+            if (auto *load = obj.as<BufferLoadNode>()) {
+              if (local_data_vars.count(load->buffer->data.get())) {
+                found = true;
+              }
+            }
+            if (auto *var = obj.as<VarNode>()) {
+              if (local_data_vars.count(var)) {
+                found = true;
+              }
+            }
+          });
+          if (found)
+            return true;
+        }
+        return false;
+      };
       Array<Array<BufferRegion>> access =
           GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+      auto sanitize = [&](const Array<BufferRegion> &regions) {
+        Array<BufferRegion> out;
+        for (const auto &br : regions) {
+          if (local_bufs.count(br->buffer.get())) {
+            continue; // drop block-local buffer
+          }
+          if (region_uses_local_var(br)) {
+            out.push_back(BufferRegion::FullRegion(br->buffer));
+          } else {
+            out.push_back(br);
+          }
+        }
+        return out;
+      };
       BlockNode *n = block.CopyOnWrite();
-      n->reads = access[0];
-      n->writes = access[1];
+      n->reads = sanitize(access[0]);
+      n->writes = sanitize(access[1]);
       n->alloc_buffers = std::move(new_alloc_buffers);
     }
 

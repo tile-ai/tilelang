@@ -4,6 +4,27 @@ import tilelang.language as T
 import tilelang.testing
 from tvm.tir.stmt_functor import post_order_visit
 
+_MVB_ATTR_KEYS = frozenset(
+    [
+        "tl.pipeline_mvb_num_stages",
+        "tl.pipeline_mvb_stage_expr",
+        "tl.pipeline_mvb_parity_expr",
+        "tl.pipeline_context_num_stages",
+    ]
+)
+
+
+@tvm.tir.transform.prim_func_pass(opt_level=0)
+def _strip_mvb_attrs(func, mod, ctx):
+    """Remove intermediate MVB attributes that are consumed by later passes."""
+
+    def _visit(stmt):
+        if isinstance(stmt, tvm.tir.AttrStmt) and str(stmt.attr_key) in _MVB_ATTR_KEYS:
+            return stmt.body
+        return None
+
+    return func.with_body(tvm.tir.stmt_functor.ir_transform(func.body, None, _visit, ["tir.AttrStmt"]))
+
 
 def _check(original, transformed):
     func = original
@@ -12,6 +33,7 @@ def _check(original, transformed):
     mod = tl.transform.Simplify()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     mod = tl.transform.Simplify()(mod)
+    mod = _strip_mvb_attrs(mod)
     tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), True)
 
 

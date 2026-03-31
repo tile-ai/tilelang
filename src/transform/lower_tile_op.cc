@@ -1057,19 +1057,7 @@ private:
       return workspace.access_ptr(2); // write
     };
 
-    Range thread_bounds;
-
-    if (analyzer_->const_int_bound.IsBound(thread_var_->var)) {
-      auto const_int_bound = analyzer_->const_int_bound(thread_var_);
-      auto min_value = const_int_bound->min_value;
-      auto max_value = const_int_bound->max_value;
-      auto extent = max_value + 1 - min_value;
-      thread_bounds =
-          Range::FromMinExtent(IntImm(thread_var_->var.dtype(), min_value),
-                               IntImm(thread_var_->var.dtype(), extent));
-    } else {
-      thread_bounds = Range::FromMinExtent(0, 1);
-    }
+    Range thread_bounds = CurrentThreadBounds();
 
     // Convert let_bindings_ to Map<Var, PrimExpr> for LowerArgs
     Map<Var, PrimExpr> let_var_to_expr;
@@ -1195,9 +1183,8 @@ private:
                          .value();
     }
 
-    bool enter_pipelined =
-        (!pipeline_context_num_stages_stack_.empty() &&
-         pipeline_context_num_stages_stack_.back() > 0);
+    bool enter_pipelined = (!pipeline_context_num_stages_stack_.empty() &&
+                            pipeline_context_num_stages_stack_.back() > 0);
     if (has_num_stages_anno) {
       auto num_stages_anno = op->annotations.Get("num_stages");
       const auto *imm = num_stages_anno->as<IntImmNode>();
@@ -1397,6 +1384,18 @@ private:
                                    parallel_async_without_async_commit_wait);
     }
     return lowered;
+  }
+
+  Range CurrentThreadBounds() const {
+    if (analyzer_->const_int_bound.IsBound(thread_var_->var)) {
+      auto const_int_bound = analyzer_->const_int_bound(thread_var_);
+      auto min_value = const_int_bound->min_value;
+      auto max_value = const_int_bound->max_value;
+      auto extent = max_value + 1 - min_value;
+      return Range::FromMinExtent(IntImm(thread_var_->var.dtype(), min_value),
+                                  IntImm(thread_var_->var.dtype(), extent));
+    }
+    return Range::FromMinExtent(0, 1);
   }
 
   Target target_;

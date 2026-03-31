@@ -177,10 +177,14 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << ">";
   // Build access pointers from regions to preserve stage-specific offsets
   // from pipeline multi-versioning (matching dense GemmNode::Lower pattern).
-  PrimExpr Aptr = MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
-  PrimExpr Bptr = MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
-  PrimExpr Cptr = MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
-  PrimExpr Eptr = MakeAccessPtrFromRegion(eRegion_, /*r*/ 1, /*require_2d*/ false);
+  PrimExpr Aptr =
+      MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Bptr =
+      MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Cptr =
+      MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
+  PrimExpr Eptr =
+      MakeAccessPtrFromRegion(eRegion_, /*r*/ 1, /*require_2d*/ false);
 
   auto new_call =
       Call(DataType::Handle(), tl::tl_gemm_sp(),

@@ -18,6 +18,7 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
@@ -204,12 +205,12 @@ public:
             for (const auto &d : src_layout->InputShape())
               src_product = src_product * d;
             PrimExpr sib_product = Integer(1);
-            for (const auto &d : sib->shape) sib_product = sib_product * d;
+            for (const auto &d : sib->shape)
+              sib_product = sib_product * d;
             if (!analyzer_.CanProveEqual(
                     src_product *
                         Integer(GetElementStorageBits(src_buffer->dtype)),
-                    sib_product *
-                        Integer(GetElementStorageBits(sib->dtype)))) {
+                    sib_product * Integer(GetElementStorageBits(sib->dtype)))) {
               continue;
             }
           }
@@ -489,8 +490,7 @@ public:
             if (!analyzer_.CanProveEqual(
                     src_product *
                         Integer(GetElementStorageBits(rep.value()->dtype)),
-                    buf_product *
-                        Integer(GetElementStorageBits(buf->dtype)))) {
+                    buf_product * Integer(GetElementStorageBits(buf->dtype)))) {
               continue;
             }
           }
@@ -631,17 +631,7 @@ private:
       }
       // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
-      if (analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto min_value = const_int_bound->min_value;
-        auto max_value = const_int_bound->max_value;
-        auto extent = max_value - min_value + 1;
-        auto dtype = thread_var_->var.dtype();
-        thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, min_value), IntImm(dtype, extent)));
-      } else {
-        thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
-      }
+      thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
 
       // Compute buffer oob for each buffer in the op
@@ -825,17 +815,7 @@ private:
       infer_list_.push_back(std::move(infer));
       in_pipeline_vec_.push_back(pipelined_depth_ > 0);
       thread_var_vec_.push_back(thread_var_);
-      if (thread_var_.defined() &&
-          analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto dtype = thread_var_->var.dtype();
-        auto extent =
-            const_int_bound->max_value - const_int_bound->min_value + 1;
-        thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent)));
-      } else {
-        thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
-      }
+      thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
       buffer_oob_vec_.push_back(false);
     } else {
@@ -990,6 +970,20 @@ private:
     });
   }
 
+  Range CurrentThreadBounds() const {
+    if (thread_var_.defined() &&
+        analyzer_.const_int_bound.IsBound(thread_var_->var)) {
+      auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+      auto min_value = const_int_bound->min_value;
+      auto max_value = const_int_bound->max_value;
+      auto extent = max_value - min_value + 1;
+      auto dtype = thread_var_->var.dtype();
+      return Range::FromMinExtent(IntImm(dtype, min_value),
+                                  IntImm(dtype, extent));
+    }
+    return Range::FromMinExtent(0, 1);
+  }
+
   void VisitExpr_(const BufferLoadNode *op) final {
     // Collect buffer from BufferLoad
     if (op->buffer.defined() && op->buffer->data.defined()) {
@@ -1120,17 +1114,20 @@ private:
         // This is a floating access - record buffer with current thread_bounds
         if (floating_buffers_.find(buffer) != floating_buffers_.end())
           return; // Already recorded
-        Range thread_bounds = Range::FromMinExtent(0, 1);
+        floating_buffers_[buffer] = CurrentThreadBounds();
+      }
+
+      Range CurrentThreadBounds() const {
         if (thread_var_.defined() &&
             analyzer_.const_int_bound.IsBound(thread_var_->var)) {
           auto const_int_bound = analyzer_.const_int_bound(thread_var_);
           auto dtype = thread_var_->var.dtype();
           auto extent =
               const_int_bound->max_value - const_int_bound->min_value + 1;
-          thread_bounds = Range::FromMinExtent(
-              IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent));
+          return Range::FromMinExtent(IntImm(dtype, const_int_bound->min_value),
+                                      IntImm(dtype, extent));
         }
-        floating_buffers_[buffer] = thread_bounds;
+        return Range::FromMinExtent(0, 1);
       }
 
       const std::unordered_set<const Object *> &nodes_in_tileops_;

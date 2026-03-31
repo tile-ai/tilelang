@@ -1116,8 +1116,12 @@ private:
         }
         // Check for write-after-write conflicts (multiple stages writing to
         // same buffer region) This is important for pipeline correctness and
-        // affects last_use_stmt_index analysis
-        if (pinfo.is_copy_stage()) {
+        // affects last_use_stmt_index analysis.
+        // Skip WAW checks between statements in the same cp.async group
+        // (e.g. predicated cp.async calls that intentionally overlap).
+        if (pinfo.is_copy_stage() &&
+            !(pinfo.cp_async_group >= 0 &&
+              pinfo.cp_async_group == pipeline_stage_infos[i].cp_async_group)) {
           for (const BufferRegion &write : pipeline_stage_infos[i].writes) {
             if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
                              [&](const BufferRegion &r) {

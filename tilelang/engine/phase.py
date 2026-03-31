@@ -229,10 +229,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.IfStmtBinding()(mod)
     has_tma = module_has_tma(mod)
     if has_tma:
-        # For functions already transformed by ProducerConsumerWarpSpecializedTiled
-        # (num_stages stripped), MultiVersionBuffer is a no-op.
-        # For remaining TMA functions, version barrier buffers only;
-        # data buffer versioning is handled by InjectSoftwarePipeline.
         mod = tilelang.transform.MultiVersionBuffer(barrier_only=True)(mod)
     else:
         # Non-TMA: MultiVersionBuffer is not used, so buffer allocation

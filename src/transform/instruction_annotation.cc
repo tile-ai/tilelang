@@ -211,8 +211,7 @@ private:
     // Create a new Call with the annotation added.
     auto new_annotations = call->annotations;
     new_annotations.Set(kInstructionKind, StringImm(kind));
-    return Call(call->dtype, call->op, call->args, new_annotations,
-                call->span);
+    return Call(call->dtype, call->op, call->args, new_annotations, call->span);
   }
 
   Target target_;
