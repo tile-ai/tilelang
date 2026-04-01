@@ -562,6 +562,11 @@ def LowerSharedTmem():
     return _ffi_api.LowerSharedTmem()  # type: ignore
 
 
+def IfConditionExtract():
+    """Extract if condition to LetStmt variables."""
+    return _ffi_api.IfConditionExtract()  # type: ignore
+
+
 def AutoSchedule(enable_epi: bool):
     """Auto schedule for high-level operations"""
     return _ffi_api.AutoSchedule(enable_epi)  # type: ignore

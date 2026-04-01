@@ -38,6 +38,8 @@ public:
     hint_map_.clear();
     pending_conditions_.clear();
     let_bindings_.clear();
+    read_vars_.clear();
+    write_vars_.clear();
     operator()(stmt);
   }
 
@@ -50,6 +52,8 @@ public:
     hint_map_.clear();
     pending_conditions_.clear();
     let_bindings_.clear();
+    read_vars_.clear();
+    write_vars_.clear();
     operator()(expr);
   }
 
@@ -62,6 +66,11 @@ public:
   std::vector<BufferRegion> GetWriteRegions() const {
     return CollectRegions(write_buffers_, write_regions_);
   }
+
+  // Return all variables that are read from
+  std::vector<Var> GetReadVars() const { return read_vars_; }
+  // Return all variables that are written to
+  std::vector<Var> GetWriteVars() const { return write_vars_; }
 
 private:
   /*! \brief Iteration range for loop_vars */
@@ -82,6 +91,11 @@ private:
   arith::Analyzer ana_;
   /*! \brief let bindings inside the block */
   std::unordered_map<const VarNode *, PrimExpr> let_bindings_;
+
+  /*! \brief The set of variables that are read in the current block.  */
+  std::vector<Var> read_vars_;
+  /*! \brief The set of variables that are written in the current block.  */
+  std::vector<Var> write_vars_;
 
   /*!
    * \brief Update read/write buffers and regions with provided buffer and
@@ -104,6 +118,30 @@ private:
     // New buffer
     buffers->push_back(buffer);
     regions->push_back(region);
+  }
+
+  /*!
+   * \brief Update the set of read variables with the given variable
+   * \param var The variable to add to the set of read variables
+   */
+  void UpdateReadVar(const Var &var) {
+    for (const auto &v : read_vars_) {
+      if (v.same_as(var))
+        return;
+    }
+    read_vars_.push_back(var);
+  }
+
+  /*!
+   * \brief Update the set of write variables with the given variable
+   * \param var The variable to add to the set of write variables
+   */
+  void UpdateWriteVar(const Var &var) {
+    for (const auto &v : write_vars_) {
+      if (v.same_as(var))
+        return;
+    }
+    write_vars_.push_back(var);
   }
 
   /*!
@@ -227,8 +265,14 @@ private:
 
   void VisitStmt_(const LetStmtNode *op) override {
     let_bindings_[op->var.get()] = op->value;
-    StmtExprVisitor::VisitStmt_(op);
+    UpdateWriteVar(op->var);
+    StmtExprVisitor::VisitStmt(op->body);
     let_bindings_.erase(op->var.get());
+  }
+
+  void VisitExpr_(const VarNode *op) override {
+    UpdateReadVar(tvm::ffi::GetRef<Var>(op));
+    StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitExpr_(const BufferLoadNode *op) override {

@@ -69,6 +69,38 @@ namespace tl {
 using namespace tir;
 using ffi::GetRef;
 
+// Extract all sequencial task nodes from the IR structure tree
+void GatherTaskNodesSingle(
+    const std::shared_ptr<IRStructure> &node,
+    std::vector<std::shared_ptr<IRStructure>> &task_nodes);
+void GatherTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
+                     std::vector<std::shared_ptr<IRStructure>> &task_nodes) {
+  for (const auto &node : nodes) {
+    if (node->IsTask()) {
+      task_nodes.emplace_back(node);
+    } else if (node->IsSequence()) {
+      auto seq = static_cast<SequenceNode *>(node.get());
+      GatherTaskNodes(seq->children, task_nodes);
+    } else if (node->IsWrapper()) {
+      auto wrapper = static_cast<WrapperNode *>(node.get());
+      if (wrapper->task)
+        task_nodes.emplace_back(wrapper->task);
+      if (wrapper->child)
+        GatherTaskNodesSingle(wrapper->child, task_nodes);
+    } else if (node->IsControl()) {
+      task_nodes.emplace_back(node);
+    } else {
+      LOG(FATAL) << "Unknown node type in GatherTaskNodes";
+    }
+  }
+}
+
+void GatherTaskNodesSingle(
+    const std::shared_ptr<IRStructure> &node,
+    std::vector<std::shared_ptr<IRStructure>> &task_nodes) {
+  return GatherTaskNodes({node}, task_nodes);
+}
+
 // Forward declaration
 Stmt ApplyWarpgroupPartitionToIRStructure(
     IRStructure *root, IterVar thread_var, std::vector<Buffer> &barrier_buffers,
@@ -576,6 +608,22 @@ public:
   // Z3-based scheduler for loops that calls Python implementation via FFI
   // with distance-aware dependencies
   void Z3SchedulePythonLoop(ControlNode *ctrl) {
+    if (ctrl->child == nullptr) {
+      LOG(WARNING)
+          << "Z3SchedulePythonLoop called on a control node without child";
+      return;
+    }
+    std::vector<std::shared_ptr<IRStructure>> flat_children;
+    if (!ctrl->child->IsSequence()) {
+      GatherTaskNodesSingle(ctrl->child, flat_children);
+    } else {
+      auto seq_node = static_cast<SequenceNode *>(ctrl->child.get());
+      GatherTaskNodes(seq_node->children, flat_children);
+    }
+    auto seq_node = std::make_shared<SequenceNode>();
+    seq_node->children = flat_children;
+    ctrl->child = std::move(seq_node);
+
     auto seq_body = static_cast<SequenceNode *>(ctrl->child.get());
     std::vector<IRStructure *> nodes;
     nodes.reserve(seq_body->children.size());
@@ -752,7 +800,7 @@ public:
         node_to_index[nodes[i]] = i;
       }
 
-      std::vector<std::unique_ptr<IRStructure>> reordered_children;
+      std::vector<std::shared_ptr<IRStructure>> reordered_children;
       reordered_children.reserve(sorted_nodes.size());
       for (IRStructure *sorted_node : sorted_nodes) {
         auto it = node_to_index.find(sorted_node);
@@ -765,8 +813,87 @@ public:
       seq_body->children = std::move(reordered_children);
     }
 
+    // Reorder & Copy Let-defined variables
+    auto IsVarDecl = [&](IRStructure *node) -> bool {
+      if (!node)
+        return false;
+
+      if (node->IsTask()) {
+        auto task = static_cast<TaskNode *>(node);
+        if (task->stmts.size() == 1) {
+          return task->stmts[0].as<LetStmtNode>() != nullptr;
+        }
+      }
+      return false;
+    };
+    auto SolveConflictVar = [&]() -> bool {
+      for (int i = 0; i < n; ++i)
+        if (IsVarDecl(seq_body->children[i].get())) {
+          for (int j = 0; j < n; ++j) {
+            if (i == j)
+              continue;
+
+            auto node_i = seq_body->children[i].get();
+            auto node_j = seq_body->children[j].get();
+            int rem_stage_j = stage_map[node_j];
+
+            if (!HasDependency(node_i, node_j))
+              continue;
+
+            // LOG(INFO) << "[ScheduleRecursive] Conflict var detection between
+            // " << i << " and " << j;
+
+            if (stage_map[node_j] == stage_map[node_i])
+              continue;
+
+            auto node_i_task = static_cast<TaskNode *>(node_i);
+            auto node_i_let_stmt = node_i_task->stmts[0].as<LetStmtNode>();
+
+            auto iter = ctrl->control->loop_var;
+            auto step = ctrl->control->step.has_value()
+                            ? ctrl->control->step.value()
+                            : 1;
+            auto cloned_value = node_i_let_stmt->value;
+            auto cloned_let_stmt =
+                LetStmt(node_i_let_stmt->var.copy_with_suffix(""), cloned_value,
+                        Evaluate(0));
+            auto cloned_task = std::make_shared<TaskNode>();
+            cloned_task->stmts.push_back(cloned_let_stmt);
+            stage_map[cloned_task.get()] = rem_stage_j;
+
+            for (int k = j; k < n; ++k) {
+              auto node_k = seq_body->children[k].get();
+              auto task_k = static_cast<TaskNode *>(node_k);
+              if (rem_stage_j != stage_map[node_k])
+                continue;
+              if (HasDependency(node_i, node_k)) {
+                for (size_t id = 0; id < task_k->stmts.size(); ++id) {
+                  task_k->stmts[id] = Substitute(
+                      task_k->stmts[id],
+                      {{node_i_let_stmt->var, cloned_let_stmt->var}});
+                }
+                task_k->SubstituteVar(node_i_let_stmt->var,
+                                      cloned_let_stmt->var);
+                stage_map[node_k] = rem_stage_j;
+              }
+            }
+
+            seq_body->children.insert(seq_body->children.begin() + j,
+                                      std::move(cloned_task));
+            n += 1;
+            return true; // Conflict resolved, restart the loop
+          }
+        }
+      return false;
+    };
+    // Resolve conflicts until no more conflicts exist or max iterations reached
+    // (to avoid infinite loop)
+    int conflict_count = 0;
+    while (SolveConflictVar() && ++conflict_count < 100)
+      ;
+
     for (auto &node : seq_body->children) {
-      auto unit = std::make_unique<ScheduleUnit>();
+      auto unit = std::make_shared<ScheduleUnit>();
       unit->stage = stage_map[node.get()];
       unit->child = std::move(node);
       node = std::move(unit);
@@ -827,6 +954,9 @@ private:
     return a->buffer.same_as(b->buffer);
   }
 
+  // Check if two variables are the same
+  bool SameVar(const Var &a, const Var &b) const { return a.same_as(b); }
+
   // Check if two IRStructures have data dependency (excluding read-after-read)
   bool HasDependency(const IRStructure *a, const IRStructure *b) const {
     // Check if either node contains loop_break (if it's a TaskNode)
@@ -870,6 +1000,12 @@ private:
     for (const auto &read_region_a : a->GetReadRegions()) {
       for (const auto &write_region_b : b->GetWriteRegions()) {
         if (SameBuffer(read_region_a, write_region_b))
+          return true;
+      }
+    }
+    for (const auto &write_var_a : a->GetWriteVars()) {
+      for (const auto &read_var_b : b->GetReadVars()) {
+        if (SameVar(write_var_a, read_var_b))
           return true;
       }
     }
@@ -973,21 +1109,13 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
   if (!node)
     return;
 
-  if (node->IsTask()) {
-    // TaskNode: no further scheduling needed
-    return;
-  } else if (node->IsSequence()) {
-    auto seq = static_cast<SequenceNode *>(node);
-
-    // First, recursively schedule all children
-    for (size_t i = 0; i < seq->children.size(); ++i) {
-      ScheduleRecursive(seq->children[i].get());
-    }
-
+  auto ChildrenScheduleHelper =
+      [&](std::vector<std::shared_ptr<IRStructure>> origin_children)
+      -> std::vector<std::shared_ptr<IRStructure>> {
     // Now collect child nodes for potential scheduling
     std::vector<IRStructure *> child_nodes;
-    child_nodes.reserve(seq->children.size());
-    for (const auto &child : seq->children) {
+    child_nodes.reserve(origin_children.size());
+    for (const auto &child : origin_children) {
       child_nodes.push_back(child.get());
     }
 
@@ -1011,7 +1139,7 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
       }
 
       // Reorder children according to sorted_nodes
-      std::vector<std::unique_ptr<IRStructure>> reordered_children;
+      std::vector<std::shared_ptr<IRStructure>> reordered_children;
       reordered_children.reserve(sorted_nodes.size());
 
       for (IRStructure *sorted_node : sorted_nodes) {
@@ -1021,41 +1149,73 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
                         "children mapping";
         }
         size_t old_idx = it->second;
-        reordered_children.push_back(std::move(seq->children[old_idx]));
+        reordered_children.emplace_back(origin_children[old_idx]);
       }
 
       // Move reordered children back
-      seq->children = std::move(reordered_children);
+      origin_children = reordered_children;
     }
-    for (auto &node : seq->children) {
-      auto unit = std::make_unique<ScheduleUnit>();
+    for (auto &node : origin_children) {
+      auto unit = std::make_shared<ScheduleUnit>();
       unit->stage = -1;
-      unit->child = std::move(node);
-      node = std::move(unit);
+      unit->child = std::shared_ptr<IRStructure>(node);
+      node = unit;
     }
+    return origin_children;
+  };
+
+  if (node->IsTask()) {
+    // TaskNode: no further scheduling needed
+    return;
+  } else if (node->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(node);
+
+    // First, recursively schedule all children
+    std::vector<std::shared_ptr<IRStructure>> seq_children, origin_children;
+    GatherTaskNodes(seq->children, origin_children);
+    for (auto &child : origin_children) {
+      ScheduleRecursive(child.get());
+    }
+
+    seq->children = ChildrenScheduleHelper(origin_children);
     return;
   } else if (node->IsControl()) {
     auto ctrl = static_cast<ControlNode *>(node);
 
     // Now schedule the ControlNode's internal tasks (if any) as a unit
     // The body should now be a SequenceNode containing the tasks
-    if (ctrl->child && ctrl->child->IsSequence()) {
-      auto seq_body = static_cast<SequenceNode *>(ctrl->child.get());
-      for (const auto &child : seq_body->children) {
-        ScheduleRecursive(child.get());
+    if (ctrl->child) {
+      if (ctrl->child->IsSequence()) {
+        auto seq_body = static_cast<SequenceNode *>(ctrl->child.get());
+        std::vector<std::shared_ptr<IRStructure>> origin_children;
+        GatherTaskNodes(seq_body->children, origin_children);
+        for (auto &child : origin_children) {
+          ScheduleRecursive(child.get());
+        }
+        Z3SchedulePythonLoop(ctrl);
+      } else if (ctrl->child->IsWrapper()) {
+        auto wrapper = static_cast<WrapperNode *>(ctrl->child.get());
+        std::vector<std::shared_ptr<IRStructure>> origin_children;
+        GatherTaskNodes({wrapper->child}, origin_children);
+        for (auto &child : origin_children) {
+          ScheduleRecursive(child.get());
+        }
+        Z3SchedulePythonLoop(ctrl);
+      } else {
+        ScheduleRecursive(ctrl->child.get());
       }
-      Z3SchedulePythonLoop(ctrl);
-    } else {
-      ScheduleRecursive(ctrl->child.get());
     }
     return;
   } else if (node->IsWrapper()) {
     auto wrapper = static_cast<WrapperNode *>(node);
-    if (wrapper->child) {
-      ScheduleRecursive(wrapper->child.get());
-      wrapper->SetII(wrapper->child->GetII());
-      wrapper->SetLatency(wrapper->child->GetLatency());
+    std::vector<std::shared_ptr<IRStructure>> origin_children;
+    GatherTaskNodes({wrapper->child}, origin_children);
+    for (auto &child : origin_children) {
+      ScheduleRecursive(child.get());
     }
+    auto seq_node = std::make_shared<SequenceNode>();
+    seq_node->children = ChildrenScheduleHelper(origin_children);
+    *node = *(seq_node.get());
     return;
   }
 
@@ -1139,7 +1299,7 @@ private:
 // Visitor to build IRStructure from TIR statements
 class IRStructureBuilder : public StmtVisitor {
 public:
-  std::unique_ptr<IRStructure> Build(const Stmt &stmt, int64_t thread_count = 1,
+  std::shared_ptr<IRStructure> Build(const Stmt &stmt, int64_t thread_count = 1,
                                      Target target = Target()) {
     thread_count_ = thread_count;
     target_ = target;
@@ -1149,7 +1309,7 @@ public:
           << "IRStructureBuilder: root_ is null after visiting statement. "
           << "This may indicate an unhandled statement type.";
       // Return an empty TaskNode as fallback
-      auto task_node = std::make_unique<TaskNode>();
+      auto task_node = std::make_shared<TaskNode>();
       task_node->stmts.push_back(stmt);
       return task_node;
     }
@@ -1158,7 +1318,7 @@ public:
 
 protected:
   void VisitStmt_(const SeqStmtNode *op) override {
-    auto seq_node = std::make_unique<SequenceNode>();
+    auto seq_node = std::make_shared<SequenceNode>();
 
     for (size_t i = 0; i < op->seq.size(); i++) {
       VisitStmt(op->seq[i]);
@@ -1173,7 +1333,7 @@ protected:
     // Determine if this is a sequential or parallel for
     if (op->kind == ForKind::kSerial) {
       // Sequential For -> ControlNode
-      auto control_node = std::make_unique<ControlNode>();
+      auto control_node = std::make_shared<ControlNode>();
       control_node->control = GetRef<For>(op);
 
       // Process the loop body
@@ -1183,17 +1343,10 @@ protected:
       } else {
       }
 
-      // Absorb WrapperNode chain into ControlNode.wrappers
-      while (control_node->child && control_node->child->IsWrapper()) {
-        auto *wrapper = static_cast<WrapperNode *>(control_node->child.get());
-        control_node->wrappers.push_back(wrapper->wrapper);
-        control_node->child = std::move(wrapper->child);
-      }
-
       root_ = std::move(control_node);
     } else {
       // Parallel For -> TaskNode
-      auto task_node = std::make_unique<TaskNode>();
+      auto task_node = std::make_shared<TaskNode>();
       task_node->stmts.push_back(GetRef<Stmt>(op));
 
       // Analyze the loop body for resource usage
@@ -1205,7 +1358,7 @@ protected:
 
   void VisitStmt_(const EvaluateNode *op) override {
     // Evaluate statement (usually a Call) -> TaskNode
-    auto task_node = std::make_unique<TaskNode>();
+    auto task_node = std::make_shared<TaskNode>();
     task_node->stmts.push_back(GetRef<Stmt>(op));
 
     // Analyze the expression for resource usage
@@ -1216,10 +1369,11 @@ protected:
 
   void VisitStmt_(const IfThenElseNode *op) override {
     // If statement -> treat as TaskNode for now (could be refined later)
-    auto task_node = std::make_unique<TaskNode>();
+    auto task_node = std::make_shared<TaskNode>();
     task_node->stmts.push_back(GetRef<Stmt>(op));
 
     AnalyzeMemoryExpr(op->condition, task_node.get());
+    AnalyzeResourceUsage(Evaluate(op->condition), task_node.get(), true);
 
     // Analyze both branches for resource usage
     AnalyzeResourceUsage(op->then_case, task_node.get());
@@ -1232,8 +1386,12 @@ protected:
 
   void VisitStmt_(const LetStmtNode *op) override {
     // Wrapper statement -> WrapperNode
-    auto wrapper_node = std::make_unique<WrapperNode>();
+    auto wrapper_node = std::make_shared<WrapperNode>();
     wrapper_node->wrapper = GetRef<Stmt>(op);
+    auto task_node = std::make_shared<TaskNode>();
+    task_node->stmts.push_back(GetLetDecl(op));
+    AnalyzeResourceUsage(GetLetDecl(op), task_node.get());
+    wrapper_node->task = std::move(task_node);
 
     // Process the wrapperbody
     VisitStmt(op->body);
@@ -1246,8 +1404,12 @@ protected:
 
   void VisitStmt_(const AttrStmtNode *op) override {
     // Wrapper statement -> WrapperNode
-    auto wrapper_node = std::make_unique<WrapperNode>();
+    auto wrapper_node = std::make_shared<WrapperNode>();
     wrapper_node->wrapper = GetRef<Stmt>(op);
+    auto task_node = std::make_shared<TaskNode>();
+    task_node->stmts.push_back(GetAttrDecl(op));
+    AnalyzeResourceUsage(GetAttrDecl(op), task_node.get());
+    wrapper_node->task = std::move(task_node);
 
     // Process the wrapperbody
     VisitStmt(op->body);
@@ -1259,7 +1421,7 @@ protected:
   }
 
   void VisitStmt_(const WhileNode *op) override {
-    auto task_node = std::make_unique<TaskNode>();
+    auto task_node = std::make_shared<TaskNode>();
     task_node->stmts.push_back(GetRef<Stmt>(op));
 
     // Analyze condition and body for resource usage
@@ -1275,18 +1437,19 @@ protected:
     // TilelangRootBodyExtractor If we encounter it here, it means we're
     // processing the entire function body (not extracted), which should only
     // happen when there's no tilelang_root block
-    auto task_node = std::make_unique<TaskNode>();
+    auto task_node = std::make_shared<TaskNode>();
     task_node->stmts.push_back(GetRef<Stmt>(op));
     AnalyzeResourceUsage(GetRef<Stmt>(op), task_node.get());
     root_ = std::move(task_node);
   }
 
 private:
-  std::unique_ptr<IRStructure> root_;
+  std::shared_ptr<IRStructure> root_;
   int64_t thread_count_ = 1;
   Target target_;
 
-  void AnalyzeResourceUsage(const Stmt &stmt, TaskNode *task_node) {
+  void AnalyzeResourceUsage(const Stmt &stmt, TaskNode *task_node,
+                            bool only_variables = false) {
     // Recursively analyze statements to determine resource usage
     struct ResourceAnalyzer : public StmtExprVisitor {
       TaskNode *task_node;
@@ -1307,7 +1470,7 @@ private:
       std::vector<TensorCoreShape> tensor_core_shapes;
 
       // GemmInst: the resolved tensor core instruction (single, asserted
-      // unique)
+      // shared)
       GemmInst gemm_inst{GemmInst::kMMA};
       bool has_gemm_inst{false};
 
@@ -1336,7 +1499,8 @@ private:
 
         // Check if this is a TMA copy operation
         if (op->op.same_as(copy_op)) {
-          bool found_global = false;
+          bool found_global = false, found_shared = false;
+          int idx_global = -1, idx_shared = -1;
           for (unsigned idx = 0; idx != 2; ++idx) {
             auto region = Downcast<Call>(op->args[idx]);
             if (const auto *buffer_load =
@@ -1346,13 +1510,21 @@ private:
               MemoryType mem_type = GetMemoryTypeFromScope(scope);
               if (mem_type == MemoryType::kGlobal) {
                 found_global = true;
-                if (idx == 0) {
-                  found_tma_load = true;
-                }
+                idx_global = idx;
+              }
+              if (mem_type == MemoryType::kShared) {
+                found_shared = true;
+                idx_shared = idx;
               }
             }
           }
-          found_tma |= found_global;
+          found_tma = false;
+          if (found_global && found_shared) {
+            if (idx_global == 0 && idx_shared == 1)
+              found_tma = true;
+            if (idx_global == 1 && idx_shared == 0)
+              found_tma = true;
+          }
         } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op)) {
           found_tensor = true;
 
@@ -1428,30 +1600,32 @@ private:
     ResourceAnalyzer analyzer(task_node, target_, thread_count_);
     analyzer(stmt);
 
-    // Set task node flags based on what was found
-    if (analyzer.found_tma) {
-      task_node->SetUsesTMACore(true);
-      if (analyzer.found_tma_load) {
-        task_node->SetHasTMALoad(true);
-      }
-    }
-    if (analyzer.found_tensor) {
-      task_node->SetUsesTensorCore(true);
-      // Set Tensor Core shape information if available
-      for (const auto &shape : analyzer.tensor_core_shapes) {
-        if (shape.m > 0 && shape.n > 0 && shape.k > 0) {
-          task_node->AddTensorCoreShape(shape.m, shape.n, shape.k);
+    if (!only_variables) {
+      // Set task node flags based on what was found
+      if (analyzer.found_tma) {
+        task_node->SetUsesTMACore(true);
+        if (analyzer.found_tma_load) {
+          task_node->SetHasTMALoad(true);
         }
       }
-      // Set GemmInst information
-      if (analyzer.has_gemm_inst) {
-        task_node->SetGemmInst(analyzer.gemm_inst);
+      if (analyzer.found_tensor) {
+        task_node->SetUsesTensorCore(true);
+        // Set Tensor Core shape information if available
+        for (const auto &shape : analyzer.tensor_core_shapes) {
+          if (shape.m > 0 && shape.n > 0 && shape.k > 0) {
+            task_node->AddTensorCoreShape(shape.m, shape.n, shape.k);
+          }
+        }
+        // Set GemmInst information
+        if (analyzer.has_gemm_inst) {
+          task_node->SetGemmInst(analyzer.gemm_inst);
+        }
       }
-    }
-    // If neither TMA nor Tensor core was used, and CUDA operations were found,
-    // set CUDA core flag
-    if (!analyzer.found_tma && !analyzer.found_tensor) {
-      task_node->SetUsesCUDACore(true);
+      // If neither TMA nor Tensor core was used, and CUDA operations were
+      // found, set CUDA core flag
+      if (!analyzer.found_tma && !analyzer.found_tensor) {
+        task_node->SetUsesCUDACore(true);
+      }
     }
 
     // Analyze memory access regions
@@ -1459,6 +1633,8 @@ private:
     memory_detector.Analyze(stmt);
     std::vector<BufferRegion> read_regions = memory_detector.GetReadRegions();
     std::vector<BufferRegion> write_regions = memory_detector.GetWriteRegions();
+    std::vector<Var> read_vars = memory_detector.GetReadVars();
+    std::vector<Var> write_vars = memory_detector.GetWriteVars();
 
     // Merge with existing regions (avoid duplicates)
     for (const auto &region : read_regions) {
@@ -1467,6 +1643,14 @@ private:
 
     for (const auto &region : write_regions) {
       task_node->AddWriteRegion(region);
+    }
+
+    for (const auto &var : read_vars) {
+      task_node->AddReadVar(var);
+    }
+
+    for (const auto &var : write_vars) {
+      task_node->AddWriteVar(var);
     }
 
     // Estimate latency and initiation interval for this task
@@ -1497,6 +1681,8 @@ private:
     latency_estimator.Estimate(task_node);
   }
 };
+
+Stmt ReNestLetStmts(const Stmt &stmt);
 
 // The main pass function
 tvm::transform::Pass AutoSchedule(const bool enable_epi) {
@@ -1587,6 +1773,8 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       Stmt final_body;
       TilelangRootBodyReplacer replacer(new_body);
       final_body = replacer(func->body);
+
+      final_body = ReNestLetStmts(final_body);
 
       // Create a new PrimFunc with the updated body
       auto new_func = PrimFunc(func->params, final_body, func->ret_type,
@@ -1699,6 +1887,10 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       final_body = RewriteAllocBuffers(final_body, buffer_infos);
     }
 
+    // LOG(INFO) << final_body << std::endl;
+
+    final_body = ReNestLetStmts(final_body);
+
     // Create a new PrimFunc with the updated body
     auto new_func = PrimFunc(func->params, final_body, func->ret_type,
                              func->buffer_map, func->attrs);
@@ -1708,53 +1900,313 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
   return CreatePrimFuncPass(pass_func, 0, "tl.AutoSchedule", {});
 }
 
-// Helper function to clone IRStructure with warpgroup filter
-std::unique_ptr<IRStructure>
-CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
-  if (!node || !node->containWarpgroupId(warpgroup_id))
+// Helper: check if a TaskNode is a LetDecl (single LetStmt with empty body)
+static bool IsLetDeclTask(const TaskNode *task) {
+  return task->stmts.size() == 1 && task->stmts[0].as<LetStmtNode>() != nullptr;
+}
+
+// Helper: check if an IRStructure node is a LetDecl task (or a ScheduleUnit
+// wrapping one)
+static bool IsLetDeclNode(const IRStructure *node) {
+  if (!node)
+    return false;
+  if (node->IsTask()) {
+    return IsLetDeclTask(static_cast<const TaskNode *>(node));
+  }
+  if (node->IsScheduleUnit()) {
+    auto unit = static_cast<const ScheduleUnit *>(node);
+    return unit->child && unit->child->IsTask() &&
+           IsLetDeclTask(static_cast<const TaskNode *>(unit->child.get()));
+  }
+  return false;
+}
+
+// Helper: check if an IRStructure subtree contains any LetDecl tasks
+static bool ContainsLetDecl(const IRStructure *node) {
+  if (!node)
+    return false;
+  if (IsLetDeclNode(node))
+    return true;
+  if (node->IsSequence()) {
+    auto seq = static_cast<const SequenceNode *>(node);
+    for (const auto &child : seq->children) {
+      if (ContainsLetDecl(child.get()))
+        return true;
+    }
+  } else if (node->IsControl()) {
+    auto ctrl = static_cast<const ControlNode *>(node);
+    return ContainsLetDecl(ctrl->child.get());
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<const WrapperNode *>(node);
+    return ContainsLetDecl(wrapper->child.get());
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<const ScheduleUnit *>(node);
+    return ContainsLetDecl(unit->child.get());
+  }
+  return false;
+}
+
+// Helper function to clone IRStructure with warpgroup filter.
+std::shared_ptr<IRStructure>
+CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
+                                    Map<Var, PrimExpr> &var_remap) {
+  if (!node)
     return nullptr;
 
   if (node->IsTask()) {
     auto task = static_cast<TaskNode *>(node);
-    return task->Clone();
+
+    // LetDecl tasks are always included in every warp group clone.
+    // Create a fresh variable copy so the two warp groups use different names.
+    if (IsLetDeclTask(task)) {
+      const auto *let = task->stmts[0].as<LetStmtNode>();
+      auto new_var = let->var.copy_with_suffix("");
+      // Substitute previously renamed variables in the value expression.
+      PrimExpr new_value =
+          var_remap.empty() ? let->value : Substitute(let->value, var_remap);
+      var_remap.Set(let->var, new_var);
+      auto new_task = std::make_shared<TaskNode>();
+      new_task->stmts.push_back(LetStmt(new_var, new_value, Evaluate(0)));
+      return new_task;
+    }
+
+    // Non-LetDecl tasks: only include if warp group matches
+    if (!node->containWarpgroupId(warpgroup_id))
+      return nullptr;
+    auto cloned = task->Clone();
+    // Substitute renamed LetDecl variables in task statements
+    if (!var_remap.empty()) {
+      auto ct = static_cast<TaskNode *>(cloned.get());
+      for (size_t i = 0; i < ct->stmts.size(); ++i) {
+        ct->stmts[i] = Substitute(ct->stmts[i], var_remap);
+      }
+    }
+    return cloned;
   } else if (node->IsSequence()) {
+    // A SequenceNode is included if it contains the target warp group
+    // OR if it contains LetDecl tasks (which are always needed).
+    if (!node->containWarpgroupId(warpgroup_id) && !ContainsLetDecl(node))
+      return nullptr;
     auto seq = static_cast<SequenceNode *>(node);
-    auto new_seq = std::make_unique<SequenceNode>();
+    auto new_seq = std::make_shared<SequenceNode>();
     for (const auto &child : seq->children) {
-      auto new_child =
-          CloneIRStructureWithWarpgroupFilter(child.get(), warpgroup_id);
+      auto new_child = CloneIRStructureWithWarpgroupFilter(
+          child.get(), warpgroup_id, var_remap);
       if (new_child) {
         new_seq->children.push_back(std::move(new_child));
       }
     }
+    if (new_seq->children.empty())
+      return nullptr;
     return new_seq;
   } else if (node->IsControl()) {
+    // A ControlNode is included if it contains the target warp group
+    // OR if it contains LetDecl tasks.
+    if (!node->containWarpgroupId(warpgroup_id) && !ContainsLetDecl(node))
+      return nullptr;
     auto ctrl = static_cast<ControlNode *>(node);
-    auto new_ctrl = std::make_unique<ControlNode>();
+    auto new_ctrl = std::make_shared<ControlNode>();
     new_ctrl->control = ctrl->control;
     new_ctrl->SetPromote(ctrl->hasPromote());
-    new_ctrl->wrappers = ctrl->wrappers;
-    new_ctrl->child =
-        CloneIRStructureWithWarpgroupFilter(ctrl->child.get(), warpgroup_id);
+    new_ctrl->child = CloneIRStructureWithWarpgroupFilter(
+        ctrl->child.get(), warpgroup_id, var_remap);
     return new_ctrl;
   } else if (node->IsWrapper()) {
+    if (!node->containWarpgroupId(warpgroup_id) && !ContainsLetDecl(node))
+      return nullptr;
     auto wrapper = static_cast<WrapperNode *>(node);
-    auto new_wrapper = std::make_unique<WrapperNode>();
+    auto new_wrapper = std::make_shared<WrapperNode>();
+    // Keep the wrapper statement as-is (do NOT rename LetStmt wrappers here;
+    // only LetDecl TaskNodes get renamed).
     new_wrapper->wrapper = wrapper->wrapper;
-    new_wrapper->child =
-        CloneIRStructureWithWarpgroupFilter(wrapper->child.get(), warpgroup_id);
+    new_wrapper->child = CloneIRStructureWithWarpgroupFilter(
+        wrapper->child.get(), warpgroup_id, var_remap);
     return new_wrapper;
   } else if (node->IsScheduleUnit()) {
     auto unit = static_cast<ScheduleUnit *>(node);
-    auto new_unit = std::make_unique<ScheduleUnit>();
-    new_unit->before[warpgroup_id] = unit->before[warpgroup_id];
-    new_unit->after[warpgroup_id] = unit->after[warpgroup_id];
+    bool child_is_let_decl = IsLetDeclNode(unit->child.get());
+
+    // Include the ScheduleUnit if the child is a LetDecl or the warp group
+    // matches.
+    if (!child_is_let_decl && !node->containWarpgroupId(warpgroup_id))
+      return nullptr;
+
+    auto new_unit = std::make_shared<ScheduleUnit>();
     new_unit->stage = unit->stage;
-    new_unit->child =
-        CloneIRStructureWithWarpgroupFilter(unit->child.get(), warpgroup_id);
+    new_unit->child = CloneIRStructureWithWarpgroupFilter(
+        unit->child.get(), warpgroup_id, var_remap);
+
+    if (!child_is_let_decl) {
+      // Copy before/after for the target warp group
+      new_unit->before[warpgroup_id] = unit->before[warpgroup_id];
+      new_unit->after[warpgroup_id] = unit->after[warpgroup_id];
+      // Substitute renamed LetDecl variables in before/after stmts
+      if (!var_remap.empty()) {
+        for (auto &s : new_unit->before[warpgroup_id]) {
+          s = Substitute(s, var_remap);
+        }
+        for (auto &s : new_unit->after[warpgroup_id]) {
+          s = Substitute(s, var_remap);
+        }
+      }
+    }
     return new_unit;
   }
   LOG(FATAL);
+}
+
+// Entry point overload — creates a fresh var_remap per call
+std::shared_ptr<IRStructure>
+CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id) {
+  Map<Var, PrimExpr> var_remap;
+  return CloneIRStructureWithWarpgroupFilter(node, warpgroup_id, var_remap);
+}
+
+// Simple visitor to collect all Var references from statements/expressions
+class VarRefCollector : public StmtExprVisitor {
+public:
+  std::unordered_set<const VarNode *> vars;
+  void VisitExpr_(const VarNode *op) override { vars.insert(op); }
+};
+
+// Remove LetDecl definitions whose variables are not referenced by any
+// non-LetDecl task in the IR tree.  After warp-group partitioning some
+// LetDecl values may access out-of-bounds indices because the consumer
+// tasks that used them ended up in the other warp group.
+std::shared_ptr<IRStructure>
+RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
+  if (!root)
+    return nullptr;
+
+  // Phase 1: Collect LetDecl definitions and variable references from
+  // non-LetDecl nodes (task stmts and ScheduleUnit before/after).
+  struct LetDeclEntry {
+    const VarNode *var;
+    PrimExpr value;
+  };
+  std::vector<LetDeclEntry> let_decls;
+  std::unordered_set<const VarNode *> referenced_vars;
+
+  std::function<void(const IRStructure *)> collect =
+      [&](const IRStructure *node) {
+        if (!node)
+          return;
+        if (node->IsTask()) {
+          auto task = static_cast<const TaskNode *>(node);
+          if (IsLetDeclTask(task)) {
+            const auto *let = task->stmts[0].as<LetStmtNode>();
+            let_decls.push_back({let->var.get(), let->value});
+          } else {
+            VarRefCollector collector;
+            for (const auto &stmt : task->stmts) {
+              collector(stmt);
+            }
+            referenced_vars.insert(collector.vars.begin(),
+                                   collector.vars.end());
+          }
+        } else if (node->IsSequence()) {
+          for (const auto &child :
+               static_cast<const SequenceNode *>(node)->children) {
+            collect(child.get());
+          }
+        } else if (node->IsControl()) {
+          collect(static_cast<const ControlNode *>(node)->child.get());
+        } else if (node->IsWrapper()) {
+          collect(static_cast<const WrapperNode *>(node)->child.get());
+        } else if (node->IsScheduleUnit()) {
+          auto unit = static_cast<const ScheduleUnit *>(node);
+          collect(unit->child.get());
+          VarRefCollector collector;
+          for (const auto &stmts : unit->before) {
+            for (const auto &s : stmts)
+              collector(s);
+          }
+          for (const auto &stmts : unit->after) {
+            for (const auto &s : stmts)
+              collector(s);
+          }
+          referenced_vars.insert(collector.vars.begin(), collector.vars.end());
+        }
+      };
+  collect(root.get());
+
+  // Phase 2: Transitive closure — if a LetDecl var is referenced,
+  // all vars in its value expression are transitively referenced too.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto &entry : let_decls) {
+      if (referenced_vars.count(entry.var)) {
+        VarRefCollector collector;
+        collector(entry.value);
+        for (const auto *v : collector.vars) {
+          if (!referenced_vars.count(v)) {
+            referenced_vars.insert(v);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  // Phase 3: Filter the tree — remove LetDecl tasks for unused vars.
+  std::function<std::shared_ptr<IRStructure>(
+      const std::shared_ptr<IRStructure> &)>
+      filter_tree = [&](const std::shared_ptr<IRStructure> &node)
+      -> std::shared_ptr<IRStructure> {
+    if (!node)
+      return nullptr;
+    if (node->IsTask()) {
+      if (IsLetDeclTask(static_cast<const TaskNode *>(node.get()))) {
+        const auto *let = static_cast<const TaskNode *>(node.get())
+                              ->stmts[0]
+                              .as<LetStmtNode>();
+        if (!referenced_vars.count(let->var.get())) {
+          return nullptr; // Remove unused LetDecl
+        }
+      }
+      return node;
+    } else if (node->IsSequence()) {
+      auto seq = static_cast<const SequenceNode *>(node.get());
+      auto new_seq = std::make_shared<SequenceNode>();
+      for (const auto &child : seq->children) {
+        auto filtered = filter_tree(child);
+        if (filtered)
+          new_seq->children.push_back(std::move(filtered));
+      }
+      if (new_seq->children.empty())
+        return nullptr;
+      return new_seq;
+    } else if (node->IsControl()) {
+      auto ctrl = static_cast<const ControlNode *>(node.get());
+      auto new_ctrl = std::make_shared<ControlNode>();
+      new_ctrl->control = ctrl->control;
+      new_ctrl->SetPromote(ctrl->hasPromote());
+      new_ctrl->child = filter_tree(ctrl->child);
+      if (!new_ctrl->child)
+        return nullptr;
+      return new_ctrl;
+    } else if (node->IsWrapper()) {
+      auto wrapper = static_cast<const WrapperNode *>(node.get());
+      auto new_wrapper = std::make_shared<WrapperNode>();
+      new_wrapper->wrapper = wrapper->wrapper;
+      new_wrapper->child = filter_tree(wrapper->child);
+      return new_wrapper;
+    } else if (node->IsScheduleUnit()) {
+      auto unit = static_cast<const ScheduleUnit *>(node.get());
+      auto new_unit = std::make_shared<ScheduleUnit>();
+      new_unit->stage = unit->stage;
+      new_unit->before = unit->before;
+      new_unit->after = unit->after;
+      new_unit->child = filter_tree(unit->child);
+      if (!new_unit->child)
+        return nullptr;
+      return new_unit;
+    }
+    return node;
+  };
+
+  return filter_tree(root);
 }
 
 class SimtCopyDetector : public StmtExprVisitor {
@@ -1869,16 +2321,6 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
           LOG(FATAL);
         }
         Stmt body = SeqStmt::Flatten(stmts);
-        // Re-wrap body with ControlNode wrappers (innermost first = reverse
-        // order)
-        for (auto it = ctrl->wrappers.rbegin(); it != ctrl->wrappers.rend();
-             ++it) {
-          if (const auto *let = (*it).as<LetStmtNode>()) {
-            body = LetStmt(let->var, let->value, body);
-          } else if (const auto *attr = (*it).as<AttrStmtNode>()) {
-            body = AttrStmt(attr->node, attr->attr_key, attr->value, body);
-          }
-        }
         // Filter out "num_stages" annotation
         Map<String, Any> filtered_annotations = ctrl->control->annotations;
         filtered_annotations.erase("num_stages");
@@ -1969,32 +2411,31 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
             stmts.push_back(stmt);
           }
         }
-        Map<Var, PrimExpr> substitution;
-        PrimExpr condition =
-            And(loop_var < loop_extent, loop_var >= loop_start);
-        if (unit->stage == min_stages) {
-          condition = loop_var >= loop_start;
-        }
-        if (unit->stage == max_stages) {
-          condition = loop_var < loop_extent;
-        }
-        Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+        Map<Var, PrimExpr> substitution, substitution_cond;
         substitution.Set(loop_var,
                          loop_var - loop_step * (max_stages - unit->stage));
-        steady.push_back(Substitute(stmt, substitution));
-      }
-      Stmt new_body = SeqStmt::Flatten(steady);
-      // Re-wrap body with ControlNode wrappers (innermost first = reverse
-      // order)
-      for (auto it = ctrl->wrappers.rbegin(); it != ctrl->wrappers.rend();
-           ++it) {
-        if (const auto *let = (*it).as<LetStmtNode>()) {
-          new_body = LetStmt(let->var, let->value, new_body);
-        } else if (const auto *attr = (*it).as<AttrStmtNode>()) {
-          new_body =
-              AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
+        substitution_cond.Set(
+            loop_var,
+            Max(loop_start,
+                Min(loop_start + loop_extent - loop_step,
+                    loop_var - loop_step * (max_stages - unit->stage))));
+        if (IsLetDeclNode(unit->child.get())) {
+          Stmt stmt = SeqStmt::Flatten(stmts);
+          steady.push_back(Substitute(stmt, substitution_cond));
+        } else {
+          PrimExpr condition =
+              And(loop_var < loop_extent, loop_var >= loop_start);
+          if (unit->stage == min_stages) {
+            condition = loop_var >= loop_start;
+          }
+          if (unit->stage == max_stages) {
+            condition = loop_var < loop_extent;
+          }
+          Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+          steady.push_back(Substitute(stmt, substitution));
         }
       }
+      Stmt new_body = SeqStmt::Flatten(steady);
       auto new_var = loop_var.copy_with_suffix("");
       // Filter out "num_stages" annotation
       Map<String, Any> filtered_annotations = ctrl->control->annotations;
@@ -2198,16 +2639,6 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           LOG(FATAL);
         }
         Stmt body = SeqStmt::Flatten(stmts);
-        // Re-wrap body with ControlNode wrappers (innermost first = reverse
-        // order)
-        for (auto it = ctrl->wrappers.rbegin(); it != ctrl->wrappers.rend();
-             ++it) {
-          if (const auto *let = (*it).as<LetStmtNode>()) {
-            body = LetStmt(let->var, let->value, body);
-          } else if (const auto *attr = (*it).as<AttrStmtNode>()) {
-            body = AttrStmt(attr->node, attr->attr_key, attr->value, body);
-          }
-        }
         // Filter out "num_stages" annotation
         Map<String, Any> filtered_annotations = ctrl->control->annotations;
         filtered_annotations.erase("num_stages");
@@ -2298,32 +2729,31 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
             stmts.push_back(stmt);
           }
         }
-        Map<Var, PrimExpr> substitution;
-        PrimExpr condition =
-            And(loop_var < loop_extent, loop_var >= loop_start);
-        if (unit->stage == min_stages) {
-          condition = loop_var >= loop_start;
-        }
-        if (unit->stage == max_stages) {
-          condition = loop_var < loop_extent;
-        }
-        Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+        Map<Var, PrimExpr> substitution, substitution_cond;
         substitution.Set(loop_var,
                          loop_var - loop_step * (max_stages - unit->stage));
-        steady.push_back(Substitute(stmt, substitution));
-      }
-      Stmt new_body = SeqStmt::Flatten(steady);
-      // Re-wrap body with ControlNode wrappers (innermost first = reverse
-      // order)
-      for (auto it = ctrl->wrappers.rbegin(); it != ctrl->wrappers.rend();
-           ++it) {
-        if (const auto *let = (*it).as<LetStmtNode>()) {
-          new_body = LetStmt(let->var, let->value, new_body);
-        } else if (const auto *attr = (*it).as<AttrStmtNode>()) {
-          new_body =
-              AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
+        substitution_cond.Set(
+            loop_var,
+            Max(loop_start,
+                Min(loop_start + loop_extent - loop_step,
+                    loop_var - loop_step * (max_stages - unit->stage))));
+        if (IsLetDeclNode(unit->child.get())) {
+          Stmt stmt = SeqStmt::Flatten(stmts);
+          steady.push_back(Substitute(stmt, substitution_cond));
+        } else {
+          PrimExpr condition =
+              And(loop_var < loop_extent, loop_var >= loop_start);
+          if (unit->stage == min_stages) {
+            condition = loop_var >= loop_start;
+          }
+          if (unit->stage == max_stages) {
+            condition = loop_var < loop_extent;
+          }
+          Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
+          steady.push_back(Substitute(stmt, substitution));
         }
       }
+      Stmt new_body = SeqStmt::Flatten(steady);
       auto new_var = loop_var.copy_with_suffix("");
       // Filter out "num_stages" annotation
       Map<String, Any> filtered_annotations = ctrl->control->annotations;
@@ -2396,11 +2826,11 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
   // Helper function to clone IRStructure filtering tasks with warpgroup_id ==
   // -1 (neutral tasks)
-  std::function<std::unique_ptr<IRStructure>(IRStructure *)>
+  std::function<std::shared_ptr<IRStructure>(IRStructure *)>
       clone_neutral_filter;
   clone_neutral_filter =
       [&clone_neutral_filter](
-          IRStructure *node) -> std::unique_ptr<IRStructure> {
+          IRStructure *node) -> std::shared_ptr<IRStructure> {
     if (!node)
       return nullptr;
 
@@ -2409,19 +2839,19 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       if (task->GetWarpgroupId() == -1) {
         return task->Clone();
       } else {
-        auto new_task = std::make_unique<TaskNode>();
+        auto new_task = std::make_shared<TaskNode>();
         // Empty statements
         return new_task;
       }
     } else if (node->IsSequence()) {
       auto seq = static_cast<SequenceNode *>(node);
-      auto new_seq = std::make_unique<SequenceNode>();
+      auto new_seq = std::make_shared<SequenceNode>();
       for (const auto &child : seq->children) {
         if (child) {
           auto node = static_cast<ScheduleUnit *>(child.get());
           auto new_node = clone_neutral_filter(node->child.get());
           if (new_node) {
-            auto new_unit = std::make_unique<ScheduleUnit>();
+            auto new_unit = std::make_shared<ScheduleUnit>();
             new_unit->child = std::move(new_node);
             new_seq->children.push_back(std::move(new_unit));
           }
@@ -2430,7 +2860,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       return new_seq;
     } else if (node->IsWrapper()) {
       auto wrapper = static_cast<WrapperNode *>(node);
-      auto new_wrapper = std::make_unique<WrapperNode>();
+      auto new_wrapper = std::make_shared<WrapperNode>();
       new_wrapper->child = clone_neutral_filter(wrapper->child.get());
       if (new_wrapper->child) {
         return new_wrapper;
@@ -2453,13 +2883,13 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     return false;
   };
 
-  std::function<std::unique_ptr<IRStructure>(
+  std::function<std::shared_ptr<IRStructure>(
       IRStructure *, const std::function<bool(int)> &, int)>
       clone_neutral_filter_with_top_level;
   clone_neutral_filter_with_top_level =
       [&clone_neutral_filter_with_top_level, &clone_neutral_filter](
           IRStructure *node, const std::function<bool(int)> &include_top_level,
-          int top_level_index) -> std::unique_ptr<IRStructure> {
+          int top_level_index) -> std::shared_ptr<IRStructure> {
     if (!node)
       return nullptr;
 
@@ -2467,13 +2897,13 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       if (include_top_level(top_level_index)) {
         return clone_neutral_filter(node);
       } else {
-        auto new_task = std::make_unique<TaskNode>();
+        auto new_task = std::make_shared<TaskNode>();
         // Empty statements
         return new_task;
       }
     } else if (node->IsSequence()) {
       auto seq = static_cast<SequenceNode *>(node);
-      auto new_seq = std::make_unique<SequenceNode>();
+      auto new_seq = std::make_shared<SequenceNode>();
       int child_index = 0;
       for (const auto &child : seq->children) {
         if (child) {
@@ -2484,7 +2914,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
               schedule_unit->child.get(), include_top_level,
               next_top_level_index);
           if (new_node) {
-            auto new_unit = std::make_unique<ScheduleUnit>();
+            auto new_unit = std::make_shared<ScheduleUnit>();
             new_unit->child = std::move(new_node);
             new_seq->children.push_back(std::move(new_unit));
           }
@@ -2494,7 +2924,7 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       return new_seq;
     } else if (node->IsWrapper()) {
       auto wrapper = static_cast<WrapperNode *>(node);
-      auto new_wrapper = std::make_unique<WrapperNode>();
+      auto new_wrapper = std::make_shared<WrapperNode>();
       new_wrapper->child = clone_neutral_filter_with_top_level(
           wrapper->child.get(), include_top_level, top_level_index);
       if (new_wrapper->child) {
@@ -2544,8 +2974,10 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
                                             root, is_epi_top_level_index, -1)
                                       : nullptr;
 
-  auto wg0_structure = CloneIRStructureWithWarpgroupFilter(root, 0);
-  auto wg1_structure = CloneIRStructureWithWarpgroupFilter(root, 1);
+  auto wg0_structure =
+      RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, 0));
+  auto wg1_structure =
+      RemoveUnusedLetDecls(CloneIRStructureWithWarpgroupFilter(root, 1));
 
   bool wg_pro_neutral_has_stmts =
       wg_pro_neutral_structure
@@ -2673,6 +3105,113 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
   }
 
   return combined_stmt;
+}
+
+// Re-write LetStmt to nest them properly
+// Example transformation:
+//   SeqStmt {
+//     let x = 42 { Evaluate(0) }     // standalone, empty body
+//     let y = x+1 { Evaluate(0) }    // standalone, empty body
+//     compute(x, y)                   // actual work
+//     store(result)
+//   }
+// becomes:
+//   let x = 42 {
+//     let y = x+1 {
+//       SeqStmt {
+//         compute(x, y)
+//         store(result)
+//       }
+//     }
+//   }
+class LetStmtNester : public StmtMutator {
+public:
+  Stmt VisitStmt_(const SeqStmtNode *op) override {
+    Array<Stmt> stmts;
+    for (const auto &stmt : op->seq) {
+      stmts.push_back(this->VisitStmt(stmt));
+    }
+
+    Array<Stmt> flat_stmts;
+    for (const auto &stmt : stmts) {
+      if (const auto *inner_seq = stmt.as<SeqStmtNode>()) {
+        for (const auto &inner_stmt : inner_seq->seq) {
+          flat_stmts.push_back(inner_stmt);
+        }
+      } else {
+        flat_stmts.push_back(stmt);
+      }
+    }
+    stmts = flat_stmts;
+
+    for (int i = static_cast<int>(stmts.size()) - 2; i >= 0; --i) {
+      if (const auto *let = stmts[i].as<LetStmtNode>()) {
+        if (IsEmptyBody(let->body)) {
+          Stmt absorbed_body = CollectRemaining(stmts, i + 1);
+          stmts = TruncateAndReplace(
+              stmts, i, LetStmt(let->var, let->value, absorbed_body));
+        }
+      } else if (const auto *attr = stmts[i].as<AttrStmtNode>()) {
+        if (IsEmptyBody(attr->body)) {
+          Stmt absorbed_body = CollectRemaining(stmts, i + 1);
+          stmts = TruncateAndReplace(
+              stmts, i,
+              AttrStmt(attr->node, attr->attr_key, attr->value, absorbed_body));
+        }
+      }
+    }
+
+    if (stmts.empty())
+      return Evaluate(0);
+    if (stmts.size() == 1)
+      return stmts[0];
+
+    return SeqStmt(stmts);
+  }
+
+private:
+  // Check if a statement body is Evaluate(0) — the empty placeholder
+  static bool IsEmptyBody(const Stmt &stmt) {
+    if (const auto *eval = stmt.as<EvaluateNode>()) {
+      if (const auto *imm = eval->value.as<IntImmNode>()) {
+        return imm->value == 0;
+      }
+    }
+    return false;
+  }
+
+  // Collect stmts[start .. end) into a single Stmt
+  static Stmt CollectRemaining(const Array<Stmt> &stmts, int start) {
+    int n = static_cast<int>(stmts.size());
+    if (start >= n) {
+      return Evaluate(0);
+    }
+    if (start == n - 1) {
+      return stmts[start];
+    }
+    Array<Stmt> remaining;
+    for (int j = start; j < n; ++j) {
+      remaining.push_back(stmts[j]);
+    }
+    return SeqStmt(remaining);
+  }
+
+  // Keep stmts[0..index), replace stmts[index] with new_stmt,
+  // discard everything after (already absorbed into new_stmt body)
+  static Array<Stmt> TruncateAndReplace(const Array<Stmt> &stmts, int index,
+                                        Stmt new_stmt) {
+    Array<Stmt> result;
+    for (int j = 0; j < index; ++j) {
+      result.push_back(stmts[j]);
+    }
+    result.push_back(new_stmt);
+    return result;
+  }
+};
+
+Stmt ReNestLetStmts(const Stmt &stmt) {
+  LetStmtNester nester;
+  return nester(stmt);
 }
 
 // StmtMutator to rewrite alloc_buffers in Block nodes
