@@ -866,10 +866,6 @@ public:
 
     if (T.ws_transformed_) {
       f = WithAttr(std::move(f), kTiledWSApplied, IntImm(DataType::Int(32), 1));
-      if (T.ws_total_threads_.defined()) {
-        f = WithAttr(std::move(f), "tl_ws_total_threads",
-                     T.ws_total_threads_.value());
-      }
     }
     return f;
   }
@@ -1504,7 +1500,6 @@ private:
     // Update thread extent at the tiled WS level so LayoutInference sees
     // the producer branch as live and can analyze explicit TMA copies.
     num_threads_ = consumer_extent + producer_extent;
-    ws_total_threads_ = consumer_extent + producer_extent;
     ws_transformed_ = true;
 
     // Rebuild BlockRealize.
@@ -1832,7 +1827,6 @@ private:
   Target target_;
   IterVar thread_iv_;
   Optional<PrimExpr> num_threads_;      // total (consumer + producer)
-  Optional<PrimExpr> ws_total_threads_; // same, stored as func attr
   bool ws_transformed_{false};
   BufferDataToBufferMap buffer_data_to_buffer_;
   LocalLiveSet producer_prelude_live_seed_;
@@ -2117,61 +2111,10 @@ tvm::transform::Pass ProducerConsumerWarpSpecializedTiled() {
                             "tl.ProducerConsumerWarpSpecializedTiled", {});
 }
 
-// ---------------------------------------------------------------------------
-// RestoreWSThreadExtent: update AttrStmt(threadIdx.x) to the WS total.
-// Must run after LowerTileOp but before the first Simplify in
-// OptimizeForTarget, otherwise the analyzer proves the producer branch
-// (threadIdx.x >= consumer_extent) is dead code.
-// ---------------------------------------------------------------------------
-
-tvm::transform::Pass RestoreWSThreadExtent() {
-  using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    auto attr = f->GetAttr<PrimExpr>("tl_ws_total_threads");
-    if (!attr.defined())
-      return f;
-    auto *imm = attr.value().as<IntImmNode>();
-    if (!imm)
-      return f;
-
-    int64_t total = imm->value;
-
-    // Walk the body:
-    // 1. Update threadIdx.x AttrStmt extent to the WS total.
-    // 2. Strip tl_ws_split wrapper (no longer needed after lowering).
-    class Updater : public StmtExprMutator {
-    public:
-      int64_t total_;
-      explicit Updater(int64_t t) : total_(t) {}
-      Stmt VisitStmt_(const AttrStmtNode *op) final {
-        if (op->attr_key == tir::attr::thread_extent) {
-          IterVar iv = Downcast<IterVar>(op->node);
-          if (iv->thread_tag == "threadIdx.x") {
-            AttrStmt a = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
-            PrimExpr nt = IntImm(DataType::Int(32), total_);
-            iv.CopyOnWrite()->dom = {0, nt};
-            a.CopyOnWrite()->node = iv;
-            a.CopyOnWrite()->value = nt;
-            return a;
-          }
-        }
-        return StmtExprMutator::VisitStmt_(op);
-      }
-    };
-
-    Updater u(total);
-    f.CopyOnWrite()->body = u(f->body);
-    return f;
-  };
-  return CreatePrimFuncPass(pass_func, 0, "tl.RestoreWSThreadExtent", {});
-}
-
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.ProducerConsumerWarpSpecializedTiled",
                         ProducerConsumerWarpSpecializedTiled);
-  refl::GlobalDef().def("tl.transform.RestoreWSThreadExtent",
-                        RestoreWSThreadExtent);
 }
 
 } // namespace tl

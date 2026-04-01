@@ -193,14 +193,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
+
     # Visualize the layout
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
-    # Now that LayoutInference + LowerTileOp have seen the original consumer
-    # thread count, restore threadIdx.x extent to the WS total so that
-    # downstream passes (Simplify, codegen) see the correct launch config.
-    mod = tilelang.transform.RestoreWSThreadExtent()(mod)
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
     # Decouple type cast vectorization constraints before vectorization

@@ -289,13 +289,6 @@ def ProducerConsumerWarpSpecializedTiled():
     return _ffi_api.ProducerConsumerWarpSpecializedTiled()  # type: ignore
 
 
-def RestoreWSThreadExtent():
-    """Update threadIdx.x extent to the WS total (consumer + producer).
-
-    Must run after LowerTileOp but before any Simplify pass.
-    """
-    return _ffi_api.RestoreWSThreadExtent()  # type: ignore
-
 
 def AnnotateWarpGroupRegAlloc():
     """Inject set_max_nreg calls into warp-specialized functions.
