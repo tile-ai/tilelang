@@ -943,9 +943,8 @@ Buffer RewritePipelineTmaBarriers(
       // resolves the correct parity for prologue/main/epilogue blocks.
       PrimExpr ns = IntImm(DataType::Int(32), num_stages);
       PrimExpr parity = FloorMod(FloorDiv(loop_var - loop_min, ns), 2);
-      wait_stmts.push_back(
-          Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
-                        {barrier_ref, parity})));
+      wait_stmts.push_back(Evaluate(Call(
+          DataType::Handle(), mbarrier_wait_parity(), {barrier_ref, parity})));
     }
     wait_stmts.push_back(old_block->body);
     Stmt new_body = SeqStmt(wait_stmts);
@@ -1241,8 +1240,7 @@ private:
               pipeline_barrier_buf = RewritePipelineTmaBarriers(
                   original_order, pipeline_info, tma_copies,
                   buffer_data_to_buffer_, allocated_buffers_,
-                  block_local_allocs, op->loop_var, op->min,
-                  max_stage + 1);
+                  block_local_allocs, op->loop_var, op->min, max_stage + 1);
             }
           }
         }
