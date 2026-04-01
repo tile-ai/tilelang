@@ -1631,8 +1631,10 @@ private:
           }
           found_tma = false;
           if (found_global && found_shared) {
-            if (idx_global == 0 && idx_shared == 1)
+            if (idx_global == 0 && idx_shared == 1) {
               found_tma = true;
+              found_tma_load = true;
+            }
             if (idx_global == 1 && idx_shared == 0)
               found_tma = true;
           }
