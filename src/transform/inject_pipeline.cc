@@ -1223,7 +1223,10 @@ private:
       for (const auto &pair : pipeline_info) {
         max_stage = std::max(max_stage, pair.second.stage);
       }
-      if (max_stage > 0) {
+      bool disable_tma = tvm::transform::PassContext::Current()
+                             ->GetConfig<Bool>(kDisableTMALower, Bool(false))
+                             .value();
+      if (max_stage > 0 && !disable_tma) {
         if (auto tma_copies_anno = op->annotations.Get(kPipelineTmaCopies)) {
           auto tma_copies = Downcast<Array<Integer>>(tma_copies_anno.value());
           if (tma_copies.size() == original_order.size()) {
