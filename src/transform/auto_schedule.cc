@@ -434,16 +434,16 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition) {
 // Builder that collects ScheduleUnits from IRStructure
 class ScheduleUnitBuilder {
 public:
-  bool Build(IRStructure *root) {
+  bool Build(std::shared_ptr<IRStructure> &root) {
     ScheduleRecursive(root, {});
 
     // Global warpgroup id assignment from the top level
-    return AssignWarpgroupIdsGlobal(root, enable_warp_partition_);
+    return AssignWarpgroupIdsGlobal(root.get(), enable_warp_partition_);
   }
 
   // New recursive scheduling function that replaces Collect method
   // Directly schedules the entire IRStructure tree recursively in place
-  void ScheduleRecursive(IRStructure *node,
+  void ScheduleRecursive(std::shared_ptr<IRStructure> &node,
                          const std::set<Buffer> &used_buffers);
 
   // Z3-based scheduler that calls Python implementation via FFI
@@ -1172,7 +1172,7 @@ private:
 
 // Implementation of ScheduleRecursive function
 void ScheduleUnitBuilder::ScheduleRecursive(
-    IRStructure *node, const std::set<Buffer> &used_buffers) {
+    std::shared_ptr<IRStructure> &node, const std::set<Buffer> &used_buffers) {
   if (!node)
     return;
 
@@ -1235,7 +1235,7 @@ void ScheduleUnitBuilder::ScheduleRecursive(
     // TaskNode: no further scheduling needed
     return;
   } else if (node->IsSequence()) {
-    auto seq = static_cast<SequenceNode *>(node);
+    auto seq = static_cast<SequenceNode *>(node.get());
 
     // First, recursively schedule all children
     std::vector<std::shared_ptr<IRStructure>> seq_children, origin_children;
@@ -1252,13 +1252,13 @@ void ScheduleUnitBuilder::ScheduleRecursive(
           }
         }
       }
-      ScheduleRecursive(child.get(), child_used_buffers);
+      ScheduleRecursive(child, child_used_buffers);
     }
 
     seq->children = ChildrenScheduleHelper(origin_children);
     return;
   } else if (node->IsControl()) {
-    auto ctrl = static_cast<ControlNode *>(node);
+    auto ctrl = static_cast<ControlNode *>(node.get());
 
     // Now schedule the ControlNode's internal tasks (if any) as a unit
     // The body should now be a SequenceNode containing the tasks
@@ -1279,13 +1279,13 @@ void ScheduleUnitBuilder::ScheduleRecursive(
               }
             }
           }
-          ScheduleRecursive(child.get(), child_used_buffers);
+          ScheduleRecursive(child, child_used_buffers);
         }
         Z3SchedulePythonLoop(ctrl, used_buffers);
       } else if (ctrl->child->IsWrapper()) {
         auto wrapper = static_cast<WrapperNode *>(ctrl->child.get());
         std::vector<std::shared_ptr<IRStructure>> origin_children;
-        GatherTaskNodes({wrapper->child}, origin_children);
+        GatherTaskNodes({wrapper->task, wrapper->child}, origin_children);
         for (auto &child : origin_children) {
           auto child_used_buffers = used_buffers;
           for (auto &other_child : origin_children) {
@@ -1298,18 +1298,18 @@ void ScheduleUnitBuilder::ScheduleRecursive(
               }
             }
           }
-          ScheduleRecursive(child.get(), child_used_buffers);
+          ScheduleRecursive(child, child_used_buffers);
         }
         Z3SchedulePythonLoop(ctrl, used_buffers);
       } else {
-        ScheduleRecursive(ctrl->child.get(), used_buffers);
+        ScheduleRecursive(ctrl->child, used_buffers);
       }
     }
     return;
   } else if (node->IsWrapper()) {
-    auto wrapper = static_cast<WrapperNode *>(node);
+    auto wrapper = static_cast<WrapperNode *>(node.get());
     std::vector<std::shared_ptr<IRStructure>> origin_children;
-    GatherTaskNodes({wrapper->child}, origin_children);
+    GatherTaskNodes({wrapper->task, wrapper->child}, origin_children);
     for (auto &child : origin_children) {
       auto child_used_buffers = used_buffers;
       for (auto &other_child : origin_children) {
@@ -1322,15 +1322,15 @@ void ScheduleUnitBuilder::ScheduleRecursive(
           }
         }
       }
-      ScheduleRecursive(child.get(), child_used_buffers);
+      ScheduleRecursive(child, child_used_buffers);
     }
     auto seq_node = std::make_shared<SequenceNode>();
     seq_node->children = ChildrenScheduleHelper(origin_children);
-    *node = *seq_node;
+    node = seq_node;
     return;
   }
 
-  LOG(FATAL) << "[ScheduleRecursive] Unknown IRStructure type" << node;
+  LOG(FATAL) << "[ScheduleRecursive] Unknown IRStructure type" << node.get();
 }
 
 // Mutator to update thread extent in AttrStmt nodes
@@ -1878,7 +1878,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     }
     unit_builder.SetEnableWarpPartition(config.enable_warp_partition);
     unit_builder.SetSharedMemoryLimit(config.shared_memory_limit);
-    bool double_thread = unit_builder.Build(ir_structure.get());
+    bool double_thread = unit_builder.Build(ir_structure);
 
     if (!config.enable_warpgroup_partition) {
       Stmt new_body = ConvertIRStructureToStmt(ir_structure.get(), enable_epi);
