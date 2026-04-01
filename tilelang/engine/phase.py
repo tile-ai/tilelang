@@ -181,25 +181,16 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # InstructionAnnotation pass needed).  MultiVersionBuffer is called
     # internally only for functions where the tiled WS transformation
     # actually applies.
-    print("Before ProducerConsumerWarpSpecializedTiled")
-    print(mod)
     if allow_warp_specialized(target=target):
         mod = tilelang.transform.ProducerConsumerWarpSpecializedTiled()(mod)
-    print("After ProducerConsumerWarpSpecializedTiled")
-    print(mod)
     # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
     # LayoutInference so that the use_2cta annotation is visible to infer_layout)
     mod = tilelang.transform.LowerBlackwell2SM()(mod)
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
-    print("PipelinePlanning done")
-    print(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    print("InjectSoftwarePipeline done")
-    print(mod)
-    exit()
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout
