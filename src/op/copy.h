@@ -420,9 +420,10 @@ public:
   int padding_;  // Padding amount
   int dilation_; // Dilation factor
   int kernel_;   // Kernel size
-  int eviction_policy_; // Cache eviction policy
-  PrimExpr nhw_step_;   // Step size in NHW dimensions
-  PrimExpr c_step_;     // Step size in channel dimension
+  int eviction_policy_;                // Cache eviction policy
+  PrimExpr nhw_step_;                  // Step size in NHW dimensions
+  PrimExpr c_step_;                    // Step size in channel dimension
+  Map<String, ObjectRef> annotations_; // Annotations from Call node
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Conv2DIm2Col", Conv2DIm2ColOpNode,
                                     TileOperatorNode);

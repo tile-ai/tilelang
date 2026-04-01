@@ -289,31 +289,41 @@ enum class TileStmtKind {
   kOther         // Unclassified
 };
 
-/// Detect if a statement is a pure SIMT global-to-shared memory copy.
-/// Pattern: For loop containing BufferStore(shared, BufferLoad(global))
-/// with no arithmetic (just direct element copy).
+/// Detect if a statement is a SIMT global-to-shared memory copy.
+/// Matches any statement that writes to shared memory and reads from global
+/// memory, without reading shared or local buffers (which would indicate
+/// consumer-side compute).  This is intentionally broader than "pure direct
+/// copy" so that T.Parallel with complex indexing / if_then_else (later
+/// lowered to cp.async) is also captured.
 class SimtProducerDetector : public StmtExprVisitor {
 public:
   static bool Detect(const Stmt &stmt) {
     SimtProducerDetector d;
     d(stmt);
-    return d.is_pure_copy_;
+    return d.writes_shared_ && d.reads_global_ && !d.reads_shared_local_;
   }
 
 private:
   void VisitStmt_(const BufferStoreNode *op) final {
     if (IsSharedBuffer(op->buffer)) {
-      if (auto *load = op->value.as<BufferLoadNode>()) {
-        if (IsGlobalBuffer(load->buffer)) {
-          is_pure_copy_ = true;
-          return;
-        }
-      }
+      writes_shared_ = true;
     }
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  bool is_pure_copy_{false};
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (IsGlobalBuffer(op->buffer)) {
+      reads_global_ = true;
+    }
+    if (IsSharedBuffer(op->buffer) || IsLocalBuffer(op->buffer, true)) {
+      reads_shared_local_ = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  bool writes_shared_{false};
+  bool reads_global_{false};
+  bool reads_shared_local_{false};
 };
 
 static const CallNode *GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
@@ -688,6 +698,13 @@ TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
         if (auto *copy = tile_op.as<CopyNode>()) {
           return ClassifyCopy(copy, target);
         }
+        // Conv2D im2col lowers to tma_load_im2col on Hopper — treat as TMA
+        // producer so it goes to the producer warp group.
+        if (tile_op.as<Conv2DIm2ColOpNode>()) {
+          if (TargetIsHopper(target)) {
+            return TileStmtKind::kTmaProducer;
+          }
+        }
         return TileStmtKind::kConsumer; // non-copy tile-op
       }
     }
@@ -743,6 +760,40 @@ static PrimExpr RewriteCopyToTmaCopy(const Call &copy_call,
   new_annotations.Set("is_tma_copy", IntImm(DataType::Int(32), 1));
   return Call(copy_call->dtype, tma_copy_op, copy_call->args, new_annotations,
               copy_call->span);
+}
+
+/// Annotate all ForNodes in a SIMT producer statement with
+/// `kParallelAsyncWithoutAsyncCommitWait = true` so that InjectPTXAsyncCopy
+/// (called from LowerTileOp) does not emit commit_group + wait_group(0).
+/// This allows the WS pass to emit its own commit_group +
+/// cp_async_barrier_noinc, tying cp.async completion to the forward mbarrier.
+class SimtProducerAnnotator : public StmtExprMutator {
+public:
+  static Stmt Annotate(const Stmt &stmt) {
+    SimtProducerAnnotator a;
+    return a.VisitStmt(stmt);
+  }
+
+private:
+  Stmt VisitStmt_(const ForNode *op) final {
+    Stmt body = VisitStmt(op->body);
+    auto annotations = op->annotations;
+    annotations.Set(attr::kParallelAsyncWithoutAsyncCommitWait, Bool(true));
+    return For(op->loop_var, op->min, op->extent, op->kind, body,
+               op->thread_binding, annotations, op->step, op->span);
+  }
+};
+
+/// Annotate a tile-op Call (e.g., c2d_im2col) with a barrier reference.
+/// The tile-op's Lower() is expected to check for the "barrier" annotation
+/// and use it instead of allocating its own mbarrier.
+static PrimExpr AnnotateTileOpBarrier(const Call &tile_call,
+                                      const Buffer &barrier_buf,
+                                      PrimExpr barrier_id) {
+  auto new_annotations = tile_call->annotations;
+  new_annotations.Set("barrier", MakeBarrierRef(barrier_buf, barrier_id));
+  return Call(tile_call->dtype, tile_call->op, tile_call->args, new_annotations,
+              tile_call->span);
 }
 
 struct BufferDataAccessInfo {
@@ -844,6 +895,11 @@ static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
   if (const auto *copy = tile_op.as<CopyNode>()) {
     if (IsSharedBuffer(copy->dst)) {
       return copy->dst->data;
+    }
+  }
+  if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+    if (IsSharedBuffer(im2col->dst_)) {
+      return im2col->dst_->data;
     }
   }
   return Optional<Var>();
@@ -1030,21 +1086,7 @@ private:
     int total_barriers = num_fwd + num_bp;
     Buffer barrier_buf =
         CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
-
-    // Forward arrive_count:
-    //   - Pure TMA: 1 (leader thread only issues expect_tx + tma_load + arrive)
-    //   - Mixed TMA with SIMT/cp.async producers: producer_extent (128) —
-    //     all producer threads arrive after all producer-side work completes.
-    PrimExpr fwd_arrive_count = (has_simt_producer || has_cp_async_producer)
-                                    ? producer_extent // 128
-                                    : IntImm(DataType::Int(32), 1);
-    Array<PrimExpr> arrive_counts;
-    for (int i = 0; i < num_fwd; ++i) {
-      arrive_counts.push_back(fwd_arrive_count);
-    }
-    for (int i = 0; i < num_bp; ++i) {
-      arrive_counts.push_back(consumer_extent);
-    }
+    // arrive_counts are computed later (after producer_extent is finalized).
 
     buffer_data_to_buffer_ =
         BufferDataToBufferCollector::Collect(orig_block->body);
@@ -1111,15 +1153,6 @@ private:
       total_barriers = num_fwd + num_bp;
       barrier_buf =
           CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
-      // Forward arrive_count = 1 (single arrive after all copies)
-      fwd_arrive_count = IntImm(DataType::Int(32), 1);
-      arrive_counts = {};
-      for (int i = 0; i < num_fwd; ++i) {
-        arrive_counts.push_back(fwd_arrive_count);
-      }
-      for (int i = 0; i < num_bp; ++i) {
-        arrive_counts.push_back(consumer_extent);
-      }
     }
 
     std::vector<Array<Stmt>> producer_loop_prefix_stmts(num_producer_groups);
@@ -1176,13 +1209,48 @@ private:
       producer_extent = consumer_extent;
     }
 
+    // --- Compute arrive_counts (after producer_extent is finalized) ---
+    // Forward arrive_count:
+    //   - Pure TMA (possibly merged): 1 (leader thread only)
+    //   - Mixed TMA with SIMT/cp.async: producer_extent (all producer threads)
+    PrimExpr fwd_arrive_count = (can_merge_tma_barriers ||
+                                 (!has_simt_producer && !has_cp_async_producer))
+                                    ? IntImm(DataType::Int(32), 1)
+                                    : producer_extent;
+    Array<PrimExpr> arrive_counts;
+    for (int i = 0; i < num_fwd; ++i) {
+      arrive_counts.push_back(fwd_arrive_count);
+    }
+    for (int i = 0; i < num_bp; ++i) {
+      arrive_counts.push_back(consumer_extent);
+    }
+
     // --- Build producer body ---
-    // Producer structure:
-    //   bp_wait → TMA copies (leader gated) → SIMT/cp.async producers
-    //   (all threads) → fwd arrive.
+    // Producer structure (mixed TMA + SIMT/cp.async):
+    //   bp_wait → SIMT copies (all threads, async) → TMA copies (leader) →
+    //   commit + cp_async_barrier_noinc.
+    // SIMT copies are placed after bp_wait but before TMA so cp.async
+    // and TMA can overlap.
+
+    // First pass: collect SIMT/cp.async producer stmts separately.
+    Array<Stmt> simt_producer_stmts;
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      if (kinds[i] == TileStmtKind::kSimtProducer) {
+        // Annotate ForNodes with kParallelAsyncWithoutAsyncCommitWait so
+        // InjectPTXAsyncCopy (called from LowerTileOp) does not insert
+        // commit+wait — the WS pass will emit its own commit+barrier_noinc.
+        simt_producer_stmts.push_back(
+            SimtProducerAnnotator::Annotate(flat_stmts[i]));
+      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer) {
+        simt_producer_stmts.push_back(flat_stmts[i]);
+      }
+    }
+
+    // Second pass: build the producer body with correct ordering.
     Array<Stmt> producer_stmts;
     int tma_idx = 0;
     int last_tma_idx = num_producer_groups - 1;
+    bool simt_stmts_emitted = false;
     for (size_t i = 0; i < flat_stmts.size(); ++i) {
       if (kinds[i] == TileStmtKind::kTmaProducer) {
         int barrier_group = can_merge_tma_barriers ? 0 : tma_idx;
@@ -1197,18 +1265,43 @@ private:
               barrier_buf, bp_id,
               bitwise_xor(p_parity_expr, IntImm(DataType::Int(32), 1))));
         }
+
+        // After the first bp_wait, emit all SIMT/cp.async producers
+        // followed immediately by commit_group so the hardware can start
+        // the async transfers as early as possible, overlapping with TMA.
+        if (!simt_stmts_emitted && !simt_producer_stmts.empty()) {
+          for (const auto &s : simt_producer_stmts) {
+            producer_stmts.push_back(s);
+          }
+          // Commit cp.async group right after issuing — the earlier the
+          // commit, the more overlap with subsequent TMA loads.
+          if (has_simt_producer || has_cp_async_producer) {
+            producer_stmts.push_back(Evaluate(
+                Call(DataType::Handle(), builtin::ptx_commit_group(), {})));
+          }
+          simt_stmts_emitted = true;
+        }
+
         for (const auto &stmt : producer_loop_prefix_stmts[tma_idx]) {
           producer_stmts.push_back(stmt);
         }
-        // Convert copy → tma_copy with barrier
+        // Convert copy → tma_copy with barrier, or annotate non-copy
+        // TMA tile-ops (e.g. c2d_im2col) with barrier reference.
         const auto *eval = flat_stmts[i].as<EvaluateNode>();
         ICHECK(eval);
-        Call copy_call = Downcast<Call>(eval->value);
-        PrimExpr tma_call =
-            RewriteCopyToTmaCopy(copy_call, barrier_buf, fwd_id);
+        Call tile_call = Downcast<Call>(eval->value);
+        auto tile_op = ParseOperator(tile_call);
+        PrimExpr tma_call;
+        if (tile_op.defined() && tile_op.as<CopyNode>()) {
+          tma_call = RewriteCopyToTmaCopy(tile_call, barrier_buf, fwd_id);
+        } else {
+          // Non-copy TMA producer (e.g. Conv2DIm2ColOp): annotate with
+          // barrier so Lower() uses the WS barrier instead of its own.
+          tma_call = AnnotateTileOpBarrier(tile_call, barrier_buf, fwd_id);
+        }
         producer_stmts.push_back(Evaluate(tma_call));
 
-        if (!has_simt_producer) {
+        if (!has_simt_producer && !has_cp_async_producer) {
           // Pure TMA: single-thread arrive.
           // When merged, only arrive once after the last TMA copy.
           if (!can_merge_tma_barriers || tma_idx == last_tma_idx) {
@@ -1218,30 +1311,36 @@ private:
           }
         }
         ++tma_idx;
-      } else if (kinds[i] == TileStmtKind::kSimtProducer) {
-        // SIMT copy goes directly into producer body (all threads)
-        producer_stmts.push_back(flat_stmts[i]);
-      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer) {
-        producer_stmts.push_back(flat_stmts[i]);
       }
+      // SIMT/cp.async producers are handled above (after first bp_wait).
       // Consumer/Other statements are skipped in producer.
+    }
+    // Fallback: if there were no TMA producers to anchor the bp_wait,
+    // emit SIMT stmts now (shouldn't happen in the mixed path).
+    if (!simt_stmts_emitted && !simt_producer_stmts.empty()) {
+      for (const auto &s : simt_producer_stmts) {
+        producer_stmts.push_back(s);
+      }
     }
     // When any producer-side work is not single-threaded pure-TMA, all
     // producer threads arrive on all forward barriers after finishing it.
-    // For groups that contain cp.async, use cp_async_barrier_noinc to let
-    // the async copy own the arrival count (matching reference per-group
-    // protocol). Other groups use generic MakeArriveBarrier.
+    // SIMT copies (later lowered to cp.async by InjectPTXAsyncCopy) and
+    // explicit cp.async groups use commit_group + cp_async_barrier_noinc
+    // so the async copy completion drives the mbarrier arrival, allowing
+    // TMA and cp.async to overlap.  Other groups use MakeArriveBarrier.
     if (has_simt_producer || has_cp_async_producer) {
-      // Build per-group cp.async flag (single group for now since the
-      // tiled pass doesn't yet split multiple producer groups).
-      bool group_has_cp_async = has_cp_async_producer;
+      // Any SIMT producer will become cp.async after LowerTileOp.
+      bool group_has_async_copy = has_simt_producer || has_cp_async_producer;
       for (int g = 0; g < num_producer_groups; ++g) {
         int fwd_base = g * num_stages;
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
-        if (group_has_cp_async) {
-          auto call = Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
-                           {MakeBarrierRef(barrier_buf, fwd_id)});
-          producer_stmts.push_back(Evaluate(call));
+        if (group_has_async_copy) {
+          // Tie cp.async completion to the forward mbarrier.
+          // commit_group was already emitted right after the cp.async
+          // instructions (before TMA) to maximize overlap.
+          producer_stmts.push_back(Evaluate(
+              Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
+                   {MakeBarrierRef(barrier_buf, fwd_id)})));
         } else {
           producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
         }

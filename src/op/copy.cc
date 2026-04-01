@@ -29,6 +29,15 @@ using namespace tir;
 
 namespace {
 
+/// Build a TMA leader-thread condition using tl_shuffle_elect.
+/// \param thread_extent The number of threads in the current group
+///        (e.g., full block extent for non-WS, producer_extent for WS).
+///        The elected thread will be the first lane of the first warp in
+///        the group.
+static PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
+  return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
+}
+
 // Rewrite scalar global->shared stores into ptx_cp_async calls.
 // This rewriter is applied before the global vectorize pass, so each generated
 // cp.async call starts with element-wise bytes and can be widened later.
@@ -1897,7 +1906,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     }
 
     // Thread-gated block: expect_tx + tma_load (+ optional arrive)
-    Stmt producer = IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                                SeqStmt(producer_seq));
 
     // Annotate the producer with the shared buffer it writes to.
@@ -1920,7 +1929,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
+  tma_copy =
+      IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
 
   return tma_copy;
 }
@@ -2062,7 +2072,7 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer = IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                                SeqStmt(producer_seq));
 
     // Annotate the producer with the shared buffer it writes to.
@@ -2084,7 +2094,8 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
+  tma_copy =
+      IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
   return tma_copy;
 }
 // Encodes the TMA descriptor into an array of PrimExpr for
@@ -2130,6 +2141,7 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args,
   node->dilation_ = args[6].as<IntImm>().value()->value;
   node->padding_ = args[7].as<IntImm>().value()->value;
   node->eviction_policy_ = args[8].as<IntImm>().value()->value;
+  node->annotations_ = annotations;
   data_ = std::move(node);
 }
 
@@ -2239,9 +2251,14 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
 
   // Allocate mbarrier(s) for TMA im2col load synchronization,
   // matching the protocol used by regular TMA loads.
+  // If a barrier was provided by the WS pass (via annotation), use it directly.
   int barrier_base_id = -1;
   PrimExpr mbar_handle;
-  if (T.AllocMBarrier) {
+  if (auto user_barrier = annotations_.Get("barrier")) {
+    // WS pass provided a barrier: use it without allocating a new one.
+    mbar_handle = Downcast<PrimExpr>(user_barrier.value());
+    barrier_base_id = 0;
+  } else if (T.AllocMBarrier) {
     // Allocate a single barrier slot; MultiVersionBuffer will
     // expand it for pipelining stages.
     barrier_base_id = T.AllocMBarrier(1);
@@ -2265,6 +2282,7 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
       Evaluate(Call(DataType::Handle(), tma_load_im2col(), args));
 
   if (barrier_base_id >= 0) {
+    bool ws_barrier = annotations_.Get("barrier").has_value();
     // Total bytes transferred by im2col TMA copy
     PrimExpr total_bytes =
         IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel *
@@ -2272,11 +2290,23 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
 
     Stmt barrier_before_tma_stmt = Evaluate(Call(
         DataType::Handle(), mbarrier_expect_tx(), {mbar_handle, total_bytes}));
+
+    if (ws_barrier) {
+      // WS-provided barrier: expect_tx + tma_load only (no arrive, no wait).
+      // The WS pass manages arrive and the consumer handles wait.
+      Stmt producer =
+          IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
+                     SeqStmt({barrier_before_tma_stmt, tma_copy_stmt}));
+      producer = AttrStmt(dst_buffer->data, "tl.tma_copy_write_buffer",
+                          IntImm(DataType::Int(32), 1), producer);
+      return producer;
+    }
+
     Stmt barrier_after_tma_stmt = Evaluate(
         Call(DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
 
     // Thread-gated block: expect_tx + tma_load_im2col + arrive
-    Stmt producer = IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                                SeqStmt({barrier_before_tma_stmt, tma_copy_stmt,
                                         barrier_after_tma_stmt}));
 
@@ -2292,8 +2322,8 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  Stmt tma_copy =
-      IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy_stmt);
+  Stmt tma_copy = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
+                             tma_copy_stmt);
   return tma_copy;
 }
 
