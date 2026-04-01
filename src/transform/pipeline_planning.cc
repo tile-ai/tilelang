@@ -1572,6 +1572,17 @@ private:
     annotations.Set(tir::attr::software_pipeline_stage, Array<Integer>(stages));
     annotations.Set(tir::attr::software_pipeline_order, Array<Integer>(orders));
 
+    // Propagate per-statement TMA eligibility so InjectSoftwarePipeline can
+    // rewrite TMA copies to use pipeline-level barrier management.
+    {
+      std::vector<Integer> tma_copies;
+      tma_copies.reserve(pipeline_stage_infos.size());
+      for (auto &pinfo : pipeline_stage_infos) {
+        tma_copies.push_back(Integer(pinfo.is_tma_copy() ? 1 : 0));
+      }
+      annotations.Set(kPipelineTmaCopies, Array<Integer>(tma_copies));
+    }
+
     // Only mark stage 0 as async for cp.async copies. TMA copies use
     // mbarrier synchronization and don't need async_commit/wait_queue.
     bool has_tma_copy = false;

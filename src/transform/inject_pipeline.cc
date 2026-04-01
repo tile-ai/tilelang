@@ -11,7 +11,9 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "../op/region.h"
+#include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
 #include "common/tma_copy_utils.h"
 #include "support/utils.h"
@@ -727,6 +729,7 @@ private:
         if (kv.first != tir::attr::software_pipeline_stage &&
             kv.first != tir::attr::software_pipeline_order &&
             kv.first != tir::attr::software_pipeline_async_stages &&
+            kv.first != kPipelineTmaCopies &&
             kv.first != "num_stages") {
           preserved_annotations.Set(key, kv.second);
         }
@@ -802,6 +805,140 @@ void BuildDependencyGraph(const Array<Block> &blocks,
       buffer_writers[write->buffer->data].push_back(block);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for pipeline-level TMA barrier management
+// ---------------------------------------------------------------------------
+
+/*!
+ * \brief Rewrite a block's body, converting tl.tileop.copy calls to
+ *        tl.tileop.tma_copy with barrier and emit_arrive annotations.
+ */
+class CopyToTmaCopyRewriter : public StmtExprMutator {
+public:
+  CopyToTmaCopyRewriter(const Buffer &barrier_buf, int barrier_id)
+      : barrier_buf_(barrier_buf), barrier_id_(barrier_id) {}
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    static const Op &copy_op = Op::Get("tl.tileop.copy");
+    static const Op &tma_copy_op = Op::Get("tl.tileop.tma_copy");
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (call->op.same_as(copy_op)) {
+      auto new_annotations = call->annotations;
+      new_annotations.Set("barrier",
+                          MakeBarrierRef(barrier_buf_,
+                                         IntImm(DataType::Int(32), barrier_id_)));
+      new_annotations.Set("is_tma_copy", IntImm(DataType::Int(32), 1));
+      new_annotations.Set("emit_arrive", IntImm(DataType::Int(32), 1));
+      return Call(call->dtype, tma_copy_op, call->args, new_annotations,
+                  call->span);
+    }
+    return call;
+  }
+
+private:
+  Buffer barrier_buf_;
+  int barrier_id_;
+};
+
+/*!
+ * \brief Rewrite TMA-eligible copy blocks in the pipeline body for
+ *        pipeline-level barrier management.
+ *
+ * For each TMA copy: convert tl.tileop.copy → tl.tileop.tma_copy with a
+ * per-copy barrier slot and emit_arrive=1 so LowerTileOp emits arrive inside
+ * the thread-0 guard.
+ *
+ * For the first consumer stage block: prepend mbarrier_wait_parity calls for
+ * all TMA copy barriers (placeholder parity 0; MultiVersionBuffer rewrites it
+ * later using kPipelineMVBParityExpr).
+ *
+ * \param original_order  In/out: blocks in original pipeline order.
+ * \param pipeline_info   In/out: block → PipelineAnnotation mapping.
+ * \param tma_copies      Per-statement TMA flag array from PipelinePlanning.
+ * \param buffer_data_to_buffer  In/out: buffer var → Buffer mapping.
+ * \param allocated_buffers      In/out: set of allocated buffers.
+ * \param block_local_allocs     In/out: buffers allocated in the pipeline block.
+ * \return The newly created barrier buffer (undefined if no TMA copies).
+ */
+Buffer RewritePipelineTmaBarriers(
+    Array<Block> &original_order, PipelineInfo &pipeline_info,
+    const Array<Integer> &tma_copies,
+    Map<Var, Buffer> &buffer_data_to_buffer,
+    std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> &allocated_buffers,
+    Array<Buffer> &block_local_allocs) {
+  // Count TMA copies
+  int num_tma = 0;
+  for (const auto &tc : tma_copies) {
+    if (tc->value != 0) num_tma++;
+  }
+  if (num_tma == 0) return Buffer();
+
+  // Create pipeline barrier buffer: one slot per TMA copy
+  Buffer barrier_buf = CreateMBarrierBuffer("pipeline_mbar", num_tma);
+  buffer_data_to_buffer.Set(barrier_buf->data, barrier_buf);
+  allocated_buffers.insert(barrier_buf);
+  block_local_allocs.push_back(barrier_buf);
+
+  // Phase 1: Rewrite TMA copy blocks
+  int tma_idx = 0;
+  for (size_t i = 0; i < original_order.size(); i++) {
+    if (static_cast<int>(tma_copies[i]->value) == 0) continue;
+
+    Block old_block = original_order[i];
+    CopyToTmaCopyRewriter rewriter(barrier_buf, tma_idx);
+    Stmt new_body = rewriter(old_block->body);
+
+    Block new_block(old_block->iter_vars, old_block->reads, old_block->writes,
+                    old_block->name_hint, new_body, old_block->init,
+                    old_block->alloc_buffers, old_block->match_buffers,
+                    old_block->annotations);
+
+    PipelineAnnotation anno = pipeline_info.at(old_block);
+    pipeline_info.erase(old_block);
+    pipeline_info.emplace(new_block, anno);
+    original_order.Set(i, new_block);
+    tma_idx++;
+  }
+
+  // Phase 2: Insert waits in consumer blocks (blocks that depend on TMA data).
+  // For simplicity, we insert waits before the first block whose stage > 0.
+  // This covers the common case where stage 0 = producers, stage 1 = consumer.
+  bool waits_inserted = false;
+  for (size_t i = 0; i < original_order.size(); i++) {
+    if (waits_inserted) break;
+    Block old_block = original_order[i];
+    int stage = pipeline_info.at(old_block).stage;
+    if (stage == 0) continue;  // still in producer stage
+
+    // Build wait statements for all TMA barriers
+    Array<Stmt> wait_stmts;
+    for (int j = 0; j < num_tma; j++) {
+      PrimExpr barrier_ref =
+          MakeBarrierRef(barrier_buf, IntImm(DataType::Int(32), j));
+      // Parity placeholder 0: MultiVersionBuffer will rewrite this using
+      // the kPipelineMVBParityExpr attached by EmitImpl.
+      wait_stmts.push_back(Evaluate(
+          Call(DataType::Handle(), mbarrier_wait_parity(),
+               {barrier_ref, IntImm(DataType::Int(32), 0)})));
+    }
+    wait_stmts.push_back(old_block->body);
+    Stmt new_body = SeqStmt(wait_stmts);
+
+    Block new_block(old_block->iter_vars, old_block->reads, old_block->writes,
+                    old_block->name_hint, new_body, old_block->init,
+                    old_block->alloc_buffers, old_block->match_buffers,
+                    old_block->annotations);
+
+    PipelineAnnotation anno = pipeline_info.at(old_block);
+    pipeline_info.erase(old_block);
+    pipeline_info.emplace(new_block, anno);
+    original_order.Set(i, new_block);
+    waits_inserted = true;
+  }
+
+  return barrier_buf;
 }
 
 class PipelineInjector : private StmtExprMutator {
@@ -1051,6 +1188,38 @@ private:
 
     ValidatePipelineBody(pipeline_info, original_order);
 
+    // Step 3.5: Pipeline-level TMA barrier management.
+    // When TMA copies are present (without warp specialization), rewrite
+    // them to use tl.tileop.tma_copy with per-copy barriers and insert
+    // mbarrier_wait_parity before the first consumer stage.
+    // Only applies when num_stages > 1 (actual pipelining) — with num_stages=1
+    // there's no overlapping and EmitImpl won't emit kPipelineMVBStageExpr
+    // context needed by MultiVersionBuffer.
+    Buffer pipeline_barrier_buf;
+    int num_pipeline_tma_copies = 0;
+    {
+      int max_stage = 0;
+      for (const auto &pair : pipeline_info) {
+        max_stage = std::max(max_stage, pair.second.stage);
+      }
+      if (max_stage > 0) {
+        if (auto tma_copies_anno = op->annotations.Get(kPipelineTmaCopies)) {
+          auto tma_copies = Downcast<Array<Integer>>(tma_copies_anno.value());
+          if (tma_copies.size() == original_order.size()) {
+            for (const auto &tc : tma_copies) {
+              if (tc->value != 0) num_pipeline_tma_copies++;
+            }
+            if (num_pipeline_tma_copies > 0) {
+              pipeline_barrier_buf = RewritePipelineTmaBarriers(
+                  original_order, pipeline_info, tma_copies,
+                  buffer_data_to_buffer_, allocated_buffers_,
+                  block_local_allocs);
+            }
+          }
+        }
+      }
+    }
+
     // Step 4: Rewrite the pipeline body.
     // local_allocs contains buffers allocated in the pipeline block itself.
     // pipeline_allocs contains all buffers that need multi-versioning,
@@ -1075,6 +1244,28 @@ private:
                               loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
     subtree_modified_ = true;
+
+    // Add barrier_init annotation for the pipeline barrier buffer so that
+    // LowerSharedBarrier emits ptx_init_barrier_thread_count for each slot.
+    if (pipeline_barrier_buf.defined()) {
+      BlockRealize br = Downcast<BlockRealize>(pipeline);
+      Block block = br->block;
+      BlockNode *bn = block.CopyOnWrite();
+
+      Map<Var, Array<PrimExpr>> barrier_init_map;
+      if (bn->annotations.count("barrier_init")) {
+        barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+            bn->annotations.Get("barrier_init").value());
+      }
+      Array<PrimExpr> arrive_counts;
+      for (int i = 0; i < num_pipeline_tma_copies; i++) {
+        arrive_counts.push_back(IntImm(DataType::Int(32), 1));
+      }
+      barrier_init_map.Set(pipeline_barrier_buf->data, arrive_counts);
+      bn->annotations.Set("barrier_init", barrier_init_map);
+
+      pipeline = BlockRealize(br->iter_values, br->predicate, block, br->span);
+    }
 
     // Store the buffer remapping for updating outer block alloc_buffers
     for (const auto &kv : rewriter.GetBufferRemap()) {

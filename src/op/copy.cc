@@ -1871,6 +1871,14 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
                           {mbar_handle, total_bytes}));
       }
+      // When emit_arrive is set (by InjectSoftwarePipeline for pipeline-level
+      // barrier management), also emit arrive inside the thread-0 guard.
+      if (auto emit_arrive_val = annotations.Get("emit_arrive")) {
+        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
+          barrier_after_tma_stmt = Evaluate(Call(
+              DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
+        }
+      }
     } else {
       // T.copy() with TMA: keep expect_tx and arrive as separate control ops.
       // This lets downstream WS/barrier passes reason about the arrival

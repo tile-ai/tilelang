@@ -44,6 +44,9 @@ static constexpr const char *kPipelineMVBStageExpr =
 /*! Multi-version buffer: per-statement parity expression. */
 static constexpr const char *kPipelineMVBParityExpr =
     "tl.pipeline_mvb_parity_expr";
+/*! Per-statement TMA copy flag (1 = TMA eligible, 0 = not). */
+static constexpr const char *kPipelineTmaCopies =
+    "software_pipeline_tma_copies";
 
 // ---------------------------------------------------------------------------
 // GetPipelineNumStages
