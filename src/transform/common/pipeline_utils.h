@@ -195,7 +195,7 @@ inline Range ComputeThreadBounds(const IterVar &thread_var,
   return Range::FromMinExtent(0, 1);
 }
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
 
-#endif  // TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
+#endif // TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_

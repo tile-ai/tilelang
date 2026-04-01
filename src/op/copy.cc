@@ -1875,8 +1875,9 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       // barrier management), also emit arrive inside the thread-0 guard.
       if (auto emit_arrive_val = annotations.Get("emit_arrive")) {
         if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
-          barrier_after_tma_stmt = Evaluate(Call(
-              DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
+          barrier_after_tma_stmt =
+              Evaluate(Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
+                            {mbar_handle}));
         }
       }
     } else {

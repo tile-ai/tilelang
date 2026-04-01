@@ -900,31 +900,30 @@ Layout makeSwizzledLayout(const Buffer &buffer, bool k_inner, bool allow_pad) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   Layout base;
   if (allow_pad) {
-    base = makeGemmABLayout(static_cast<int>(info.stride),
-                            static_cast<int>(info.continuous),
-                            static_cast<int>(info.continuous),
-                            info.element_size, k_inner);
+    base = makeGemmABLayout(
+        static_cast<int>(info.stride), static_cast<int>(info.continuous),
+        static_cast<int>(info.continuous), info.element_size, k_inner);
   } else {
-    base = makeGemmABLayoutHopper(static_cast<int>(info.stride),
-                                  static_cast<int>(info.continuous),
-                                  static_cast<int>(info.continuous),
-                                  info.element_size, k_inner);
+    base = makeGemmABLayoutHopper(
+        static_cast<int>(info.stride), static_cast<int>(info.continuous),
+        static_cast<int>(info.continuous), info.element_size, k_inner);
   }
   return ExpandLayout2D(base, buffer);
 }
 
 Layout makeVoltaSwizzledLayout(const Buffer &buffer, bool is_a, bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
-  auto base = makeGemmVoltaABLayout(static_cast<int>(info.stride),
-                                    static_cast<int>(info.continuous),
-                                    is_a, k_inner);
+  auto base =
+      makeGemmVoltaABLayout(static_cast<int>(info.stride),
+                            static_cast<int>(info.continuous), is_a, k_inner);
   return ExpandLayout2D(base, buffer);
 }
 
 Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity,
-                                bool k_inner) {
+                               bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
-  if (continuity < 0) continuity = static_cast<int>(info.continuous);
+  if (continuity < 0)
+    continuity = static_cast<int>(info.continuous);
   auto base = makeGemmABLayoutHopper(static_cast<int>(info.stride),
                                      static_cast<int>(info.continuous),
                                      continuity, info.element_size, k_inner);
@@ -932,9 +931,10 @@ Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity,
 }
 
 Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity,
-                                     bool k_inner) {
+                                    bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
-  if (continuity < 0) continuity = static_cast<int>(info.continuous);
+  if (continuity < 0)
+    continuity = static_cast<int>(info.continuous);
   auto base = makeGemmABLayoutSm100(static_cast<int>(info.stride),
                                     static_cast<int>(info.continuous),
                                     continuity, info.element_size, k_inner);

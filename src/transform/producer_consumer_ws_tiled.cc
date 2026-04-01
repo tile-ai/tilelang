@@ -1089,6 +1089,39 @@ private:
       ++access_group_idx;
     }
 
+    // --- Determine if TMA barriers can be merged ---
+    // When all pure-TMA producers wait at the same consumer position and
+    // release at the same position, forward and back-pressure barriers can
+    // be shared across all TMA copies, reducing from 2*G*S to 2*S barriers.
+    bool can_merge_tma_barriers = (num_producer_groups > 1) &&
+                                  !has_simt_producer && !has_cp_async_producer;
+    if (can_merge_tma_barriers) {
+      for (int g = 1; g < num_producer_groups; ++g) {
+        if (wait_insert_pos[g] != wait_insert_pos[0] ||
+            arrive_insert_pos[g] != arrive_insert_pos[0]) {
+          can_merge_tma_barriers = false;
+          break;
+        }
+      }
+    }
+    if (can_merge_tma_barriers) {
+      // Re-compute barrier layout with a single merged group.
+      num_fwd = num_stages;
+      num_bp = num_stages;
+      total_barriers = num_fwd + num_bp;
+      barrier_buf =
+          CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
+      // Forward arrive_count = 1 (single arrive after all copies)
+      fwd_arrive_count = IntImm(DataType::Int(32), 1);
+      arrive_counts = {};
+      for (int i = 0; i < num_fwd; ++i) {
+        arrive_counts.push_back(fwd_arrive_count);
+      }
+      for (int i = 0; i < num_bp; ++i) {
+        arrive_counts.push_back(consumer_extent);
+      }
+    }
+
     std::vector<Array<Stmt>> producer_loop_prefix_stmts(num_producer_groups);
     std::vector<bool> moved_compute_stmts(consumer_compute_stmts.size(), false);
     int compute_cursor = 0;
@@ -1152,15 +1185,18 @@ private:
     int last_tma_idx = num_producer_groups - 1;
     for (size_t i = 0; i < flat_stmts.size(); ++i) {
       if (kinds[i] == TileStmtKind::kTmaProducer) {
-        int fwd_base = tma_idx * num_stages;
-        int bp_base = num_fwd + tma_idx * num_stages;
+        int barrier_group = can_merge_tma_barriers ? 0 : tma_idx;
+        int fwd_base = barrier_group * num_stages;
+        int bp_base = num_fwd + barrier_group * num_stages;
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
         PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + p_stage_expr;
 
-        // Back-pressure wait
-        producer_stmts.push_back(MakeParityWait(
-            barrier_buf, bp_id,
-            bitwise_xor(p_parity_expr, IntImm(DataType::Int(32), 1))));
+        // Back-pressure wait (only once when barriers are merged)
+        if (!can_merge_tma_barriers || tma_idx == 0) {
+          producer_stmts.push_back(MakeParityWait(
+              barrier_buf, bp_id,
+              bitwise_xor(p_parity_expr, IntImm(DataType::Int(32), 1))));
+        }
         for (const auto &stmt : producer_loop_prefix_stmts[tma_idx]) {
           producer_stmts.push_back(stmt);
         }
@@ -1173,10 +1209,13 @@ private:
         producer_stmts.push_back(Evaluate(tma_call));
 
         if (!has_simt_producer) {
-          // Pure TMA: single-thread arrive after each copy
-          producer_stmts.push_back(
-              IfThenElse(EQ(thread_iv_->var, IntImm(DataType::Int(32), 0)),
-                         MakeArriveBarrier(barrier_buf, fwd_id)));
+          // Pure TMA: single-thread arrive.
+          // When merged, only arrive once after the last TMA copy.
+          if (!can_merge_tma_barriers || tma_idx == last_tma_idx) {
+            producer_stmts.push_back(
+                IfThenElse(EQ(thread_iv_->var, IntImm(DataType::Int(32), 0)),
+                           MakeArriveBarrier(barrier_buf, fwd_id)));
+          }
         }
         ++tma_idx;
       } else if (kinds[i] == TileStmtKind::kSimtProducer) {
@@ -1214,10 +1253,13 @@ private:
     }
 
     // --- Build consumer body ---
+    // When barriers are merged, iterate over a single effective group.
+    int consumer_barrier_groups =
+        can_merge_tma_barriers ? 1 : num_producer_groups;
     Array<Stmt> consumer_stmts;
-    std::vector<bool> arrive_emitted(num_producer_groups, false);
+    std::vector<bool> arrive_emitted(consumer_barrier_groups, false);
     for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
-      for (int g = 0; g < num_producer_groups; ++g) {
+      for (int g = 0; g < consumer_barrier_groups; ++g) {
         if (wait_insert_pos[g] == static_cast<int>(ci)) {
           int fwd_base = g * num_stages;
           PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + c_stage_expr;
@@ -1228,7 +1270,7 @@ private:
       if (!moved_compute_stmts[ci]) {
         consumer_stmts.push_back(consumer_compute_stmts[ci]);
       }
-      for (int g = 0; g < num_producer_groups; ++g) {
+      for (int g = 0; g < consumer_barrier_groups; ++g) {
         if (arrive_insert_pos[g] == static_cast<int>(ci + 1)) {
           int bp_base = num_fwd + g * num_stages;
           PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + c_stage_expr;
@@ -1238,14 +1280,14 @@ private:
       }
     }
     if (consumer_compute_stmts.empty()) {
-      for (int g = 0; g < num_producer_groups; ++g) {
+      for (int g = 0; g < consumer_barrier_groups; ++g) {
         int fwd_base = g * num_stages;
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + c_stage_expr;
         consumer_stmts.push_back(
             MakeParityWait(barrier_buf, fwd_id, c_parity_expr));
       }
     }
-    for (int g = 0; g < num_producer_groups; ++g) {
+    for (int g = 0; g < consumer_barrier_groups; ++g) {
       if (!arrive_emitted[g] &&
           arrive_insert_pos[g] ==
               static_cast<int>(consumer_compute_stmts.size())) {
@@ -1826,7 +1868,7 @@ private:
   // State
   Target target_;
   IterVar thread_iv_;
-  Optional<PrimExpr> num_threads_;      // total (consumer + producer)
+  Optional<PrimExpr> num_threads_; // total (consumer + producer)
   bool ws_transformed_{false};
   BufferDataToBufferMap buffer_data_to_buffer_;
   LocalLiveSet producer_prelude_live_seed_;

@@ -289,7 +289,6 @@ def ProducerConsumerWarpSpecializedTiled():
     return _ffi_api.ProducerConsumerWarpSpecializedTiled()  # type: ignore
 
 
-
 def AnnotateWarpGroupRegAlloc():
     """Inject set_max_nreg calls into warp-specialized functions.
 
