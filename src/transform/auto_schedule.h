@@ -100,17 +100,41 @@ struct WarpSpecializeConfig {
   bool enable_warpgroup_partition = false;
   bool enable_thread_extend = false;
   bool enable_warp_partition = false;
+  int shared_memory_limit = 0;
 };
 
 // Factory function to get warp specialization configuration for a target
 inline WarpSpecializeConfig GetWarpSpecializeConfig(Target target) {
   if (TargetIsHopper(target)) {
-    return {WarpSpecializeArch::kHopper, 240, 24, 128, true, true, true, false};
+    return {WarpSpecializeArch::kHopper,
+            240,
+            24,
+            128,
+            true,
+            true,
+            true,
+            false,
+            228 * 1024};
   } else if (TargetIsSm100(target)) {
-    return {WarpSpecializeArch::kBlackwell, 0, 0, 32, false, true, false, true};
+    return {WarpSpecializeArch::kBlackwell,
+            0,
+            0,
+            32,
+            false,
+            true,
+            false,
+            true,
+            228 * 1024};
   } else {
-    return {
-        WarpSpecializeArch::kUnsupported, 0, 0, 0, false, false, false, false};
+    return {WarpSpecializeArch::kUnsupported,
+            0,
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            0};
   }
 }
 

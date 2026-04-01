@@ -407,6 +407,10 @@ public:
 
   void SetPromote(bool promote) { has_promote_ = promote; }
 
+  void SetIIperIter(int64_t ii) { ii_per_iter_ = ii; }
+
+  int64_t GetIIperIter() const { return ii_per_iter_; }
+
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;
 
@@ -419,6 +423,7 @@ private:
   int64_t latency_{0}; // Estimated latency in cycles
   int64_t ii_{0};      // Initiation interval in cycles
   bool has_promote_{false};
+  int64_t ii_per_iter_{0};
 };
 
 // Wrapper node: contains a Wrapper statement with variable, value, and child
@@ -576,7 +581,7 @@ public:
       std::vector<RegionAccessInfo> &result,
       std::set<std::pair<Buffer, std::pair<int, int>>> &visited) const override;
 
-  bool GetPromote() const { return stage; }
+  int GetStage() const { return stage; }
   bool isInnerTask() const { return child->IsTask(); }
   int GetWarpgroupId() const override {
     ICHECK(isInnerTask());

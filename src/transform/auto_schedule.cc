@@ -435,7 +435,7 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition) {
 class ScheduleUnitBuilder {
 public:
   bool Build(IRStructure *root) {
-    ScheduleRecursive(root);
+    ScheduleRecursive(root, {});
 
     // Global warpgroup id assignment from the top level
     return AssignWarpgroupIdsGlobal(root, enable_warp_partition_);
@@ -443,7 +443,8 @@ public:
 
   // New recursive scheduling function that replaces Collect method
   // Directly schedules the entire IRStructure tree recursively in place
-  void ScheduleRecursive(IRStructure *node);
+  void ScheduleRecursive(IRStructure *node,
+                         const std::set<Buffer> &used_buffers);
 
   // Z3-based scheduler that calls Python implementation via FFI
   std::vector<IRStructure *>
@@ -607,7 +608,8 @@ public:
 
   // Z3-based scheduler for loops that calls Python implementation via FFI
   // with distance-aware dependencies
-  void Z3SchedulePythonLoop(ControlNode *ctrl) {
+  void Z3SchedulePythonLoop(ControlNode *ctrl,
+                            const std::set<Buffer> &used_buffers) {
     if (ctrl->child == nullptr) {
       LOG(WARNING)
           << "Z3SchedulePythonLoop called on a control node without child";
@@ -675,20 +677,47 @@ public:
       resource_flags.push_back(flags);
     }
 
+    // Collect all shared buffers
+    // The negative number means we can use multi-buffering for this buffer, so
+    // we need to create a variable for the number of versions for this buffer
+    // in z3 scheduler.
+    std::vector<int64_t> buffer_sizes;
+    std::map<Buffer, int64_t> buffer_to_num_versions;
+    int64_t memory_limit = shared_memory_limit_;
+    for (const auto &region_access : ctrl->GetReadWriteRegions()) {
+      const auto &buffer = region_access.region->buffer;
+      if (!IsSharedBuffer(buffer)) {
+        continue; // Only consider shared buffers for multi-buffer
+      }
+      if (buffer_to_num_versions.count(buffer)) {
+        continue;
+      }
+      if (used_buffers.count(buffer)) {
+        buffer_to_num_versions[buffer] = 1;
+        memory_limit -= GetBufferSize(buffer);
+      } else {
+        buffer_sizes.push_back(GetBufferSize(buffer));
+        buffer_to_num_versions[buffer] = -(int64_t)buffer_sizes.size();
+      }
+    }
+
     // Collect data dependencies with distance
     // distance = 0 if i < j (same iteration), distance = 1 if i > j (next
     // iteration)
     for (size_t i = 0; i < n; ++i) {
       for (size_t j = 0; j < n; ++j) {
-        if (i == j)
-          continue; // Skip self-dependency
         if (HasDependency(nodes[i], nodes[j])) {
           if (i < j) {
             data_deps.emplace_back(i, j, 0);
           } else {
-            int64_t distance =
-                HasRegisterDependency(nodes[i], nodes[j]) ? 1 : num_stages;
-            data_deps.emplace_back(i, j, distance);
+            if (HasRegisterDependency(nodes[i], nodes[j])) {
+              data_deps.emplace_back(i, j, 1);
+            } else {
+              auto deps = GetSharedDependencies(nodes[i], nodes[j]);
+              for (const auto &buffer : deps) {
+                data_deps.emplace_back(i, j, buffer_to_num_versions[buffer]);
+              }
+            }
           }
         }
       }
@@ -710,6 +739,7 @@ public:
     ffi::Array<ffi::Array<int64_t>>
         tvm_data_deps; // each element is [i, j, distance]
     ffi::Array<ffi::Array<int64_t>> tvm_resource_deps;
+    ffi::Array<int64_t> tvm_buffer_sizes;
 
     for (auto val : latencies) {
       tvm_latencies.push_back(val);
@@ -733,6 +763,9 @@ public:
       pair.push_back(dep.second);
       tvm_resource_deps.push_back(pair);
     }
+    for (auto val : buffer_sizes) {
+      tvm_buffer_sizes.push_back(val);
+    }
 
     // Extract results
     // Python function returns (start_times, stages) as a tuple of two
@@ -740,7 +773,8 @@ public:
     auto return_val =
         z3_schedule_loop_func
             .value()(num_stages, tvm_latencies, tvm_iis, tvm_resource_flags,
-                     tvm_data_deps, tvm_resource_deps)
+                     tvm_data_deps, tvm_resource_deps, tvm_buffer_sizes,
+                     memory_limit)
             .cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<int>, int64_t>>();
 
     ffi::Array<int64_t> start_times = return_val.get<0>();
@@ -937,6 +971,7 @@ public:
     // Set II and latency on the ControlNode (which delegates to child)
     ctrl->SetII(overall_latency);
     ctrl->SetLatency(overall_latency);
+    ctrl->SetIIperIter(ii);
   }
 
   // Set thread index variable for warpgroup partition
@@ -945,9 +980,13 @@ public:
   // Set enable_warp_partition flag
   void SetEnableWarpPartition(bool enable) { enable_warp_partition_ = enable; }
 
+  // Set shared memory limit for pipeline (in bytes)
+  void SetSharedMemoryLimit(int64_t bytes) { shared_memory_limit_ = bytes; }
+
 private:
   IterVar thread_var_; // Thread index variable for warpgroup partition
   bool enable_warp_partition_ = false;
+  int64_t shared_memory_limit_ = 48 * 1024;
 
   // Check if two regions refer to the same buffer
   bool SameBuffer(const BufferRegion &a, const BufferRegion &b) const {
@@ -1065,6 +1104,33 @@ private:
     return false;
   }
 
+  // Get shared buffers two IRStructures both access (excluding read-after-read)
+  std::set<Buffer> GetSharedDependencies(const IRStructure *a,
+                                         const IRStructure *b) const {
+    std::set<Buffer> deps;
+    for (const auto &write_region_a : a->GetWriteRegions()) {
+      if (!IsSharedBuffer(write_region_a->buffer))
+        continue;
+      for (const auto &read_region_b : b->GetReadRegions()) {
+        if (SameBuffer(write_region_a, read_region_b))
+          deps.insert(write_region_a->buffer);
+      }
+      for (const auto &write_region_b : b->GetWriteRegions()) {
+        if (SameBuffer(write_region_a, write_region_b))
+          deps.insert(write_region_a->buffer);
+      }
+    }
+    for (const auto &read_region_a : a->GetReadRegions()) {
+      if (!IsSharedBuffer(read_region_a->buffer))
+        continue;
+      for (const auto &write_region_b : b->GetWriteRegions()) {
+        if (SameBuffer(read_region_a, write_region_b))
+          deps.insert(read_region_a->buffer);
+      }
+    }
+    return deps;
+  }
+
   // Check if an IRStructure has any register region
   bool HasRegisterRegion(const IRStructure *node) const {
     return CountRegisterRegions(node) > 0;
@@ -1105,7 +1171,8 @@ private:
 };
 
 // Implementation of ScheduleRecursive function
-void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
+void ScheduleUnitBuilder::ScheduleRecursive(
+    IRStructure *node, const std::set<Buffer> &used_buffers) {
   if (!node)
     return;
 
@@ -1174,7 +1241,18 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
     std::vector<std::shared_ptr<IRStructure>> seq_children, origin_children;
     GatherTaskNodes(seq->children, origin_children);
     for (auto &child : origin_children) {
-      ScheduleRecursive(child.get());
+      auto child_used_buffers = used_buffers;
+      for (auto &other_child : origin_children) {
+        if (child.get() != other_child.get()) {
+          for (const auto &region : other_child->GetReadRegions()) {
+            child_used_buffers.insert(region.get()->buffer);
+          }
+          for (const auto &region : other_child->GetWriteRegions()) {
+            child_used_buffers.insert(region.get()->buffer);
+          }
+        }
+      }
+      ScheduleRecursive(child.get(), child_used_buffers);
     }
 
     seq->children = ChildrenScheduleHelper(origin_children);
@@ -1190,19 +1268,41 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
         std::vector<std::shared_ptr<IRStructure>> origin_children;
         GatherTaskNodes(seq_body->children, origin_children);
         for (auto &child : origin_children) {
-          ScheduleRecursive(child.get());
+          auto child_used_buffers = used_buffers;
+          for (auto &other_child : origin_children) {
+            if (child.get() != other_child.get()) {
+              for (const auto &region : other_child->GetReadRegions()) {
+                child_used_buffers.insert(region.get()->buffer);
+              }
+              for (const auto &region : other_child->GetWriteRegions()) {
+                child_used_buffers.insert(region.get()->buffer);
+              }
+            }
+          }
+          ScheduleRecursive(child.get(), child_used_buffers);
         }
-        Z3SchedulePythonLoop(ctrl);
+        Z3SchedulePythonLoop(ctrl, used_buffers);
       } else if (ctrl->child->IsWrapper()) {
         auto wrapper = static_cast<WrapperNode *>(ctrl->child.get());
         std::vector<std::shared_ptr<IRStructure>> origin_children;
         GatherTaskNodes({wrapper->child}, origin_children);
         for (auto &child : origin_children) {
-          ScheduleRecursive(child.get());
+          auto child_used_buffers = used_buffers;
+          for (auto &other_child : origin_children) {
+            if (child.get() != other_child.get()) {
+              for (const auto &region : other_child->GetReadRegions()) {
+                child_used_buffers.insert(region.get()->buffer);
+              }
+              for (const auto &region : other_child->GetWriteRegions()) {
+                child_used_buffers.insert(region.get()->buffer);
+              }
+            }
+          }
+          ScheduleRecursive(child.get(), child_used_buffers);
         }
-        Z3SchedulePythonLoop(ctrl);
+        Z3SchedulePythonLoop(ctrl, used_buffers);
       } else {
-        ScheduleRecursive(ctrl->child.get());
+        ScheduleRecursive(ctrl->child.get(), used_buffers);
       }
     }
     return;
@@ -1211,11 +1311,22 @@ void ScheduleUnitBuilder::ScheduleRecursive(IRStructure *node) {
     std::vector<std::shared_ptr<IRStructure>> origin_children;
     GatherTaskNodes({wrapper->child}, origin_children);
     for (auto &child : origin_children) {
-      ScheduleRecursive(child.get());
+      auto child_used_buffers = used_buffers;
+      for (auto &other_child : origin_children) {
+        if (child.get() != other_child.get()) {
+          for (const auto &region : other_child->GetReadRegions()) {
+            child_used_buffers.insert(region.get()->buffer);
+          }
+          for (const auto &region : other_child->GetWriteRegions()) {
+            child_used_buffers.insert(region.get()->buffer);
+          }
+        }
+      }
+      ScheduleRecursive(child.get(), child_used_buffers);
     }
     auto seq_node = std::make_shared<SequenceNode>();
     seq_node->children = ChildrenScheduleHelper(origin_children);
-    *node = *(seq_node.get());
+    *node = *seq_node;
     return;
   }
 
@@ -1520,8 +1631,10 @@ private:
           }
           found_tma = false;
           if (found_global && found_shared) {
-            if (idx_global == 0 && idx_shared == 1)
+            if (idx_global == 0 && idx_shared == 1) {
               found_tma = true;
+              found_tma_load = true;
+            }
             if (idx_global == 1 && idx_shared == 0)
               found_tma = true;
           }
@@ -1764,6 +1877,7 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
                     "partition will use default";
     }
     unit_builder.SetEnableWarpPartition(config.enable_warp_partition);
+    unit_builder.SetSharedMemoryLimit(config.shared_memory_limit);
     bool double_thread = unit_builder.Build(ir_structure.get());
 
     if (!config.enable_warpgroup_partition) {
@@ -2424,12 +2538,12 @@ Stmt ConvertIRStructureToStmt(IRStructure *root, const bool outer_enable_epi) {
           steady.push_back(Substitute(stmt, substitution_cond));
         } else {
           PrimExpr condition =
-              And(loop_var < loop_extent, loop_var >= loop_start);
+              And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
           if (unit->stage == min_stages) {
             condition = loop_var >= loop_start;
           }
           if (unit->stage == max_stages) {
-            condition = loop_var < loop_extent;
+            condition = loop_var < loop_start + loop_extent;
           }
           Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
           steady.push_back(Substitute(stmt, substitution));
@@ -2742,12 +2856,12 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
           steady.push_back(Substitute(stmt, substitution_cond));
         } else {
           PrimExpr condition =
-              And(loop_var < loop_extent, loop_var >= loop_start);
+              And(loop_var < loop_start + loop_extent, loop_var >= loop_start);
           if (unit->stage == min_stages) {
             condition = loop_var >= loop_start;
           }
           if (unit->stage == max_stages) {
-            condition = loop_var < loop_extent;
+            condition = loop_var < loop_start + loop_extent;
           }
           Stmt stmt = IfThenElse(condition, SeqStmt::Flatten(stmts));
           steady.push_back(Substitute(stmt, substitution));
