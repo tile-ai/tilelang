@@ -1326,7 +1326,7 @@ void ScheduleUnitBuilder::ScheduleRecursive(
     }
     auto seq_node = std::make_shared<SequenceNode>();
     seq_node->children = ChildrenScheduleHelper(origin_children);
-    *node = *(seq_node.get());
+    *node = *seq_node;
     return;
   }
 
