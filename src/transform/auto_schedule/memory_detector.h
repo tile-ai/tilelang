@@ -264,6 +264,7 @@ private:
   }
 
   void VisitStmt_(const LetStmtNode *op) override {
+    VisitExpr(op->value);
     let_bindings_[op->var.get()] = op->value;
     UpdateWriteVar(op->var);
     StmtExprVisitor::VisitStmt(op->body);
