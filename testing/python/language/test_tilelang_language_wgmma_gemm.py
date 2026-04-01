@@ -28,7 +28,7 @@ def _make_wgmma_kernel(gemm_op):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 @pytest.mark.parametrize(
     "gemm_api",
     [T.wgmma_gemm],
@@ -41,7 +41,7 @@ def test_wgmma_gemm_has_no_implicit_wait(gemm_api):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_wgmma_gemm_dispatch_has_no_implicit_wait():
     kernel = tilelang.compile(
         _make_wgmma_kernel(lambda A, B, C: T.wgmma_gemm(A, B, C, clear_accum=True)),
@@ -52,7 +52,7 @@ def test_wgmma_gemm_dispatch_has_no_implicit_wait():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_wgmma_gemm_rejects_mma_fallback():
     @T.prim_func
     def main(

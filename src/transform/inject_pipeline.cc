@@ -871,7 +871,8 @@ Buffer RewritePipelineTmaBarriers(
     const Array<Integer> &tma_copies, Map<Var, Buffer> &buffer_data_to_buffer,
     std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>
         &allocated_buffers,
-    Array<Buffer> &block_local_allocs) {
+    Array<Buffer> &block_local_allocs, Var loop_var, PrimExpr loop_min,
+    int num_stages) {
   // Count TMA copies
   int num_tma = 0;
   for (const auto &tc : tma_copies) {
@@ -938,11 +939,13 @@ Buffer RewritePipelineTmaBarriers(
     {
       PrimExpr barrier_ref =
           MakeBarrierRef(barrier_buf, IntImm(DataType::Int(32), 0));
-      // Parity placeholder 0: MultiVersionBuffer will rewrite this using
-      // the kPipelineMVBParityExpr attached by EmitImpl.
+      // Parity expression using the loop variable so EmitImpl's Substitute
+      // resolves the correct parity for prologue/main/epilogue blocks.
+      PrimExpr ns = IntImm(DataType::Int(32), num_stages);
+      PrimExpr parity = FloorMod(FloorDiv(loop_var - loop_min, ns), 2);
       wait_stmts.push_back(
           Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
-                        {barrier_ref, IntImm(DataType::Int(32), 0)})));
+                        {barrier_ref, parity})));
     }
     wait_stmts.push_back(old_block->body);
     Stmt new_body = SeqStmt(wait_stmts);
@@ -1238,7 +1241,8 @@ private:
               pipeline_barrier_buf = RewritePipelineTmaBarriers(
                   original_order, pipeline_info, tma_copies,
                   buffer_data_to_buffer_, allocated_buffers_,
-                  block_local_allocs);
+                  block_local_allocs, op->loop_var, op->min,
+                  max_stage + 1);
             }
           }
         }

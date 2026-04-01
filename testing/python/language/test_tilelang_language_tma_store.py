@@ -82,6 +82,7 @@ def run_gemm_tma_store(num_stages):
     )
     kernel_source = kernel.get_kernel_source()
     print(kernel_source)
+    # exit()
     # Verify that the generated kernel contains tma_store_arrive but NOT tma_store_wait
     # (the wait is issued separately by the user via T.tma_store_wait)
     assert "tma_store_arrive" in kernel_source, "Expected tma_store_arrive in kernel source"
@@ -110,4 +111,5 @@ def test_tma_store_3_stages():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_tma_store_2_stages()

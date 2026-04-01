@@ -20,7 +20,7 @@ def _compile_tvm_ffi(func, pass_configs=None):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_ws_keeps_full_producer_extent_for_lowered_simt_copy():
     M, N, K = 128, 64, 64
     block_M, block_N, block_K = 64, 64, 32

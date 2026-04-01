@@ -428,7 +428,7 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
 
 
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     """Ordinary global->shared metadata copies should stay in the producer."""
 

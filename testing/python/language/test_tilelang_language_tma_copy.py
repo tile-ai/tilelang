@@ -213,3 +213,4 @@ def test_tma_copy_store_pipeline_3_stages():
 
 if __name__ == "__main__":
     tilelang.testing.main()
+    # test_tma_copy_pipeline_2_stages()

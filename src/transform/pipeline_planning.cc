@@ -250,11 +250,14 @@ private:
   void HandleTileOp(const TileOperator &tile_op) {
     AddReadsWritesForTileOp(tile_op, &reads_, &writes_);
     // Detect global->shared TMA copy pattern for pipeline planning.
+    // Only mark T.copy (not T.tma_copy) — user-written T.tma_copy already
+    // manages its own barriers and should not get a pipeline barrier.
     if (const auto *copy = tile_op.as<CopyNode>()) {
       if (IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
         is_global_copy_pattern_ = true;
         arith::Analyzer analyzer;
-        if (copy->CheckBulkLoad(target_, &analyzer, /*check_last_dim=*/false)) {
+        if (!copy->GetIsTmaCopy() &&
+            copy->CheckBulkLoad(target_, &analyzer, /*check_last_dim=*/false)) {
           is_tma_copy_ = true;
         }
       }
