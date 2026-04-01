@@ -357,8 +357,7 @@ protected:
    * \brief Check that a global buffer's strides satisfy TMA requirements.
    *
    * Validates: contiguous innermost stride, 16-byte alignment for outer
-   * strides, and stride < 2^40.  The copy direction (load/store) for warning
-   * messages is inferred from the buffer's scope relative to src/dst.
+   * strides, and stride < 2^40.
    *
    * \return true if all stride checks pass.
    */
