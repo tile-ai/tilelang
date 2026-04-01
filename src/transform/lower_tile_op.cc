@@ -24,18 +24,12 @@
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/mbarrier.h"
+#include "common/pipeline_utils.h"
 #include "layout_reducer.h"
 #include "loop_partition.h"
 
 namespace tvm {
 namespace tl {
-
-namespace {
-
-static constexpr const char *kPipelineContextNumStages =
-    "tl.pipeline_context_num_stages";
-
-} // namespace
 
 using namespace tir;
 
@@ -1134,6 +1128,12 @@ private:
       ICHECK_GT(pipelined_depth_, 0);
       --pipelined_depth_;
       pipeline_context_num_stages_stack_.pop_back();
+      // Strip the attribute — no downstream pass needs it.
+      if (const auto *attr = stmt.as<AttrStmtNode>()) {
+        if (attr->attr_key == kPipelineContextNumStages) {
+          return attr->body;
+        }
+      }
     }
     return stmt;
   }
@@ -1387,15 +1387,7 @@ private:
   }
 
   Range CurrentThreadBounds() const {
-    if (analyzer_->const_int_bound.IsBound(thread_var_->var)) {
-      auto const_int_bound = analyzer_->const_int_bound(thread_var_);
-      auto min_value = const_int_bound->min_value;
-      auto max_value = const_int_bound->max_value;
-      auto extent = max_value + 1 - min_value;
-      return Range::FromMinExtent(IntImm(thread_var_->var.dtype(), min_value),
-                                  IntImm(thread_var_->var.dtype(), extent));
-    }
-    return Range::FromMinExtent(0, 1);
+    return ComputeThreadBounds(thread_var_, *analyzer_);
   }
 
   Target target_;

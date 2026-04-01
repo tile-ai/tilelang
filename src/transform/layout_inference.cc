@@ -24,6 +24,7 @@
 #include "../op/region.h"
 #include "../op/utils.h"
 #include "../target/utils.h"
+#include "common/pipeline_utils.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -47,9 +48,6 @@ int64_t GetElementStorageBits(DataType dtype) {
   // subtype-changing views rely on.
   return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
 }
-
-static constexpr const char *kPipelineContextNumStages =
-    "tl.pipeline_context_num_stages";
 
 } // namespace
 
@@ -971,17 +969,7 @@ private:
   }
 
   Range CurrentThreadBounds() const {
-    if (thread_var_.defined() &&
-        analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-      auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-      auto min_value = const_int_bound->min_value;
-      auto max_value = const_int_bound->max_value;
-      auto extent = max_value - min_value + 1;
-      auto dtype = thread_var_->var.dtype();
-      return Range::FromMinExtent(IntImm(dtype, min_value),
-                                  IntImm(dtype, extent));
-    }
-    return Range::FromMinExtent(0, 1);
+    return ComputeThreadBounds(thread_var_, analyzer_);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -1118,16 +1106,7 @@ private:
       }
 
       Range CurrentThreadBounds() const {
-        if (thread_var_.defined() &&
-            analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-          auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-          auto dtype = thread_var_->var.dtype();
-          auto extent =
-              const_int_bound->max_value - const_int_bound->min_value + 1;
-          return Range::FromMinExtent(IntImm(dtype, const_int_bound->min_value),
-                                      IntImm(dtype, extent));
-        }
-        return Range::FromMinExtent(0, 1);
+        return ComputeThreadBounds(thread_var_, analyzer_);
       }
 
       const std::unordered_set<const Object *> &nodes_in_tileops_;

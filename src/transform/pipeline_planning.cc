@@ -6,17 +6,9 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../op/atomic_add.h"
-#include "../op/atomic_reduce.h"
 #include "../op/builtin.h"
-#include "../op/copy.h"
-#include "../op/fill.h"
-#include "../op/finalize_reducer.h"
-#include "../op/gemm.h"
-#include "../op/gemm_sp.h"
-#include "../op/operator.h"
-#include "../op/reduce.h"
 #include "../op/utils.h"
+#include "common/pipeline_utils.h"
 #include <algorithm>
 #include <functional>
 #include <limits>
@@ -255,18 +247,10 @@ public:
   bool GetTmaCopyPattern() const { return is_tma_copy_; }
 
 private:
-  void AddReads(const Array<BufferRegion> &regions) {
-    reads_.insert(reads_.end(), regions.begin(), regions.end());
-  }
-
-  void AddWrites(const Array<BufferRegion> &regions) {
-    writes_.insert(writes_.end(), regions.begin(), regions.end());
-  }
-
   void HandleTileOp(const TileOperator &tile_op) {
+    AddReadsWritesForTileOp(tile_op, &reads_, &writes_);
+    // Detect global->shared TMA copy pattern for pipeline planning.
     if (const auto *copy = tile_op.as<CopyNode>()) {
-      AddReads({BufferRegion(copy->src, copy->src_range)});
-      AddWrites({BufferRegion(copy->dst, copy->dst_range)});
       if (IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
         is_global_copy_pattern_ = true;
         arith::Analyzer analyzer;
@@ -274,66 +258,6 @@ private:
           is_tma_copy_ = true;
         }
       }
-      return;
-    }
-    if (const auto *gemm = tile_op.as<GemmNode>()) {
-      AddReads({gemm->aRegion_, gemm->bRegion_});
-      if (!is_one(gemm->clearAccum_)) {
-        AddReads({gemm->cRegion_});
-      }
-      AddWrites({gemm->cRegion_});
-      return;
-    }
-    if (const auto *gemm_sp = tile_op.as<GemmSPNode>()) {
-      AddReads({gemm_sp->aRegion_, gemm_sp->bRegion_, gemm_sp->eRegion_});
-      if (!gemm_sp->clearAccum_) {
-        AddReads({gemm_sp->cRegion_});
-      }
-      AddWrites({gemm_sp->cRegion_});
-      return;
-    }
-    if (const auto *reduce = tile_op.as<ReduceOpNode>()) {
-      AddReads({reduce->srcRegion_});
-      if (!reduce->clear) {
-        AddReads({reduce->dstRegion_});
-      }
-      AddWrites({reduce->dstRegion_});
-      return;
-    }
-    if (const auto *cumsum = tile_op.as<CumSumOpNode>()) {
-      AddReads({cumsum->srcRegion_});
-      AddWrites({cumsum->dstRegion_});
-      return;
-    }
-    if (const auto *fill = tile_op.as<FillNode>()) {
-      AddWrites({BufferRegion(fill->dst, fill->region)});
-      return;
-    }
-    auto handle_atomic = [&](const auto *atomic) {
-      if (atomic->src.defined()) {
-        AddReads({BufferRegion(atomic->src, atomic->src_range)});
-      }
-      BufferRegion dst_region(atomic->dst, atomic->dst_range);
-      AddReads({dst_region});
-      AddWrites({dst_region});
-    };
-    if (const auto *atomic = tile_op.as<AtomicAddNode>()) {
-      handle_atomic(atomic);
-      return;
-    }
-    if (const auto *atomic = tile_op.as<AtomicMaxNode>()) {
-      handle_atomic(atomic);
-      return;
-    }
-    if (const auto *atomic = tile_op.as<AtomicMinNode>()) {
-      handle_atomic(atomic);
-      return;
-    }
-    if (const auto *finalize = tile_op.as<FinalizeReducerOpNode>()) {
-      BufferRegion region = BufferRegion::FullRegion(finalize->reducer);
-      AddReads({region});
-      AddWrites({region});
-      return;
     }
   }
 

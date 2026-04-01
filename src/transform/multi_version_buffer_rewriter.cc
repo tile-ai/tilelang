@@ -19,34 +19,14 @@
 #include "../op/operator.h"
 #include "../op/region.h"
 #include "../op/utils.h"
+#include "common/pipeline_utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-static constexpr const char *kPipelineMVBContextNumStages =
-    "tl.pipeline_mvb_num_stages";
-static constexpr const char *kPipelineMVBStageExpr =
-    "tl.pipeline_mvb_stage_expr";
-static constexpr const char *kPipelineMVBParityExpr =
-    "tl.pipeline_mvb_parity_expr";
-
 enum class Role : uint8_t { kConsumer, kProducer, kBoth };
-
-Optional<Integer> GetPipelineNumStages(const ForNode *loop) {
-  if (auto num_stages = loop->annotations.Get("num_stages")) {
-    if (const auto *imm = num_stages->as<IntImmNode>()) {
-      return Integer(static_cast<int>(imm->value));
-    }
-  }
-  if (auto num_stages = loop->annotations.Get("tl_pipelined_num_stages")) {
-    if (const auto *imm = num_stages->as<IntImmNode>()) {
-      return Integer(static_cast<int>(imm->value));
-    }
-  }
-  return Optional<Integer>();
-}
 
 class WarpSpecializedRoleMarker_ : public StmtVisitor {
 public:
@@ -556,7 +536,8 @@ private:
     stmt_stack_.pop_back();
 
     if (op->attr_key == kPipelineMVBStageExpr ||
-        op->attr_key == kPipelineMVBParityExpr) {
+        op->attr_key == kPipelineMVBParityExpr ||
+        op->attr_key == kPipelineMVBContextNumStages) {
       return body;
     }
     return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
