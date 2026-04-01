@@ -117,6 +117,18 @@ std::vector<BufferRegion> SequenceNode::GetReadRegions() const {
   return deduplicated;
 }
 
+std::vector<Var> SequenceNode::GetReadVars() const {
+  std::vector<Var> all_vars;
+  for (const auto &child : children) {
+    if (child) {
+      auto child_read_vars = child->GetReadVars();
+      all_vars.insert(all_vars.end(), child_read_vars.begin(),
+                      child_read_vars.end());
+    }
+  }
+  return all_vars;
+}
+
 std::vector<BufferRegion> SequenceNode::GetWriteRegions() const {
   std::vector<BufferRegion> all_write_regions;
   for (const auto &child : children) {
@@ -142,6 +154,18 @@ std::vector<BufferRegion> SequenceNode::GetWriteRegions() const {
       deduplicated.push_back(region);
   }
   return deduplicated;
+}
+
+std::vector<Var> SequenceNode::GetWriteVars() const {
+  std::vector<Var> all_vars;
+  for (const auto &child : children) {
+    if (child) {
+      auto child_write_vars = child->GetWriteVars();
+      all_vars.insert(all_vars.end(), child_write_vars.begin(),
+                      child_write_vars.end());
+    }
+  }
+  return all_vars;
 }
 
 int64_t SequenceNode::GetLatency() const { return latency_; }
@@ -186,20 +210,8 @@ void SequenceNode::SetLatency(int64_t latency) { latency_ = latency; }
 
 void SequenceNode::SetII(int64_t ii) { ii_ = ii; }
 
-void SequenceNode::AddReadRegion(const BufferRegion &region) {
-  if (!children.empty() && children[0]) {
-    children[0]->AddReadRegion(region);
-  }
-}
-
-void SequenceNode::AddWriteRegion(const BufferRegion &region) {
-  if (!children.empty() && children[0]) {
-    children[0]->AddWriteRegion(region);
-  }
-}
-
-std::unique_ptr<IRStructure> SequenceNode::Clone() const {
-  auto new_seq = std::make_unique<SequenceNode>();
+std::shared_ptr<IRStructure> SequenceNode::Clone() const {
+  auto new_seq = std::make_shared<SequenceNode>();
   new_seq->children.reserve(children.size());
   for (const auto &child : children) {
     if (child) {
@@ -214,8 +226,8 @@ std::unique_ptr<IRStructure> SequenceNode::Clone() const {
   return new_seq;
 }
 
-std::unique_ptr<IRStructure> TaskNode::Clone() const {
-  auto new_task = std::make_unique<TaskNode>();
+std::shared_ptr<IRStructure> TaskNode::Clone() const {
+  auto new_task = std::make_shared<TaskNode>();
   // Copy statements
   new_task->stmts = stmts;
   // Copy resource usage flags
@@ -293,8 +305,8 @@ bool TaskNode::ContainsLoopBreak() const {
   return found_loop_break;
 }
 
-std::unique_ptr<IRStructure> ControlNode::Clone() const {
-  auto new_ctrl = std::make_unique<ControlNode>();
+std::shared_ptr<IRStructure> ControlNode::Clone() const {
+  auto new_ctrl = std::make_shared<ControlNode>();
   // Copy For control (For is a TVM object with reference counting)
   new_ctrl->control = control;
   // Clone child if exists
@@ -302,15 +314,14 @@ std::unique_ptr<IRStructure> ControlNode::Clone() const {
     new_ctrl->child = child->Clone();
   }
   // Copy latency and II
-  new_ctrl->wrappers = wrappers;
   new_ctrl->SetLatency(GetLatency());
   new_ctrl->SetII(GetII());
   new_ctrl->SetPromote(hasPromote());
   return new_ctrl;
 }
 
-std::unique_ptr<IRStructure> WrapperNode::Clone() const {
-  auto new_wrapper = std::make_unique<WrapperNode>();
+std::shared_ptr<IRStructure> WrapperNode::Clone() const {
+  auto new_wrapper = std::make_shared<WrapperNode>();
   // Copy var and value (TVM objects with reference counting)
   new_wrapper->wrapper = wrapper;
   // Clone child if exists
@@ -323,8 +334,8 @@ std::unique_ptr<IRStructure> WrapperNode::Clone() const {
   return new_wrapper;
 }
 
-std::unique_ptr<IRStructure> ScheduleUnit::Clone() const {
-  auto new_unit = std::make_unique<ScheduleUnit>();
+std::shared_ptr<IRStructure> ScheduleUnit::Clone() const {
+  auto new_unit = std::make_shared<ScheduleUnit>();
   // Copy var and value (TVM objects with reference counting)
   new_unit->stage = stage;
   // Clone child if exists

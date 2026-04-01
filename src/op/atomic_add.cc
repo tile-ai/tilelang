@@ -574,7 +574,8 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     seq.reserve(3);
     seq.push_back(tma_reduce);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
+                                {IntImm(DataType::Int(32), 0)})));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
                       SeqStmt(std::move(seq)));
   }

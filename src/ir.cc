@@ -316,11 +316,12 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   }
 
   if (attrs.defined()) {
-    auto empty_block = tvm::script::ir_builder::tir::Block(MainBlockName);
+    auto empty_block = tvm::script::ir_builder::tir::Block(DeviceMainBlockName);
     empty_block->annotations = attrs;
     n->frames.push_back(empty_block);
   } else {
-    n->frames.push_back(tvm::script::ir_builder::tir::Block(MainBlockName));
+    n->frames.push_back(
+        tvm::script::ir_builder::tir::Block(DeviceMainBlockName));
   }
 
   return KernelLaunchFrame(n);

@@ -638,8 +638,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl.tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
+    int count = Downcast<IntImm>(op->args[0])->value;
     PrintIndent();
-    stream << "tl.tma_store_wait(0)\n";
+    stream << "tl.tma_store_wait(" << count << ")\n";
   } else if (op->op.same_as(tl::warpgroup_arrive())) {
     PrintIndent();
     stream << "tl.warpgroup_arrive()\n";
@@ -1699,14 +1700,23 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
     VisitStmt(inner->body);
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
-    const StringImmNode *pattern = op->value.as<StringImmNode>();
-    ICHECK(pattern);
-    std::string call_str = pattern->value;
-    // replace :: with . and replace < with ( and replace > with )
-    ReplaceAll(call_str, "::", ".");
-    ReplaceAll(call_str, "<", "(");
-    ReplaceAll(call_str, ">", ")");
-    this->stream << "blockIdx = " << call_str << "\n";
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tir::builtin::tvm_tuple()) &&
+          call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        ICHECK(name_node && size_node) << "threadblock_swizzle_pattern expects "
+                                          "tvm_tuple(device_func, panel_size)";
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    }
+    ICHECK(!func_name.empty() && panel_size > 0)
+        << "threadblock_swizzle_pattern: failed to extract func_name and "
+           "panel_size";
+    this->stream << "blockIdx = tl." << func_name << "(" << panel_size << ")\n";
     this->VisitStmt(op->body);
   } else if (op->attr_key == "pragma_unroll_factor") {
     const IntImmNode *factor = op->value.as<IntImmNode>();
