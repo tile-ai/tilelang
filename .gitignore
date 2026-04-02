@@ -124,4 +124,6 @@ maint/host_checks/logs/*
 
 # perf regression test
 .perf_regression/
+
+# agent skills folder
 .humanize*

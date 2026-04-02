@@ -145,6 +145,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # main()
-    tilelang.disable_cache()
-    test(n=4096, h=2560)
+    main()
