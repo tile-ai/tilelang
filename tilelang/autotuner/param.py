@@ -466,11 +466,14 @@ class AutotuneResult:
         with open(path / FUNCTION_PATH, "rb") as f:
             func = cloudpickle.load(f)
 
-        # load out idx
-        if verbose:
-            logger.debug(f"Loading out idx from file: {path / OUT_IDX_PATH}")
-        with open(path / OUT_IDX_PATH) as f:
-            out_idx_override = json.load(f)["out_idx"]
+        # load out idx (optional — older caches may not have this file)
+        out_idx_override = None
+        out_idx_file = path / OUT_IDX_PATH
+        if out_idx_file.exists():
+            if verbose:
+                logger.debug(f"Loading out idx from file: {out_idx_file}")
+            with open(out_idx_file) as f:
+                out_idx_override = json.load(f)["out_idx"]
 
         # load latency
         if verbose:
