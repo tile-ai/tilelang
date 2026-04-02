@@ -51,11 +51,11 @@ class GemmScalar(GemmBase):
             if clear_accum:
                 # Only clear the output tile, not the entire backing buffer.
                 for ci, cj in T.grid(M, N):
-                    C_buf[*c_prefix, c0 + ci, c1 + cj] = T.cast(0, accum_dtype)
+                    C_buf[tuple(c_prefix) + (c0 + ci, c1 + cj)] = T.cast(0, accum_dtype)
             for i, j, k in T.grid(M, N, K):
-                C_buf[*c_prefix, c0 + i, c1 + j] += T.cast(
-                    A_buf[*a_prefix, a0 + (k if trans_A else i), a1 + (i if trans_A else k)]
-                    * B_buf[*b_prefix, b0 + (j if trans_B else k), b1 + (k if trans_B else j)],
+                C_buf[tuple(c_prefix) + (c0 + i, c1 + j)] += T.cast(
+                    A_buf[tuple(a_prefix) + (a0 + (k if trans_A else i), a1 + (i if trans_A else k))]
+                    * B_buf[tuple(b_prefix) + (b0 + (j if trans_B else k), b1 + (k if trans_B else j))],
                     accum_dtype,
                 )
 
