@@ -63,6 +63,7 @@ def test_simple_pipeline():
                 annotations={
                     "software_pipeline_order": [T.int32(0), T.int32(1), T.int32(2)],
                     "software_pipeline_stage": [T.int32(0), T.int32(0), T.int32(2)],
+                    "software_pipeline_tma_copies": [T.int32(1), T.int32(1), T.int32(0)],
                     "tl_pipelined_num_stages": T.int32(3),
                 },
             ):

@@ -225,14 +225,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # which may be introduced by the LegalizeSafeMemoryAccess
     mod = tilelang.transform.IfStmtBinding()(mod)
     has_tma = module_has_tma(mod)
-    if has_tma:
-        mod = tilelang.transform.MultiVersionBuffer(barrier_only=True)(mod)
-    else:
-        # Non-TMA: MultiVersionBuffer is not used, so buffer allocation
-        # locations must be planned explicitly.  In TMA paths this is
-        # handled implicitly by MultiVersionBuffer (which runs LCA
-        # analysis to place versioned buffers).
-        mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+    # Pipeline barriers are now created at final expanded size by
+    # InjectSoftwarePipeline, so no late MVB barrier fixup is needed.
+    # Buffer allocation placement is handled uniformly for both paths.
+    mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
     mod = tilelang.transform.LowerSharedBarrier()(mod)
     if has_tma:
         mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
