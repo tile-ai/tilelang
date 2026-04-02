@@ -1302,12 +1302,13 @@ private:
         producer_stmts.push_back(Evaluate(tma_call));
 
         if (!has_simt_producer && !has_cp_async_producer) {
-          // Pure TMA: single-thread arrive.
+          // Pure TMA: single-thread arrive via shuffle elect.
           // When merged, only arrive once after the last TMA copy.
           if (!can_merge_tma_barriers || tma_idx == last_tma_idx) {
-            producer_stmts.push_back(
-                IfThenElse(EQ(thread_iv_->var, IntImm(DataType::Int(32), 0)),
-                           MakeArriveBarrier(barrier_buf, fwd_id)));
+            producer_stmts.push_back(IfThenElse(
+                Call(DataType::Bool(), tl_shuffle_elect(),
+                     {producer_extent}),
+                MakeArriveBarrier(barrier_buf, fwd_id)));
           }
         }
         ++tma_idx;
@@ -2006,18 +2007,25 @@ private:
 /// Quick pre-scan: check if the function contains a pipelined loop (num_stages
 /// >= 1) with at least one TMA load producer tile op and no manual layout
 /// annotations (which are incompatible with early MVB expansion).
+/// Check whether a layout annotation on a shared buffer is compatible with
+/// TMA.  TMA supports identity (linear) layouts and the three standard
+/// swizzle modes (32B / 64B / 128B).  Any other layout (e.g. padded,
+/// Volta-style) cannot be used with TMA.
+static bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
+  // Recognised swizzle → TMA with swizzle.
+  if (DetectSwizzleMode(layout, buffer) != SwizzleMode::kNone) {
+    return true;
+  }
+  // Identity / row-major linear → TMA without swizzle.
+  if (StructuralEqual()(layout, makeLinearLayout(buffer->shape))) {
+    return true;
+  }
+  return false;
+}
+
 class TiledWSCandidate : public StmtExprVisitor {
 public:
   static bool Check(const Stmt &stmt, Target target) {
-    TiledWSCandidate c;
-    c.target_ = target;
-    c(stmt);
-    return c.has_pipeline_loop_ && c.has_tma_tile_op_ && !c.has_manual_layout_;
-  }
-
-  /// Check if the function has TMA copies in a pipeline loop (even if
-  /// other conditions prevent full WS candidacy).
-  static bool HasTmaPipeline(const Stmt &stmt, Target target) {
     TiledWSCandidate c;
     c.target_ = target;
     c(stmt);
@@ -2036,10 +2044,6 @@ private:
       }
     }
     StmtExprVisitor::VisitStmt_(op);
-    // After visiting, check if any TMA copy targets manual-layout buffers.
-    if (in_pipeline_ && !layout_map_entries_.empty()) {
-      CheckManualLayoutMVBCompat(op->body);
-    }
     in_pipeline_ = old;
   }
 
@@ -2048,7 +2052,13 @@ private:
       auto tile_op = ParseOperator(ffi::GetRef<Call>(op));
       if (auto *copy = tile_op.as<CopyNode>()) {
         if (ClassifyCopy(copy, target_) == TileStmtKind::kTmaProducer) {
-          has_tma_tile_op_ = true;
+          // If the destination buffer has a layout annotation, verify
+          // that the layout is TMA-compatible (swizzle or linear).
+          // Copies whose layout is incompatible with TMA cannot become
+          // TMA producers.
+          if (HasTmaCompatibleLayout(copy->dst)) {
+            has_tma_tile_op_ = true;
+          }
         }
       }
     }
@@ -2056,97 +2066,50 @@ private:
   }
 
   void VisitStmt_(const BlockNode *op) final {
+    // Collect layout_map entries so we can cross-check TMA copy targets.
     if (op->annotations.count("layout_map")) {
-      // Only reject manual layout if a manually-laid-out shared buffer
-      // is also a TMA copy target in the pipeline.  SIMT-copied buffers
-      // with manual layouts (sparse metadata) are handled by
-      // Layout::Expand and don't need the rejection.
-      // Collect the layout_map Buffer keys for later TMA-target checks.
-      // The map is stored as Map<Buffer, Layout> (same as lower_tile_op.cc).
       auto anno = op->annotations.Get("layout_map");
-      // The annotation is stored as a generic ffi.Map.
-      // Try to iterate it and downcast keys to Buffer.
-      bool parsed = false;
       if (auto gmap = anno->as<Map<ObjectRef, ObjectRef>>(); gmap.has_value()) {
         for (const auto &[key, val] : gmap.value()) {
           Layout layout;
           if (auto l = val.as<Layout>(); l.has_value())
             layout = l.value();
-          // Key can be Buffer or Var. Resolve to Buffer.
           if (auto buf = key.as<Buffer>(); buf.has_value()) {
-            layout_map_entries_.push_back({buf.value(), layout});
+            layout_map_[buf.value()->data.get()] = {buf.value(), layout};
           } else if (auto var = key.as<Var>(); var.has_value()) {
             for (const auto &buf : op->alloc_buffers) {
               if (buf->data.same_as(var.value())) {
-                layout_map_entries_.push_back({buf, layout});
+                layout_map_[buf->data.get()] = {buf, layout};
                 break;
               }
             }
           }
         }
-        parsed = true;
       }
-      if (!parsed) {
-        has_manual_layout_ = true;
-      }
-      // Don't set has_manual_layout_ here for valid maps — defer to
-      // TMA-target check in CheckTmaCopyTargetsManualLayout.
     }
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  // Check if any producer copy destination is a manually-laid-out buffer
-  // whose layout can NOT survive MVB expansion via Layout::Expand.
-  void CheckManualLayoutMVBCompat(const Stmt &pipeline_body) {
-    class CopyDstChecker : public StmtExprVisitor {
-    public:
-      CopyDstChecker(Target target,
-                     const std::vector<std::pair<Buffer, Layout>> &entries)
-          : target_(target), entries_(entries) {}
-      bool incompatible{false};
-
-    private:
-      void VisitExpr_(const CallNode *op) final {
-        auto tile_op = ParseOperator(ffi::GetRef<Call>(op));
-        if (tile_op.defined()) {
-          if (auto *copy = tile_op.as<CopyNode>()) {
-            if (IsProducer(ClassifyCopy(copy, target_))) {
-              Buffer dst = copy->dst;
-              for (const auto &[buf, layout] : entries_) {
-                if (buf.same_as(dst) || buf->data.same_as(dst->data)) {
-                  if (!layout.defined()) {
-                    incompatible = true;
-                    break;
-                  }
-                  // Swizzled layouts (kQuarter/kHalf/kFull) are NOT
-                  // compatible with MVB expansion. Non-swizzled
-                  // layouts (kNone, like sparse metadata) are safe.
-                  auto mode = DetectSwizzleMode(layout, buf);
-                  if (mode != SwizzleMode::kNone) {
-                    incompatible = true;
-                  }
-                }
-              }
-            }
-          }
-        }
-        StmtExprVisitor::VisitExpr_(op);
-      }
-      Target target_;
-      const std::vector<std::pair<Buffer, Layout>> &entries_;
-    };
-    CopyDstChecker checker(target_, layout_map_entries_);
-    checker(pipeline_body);
-    if (checker.incompatible)
-      has_manual_layout_ = true;
+  /// A copy destination is TMA-compatible if it has no layout annotation,
+  /// or its annotated layout is a recognised swizzle / linear layout.
+  bool HasTmaCompatibleLayout(const Buffer &dst) const {
+    auto it = layout_map_.find(dst->data.get());
+    if (it == layout_map_.end()) {
+      return true; // no annotation → identity layout → TMA OK
+    }
+    const auto &[buf, layout] = it->second;
+    if (!layout.defined()) {
+      return false; // annotation present but layout not parseable
+    }
+    return IsTmaCompatibleLayout(layout, buf);
   }
 
   Target target_;
   bool in_pipeline_{false};
   bool has_pipeline_loop_{false};
   bool has_tma_tile_op_{false};
-  bool has_manual_layout_{false};
-  std::vector<std::pair<Buffer, Layout>> layout_map_entries_;
+  // Map from buffer data Var pointer → (Buffer, Layout) for layout_map entries.
+  std::unordered_map<const Object *, std::pair<Buffer, Layout>> layout_map_;
 };
 
 } // namespace
@@ -2178,31 +2141,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecializedTiled() {
     }
     // Only apply MVB + WS if the function is a tiled WS candidate.
     if (!TiledWSCandidate::Check(f->body, target.value())) {
-      LOG(WARNING) << "[TiledWS] skipped: not a candidate";
-      // If the function has TMA copies in a pipeline loop but was
-      // rejected (e.g., manual layout annotations), strip pipeline
-      // annotations to prevent InjectSoftwarePipeline from generating
-      // broken non-WS TMA pipeline code.
-      if (TiledWSCandidate::HasTmaPipeline(f->body, target.value())) {
-        LOG(WARNING) << "[TiledWS] stripping pipeline for rejected TMA kernel";
-        class StripAnnotation : public tir::StmtExprMutator {
-        public:
-          tir::Stmt VisitStmt_(const tir::ForNode *op) final {
-            auto stmt = tir::StmtExprMutator::VisitStmt_(op);
-            const auto *n = stmt.as<tir::ForNode>();
-            ICHECK(n);
-            if (n->annotations.count("num_stages")) {
-              tir::For new_for = Downcast<tir::For>(stmt);
-              new_for.CopyOnWrite()->annotations.erase("num_stages");
-              return std::move(new_for);
-            }
-            return stmt;
-          }
-        };
-        StripAnnotation stripper;
-        auto *fn = f.CopyOnWrite();
-        fn->body = stripper(f->body);
-      }
+      LOG(WARNING) << "[TiledWS] skipped: no TMA copies in pipeline loop";
       return f;
     }
     LOG(WARNING) << "[TiledWS] candidate found, applying MVB + WS";
