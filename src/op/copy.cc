@@ -2157,8 +2157,14 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   ICHECK(TargetIsHopper(T.target));
   ICHECK(IsGlobalBuffer(src_) && IsSharedBuffer(dst_));
   ICHECK(src_->shape.size() == 4);
-  ICHECK(dst_->shape.size() == 2);
   ICHECK(src_->dtype == dst_->dtype);
+
+  // Use dstRegion_ to derive tile dimensions and shared memory offset.
+  // dstRegion_ always has the correct ranges regardless of whether MVB
+  // added a leading stage dimension to the buffer — the last two ranges
+  // give the tile (pixel, channel) extents and mins.
+  size_t ndim = dstRegion_->region.size();
+  ICHECK(ndim >= 2) << "im2col dstRegion must have at least 2 dims";
   Layout shared_layout;
   if (T.layout_map.count(dst_)) {
     shared_layout = T.layout_map[dst_];
@@ -2190,8 +2196,10 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   desc.elem_stride = {1, stride_, stride_, 1};
   desc.lower_corner = {-padding_, -padding_};
   desc.upper_corner = {-padding_, -padding_};
-  desc.smem_box_pixel = Downcast<IntImm>(dst_->shape[0])->value;
-  desc.smem_box_channel = Downcast<IntImm>(dst_->shape[1])->value;
+  desc.smem_box_pixel =
+      Downcast<IntImm>(dstRegion_->region[ndim - 2]->extent)->value;
+  desc.smem_box_channel =
+      Downcast<IntImm>(dstRegion_->region[ndim - 1]->extent)->value;
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
   desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
@@ -2199,7 +2207,8 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
     ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
-    if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(dst_))) {
+    if (StructuralEqual()(shared_layout,
+                          makeQuarterBankSwizzleLayout(dst_))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
     } else if (StructuralEqual()(shared_layout,
                                  makeHalfBankSwizzleLayout(dst_))) {
@@ -2271,7 +2280,22 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   args.push_back(create_desc);
   args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
   auto dst_buffer = T.buffer_remap.count(dst_) ? T.buffer_remap[dst_] : dst_;
-  auto shared_addr = dst_buffer.access_ptr(2);
+  // Compute flat element offset from dstRegion_ mins and buffer strides.
+  // For a plain 2D buffer this is 0; for a versioned 3D buffer this
+  // resolves to stage_idx * pixel * channel — no special-casing needed.
+  PrimExpr flat_offset = IntImm(DataType::Int(32), 0);
+  {
+    PrimExpr stride = IntImm(DataType::Int(32), 1);
+    for (int i = static_cast<int>(ndim) - 1; i >= 0; --i) {
+      flat_offset = flat_offset + dstRegion_->region[i]->min * stride;
+      stride = stride * dst_->shape[i];
+    }
+  }
+  PrimExpr tile_elems =
+      IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel);
+  PrimExpr shared_addr = dst_buffer.access_ptr(
+      /*access_mask=*/2, /*dtype=*/DataType::Handle(), /*content_lanes=*/1,
+      /*offset=*/flat_offset, /*extent=*/tile_elems);
   args.push_back(shared_addr);
   for (auto coord : global_coords)
     args.push_back(coord);

@@ -196,29 +196,41 @@ private:
       Array<BufferRegion> stmt_reads = access[0];
       Array<BufferRegion> stmt_writes = access[1];
 
-      // Supplement with tile-op region analysis.
+      // Supplement with tile-op analysis.
       // GetBlockAccessRegion misses buffer references that are encoded as
-      // tl.tileop.region Call args (they contain BufferLoad but not
-      // BufferStore, so writes are invisible).  Parse tile-op regions to
-      // recover the missing read/write information.
+      // tl.tileop.region Call args or as plain BufferLoad args whose
+      // semantic role (read vs write) is only known to the tile-op.
+      // Use AddReadsWritesForTileOp (which knows every tile-op type) as
+      // the primary supplement, and fall back to RegionOp scanning for
+      // any ops not yet handled there.
       if (auto *eval = stmt.as<EvaluateNode>()) {
         if (auto *call = eval->value.as<CallNode>()) {
           auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
           if (tile_op.defined()) {
-            // Scan all region args of the tile op.
-            for (const auto &arg : call->args) {
-              if (auto *region_call = arg.as<CallNode>()) {
-                if (region_call->op.same_as(RegionOp::Get())) {
-                  auto region_op =
-                      ParseOperator(ffi::GetRef<Call>(region_call));
-                  if (auto *rn = region_op.as<RegionOpNode>()) {
-                    int mask = rn->GetAccessMask();
-                    auto br = BufferRegion(rn->GetBuffer(), rn->GetRanges());
-                    if (mask & 1) { // read
-                      stmt_reads.push_back(br);
-                    }
-                    if (mask & 2) { // write
-                      stmt_writes.push_back(br);
+            Array<BufferRegion> op_reads, op_writes;
+            AddReadsWritesForTileOp(tile_op, &op_reads, &op_writes);
+            if (!op_reads.empty() || !op_writes.empty()) {
+              stmt_reads.insert(stmt_reads.end(), op_reads.begin(),
+                                op_reads.end());
+              stmt_writes.insert(stmt_writes.end(), op_writes.begin(),
+                                 op_writes.end());
+            } else {
+              // Fallback: scan RegionOp-encoded args.
+              for (const auto &arg : call->args) {
+                if (auto *region_call = arg.as<CallNode>()) {
+                  if (region_call->op.same_as(RegionOp::Get())) {
+                    auto region_op =
+                        ParseOperator(ffi::GetRef<Call>(region_call));
+                    if (auto *rn = region_op.as<RegionOpNode>()) {
+                      int mask = rn->GetAccessMask();
+                      auto br =
+                          BufferRegion(rn->GetBuffer(), rn->GetRanges());
+                      if (mask & 1) { // read
+                        stmt_reads.push_back(br);
+                      }
+                      if (mask & 2) { // write
+                        stmt_writes.push_back(br);
+                      }
                     }
                   }
                 }

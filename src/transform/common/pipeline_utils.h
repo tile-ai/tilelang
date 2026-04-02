@@ -168,6 +168,12 @@ inline void AddReadsWritesForTileOp(const TileOperator &tile_op,
     BufferRegion region = BufferRegion::FullRegion(finalize->reducer);
     add_reads({region});
     add_writes({region});
+    return;
+  }
+  if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+    add_reads({im2col->srcRegion_});
+    add_writes({im2col->dstRegion_});
+    return;
   }
 }
 
