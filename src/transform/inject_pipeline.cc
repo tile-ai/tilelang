@@ -1060,8 +1060,7 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   public:
     std::unordered_set<const BufferNode *> arrived_;
     void VisitExpr_(const CallNode *op) final {
-      if (op->op.same_as(builtin::ptx_arrive_barrier()) &&
-          op->args.size() >= 1) {
+      if (op->op.same_as(builtin::ptx_arrive_barrier()) && !op->args.empty()) {
         if (auto load = op->args[0].as<BufferLoadNode>()) {
           arrived_.insert(load->buffer.get());
         }
