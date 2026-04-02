@@ -874,9 +874,6 @@ public:
             if (!HasDependency(node_i, node_j))
               continue;
 
-            // LOG(INFO) << "[ScheduleRecursive] Conflict var detection between
-            // " << i << " and " << j;
-
             if (stage_map[node_j] == stage_map[node_i])
               continue;
 
@@ -897,16 +894,10 @@ public:
 
             for (int k = j; k < n; ++k) {
               auto node_k = seq_body->children[k].get();
-              auto task_k = static_cast<TaskNode *>(node_k);
               if (rem_stage_j != stage_map[node_k])
                 continue;
               if (HasDependency(node_i, node_k)) {
-                for (size_t id = 0; id < task_k->stmts.size(); ++id) {
-                  task_k->stmts[id] = Substitute(
-                      task_k->stmts[id],
-                      {{node_i_let_stmt->var, cloned_let_stmt->var}});
-                }
-                task_k->SubstituteVar(node_i_let_stmt->var,
+                node_k->SubstituteVar(node_i_let_stmt->var,
                                       cloned_let_stmt->var);
                 stage_map[node_k] = rem_stage_j;
               }
@@ -1446,6 +1437,16 @@ protected:
       // Sequential For -> ControlNode
       auto control_node = std::make_shared<ControlNode>();
       control_node->control = GetRef<For>(op);
+      control_node->task = std::make_shared<TaskNode>();
+      control_node->task->stmts.push_back(
+          For(op->loop_var, op->min, op->extent, op->kind, Evaluate(0),
+              op->thread_binding, op->annotations, op->step, op->span));
+      AnalyzeResourceUsage(Evaluate(op->min), control_node->task.get(), true);
+      AnalyzeResourceUsage(Evaluate(op->extent), control_node->task.get(),
+                           true);
+      if (op->step.defined())
+        AnalyzeResourceUsage(Evaluate(GetRef<PrimExpr>(op->step.get())),
+                             control_node->task.get(), true);
 
       // Process the loop body
       VisitStmt(op->body);
@@ -1460,8 +1461,13 @@ protected:
       auto task_node = std::make_shared<TaskNode>();
       task_node->stmts.push_back(GetRef<Stmt>(op));
 
-      // Analyze the loop body for resource usage
+      // Analyze the loop body for resource usage)
       AnalyzeResourceUsage(op->body, task_node.get());
+      AnalyzeResourceUsage(Evaluate(op->min), task_node.get(), true);
+      AnalyzeResourceUsage(Evaluate(op->extent), task_node.get(), true);
+      if (op->step.defined())
+        AnalyzeResourceUsage(Evaluate(GetRef<PrimExpr>(op->step.get())),
+                             task_node.get(), true);
 
       root_ = std::move(task_node);
     }
@@ -2001,8 +2007,6 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       final_body = RewriteAllocBuffers(final_body, buffer_infos);
     }
 
-    // LOG(INFO) << final_body << std::endl;
-
     final_body = ReNestLetStmts(final_body);
 
     // Create a new PrimFunc with the updated body
@@ -2120,7 +2124,33 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
       return nullptr;
     auto ctrl = static_cast<ControlNode *>(node);
     auto new_ctrl = std::make_shared<ControlNode>();
-    new_ctrl->control = ctrl->control;
+    // Apply var_remap to the For statement's min/extent/step so that renamed
+    // LetDecl variables are correctly referenced in the loop bounds.
+    if (!var_remap.empty()) {
+      For new_for = ctrl->control;
+      new_for.CopyOnWrite()->min = Substitute(ctrl->control->min, var_remap);
+      new_for.CopyOnWrite()->extent =
+          Substitute(ctrl->control->extent, var_remap);
+      if (ctrl->control->step.has_value()) {
+        new_for.CopyOnWrite()->step =
+            Substitute(ctrl->control->step.value(), var_remap);
+      }
+      new_ctrl->control = new_for;
+    } else {
+      new_ctrl->control = ctrl->control;
+    }
+    // Clone the task and apply var_remap so each warpgroup gets its own copy
+    // with correctly renamed LetDecl variables.
+    if (ctrl->task) {
+      auto cloned_task =
+          std::static_pointer_cast<TaskNode>(ctrl->task->Clone());
+      if (!var_remap.empty()) {
+        for (size_t i = 0; i < cloned_task->stmts.size(); ++i) {
+          cloned_task->stmts[i] = Substitute(cloned_task->stmts[i], var_remap);
+        }
+      }
+      new_ctrl->task = std::move(cloned_task);
+    }
     new_ctrl->SetPromote(ctrl->hasPromote());
     new_ctrl->child = CloneIRStructureWithWarpgroupFilter(
         ctrl->child.get(), warpgroup_id, var_remap);
@@ -2130,9 +2160,11 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
       return nullptr;
     auto wrapper = static_cast<WrapperNode *>(node);
     auto new_wrapper = std::make_shared<WrapperNode>();
-    // Keep the wrapper statement as-is (do NOT rename LetStmt wrappers here;
-    // only LetDecl TaskNodes get renamed).
-    new_wrapper->wrapper = wrapper->wrapper;
+    // Apply var_remap to the wrapper statement so that renamed LetDecl
+    // variables are correctly substituted in LetStmt values / AttrStmt values.
+    new_wrapper->wrapper = var_remap.empty()
+                               ? wrapper->wrapper
+                               : Substitute(wrapper->wrapper, var_remap);
     new_wrapper->child = CloneIRStructureWithWarpgroupFilter(
         wrapper->child.get(), warpgroup_id, var_remap);
     return new_wrapper;
@@ -2224,9 +2256,29 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
             collect(child.get());
           }
         } else if (node->IsControl()) {
-          collect(static_cast<const ControlNode *>(node)->child.get());
+          auto ctrl = static_cast<const ControlNode *>(node);
+          collect(ctrl->task.get());
+          collect(ctrl->child.get());
+          // Also collect variable references from the For loop bounds
+          // (min, extent, step) so their LetDecls are not removed.
+          VarRefCollector for_collector;
+          for_collector(ctrl->control->min);
+          for_collector(ctrl->control->extent);
+          if (ctrl->control->step.has_value()) {
+            for_collector(ctrl->control->step.value());
+          }
+          referenced_vars.insert(for_collector.vars.begin(),
+                                 for_collector.vars.end());
         } else if (node->IsWrapper()) {
-          collect(static_cast<const WrapperNode *>(node)->child.get());
+          auto wrapper = static_cast<const WrapperNode *>(node);
+          collect(wrapper->task.get());
+          collect(wrapper->child.get());
+          // Also collect variable references from the wrapper statement
+          // (LetStmt value / AttrStmt value) so their LetDecls are not removed.
+          VarRefCollector wrapper_collector;
+          wrapper_collector(wrapper->wrapper);
+          referenced_vars.insert(wrapper_collector.vars.begin(),
+                                 wrapper_collector.vars.end());
         } else if (node->IsScheduleUnit()) {
           auto unit = static_cast<const ScheduleUnit *>(node);
           collect(unit->child.get());
@@ -2295,6 +2347,7 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
       auto ctrl = static_cast<const ControlNode *>(node.get());
       auto new_ctrl = std::make_shared<ControlNode>();
       new_ctrl->control = ctrl->control;
+      new_ctrl->task = ctrl->task;
       new_ctrl->SetPromote(ctrl->hasPromote());
       new_ctrl->child = filter_tree(ctrl->child);
       if (!new_ctrl->child)
@@ -2304,6 +2357,7 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
       auto wrapper = static_cast<const WrapperNode *>(node.get());
       auto new_wrapper = std::make_shared<WrapperNode>();
       new_wrapper->wrapper = wrapper->wrapper;
+      new_wrapper->task = wrapper->task;
       new_wrapper->child = filter_tree(wrapper->child);
       return new_wrapper;
     } else if (node->IsScheduleUnit()) {
