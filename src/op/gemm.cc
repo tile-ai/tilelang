@@ -650,11 +650,13 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                            c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
     if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      auto layout = makeGemmVoltaABLayout(*as_const_int(a_->shape[dim_A - 2]),
-                                          *as_const_int(a_->shape[dim_A - 1]),
-                                          true, !transA_);
-      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
+      if (!T.layout_map.count(a_)) {
+        int dim_A = a_->shape.size();
+        auto layout = makeGemmVoltaABLayout(*as_const_int(a_->shape[dim_A - 2]),
+                                            *as_const_int(a_->shape[dim_A - 1]),
+                                            true, !transA_);
+        results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
+      }
     } else if (IsFragmentBuffer(a_)) {
       ICHECK(transA_ == false);
       auto fragment =
@@ -665,11 +667,13 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     }
 
     ICHECK(IsSharedBuffer(b_));
-    int dim_B = b_->shape.size();
-    auto layout = makeGemmVoltaABLayout(*as_const_int(b_->shape[dim_B - 2]),
-                                        *as_const_int(b_->shape[dim_B - 1]),
-                                        false, transB_);
-    results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
+    if (!T.layout_map.count(b_)) {
+      int dim_B = b_->shape.size();
+      auto layout = makeGemmVoltaABLayout(*as_const_int(b_->shape[dim_B - 2]),
+                                          *as_const_int(b_->shape[dim_B - 1]),
+                                          false, transB_);
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
+    }
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
              TargetIsSM120(T.target) ||
              (TargetIsSm100(T.target) && gemm_inst == GemmInst::kMMA)) {
@@ -681,12 +685,15 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     results.Set(c_, fragment->BindThreadRange(thread_range));
 
     if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      auto layout = makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                     a_->dtype.bits(), !transA_);
-      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
+      if (!T.layout_map.count(a_)) {
+        int dim_A = a_->shape.size();
+        const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+        const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+        auto layout =
+            makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                             a_->dtype.bits(), !transA_);
+        results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
+      }
     } else if (IsFragmentBuffer(a_)) {
       auto fragment = makeGemmFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
                                         a_->dtype.bits(), transA_);
@@ -695,12 +702,15 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       ICHECK(0);
     }
     if (IsSharedBuffer(b_)) {
-      int dim_B = b_->shape.size();
-      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      auto layout = makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                     b_->dtype.bits(), transB_);
-      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
+      if (!T.layout_map.count(b_)) {
+        int dim_B = b_->shape.size();
+        const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+        const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
+        auto layout =
+            makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                             b_->dtype.bits(), transB_);
+        results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
+      }
     } else if (IsFragmentBuffer(b_)) {
       auto fragment =
           makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
@@ -719,37 +729,45 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                             c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
     if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      const int64_t continuity =
-          transA_ ? 4 * mat_continuous / warp_m : mat_continuous;
-      auto ABLayout =
-          gemm_inst == GemmInst::kWGMMA
-              ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       a_->dtype.bits(), !transA_)
-              : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 a_->dtype.bits(), !transA_);
-      results.Set(a_, ExpandLayoutToMatchBuffer(ABLayout, a_));
+      // For MMA instructions, skip layout inference if the shared buffer
+      // already has a layout, to avoid conflicts when the same buffer is used
+      // by multiple gemm ops with different transpose semantics. WGMMA has
+      // strict shared memory layout requirements and must always set.
+      if (!(gemm_inst == GemmInst::kMMA && T.layout_map.count(a_))) {
+        int dim_A = a_->shape.size();
+        const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
+        const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
+        const int64_t continuity =
+            transA_ ? 4 * mat_continuous / warp_m : mat_continuous;
+        auto ABLayout =
+            gemm_inst == GemmInst::kWGMMA
+                ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
+                                         a_->dtype.bits(), !transA_)
+                : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   a_->dtype.bits(), !transA_);
+        results.Set(a_, ExpandLayoutToMatchBuffer(ABLayout, a_));
+      }
     } else {
       auto fragment = makeGemmFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
                                         a_->dtype.bits(), transA_);
       results.Set(a_, fragment->BindThreadRange(thread_range));
     }
     if (IsSharedBuffer(b_)) {
-      int dim_B = b_->shape.size();
-      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      const int64_t continuity =
-          transB_ ? mat_continuous : mat_continuous / warp_n;
+      if (!(gemm_inst == GemmInst::kMMA && T.layout_map.count(b_))) {
+        int dim_B = b_->shape.size();
+        const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
+        const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
+        const int64_t continuity =
+            transB_ ? mat_continuous : mat_continuous / warp_n;
 
-      auto ABLayout =
-          gemm_inst == GemmInst::kWGMMA
-              ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       b_->dtype.bits(), transB_)
-              : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 b_->dtype.bits(), transB_);
-      results.Set(b_, ExpandLayoutToMatchBuffer(ABLayout, b_));
+        auto ABLayout =
+            gemm_inst == GemmInst::kWGMMA
+                ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
+                                         b_->dtype.bits(), transB_)
+                : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   b_->dtype.bits(), transB_);
+        results.Set(b_, ExpandLayoutToMatchBuffer(ABLayout, b_));
+      }
     } else {
       auto fragment =
           makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);

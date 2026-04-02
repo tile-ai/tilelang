@@ -317,14 +317,26 @@ LayoutMap GemmPyNode::InferLayout(const LayoutInferArgs &T,
   LayoutMap results;
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.infer_layout")) {
-    results = Downcast<LayoutMap>(
+    auto raw_results = Downcast<LayoutMap>(
         (*f)(tvm::ffi::GetRef<GemmPy>(this), T.target, T.thread_bounds));
-    // Bind all fragment layouts with the provided thread range
-    for (auto kv : results) {
+    // For MMA instructions, skip shared buffer layouts that are already
+    // inferred by a prior operator to avoid layout conflicts when the same
+    // shared buffer is consumed by multiple gemm ops with different transpose
+    // semantics. WGMMA/TCGEN5MMA have strict shared memory layout requirements
+    // and must always set their layouts.
+    auto block_size = *as_const_int(T.thread_bounds->extent);
+    GemmInst gemm_inst = getGemmInst(block_size, T.target);
+    bool is_mma = (gemm_inst == GemmInst::kMMA);
+    for (auto kv : raw_results) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
+      if (is_mma && IsSharedBuffer(buf) && T.layout_map.count(buf)) {
+        continue;
+      }
       if (auto frag = layout.as<Fragment>()) {
         results.Set(buf, frag.value()->BindThreadRange(T.thread_bounds));
+      } else {
+        results.Set(buf, layout);
       }
     }
   } else {
