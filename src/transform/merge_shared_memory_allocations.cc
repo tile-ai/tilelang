@@ -282,6 +282,8 @@ public:
       VisitNewScope(op);
     } else if (op->attr_key == "kWarpSpecializationScope") {
       VisitWarpSpecializationBody(op->body);
+    } else if (op->attr_key == "kSharedMemoryLivenessBoundary") {
+      VisitNewScope(op);
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }

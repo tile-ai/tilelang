@@ -27,6 +27,8 @@ static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
+static constexpr const char *kSharedMemoryLivenessBoundary =
+    "kSharedMemoryLivenessBoundary";
 // Loop annotation key controlling whether PTX async-copy rewriting is enabled
 // in the annotated loop subtree. Value should be Bool (False/True).
 static constexpr const char *kLoopPreferAsync = "parallel_prefer_async";
