@@ -262,6 +262,15 @@ private:
         }
       }
     }
+    // Conv2D im2col always uses TMA on Hopper.
+    if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (IsGlobalBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
+        is_global_copy_pattern_ = true;
+        if (TargetIsHopper(target_)) {
+          is_tma_copy_ = true;
+        }
+      }
+    }
   }
 
   Optional<Buffer> TryGetBufFromAccessPtr(const PrimExpr &expr) const {

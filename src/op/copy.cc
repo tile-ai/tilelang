@@ -2315,11 +2315,18 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
         DataType::Handle(), mbarrier_expect_tx(), {mbar_handle, total_bytes}));
 
     if (ws_barrier) {
-      // WS-provided barrier: expect_tx + tma_load only (no arrive, no wait).
-      // The WS pass manages arrive and the consumer handles wait.
+      // External barrier (WS pass or InjectSoftwarePipeline).
+      // Build: expect_tx + tma_load [+ arrive if emit_arrive is set].
+      Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy_stmt};
+      if (auto emit_arrive_val = annotations_.Get("emit_arrive")) {
+        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
+          producer_seq.push_back(Evaluate(Call(
+              DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle})));
+        }
+      }
       Stmt producer =
           IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                     SeqStmt({barrier_before_tma_stmt, tma_copy_stmt}));
+                     SeqStmt(producer_seq));
       producer = AttrStmt(dst_buffer->data, "tl.tma_copy_write_buffer",
                           IntImm(DataType::Int(32), 1), producer);
       return producer;

@@ -688,19 +688,9 @@ private:
         rewritten_stmt = LetStmt(lw.var, substituted, rewritten_stmt);
       }
 
-      if (pipeline_num_stages && pipeline_num_stages.value()->value > 1) {
-        PrimExpr ns =
-            IntImm(DataType::Int(32), pipeline_num_stages.value()->value);
-        PrimExpr stage_expr =
-            analyzer_.Simplify(FloorMod(normalized_access_index, ns));
-        PrimExpr parity_expr =
-            analyzer_.Simplify(FloorMod(FloorDiv(normalized_access_index, ns),
-                                        IntImm(DataType::Int(32), 2)));
-        rewritten_stmt = AttrStmt(Integer(0), kPipelineMVBParityExpr,
-                                  parity_expr, rewritten_stmt);
-        rewritten_stmt = AttrStmt(Integer(0), kPipelineMVBStageExpr, stage_expr,
-                                  rewritten_stmt);
-      }
+      // kPipelineMVBStageExpr / kPipelineMVBParityExpr annotations are no
+      // longer emitted: pipeline barriers are created at final size by
+      // RewritePipelineTmaBarriers, so late MVB barrier expansion is not needed.
 
       new_blocks.push_back(std::move(rewritten_stmt));
     }
@@ -746,11 +736,8 @@ private:
     Stmt result = BlockRealize({}, Bool(true),
                                MakeBlock(new_loop, buffer_data_to_buffer_));
     if (pipeline_num_stages) {
-      if (pipeline_num_stages.value()->value > 1) {
-        result =
-            AttrStmt(Integer(0), kPipelineMVBContextNumStages,
-                     Downcast<PrimExpr>(pipeline_num_stages.value()), result);
-      }
+      // kPipelineMVBContextNumStages is no longer emitted: pipeline barriers
+      // are created at final size, so late MVB expansion is not needed.
       result =
           AttrStmt(Integer(0), kPipelineContextNumStages,
                    Downcast<PrimExpr>(pipeline_num_stages.value()), result);
@@ -824,6 +811,7 @@ public:
   PrimExpr VisitExpr_(const CallNode *op) final {
     static const Op &copy_op = Op::Get("tl.tileop.copy");
     static const Op &tma_copy_op = Op::Get("tl.tileop.tma_copy");
+    static const Op &im2col_op = Op::Get("tl.tileop.c2d_im2col");
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(copy_op)) {
       auto new_annotations = call->annotations;
@@ -833,6 +821,17 @@ public:
       new_annotations.Set("emit_arrive",
                           IntImm(DataType::Int(32), emit_arrive_ ? 1 : 0));
       return Call(call->dtype, tma_copy_op, call->args, new_annotations,
+                  call->span);
+    }
+    // Annotate c2d_im2col with pipeline barrier so its Lower() uses it
+    // instead of allocating a separate internal barrier.
+    if (call->op.same_as(im2col_op)) {
+      auto new_annotations = call->annotations;
+      new_annotations.Set("barrier",
+                          MakeBarrierRef(barrier_buf_, barrier_id_));
+      new_annotations.Set("emit_arrive",
+                          IntImm(DataType::Int(32), emit_arrive_ ? 1 : 0));
+      return Call(call->dtype, call->op, call->args, new_annotations,
                   call->span);
     }
     return call;
@@ -849,12 +848,11 @@ private:
  *        pipeline-level barrier management.
  *
  * For each TMA copy: convert tl.tileop.copy → tl.tileop.tma_copy with a
- * per-copy barrier slot and emit_arrive=1 so LowerTileOp emits arrive inside
+ * per-stage barrier slot and emit_arrive=1 so LowerTileOp emits arrive inside
  * the thread-0 guard.
  *
- * For the first consumer stage block: prepend mbarrier_wait_parity calls for
- * all TMA copy barriers (placeholder parity 0; MultiVersionBuffer rewrites it
- * later using kPipelineMVBParityExpr).
+ * For the first consumer stage block: prepend mbarrier_wait_parity with
+ * stage-indexed barrier reference and parity expression.
  *
  * \param original_order  In/out: blocks in original pipeline order.
  * \param pipeline_info   In/out: block → PipelineAnnotation mapping.
@@ -1226,10 +1224,17 @@ private:
       for (const auto &pair : pipeline_info) {
         max_stage = std::max(max_stage, pair.second.stage);
       }
+      // Use the actual pipeline depth (number of buffer copies) for barrier
+      // sizing, not the SW pipeline stage count (max_stage + 1).
+      Optional<Integer> pipelined_num_stages =
+          GetPipelineNumStages(op);
+      int pipeline_depth = pipelined_num_stages.defined()
+                               ? static_cast<int>(pipelined_num_stages.value()->value)
+                               : max_stage + 1;
       bool disable_tma = tvm::transform::PassContext::Current()
                              ->GetConfig<Bool>(kDisableTMALower, Bool(false))
                              .value();
-      if (max_stage > 0 && !disable_tma) {
+      if (max_stage > 0 && pipeline_depth > 1 && !disable_tma) {
         if (auto tma_copies_anno = op->annotations.Get(kPipelineTmaCopies)) {
           auto tma_copies = Downcast<Array<Integer>>(tma_copies_anno.value());
           if (tma_copies.size() == original_order.size()) {
@@ -1241,7 +1246,7 @@ private:
               pipeline_barrier_buf = RewritePipelineTmaBarriers(
                   original_order, pipeline_info, tma_copies,
                   buffer_data_to_buffer_, allocated_buffers_,
-                  block_local_allocs, op->loop_var, op->min, max_stage + 1);
+                  block_local_allocs, op->loop_var, op->min, pipeline_depth);
             }
           }
         }
