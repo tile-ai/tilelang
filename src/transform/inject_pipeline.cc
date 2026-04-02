@@ -1212,11 +1212,10 @@ private:
 
     // Step 3.5: Pipeline-level TMA barrier management.
     // When TMA copies are present (without warp specialization), rewrite
-    // them to use tl.tileop.tma_copy with per-copy barriers and insert
+    // them to use tl.tileop.tma_copy with shared pipeline barriers and insert
     // mbarrier_wait_parity before the first consumer stage.
-    // Only applies when num_stages > 1 (actual pipelining) — with num_stages=1
-    // there's no overlapping and EmitImpl won't emit kPipelineMVBStageExpr
-    // context needed by MultiVersionBuffer.
+    // Creates pipeline_mbar[pipeline_depth] at final size so LowerTileOp
+    // uses the provided barrier instead of allocating separate per-copy ones.
     Buffer pipeline_barrier_buf;
     int num_pipeline_tma_copies = 0;
     {
@@ -1226,15 +1225,19 @@ private:
       }
       // Use the actual pipeline depth (number of buffer copies) for barrier
       // sizing, not the SW pipeline stage count (max_stage + 1).
+      // Even for pipeline_depth=1 we create a shared barrier so that
+      // LowerTileOp uses it instead of allocating separate per-copy barriers.
       Optional<Integer> pipelined_num_stages =
           GetPipelineNumStages(op);
       int pipeline_depth = pipelined_num_stages.defined()
                                ? static_cast<int>(pipelined_num_stages.value()->value)
                                : max_stage + 1;
+      // Clamp to at least 1 so we always allocate at least one barrier slot.
+      pipeline_depth = std::max(pipeline_depth, 1);
       bool disable_tma = tvm::transform::PassContext::Current()
                              ->GetConfig<Bool>(kDisableTMALower, Bool(false))
                              .value();
-      if (max_stage > 0 && pipeline_depth > 1 && !disable_tma) {
+      if (max_stage > 0 && !disable_tma) {
         if (auto tma_copies_anno = op->annotations.Get(kPipelineTmaCopies)) {
           auto tma_copies = Downcast<Array<Integer>>(tma_copies_anno.value());
           if (tma_copies.size() == original_order.size()) {
