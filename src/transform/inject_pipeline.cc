@@ -830,8 +830,7 @@ public:
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(copy_op)) {
       auto new_annotations = call->annotations;
-      new_annotations.Set("barrier",
-                          MakeBarrierRef(barrier_buf_, barrier_id_));
+      new_annotations.Set("barrier", MakeBarrierRef(barrier_buf_, barrier_id_));
       new_annotations.Set("is_tma_copy", IntImm(DataType::Int(32), 1));
       new_annotations.Set("emit_arrive",
                           IntImm(DataType::Int(32), emit_arrive_ ? 1 : 0));
@@ -842,8 +841,7 @@ public:
     // instead of allocating a separate internal barrier.
     if (call->op.same_as(im2col_op)) {
       auto new_annotations = call->annotations;
-      new_annotations.Set("barrier",
-                          MakeBarrierRef(barrier_buf_, barrier_id_));
+      new_annotations.Set("barrier", MakeBarrierRef(barrier_buf_, barrier_id_));
       new_annotations.Set("emit_arrive",
                           IntImm(DataType::Int(32), emit_arrive_ ? 1 : 0));
       return Call(call->dtype, call->op, call->args, new_annotations,
@@ -857,6 +855,308 @@ private:
   PrimExpr barrier_id_;
   bool emit_arrive_;
 };
+
+// ---------------------------------------------------------------------------
+// ExpandPipelineBarriers — multi-version all barrier buffers for pipelining
+// ---------------------------------------------------------------------------
+
+/// Collect all shared.barrier Buffer objects referenced in a statement.
+class BarrierBufferCollector : public StmtExprVisitor {
+public:
+  static std::vector<Buffer>
+  Collect(const Array<Block> &blocks,
+          const Map<Var, Buffer> &buffer_data_to_buffer) {
+    BarrierBufferCollector c(buffer_data_to_buffer);
+    for (const auto &block : blocks) {
+      c(block->body);
+    }
+    return {c.barriers_.begin(), c.barriers_.end()};
+  }
+
+private:
+  explicit BarrierBufferCollector(const Map<Var, Buffer> &buf_map)
+      : buf_map_(buf_map) {}
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (op->buffer.scope() == "shared.barrier" ||
+        op->buffer.scope() == "shared.cluster_barrier") {
+      if (!seen_.count(op->buffer.get())) {
+        seen_.insert(op->buffer.get());
+        barriers_.push_back(op->buffer);
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    if (op->buffer.scope() == "shared.barrier" ||
+        op->buffer.scope() == "shared.cluster_barrier") {
+      if (!seen_.count(op->buffer.get())) {
+        seen_.insert(op->buffer.get());
+        barriers_.push_back(op->buffer);
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  // Also check barrier refs inside Call annotations (e.g., tma_copy barrier).
+  void VisitExpr_(const CallNode *op) final {
+    for (const auto &[key, val] : op->annotations) {
+      if (auto load = val.as<BufferLoadNode>()) {
+        if (load->buffer.scope() == "shared.barrier" ||
+            load->buffer.scope() == "shared.cluster_barrier") {
+          if (!seen_.count(load->buffer.get())) {
+            seen_.insert(load->buffer.get());
+            barriers_.push_back(load->buffer);
+          }
+        }
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  const Map<Var, Buffer> &buf_map_;
+  std::unordered_set<const BufferNode *> seen_;
+  std::vector<Buffer> barriers_;
+};
+
+/// Rewrite barrier references: expand indices and rewrite parity.
+class BarrierIndexRewriter : public StmtExprMutator {
+public:
+  BarrierIndexRewriter(
+      const std::unordered_map<const BufferNode *, Buffer> &old_to_new,
+      const std::unordered_map<const BufferNode *, PrimExpr> &old_shapes,
+      PrimExpr stage_expr, PrimExpr parity_cycle, Var loop_var,
+      PrimExpr loop_min)
+      : old_to_new_(old_to_new), old_shapes_(old_shapes),
+        stage_expr_(std::move(stage_expr)),
+        parity_cycle_(std::move(parity_cycle)), loop_var_(std::move(loop_var)),
+        loop_min_(std::move(loop_min)) {}
+
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    auto it = old_to_new_.find(load->buffer.get());
+    if (it != old_to_new_.end()) {
+      auto *n = load.CopyOnWrite();
+      PrimExpr old_size = old_shapes_.at(load->buffer.get());
+      n->buffer = it->second;
+      n->indices.Set(0, stage_expr_ * old_size + n->indices[0]);
+    }
+    return load;
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    auto it = old_to_new_.find(store->buffer.get());
+    if (it != old_to_new_.end()) {
+      auto *n = store.CopyOnWrite();
+      PrimExpr old_size = old_shapes_.at(store->buffer.get());
+      n->buffer = it->second;
+      n->indices.Set(0, stage_expr_ * old_size + n->indices[0]);
+    }
+    return store;
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+
+    // Rewrite barrier refs inside annotations (e.g., tma_copy "barrier").
+    bool anno_changed = false;
+    Map<String, ObjectRef> new_annos = call->annotations;
+    for (const auto &[key, val] : call->annotations) {
+      if (auto load = val.as<BufferLoadNode>()) {
+        auto it = old_to_new_.find(load->buffer.get());
+        if (it != old_to_new_.end()) {
+          PrimExpr old_size = old_shapes_.at(load->buffer.get());
+          auto new_load = BufferLoad(
+              it->second, {stage_expr_ * old_size + load->indices[0]});
+          new_annos.Set(key, new_load);
+          anno_changed = true;
+        }
+      }
+    }
+    if (anno_changed) {
+      call = Call(call->dtype, call->op, call->args, new_annos, call->span);
+    }
+
+    // Rewrite mbarrier_wait_parity parity argument.
+    if (call->op.same_as(mbarrier_wait_parity()) && call->args.size() >= 2) {
+      if (auto load = call->args[0].as<BufferLoadNode>()) {
+        // Check if the barrier ref (possibly already rewritten above)
+        // targets one of our expanded barriers.
+        const BufferNode *target = load->buffer.get();
+        bool is_expanded = false;
+        for (const auto &[old_buf, new_buf] : old_to_new_) {
+          if (new_buf.get() == target) {
+            is_expanded = true;
+            break;
+          }
+        }
+        if (is_expanded) {
+          // Compute initial-phase offset from the user's original parity.
+          arith::Analyzer analyzer;
+          PrimExpr user_parity = call->args[1];
+          PrimExpr user_parity_at_min = analyzer.Simplify(
+              tir::Substitute(user_parity, {{loop_var_, loop_min_}}));
+          // New parity = (iteration_block + offset) % 2
+          PrimExpr offset = IntImm(DataType::Int(32), 0);
+          if (auto *imm = user_parity_at_min.as<IntImmNode>()) {
+            offset = IntImm(DataType::Int(32), imm->value % 2);
+          }
+          PrimExpr new_parity = FloorMod(parity_cycle_ + offset, 2);
+          Array<PrimExpr> new_args = call->args;
+          new_args.Set(1, new_parity);
+          return Call(call->dtype, call->op, new_args, call->annotations,
+                      call->span);
+        }
+      }
+    }
+    return call;
+  }
+
+private:
+  const std::unordered_map<const BufferNode *, Buffer> &old_to_new_;
+  const std::unordered_map<const BufferNode *, PrimExpr> &old_shapes_;
+  PrimExpr stage_expr_;
+  PrimExpr parity_cycle_;
+  Var loop_var_;
+  PrimExpr loop_min_;
+};
+
+/// Expand all shared.barrier buffers in the pipeline body from [N] to
+/// [N * num_stages], rewrite barrier indices to include stage offset, and
+/// rewrite mbarrier_wait_parity parity expressions.
+///
+/// This is the unified barrier multi-versioning pass that replaces the
+/// late MVB(barrier_only=true) fixup in OptimizeForTarget.
+/// Returns a map of old→new barrier buffers for outer block alloc_buffers
+/// update.
+Map<Buffer, Buffer> ExpandPipelineBarriers(
+    Array<Block> &original_order, PipelineInfo &pipeline_info,
+    Map<Var, Buffer> &buffer_data_to_buffer,
+    std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>
+        &allocated_buffers,
+    Array<Buffer> &block_local_allocs, Array<Buffer> &pipeline_allocs,
+    Var loop_var, PrimExpr loop_min, int num_stages) {
+  if (num_stages <= 1)
+    return {};
+
+  // Only expand barriers that have explicit ptx_arrive_barrier calls in the
+  // loop body.  This distinguishes pipeline synchronization barriers (where
+  // arrive/wait are user-managed and need per-stage slots) from barriers
+  // whose arrival is managed internally by tile-ops (e.g., tcgen05 MMA
+  // arrive barriers) — those should NOT be pipeline-expanded.
+  // ISP-created pipeline_mbar is handled specially: it's always in
+  // block_local_allocs and was just created, so include it too.
+  std::unordered_set<const BufferNode *> local_barrier_set;
+  for (const Buffer &buf : block_local_allocs) {
+    if (buf.scope() == "shared.barrier" ||
+        buf.scope() == "shared.cluster_barrier")
+      local_barrier_set.insert(buf.get());
+  }
+
+  // Find barriers that have explicit ptx_arrive_barrier calls.
+  class ArriveBarrierDetector : public StmtExprVisitor {
+  public:
+    std::unordered_set<const BufferNode *> arrived_;
+    void VisitExpr_(const CallNode *op) final {
+      if (op->op.same_as(builtin::ptx_arrive_barrier()) &&
+          op->args.size() >= 1) {
+        if (auto load = op->args[0].as<BufferLoadNode>()) {
+          arrived_.insert(load->buffer.get());
+        }
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    }
+  };
+  ArriveBarrierDetector arrive_det;
+  for (const auto &block : original_order) {
+    arrive_det(block->body);
+  }
+
+  std::vector<Buffer> all_referenced =
+      BarrierBufferCollector::Collect(original_order, buffer_data_to_buffer);
+  std::vector<Buffer> barriers;
+  for (const Buffer &buf : all_referenced) {
+    // Include if: (a) it's an ISP-created local barrier, OR
+    //             (b) it has explicit ptx_arrive_barrier calls.
+    if (local_barrier_set.count(buf.get()) ||
+        arrive_det.arrived_.count(buf.get())) {
+      barriers.push_back(buf);
+    }
+  }
+  if (barriers.empty())
+    return {};
+
+  PrimExpr ns = IntImm(DataType::Int(32), num_stages);
+  PrimExpr stage_expr = FloorMod(loop_var - loop_min, ns);
+  PrimExpr parity_cycle = FloorMod(FloorDiv(loop_var - loop_min, ns), 2);
+
+  auto replace_in_array = [](Array<Buffer> &arr, const Buffer &old_buf,
+                             const Buffer &new_buf) {
+    for (size_t i = 0; i < arr.size(); ++i) {
+      if (arr[i].same_as(old_buf)) {
+        arr.Set(i, new_buf);
+      }
+    }
+  };
+
+  // Create expanded buffer for each barrier.
+  std::unordered_map<const BufferNode *, Buffer> old_to_new;
+  std::unordered_map<const BufferNode *, PrimExpr> old_shapes;
+  for (const Buffer &buf : barriers) {
+    old_shapes[buf.get()] = buf->shape[0];
+    ObjectPtr<BufferNode> new_node =
+        tvm::ffi::make_object<BufferNode>(*(buf.get()));
+    new_node->shape = {PrimExpr(num_stages) * buf->shape[0]};
+    Buffer new_buf(new_node);
+    old_to_new[buf.get()] = new_buf;
+
+    // Update all maps and alloc arrays.
+    buffer_data_to_buffer.Set(buf->data, new_buf);
+    allocated_buffers.erase(buf);
+    allocated_buffers.insert(new_buf);
+    replace_in_array(block_local_allocs, buf, new_buf);
+    replace_in_array(pipeline_allocs, buf, new_buf);
+  }
+
+  // Rewrite all blocks.
+  BarrierIndexRewriter rewriter(old_to_new, old_shapes, stage_expr,
+                                parity_cycle, loop_var, loop_min);
+  for (size_t i = 0; i < original_order.size(); ++i) {
+    Block old_block = original_order[i];
+    Stmt new_body = rewriter(old_block->body);
+    if (!new_body.same_as(old_block->body)) {
+      // Also rewrite alloc_buffers in the block (barriers may be allocated
+      // here).
+      Array<Buffer> new_allocs;
+      for (const Buffer &ab : old_block->alloc_buffers) {
+        auto it = old_to_new.find(ab.get());
+        new_allocs.push_back(it != old_to_new.end() ? it->second : ab);
+      }
+      Block new_block(old_block->iter_vars, old_block->reads, old_block->writes,
+                      old_block->name_hint, new_body, old_block->init,
+                      new_allocs, old_block->match_buffers,
+                      old_block->annotations);
+      PipelineAnnotation anno = pipeline_info.at(old_block);
+      pipeline_info.erase(old_block);
+      pipeline_info.emplace(new_block, anno);
+      original_order.Set(i, new_block);
+    }
+  }
+
+  // Return the old→new mapping for outer block alloc_buffers update.
+  Map<Buffer, Buffer> result;
+  for (const auto &[old_ptr, new_buf] : old_to_new) {
+    for (const Buffer &old_buf : barriers) {
+      if (old_buf.get() == old_ptr) {
+        result.Set(old_buf, new_buf);
+        break;
+      }
+    }
+  }
+  return result;
+}
 
 /*!
  * \brief Rewrite TMA-eligible copy blocks in the pipeline body for
@@ -894,19 +1194,13 @@ Buffer RewritePipelineTmaBarriers(
   if (num_tma == 0)
     return Buffer();
 
-  // Create pipeline barrier buffer at final expanded size: one slot per
-  // pipeline stage.  All TMA copies in a given iteration share the same
-  // slot (indexed by stage_expr).  expect_tx is additive, so multiple TMA
-  // copies accumulate their byte counts on the same barrier.  Only the
-  // last TMA copy emits arrive, so arrive_count = 1.
-  Buffer barrier_buf = CreateMBarrierBuffer("pipeline_mbar", num_stages);
+  // Create pipeline barrier buffer with a single slot.  The generic
+  // ExpandPipelineBarriers pass (called later) will expand it to
+  // num_stages slots along with all other barrier buffers.
+  Buffer barrier_buf = CreateMBarrierBuffer("pipeline_mbar", 1);
   buffer_data_to_buffer.Set(barrier_buf->data, barrier_buf);
   allocated_buffers.insert(barrier_buf);
   block_local_allocs.push_back(barrier_buf);
-
-  // Stage expression: maps loop iteration to barrier slot.
-  PrimExpr ns = IntImm(DataType::Int(32), num_stages);
-  PrimExpr stage_expr = FloorMod(loop_var - loop_min, ns);
 
   // Find the index of the last TMA copy for arrive emission.
   int last_tma_idx = -1;
@@ -915,15 +1209,17 @@ Buffer RewritePipelineTmaBarriers(
       last_tma_idx = static_cast<int>(i);
   }
 
-  // Phase 1: Rewrite TMA copy blocks — all share the same barrier slot
-  // indexed by stage_expr.  Only the last TMA copy emits arrive.
+  // Phase 1: Rewrite TMA copy blocks — all share barrier slot 0.
+  // ExpandPipelineBarriers (called later) will rewrite indices to be
+  // stage-dependent.  Only the last TMA copy emits arrive.
   for (size_t i = 0; i < original_order.size(); i++) {
     if (static_cast<int>(tma_copies[i]->value) == 0)
       continue;
 
     bool is_last = (static_cast<int>(i) == last_tma_idx);
     Block old_block = original_order[i];
-    CopyToTmaCopyRewriter rewriter(barrier_buf, /*barrier_id=*/stage_expr,
+    CopyToTmaCopyRewriter rewriter(barrier_buf,
+                                   /*barrier_id=*/IntImm(DataType::Int(32), 0),
                                    /*emit_arrive=*/is_last);
     Stmt new_body = rewriter(old_block->body);
 
@@ -950,12 +1246,13 @@ Buffer RewritePipelineTmaBarriers(
     if (stage == 0)
       continue; // still in producer stage
 
-    // Wait on the barrier slot for the current iteration.
+    // Wait on barrier slot 0 with single-slot parity.
+    // ExpandPipelineBarriers will rewrite index and parity for versioning.
     Array<Stmt> wait_stmts;
     {
-      PrimExpr barrier_ref = MakeBarrierRef(barrier_buf, stage_expr);
-      // Parity tracks reuse of the same physical barrier slot: it flips
-      // every num_stages iterations (each slot is reused every num_stages).
+      PrimExpr barrier_ref =
+          MakeBarrierRef(barrier_buf, IntImm(DataType::Int(32), 0));
+      PrimExpr ns = IntImm(DataType::Int(32), num_stages);
       PrimExpr parity = FloorMod(FloorDiv(loop_var - loop_min, ns), 2);
       wait_stmts.push_back(Evaluate(Call(
           DataType::Handle(), mbarrier_wait_parity(), {barrier_ref, parity})));
@@ -1242,11 +1539,11 @@ private:
       // sizing, not the SW pipeline stage count (max_stage + 1).
       // Even for pipeline_depth=1 we create a shared barrier so that
       // LowerTileOp uses it instead of allocating separate per-copy barriers.
-      Optional<Integer> pipelined_num_stages =
-          GetPipelineNumStages(op);
-      int pipeline_depth = pipelined_num_stages.defined()
-                               ? static_cast<int>(pipelined_num_stages.value()->value)
-                               : max_stage + 1;
+      Optional<Integer> pipelined_num_stages = GetPipelineNumStages(op);
+      int pipeline_depth =
+          pipelined_num_stages.defined()
+              ? static_cast<int>(pipelined_num_stages.value()->value)
+              : max_stage + 1;
       // Clamp to at least 1 so we always allocate at least one barrier slot.
       pipeline_depth = std::max(pipeline_depth, 1);
       bool disable_tma = tvm::transform::PassContext::Current()
@@ -1275,6 +1572,30 @@ private:
     // local_allocs contains buffers allocated in the pipeline block itself.
     // pipeline_allocs contains all buffers that need multi-versioning,
     // including buffers from outer blocks.
+    // Step 4.5: Expand all barrier buffers for pipelining.
+    // This handles both ISP-created pipeline_mbar AND user-written
+    // T.alloc_barrier, so that no late MVB(barrier_only) is needed.
+    // Must run BEFORE local_allocs is copied from block_local_allocs.
+    {
+      Optional<Integer> pipelined_ns = GetPipelineNumStages(op);
+      int barrier_depth = 1;
+      if (pipelined_ns.defined()) {
+        barrier_depth = static_cast<int>(pipelined_ns.value()->value);
+      } else if (op->annotations.count("num_stages")) {
+        barrier_depth = static_cast<int>(
+            Downcast<Integer>(op->annotations.Get("num_stages").value())
+                ->value);
+      }
+      Map<Buffer, Buffer> barrier_remap = ExpandPipelineBarriers(
+          original_order, pipeline_info, buffer_data_to_buffer_,
+          allocated_buffers_, block_local_allocs, pipeline_allocs, op->loop_var,
+          op->min, barrier_depth);
+      // Register expanded barriers for outer block alloc_buffers update.
+      for (const auto &[old_buf, new_buf] : barrier_remap) {
+        pending_buffer_remap_.Set(old_buf, new_buf);
+      }
+    }
+
     Array<Buffer> local_allocs = block_local_allocs;
     // Add nested block allocs to local_allocs
     for (size_t i = 0; i < pipeline_body_seq->seq.size(); i++) {
@@ -1296,9 +1617,11 @@ private:
     Stmt pipeline = rewriter.BuildPipeline();
     subtree_modified_ = true;
 
-    // Add barrier_init annotation for the pipeline barrier buffer so that
-    // LowerSharedBarrier emits ptx_init_barrier_thread_count for each slot.
-    if (pipeline_barrier_buf.defined()) {
+    // Update barrier_init annotations for expanded barrier buffers.
+    // For pipeline_mbar (ISP-created): add new entry with arrive_count=1 per
+    // slot. For user barriers (T.alloc_barrier): replicate existing arrive
+    // counts across the expanded slots.
+    {
       BlockRealize br = Downcast<BlockRealize>(pipeline);
       Block block = br->block;
       BlockNode *bn = block.CopyOnWrite();
@@ -1308,17 +1631,51 @@ private:
         barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
             bn->annotations.Get("barrier_init").value());
       }
-      Array<PrimExpr> arrive_counts;
-      // One barrier slot per pipeline stage, each with arrive_count = 1
-      // (single-thread TMA leader arrives per slot).
-      int num_barrier_slots = Downcast<IntImm>(pipeline_barrier_buf->shape[0])->value;
-      for (int s = 0; s < num_barrier_slots; ++s) {
-        arrive_counts.push_back(IntImm(DataType::Int(32), 1));
-      }
-      barrier_init_map.Set(pipeline_barrier_buf->data, arrive_counts);
-      bn->annotations.Set("barrier_init", barrier_init_map);
+      bool changed = false;
 
-      pipeline = BlockRealize(br->iter_values, br->predicate, block, br->span);
+      // Handle ISP-created pipeline barrier (needs new entry).
+      if (pipeline_barrier_buf.defined()) {
+        int num_slots = Downcast<IntImm>(pipeline_barrier_buf->shape[0])->value;
+        // After ExpandPipelineBarriers, pipeline_mbar has been expanded.
+        // Look up the expanded buffer via buffer_data_to_buffer_.
+        Buffer expanded_buf =
+            buffer_data_to_buffer_[pipeline_barrier_buf->data];
+        int expanded_slots = Downcast<IntImm>(expanded_buf->shape[0])->value;
+        Array<PrimExpr> counts;
+        for (int s = 0; s < expanded_slots; ++s) {
+          counts.push_back(IntImm(DataType::Int(32), 1));
+        }
+        barrier_init_map.Set(expanded_buf->data, counts);
+        changed = true;
+      }
+
+      // Replicate existing barrier_init entries for expanded barriers.
+      Map<Var, Array<PrimExpr>> updated_init;
+      for (const auto &[var, counts] : barrier_init_map) {
+        Buffer buf = buffer_data_to_buffer_[var];
+        int buf_size = Downcast<IntImm>(buf->shape[0])->value;
+        int orig_size = static_cast<int>(counts.size());
+        if (buf_size > orig_size && orig_size > 0 &&
+            buf_size % orig_size == 0) {
+          // Replicate pattern to match expanded size.
+          Array<PrimExpr> new_counts;
+          for (int v = 0; v < buf_size; v += orig_size) {
+            for (const auto &c : counts) {
+              new_counts.push_back(c);
+            }
+          }
+          updated_init.Set(var, new_counts);
+          changed = true;
+        } else {
+          updated_init.Set(var, counts);
+        }
+      }
+
+      if (changed) {
+        bn->annotations.Set("barrier_init", updated_init);
+        pipeline =
+            BlockRealize(br->iter_values, br->predicate, block, br->span);
+      }
     }
 
     // Store the buffer remapping for updating outer block alloc_buffers
@@ -1382,6 +1739,46 @@ private:
         allocs_changed = true;
       } else {
         new_alloc_buffers.push_back(buffer);
+      }
+    }
+
+    // Replicate barrier_init counts for any expanded barrier buffers.
+    if (allocs_changed && block->annotations.count("barrier_init")) {
+      Map<Var, Array<PrimExpr>> init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+          block->annotations.Get("barrier_init").value());
+      Map<Var, Array<PrimExpr>> new_init;
+      bool init_changed = false;
+      for (const auto &[var, counts] : init_map) {
+        // Find the buffer for this var — it may have been remapped.
+        Buffer buf;
+        for (const auto &ab : new_alloc_buffers) {
+          if (ab->data.same_as(var)) {
+            buf = ab;
+            break;
+          }
+        }
+        if (buf.defined()) {
+          int buf_size = Downcast<IntImm>(buf->shape[0])->value;
+          int orig_size = static_cast<int>(counts.size());
+          if (buf_size > orig_size && orig_size > 0 &&
+              buf_size % orig_size == 0) {
+            Array<PrimExpr> new_counts;
+            for (int v = 0; v < buf_size; v += orig_size) {
+              for (const auto &c : counts)
+                new_counts.push_back(c);
+            }
+            new_init.Set(var, new_counts);
+            init_changed = true;
+            continue;
+          }
+        }
+        new_init.Set(var, counts);
+      }
+      if (init_changed) {
+        BlockNode *bn = block.CopyOnWrite();
+        bn->annotations.Set("barrier_init", new_init);
+        bn->alloc_buffers = new_alloc_buffers;
+        allocs_changed = false; // already applied
       }
     }
 

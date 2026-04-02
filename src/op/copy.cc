@@ -2320,8 +2320,9 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
       Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy_stmt};
       if (auto emit_arrive_val = annotations_.Get("emit_arrive")) {
         if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
-          producer_seq.push_back(Evaluate(Call(
-              DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle})));
+          producer_seq.push_back(
+              Evaluate(Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
+                            {mbar_handle})));
         }
       }
       Stmt producer =

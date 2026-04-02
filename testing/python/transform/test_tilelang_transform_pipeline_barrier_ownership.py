@@ -58,13 +58,9 @@ def test_nonws_tma_gemm_num_stages_3_has_multislot_pipeline_barrier():
         },
     )
     src = kernel.get_kernel_source()
-    assert "pipeline_mbar_mem[3]" in src, (
-        "Expected pipeline_mbar_mem[3] for num_stages=3 non-WS TMA GEMM"
-    )
+    assert "pipeline_mbar_mem[3]" in src, "Expected pipeline_mbar_mem[3] for num_stages=3 non-WS TMA GEMM"
     # No fallback internal barriers
-    assert "mbarrier_1" not in src, (
-        "Should not have fallback mbarrier_1 when pipeline barrier is provided"
-    )
+    assert "mbarrier_1" not in src, "Should not have fallback mbarrier_1 when pipeline barrier is provided"
 
 
 @pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
@@ -101,17 +97,11 @@ def test_nonws_tma_gemm_num_stages_1_stays_single_slot():
     )
     src = kernel.get_kernel_source()
     # pipeline_mbar[1] is acceptable; multi-slot is not
-    assert "pipeline_mbar_mem[1]" in src, (
-        "Expected pipeline_mbar_mem[1] for num_stages=1"
-    )
+    assert "pipeline_mbar_mem[1]" in src, "Expected pipeline_mbar_mem[1] for num_stages=1"
     for n in [2, 3, 4, 5, 6]:
-        assert f"pipeline_mbar_mem[{n}]" not in src, (
-            f"num_stages=1 must not create multi-slot pipeline_mbar_mem[{n}]"
-        )
+        assert f"pipeline_mbar_mem[{n}]" not in src, f"num_stages=1 must not create multi-slot pipeline_mbar_mem[{n}]"
     # No fallback internal barriers
-    assert "mbarrier_1" not in src, (
-        "Should not have fallback mbarrier_1"
-    )
+    assert "mbarrier_1" not in src, "Should not have fallback mbarrier_1"
 
 
 @pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
@@ -156,15 +146,11 @@ def test_nonws_im2col_tma_num_stages_3_uses_pipeline_barrier():
         },
     )
     src = kernel.get_kernel_source()
-    assert f"pipeline_mbar_mem[{num_stages}]" in src, (
-        f"Expected pipeline_mbar_mem[{num_stages}] for non-WS im2col TMA pipeline"
-    )
+    assert f"pipeline_mbar_mem[{num_stages}]" in src, f"Expected pipeline_mbar_mem[{num_stages}] for non-WS im2col TMA pipeline"
     # tma_load_im2col must appear (im2col was lowered through TMA path)
     assert "tma_load_im2col" in src, "Expected tma_load_im2col in generated code"
     # No fallback internal barriers for im2col
-    assert "mbarrier_1" not in src, (
-        "Should not have fallback mbarrier_1 when im2col uses pipeline barrier"
-    )
+    assert "mbarrier_1" not in src, "Should not have fallback mbarrier_1 when im2col uses pipeline barrier"
 
 
 if __name__ == "__main__":
