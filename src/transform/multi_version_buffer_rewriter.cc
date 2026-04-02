@@ -223,8 +223,7 @@ private:
                         ParseOperator(ffi::GetRef<Call>(region_call));
                     if (auto *rn = region_op.as<RegionOpNode>()) {
                       int mask = rn->GetAccessMask();
-                      auto br =
-                          BufferRegion(rn->GetBuffer(), rn->GetRanges());
+                      auto br = BufferRegion(rn->GetBuffer(), rn->GetRanges());
                       if (mask & 1) { // read
                         stmt_reads.push_back(br);
                       }

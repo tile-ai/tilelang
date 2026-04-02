@@ -2207,8 +2207,7 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
     ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
-    if (StructuralEqual()(shared_layout,
-                          makeQuarterBankSwizzleLayout(dst_))) {
+    if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(dst_))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
     } else if (StructuralEqual()(shared_layout,
                                  makeHalfBankSwizzleLayout(dst_))) {
