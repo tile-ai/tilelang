@@ -1,4 +1,5 @@
 """GEMM implementation using AMD RDNA WMMA instructions (gfx11/gfx12)."""
+
 from __future__ import annotations
 
 from .gemm_base import GemmBase
