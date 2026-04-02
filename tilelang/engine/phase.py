@@ -193,7 +193,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
-
     # Visualize the layout
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations

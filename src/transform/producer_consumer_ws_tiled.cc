@@ -1292,6 +1292,14 @@ private:
         Call tile_call = Downcast<Call>(eval->value);
         auto tile_op = ParseOperator(tile_call);
         PrimExpr tma_call;
+        // For pure TMA, tell LowerTileOp to emit arrive inside the same
+        // tl_shuffle_elect block (via emit_arrive annotation), producing
+        // arrive_and_expect_tx instead of separate expect_tx + arrive.
+        // When merged barriers, only the last TMA copy should arrive.
+        bool emit_arrive_on_this =
+            !has_simt_producer && !has_cp_async_producer &&
+            (!can_merge_tma_barriers || tma_idx == last_tma_idx);
+
         if (tile_op.defined() && tile_op.as<CopyNode>()) {
           tma_call = RewriteCopyToTmaCopy(tile_call, barrier_buf, fwd_id);
         } else {
@@ -1299,18 +1307,13 @@ private:
           // barrier so Lower() uses the WS barrier instead of its own.
           tma_call = AnnotateTileOpBarrier(tile_call, barrier_buf, fwd_id);
         }
-        producer_stmts.push_back(Evaluate(tma_call));
-
-        if (!has_simt_producer && !has_cp_async_producer) {
-          // Pure TMA: single-thread arrive via shuffle elect.
-          // When merged, only arrive once after the last TMA copy.
-          if (!can_merge_tma_barriers || tma_idx == last_tma_idx) {
-            producer_stmts.push_back(IfThenElse(
-                Call(DataType::Bool(), tl_shuffle_elect(),
-                     {producer_extent}),
-                MakeArriveBarrier(barrier_buf, fwd_id)));
-          }
+        if (emit_arrive_on_this) {
+          auto call = Downcast<Call>(tma_call);
+          auto annos = call->annotations;
+          annos.Set("emit_arrive", IntImm(DataType::Int(32), 1));
+          tma_call = Call(call->dtype, call->op, call->args, annos, call->span);
         }
+        producer_stmts.push_back(Evaluate(tma_call));
         ++tma_idx;
       }
       // SIMT/cp.async producers are handled above (after first bp_wait).

@@ -199,10 +199,12 @@ def test_tiled_ws_swizzled_layout_allows_ws():
             B_shared = T.alloc_shared((block_K, block_N), "float16")
             C_local = T.alloc_fragment((block_M, block_N), "float32")
 
-            T.annotate_layout({
-                A_shared: make_swizzled_layout(A_shared),
-                B_shared: make_swizzled_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzled_layout(A_shared),
+                    B_shared: make_swizzled_layout(B_shared),
+                }
+            )
 
             T.clear(C_local)
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
@@ -259,7 +261,7 @@ def test_tiled_ws_incompatible_layout_blocks_ws():
 
             T.annotate_layout({x_shared: padded_layout})
 
-            for ko in T.Pipelined(1, num_stages=1):
+            for _ in T.Pipelined(1, num_stages=1):
                 T.copy(x[pid_m * block_m, 0], x_shared)
                 T.copy(x_shared, y[pid_m * block_m, 0])
 
