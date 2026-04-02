@@ -438,9 +438,19 @@ private:
     }
   }
 
-  PrimExpr CurrentVersionIndex() const { return version_index_; }
+  PrimExpr CurrentVersionIndex() const {
+    if (!explicit_version_index_stack_.empty()) {
+      return explicit_version_index_stack_.back();
+    }
+    return version_index_;
+  }
 
-  PrimExpr CurrentParityCycle() const { return parity_cycle_; }
+  PrimExpr CurrentParityCycle() const {
+    if (!explicit_parity_cycle_stack_.empty()) {
+      return explicit_parity_cycle_stack_.back();
+    }
+    return parity_cycle_;
+  }
 
   Stmt VisitStmt_(const BlockRealizeNode *op) final {
     BlockRealize block_realize =
@@ -510,10 +520,37 @@ private:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     stmt_stack_.push_back(op);
 
+    bool pushed_explicit_version = false;
+    bool pushed_explicit_parity = false;
+    if (op->attr_key == kPipelineMVBContextNumStages) {
+      if (const auto *imm = op->value.as<IntImmNode>()) {
+        int num_stages = static_cast<int>(imm->value);
+        EnsureVersionedBuffers(SelectVersionedBuffers(op->body, num_stages),
+                               num_stages);
+      }
+    } else if (op->attr_key == kPipelineMVBStageExpr) {
+      explicit_version_index_stack_.push_back(op->value);
+      pushed_explicit_version = true;
+    } else if (op->attr_key == kPipelineMVBParityExpr) {
+      explicit_parity_cycle_stack_.push_back(op->value);
+      pushed_explicit_parity = true;
+    }
+
     Stmt body = this->VisitStmt(op->body);
 
+    if (pushed_explicit_version) {
+      explicit_version_index_stack_.pop_back();
+    }
+    if (pushed_explicit_parity) {
+      explicit_parity_cycle_stack_.pop_back();
+    }
     stmt_stack_.pop_back();
 
+    if (op->attr_key == kPipelineMVBStageExpr ||
+        op->attr_key == kPipelineMVBParityExpr ||
+        op->attr_key == kPipelineMVBContextNumStages) {
+      return body;
+    }
     return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
   }
 
@@ -652,6 +689,12 @@ private:
           arith::Analyzer analyzer;
           PrimExpr init_orig = call->args[1];
           PrimExpr init_cycle = parity_cycle;
+          if (!explicit_parity_cycle_stack_.empty()) {
+            PrimExpr version_index = CurrentVersionIndex();
+            ICHECK(version_index.defined())
+                << "Explicit parity rewrite requires a version index";
+            init_cycle = version_index;
+          }
           if (pipeline_loop_var_.defined()) {
             auto subst = [&](const Var &v) -> Optional<PrimExpr> {
               if (v.same_as(pipeline_loop_var_))
@@ -721,6 +764,8 @@ private:
   // Track ancestor statements to query whether an LCA is inside the current
   // loop.
   std::vector<const StmtNode *> stmt_stack_;
+  std::vector<PrimExpr> explicit_version_index_stack_;
+  std::vector<PrimExpr> explicit_parity_cycle_stack_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Optional<Stmt>> buffer_lca_;
   Map<Buffer, Buffer> buffer_remap_;

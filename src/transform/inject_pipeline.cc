@@ -688,9 +688,21 @@ private:
         rewritten_stmt = LetStmt(lw.var, substituted, rewritten_stmt);
       }
 
-      // kPipelineMVBStageExpr / kPipelineMVBParityExpr annotations are no
-      // longer emitted: pipeline barriers are created at final size by
-      // RewritePipelineTmaBarriers, so late MVB barrier expansion is not needed.
+      // Emit stage/parity context for MultiVersionBuffer (still used by the
+      // full MVB call inside ProducerConsumerWarpSpecializedTiled).
+      if (pipeline_num_stages && pipeline_num_stages.value()->value > 1) {
+        PrimExpr ns =
+            IntImm(DataType::Int(32), pipeline_num_stages.value()->value);
+        PrimExpr stage_expr =
+            analyzer_.Simplify(FloorMod(normalized_access_index, ns));
+        PrimExpr parity_expr =
+            analyzer_.Simplify(FloorMod(FloorDiv(normalized_access_index, ns),
+                                        IntImm(DataType::Int(32), 2)));
+        rewritten_stmt = AttrStmt(Integer(0), kPipelineMVBParityExpr,
+                                  parity_expr, rewritten_stmt);
+        rewritten_stmt = AttrStmt(Integer(0), kPipelineMVBStageExpr, stage_expr,
+                                  rewritten_stmt);
+      }
 
       new_blocks.push_back(std::move(rewritten_stmt));
     }
@@ -736,8 +748,11 @@ private:
     Stmt result = BlockRealize({}, Bool(true),
                                MakeBlock(new_loop, buffer_data_to_buffer_));
     if (pipeline_num_stages) {
-      // kPipelineMVBContextNumStages is no longer emitted: pipeline barriers
-      // are created at final size, so late MVB expansion is not needed.
+      if (pipeline_num_stages.value()->value > 1) {
+        result =
+            AttrStmt(Integer(0), kPipelineMVBContextNumStages,
+                     Downcast<PrimExpr>(pipeline_num_stages.value()), result);
+      }
       result =
           AttrStmt(Integer(0), kPipelineContextNumStages,
                    Downcast<PrimExpr>(pipeline_num_stages.value()), result);
