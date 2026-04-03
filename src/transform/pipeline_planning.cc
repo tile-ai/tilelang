@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -299,22 +300,6 @@ private:
     return Optional<Buffer>();
   }
 
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == "tl.tma_copy_write_buffer") {
-      // TMA copy lowering annotates the producer with the shared buffer
-      // it writes to. Use this to detect TMA copy stages and track the
-      // written buffer for pipeline dependency analysis.
-      auto var = Downcast<Var>(op->node);
-      auto it = buffer_data_to_buffer_.find(var);
-      if (it != buffer_data_to_buffer_.end()) {
-        writes_.push_back(BufferRegion::FullRegion((*it).second));
-        is_global_copy_pattern_ = true;
-        is_tma_copy_ = true;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
   void VisitStmt_(const BufferStoreNode *op) final {
     Buffer store_buffer = op->buffer;
     Array<PrimExpr> indices = op->indices;
@@ -590,6 +575,19 @@ private:
     return info;
   }
 
+  bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
+    if (pinfo.is_tma_copy()) {
+      return false;
+    }
+    if (pinfo.has_cp_async_wait()) {
+      return false;
+    }
+    if (pinfo.has_cp_async_commit() && !pinfo.has_cp_async_call()) {
+      return false;
+    }
+    return pinfo.is_copy_stage() || pinfo.has_cp_async_call();
+  }
+
   PipelineStageInfo
   MakePipelineStageInfo(Stmt stmt, int idx,
                         AsyncDependencyChainBuilder &chain_builder) {
@@ -658,9 +656,13 @@ private:
         }
       }
       annotations.Set(tir::attr::software_pipeline_stage, stage_anno.value());
-      if (TargetHasAsyncCopy(target_) && use_async_copy_)
+      if (TargetHasAsyncCopy(target_) && use_async_copy_) {
+        // Legacy explicit stage/order annotations do not carry per-statement
+        // async producer metadata yet, so keep the previous stage-level
+        // behavior as a fallback for these loops.
         annotations.Set(tir::attr::software_pipeline_async_stages,
                         Array<Integer>{0});
+      }
       auto for_node = tvm::ffi::GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
@@ -1595,18 +1597,80 @@ private:
       annotations.Set(kPipelineTmaCopies, Array<Integer>(tma_copies));
     }
 
-    // Only mark stage 0 as async for cp.async copies. TMA copies use
-    // mbarrier synchronization and don't need async_commit/wait_queue.
-    bool has_tma_copy = false;
-    for (const auto &pinfo : pipeline_stage_infos) {
-      if (pinfo.is_tma_copy()) {
-        has_tma_copy = true;
-        break;
+    if (TargetHasAsyncCopy(target_) && use_async_copy_) {
+      std::vector<int> async_group_ids(pipeline_stage_infos.size(), -1);
+      int next_async_group_id = 0;
+
+      for (int scheduled_group_id : cp_async_group_schedule_order) {
+        const auto &group = cp_async_groups[scheduled_group_id];
+        bool emitted_group = false;
+        for (int stmt_idx : group.cp_async_stmt_indices) {
+          if (!IsAsyncProducerCandidate(pipeline_stage_infos[stmt_idx])) {
+            continue;
+          }
+          async_group_ids[stmt_idx] = next_async_group_id;
+          emitted_group = true;
+        }
+        if (emitted_group) {
+          ++next_async_group_id;
+        }
+      }
+
+      std::vector<int> stmt_indices_by_order(pipeline_stage_infos.size());
+      std::iota(stmt_indices_by_order.begin(), stmt_indices_by_order.end(), 0);
+      std::stable_sort(stmt_indices_by_order.begin(), stmt_indices_by_order.end(),
+                       [&](int lhs, int rhs) {
+                         if (pipeline_stage_infos[lhs].order !=
+                             pipeline_stage_infos[rhs].order) {
+                           return pipeline_stage_infos[lhs].order <
+                                  pipeline_stage_infos[rhs].order;
+                         }
+                         return lhs < rhs;
+                       });
+      std::map<std::pair<int, int>, int> implicit_group_ids;
+      for (int stmt_idx : stmt_indices_by_order) {
+        const auto &pinfo = pipeline_stage_infos[stmt_idx];
+        if (!IsAsyncProducerCandidate(pinfo) || async_group_ids[stmt_idx] != -1) {
+          continue;
+        }
+        auto key = std::make_pair(pinfo.stage, pinfo.last_use_stmt_index);
+        auto [it, inserted] =
+            implicit_group_ids.emplace(key, next_async_group_id);
+        if (inserted) {
+          ++next_async_group_id;
+        }
+        async_group_ids[stmt_idx] = it->second;
+      }
+
+      std::vector<Integer> async_producers;
+      std::vector<Integer> async_producer_groups;
+      async_producers.reserve(pipeline_stage_infos.size());
+      async_producer_groups.reserve(pipeline_stage_infos.size());
+      std::unordered_set<int> async_stage_ids;
+      for (size_t i = 0; i < pipeline_stage_infos.size(); ++i) {
+        bool is_async_producer = async_group_ids[i] != -1;
+        async_producers.push_back(Integer(is_async_producer ? 1 : 0));
+        async_producer_groups.push_back(Integer(async_group_ids[i]));
+        if (is_async_producer) {
+          async_stage_ids.insert(pipeline_stage_infos[i].stage);
+        }
+      }
+      annotations.Set(kPipelineAsyncProducers, Array<Integer>(async_producers));
+      annotations.Set(kPipelineAsyncProducerGroups,
+                      Array<Integer>(async_producer_groups));
+      if (!async_stage_ids.empty()) {
+        std::vector<int> sorted_async_stage_ids(async_stage_ids.begin(),
+                                                async_stage_ids.end());
+        std::sort(sorted_async_stage_ids.begin(), sorted_async_stage_ids.end());
+        std::vector<Integer> async_stages;
+        async_stages.reserve(sorted_async_stage_ids.size());
+        for (int stage_id : sorted_async_stage_ids) {
+          async_stages.push_back(Integer(stage_id));
+        }
+        annotations.Set(tir::attr::software_pipeline_async_stages,
+                        Array<Integer>(async_stages));
       }
     }
-    if (TargetHasAsyncCopy(target_) && use_async_copy_ && !has_tma_copy)
-      annotations.Set(tir::attr::software_pipeline_async_stages,
-                      Array<Integer>{0});
 
     // Reconstruct the loop body with the flattened SeqStmt so that
     // InjectSoftwarePipeline sees the correct number of pipeline stages.

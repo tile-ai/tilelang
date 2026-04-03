@@ -1909,11 +1909,6 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                                SeqStmt(producer_seq));
 
-    // Annotate the producer with the shared buffer it writes to.
-    // PipelinePlanning uses this to identify TMA copy stages.
-    producer = AttrStmt(shared_tensor->data, "tl.tma_copy_write_buffer",
-                        IntImm(DataType::Int(32), 1), producer);
-
     // tma_copy (from T.tma_copy()) is fire-and-forget: only emit the
     // producer (expect_tx + tma_load). The user manages synchronization
     // (arrive + wait) explicitly.
@@ -2047,7 +2042,6 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
 
   // For 1D TMA loads with inline mbarrier: emit expect_tx + tma_load
   // (inside thread-gated block), and wait_parity after (all threads).
-  // The producer is annotated with the shared buffer for pipeline detection.
   if (is_load && barrier_base_id >= 0) {
     Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
@@ -2074,10 +2068,6 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
 
     Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                                SeqStmt(producer_seq));
-
-    // Annotate the producer with the shared buffer it writes to.
-    producer = AttrStmt(shared_tensor->data, "tl.tma_copy_write_buffer",
-                        IntImm(DataType::Int(32), 1), producer);
 
     // tma_copy (from T.tma_copy()) is fire-and-forget: only emit the
     // producer (expect_tx + tma_load). The user manages synchronization
@@ -2328,8 +2318,6 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
       Stmt producer =
           IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                      SeqStmt(producer_seq));
-      producer = AttrStmt(dst_buffer->data, "tl.tma_copy_write_buffer",
-                          IntImm(DataType::Int(32), 1), producer);
       return producer;
     }
 
@@ -2340,11 +2328,6 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
     Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                                SeqStmt({barrier_before_tma_stmt, tma_copy_stmt,
                                         barrier_after_tma_stmt}));
-
-    // Annotate the producer with the shared buffer it writes to.
-    // PipelinePlanning uses this to identify TMA copy stages.
-    producer = AttrStmt(dst_buffer->data, "tl.tma_copy_write_buffer",
-                        IntImm(DataType::Int(32), 1), producer);
 
     // Emit producer + wait pair for pipeline/WS passes.
     Stmt wait_stmt = Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),

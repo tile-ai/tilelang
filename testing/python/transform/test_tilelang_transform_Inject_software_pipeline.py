@@ -53,6 +53,30 @@ def _count_attrs_and_calls(func):
     return attr_count, call_count
 
 
+def _collect_attr_values(func, attr_key):
+    values = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tir.AttrStmt) and str(node.attr_key) == attr_key:
+            value = node.value
+            if isinstance(value, tvm.tir.IntImm):
+                values.append(int(value.value))
+
+    post_order_visit(func.body, _visit)
+    return values
+
+
+def _collect_attr_value_nodes(func, attr_key):
+    values = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tir.AttrStmt) and str(node.attr_key) == attr_key:
+            values.append(node.value)
+
+    post_order_visit(func.body, _visit)
+    return values
+
+
 def test_trival_pipeline():
     @T.prim_func
     def before(A: T.Tensor((16, 1), T.float32), C: T.Tensor((16, 1), T.float32)):
@@ -124,6 +148,115 @@ def test_preserve_inline_cp_async_sync_in_pipeline_stage():
     # Inline sync calls should remain explicit in the rewritten pipeline.
     assert calls.get("tir.ptx_commit_group", 0) > 0
     assert calls.get("tir.ptx_wait_group", 0) > 0
+
+
+def test_async_pipeline_groups_multiple_copy_producers():
+    @T.prim_func
+    def before(
+        A: T.Tensor((16, 16), T.float32),
+        B: T.Tensor((16, 16), T.float32),
+        C: T.Tensor((16, 16), T.float32),
+    ):
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 0, 1],
+                    "software_pipeline_order": [0, 1, 2],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 1, 0],
+                    "software_pipeline_async_producer_groups": [0, 0, -1],
+                },
+            ):
+                with T.block("compute"):
+                    T.reads(A[tx, i], B[tx, i])
+                    T.writes(C[tx, i])
+                    A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                    B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                    with T.block("copy_a"):
+                        T.reads(A[tx, i])
+                        T.writes(A_shared[tx, 0])
+                        A_shared[tx, 0] = A[tx, i]
+                    with T.block("copy_b"):
+                        T.reads(B[tx, i])
+                        T.writes(B_shared[tx, 0])
+                        B_shared[tx, 0] = B[tx, i]
+                    with T.block("consume"):
+                        T.reads(A_shared[tx, 0], B_shared[tx, 0])
+                        T.writes(C[tx, i])
+                        C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    mod = tl.transform.Simplify()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.Simplify()(mod)
+
+    attrs, calls = _count_attrs_and_calls(mod["main"])
+    assert attrs.get("async_scope", 0) > 0
+    assert attrs.get("async_commit_queue_scope", 0) > 0
+    assert attrs.get("async_wait_queue_scope", 0) > 0
+    assert all(
+        isinstance(value, tvm.tir.IntImm)
+        for value in _collect_attr_value_nodes(mod["main"], "async_wait_inflight_count")
+    )
+    assert 1 in _collect_attr_values(mod["main"], "async_wait_inflight_count")
+    assert calls.get("tir.ptx_commit_group", 0) == 0
+    assert calls.get("tir.ptx_wait_group", 0) == 0
+
+
+def test_async_pipeline_only_wraps_producer_statements_from_explicit_group_annotations():
+    @T.prim_func
+    def before(
+        A: T.Tensor((16, 16), T.float32),
+        B: T.Tensor((16, 16), T.float32),
+        C: T.Tensor((16, 16), T.float32),
+    ):
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 0, 0, 1],
+                    "software_pipeline_order": [0, 1, 2, 3],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [0, 1, 1, 0],
+                    "software_pipeline_async_producer_groups": [-1, 0, 0, -1],
+                },
+            ):
+                with T.block("compute"):
+                    T.reads(A[tx, i], B[tx, i])
+                    T.writes(C[tx, i])
+                    A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                    B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                    with T.block("fill"):
+                        T.reads()
+                        T.writes(A_shared[tx, 0])
+                        A_shared[tx, 0] = T.float32(0)
+                    with T.block("copy_a"):
+                        T.reads(A[tx, i])
+                        T.writes(A_shared[tx, 0])
+                        A_shared[tx, 0] = A[tx, i]
+                    with T.block("copy_b"):
+                        T.reads(B[tx, i])
+                        T.writes(B_shared[tx, 0])
+                        B_shared[tx, 0] = B[tx, i]
+                    with T.block("consume"):
+                        T.reads(A_shared[tx, 0], B_shared[tx, 0])
+                        T.writes(C[tx, i])
+                        C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    mod = tl.transform.Simplify()(mod)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.Simplify()(mod)
+
+    attrs, _ = _count_attrs_and_calls(mod["main"])
+    # Two producer statements are replicated into prologue / steady / epilogue.
+    assert attrs.get("async_scope", 0) == 6
+    assert attrs.get("async_commit_queue_scope", 0) == 3
 
 
 if __name__ == "__main__":

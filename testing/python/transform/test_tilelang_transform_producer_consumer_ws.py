@@ -170,7 +170,6 @@ def test_producer_consumer_ws_preserves_guarded_forward_wait():
                 i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
 
                 if i_s >= 0:
-                    T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1)
                     if tx == 0:
                         T.call_intrin(
                             "handle",
@@ -234,7 +233,6 @@ def test_producer_consumer_ws_preserves_guarded_producer_backpressure_wait():
                 i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
 
                 if i_s >= 0:
-                    T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1)
                     if tx == 0:
                         T.call_intrin(
                             "handle",
@@ -301,7 +299,6 @@ def test_producer_consumer_ws_uses_consumer_guard_for_backpressure_protocol():
                 i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
 
                 if i_s >= 0:
-                    T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1)
                     if tx == 0:
                         T.call_intrin(
                             "handle",
@@ -368,22 +365,21 @@ def test_producer_consumer_ws_finds_pipeline_loop_under_if_wrapper():
 
             if bx < 1:
                 for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
-                    with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
-                        if tx == 0:
-                            T.call_intrin(
-                                "handle",
-                                tir.op.Op.get("tl.mbarrier_expect_tx"),
-                                mbarrier[k % 2],
-                                4096,
-                            )
-                        if tx == 0:
-                            T.tma_load(
-                                T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                                mbarrier[k % 2],
-                                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
-                                k * 32,
-                                by * 64,
-                            )
+                    if tx == 0:
+                        T.call_intrin(
+                            "handle",
+                            tir.op.Op.get("tl.mbarrier_expect_tx"),
+                            mbarrier[k % 2],
+                            4096,
+                        )
+                    if tx == 0:
+                        T.tma_load(
+                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                            mbarrier[k % 2],
+                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
+                            k * 32,
+                            by * 64,
+                        )
                     T.call_intrin(
                         "handle",
                         tir.op.Op.get("tl.mbarrier_wait_parity"),
@@ -422,22 +418,21 @@ def test_producer_consumer_ws_moves_preloop_tma_prefix_inside_wrapped_ws_split()
             mbarrier = T.alloc_barrier([1, 1, 1])
 
             if bx < 1:
-                with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
-                    if tx == 0:
-                        T.call_intrin(
-                            "handle",
-                            tir.op.Op.get("tl.mbarrier_expect_tx"),
-                            mbarrier[0],
-                            4096,
-                        )
-                    if tx == 0:
-                        T.tma_load(
-                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                            mbarrier[0],
-                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 2),
-                            0,
-                            by * 64,
-                        )
+                if tx == 0:
+                    T.call_intrin(
+                        "handle",
+                        tir.op.Op.get("tl.mbarrier_expect_tx"),
+                        mbarrier[0],
+                        4096,
+                    )
+                if tx == 0:
+                    T.tma_load(
+                        T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                        mbarrier[0],
+                        T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 2),
+                        0,
+                        by * 64,
+                    )
                 T.call_intrin(
                     "handle",
                     tir.op.Op.get("tl.mbarrier_wait_parity"),
@@ -446,22 +441,21 @@ def test_producer_consumer_ws_moves_preloop_tma_prefix_inside_wrapped_ws_split()
                 )
 
                 for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
-                    with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
-                        if tx == 0:
-                            T.call_intrin(
-                                "handle",
-                                tir.op.Op.get("tl.mbarrier_expect_tx"),
-                                mbarrier[k % 2 + 1],
-                                4096,
-                            )
-                        if tx == 0:
-                            T.tma_load(
-                                T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                                mbarrier[k % 2 + 1],
-                                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
-                                k * 32,
-                                by * 64,
-                            )
+                    if tx == 0:
+                        T.call_intrin(
+                            "handle",
+                            tir.op.Op.get("tl.mbarrier_expect_tx"),
+                            mbarrier[k % 2 + 1],
+                            4096,
+                        )
+                    if tx == 0:
+                        T.tma_load(
+                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
+                            mbarrier[k % 2 + 1],
+                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
+                            k * 32,
+                            by * 64,
+                        )
                     T.call_intrin(
                         "handle",
                         tir.op.Op.get("tl.mbarrier_wait_parity"),

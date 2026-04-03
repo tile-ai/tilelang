@@ -244,6 +244,7 @@ def run_regression_perf():
     out_dtype, accum_dtype = "float32", "float32"
     in_dtype = determine_fp8_type()
     kernel_e4m3 = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    print(kernel_e4m3.get_kernel_source())
     profiler_e4m3 = kernel_e4m3.get_profiler(tilelang.TensorSupplyType.Integer)
     if torch.version.hip is None:
         latency_e4m3 = profiler_e4m3.do_bench(backend="cupti")
@@ -253,4 +254,7 @@ def run_regression_perf():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    tilelang.disable_cache()
+    latency = run_regression_perf()
+    print(f"latency is {latency} ms")

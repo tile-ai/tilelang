@@ -47,6 +47,12 @@ static constexpr const char *kPipelineMVBParityExpr =
 /*! Per-statement TMA copy flag (1 = TMA eligible, 0 = not). */
 static constexpr const char *kPipelineTmaCopies =
     "software_pipeline_tma_copies";
+/*! Per-statement async producer flag (1 = async copy producer, 0 = not). */
+static constexpr const char *kPipelineAsyncProducers =
+    "software_pipeline_async_producers";
+/*! Per-statement async producer group id (-1 = not an async producer). */
+static constexpr const char *kPipelineAsyncProducerGroups =
+    "software_pipeline_async_producer_groups";
 
 // ---------------------------------------------------------------------------
 // GetPipelineNumStages

@@ -8,6 +8,8 @@
 #include <tvm/tir/transform.h>
 
 #include <functional>
+#include <map>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -15,7 +17,6 @@
 #include "../op/region.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
-#include "common/tma_copy_utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
 #include "tir/transforms/ir_utils.h"
@@ -182,6 +183,8 @@ Block MakeBlock(const Stmt &body,
 struct PipelineAnnotation {
   int stage;
   int order;
+  bool async{false};
+  int async_group_id{-1};
 };
 
 using PipelineInfo = std::unordered_map<Block, PipelineAnnotation,
@@ -190,6 +193,52 @@ using PipelineInfo = std::unordered_map<Block, PipelineAnnotation,
 struct BufferAccessInfo {
   int def = -1; // the defining stage of the buffer
   int use = -1; // the last using stage of the buffer
+};
+
+bool ContainsExplicitAsyncIntrinsics(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+    if (found) {
+      return;
+    }
+    if (const auto *attr = obj.as<AttrStmtNode>()) {
+      if (attr->attr_key == tir::attr::async_scope ||
+          attr->attr_key == tir::attr::async_commit_queue_scope ||
+          attr->attr_key == tir::attr::async_wait_queue_scope ||
+          attr->attr_key == tir::attr::async_wait_inflight_count) {
+        found = true;
+        return;
+      }
+    }
+    const auto *call = obj.as<CallNode>();
+    if (!call) {
+      return;
+    }
+    if (call->op.same_as(builtin::ptx_cp_async()) ||
+        call->op.same_as(tl::ptx_cp_async()) ||
+        call->op.same_as(builtin::ptx_commit_group()) ||
+        call->op.same_as(builtin::ptx_wait_group())) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+class SimtProducerAnnotator : public StmtExprMutator {
+public:
+  static Stmt Annotate(const Stmt &stmt) {
+    SimtProducerAnnotator annotator;
+    return annotator.VisitStmt(stmt);
+  }
+
+private:
+  Stmt VisitStmt_(const ForNode *op) final {
+    Stmt body = VisitStmt(op->body);
+    auto annotations = op->annotations;
+    annotations.Set(attr::kParallelAsyncWithoutAsyncCommitWait, Bool(true));
+    return For(op->loop_var, op->min, op->extent, op->kind, body,
+               op->thread_binding, annotations, op->step, op->span);
+  }
 };
 
 /*!
@@ -590,6 +639,255 @@ private:
     return Buffer(new_buffer);
   }
 
+  struct AsyncStateGlobal {
+    std::unordered_set<const BufferNode *> dst_buffers;
+    Optional<PrimExpr> producer_head{PrimExpr(-1)};
+
+    bool writes(const Buffer &buffer) const {
+      return dst_buffers.count(buffer.get()) > 0;
+    }
+  };
+
+  struct AsyncStateLocal {
+    struct {
+      int insert_before{-1};
+      PrimExpr wait_count{nullptr};
+
+      bool valid() const { return wait_count.defined(); }
+    } pending_wait;
+
+    std::unordered_set<const BufferNode *> seen;
+    Optional<PrimExpr> producer_head;
+    Optional<PrimExpr> predicate;
+    std::vector<std::vector<size_t>> commit_groups;
+    std::unordered_map<int, int> annotated_group_to_commit_group;
+    bool consumed{false};
+  };
+
+  struct RewrittenStmtInfo {
+    int stage;
+    PrimExpr predicate;
+    Array<BufferRegion> reads;
+    Array<BufferRegion> writes;
+    PrimExpr access_index;
+    bool is_async;
+    Stmt stmt;
+  };
+
+  struct FinalStmtInfo {
+    int stage;
+    PrimExpr access_index;
+    PrimExpr predicate;
+    Stmt stmt;
+  };
+
+  Stmt WrapLoopDependentWrappers(Stmt stmt,
+                                 const PrimExpr &normalized_access_index) const {
+    for (auto it = loop_var_if_wrappers_.rbegin();
+         it != loop_var_if_wrappers_.rend(); ++it) {
+      const auto &iw = *it;
+      PrimExpr substituted_condition =
+          Substitute(iw.condition,
+                     {{pipeline_loop_->loop_var, normalized_access_index}});
+      stmt = IfThenElse(substituted_condition, stmt, Stmt(), iw.span);
+    }
+    for (auto it = loop_var_let_wrappers_.rbegin();
+         it != loop_var_let_wrappers_.rend(); ++it) {
+      const auto &lw = *it;
+      PrimExpr substituted = Substitute(
+          lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
+      stmt = LetStmt(lw.var, substituted, stmt);
+    }
+    return stmt;
+  }
+
+  Stmt WrapPipelineStageContext(Stmt stmt,
+                                const PrimExpr &normalized_access_index,
+                                const Optional<Integer> &pipeline_num_stages) {
+    if (!(pipeline_num_stages && pipeline_num_stages.value()->value > 1)) {
+      return stmt;
+    }
+    PrimExpr ns = IntImm(DataType::Int(32), pipeline_num_stages.value()->value);
+    PrimExpr stage_expr =
+        analyzer_.Simplify(FloorMod(normalized_access_index, ns));
+    PrimExpr parity_expr = analyzer_.Simplify(
+        FloorMod(FloorDiv(normalized_access_index, ns),
+                 IntImm(DataType::Int(32), 2)));
+    stmt = AttrStmt(Integer(0), kPipelineMVBParityExpr, parity_expr, stmt);
+    stmt = AttrStmt(Integer(0), kPipelineMVBStageExpr, stage_expr, stmt);
+    return stmt;
+  }
+
+  void PopulateWaitCounts(
+      const std::vector<RewrittenStmtInfo> &new_stmts,
+      arith::Analyzer *ana_normalized,
+      const std::unordered_map<const BufferNode *, int> &buffer_to_commit_group,
+      std::map<int, AsyncStateLocal> *async_states_local) {
+    for (size_t i = 0; i < new_stmts.size(); ++i) {
+      if (new_stmts[i].is_async) {
+        for (const BufferRegion &write_region : new_stmts[i].writes) {
+          (*async_states_local)[new_stmts[i].stage].seen.insert(
+              write_region->buffer.get());
+        }
+      }
+
+      int producer_stage_idx = -1;
+      for (const BufferRegion &read_region : new_stmts[i].reads) {
+        for (const auto &kv : async_states_) {
+          if (kv.first <= new_stmts[i].stage &&
+              kv.second.writes(read_region->buffer)) {
+            ICHECK(producer_stage_idx == -1 || producer_stage_idx == kv.first)
+                << "A dependency on multiple async stages is not supported";
+            producer_stage_idx = kv.first;
+          }
+        }
+      }
+
+      if (producer_stage_idx == -1) {
+        continue;
+      }
+
+      auto &dep_local_state = (*async_states_local)[producer_stage_idx];
+      int num_commit_group = dep_local_state.commit_groups.size();
+      std::vector<Optional<PrimExpr>> producer_head_per_commit;
+
+      if (num_commit_group == 0) {
+        ICHECK(!dep_local_state.producer_head);
+        producer_head_per_commit.push_back(
+            async_states_[producer_stage_idx].producer_head);
+      } else {
+        ICHECK(dep_local_state.producer_head);
+        std::vector<bool> need_wait_count(num_commit_group, true);
+        for (const BufferRegion &read_region : new_stmts[i].reads) {
+          if (!async_states_[producer_stage_idx].writes(read_region->buffer)) {
+            continue;
+          }
+          auto commit_group_id =
+              buffer_to_commit_group.at(read_region->buffer.get());
+          if (!need_wait_count[commit_group_id]) {
+            continue;
+          }
+          if (!dep_local_state.seen.count(read_region->buffer.get())) {
+            producer_head_per_commit.push_back(
+                dep_local_state.producer_head.value() - 1);
+          } else {
+            producer_head_per_commit.push_back(
+                dep_local_state.producer_head.value());
+          }
+          need_wait_count[commit_group_id] = false;
+        }
+      }
+
+      PrimExpr wait_count = [&]() {
+        PrimExpr sum = PrimExpr(0);
+        for (const Optional<PrimExpr> &producer_head : producer_head_per_commit) {
+          if (producer_head &&
+              ana_normalized->CanProve(producer_head.value() >= 0)) {
+            sum += analyzer_.Simplify(producer_head.value() -
+                                      new_stmts[i].access_index);
+          } else {
+            return PrimExpr(0);
+          }
+        }
+        return sum;
+      }();
+
+      auto &pending_wait = dep_local_state.pending_wait;
+      if (!pending_wait.valid()) {
+        pending_wait = {static_cast<int>(i), wait_count};
+      } else if (analyzer_.CanProve(wait_count < pending_wait.wait_count)) {
+        pending_wait = {pending_wait.insert_before, wait_count};
+      }
+    }
+  }
+
+  std::vector<FinalStmtInfo> CompletePipelineLoopStatements(
+      const std::vector<RewrittenStmtInfo> &stmts,
+      const std::map<int, AsyncStateLocal> &async_states_local,
+      arith::Analyzer *ana_normalized) const {
+    std::vector<FinalStmtInfo> new_stmts;
+    new_stmts.reserve(stmts.size());
+    for (const auto &stmt : stmts) {
+      new_stmts.push_back(
+          {stmt.stage, stmt.access_index, stmt.predicate, stmt.stmt});
+    }
+
+    std::vector<int> commit_group_tags(new_stmts.size(), -1);
+    std::unordered_map<int, int> commit_group_tag_to_stage;
+    int next_commit_group_tag = 0;
+    std::map<int, std::vector<Stmt>> waits_before_stmt;
+    auto make_wait_stmt = [](int stage_id, PrimExpr wait_count, Stmt body) {
+      auto zero = make_zero(DataType::Int(32));
+      return AttrStmt(zero, tir::attr::async_wait_queue_scope, stage_id,
+                      AttrStmt(zero, tir::attr::async_wait_inflight_count,
+                               wait_count, body));
+    };
+
+    for (const auto &[stage_id, state] : async_states_local) {
+      if (!state.commit_groups.empty()) {
+        for (const auto &group_stmt_indices : state.commit_groups) {
+          int commit_group_tag = next_commit_group_tag++;
+          commit_group_tag_to_stage.emplace(commit_group_tag, stage_id);
+          for (size_t stmt_idx : group_stmt_indices) {
+            ICHECK(stmt_idx < new_stmts.size());
+            commit_group_tags[stmt_idx] = commit_group_tag;
+          }
+        }
+      }
+
+      if (state.pending_wait.valid()) {
+        PrimExpr wait_count =
+            ana_normalized->Simplify(state.pending_wait.wait_count);
+        if (state.predicate && !ana_normalized->CanProve(state.predicate.value())) {
+          PrimExpr predicate = ana_normalized->Simplify(state.predicate.value());
+          if (is_zero(predicate)) {
+            continue;
+          }
+          waits_before_stmt[state.pending_wait.insert_before].push_back(
+              IfThenElse(predicate,
+                         make_wait_stmt(stage_id, wait_count, Evaluate(0)),
+                         Evaluate(0)));
+        } else {
+          new_stmts[state.pending_wait.insert_before].stmt = make_wait_stmt(
+              stage_id, wait_count, new_stmts[state.pending_wait.insert_before].stmt);
+        }
+      }
+    }
+
+    std::vector<FinalStmtInfo> result;
+    for (size_t i = 0; i < new_stmts.size();) {
+      if (auto it = waits_before_stmt.find(i); it != waits_before_stmt.end()) {
+        for (const Stmt &wait_stmt : it->second) {
+          result.push_back(
+              {new_stmts[i].stage, new_stmts[i].access_index, new_stmts[i].predicate, wait_stmt});
+        }
+      }
+
+      if (commit_group_tags[i] == -1) {
+        result.push_back(new_stmts[i]);
+        ++i;
+        continue;
+      }
+
+      int commit_group_tag = commit_group_tags[i];
+      int stage_id = commit_group_tag_to_stage.at(commit_group_tag);
+      Array<Stmt> group_stmts;
+      PrimExpr access_index = new_stmts[i].access_index;
+      PrimExpr predicate = new_stmts[i].predicate;
+      for (; i < new_stmts.size() && commit_group_tags[i] == commit_group_tag;
+           ++i) {
+        group_stmts.push_back(new_stmts[i].stmt);
+      }
+      Stmt group_body =
+          group_stmts.size() == 1 ? group_stmts[0] : SeqStmt(group_stmts);
+      auto commit_queue_scope =
+          AttrStmt(make_zero(DataType::Int(32)),
+                   tir::attr::async_commit_queue_scope, stage_id, group_body);
+      result.push_back({stage_id, access_index, predicate, commit_queue_scope});
+    }
+    return result;
+  }
+
   /*!
    * \brief Emit the pipeline loop in the given range.
    * \param start The start of the range
@@ -628,10 +926,19 @@ private:
           new With<arith::ConstraintContext>(&analyzer_, loop_iter < end));
     }
 
-    std::vector<Stmt> new_blocks;
+    arith::Analyzer ana_normalized;
+    if (!is_unit_loop) {
+      ana_normalized.Bind(Downcast<Var>(new_loop_var),
+                          Range(pipeline_loop_->min, extent));
+    }
+
+    std::vector<RewrittenStmtInfo> new_stmts;
+    std::map<int, AsyncStateLocal> async_states_local;
+    std::unordered_map<const BufferNode *, int> buffer_to_commit_group;
 
     for (const Block &block : ordered_stmts_) {
-      int stage = pipeline_info_.at(block).stage;
+      const auto &pipeline_anno = pipeline_info_.at(block);
+      int stage = pipeline_anno.stage;
       PrimExpr inbound = Bool(true);
       PrimExpr skewed_loop_var = new_loop_var - stage;
       if (need_bound_check)
@@ -660,56 +967,81 @@ private:
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
 
       Stmt rewritten_stmt = BlockRealize({}, inbound, new_block);
+      rewritten_stmt =
+          WrapLoopDependentWrappers(std::move(rewritten_stmt),
+                                    normalized_access_index);
+      rewritten_stmt = WrapPipelineStageContext(std::move(rewritten_stmt),
+                                                normalized_access_index,
+                                                pipeline_num_stages);
 
-      // Re-attach loop-dependent If/Let wrappers outside the block realize so
-      // their bindings also scope the block metadata (reads/writes/predicate).
-      // The original structure is:
-      //   LetStmt(...):
-      //     LetStmt(...):
-      //       IfThenElse(cond):
-      //         block
-      // Rebuild it from the inside out. We place If wrappers first and Let
-      // wrappers last so loop-dependent Let bindings remain visible to both
-      // the block body and the lifted If conditions.
-      for (auto it = loop_var_if_wrappers_.rbegin();
-           it != loop_var_if_wrappers_.rend(); ++it) {
-        const auto &iw = *it;
-        PrimExpr substituted_condition =
-            Substitute(iw.condition,
-                       {{pipeline_loop_->loop_var, normalized_access_index}});
+      bool is_async = pipeline_anno.async;
+      if (is_async) {
+        auto &local_state = async_states_local[stage];
+        int commit_group_id = -1;
+        if (pipeline_anno.async_group_id >= 0) {
+          auto it = local_state.annotated_group_to_commit_group.find(
+              pipeline_anno.async_group_id);
+          if (it == local_state.annotated_group_to_commit_group.end()) {
+            commit_group_id = local_state.commit_groups.size();
+            local_state.commit_groups.push_back({new_stmts.size()});
+            local_state.annotated_group_to_commit_group.emplace(
+                pipeline_anno.async_group_id, commit_group_id);
+          } else {
+            commit_group_id = it->second;
+            local_state.commit_groups[commit_group_id].push_back(new_stmts.size());
+          }
+        } else if (local_state.commit_groups.empty() || local_state.consumed) {
+          commit_group_id = local_state.commit_groups.size();
+          local_state.commit_groups.push_back({new_stmts.size()});
+        } else {
+          commit_group_id = local_state.commit_groups.size() - 1;
+          local_state.commit_groups.back().push_back(new_stmts.size());
+        }
+
+        for (const BufferRegion &write_region : new_block->writes) {
+          async_states_[stage].dst_buffers.insert(write_region->buffer.get());
+          buffer_to_commit_group[write_region->buffer.get()] = commit_group_id;
+        }
+        local_state.producer_head = normalized_access_index;
+        if (!local_state.predicate ||
+            ana_normalized.CanProve(local_state.predicate.value())) {
+          local_state.predicate = inbound;
+        } else {
+          local_state.predicate = ana_normalized.Simplify(
+              local_state.predicate.value() & inbound);
+        }
+        rewritten_stmt = SimtProducerAnnotator::Annotate(rewritten_stmt);
         rewritten_stmt =
-            IfThenElse(substituted_condition, rewritten_stmt, Stmt(), iw.span);
-      }
-      for (auto it = loop_var_let_wrappers_.rbegin();
-           it != loop_var_let_wrappers_.rend(); ++it) {
-        const auto &lw = *it;
-        PrimExpr substituted = Substitute(
-            lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
-        rewritten_stmt = LetStmt(lw.var, substituted, rewritten_stmt);
+            AttrStmt(make_zero(DataType::Int(32)), tir::attr::async_scope, 1,
+                     rewritten_stmt);
       }
 
-      // Emit stage/parity context for MultiVersionBuffer (still used by the
-      // full MVB call inside ProducerConsumerWarpSpecializedTiled).
-      if (pipeline_num_stages && pipeline_num_stages.value()->value > 1) {
-        PrimExpr ns =
-            IntImm(DataType::Int(32), pipeline_num_stages.value()->value);
-        PrimExpr stage_expr =
-            analyzer_.Simplify(FloorMod(normalized_access_index, ns));
-        PrimExpr parity_expr =
-            analyzer_.Simplify(FloorMod(FloorDiv(normalized_access_index, ns),
-                                        IntImm(DataType::Int(32), 2)));
-        rewritten_stmt = AttrStmt(Integer(0), kPipelineMVBParityExpr,
-                                  parity_expr, rewritten_stmt);
-        rewritten_stmt = AttrStmt(Integer(0), kPipelineMVBStageExpr, stage_expr,
-                                  rewritten_stmt);
-      }
+      new_stmts.push_back({stage,
+                           inbound,
+                           new_block->reads,
+                           new_block->writes,
+                           normalized_access_index,
+                           is_async,
+                           rewritten_stmt});
 
-      new_blocks.push_back(std::move(rewritten_stmt));
+      for (const BufferRegion &read_region : new_block->reads) {
+        for (const auto &kv : async_states_) {
+          if (kv.first <= stage && kv.second.writes(read_region->buffer)) {
+            async_states_local[kv.first].consumed = true;
+          }
+        }
+      }
     }
 
+    PopulateWaitCounts(new_stmts, &ana_normalized, buffer_to_commit_group,
+                       &async_states_local);
+    std::vector<FinalStmtInfo> final_stmts =
+        CompletePipelineLoopStatements(new_stmts, async_states_local,
+                                       &ana_normalized);
+
     Array<Stmt> stmts;
-    for (const auto &stmt : new_blocks) {
-      stmts.push_back(stmt);
+    for (const auto &stmt_info : final_stmts) {
+      stmts.push_back(stmt_info.stmt);
     }
 
     Stmt new_loop{nullptr};
@@ -731,6 +1063,8 @@ private:
         if (kv.first != tir::attr::software_pipeline_stage &&
             kv.first != tir::attr::software_pipeline_order &&
             kv.first != tir::attr::software_pipeline_async_stages &&
+            kv.first != kPipelineAsyncProducers &&
+            kv.first != kPipelineAsyncProducerGroups &&
             kv.first != kPipelineTmaCopies && kv.first != "num_stages") {
           preserved_annotations.Set(key, kv.second);
         }
@@ -771,6 +1105,7 @@ private:
   Array<Block> ordered_stmts_;
   std::vector<LetWrapper> loop_var_let_wrappers_;
   std::vector<IfWrapper> loop_var_if_wrappers_;
+  std::map<int, AsyncStateGlobal> async_states_;
 };
 
 /*!
@@ -1512,10 +1847,55 @@ private:
         << ", but pipeline annotation is " << pipeline_orders
         << " with different size";
 
+    std::unordered_set<int> pipeline_async_stages;
+    if (auto async_annot =
+            op->annotations.Get(tir::attr::software_pipeline_async_stages)) {
+      for (const Integer &stage :
+           Downcast<Array<Integer>>(async_annot.value())) {
+        pipeline_async_stages.insert(static_cast<int>(stage->value));
+      }
+    }
+    Optional<Array<Integer>> pipeline_async_producers;
+    if (auto async_producers_anno = op->annotations.Get(kPipelineAsyncProducers)) {
+      auto async_flags = Downcast<Array<Integer>>(async_producers_anno.value());
+      CHECK_EQ(async_flags.size(), original_order.size())
+          << "PrimFunc " << global_symbol_ << " has original order "
+          << original_order.Map(
+                 [](const auto &block) { return block->name_hint; })
+          << ", but async producer annotation is " << async_flags
+          << " with different size";
+      pipeline_async_producers = async_flags;
+    }
+    Optional<Array<Integer>> pipeline_async_producer_groups;
+    if (auto async_groups_anno =
+            op->annotations.Get(kPipelineAsyncProducerGroups)) {
+      auto async_group_ids = Downcast<Array<Integer>>(async_groups_anno.value());
+      CHECK_EQ(async_group_ids.size(), original_order.size())
+          << "PrimFunc " << global_symbol_ << " has original order "
+          << original_order.Map(
+                 [](const auto &block) { return block->name_hint; })
+          << ", but async producer group annotation is " << async_group_ids
+          << " with different size";
+      pipeline_async_producer_groups = async_group_ids;
+    }
+
     for (size_t i = 0; i < pipeline_stages.size(); i++) {
       int stage = static_cast<int>(pipeline_stages[i]->value);
+      bool is_async_candidate =
+          pipeline_async_producers
+              ? (pipeline_async_producers.value()[i]->value != 0)
+              : (pipeline_async_stages.count(stage) > 0);
+      bool is_async =
+          is_async_candidate &&
+          !ContainsExplicitAsyncIntrinsics(original_order[i]->body);
       PipelineAnnotation stage_order{
-          stage, /*order=*/static_cast<int>(pipeline_orders[i]->value)};
+          stage,
+          /*order=*/static_cast<int>(pipeline_orders[i]->value),
+          /*async=*/is_async,
+          /*async_group_id=*/
+          pipeline_async_producer_groups
+              ? static_cast<int>(pipeline_async_producer_groups.value()[i]->value)
+              : -1};
       pipeline_info.emplace(original_order[i], stage_order);
     }
 
@@ -1922,7 +2302,6 @@ tir::transform::Pass InjectSoftwarePipeline() {
     auto *fptr = f.CopyOnWrite();
     fptr->body = software_pipeline::PipelineInjector::Inject(f);
     fptr->body = ConvertSSA(std::move(fptr->body));
-    fptr->body = StripTmaCopyWriteBufferAttr(std::move(fptr->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectSoftwarePipeline", {});

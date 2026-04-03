@@ -5,9 +5,8 @@
  * Works on the inline barrier IR emitted by lowering passes such as
  * LowerBulkCopy / LowerPTXAsyncCopy:
  *   SeqStmt({
- *     AttrStmt("tl.tma_copy_write_buffer", buf, 1,
- *       IfThenElse(threadIdx.x == 0,
- *         SeqStmt({arrive_expect_tx(mbar, bytes), tma_load(...)}))),
+ *     IfThenElse(threadIdx.x == 0,
+ *       SeqStmt({arrive_expect_tx(mbar, bytes), tma_load(...)})),
  *     mbarrier_wait_parity(mbar, parity)
  *   })
  *
@@ -22,7 +21,6 @@
 
 #include "../op/utils.h"
 #include "common/mbarrier.h"
-#include "common/tma_copy_utils.h"
 #include "warp_specialized_rewriter.h"
 
 #include <algorithm>
@@ -551,9 +549,8 @@ static bool IsTrivialNoOpStmt(const Stmt &stmt) {
  *
  * Recognized patterns:
  *
- *  Pattern 1: AttrStmt("tl.tma_copy_write_buffer", ...) + mbarrier_wait_parity
- *  Pattern 2: IfThenElse containing tma_load + mbarrier_wait_parity
- *  Pattern 3: one or more cp_async-only stmts + commit_group + wait_group(0)
+ *  Pattern 1: IfThenElse containing tma_load + mbarrier_wait_parity
+ *  Pattern 2: one or more cp_async-only stmts + commit_group + wait_group(0)
  *
  * Everything else is classified as a compute statement.
  */
@@ -568,13 +565,12 @@ public:
       if (i + 1 < flat_stmts.size() &&
           IsMbarrierWaitParity(flat_stmts[i + 1])) {
         Optional<Var> write_buffer_data =
-            ExtractTmaCopyWriteBufferData(flat_stmts[i]);
-        // Check Pattern 1/2: TMA producer + wait pair, optionally wrapped in a
-        // simple guard/Block/Let/Attr shell. Recover the written shared buffer
-        // when the tl.tma_copy_write_buffer annotation survives under wrappers.
+            ExtractTmaLoadWriteBufferData(flat_stmts[i]);
+        // Check Pattern 1: TMA producer + wait pair, optionally wrapped in a
+        // simple guard/Block/Let/Attr shell.
         if (write_buffer_data.defined() || ContainsTmaLoad(flat_stmts[i])) {
           blocks.push_back({AsyncProducerKind::kTma,
-                            StripTmaCopyWriteBufferAttr(flat_stmts[i]),
+                            flat_stmts[i],
                             Optional<Stmt>(flat_stmts[i + 1]),
                             write_buffer_data});
           i += 2;
@@ -646,41 +642,50 @@ private:
     return nullptr;
   }
 
-  static Optional<Var> ExtractTmaCopyWriteBufferData(const Stmt &stmt) {
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (attr->attr_key == "tl.tma_copy_write_buffer") {
-        const auto *v = attr->node.as<VarNode>();
-        ICHECK(v);
-        return GetRef<Var>(v);
-      }
-      return ExtractTmaCopyWriteBufferData(attr->body);
+  static Optional<Var> ExtractTmaWriteBufferDataFromCall(const CallNode *call) {
+    if (call->op.same_as(tma_load_im2col())) {
+      ICHECK_GE(call->args.size(), 3);
+      return AccessPtrBufferVar(call->args[2]);
     }
-    if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
-      if (!if_stmt->else_case.defined() ||
-          IsTrivialNoOpStmt(if_stmt->else_case.value())) {
-        return ExtractTmaCopyWriteBufferData(if_stmt->then_case);
-      }
+    if (!call->op.same_as(tma_load())) {
       return Optional<Var>();
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return ExtractTmaCopyWriteBufferData(let->body);
+    ICHECK(!call->args.empty());
+    bool is_1d_tma_load = true;
+    if (const auto *arg0 = call->args[0].as<CallNode>()) {
+      is_1d_tma_load = !arg0->op.same_as(create_tma_descriptor()) &&
+                       !arg0->op.same_as(create_tma_im2col_descriptor());
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.size() == 1) {
-        return ExtractTmaCopyWriteBufferData(seq->seq[0]);
+    int dst_arg_index = is_1d_tma_load ? 0 : 2;
+    ICHECK_LT(dst_arg_index, static_cast<int>(call->args.size()));
+    return AccessPtrBufferVar(call->args[dst_arg_index]);
+  }
+
+  static Optional<Var> ExtractTmaLoadWriteBufferData(const Stmt &stmt) {
+    Optional<Var> found = std::nullopt;
+    bool multiple = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (multiple) {
+        return;
       }
+      const auto *call = node.as<CallNode>();
+      if (!call) {
+        return;
+      }
+      Optional<Var> current = ExtractTmaWriteBufferDataFromCall(call);
+      if (!current.defined()) {
+        return;
+      }
+      if (!found.defined()) {
+        found = current;
+      } else if (found.value().get() != current.value().get()) {
+        multiple = true;
+      }
+    });
+    if (multiple) {
       return Optional<Var>();
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      return ExtractTmaCopyWriteBufferData(block->body);
-    }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        return ExtractTmaCopyWriteBufferData(realize->block->body);
-      }
-      return Optional<Var>();
-    }
-    return Optional<Var>();
+    return found;
   }
 
   static bool IsMbarrierWaitParity(const Stmt &stmt) {
@@ -2631,12 +2636,6 @@ private:
       if (!inner.has_value()) {
         return std::nullopt;
       }
-      if (attr->attr_key == "tl.tma_copy_write_buffer") {
-        return TmaProducerWaitPair{AttrStmt(attr->node, attr->attr_key,
-                                            attr->value, inner->producer_stmt,
-                                            attr->span),
-                                   inner->wait_stmt};
-      }
       return TmaProducerWaitPair{
           AttrStmt(attr->node, attr->attr_key, attr->value,
                    inner->producer_stmt, attr->span),
@@ -2695,12 +2694,6 @@ private:
     bool has_wait = false;
     bool has_disallowed = false;
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (const auto *attr = node.as<AttrStmtNode>()) {
-        if (attr->attr_key == "tl.tma_copy_write_buffer") {
-          has_prefix_ops = true;
-        }
-        return;
-      }
       const auto *call = node.as<CallNode>();
       if (call == nullptr) {
         return;
@@ -3373,8 +3366,7 @@ private:
                                        parent_->pure_tma_preloop_fwd_cursor_++);
             Stmt producer_stmt = parent_->MergeAdjacentEquivalentIfs(
                 parent_->RewriteTmaStmtBarrierIdPreserveProtocol(
-                    StripTmaCopyWriteBufferAttr(pair->producer_stmt),
-                    barrier_id));
+                    pair->producer_stmt, barrier_id));
             Stmt wait_stmt =
                 parent_->RewriteWaitBarrier(pair->wait_stmt, barrier_id);
             new_seq.push_back(producer_stmt);
@@ -3393,7 +3385,7 @@ private:
                                        parent_->pure_tma_preloop_fwd_cursor_++);
             Stmt producer_stmt = parent_->MergeAdjacentEquivalentIfs(
                 parent_->RewriteTmaStmtBarrierIdPreserveProtocol(
-                    StripTmaCopyWriteBufferAttr(op->seq[i]), barrier_id));
+                    op->seq[i], barrier_id));
             Stmt wait_stmt =
                 parent_->RewriteWaitBarrier(op->seq[i + 1], barrier_id);
             new_seq.push_back(producer_stmt);
@@ -3613,8 +3605,7 @@ private:
         }
 
         if (flat_tma_wait_for_start[i] >= 0) {
-          Stmt producer_prefix_stmt =
-              StripTmaCopyWriteBufferAttr(rewritten_producer_prefix[i].value());
+          Stmt producer_prefix_stmt = rewritten_producer_prefix[i].value();
           Stmt consumer_wait_stmt = rewritten_consumer_wait[i].value();
           if (remap_pure_tma_barriers_) {
             ICHECK_GE(pure_tma_preloop_fwd_base_, 0);
@@ -3662,9 +3653,9 @@ private:
             (static_cast<size_t>(i + 1) < movable_begin &&
              ContainsTmaLoadStmt(pre_loop_stmts[i]) &&
              IsMbarrierWaitParityStmt(pre_loop_stmts[i + 1]))) {
-          Stmt producer_prefix_stmt = StripTmaCopyWriteBufferAttr(
-              standalone_pair.has_value() ? standalone_pair->producer_stmt
-                                          : pre_loop_stmts[i]);
+          Stmt producer_prefix_stmt = standalone_pair.has_value()
+                                          ? standalone_pair->producer_stmt
+                                          : pre_loop_stmts[i];
           Stmt consumer_wait_stmt = standalone_pair.has_value()
                                         ? standalone_pair->wait_stmt
                                         : pre_loop_stmts[i + 1];

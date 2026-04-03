@@ -189,7 +189,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
+    print("After pipeline planing")
+    print(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    print("After InjectSoftwarePipeline")
+    print(mod)
     mod = tilelang.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
