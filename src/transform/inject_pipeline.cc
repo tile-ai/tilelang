@@ -14,7 +14,10 @@
 #include <utility>
 
 #include "../op/builtin.h"
+#include "../op/copy.h"
+#include "../op/operator.h"
 #include "../op/region.h"
+#include "../op/utils.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
 #include "support/utils.h"
@@ -226,12 +229,15 @@ bool ContainsExplicitAsyncIntrinsics(const Stmt &stmt) {
 
 class SimtProducerAnnotator : public StmtExprMutator {
 public:
-  static Stmt Annotate(const Stmt &stmt) {
-    SimtProducerAnnotator annotator;
+  static Stmt Annotate(const Stmt &stmt, Optional<Target> target = Optional<Target>()) {
+    SimtProducerAnnotator annotator(std::move(target));
     return annotator.VisitStmt(stmt);
   }
 
 private:
+  explicit SimtProducerAnnotator(Optional<Target> target)
+      : target_(std::move(target)) {}
+
   Stmt VisitStmt_(const ForNode *op) final {
     Stmt body = VisitStmt(op->body);
     auto annotations = op->annotations;
@@ -244,9 +250,8 @@ private:
 
   PrimExpr VisitExpr_(const CallNode *op) final {
     static const Op &copy_op = Op::Get("tl.tileop.copy");
-    static const Op &async_copy_op = Op::Get("tl.tileop.async_copy");
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (!call->op.same_as(copy_op) && !call->op.same_as(async_copy_op)) {
+    if (!call->op.same_as(copy_op) || !CanUsePipelineManagedCPAsyncCopy(call)) {
       return call;
     }
     // Tile-op copies lower through copy.cc, so they need an explicit
@@ -256,6 +261,21 @@ private:
                     IntImm(DataType::Int(32), 1));
     return Call(call->dtype, call->op, call->args, annotations, call->span);
   }
+
+  bool CanUsePipelineManagedCPAsyncCopy(const Call &call) const {
+    auto tile_op = ParseOperator(call);
+    const auto *copy = tile_op.as<CopyNode>();
+    if (copy == nullptr) {
+      return false;
+    }
+    if (!target_.defined()) {
+      return copy->CheckPipelineManagedCPAsyncCopy();
+    }
+    return copy->CheckPipelineManagedCPAsyncCopy(target_.value(), &analyzer_);
+  }
+
+  Optional<Target> target_;
+  mutable arith::Analyzer analyzer_;
 };
 
 class AsyncCommitWaitAttrLowerer : public StmtExprMutator {
@@ -486,11 +506,13 @@ public:
                    const Array<Buffer> &pipeline_allocs,
                    const Array<Buffer> &local_allocs, const For &pipeline_loop,
                    const PipelineInfo &pipeline_info,
+                   Optional<Target> target,
                    const std::vector<LetWrapper> &loop_var_let_wrappers,
                    const std::vector<IfWrapper> &loop_var_if_wrappers)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), local_allocs_(local_allocs),
         pipeline_loop_(pipeline_loop), pipeline_info_(pipeline_info),
+        target_(std::move(target)),
         loop_var_let_wrappers_(loop_var_let_wrappers),
         loop_var_if_wrappers_(loop_var_if_wrappers) {}
 
@@ -733,17 +755,18 @@ private:
   };
 
   struct AsyncStateLocal {
-    struct {
+    struct PendingWait {
       int insert_before{-1};
       PrimExpr wait_count{nullptr};
 
       bool valid() const { return wait_count.defined(); }
-    } pending_wait;
+    };
 
     std::unordered_set<const BufferNode *> seen;
     Optional<PrimExpr> producer_head;
     Optional<PrimExpr> predicate;
     std::vector<std::vector<size_t>> commit_groups;
+    std::map<int, PendingWait> pending_waits;
     std::unordered_map<int, int> annotated_group_to_commit_group;
     bool consumed{false};
   };
@@ -1138,6 +1161,41 @@ private:
     return std::nullopt;
   }
 
+  std::optional<int> TryGetFirstStaticWaitCount(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return TryGetFirstStaticWaitCount(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (IsAsyncWaitQueueScope(attr)) {
+        return TryGetStaticAsyncWaitCount(attr);
+      }
+      if (IsAsyncCommitQueueScope(attr) || IsAsyncWaitInflightCount(attr)) {
+        return std::nullopt;
+      }
+      return TryGetFirstStaticWaitCount(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const Stmt &elem : seq->seq) {
+        if (auto wait = TryGetFirstStaticWaitCount(elem)) {
+          return wait;
+        }
+        if (ContainsAsyncSyncScopes(elem)) {
+          return std::nullopt;
+        }
+      }
+      return std::nullopt;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return TryGetFirstStaticWaitCount(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return TryGetFirstStaticWaitCount(realize->block->body);
+      }
+    }
+    return std::nullopt;
+  }
+
   Stmt RewriteHeadStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
                                       bool *changed) const {
     if (const auto *let = stmt.as<LetStmtNode>()) {
@@ -1191,6 +1249,73 @@ private:
           new_block.CopyOnWrite()->body = new_body;
           return BlockRealize(realize->iter_values, realize->predicate, new_block,
                               realize->span);
+        }
+      }
+      return stmt;
+    }
+    return stmt;
+  }
+
+  Stmt RewriteFirstStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
+                                       bool *changed) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      Stmt new_body =
+          RewriteFirstStaticWaitInWrapper(let->body, new_wait_n, changed);
+      if (*changed) {
+        return LetStmt(let->var, let->value, new_body, let->span);
+      }
+      return stmt;
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (IsAsyncWaitQueueScope(attr)) {
+        *changed = true;
+        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+      }
+      if (IsAsyncCommitQueueScope(attr) || IsAsyncWaitInflightCount(attr)) {
+        return stmt;
+      }
+      Stmt new_body =
+          RewriteFirstStaticWaitInWrapper(attr->body, new_wait_n, changed);
+      if (*changed) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
+                        attr->span);
+      }
+      return stmt;
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      Array<Stmt> new_seq = seq->seq;
+      for (int i = 0, n = static_cast<int>(new_seq.size()); i < n; ++i) {
+        Stmt updated =
+            RewriteFirstStaticWaitInWrapper(new_seq[i], new_wait_n, changed);
+        if (*changed) {
+          new_seq.Set(i, updated);
+          return SeqStmt(new_seq);
+        }
+        if (ContainsAsyncSyncScopes(new_seq[i])) {
+          return stmt;
+        }
+      }
+      return stmt;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      Stmt new_body =
+          RewriteFirstStaticWaitInWrapper(block->body, new_wait_n, changed);
+      if (*changed) {
+        Block new_block = Downcast<Block>(stmt);
+        new_block.CopyOnWrite()->body = new_body;
+        return new_block;
+      }
+      return stmt;
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        Stmt new_body = RewriteFirstStaticWaitInWrapper(realize->block->body,
+                                                        new_wait_n, changed);
+        if (*changed) {
+          Block new_block = realize->block;
+          new_block.CopyOnWrite()->body = new_body;
+          return BlockRealize(realize->iter_values, realize->predicate,
+                              new_block, realize->span);
         }
       }
       return stmt;
@@ -1413,8 +1538,8 @@ private:
       if (ContainsAsyncCommitScopes(seq[i])) {
         break;
       }
-      auto head_wait = TryGetHeadStaticWaitCount(seq[i]);
-      if (!head_wait.has_value() || *head_wait != 0) {
+      auto first_wait = TryGetFirstStaticWaitCount(seq[i]);
+      if (!first_wait.has_value() || *first_wait != 0) {
         break;
       }
       suffix_wait_indices.push_back(i);
@@ -1425,7 +1550,7 @@ private:
     for (size_t pos = 1; pos < suffix_wait_indices.size(); ++pos) {
       bool changed = false;
       int idx = suffix_wait_indices[pos];
-      seq.Set(idx, RewriteHeadStaticWaitInWrapper(seq[idx], retain, &changed));
+      seq.Set(idx, RewriteFirstStaticWaitInWrapper(seq[idx], retain, &changed));
     }
     return seq;
   }
@@ -1463,9 +1588,11 @@ private:
       auto &dep_local_state = (*async_states_local)[producer_stage_idx];
       int num_commit_group = dep_local_state.commit_groups.size();
       std::vector<Optional<PrimExpr>> producer_head_per_commit;
+      std::vector<int> dependent_commit_groups;
 
       if (num_commit_group == 0) {
         ICHECK(!dep_local_state.producer_head);
+        dependent_commit_groups.push_back(-1);
         producer_head_per_commit.push_back(
             async_states_[producer_stage_idx].producer_head);
       } else {
@@ -1480,6 +1607,7 @@ private:
           if (!need_wait_count[commit_group_id]) {
             continue;
           }
+          dependent_commit_groups.push_back(commit_group_id);
           if (!dep_local_state.seen.count(read_region->buffer.get())) {
             producer_head_per_commit.push_back(
                 dep_local_state.producer_head.value() - 1);
@@ -1505,11 +1633,13 @@ private:
         return sum;
       }();
 
-      auto &pending_wait = dep_local_state.pending_wait;
-      if (!pending_wait.valid()) {
-        pending_wait = {static_cast<int>(i), wait_count};
-      } else if (analyzer_.CanProve(wait_count < pending_wait.wait_count)) {
-        pending_wait = {pending_wait.insert_before, wait_count};
+      for (int commit_group_id : dependent_commit_groups) {
+        auto &pending_wait = dep_local_state.pending_waits[commit_group_id];
+        if (!pending_wait.valid()) {
+          pending_wait = {static_cast<int>(i), wait_count};
+        } else if (analyzer_.CanProve(wait_count < pending_wait.wait_count)) {
+          pending_wait = {pending_wait.insert_before, wait_count};
+        }
       }
     }
   }
@@ -1528,12 +1658,22 @@ private:
     std::vector<int> commit_group_tags(new_stmts.size(), -1);
     std::unordered_map<int, int> commit_group_tag_to_stage;
     int next_commit_group_tag = 0;
-    std::map<int, std::vector<Stmt>> waits_before_stmt;
+    std::map<int, std::map<int, PrimExpr>> waits_before_stmt;
     auto make_wait_stmt = [](int stage_id, PrimExpr wait_count, Stmt body) {
       auto zero = make_zero(DataType::Int(32));
       return AttrStmt(zero, tir::attr::async_wait_queue_scope, stage_id,
                       AttrStmt(zero, tir::attr::async_wait_inflight_count,
                                wait_count, body));
+    };
+    auto merge_wait_before_stmt = [&](int insert_before, int stage_id,
+                                      PrimExpr wait_count) {
+      auto &waits_at_stmt = waits_before_stmt[insert_before];
+      auto it = waits_at_stmt.find(stage_id);
+      if (it == waits_at_stmt.end()) {
+        waits_at_stmt.emplace(stage_id, ana_normalized->Simplify(wait_count));
+      } else if (ana_normalized->CanProve(wait_count < it->second)) {
+        it->second = ana_normalized->Simplify(wait_count);
+      }
     };
 
     for (const auto &[stage_id, state] : async_states_local) {
@@ -1548,29 +1688,39 @@ private:
         }
       }
 
-      if (state.pending_wait.valid()) {
-        PrimExpr wait_count =
-            ana_normalized->Simplify(state.pending_wait.wait_count);
+      for (const auto &[commit_group_id, pending_wait] : state.pending_waits) {
+        if (!pending_wait.valid()) {
+          continue;
+        }
+        PrimExpr wait_count = ana_normalized->Simplify(pending_wait.wait_count);
         if (state.predicate && !ana_normalized->CanProve(state.predicate.value())) {
           PrimExpr predicate = ana_normalized->Simplify(state.predicate.value());
           if (is_zero(predicate)) {
             continue;
           }
-          waits_before_stmt[state.pending_wait.insert_before].push_back(
-              IfThenElse(predicate,
-                         make_wait_stmt(stage_id, wait_count, Evaluate(0)),
-                         Evaluate(0)));
-        } else {
-          new_stmts[state.pending_wait.insert_before].stmt = make_wait_stmt(
-              stage_id, wait_count, new_stmts[state.pending_wait.insert_before].stmt);
+          merge_wait_before_stmt(pending_wait.insert_before, stage_id, wait_count);
+          continue;
         }
+
+        merge_wait_before_stmt(pending_wait.insert_before, stage_id, wait_count);
       }
     }
 
     std::vector<FinalStmtInfo> result;
     for (size_t i = 0; i < new_stmts.size();) {
       if (auto it = waits_before_stmt.find(i); it != waits_before_stmt.end()) {
-        for (const Stmt &wait_stmt : it->second) {
+        for (const auto &[stage_id, wait_count] : it->second) {
+          Stmt wait_stmt = make_wait_stmt(stage_id, wait_count, Evaluate(0));
+          if (auto state_it = async_states_local.find(stage_id);
+              state_it != async_states_local.end() && state_it->second.predicate &&
+              !ana_normalized->CanProve(state_it->second.predicate.value())) {
+            PrimExpr predicate =
+                ana_normalized->Simplify(state_it->second.predicate.value());
+            if (is_zero(predicate)) {
+              continue;
+            }
+            wait_stmt = IfThenElse(predicate, wait_stmt, Evaluate(0));
+          }
           result.push_back(
               {new_stmts[i].stage, new_stmts[i].access_index, new_stmts[i].predicate, wait_stmt});
         }
@@ -1593,9 +1743,16 @@ private:
       }
       Stmt group_body =
           group_stmts.size() == 1 ? group_stmts[0] : SeqStmt(group_stmts);
-      auto commit_queue_scope =
+      Stmt commit_queue_scope =
           AttrStmt(make_zero(DataType::Int(32)),
                    tir::attr::async_commit_queue_scope, stage_id, group_body);
+      if (!is_one(predicate) && !ana_normalized->CanProve(predicate)) {
+        PrimExpr simplified_predicate = ana_normalized->Simplify(predicate);
+        if (!is_zero(simplified_predicate)) {
+          commit_queue_scope =
+              IfThenElse(simplified_predicate, commit_queue_scope, Evaluate(0));
+        }
+      }
       result.push_back({stage_id, access_index, predicate, commit_queue_scope});
     }
     return result;
@@ -1748,6 +1905,7 @@ private:
           async_states_[stage].dst_buffers.insert(write_region->buffer.get());
           buffer_to_commit_group[write_region->buffer.get()] = commit_group_id;
         }
+        async_states_[stage].producer_head = normalized_access_index;
         local_state.producer_head = normalized_access_index;
         if (!local_state.predicate ||
             ana_normalized.CanProve(local_state.predicate.value())) {
@@ -1756,7 +1914,7 @@ private:
           local_state.predicate = ana_normalized.Simplify(
               local_state.predicate.value() & inbound);
         }
-        rewritten_stmt = SimtProducerAnnotator::Annotate(rewritten_stmt);
+        rewritten_stmt = SimtProducerAnnotator::Annotate(rewritten_stmt, target_);
         rewritten_stmt =
             AttrStmt(make_zero(DataType::Int(32)), tir::attr::async_scope, 1,
                      rewritten_stmt);
@@ -1848,6 +2006,7 @@ private:
   PipelineInfo pipeline_info_;
   int max_stage_ = -1;
   Map<Buffer, Buffer> buffer_remap_;
+  Optional<Target> target_;
   Array<Block> ordered_stmts_;
   std::vector<LetWrapper> loop_var_let_wrappers_;
   std::vector<IfWrapper> loop_var_if_wrappers_;
@@ -2359,7 +2518,8 @@ class PipelineInjector : private StmtExprMutator {
 public:
   static Stmt Inject(const PrimFunc &func) {
     auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
-    PipelineInjector injector(global_symbol);
+    auto target = func->GetAttr<Target>(tvm::attr::kTarget);
+    PipelineInjector injector(global_symbol, target);
     for (const auto &kv : func->buffer_map) {
       const Buffer &buffer = kv.second;
       injector.buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -2368,8 +2528,8 @@ public:
   }
 
 private:
-  explicit PipelineInjector(Optional<String> global_symbol)
-      : global_symbol_(std::move(global_symbol)) {}
+  explicit PipelineInjector(Optional<String> global_symbol, Optional<Target> target)
+      : global_symbol_(std::move(global_symbol)), target_(std::move(target)) {}
 
   /*!
    * \brief Check the pipeline satisfies the following conditions:
@@ -2416,6 +2576,36 @@ private:
         }
       }
     }
+  }
+
+  bool HasOverlappableStages(const PipelineInfo &pipeline_info) const {
+    std::optional<int> first_stage;
+    for (const auto &pair : pipeline_info) {
+      int stage = pair.second.stage;
+      if (!first_stage.has_value()) {
+        first_stage = stage;
+      } else if (stage != first_stage.value()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Map<String, Any> StripPipelineAnnotations(
+      const Map<String, Any> &annotations) const {
+    Map<String, Any> preserved_annotations;
+    for (const auto &kv : annotations) {
+      const String &key = kv.first;
+      if (key != tir::attr::software_pipeline_stage &&
+          key != tir::attr::software_pipeline_order &&
+          key != tir::attr::software_pipeline_async_stages &&
+          key != kPipelineAsyncProducers &&
+          key != kPipelineAsyncProducerGroups && key != kPipelineTmaCopies &&
+          key != "num_stages" && key != "tl_pipelined_num_stages") {
+        preserved_annotations.Set(key, kv.second);
+      }
+    }
+    return preserved_annotations;
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
@@ -2647,6 +2837,20 @@ private:
 
     ValidatePipelineBody(pipeline_info, original_order);
 
+    if (!HasOverlappableStages(pipeline_info)) {
+      if (const auto *realize = op->body.as<BlockRealizeNode>()) {
+        const auto &block = realize->block;
+        for (const auto &buffer : block->alloc_buffers) {
+          buffer_data_to_buffer_.erase(buffer->data);
+          allocated_buffers_.erase(buffer);
+        }
+      }
+      return For(for_node->loop_var, for_node->min, for_node->extent,
+                 for_node->kind, for_node->body, for_node->thread_binding,
+                 StripPipelineAnnotations(for_node->annotations), for_node->step,
+                 for_node->span);
+    }
+
     // Step 3.5: Pipeline-level TMA barrier management.
     // When TMA copies are present (without warp specialization), rewrite
     // them to use tl.tileop.tma_copy with shared pipeline barriers and insert
@@ -2737,7 +2941,7 @@ private:
 
     PipelineRewriter rewriter(buffer_data_to_buffer_, pipeline_allocs,
                               local_allocs, tvm::ffi::GetRef<For>(op),
-                              pipeline_info, loop_var_let_wrappers,
+                              pipeline_info, target_, loop_var_let_wrappers,
                               loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
     subtree_modified_ = true;
@@ -3049,6 +3253,7 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> allocated_buffers_;
   Map<Buffer, Buffer> pending_buffer_remap_;
+  Optional<Target> target_;
   // Buffers from outer blocks that have been used in a pipeline loop.
   // Used to detect if the same buffer is used in multiple pipeline loops.
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>

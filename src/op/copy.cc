@@ -14,6 +14,7 @@
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "../transform/ptx_async_copy_injector.h"
 #include "utils.h"
 
 #include "builtin.h"
@@ -28,6 +29,22 @@ namespace tl {
 using namespace tir;
 
 namespace {
+
+static bool ContainsPTXAsyncCopy(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+    if (found) {
+      return;
+    }
+    if (const auto *call = obj.as<CallNode>()) {
+      if (call->op.same_as(builtin::ptx_cp_async()) ||
+          call->op.same_as(tl::ptx_cp_async())) {
+        found = true;
+      }
+    }
+  });
+  return found;
+}
 
 /// Build a TMA leader-thread condition using tl_shuffle_elect.
 /// \param thread_extent The number of threads in the current group
@@ -45,7 +62,9 @@ class CPAsyncStoreRewriter : public StmtMutator {
 public:
   Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
 
-  bool RewriteSuccess() const { return successfully_rewritten_; }
+  bool RewriteSuccess() const {
+    return rewritten_any_store_ && !failed_on_shared_store_;
+  }
 
 private:
   static bool IsZeroValue(const PrimExpr &e) {
@@ -91,7 +110,6 @@ private:
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     if (!IsSharedBuffer(op->buffer)) {
-      successfully_rewritten_ = false;
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -101,19 +119,19 @@ private:
     // combined so the generated cp.async is only issued when all guards hold.
     const BufferLoadNode *load = MatchZeroFillBufferLoad(op->value, &predicate);
     if (load == nullptr) {
-      successfully_rewritten_ = false;
+      failed_on_shared_store_ = true;
       return StmtMutator::VisitStmt_(op);
     }
 
     if (!IsGlobalBuffer(load->buffer)) {
-      successfully_rewritten_ = false;
+      failed_on_shared_store_ = true;
       return StmtMutator::VisitStmt_(op);
     }
     int bytes = op->value.dtype().bytes();
     int vectorized_lanes = current_vectorized_lanes_;
 
     if (!IsValidCPAsyncTransferBytes(bytes * vectorized_lanes)) {
-      successfully_rewritten_ = false;
+      failed_on_shared_store_ = true;
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -138,7 +156,7 @@ private:
     if (predicate.defined()) {
       args.push_back(predicate.value());
     }
-    successfully_rewritten_ = true;
+    rewritten_any_store_ = true;
     return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(), args));
   }
 
@@ -165,7 +183,8 @@ private:
     return stmt;
   }
 
-  bool successfully_rewritten_ = true;
+  bool rewritten_any_store_ = false;
+  bool failed_on_shared_store_ = false;
   int current_vectorized_lanes_ = 1;
 };
 
@@ -863,15 +882,33 @@ bool CopyNode::CheckTMemStore(Target target) const {
 // - vectorized copy width (bytes) is one of {4, 8, 16}
 // - if OOB guards are required, only a *uniform* (scalar) source predicate
 //   is supported (dst must be in-bounds)
+bool CopyNode::CheckCPAsyncCopyPreconditions() const {
+  if (!IsGlobalBuffer(src) || !IsSharedBuffer(dst)) {
+    return false;
+  }
+  if (src->dtype != dst->dtype) {
+    return false;
+  }
+  return true;
+}
+
+bool CopyNode::CheckPipelineManagedCPAsyncCopy() const {
+  return !GetIsTmaCopy() && !GetIsAsyncCopy() &&
+         CheckCPAsyncCopyPreconditions();
+}
+
+bool CopyNode::CheckPipelineManagedCPAsyncCopy(Target target,
+                                               arith::Analyzer *analyzer) const {
+  return CheckPipelineManagedCPAsyncCopy() &&
+         CheckCPAsyncCopy(target, LayoutMap(), analyzer);
+}
+
 bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
                                 arith::Analyzer *analyzer) const {
   if (!TargetHasAsyncCopy(target)) {
     return false;
   }
-  if (!IsGlobalBuffer(src) || !IsSharedBuffer(dst)) {
-    return false;
-  }
-  if (src->dtype != dst->dtype) {
+  if (!CheckCPAsyncCopyPreconditions()) {
     return false;
   }
   // Skip vectorize size check here because, during the Infer Layout stage,
@@ -1046,9 +1083,26 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
       LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var, analyzer,
                         T.layout_map, par_op->GetPredicate(T.thread_var));
 
-  CPAsyncStoreRewriter cp_async_rewriter;
-  Stmt cp_async_loop = cp_async_rewriter.Rewrite(lowered_loop);
-  if (!cp_async_rewriter.RewriteSuccess()) {
+  bool async_without_implicit_commit_wait =
+      no_implicit_commit_wait || GetIsAsyncCopy();
+  Stmt cp_async_loop =
+      InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
+                         async_without_implicit_commit_wait);
+  if (!ContainsPTXAsyncCopy(cp_async_loop)) {
+    LOG(WARNING) << "cp.async rewrite miss for copy src=" << src->name
+                 << " (scope=" << src.scope() << ", dtype=" << src->dtype
+                 << "), dst=" << dst->name << " (scope=" << dst.scope()
+                 << ", dtype=" << dst->dtype
+                 << "), no_implicit_async_commit_wait="
+                 << no_implicit_commit_wait
+                 << ", is_async_copy=" << GetIsAsyncCopy()
+                 << ", in_pipeline=" << T.in_pipeline;
+    if (no_implicit_commit_wait) {
+      LOG(WARNING)
+          << "Pipeline-managed async copy fallback to normal copy because "
+             "cp.async rewrite found no eligible global->shared store.";
+      return lowered_loop;
+    }
     if (explicit_async_semantics) {
       LOG(FATAL) << "Explicit async copy semantics require cp.async lowering, "
                     "but no eligible global->shared store was rewritten.";
@@ -1060,14 +1114,12 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
   if (no_implicit_commit_wait) {
     return cp_async_loop;
   }
-  Stmt commit_group =
-      Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
   if (GetIsAsyncCopy()) {
+    Stmt commit_group =
+        Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
     return SeqStmt({cp_async_loop, commit_group});
   }
-  Stmt wait_group = Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
-                                  {IntImm(DataType::Int(32), 0)}));
-  return SeqStmt({cp_async_loop, commit_group, wait_group});
+  return cp_async_loop;
 }
 
 // Lowers the copy using standard load/store with loop transformations.

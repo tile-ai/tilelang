@@ -30,6 +30,12 @@ bool IsLocalDescriptorScope(const Var &buffer_var) {
   return scope.rfind("local.descriptor.", 0) == 0;
 }
 
+bool IsDescriptorHoistBoundary(const AttrStmtNode *op) {
+  return op->attr_key == tir::attr::thread_extent ||
+         op->attr_key == tir::attr::virtual_thread ||
+         op->attr_key == "target";
+}
+
 bool IsReusableDescriptorAllocate(const AllocateNode *op) {
   return IsLocalDescriptorScope(op->buffer_var) && is_one(op->condition) &&
          op->annotations.empty() && op->ConstantAllocationSize() > 0;
@@ -65,6 +71,13 @@ private:
       allocs_.push_back(AllocSite{
           op->buffer_var, op->dtype, op->extents, op->annotations,
           MakeDescriptorSignature(op)});
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (IsDescriptorHoistBoundary(op)) {
+      return;
     }
     StmtExprVisitor::VisitStmt_(op);
   }

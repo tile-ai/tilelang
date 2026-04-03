@@ -7,6 +7,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../op/region.h"
 #include "../op/utils.h"
 #include "common/pipeline_utils.h"
 #include <algorithm>
@@ -247,14 +248,23 @@ public:
 
   bool GetTmaCopyPattern() const { return is_tma_copy_; }
 
+  bool HasNonCopyTileOp() const { return has_non_copy_tile_op_; }
+
 private:
+  static bool IsGlobalLikeBuffer(const Buffer &buffer) {
+    return IsGlobalBuffer(buffer) || (buffer.defined() && buffer.scope().empty());
+  }
+
   void HandleTileOp(const TileOperator &tile_op) {
+    if (tile_op.as<RegionOpNode>()) {
+      return;
+    }
     AddReadsWritesForTileOp(tile_op, &reads_, &writes_);
     // Detect global->shared TMA copy pattern for pipeline planning.
     // Only mark T.copy (not T.tma_copy) — user-written T.tma_copy already
     // manages its own barriers and should not get a pipeline barrier.
     if (const auto *copy = tile_op.as<CopyNode>()) {
-      if (IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
+      if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
         is_global_copy_pattern_ = true;
         arith::Analyzer analyzer;
         if (!copy->GetIsTmaCopy() &&
@@ -265,12 +275,16 @@ private:
     }
     // Conv2D im2col always uses TMA on Hopper.
     if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
-      if (IsGlobalBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
+      if (IsGlobalLikeBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
         is_global_copy_pattern_ = true;
         if (TargetIsHopper(target_)) {
           is_tma_copy_ = true;
         }
       }
+      return;
+    }
+    if (!tile_op.as<CopyNode>()) {
+      has_non_copy_tile_op_ = true;
     }
   }
 
@@ -330,7 +344,7 @@ private:
     auto load_region = BufferRegion(load_buffer, region);
     reads_.push_back(load_region);
 
-    if (IsGlobalBuffer(op->buffer) && !within_condition_expr_) {
+    if (IsGlobalLikeBuffer(op->buffer) && !within_condition_expr_) {
       // skip condition expr of if_then_else node
       // shared[i] = T.if_then_else(global[i] < n, register_a[i], register_b[i])
       // is not a global read shared[i] = T.if_then_else(global[i] < n,
@@ -386,8 +400,7 @@ private:
           writes_.push_back(BufferRegion::FullRegion(dst_buf.value()));
         }
         if (src_buf.defined() && dst_buf.defined() &&
-            (IsGlobalBuffer(src_buf.value()) ||
-             src_buf.value().scope().empty()) &&
+            IsGlobalLikeBuffer(src_buf.value()) &&
             IsSharedBuffer(dst_buf.value())) {
           is_global_copy_pattern_ = true;
         }
@@ -460,6 +473,7 @@ private:
   bool under_buffer_store_ = false;
   bool is_global_copy_pattern_ = false;
   bool is_tma_copy_ = false;
+  bool has_non_copy_tile_op_ = false;
   bool within_condition_expr_ = false;
 };
 
@@ -511,6 +525,7 @@ private:
     int order = -1, stage = -1;
     bool copy_stage = false;
     bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
+    bool conditional_execution = false;
     bool producer_for_copy = false;
     // Commit statements have no buffer writes, but they must be scheduled as a
     // part of their cp.async producer group (after the cp.async calls).
@@ -579,7 +594,29 @@ private:
     return info;
   }
 
+  bool MayBeConditionallyExecuted(const Stmt &stmt) const {
+    bool conditional = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (conditional) {
+        return;
+      }
+      if (const auto *if_then_else = node.as<IfThenElseNode>()) {
+        conditional = true;
+        return;
+      }
+      if (const auto *realize = node.as<BlockRealizeNode>()) {
+        if (!is_one(realize->predicate)) {
+          conditional = true;
+        }
+      }
+    });
+    return conditional;
+  }
+
   bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
+    if (pinfo.conditional_execution) {
+      return false;
+    }
     if (pinfo.is_tma_copy()) {
       return false;
     }
@@ -590,6 +627,280 @@ private:
       return false;
     }
     return pinfo.is_copy_stage() || pinfo.has_cp_async_call();
+  }
+
+  bool IsPureCopyStmt(const Stmt &stmt) const {
+    bool saw_copy = false;
+    bool saw_non_copy_tile_op = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (saw_non_copy_tile_op) {
+        return;
+      }
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      if (!tile_op.defined()) {
+        return;
+      }
+      if (tile_op.as<RegionOpNode>()) {
+        return;
+      }
+      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+        saw_copy = true;
+      } else {
+        saw_non_copy_tile_op = true;
+      }
+    });
+    return saw_copy && !saw_non_copy_tile_op;
+  }
+
+  Optional<TileOperator> GetSinglePureCopyTileOp(const Stmt &stmt) const {
+    Optional<TileOperator> copy_tile_op;
+    bool saw_non_copy_tile_op = false;
+    bool saw_multiple_copy_ops = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
+        return;
+      }
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      if (!tile_op.defined()) {
+        return;
+      }
+      if (tile_op.as<RegionOpNode>()) {
+        return;
+      }
+      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+        if (copy_tile_op.defined()) {
+          saw_multiple_copy_ops = true;
+          copy_tile_op = Optional<TileOperator>();
+        } else {
+          copy_tile_op = tile_op;
+        }
+      } else {
+        saw_non_copy_tile_op = true;
+        copy_tile_op = Optional<TileOperator>();
+      }
+    });
+    if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
+      return Optional<TileOperator>();
+    }
+    return copy_tile_op;
+  }
+
+  static bool IsGlobalLikeBuffer(const Buffer &buffer) {
+    return IsGlobalBuffer(buffer) || (buffer.defined() && buffer.scope().empty());
+  }
+
+  void ClassifyCopyLikeStage(const Stmt &stmt, PipelineStageInfo *pinfo) const {
+    ICHECK(pinfo != nullptr);
+    if (pinfo->conditional_execution) {
+      return;
+    }
+
+    // Explicit cp.async producer statements participate in the synthetic
+    // stage-0 producer schedule just like ordinary global->shared copies.
+    if (pinfo->has_cp_async_call()) {
+      pinfo->copy_stage = true;
+      return;
+    }
+
+    if (pinfo->copy_stage) {
+      return;
+    }
+
+    auto copy_tile_op = GetSinglePureCopyTileOp(stmt);
+    if (!copy_tile_op.defined()) {
+      return;
+    }
+
+    if (const auto *copy = copy_tile_op.value().as<CopyNode>()) {
+      if (!IsGlobalLikeBuffer(copy->src) || !IsSharedBuffer(copy->dst)) {
+        return;
+      }
+      pinfo->copy_stage = true;
+      if (!copy->GetIsTmaCopy() && !disable_tma_lower_) {
+        arith::Analyzer analyzer;
+        pinfo->tma_copy = copy->CheckBulkLoad(target_, &analyzer,
+                                              /*check_last_dim=*/false);
+      }
+      return;
+    }
+
+    if (const auto *im2col = copy_tile_op.value().as<Conv2DIm2ColOpNode>()) {
+      if (!IsGlobalLikeBuffer(im2col->src_) ||
+          !IsSharedBuffer(im2col->dst_)) {
+        return;
+      }
+      pinfo->copy_stage = true;
+      pinfo->tma_copy = TargetIsHopper(target_) && !disable_tma_lower_;
+    }
+  }
+
+  void AnalyzeCopyLastUse(std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    for (auto &pinfo : *pipeline_stage_infos) {
+      if (!pinfo.is_first_stage()) {
+        continue;
+      }
+
+      for (int i = pinfo.original_stmt_index + 1;
+           i < static_cast<int>(pipeline_stage_infos->size()); ++i) {
+        for (const BufferRegion &read : (*pipeline_stage_infos)[i].reads) {
+          if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
+                           [&](const BufferRegion &r) {
+                             return r->buffer == read->buffer &&
+                                    MayConflict(r->region, read->region);
+                           }) != pinfo.writes.end()) {
+            pinfo.last_use_stmt_index = std::max(pinfo.last_use_stmt_index, i);
+          }
+        }
+
+        if (!pinfo.is_copy_stage() ||
+            (pinfo.cp_async_group >= 0 &&
+             pinfo.cp_async_group == (*pipeline_stage_infos)[i].cp_async_group)) {
+          continue;
+        }
+
+        for (const BufferRegion &write : (*pipeline_stage_infos)[i].writes) {
+          if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
+                           [&](const BufferRegion &r) {
+                             return r->buffer == write->buffer &&
+                                    MayConflict(r->region, write->region);
+                           }) != pinfo.writes.end()) {
+            LOG(FATAL) << "Pipeline planning error: Multiple writes to "
+                          "overlapping buffer regions detected. "
+                       << "Stage " << pinfo.original_stmt_index << " and stage "
+                       << i << " are both writing to buffer '"
+                       << write->buffer->name
+                       << "' with overlapping regions. This is not supported "
+                          "in pipeline planning.";
+          }
+        }
+      }
+    }
+  }
+
+  bool EmitImplicitAsyncAnnotations(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos,
+      Map<String, Any> *annotations) const {
+    if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
+      return false;
+    }
+
+    std::vector<int> async_group_ids(pipeline_stage_infos.size(), -1);
+    std::vector<int> stmt_indices_by_order(pipeline_stage_infos.size());
+    std::iota(stmt_indices_by_order.begin(), stmt_indices_by_order.end(), 0);
+    std::stable_sort(stmt_indices_by_order.begin(), stmt_indices_by_order.end(),
+                     [&](int lhs, int rhs) {
+                       if (pipeline_stage_infos[lhs].order !=
+                           pipeline_stage_infos[rhs].order) {
+                         return pipeline_stage_infos[lhs].order <
+                                pipeline_stage_infos[rhs].order;
+                       }
+                       return lhs < rhs;
+                     });
+
+    int next_async_group_id = 0;
+    std::map<std::pair<int, int>, int> implicit_group_ids;
+    for (int stmt_idx : stmt_indices_by_order) {
+      const auto &pinfo = pipeline_stage_infos[stmt_idx];
+      if (!IsAsyncProducerCandidate(pinfo)) {
+        continue;
+      }
+      auto key = std::make_pair(pinfo.stage, pinfo.last_use_stmt_index);
+      auto [it, inserted] =
+          implicit_group_ids.emplace(key, next_async_group_id);
+      if (inserted) {
+        ++next_async_group_id;
+      }
+      async_group_ids[stmt_idx] = it->second;
+    }
+
+    if (next_async_group_id == 0) {
+      return false;
+    }
+
+    std::vector<Integer> async_producers;
+    std::vector<Integer> async_producer_groups;
+    async_producers.reserve(pipeline_stage_infos.size());
+    async_producer_groups.reserve(pipeline_stage_infos.size());
+    std::unordered_set<int> async_stage_ids;
+    for (size_t i = 0; i < pipeline_stage_infos.size(); ++i) {
+      bool is_async_producer = async_group_ids[i] != -1;
+      async_producers.push_back(Integer(is_async_producer ? 1 : 0));
+      async_producer_groups.push_back(Integer(async_group_ids[i]));
+      if (is_async_producer) {
+        async_stage_ids.insert(pipeline_stage_infos[i].stage);
+      }
+    }
+
+    annotations->Set(kPipelineAsyncProducers, Array<Integer>(async_producers));
+    annotations->Set(kPipelineAsyncProducerGroups,
+                     Array<Integer>(async_producer_groups));
+
+    std::vector<int> sorted_async_stage_ids(async_stage_ids.begin(),
+                                            async_stage_ids.end());
+    std::sort(sorted_async_stage_ids.begin(), sorted_async_stage_ids.end());
+    std::vector<Integer> async_stages;
+    async_stages.reserve(sorted_async_stage_ids.size());
+    for (int stage_id : sorted_async_stage_ids) {
+      async_stages.push_back(Integer(stage_id));
+    }
+    annotations->Set(tir::attr::software_pipeline_async_stages,
+                     Array<Integer>(async_stages));
+    return true;
+  }
+
+  void MaybeAnnotateLegacyAsyncPipelineLoop(
+      const Stmt &pipeline_body_root, const Array<Stmt> &pipeline_stmts,
+      const Array<Integer> &order_array, const Array<Integer> &stage_array,
+      Map<String, Any> *annotations) {
+    if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
+      return;
+    }
+    ICHECK_EQ(pipeline_stmts.size(), order_array.size());
+    ICHECK_EQ(pipeline_stmts.size(), stage_array.size());
+
+    AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
+    chain_builder(pipeline_body_root);
+
+    std::vector<PipelineStageInfo> pipeline_stage_infos;
+    pipeline_stage_infos.reserve(pipeline_stmts.size());
+    for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
+      auto pinfo = MakePipelineStageInfo(pipeline_stmts[i], i, chain_builder);
+      ClassifyCopyLikeStage(pipeline_stmts[i], &pinfo);
+      pinfo.order = static_cast<int>(order_array[i]->value);
+      pinfo.stage = static_cast<int>(stage_array[i]->value);
+      if (!pinfo.is_copy_stage() && !pinfo.conditional_execution &&
+          pinfo.stage == 0) {
+        bool reads_global = false;
+        bool writes_shared = false;
+        for (const BufferRegion &read : pinfo.reads) {
+          if (IsGlobalLikeBuffer(read->buffer)) {
+            reads_global = true;
+            break;
+          }
+        }
+        for (const BufferRegion &write : pinfo.writes) {
+          if (IsSharedBuffer(write->buffer)) {
+            writes_shared = true;
+            break;
+          }
+        }
+        if (reads_global && writes_shared) {
+          pinfo.copy_stage = true;
+        }
+      }
+      pipeline_stage_infos.push_back(std::move(pinfo));
+    }
+
+    AnalyzeCopyLastUse(&pipeline_stage_infos);
+    EmitImplicitAsyncAnnotations(pipeline_stage_infos, annotations);
   }
 
   PipelineStageInfo
@@ -606,14 +917,19 @@ private:
     pinfo.reads = std::move(collector.GetReads());
     pinfo.writes = std::move(collector.GetWrites());
     pinfo.original_stmt_index = idx;
-    pinfo.copy_stage = collector.GetGlobalCopyPattern();
-    pinfo.tma_copy = collector.GetTmaCopyPattern() && !disable_tma_lower_;
+    pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
+    bool pure_copy_stage =
+        collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
+    pinfo.copy_stage = pure_copy_stage;
+    pinfo.tma_copy = pure_copy_stage && !pinfo.conditional_execution &&
+                     collector.GetTmaCopyPattern() && !disable_tma_lower_;
     auto async_info = AnalyzeAsyncIntrinsics(block->body);
     pinfo.cp_async_call_count = async_info.cp_async_call_count;
     pinfo.cp_async_commit_count = async_info.cp_async_commit_count;
     pinfo.cp_async_wait_count = async_info.cp_async_wait_count;
     pinfo.cp_async_wait_min_inflight = async_info.cp_async_wait_min_inflight;
     pinfo.cp_async_wait_has_dynamic = async_info.cp_async_wait_has_dynamic;
+    ClassifyCopyLikeStage(block->body, &pinfo);
     return std::move(pinfo);
   }
 
@@ -667,6 +983,46 @@ private:
         annotations.Set(tir::attr::software_pipeline_async_stages,
                         Array<Integer>{0});
       }
+      Stmt pipeline_body_root{nullptr};
+      const SeqStmtNode *pipeline_body_seq = nullptr;
+      if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
+        const auto &block = realize->block;
+        for (const auto &buffer : block->alloc_buffers) {
+          ICHECK(buffer->IsInstance<BufferNode>());
+          buffer_data_to_buffer_.Set(buffer->data, buffer);
+        }
+        pipeline_body_root = block->body;
+      } else {
+        pipeline_body_root = loop->body;
+      }
+      {
+        Stmt current = pipeline_body_root;
+        while (true) {
+          if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
+            pipeline_body_seq = seq_stmt;
+            break;
+          }
+          if (const auto *if_then_else = current.as<IfThenElseNode>()) {
+            ICHECK(!if_then_else->else_case.defined())
+                << "Pipeline_Planning: Can't handle the body of the loop "
+                   "because the IfThenElse node has an else branch";
+            current = if_then_else->then_case;
+            continue;
+          }
+          if (const auto *let_stmt = current.as<LetStmtNode>()) {
+            current = let_stmt->body;
+            continue;
+          }
+          LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
+                     << "because it is not a SeqStmt, IfThenElse without else, "
+                     << "or LetStmt wrapping them, but got "
+                     << current->GetTypeKey();
+        }
+      }
+      ICHECK(pipeline_body_seq != nullptr);
+      MaybeAnnotateLegacyAsyncPipelineLoop(pipeline_body_root,
+                                           pipeline_body_seq->seq, order_array,
+                                           stage_array, &annotations);
       auto for_node = tvm::ffi::GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
@@ -912,24 +1268,11 @@ private:
       last_bound_consumer_stmt = consumer_stmt_idx;
     }
 
-    // Prioritize cp.async groups with earlier consumers when enforcing group
-    // boundary ordering. This helps place prefetches for near-term consumers
-    // earlier in the stage-0 schedule.
     std::vector<int> cp_async_group_schedule_order;
     cp_async_group_schedule_order.reserve(cp_async_groups.size());
     for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
       cp_async_group_schedule_order.push_back(static_cast<int>(group_id));
     }
-    std::stable_sort(
-        cp_async_group_schedule_order.begin(),
-        cp_async_group_schedule_order.end(), [&](int lhs_group, int rhs_group) {
-          int lhs_first_consumer = cp_async_group_first_consumer[lhs_group];
-          int rhs_first_consumer = cp_async_group_first_consumer[rhs_group];
-          if (lhs_first_consumer != rhs_first_consumer) {
-            return lhs_first_consumer < rhs_first_consumer;
-          }
-          return lhs_group < rhs_group;
-        });
 
     // For every copy stage, mark all its dependency stages as producer_for_copy
     // Helper struct to manage copy stage dependency reads
@@ -1031,58 +1374,7 @@ private:
     // identifies the index of the last statement that consumes data produced by
     // copy stages, enabling optimal placement of copy operations in the
     // pipeline schedule.
-    for (auto &pinfo : pipeline_stage_infos) {
-      // Only analyze copy stages (memory copy operations)
-      if (!pinfo.is_first_stage())
-        continue;
-
-      // Check all subsequent statements to find the latest consumer
-      for (int i = pinfo.original_stmt_index + 1;
-           i < static_cast<int>(flat_stmts.size()); i++) {
-
-        // Check if any read operation in statement 'i' uses data written by
-        // this copy stage
-        for (const BufferRegion &read : pipeline_stage_infos[i].reads) {
-          // Look for overlapping buffer regions between this stage's writes and
-          // stage 'i's reads
-          if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
-                           [&](const BufferRegion &r) {
-                             return r->buffer == read->buffer &&
-                                    MayConflict(r->region, read->region);
-                           }) != pinfo.writes.end()) {
-            // Update last_use_stmt_index to the maximum (latest) statement
-            // index that uses this data This ensures we capture the final
-            // consumer of the copied data
-            pinfo.last_use_stmt_index = std::max(pinfo.last_use_stmt_index, i);
-          }
-        }
-        // Check for write-after-write conflicts (multiple stages writing to
-        // same buffer region) This is important for pipeline correctness and
-        // affects last_use_stmt_index analysis.
-        // Skip WAW checks between statements in the same cp.async group
-        // (e.g. predicated cp.async calls that intentionally overlap).
-        if (pinfo.is_copy_stage() &&
-            !(pinfo.cp_async_group >= 0 &&
-              pinfo.cp_async_group == pipeline_stage_infos[i].cp_async_group)) {
-          for (const BufferRegion &write : pipeline_stage_infos[i].writes) {
-            if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
-                             [&](const BufferRegion &r) {
-                               return r->buffer == write->buffer &&
-                                      MayConflict(r->region, write->region);
-                             }) != pinfo.writes.end()) {
-              LOG(FATAL) << "Pipeline planning error: Multiple writes to "
-                            "overlapping buffer regions detected. "
-                         << "Stage " << pinfo.original_stmt_index
-                         << " and stage " << i
-                         << " are both writing to buffer '"
-                         << write->buffer->name
-                         << "' with overlapping regions. This is not supported "
-                            "in pipeline planning.";
-            }
-          }
-        }
-      }
-    }
+    AnalyzeCopyLastUse(&pipeline_stage_infos);
 
     // Treat each explicit `cp_async* ; commit` producer group as a synthetic
     // copy stage for scheduling. All statements in the group share the same
@@ -1124,6 +1416,27 @@ private:
         }
       }
     }
+
+    // Order explicit cp.async producer groups by the lifetime of the data they
+    // introduce. Groups whose data dies earlier should be scheduled earlier in
+    // the synthetic stage-0 producer schedule, which also matches the desired
+    // wait rebinding behavior for wait_group(0) consumers.
+    std::stable_sort(
+        cp_async_group_schedule_order.begin(),
+        cp_async_group_schedule_order.end(), [&](int lhs_group, int rhs_group) {
+          int lhs_last_use = cp_async_groups[lhs_group].last_use_stmt_index;
+          int rhs_last_use = cp_async_groups[rhs_group].last_use_stmt_index;
+          if (lhs_last_use != rhs_last_use) {
+            return lhs_last_use < rhs_last_use;
+          }
+          int lhs_first_consumer = cp_async_group_first_consumer[lhs_group];
+          int rhs_first_consumer = cp_async_group_first_consumer[rhs_group];
+          if (lhs_first_consumer != rhs_first_consumer) {
+            return lhs_first_consumer < rhs_first_consumer;
+          }
+          return cp_async_groups[lhs_group].anchor_cp_async_stmt <
+                 cp_async_groups[rhs_group].anchor_cp_async_stmt;
+        });
 
     // Making stages and orders
     int order_idx = 0;

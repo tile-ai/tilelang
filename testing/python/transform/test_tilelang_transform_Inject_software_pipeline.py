@@ -346,6 +346,41 @@ def test_async_pipeline_marks_copy_ops_for_pipeline_managed_cp_async_sync():
     assert annotated == total
 
 
+def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():
+    @T.prim_func
+    def before(
+        A: T.Tensor((16, 16), T.bfloat16),
+        C: T.Tensor((16, 16), T.float32),
+    ):
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [0, 1],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 0],
+                    "software_pipeline_async_producer_groups": [0, -1],
+                },
+            ):
+                with T.block("compute"):
+                    T.reads(A[tx, i])
+                    T.writes(C[tx, i])
+                    S = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                    T.copy(A[tx, i : i + 1], S[tx, 0:1])
+                    C[tx, i] = S[tx, 0]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    annotated, total = _count_copy_calls_with_annotation(
+        mod["main"], "no_implicit_async_commit_wait"
+    )
+    assert total > 0
+    assert annotated == 0
+
+
 def test_async_pipeline_relaxes_loop_wait_and_splits_trailing_drain():
     @T.prim_func
     def before(A: T.Tensor((32,), T.uint8), B: T.Tensor((32,), T.uint8)):
@@ -382,6 +417,43 @@ def test_async_pipeline_relaxes_loop_wait_and_splits_trailing_drain():
 
     assert loop_waits == [2], f"Expected relaxed loop wait to keep two groups in flight, got {loop_waits}"
     assert all_waits == [2, 2, 0], f"Expected trailing waits to split into retain+drain, got {all_waits}"
+
+
+def test_degenerate_pipeline_with_single_stage_is_not_expanded():
+    @T.prim_func
+    def before(B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=128) as _:
+            frag = T.alloc_fragment((4, 128), T.float16)
+            split = T.alloc_fragment((128,), T.float32)
+            scale = T.alloc_fragment((128,), T.float32)
+            for k in T.serial(
+                4,
+                annotations={
+                    "software_pipeline_stage": [2, 2],
+                    "software_pipeline_order": [0, 1],
+                    "tl_pipelined_num_stages": 2,
+                },
+            ):
+                for i in T.Parallel(128):
+                    split[i] = T.Cast("float32", frag[k, i])
+                for i in T.Parallel(128):
+                    scale[i] = split[i]
+                    B[i] = scale[i]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    mod = tl.transform.Simplify()(mod)
+
+    func = mod["main"]
+    attrs, calls = _count_attrs_and_calls(func)
+    assert attrs.get("tl.pipeline_context_num_stages", 0) == 0
+    assert attrs.get("tl.pipeline_mvb_num_stages", 0) == 0
+    assert attrs.get("tl.pipeline_mvb_stage_expr", 0) == 0
+    assert attrs.get("tl.pipeline_mvb_parity_expr", 0) == 0
+    assert calls.get("tir.ptx_wait_group", 0) == 0
+    assert "tl_pipelined_num_stages" not in func.script()
+    assert "frag[k, i]" in func.script()
+    assert "frag[2, i]" not in func.script()
 
 
 if __name__ == "__main__":

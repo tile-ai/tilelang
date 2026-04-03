@@ -521,4 +521,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    test(n=2048, hidden_size=4096, hc_mult=4)

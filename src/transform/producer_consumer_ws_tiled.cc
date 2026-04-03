@@ -772,12 +772,14 @@ static PrimExpr RewriteCopyToTmaCopy(const Call &copy_call,
 /// cp_async_barrier_noinc, tying cp.async completion to the forward mbarrier.
 class SimtProducerAnnotator : public StmtExprMutator {
 public:
-  static Stmt Annotate(const Stmt &stmt) {
-    SimtProducerAnnotator a;
+  static Stmt Annotate(const Stmt &stmt, Target target) {
+    SimtProducerAnnotator a(std::move(target));
     return a.VisitStmt(stmt);
   }
 
 private:
+  explicit SimtProducerAnnotator(Target target) : target_(std::move(target)) {}
+
   Stmt VisitStmt_(const ForNode *op) final {
     Stmt body = VisitStmt(op->body);
     auto annotations = op->annotations;
@@ -787,10 +789,9 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
-    static const Op &copy_op = Op::Get("tl.tileop.copy");
-    static const Op &async_copy_op = Op::Get("tl.tileop.async_copy");
+  static const Op &copy_op = Op::Get("tl.tileop.copy");
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (!call->op.same_as(copy_op) && !call->op.same_as(async_copy_op)) {
+    if (!call->op.same_as(copy_op) || !CanUsePipelineManagedCPAsyncCopy(call)) {
       return call;
     }
     auto annotations = call->annotations;
@@ -798,6 +799,18 @@ private:
                     IntImm(DataType::Int(32), 1));
     return Call(call->dtype, call->op, call->args, annotations, call->span);
   }
+
+  bool CanUsePipelineManagedCPAsyncCopy(const Call &call) const {
+    auto tile_op = ParseOperator(call);
+    const auto *copy = tile_op.as<CopyNode>();
+    if (copy == nullptr) {
+      return false;
+    }
+    return copy->CheckPipelineManagedCPAsyncCopy(target_, &analyzer_);
+  }
+
+  Target target_;
+  mutable arith::Analyzer analyzer_;
 };
 
 /// Annotate a tile-op Call (e.g., c2d_im2col) with a barrier reference.
@@ -1256,7 +1269,7 @@ private:
         // InjectPTXAsyncCopy (called from LowerTileOp) does not insert
         // commit+wait — the WS pass will emit its own commit+barrier_noinc.
         simt_producer_stmts.push_back(
-            SimtProducerAnnotator::Annotate(flat_stmts[i]));
+            SimtProducerAnnotator::Annotate(flat_stmts[i], target_));
       } else if (kinds[i] == TileStmtKind::kCpAsyncProducer) {
         simt_producer_stmts.push_back(flat_stmts[i]);
       }

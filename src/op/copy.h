@@ -266,11 +266,30 @@ public:
   bool CheckTMemStore(Target target) const;
 
   /*!
+   * \brief Check target-independent cp.async prerequisites.
+   */
+  bool CheckCPAsyncCopyPreconditions() const;
+
+  /*!
+   * \brief Check whether this copy can participate in pipeline-managed
+   * cp.async synchronization using only target-independent prerequisites.
+   */
+  bool CheckPipelineManagedCPAsyncCopy() const;
+
+  /*!
+   * \brief Check whether this copy can participate in pipeline-managed
+   * cp.async synchronization for a concrete target.
+   */
+  bool CheckPipelineManagedCPAsyncCopy(Target target,
+                                       arith::Analyzer *analyzer) const;
+
+  /*!
    * \brief Check if cp.async copy is supported.
    */
   bool CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
                         arith::Analyzer *analyzer) const;
 
+protected:
   /*!
    * \brief Get the copy instruction type.
    */
@@ -278,7 +297,6 @@ public:
                        const LayoutMap &layout_map, arith::Analyzer *analyzer,
                        bool buffer_oob = false, bool in_pipeline = false) const;
 
-protected:
   /*!
    * \brief Generate lowering for bulk/global-to-shared copy.
    */
