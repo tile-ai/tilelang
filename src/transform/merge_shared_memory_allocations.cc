@@ -271,7 +271,7 @@ public:
   }
 
   // Visit kSharedMemoryLivenessBoundary bounded scopes
-  void VisitNewScopes(const AttrStmtNode *op)  {
+  void VisitNewScopes(const AttrStmtNode *op) {
     scope_.push_back(StmtEntry());
     StmtEntry e;
     e.stmt = op;
@@ -285,7 +285,8 @@ public:
     if (op->body.as<SeqStmtNode>()) {
       for (auto &sub_stmt : body->seq) {
         if (sub_stmt.as<AttrStmtNode>() &&
-            sub_stmt.as<AttrStmtNode>()->attr_key == attr::kSharedMemoryLivenessBoundary) {
+            sub_stmt.as<AttrStmtNode>()->attr_key ==
+                attr::kSharedMemoryLivenessBoundary) {
           has_tail_stmt = true;
           tail_stmt = sub_stmt.as<AttrStmtNode>();
         } else {
