@@ -343,6 +343,16 @@ TVM_DLL const Op &ptx_tcgen05_mma_ss();
 TVM_DLL const Op &ptx_tcgen05_mma_ts();
 
 /*!
+ * \brief Frontend TMEM deallocation marker.
+ *
+ * deallocate_tmem(tmem_buffer_data)
+ *
+ * This op is produced by the TileLang Python frontend and must be lowered by
+ * LowerSharedTmem into ptx_deallocate_tensor_memory(access_ptr, num_cols).
+ */
+TVM_DLL const Op &deallocate_tmem();
+
+/*!
  * \brief tvm intrinsics for initializing tensor memory
  *
  * ptx_init_tensor_memory(tmem_buffer, num_cols)
@@ -694,6 +704,19 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
  *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
  */
 TVM_DLL const Op &tcgen05_mma_arrive();
+
+/*!
+ * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
+ * bar.sync). Matches PTX \c tcgen05.fence::before_thread_sync (DeepGEMM /
+ * Blackwell UMMA sequencing).
+ */
+TVM_DLL const Op &tcgen05_before_thread_sync();
+
+/*!
+ * \brief TCGEN05 fence after a thread-block-wide sync. Matches PTX \c
+ * tcgen05.fence::after_thread_sync.
+ */
+TVM_DLL const Op &tcgen05_after_thread_sync();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor

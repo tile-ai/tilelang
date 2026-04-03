@@ -1775,7 +1775,13 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     seq.reserve(3);
     seq.push_back(tma_copy);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    if (!GetIsTmaCopy()) {
+      // T.copy(): emit both arrive and wait for automatic synchronization.
+      seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
+                                  {IntImm(DataType::Int(32), 0)})));
+    }
+    // T.tma_copy(): only arrive, no wait. The user must call
+    // T.tma_store_wait() explicitly to synchronize.
     tma_copy = SeqStmt(std::move(seq));
   }
 
@@ -1961,7 +1967,13 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
     seq.reserve(3);
     seq.push_back(tma_copy);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
+    if (!GetIsTmaCopy()) {
+      // T.copy(): emit both arrive and wait for automatic synchronization.
+      seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
+                                  {IntImm(DataType::Int(32), 0)})));
+    }
+    // T.tma_copy(): only arrive, no wait. The user must call
+    // T.tma_store_wait() explicitly to synchronize.
     tma_copy = SeqStmt(std::move(seq));
   }
 
