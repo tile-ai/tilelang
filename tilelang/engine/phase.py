@@ -238,6 +238,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
+    mod = tilelang.transform.ReuseLocalDescriptorAllocations()(mod)
     if is_hopper(target):
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
     mod = tilelang.transform.Simplify()(mod)
