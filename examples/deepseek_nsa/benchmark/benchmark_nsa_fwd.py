@@ -468,8 +468,10 @@ def get_configs():
     }
 )
 def tilelang_sparse_attention(
-    batch, heads, seq_len, dim, is_causal, scale=None, block_size=64, groups=1, selected_blocks=16, block_T=128, num_stages=2, threads=32
+    Q, K, V, BlockIndices, dim, is_causal, scale=None, block_size=64, groups=1, selected_blocks=16, block_T=128, num_stages=2, threads=32
 ):
+    batch, heads, seq_len = T.const("batch, heads, seq_len")
+
     if scale is None:
         scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     else:
@@ -494,80 +496,78 @@ def tilelang_sparse_attention(
     BS = block_S
     BK = BV = block_T
 
-    @T.prim_func
-    def tilelang_sparse_attention(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
-        BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
-        Output: T.Tensor(q_shape, dtype),
-    ):
-        with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
-            Q_shared = T.alloc_shared([G, BK], dtype)
-            K_shared = T.alloc_shared([BS, BK], dtype)
-            V_shared = T.alloc_shared([BS, BV], dtype)
-            O_shared = T.alloc_shared([G, BV], dtype)
+    Q: T.Tensor(q_shape, dtype)
+    K: T.Tensor(kv_shape, dtype)
+    V: T.Tensor(kv_shape, dtype)
+    BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype)
+    Output = T.empty(q_shape, dtype)
 
-            acc_s = T.alloc_fragment([G, BS], accum_dtype)
-            acc_s_cast = T.alloc_shared([G, BS], dtype)
-            acc_o = T.alloc_fragment([G, BV], accum_dtype)
-            scores_max = T.alloc_fragment([G], accum_dtype)
-            scores_max_prev = T.alloc_fragment([G], accum_dtype)
-            scores_scale = T.alloc_fragment([G], accum_dtype)
-            scores_sum = T.alloc_fragment([G], accum_dtype)
-            logsum = T.alloc_fragment([G], accum_dtype)
+    with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
+        Q_shared = T.alloc_shared([G, BK], dtype)
+        K_shared = T.alloc_shared([BS, BK], dtype)
+        V_shared = T.alloc_shared([BS, BV], dtype)
+        O_shared = T.alloc_shared([G, BV], dtype)
 
-            i_t, i_v, i_bh = bx, by, bz
-            i_b, i_h = i_bh // head_kv, i_bh % head_kv
+        acc_s = T.alloc_fragment([G, BS], accum_dtype)
+        acc_s_cast = T.alloc_shared([G, BS], dtype)
+        acc_o = T.alloc_fragment([G, BV], accum_dtype)
+        scores_max = T.alloc_fragment([G], accum_dtype)
+        scores_max_prev = T.alloc_fragment([G], accum_dtype)
+        scores_scale = T.alloc_fragment([G], accum_dtype)
+        scores_sum = T.alloc_fragment([G], accum_dtype)
+        logsum = T.alloc_fragment([G], accum_dtype)
 
-            NS = S
-            T.copy(Q[i_b, i_t, i_h * G : (i_h + 1) * G, :], Q_shared)
+        i_t, i_v, i_bh = bx, by, bz
+        i_b, i_h = i_bh // head_kv, i_bh % head_kv
 
-            T.fill(acc_o, 0)
-            T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
+        NS = S
+        T.copy(Q[i_b, i_t, i_h * G : (i_h + 1) * G, :], Q_shared)
 
-            for i in T.Pipelined(NS, num_stages=num_stages):
-                i_s = BlockIndices[i_b, i_t, i_h, i] * BS
-                if i_s <= i_t and i_s >= 0:
-                    # [BS, BK]
-                    T.copy(K[i_b, i_s : i_s + BS, i_h, :], K_shared)
+        T.fill(acc_o, 0)
+        T.fill(logsum, 0)
+        T.fill(scores_max, -T.infinity(accum_dtype))
 
-                    if is_causal:
-                        for i, j in T.Parallel(G, BS):
-                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
-                    else:
-                        T.clear(acc_s)
+        for i in T.Pipelined(NS, num_stages=num_stages):
+            i_s = BlockIndices[i_b, i_t, i_h, i] * BS
+            if i_s <= i_t and i_s >= 0:
+                # [BS, BK]
+                T.copy(K[i_b, i_s : i_s + BS, i_h, :], K_shared)
 
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-
-                    # Softmax
-                    T.copy(scores_max, scores_max_prev)
-                    T.fill(scores_max, -T.infinity(accum_dtype))
-                    T.reduce_max(acc_s, scores_max, dim=1, clear=True)
-                    for i in T.Parallel(G):
-                        scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                if is_causal:
                     for i, j in T.Parallel(G, BS):
-                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                    T.reduce_sum(acc_s, scores_sum, dim=1)
-                    for i in T.Parallel(G):
-                        logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                    T.copy(acc_s, acc_s_cast)
+                        acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
+                else:
+                    T.clear(acc_s)
 
-                    # Rescale
-                    for i, j in T.Parallel(G, BV):
-                        acc_o[i, j] *= scores_scale[i]
+                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
-                    # V * softmax(Q * K)
-                    T.copy(V[i_b, i_s : i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
-                    T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+                # Softmax
+                T.copy(scores_max, scores_max_prev)
+                T.fill(scores_max, -T.infinity(accum_dtype))
+                T.reduce_max(acc_s, scores_max, dim=1, clear=True)
+                for i in T.Parallel(G):
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                for i, j in T.Parallel(G, BS):
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                T.reduce_sum(acc_s, scores_sum, dim=1)
+                for i in T.Parallel(G):
+                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                T.copy(acc_s, acc_s_cast)
 
-            for i, j in T.Parallel(G, BV):
-                acc_o[i, j] /= logsum[i]
-            T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[i_b, i_t, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV])
+                # Rescale
+                for i, j in T.Parallel(G, BV):
+                    acc_o[i, j] *= scores_scale[i]
 
-    return tilelang_sparse_attention
+                # V * softmax(Q * K)
+                T.copy(V[i_b, i_s : i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+
+        for i, j in T.Parallel(G, BV):
+            acc_o[i, j] /= logsum[i]
+        T.copy(acc_o, O_shared)
+        T.copy(O_shared, Output[i_b, i_t, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV])
+
+    return Output
 
 
 def generate_block_indices(batch, seq_len, heads, selected_blocks, block_size):
@@ -593,7 +593,7 @@ def benchmark_nsa(
     torch.random.manual_seed(0)
 
     # Compile the NSA kernel
-    kernel = tilelang_sparse_attention(
+    kernel = tilelang_sparse_attention.compile(
         batch=batch_size,
         heads=head_query,
         seq_len=seq_len,
@@ -614,14 +614,13 @@ def benchmark_nsa(
     Q = torch.randn((batch_size, seq_len, head_query, dim), dtype=dtype, device="cuda")
     K = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device="cuda")
     V = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device="cuda")
-    out = torch.empty((batch_size, seq_len, head_query, dim), dtype=dtype, device="cuda")
 
     # Generate block indices
     block_indices = generate_block_indices(batch_size, seq_len, heads, selected_blocks, block_size).to(torch.int32)
 
     # Warmup
     for _ in range(warmup):
-        kernel(Q, K, V, block_indices, out)
+        out = kernel(Q, K, V, block_indices)
 
     # Synchronize before timing
     torch.cuda.synchronize()
@@ -629,7 +628,7 @@ def benchmark_nsa(
     # Benchmark
     start_time = time.time()
     for _ in range(iterations):
-        kernel(Q, K, V, block_indices, out)
+        out = kernel(Q, K, V, block_indices)
     torch.cuda.synchronize()
     end_time = time.time()
 

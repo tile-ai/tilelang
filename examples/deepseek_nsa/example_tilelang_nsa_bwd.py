@@ -16,6 +16,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 from reference import naive_nsa
 from einops import rearrange
 import tilelang
+from tilelang import language as T
 
 
 @tilelang.jit(
@@ -26,9 +27,10 @@ import tilelang
     }
 )
 def tilelang_kernel_fwd(
-    batch,
-    heads,
-    seq_len,
+    Q,
+    K,
+    V,
+    BlockIndices,
     dim,
     is_causal,
     scale=None,
@@ -36,7 +38,7 @@ def tilelang_kernel_fwd(
     groups=1,
     selected_blocks=16,
 ):
-    from tilelang import language as T
+    batch, seq_len, heads = T.const("batch, seq_len, heads")
 
     if scale is None:
         scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
@@ -66,93 +68,91 @@ def tilelang_kernel_fwd(
     num_stages = 0
     threads = 32
 
-    @T.prim_func
-    def native_sparse_attention(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
-        BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
-        O_slc: T.Tensor(o_slc_shape, dtype),
-        LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
-    ):
-        with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
-            Q_shared = T.alloc_shared([G, BK], dtype)
-            K_shared = T.alloc_shared([BS, BK], dtype)
-            V_shared = T.alloc_shared([BS, BV], dtype)
-            O_shared = T.alloc_shared([G, BV], dtype)
+    Q: T.Tensor(q_shape, dtype)
+    K: T.Tensor(kv_shape, dtype)
+    V: T.Tensor(kv_shape, dtype)
+    BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype)
+    O_slc = T.empty(o_slc_shape, dtype)
+    LSE_slc = T.empty(lse_slc_shape, accum_dtype)
 
-            acc_s = T.alloc_fragment([G, BS], accum_dtype)
-            acc_s_cast = T.alloc_fragment([G, BS], dtype)
-            acc_o = T.alloc_fragment([G, BV], accum_dtype)
-            scores_max = T.alloc_fragment([G], accum_dtype)
-            scores_max_prev = T.alloc_fragment([G], accum_dtype)
-            scores_scale = T.alloc_fragment([G], accum_dtype)
-            scores_sum = T.alloc_fragment([G], accum_dtype)
-            logsum = T.alloc_fragment([G], accum_dtype)
+    with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
+        Q_shared = T.alloc_shared([G, BK], dtype)
+        K_shared = T.alloc_shared([BS, BK], dtype)
+        V_shared = T.alloc_shared([BS, BV], dtype)
+        O_shared = T.alloc_shared([G, BV], dtype)
 
-            i_t, i_v, i_bh = bx, by, bz
-            i_b, i_h = i_bh // head_kv, i_bh % head_kv
+        acc_s = T.alloc_fragment([G, BS], accum_dtype)
+        acc_s_cast = T.alloc_fragment([G, BS], dtype)
+        acc_o = T.alloc_fragment([G, BV], accum_dtype)
+        scores_max = T.alloc_fragment([G], accum_dtype)
+        scores_max_prev = T.alloc_fragment([G], accum_dtype)
+        scores_scale = T.alloc_fragment([G], accum_dtype)
+        scores_sum = T.alloc_fragment([G], accum_dtype)
+        logsum = T.alloc_fragment([G], accum_dtype)
 
-            NS = S
-            T.copy(Q[i_b, i_t, i_h * G : (i_h + 1) * G, :], Q_shared)
+        i_t, i_v, i_bh = bx, by, bz
+        i_b, i_h = i_bh // head_kv, i_bh % head_kv
 
-            T.fill(acc_o, 0)
-            T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
+        NS = S
+        T.copy(Q[i_b, i_t, i_h * G : (i_h + 1) * G, :], Q_shared)
 
-            for i in T.Pipelined(NS, num_stages=num_stages):
-                i_s = BlockIndices[i_b, i_t, i_h, i] * BS
-                if i_s <= i_t and i_s >= 0:
-                    # [BS, BK]
-                    T.copy(K[i_b, i_s : i_s + BS, i_h, :], K_shared)
+        T.fill(acc_o, 0)
+        T.fill(logsum, 0)
+        T.fill(scores_max, -T.infinity(accum_dtype))
 
-                    if is_causal:
-                        for k, j in T.Parallel(G, BS):
-                            acc_s[k, j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
-                    else:
-                        T.clear(acc_s)
+        for i in T.Pipelined(NS, num_stages=num_stages):
+            i_s = BlockIndices[i_b, i_t, i_h, i] * BS
+            if i_s <= i_t and i_s >= 0:
+                # [BS, BK]
+                T.copy(K[i_b, i_s : i_s + BS, i_h, :], K_shared)
 
-                    T.gemm(
-                        Q_shared,
-                        K_shared,
-                        acc_s,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-
-                    # Softmax
-                    T.copy(scores_max, scores_max_prev)
-                    T.fill(scores_max, -T.infinity(accum_dtype))
-                    T.reduce_max(acc_s, scores_max, dim=1, clear=True)
-                    for k in T.Parallel(G):
-                        scores_scale[k] = T.exp2(scores_max_prev[k] * scale - scores_max[k] * scale)
+                if is_causal:
                     for k, j in T.Parallel(G, BS):
-                        acc_s[k, j] = T.exp2(acc_s[k, j] * scale - scores_max[k] * scale)
-                    T.reduce_sum(acc_s, scores_sum, dim=1)
-                    for k in T.Parallel(G):
-                        logsum[k] = logsum[k] * scores_scale[k] + scores_sum[k]
-                    T.copy(acc_s, acc_s_cast)
+                        acc_s[k, j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
+                else:
+                    T.clear(acc_s)
 
-                    # Rescale
-                    for k, j in T.Parallel(G, BV):
-                        acc_o[k, j] *= scores_scale[k]
+                T.gemm(
+                    Q_shared,
+                    K_shared,
+                    acc_s,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
 
-                    # V * softmax(Q * K)
-                    T.copy(V[i_b, i_s : i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
-                    T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+                # Softmax
+                T.copy(scores_max, scores_max_prev)
+                T.fill(scores_max, -T.infinity(accum_dtype))
+                T.reduce_max(acc_s, scores_max, dim=1, clear=True)
+                for k in T.Parallel(G):
+                    scores_scale[k] = T.exp2(scores_max_prev[k] * scale - scores_max[k] * scale)
+                for k, j in T.Parallel(G, BS):
+                    acc_s[k, j] = T.exp2(acc_s[k, j] * scale - scores_max[k] * scale)
+                T.reduce_sum(acc_s, scores_sum, dim=1)
+                for k in T.Parallel(G):
+                    logsum[k] = logsum[k] * scores_scale[k] + scores_sum[k]
+                T.copy(acc_s, acc_s_cast)
 
-            for i, j in T.Parallel(G, BV):
-                acc_o[i, j] /= logsum[i]
-            T.copy(acc_o, O_shared)
-            T.copy(
-                O_shared,
-                O_slc[i_b, i_t, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV],
-            )
-            for i in T.Parallel(G):
-                logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-            T.copy(logsum, LSE_slc[i_b, i_t, i_h * G : (i_h + 1) * G])
+                # Rescale
+                for k, j in T.Parallel(G, BV):
+                    acc_o[k, j] *= scores_scale[k]
 
-    return native_sparse_attention
+                # V * softmax(Q * K)
+                T.copy(V[i_b, i_s : i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+
+        for i, j in T.Parallel(G, BV):
+            acc_o[i, j] /= logsum[i]
+        T.copy(acc_o, O_shared)
+        T.copy(
+            O_shared,
+            O_slc[i_b, i_t, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV],
+        )
+        for i in T.Parallel(G):
+            logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
+        T.copy(logsum, LSE_slc[i_b, i_t, i_h * G : (i_h + 1) * G])
+
+    return O_slc, LSE_slc
 
 
 @tilelang.jit(
@@ -161,9 +161,15 @@ def tilelang_kernel_fwd(
     }
 )
 def tilelang_kernel_bwd_dkv(
-    batch,
-    heads,
-    seq_len,
+    Q,
+    K,
+    V,
+    LSE_slc,
+    Delta_slc,
+    DO_slc,
+    DK,
+    DV,
+    BlockMask,
     dim,
     is_causal,
     scale=None,
@@ -173,14 +179,14 @@ def tilelang_kernel_bwd_dkv(
     dtype=T.float16,
     accum_dtype=T.float32,
 ):
+    batch, seq_len, heads = T.const("batch, seq_len, heads")
+
     if scale is None:
         sm_scale = (1.0 / dim) ** 0.5
     else:
         sm_scale = scale
 
     scale = sm_scale * 1.44269504
-
-    from tilelang import language as T
 
     B = batch
     BS = block_size
@@ -207,109 +213,103 @@ def tilelang_kernel_bwd_dkv(
     num_threads = 32
     print("NV", NV, "NS", NS, "B", B, "H", H)
 
-    @T.prim_func
-    def flash_bwd_dkv(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(k_shape, dtype),
-        V: T.Tensor(v_shape, dtype),
-        LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
-        Delta_slc: T.Tensor(delta_slc_shape, accum_dtype),
-        DO_slc: T.Tensor(do_slc_shape, dtype),
-        DK: T.Tensor(dk_shape, dtype),
-        DV: T.Tensor(dv_shape, dtype),
-        BlockMask: T.Tensor(block_mask_shape, T.int32),
-    ):
-        with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
-            K_shared = T.alloc_shared([BS, BK], dtype)
-            V_shared = T.alloc_shared([BS, BV], dtype)
-            Q_shared = T.alloc_shared([G, BK], dtype)
-            qkT = T.alloc_fragment([BS, G], accum_dtype)
-            qkT_cast = T.alloc_fragment([BS, G], dtype)
-            dsT = T.alloc_fragment([BS, G], accum_dtype)
-            dsT_cast = T.alloc_fragment([BS, G], dtype)
-            lse_shared = T.alloc_shared([G], accum_dtype)
-            delta = T.alloc_shared([G], accum_dtype)
+    Q: T.Tensor(q_shape, dtype)
+    K: T.Tensor(k_shape, dtype)
+    V: T.Tensor(v_shape, dtype)
+    LSE_slc: T.Tensor(lse_slc_shape, accum_dtype)
+    Delta_slc: T.Tensor(delta_slc_shape, accum_dtype)
+    DO_slc: T.Tensor(do_slc_shape, dtype)
+    DK: T.Tensor(dk_shape, dtype)
+    DV: T.Tensor(dv_shape, dtype)
+    BlockMask: T.Tensor(block_mask_shape, T.int32)
 
-            do = T.alloc_shared([G, BV], dtype)
-            dv = T.alloc_fragment([BS, BV], accum_dtype)
-            dk = T.alloc_fragment([BS, BK], accum_dtype)
-            dq = T.alloc_fragment([BS, G], accum_dtype)
+    with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
+        K_shared = T.alloc_shared([BS, BK], dtype)
+        V_shared = T.alloc_shared([BS, BV], dtype)
+        Q_shared = T.alloc_shared([G, BK], dtype)
+        qkT = T.alloc_fragment([BS, G], accum_dtype)
+        qkT_cast = T.alloc_fragment([BS, G], dtype)
+        dsT = T.alloc_fragment([BS, G], accum_dtype)
+        dsT_cast = T.alloc_fragment([BS, G], dtype)
+        lse_shared = T.alloc_shared([G], accum_dtype)
+        delta = T.alloc_shared([G], accum_dtype)
 
-            dv_shared = T.alloc_shared([BS, BV], dtype)
-            dk_shared = T.alloc_shared([BS, BK], dtype)
+        do = T.alloc_shared([G, BV], dtype)
+        dv = T.alloc_fragment([BS, BV], accum_dtype)
+        dk = T.alloc_fragment([BS, BK], accum_dtype)
+        dq = T.alloc_fragment([BS, G], accum_dtype)
 
-            i_b, i_h = i_bh // H, i_bh % H
+        dv_shared = T.alloc_shared([BS, BV], dtype)
+        dk_shared = T.alloc_shared([BS, BK], dtype)
 
-            T.copy(K[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK], K_shared)
-            T.copy(V[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV], V_shared)
+        i_b, i_h = i_bh // H, i_bh % H
 
-            # [BS, BK]
-            T.clear(dk)
-            # [BS, BV]
-            T.clear(dv)
+        T.copy(K[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK], K_shared)
+        T.copy(V[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV], V_shared)
 
-            loop_st = i_s * BS
-            loop_ed = seq_len
-            for i in T.Pipelined(
-                start=loop_st,
-                stop=loop_ed,
-                num_stages=0,
-            ):
-                b_m_slc = BlockMask[i_b, i, i_h, i_s]
-                if b_m_slc != 0:
-                    # [G, BK]
-                    T.copy(Q[i_b, i, i_h * G : (i_h + 1) * G, :BK], Q_shared)
-                    T.clear(qkT)
-                    # [BS, BK] @ [G, BK] -> [BS, G]
-                    T.gemm(
-                        K_shared,
-                        Q_shared,
-                        qkT,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                    # [G]
-                    T.copy(LSE_slc[i_b, i, i_h * G : (i_h + 1) * G], lse_shared)
+        # [BS, BK]
+        T.clear(dk)
+        # [BS, BV]
+        T.clear(dv)
 
-                    for _i, _j in T.Parallel(BS, G):
-                        qkT[_i, _j] = T.exp2(qkT[_i, _j] * scale - lse_shared[_j])
+        loop_st = i_s * BS
+        loop_ed = seq_len
+        for i in T.Pipelined(
+            start=loop_st,
+            stop=loop_ed,
+            num_stages=0,
+        ):
+            b_m_slc = BlockMask[i_b, i, i_h, i_s]
+            if b_m_slc != 0:
+                # [G, BK]
+                T.copy(Q[i_b, i, i_h * G : (i_h + 1) * G, :BK], Q_shared)
+                T.clear(qkT)
+                # [BS, BK] @ [G, BK] -> [BS, G]
+                T.gemm(
+                    K_shared,
+                    Q_shared,
+                    qkT,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+                # [G]
+                T.copy(LSE_slc[i_b, i, i_h * G : (i_h + 1) * G], lse_shared)
 
-                    for _i, _j in T.Parallel(BS, G):
-                        qkT[_i, _j] = T.if_then_else(i >= (i_s * BS + _i), qkT[_i, _j], 0)
+                for _i, _j in T.Parallel(BS, G):
+                    qkT[_i, _j] = T.exp2(qkT[_i, _j] * scale - lse_shared[_j])
 
-                    # [G, BV]
-                    T.copy(DO_slc[i_b, i, i_h * G : (i_h + 1) * G, :BV], do)
-                    T.clear(dsT)
-                    # [BS, BV] @ [G, BV] -> [BS, G]
-                    T.gemm(
-                        V_shared,
-                        do,
-                        dsT,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                    T.copy(qkT, qkT_cast)
-                    # [BS, G] @ [G, BV] -> [BS, BV]
-                    T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
-                    # [G]
-                    T.copy(Delta_slc[i_b, i, i_h * G : (i_h + 1) * G], delta)
-                    for i, j in T.Parallel(BS, G):
-                        dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
+                for _i, _j in T.Parallel(BS, G):
+                    qkT[_i, _j] = T.if_then_else(i >= (i_s * BS + _i), qkT[_i, _j], 0)
 
-                    # [BS, G] @ [G, BK] -> [BS, BK]
-                    T.gemm(dsT_cast, Q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
+                # [G, BV]
+                T.copy(DO_slc[i_b, i, i_h * G : (i_h + 1) * G, :BV], do)
+                T.clear(dsT)
+                # [BS, BV] @ [G, BV] -> [BS, G]
+                T.gemm(
+                    V_shared,
+                    do,
+                    dsT,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+                T.copy(qkT, qkT_cast)
+                # [BS, G] @ [G, BV] -> [BS, BV]
+                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
+                # [G]
+                T.copy(Delta_slc[i_b, i, i_h * G : (i_h + 1) * G], delta)
+                for i, j in T.Parallel(BS, G):
+                    dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
 
-            T.copy(dv, dv_shared)
-            T.copy(dk, dk_shared)
-            T.copy(dv_shared, DV[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV])
-            T.copy(dk_shared, DK[i_v, i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK])
+                # [BS, G] @ [G, BK] -> [BS, BK]
+                T.gemm(dsT_cast, Q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
 
-    return flash_bwd_dkv
+        T.copy(dv, dv_shared)
+        T.copy(dk, dk_shared)
+        T.copy(dv_shared, DV[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV])
+        T.copy(dk_shared, DK[i_v, i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK])
 
 
 def make_dq_layout(dQ):
-    from tilelang import language as T
-
     # atomicAdd can not be vectorized, so we need to reorder dq to match the 8x8 gemm fragment
     return T.Layout(
         dQ.shape,
@@ -323,9 +323,16 @@ def make_dq_layout(dQ):
     }
 )
 def tilelang_kernel_bwd_dqkv(
-    batch,
-    heads,
-    seq_len,
+    Q,
+    K,
+    V,
+    LSE_slc,
+    Delta_slc,
+    DO_slc,
+    DQ,
+    DK,
+    DV,
+    BlockMask,
     dim,
     is_causal,
     scale=None,
@@ -335,6 +342,8 @@ def tilelang_kernel_bwd_dqkv(
     dtype=T.float16,
     accum_dtype=T.float32,
 ):
+    batch, seq_len, heads = T.const("batch, seq_len, heads")
+
     if scale is None:
         sm_scale = (1.0 / dim) ** 0.5
     else:
@@ -342,17 +351,13 @@ def tilelang_kernel_bwd_dqkv(
 
     scale = sm_scale * 1.44269504
 
-    from tilelang import language as T
-
     B = batch
     BS = block_size
     G = groups
-    V = dim
-    K = dim
-    BK = tilelang.next_power_of_2(K)
+    BK = tilelang.next_power_of_2(dim)
     BV = min(128, tilelang.next_power_of_2(dim))
     NS = tilelang.cdiv(seq_len, BS)
-    NV = tilelang.cdiv(V, BV)
+    NV = tilelang.cdiv(dim, BV)
 
     heads_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
@@ -369,200 +374,184 @@ def tilelang_kernel_bwd_dqkv(
     block_mask_shape = [batch, seq_len, heads_kv, NS]
     num_threads = 32
 
-    @T.prim_func
-    def flash_bwd_dqkv(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(k_shape, dtype),
-        V: T.Tensor(v_shape, dtype),
-        LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
-        Delta_slc: T.Tensor(delta_slc_shape, accum_dtype),
-        DO_slc: T.Tensor(do_slc_shape, dtype),
-        DQ: T.Tensor(dq_shape, dtype),
-        DK: T.Tensor(dk_shape, dtype),
-        DV: T.Tensor(dv_shape, dtype),
-        BlockMask: T.Tensor(block_mask_shape, T.int32),
-    ):
-        with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
-            K_shared = T.alloc_shared([BS, BK], dtype)
-            dsT_shared = T.alloc_shared([BS, G], dtype)
-            V_shared = T.alloc_shared([BS, BV], dtype)
-            Q_shared = T.alloc_shared([G, BK], dtype)
-            qkT = T.alloc_fragment([BS, G], accum_dtype)
-            qkT_cast = T.alloc_fragment([BS, G], dtype)
-            dsT = T.alloc_fragment([BS, G], accum_dtype)
-            dsT_cast = T.alloc_fragment([BS, G], dtype)
-            lse_shared = T.alloc_shared([G], accum_dtype)
-            delta = T.alloc_shared([G], accum_dtype)
+    Q: T.Tensor(q_shape, dtype)
+    K: T.Tensor(k_shape, dtype)
+    V: T.Tensor(v_shape, dtype)
+    LSE_slc: T.Tensor(lse_slc_shape, accum_dtype)
+    Delta_slc: T.Tensor(delta_slc_shape, accum_dtype)
+    DO_slc: T.Tensor(do_slc_shape, dtype)
+    DQ: T.Tensor(dq_shape, dtype)
+    DK: T.Tensor(dk_shape, dtype)
+    DV: T.Tensor(dv_shape, dtype)
+    BlockMask: T.Tensor(block_mask_shape, T.int32)
 
-            do = T.alloc_shared([G, BV], dtype)
-            dv = T.alloc_fragment([BS, BV], accum_dtype)
-            dk = T.alloc_fragment([BS, BK], accum_dtype)
-            dq = T.alloc_fragment([G, BK], accum_dtype)
+    with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
+        K_shared = T.alloc_shared([BS, BK], dtype)
+        dsT_shared = T.alloc_shared([BS, G], dtype)
+        V_shared = T.alloc_shared([BS, BV], dtype)
+        Q_shared = T.alloc_shared([G, BK], dtype)
+        qkT = T.alloc_fragment([BS, G], accum_dtype)
+        qkT_cast = T.alloc_fragment([BS, G], dtype)
+        dsT = T.alloc_fragment([BS, G], accum_dtype)
+        dsT_cast = T.alloc_fragment([BS, G], dtype)
+        lse_shared = T.alloc_shared([G], accum_dtype)
+        delta = T.alloc_shared([G], accum_dtype)
 
-            dv_shared = T.alloc_shared([BS, BV], dtype)
-            dk_shared = T.alloc_shared([BS, BK], dtype)
+        do = T.alloc_shared([G, BV], dtype)
+        dv = T.alloc_fragment([BS, BV], accum_dtype)
+        dk = T.alloc_fragment([BS, BK], accum_dtype)
+        dq = T.alloc_fragment([G, BK], accum_dtype)
 
-            i_b, i_h = i_bh // H, i_bh % H
+        dv_shared = T.alloc_shared([BS, BV], dtype)
+        dk_shared = T.alloc_shared([BS, BK], dtype)
 
-            T.copy(K[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK], K_shared)
-            T.copy(V[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV], V_shared)
+        i_b, i_h = i_bh // H, i_bh % H
 
-            # [BS, BK]
-            T.clear(dk)
-            # [BS, BV]
-            T.clear(dv)
+        T.copy(K[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK], K_shared)
+        T.copy(V[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV], V_shared)
 
-            loop_st = i_s * BS
-            loop_ed = seq_len
-            for i in T.Pipelined(
-                start=loop_st,
-                stop=loop_ed,
-                num_stages=0,
-            ):
-                b_m_slc = BlockMask[i_b, i, i_h, i_s]
-                if b_m_slc != 0:
-                    # [G, BK]
-                    T.copy(Q[i_b, i, i_h * G : (i_h + 1) * G, :BK], Q_shared)
-                    T.clear(qkT)
-                    # [BS, BK] @ [G, BK] -> [BS, G]
-                    T.gemm(
-                        K_shared,
-                        Q_shared,
-                        qkT,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                    # [G]
-                    T.copy(LSE_slc[i_b, i, i_h * G : (i_h + 1) * G], lse_shared)
+        # [BS, BK]
+        T.clear(dk)
+        # [BS, BV]
+        T.clear(dv)
 
-                    for _i, _j in T.Parallel(BS, G):
-                        qkT[_i, _j] = T.exp2(qkT[_i, _j] * scale - lse_shared[_j])
+        loop_st = i_s * BS
+        loop_ed = seq_len
+        for i in T.Pipelined(
+            start=loop_st,
+            stop=loop_ed,
+            num_stages=0,
+        ):
+            b_m_slc = BlockMask[i_b, i, i_h, i_s]
+            if b_m_slc != 0:
+                # [G, BK]
+                T.copy(Q[i_b, i, i_h * G : (i_h + 1) * G, :BK], Q_shared)
+                T.clear(qkT)
+                # [BS, BK] @ [G, BK] -> [BS, G]
+                T.gemm(
+                    K_shared,
+                    Q_shared,
+                    qkT,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+                # [G]
+                T.copy(LSE_slc[i_b, i, i_h * G : (i_h + 1) * G], lse_shared)
 
-                    for _i, _j in T.Parallel(BS, G):
-                        qkT[_i, _j] = T.if_then_else(i >= (i_s * BS + _i), qkT[_i, _j], 0)
+                for _i, _j in T.Parallel(BS, G):
+                    qkT[_i, _j] = T.exp2(qkT[_i, _j] * scale - lse_shared[_j])
 
-                    # [G, BV]
-                    T.copy(DO_slc[i_b, i, i_h * G : (i_h + 1) * G, :BV], do)
-                    T.clear(dsT)
-                    # [BS, BV] @ [G, BV] -> [BS, G]
-                    T.gemm(
-                        V_shared,
-                        do,
-                        dsT,
-                        transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow,
-                    )
-                    T.copy(qkT, qkT_cast)
-                    # [BS, G] @ [G, BV] -> [BS, BV]
-                    T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
-                    # [G]
-                    T.copy(Delta_slc[i_b, i, i_h * G : (i_h + 1) * G], delta)
-                    for _i, _j in T.Parallel(BS, G):
-                        dsT_cast[_i, _j] = qkT[_i, _j] * (dsT[_i, _j] - delta[_j]) * sm_scale
+                for _i, _j in T.Parallel(BS, G):
+                    qkT[_i, _j] = T.if_then_else(i >= (i_s * BS + _i), qkT[_i, _j], 0)
 
-                    # [BS, G] @ [G, BK] -> [BS, BK]
-                    T.gemm(dsT_cast, Q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
+                # [G, BV]
+                T.copy(DO_slc[i_b, i, i_h * G : (i_h + 1) * G, :BV], do)
+                T.clear(dsT)
+                # [BS, BV] @ [G, BV] -> [BS, G]
+                T.gemm(
+                    V_shared,
+                    do,
+                    dsT,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+                T.copy(qkT, qkT_cast)
+                # [BS, G] @ [G, BV] -> [BS, BV]
+                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
+                # [G]
+                T.copy(Delta_slc[i_b, i, i_h * G : (i_h + 1) * G], delta)
+                for _i, _j in T.Parallel(BS, G):
+                    dsT_cast[_i, _j] = qkT[_i, _j] * (dsT[_i, _j] - delta[_j]) * sm_scale
 
-                    T.copy(dsT_cast, dsT_shared)
-                    T.clear(dq)
-                    # [BS, G] * [BS, BK] -> [G, BK]
-                    T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
-                    for _i, _j in T.Parallel(G, BK):
-                        T.atomic_add(DQ[i_v, i_b, i, i_h * G + _i, _j], dq[_i, _j])
+                # [BS, G] @ [G, BK] -> [BS, BK]
+                T.gemm(dsT_cast, Q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
 
-            T.copy(dv, dv_shared)
-            T.copy(dk, dk_shared)
-            T.copy(dv_shared, DV[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV])
-            T.copy(dk_shared, DK[i_v, i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK])
+                T.copy(dsT_cast, dsT_shared)
+                T.clear(dq)
+                # [BS, G] * [BS, BK] -> [G, BK]
+                T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
+                for _i, _j in T.Parallel(G, BK):
+                    T.atomic_add(DQ[i_v, i_b, i, i_h * G + _i, _j], dq[_i, _j])
 
-    return flash_bwd_dqkv
+        T.copy(dv, dv_shared)
+        T.copy(dk, dk_shared)
+        T.copy(dv_shared, DV[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV])
+        T.copy(dk_shared, DK[i_v, i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK])
 
 
 @tilelang.jit(
-    out_idx=[2],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
 def tilelang_kernel_preprocess(
-    batch,
-    heads,
-    seq_len,
-    dim,
+    O,
+    dO,
     dtype=T.float16,
     accum_dtype=T.float32,
     blk=32,
 ):
-    from tilelang import language as T
-
+    batch, seq_len, heads, dim = T.const("batch, seq_len, heads, dim")
     shape = [batch, seq_len, heads, dim]
 
-    @T.prim_func
-    def flash_bwd_prep(
-        O: T.Tensor(shape, dtype),  # type: ignore
-        dO: T.Tensor(shape, dtype),  # type: ignore
-        Delta: T.Tensor([batch, seq_len, heads], accum_dtype),  # type: ignore
-    ):
-        with T.Kernel(heads, T.ceildiv(seq_len, blk), batch) as (bx, by, bz):
-            o = T.alloc_fragment([blk, blk], dtype)
-            do = T.alloc_fragment([blk, blk], dtype)
-            acc = T.alloc_fragment([blk, blk], accum_dtype)
-            delta = T.alloc_fragment([blk], accum_dtype)
-            T.clear(acc)
-            for k in range(T.ceildiv(dim, blk)):
-                T.copy(O[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], o)
-                T.copy(dO[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], do)
-                for i, j in T.Parallel(blk, blk):
-                    acc[i, j] += o[i, j] * do[i, j]
-            T.reduce_sum(acc, delta, 1)
-            T.copy(delta, Delta[bz, by * blk : (by + 1) * blk, bx])
+    O: T.Tensor(shape, dtype)  # type: ignore
+    dO: T.Tensor(shape, dtype)  # type: ignore
+    Delta = T.empty([batch, seq_len, heads], accum_dtype)
 
-    return flash_bwd_prep
+    with T.Kernel(heads, T.ceildiv(seq_len, blk), batch) as (bx, by, bz):
+        o = T.alloc_fragment([blk, blk], dtype)
+        do = T.alloc_fragment([blk, blk], dtype)
+        acc = T.alloc_fragment([blk, blk], accum_dtype)
+        delta = T.alloc_fragment([blk], accum_dtype)
+        T.clear(acc)
+        for k in range(T.ceildiv(dim, blk)):
+            T.copy(O[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], o)
+            T.copy(dO[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], do)
+            for i, j in T.Parallel(blk, blk):
+                acc[i, j] += o[i, j] * do[i, j]
+        T.reduce_sum(acc, delta, 1)
+        T.copy(delta, Delta[bz, by * blk : (by + 1) * blk, bx])
+
+    return Delta
 
 
 @tilelang.jit(
-    out_idx=[2],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
 def tilelang_kernel_block_mask(
-    batch,
-    heads,
-    seq_len,
-    selected_blocks,
+    BlockIndices,
+    BlockCounts,
     block_size,
     dtype=T.int32,
 ):
-    from tilelang import language as T
-
+    batch, seq_len, heads, selected_blocks = T.const("batch, seq_len, heads, selected_blocks")
     block_indices_shape = [batch, seq_len, heads, selected_blocks]
     block_counts_shape = [batch, seq_len, heads]
     S = selected_blocks
     BS = block_size
-    NS = tilelang.cdiv(seq_len, BS)
+    NS = T.ceildiv(seq_len, BS)
 
     block_mask_shape = [batch, seq_len, heads, NS]
     USE_BLOCK_COUNTS = block_counts is not None
 
-    @T.prim_func
-    def flash_bwd_block_mask(
-        BlockIndices: T.Tensor(block_indices_shape, dtype),  # type: ignore
-        BlockCounts: T.Tensor(block_counts_shape, dtype),  # type: ignore
-        BlockMask: T.Tensor(block_mask_shape, dtype),  # type: ignore
-    ):
-        with T.Kernel(seq_len, batch, heads * S) as (bx, by, bz):
-            i_t, i_b, i_hs = bx, by, bz
-            i_h, i_s = i_hs // S, i_hs % S
-            b_i = BlockIndices[i_b, i_t, i_h, i_s]
-            if USE_BLOCK_COUNTS:
-                b_m = b_i * BS <= i_t and i_s < BlockCounts[i_b, i_t, i_h].astype(i_s.dtype)
-                BlockMask[i_b, i_t, i_h, i_s] = b_m
-            else:
-                b_m = b_i * BS <= i_t
-                BlockMask[i_b, i_t, i_h, i_s] = b_m
+    BlockIndices: T.Tensor(block_indices_shape, dtype)  # type: ignore
+    BlockCounts: T.Tensor(block_counts_shape, dtype)  # type: ignore
+    BlockMask = T.empty(block_mask_shape, dtype)
 
-    return flash_bwd_block_mask
+    with T.Kernel(seq_len, batch, heads * S) as (bx, by, bz):
+        i_t, i_b, i_hs = bx, by, bz
+        i_h, i_s = i_hs // S, i_hs % S
+        b_i = BlockIndices[i_b, i_t, i_h, i_s]
+        if USE_BLOCK_COUNTS:
+            b_m = b_i * BS <= i_t and i_s < BlockCounts[i_b, i_t, i_h].astype(T.int32)
+            BlockMask[i_b, i_t, i_h, i_s] = b_m
+        else:
+            b_m = b_i * BS <= i_t
+            BlockMask[i_b, i_t, i_h, i_s] = b_m
+
+    return BlockMask
 
 
 def parallel_nsa_bwd(
@@ -593,18 +582,25 @@ def parallel_nsa_bwd(
     NV = triton.cdiv(V, BV)
 
     assert window_size == 0, "Window size is not supported yet"
-    delta_slc = tilelang_kernel_preprocess(B, HQ, T, K)(o_slc, do_slc)
+    delta_slc = tilelang_kernel_preprocess(o_slc, do_slc)
 
     dq = torch.zeros(NV, *q.shape, dtype=q.dtype if NV == 1 else torch.float, device=q.device)
     dk = torch.empty(NV, *k.shape, dtype=k.dtype, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
 
-    block_mask = tilelang_kernel_block_mask(B, H, T, S, BS)(block_indices.to(torch.int32), block_counts.to(torch.int32)).to(torch.bool)
+    block_mask = tilelang_kernel_block_mask(block_indices.to(torch.int32), block_counts.to(torch.int32), BS).to(torch.bool)
 
-    fused_qkv_bwd_kernel = tilelang_kernel_bwd_dqkv(
-        batch=B,
-        heads=HQ,
-        seq_len=T,
+    tilelang_kernel_bwd_dqkv(
+        q,
+        k,
+        v,
+        lse_slc,
+        delta_slc,
+        do_slc,
+        dq,
+        dk,
+        dv,
+        block_mask.to(torch.int32),
         dim=K,
         is_causal=True,
         block_size=BS,
@@ -612,7 +608,6 @@ def parallel_nsa_bwd(
         selected_blocks=S,
         scale=scale,
     )
-    fused_qkv_bwd_kernel(q, k, v, lse_slc, delta_slc, do_slc, dq, dk, dv, block_mask.to(torch.int32))
 
     dq = dq.sum(0)
     dk = dk.sum(0)
@@ -649,10 +644,11 @@ class ParallelNSAFunction(torch.autograd.Function):
         G = HQ // H
         S = block_indices.shape[-1]
         V = v.shape[-1]
-        kernel = tilelang_kernel_fwd(
-            batch=B,
-            heads=HQ,
-            seq_len=SEQLEN,
+        o_slc, lse_slc = tilelang_kernel_fwd(
+            q,
+            k,
+            v,
+            block_indices.to(torch.int32),
             dim=D,
             is_causal=True,
             scale=scale,
@@ -660,9 +656,6 @@ class ParallelNSAFunction(torch.autograd.Function):
             groups=G,
             selected_blocks=S,
         )
-        o_slc = torch.empty(B, SEQLEN, HQ, D, dtype=v.dtype, device=q.device)
-        lse_slc = torch.empty(B, SEQLEN, HQ, dtype=torch.float, device=q.device)
-        kernel(q, k, v, block_indices.to(torch.int32), o_slc, lse_slc)
 
         ctx.save_for_backward(q, k, v, o_slc, lse_slc)
         ctx.block_indices = block_indices
@@ -790,24 +783,24 @@ def parallel_nsa(
 
 
 if __name__ == "__main__":
-    B, T, H, HQ, D, S, block_size, dtype = 1, 32, 1, 16, 32, 1, 32, torch.float16
+    B, SEQ_LEN_Q, H, HQ, D, S, block_size, dtype = 1, 32, 1, 16, 32, 1, 32, torch.float16
     torch.random.manual_seed(0)
-    q = torch.randn((B, T, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=dtype, device="cuda").requires_grad_(True)
-    v = torch.randn((B, T, H, D), dtype=dtype, device="cuda").requires_grad_(True)
-    g_slc = torch.ones((B, T, HQ), dtype=dtype, device="cuda").requires_grad_(True)
-    g_swa = torch.ones((B, T, HQ), dtype=dtype, device="cuda").requires_grad_(True)
-    do = torch.randn((B, T, HQ, D), dtype=dtype, device="cuda")
+    q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
+    k = torch.randn((B, SEQ_LEN_Q, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    v = torch.randn((B, SEQ_LEN_Q, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    g_slc = torch.ones((B, SEQ_LEN_Q, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    g_swa = torch.ones((B, SEQ_LEN_Q, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    do = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda")
 
-    block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device="cuda")
+    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN_Q, dtype=torch.long, device="cuda")
     for b in range(B):
-        for t in range(T):
+        for t in range(SEQ_LEN_Q):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
                 block_indices[b, t, h, : len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
 
-    block_counts = torch.randint(1, S + 1, (B, T, H), device="cuda")
+    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN_Q, H), device="cuda")
 
     ref = naive_nsa(
         q=q,

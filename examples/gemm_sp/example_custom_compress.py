@@ -59,45 +59,44 @@ DEFAULT_CONFIG = {  # take best config from autotune script
 ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 
 
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit
 def matmul_sp_fp16_custom_compress(
-    M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasterization, use_cutlass_layout
+    A_sparse, E, B, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasterization, use_cutlass_layout
 ):
+    M, N, K = T.const("M, N, K")
     e_factor, e_dtype = (16, T.int16)
 
-    @T.prim_func
-    def gemm_sp_fp16_custom_compress(
-        A_sparse: T.Tensor((M, K // 2), T.float16),
-        E: T.Tensor((M, K // e_factor), e_dtype),
-        B: T.Tensor((K, N), T.float16),
-        C: T.Tensor((M, N), accum_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K // 2), T.float16)
-            E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
-            B_shared = T.alloc_shared((block_K, block_N), T.float16)
-            C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            if use_cutlass_layout:
-                T.annotate_layout(
-                    {
-                        E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="8.0", block_k=block_K),
-                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="8.0", block_k=block_K),
-                    }
-                )
-            T.clear(C_local)
-            T.disable_warp_group_reg_alloc()
-            T.use_swizzle(panel_size=10, enable=enable_rasterization)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
-                T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
-                T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp_v2(A_shared, E_shared, B_shared, C_local, False, False, policy=policy)
+    A_sparse: T.Tensor((M, K // 2), T.float16)
+    E: T.Tensor((M, K // e_factor), e_dtype)
+    B: T.Tensor((K, N), T.float16)
+    C = T.empty((M, N), accum_dtype)
 
-            T.copy(C_local, C_shared)
-            T.copy(C_shared, C[by * block_M, bx * block_N])
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+        A_shared = T.alloc_shared((block_M, block_K // 2), T.float16)
+        E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
+        B_shared = T.alloc_shared((block_K, block_N), T.float16)
+        C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        if use_cutlass_layout:
+            T.annotate_layout(
+                {
+                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="8.0", block_k=block_K),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="8.0", block_k=block_K),
+                }
+            )
+        T.clear(C_local)
+        T.disable_warp_group_reg_alloc()
+        T.use_swizzle(panel_size=10, enable=enable_rasterization)
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
+            T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
+            T.copy(B[k * block_K, bx * block_N], B_shared)
+            T.gemm_sp_v2(A_shared, E_shared, B_shared, C_local, False, False, policy=policy)
 
-    return gemm_sp_fp16_custom_compress
+        T.copy(C_local, C_shared)
+        T.copy(C_shared, C[by * block_M, bx * block_N])
+
+    return C
 
 
 def torch_compress(dense):
@@ -223,77 +222,73 @@ def decode_metadata(meta: torch.Tensor) -> torch.Tensor:
 
 
 @tilelang.jit(
-    out_idx=[1, 2],
     pass_configs={
         tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
     },
 )
-def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
+def compress_kernel(A, block_M, block_K, dtype, use_cutlass_layout):
+    M, K = T.const("M, K")
     e_factor, e_dtype = ARCH_INFO["8.0"]
     e_K = K // e_factor
     elem, group = 2, 4
+
+    A: T.Tensor((M, K), dtype)
+    A_sp = T.empty((M, K // 2), dtype)
+    E = T.empty((M, e_K), e_dtype)
 
     assert M % block_M == 0, "M must be divisible by block_M"
     assert K % block_K == 0, "K must be divisible by block_K"
     assert K % e_factor == 0, "K must be divisible by e_factor"
     assert block_K % e_factor == 0, "block_K must be divisible by e_factor"
 
-    @T.prim_func
-    def kernel(
-        A: T.Tensor((M, K), dtype),
-        A_sp: T.Tensor((M, K // 2), dtype),
-        E: T.Tensor((M, e_K), e_dtype),
-    ):
-        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(K, block_K), threads=block_M) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            A_sp_shared = T.alloc_shared((block_M, block_K // 2), dtype)
-            E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
-            if use_cutlass_layout:
-                T.annotate_layout(
-                    {
-                        E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="8.0", block_k=block_K),
-                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="8.0", block_k=block_K),
-                    }
-                )
-            T.clear(A_sp_shared)
-            T.clear(E_shared)
-            # TODO: alloc_var seems buggy here
-            non_zero_cnt = T.alloc_local((1,), dtype=T.uint8)
-            non_zero_elt_log_idx = T.alloc_local((elem,), dtype=T.uint8)
-            T.copy(A[bx * block_M, by * block_K], A_shared)
-            for tm in T.Parallel(block_M):
-                for g_i in range(0, block_K // group):
-                    a_k = g_i * group
-                    non_zero_cnt[0] = 0
-                    for i in range(elem):
-                        non_zero_elt_log_idx[i] = 0
-                    for i in range(group):
-                        val = A_shared[tm, a_k + i]
-                        if val != 0.0:
-                            non_zero_elt_log_idx[non_zero_cnt[0]] = i
-                            A_sp_shared[tm, a_k // 2 + non_zero_cnt[0]] = val
-                            non_zero_cnt[0] += 1
-                    # TODO: use T.device_assert(non_zero_cnt <= 2) after rebasing main
-                    if non_zero_cnt[0] == 1 and non_zero_elt_log_idx[0] == 3:
-                        non_zero_elt_log_idx[0] = 0
-                        non_zero_elt_log_idx[1] = 3
-                        A_sp_shared[tm, a_k // 2 + 1] = A_sp_shared[tm, a_k // 2]
-                        A_sp_shared[tm, a_k // 2] = 0.0
-                    elif non_zero_cnt[0] == 1:
-                        A_sp_shared[tm, a_k // 2 + 1] = 0
-                        non_zero_elt_log_idx[1] = 3
-                    for i in T.serial(elem):
-                        val = non_zero_elt_log_idx[i]
-                        E_shared[tm, a_k // e_factor] |= T.shift_left(val, 4 * (g_i % (e_factor // group)) + 2 * i)
-            T.copy(A_sp_shared, A_sp[bx * block_M, by * block_K // 2])
-            T.copy(E_shared, E[bx * block_M, by * block_K // e_factor])
+    with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(K, block_K), threads=block_M) as (bx, by):
+        A_shared = T.alloc_shared((block_M, block_K), dtype)
+        A_sp_shared = T.alloc_shared((block_M, block_K // 2), dtype)
+        E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
+        if use_cutlass_layout:
+            T.annotate_layout(
+                {
+                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="8.0", block_k=block_K),
+                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="8.0", block_k=block_K),
+                }
+            )
+        T.clear(A_sp_shared)
+        T.clear(E_shared)
+        # TODO: alloc_var seems buggy here
+        non_zero_cnt = T.alloc_local((1,), dtype=T.uint8)
+        non_zero_elt_log_idx = T.alloc_local((elem,), dtype=T.uint8)
+        T.copy(A[bx * block_M, by * block_K], A_shared)
+        for tm in T.Parallel(block_M):
+            for g_i in range(0, block_K // group):
+                a_k = g_i * group
+                non_zero_cnt[0] = 0
+                for i in range(elem):
+                    non_zero_elt_log_idx[i] = 0
+                for i in range(group):
+                    val = A_shared[tm, a_k + i]
+                    if val != 0.0:
+                        non_zero_elt_log_idx[non_zero_cnt[0]] = i
+                        A_sp_shared[tm, a_k // 2 + non_zero_cnt[0]] = val
+                        non_zero_cnt[0] += 1
+                # TODO: use T.device_assert(non_zero_cnt <= 2) after rebasing main
+                if non_zero_cnt[0] == 1 and non_zero_elt_log_idx[0] == 3:
+                    non_zero_elt_log_idx[0] = 0
+                    non_zero_elt_log_idx[1] = 3
+                    A_sp_shared[tm, a_k // 2 + 1] = A_sp_shared[tm, a_k // 2]
+                    A_sp_shared[tm, a_k // 2] = 0.0
+                elif non_zero_cnt[0] == 1:
+                    A_sp_shared[tm, a_k // 2 + 1] = 0
+                    non_zero_elt_log_idx[1] = 3
+                for i in T.serial(elem):
+                    val = non_zero_elt_log_idx[i]
+                    E_shared[tm, a_k // e_factor] |= T.shift_left(val, 4 * (g_i % (e_factor // group)) + 2 * i)
+        T.copy(A_sp_shared, A_sp[bx * block_M, by * block_K // 2])
+        T.copy(E_shared, E[bx * block_M, by * block_K // e_factor])
 
-    return kernel
+    return A_sp, E
 
 
 def main(M=1024, N=1024, K=1024, use_cutlass_layout=False, use_torch_compressor=False, accum_dtype=T.float, cfg="4090"):
-    kernel = matmul_sp_fp16_custom_compress(M, N, K, accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype], use_cutlass_layout=use_cutlass_layout)
-
     a = randn_semi_sparse(M, K, device="cuda", dtype=torch.half)
     b = torch.randn(K, N, device="cuda", dtype=torch.half)
 
@@ -301,9 +296,11 @@ def main(M=1024, N=1024, K=1024, use_cutlass_layout=False, use_torch_compressor=
         assert not use_cutlass_layout, "torch sparse must be used with naive layout"
         a_sparse, e = torch_compress(a)
     else:
-        a_sparse, e = compress_kernel(M, K, 32, 32, T.float16, use_cutlass_layout=use_cutlass_layout)(a)
+        a_sparse, e = compress_kernel(a, 32, 32, T.float16, use_cutlass_layout=use_cutlass_layout)
 
-    c = kernel(a_sparse, e, b)
+    c = matmul_sp_fp16_custom_compress(
+        a_sparse, e, b, accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype], use_cutlass_layout=use_cutlass_layout
+    )
 
     ref_c = a @ b
 
@@ -311,7 +308,11 @@ def main(M=1024, N=1024, K=1024, use_cutlass_layout=False, use_torch_compressor=
     torch_assert_close(c, ref_c.to(c.dtype), rtol=1e-3, atol=1e-3)
     print(f"Precision check passed. Max diff: {(c - ref_c).abs().max()}, Mean diff: {(c - ref_c).abs().mean()}")
 
-    latency = do_bench(lambda: kernel(a_sparse, e, b))
+    latency = do_bench(
+        lambda: matmul_sp_fp16_custom_compress(
+            a_sparse, e, b, accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype], use_cutlass_layout=use_cutlass_layout
+        )
+    )
     ref_latency = do_bench(lambda: a @ b)
 
     total_flops = 2 * M * N * K

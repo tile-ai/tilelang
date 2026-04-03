@@ -13,13 +13,83 @@ import tilelang.language as T
 from tilelang.profiler import do_bench
 
 
-@tilelang.jit(out_idx=[3])
-def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_size):
+@T.macro
+def Prefetch(
+    K,
+    V,
+    K_shared,
+    V_shared,
+    column_index,
+    column_count: T.int32,
+    k: T.int32,
+    bz: T.int32,
+    by: T.int32,
+    block_N,
+    dim,
+):
+    for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
+        K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
+
+    for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
+        V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
+
+    T.ptx_commit_group()
+
+
+@T.macro
+def Compute(
+    acc_s,
+    acc_s_cast,
+    acc_o,
+    scores_max,
+    scores_max_prev,
+    k: T.int32,
+    column_count: T.int32,
+    Q_shared,
+    K_shared,
+    V_shared,
+    scores_scale,
+    scores_sum,
+    logsum,
+    count: T.int32,
+    block_M,
+    block_N,
+    dim,
+    scale,
+):
+    T.ptx_wait_group(count)
+    for i, j in T.Parallel(block_M, block_N):
+        acc_s[i, j] = T.if_then_else(k + j < column_count, 0, -T.infinity(acc_s.dtype))
+    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+
+    T.copy(scores_max, scores_max_prev)
+    T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+    for i in T.Parallel(block_M):
+        scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+
+    for i in T.Parallel(block_M):
+        scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+    for i, j in T.Parallel(block_M, block_N):
+        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+    for i, j in T.Parallel(block_M, dim):
+        acc_o[i, j] = acc_o[i, j] * scores_scale[i]
+
+    T.copy(acc_s, acc_s_cast)
+
+    T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+
+    T.reduce_sum(acc_s, scores_sum, dim=1)
+
+    for i in T.Parallel(block_M):
+        logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+
+
+@tilelang.jit
+def _tl_vs_sparse_flashattn(Q, K, V, BlockCount, BlockOffset, ColumnCount, ColumnIndex, vertical_size, slash_size):
+    batch, heads, seq_len, dim = T.const("batch, heads, seq_len, dim")
     block_M = 64
     block_N = 64
-    num_stages = 2
-    threads = 128
-    scale = (1.0 / dim) ** 0.5 * 1.44269504
+    scale = T.pow(dim, -0.5) * 1.44269504
     shape = [batch, heads, seq_len, dim]
 
     seq_blocks = (seq_len + block_M - 1) // block_M
@@ -35,254 +105,202 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
     accum_dtype = T.float32
     int_dtype = T.int32
 
-    def kernel_func(block_M, block_N, num_stages, threads):
-        @T.macro
-        def Prefetch(
-            K: T.Tensor(shape, dtype),
-            V: T.Tensor(shape, dtype),
-            K_shared: T.SharedBuffer([block_N, dim], dtype),
-            V_shared: T.SharedBuffer([block_N, dim], dtype),
-            column_index: T.SharedBuffer([vertical_size_round], int_dtype),
-            column_count: T.int32,
-            k: T.int32,
-            bz: T.int32,
-            by: T.int32,
-        ):
-            for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
-                K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
+    Q: T.Tensor(shape, dtype)
+    K: T.Tensor(shape, dtype)
+    V: T.Tensor(shape, dtype)
+    Output = T.empty(shape, dtype)
+    BlockCount: T.Tensor(count_shape, int_dtype)
+    BlockOffset: T.Tensor(offset_shape, int_dtype)
+    ColumnCount: T.Tensor(count_shape, int_dtype)
+    ColumnIndex: T.Tensor(index_shape, int_dtype)
 
-            for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
-                V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
+    with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=256) as (bc, by, bz):
+        bx = T.ceildiv(seq_len, block_M) - 1 - bc
+        Q_shared = T.alloc_shared([block_M, dim], dtype)
+        K_shared = T.alloc_shared([2, block_N, dim], dtype)
+        V_shared = T.alloc_shared([2, block_N, dim], dtype)
+        K_shared_1 = T.alloc_shared([block_N, dim], dtype)
+        V_shared_1 = T.alloc_shared([block_N, dim], dtype)
+        K_shared_2 = T.alloc_shared([block_N, dim], dtype)
+        V_shared_2 = T.alloc_shared([block_N, dim], dtype)
+        O_shared = T.alloc_shared([block_M, dim], dtype)
+        acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
+        acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
+        acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
+        scores_max = T.alloc_fragment([block_M], accum_dtype)
+        scores_max_prev = T.alloc_fragment([block_M], accum_dtype)
+        scores_scale = T.alloc_fragment([block_M], accum_dtype)
+        scores_sum = T.alloc_fragment([block_M], accum_dtype)
+        logsum = T.alloc_fragment([block_M], accum_dtype)
+        block_count = T.alloc_var(dtype=int_dtype)
+        block_offset = T.alloc_shared([slash_size_round], int_dtype, scope="shared")
+        column_count = T.alloc_var(dtype=int_dtype)
+        column_index = T.alloc_shared([vertical_size_round], int_dtype, scope="shared")
 
-            T.ptx_commit_group()
+        mbars = T.alloc_barrier([128] * 9)
 
-        @T.macro
-        def Compute(
-            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-            scores_max: T.FragmentBuffer([block_M], accum_dtype),
-            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-            k: T.int32,
-            column_count: T.int32,
-            Q_shared: T.SharedBuffer([block_M, dim], dtype),
-            K_shared: T.SharedBuffer([block_N, dim], dtype),
-            V_shared: T.SharedBuffer([block_N, dim], dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
-            logsum: T.FragmentBuffer([block_M], accum_dtype),
-            count: T.int32,
-        ):
-            T.ptx_wait_group(count)
-            for i, j in T.Parallel(block_M, block_N):
-                acc_s[i, j] = T.if_then_else(k + j < column_count, 0, -T.infinity(acc_s.dtype))
-            T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+        block_count = BlockCount[bz, by, bx]
+        column_count = ColumnCount[bz, by, bx]
 
-            T.copy(scores_max, scores_max_prev)
-            T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-            for i in T.Parallel(block_M):
-                scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
+        for vi in T.Parallel(slash_size_round):
+            if vi < slash_size:
+                block_offset[vi] = BlockOffset[bz, by, bx, vi]
 
-            for i in T.Parallel(block_M):
-                scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-            for i, j in T.Parallel(block_M, block_N):
-                acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-            for i, j in T.Parallel(block_M, dim):
-                acc_o[i, j] = acc_o[i, j] * scores_scale[i]
+        for vi in T.Parallel(vertical_size_round):
+            if vi < vertical_size:
+                column_index[vi] = ColumnIndex[bz, by, bx, vi]
 
-            T.copy(acc_s, acc_s_cast)
+        tid = T.get_thread_binding()
 
-            T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+        if tid >= 128:
+            T.annotate_producer_reg_dealloc()
+            T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
+            T.mbarrier_arrive(mbarrier=mbars[8])
+            for bi in T.serial(block_count):
+                k = block_offset[bi]
+                T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 4], parity=(((bi & 3) >> 1) ^ 1))
+                T.copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :])
+                T.mbarrier_arrive(mbarrier=mbars[bi % 2])
+                T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 6], parity=(((bi & 3) >> 1) ^ 1))
+                T.copy(V[bz, by, k : k + block_N, :], V_shared[bi % 2, :, :])
+                T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 2])
+        else:
+            T.annotate_consumer_reg_alloc()
+            T.fill(acc_o, 0)
+            T.fill(logsum, 0)
+            T.fill(scores_max, -T.infinity(accum_dtype))
+            T.mbarrier_wait_parity(mbarrier=mbars[8], parity=0)
+            for bi in T.serial(block_count):
+                k = block_offset[bi]
+                for i, j in T.Parallel(block_M, block_N):
+                    acc_s[i, j] = T.if_then_else(bx * block_M + i >= k + j, 0, -T.infinity(acc_s.dtype))
 
-            T.reduce_sum(acc_s, scores_sum, dim=1)
+                T.mbarrier_wait_parity(mbarrier=mbars[bi % 2], parity=((bi & 3) >> 1))
+                T.gemm(Q_shared, K_shared[bi % 2, :, :], acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 4])
 
-            for i in T.Parallel(block_M):
-                logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                T.copy(scores_max, scores_max_prev)
 
-        @T.prim_func
-        def vs_sparse_flashattn_ws(
-            Q: T.Tensor(shape, dtype),
-            K: T.Tensor(shape, dtype),
-            V: T.Tensor(shape, dtype),
-            Output: T.Tensor(shape, dtype),
-            BlockCount: T.Tensor(count_shape, int_dtype),
-            BlockOffset: T.Tensor(offset_shape, int_dtype),
-            ColumnCount: T.Tensor(count_shape, int_dtype),
-            ColumnIndex: T.Tensor(index_shape, int_dtype),
-        ):
-            with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=256) as (bc, by, bz):
-                bx = T.ceildiv(seq_len, block_M) - 1 - bc
-                Q_shared = T.alloc_shared([block_M, dim], dtype)
-                K_shared = T.alloc_shared([2, block_N, dim], dtype)
-                V_shared = T.alloc_shared([2, block_N, dim], dtype)
-                K_shared_1 = T.alloc_shared([block_N, dim], dtype)
-                V_shared_1 = T.alloc_shared([block_N, dim], dtype)
-                K_shared_2 = T.alloc_shared([block_N, dim], dtype)
-                V_shared_2 = T.alloc_shared([block_N, dim], dtype)
-                O_shared = T.alloc_shared([block_M, dim], dtype)
-                acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
-                acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
-                acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
-                scores_max = T.alloc_fragment([block_M], accum_dtype)
-                scores_max_prev = T.alloc_fragment([block_M], accum_dtype)
-                scores_scale = T.alloc_fragment([block_M], accum_dtype)
-                scores_sum = T.alloc_fragment([block_M], accum_dtype)
-                logsum = T.alloc_fragment([block_M], accum_dtype)
-                block_count = T.alloc_var(dtype=int_dtype)
-                block_offset = T.alloc_shared([slash_size_round], int_dtype, scope="shared")
-                column_count = T.alloc_var(dtype=int_dtype)
-                column_index = T.alloc_shared([vertical_size_round], int_dtype, scope="shared")
+                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                for i in T.Parallel(block_M):
+                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
 
-                mbars = T.alloc_barrier([128] * 9)
+                for i in T.Parallel(block_M):
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                for i, j in T.Parallel(block_M, block_N):
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                for i, j in T.Parallel(block_M, dim):
+                    acc_o[i, j] = acc_o[i, j] * scores_scale[i]
 
-                block_count = BlockCount[bz, by, bx]
-                column_count = ColumnCount[bz, by, bx]
+                T.copy(acc_s, acc_s_cast)
+                T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 2], parity=((bi & 3) >> 1))
+                T.gemm(acc_s_cast, V_shared[bi % 2, :, :], acc_o, policy=T.GemmWarpPolicy.FullRow)
 
-                for vi in T.Parallel(slash_size_round):
-                    if vi < slash_size:
-                        block_offset[vi] = BlockOffset[bz, by, bx, vi]
+                T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 6])
 
-                for vi in T.Parallel(vertical_size_round):
-                    if vi < vertical_size:
-                        column_index[vi] = ColumnIndex[bz, by, bx, vi]
+                T.reduce_sum(acc_s, scores_sum, dim=1)
 
-                tid = T.get_thread_binding()
+                for i in T.Parallel(block_M):
+                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
 
-                if tid >= 128:
-                    T.annotate_producer_reg_dealloc()
-                    T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
-                    T.mbarrier_arrive(mbarrier=mbars[8])
-                    for bi in T.serial(block_count):
-                        k = block_offset[bi]
-                        T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 4], parity=(((bi & 3) >> 1) ^ 1))
-                        T.copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :])
-                        T.mbarrier_arrive(mbarrier=mbars[bi % 2])
-                        T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 6], parity=(((bi & 3) >> 1) ^ 1))
-                        T.copy(V[bz, by, k : k + block_N, :], V_shared[bi % 2, :, :])
-                        T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 2])
+            if column_count != 0:
+                Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, 0, bz, by, block_N, dim)
+                for bi in T.serial(T.ceildiv(column_count, block_N) - 1):
+                    k = bi * block_N
+                    if bi % 2 == 0:
+                        Prefetch(K, V, K_shared_2, V_shared_2, column_index, column_count, k + block_N, bz, by, block_N, dim)
+
+                        Compute(
+                            acc_s,
+                            acc_s_cast,
+                            acc_o,
+                            scores_max,
+                            scores_max_prev,
+                            k,
+                            column_count,
+                            Q_shared,
+                            K_shared_1,
+                            V_shared_1,
+                            scores_scale,
+                            scores_sum,
+                            logsum,
+                            1,
+                            block_M,
+                            block_N,
+                            dim,
+                            scale,
+                        )
+                    else:
+                        Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, k + block_N, bz, by, block_N, dim)
+
+                        Compute(
+                            acc_s,
+                            acc_s_cast,
+                            acc_o,
+                            scores_max,
+                            scores_max_prev,
+                            k,
+                            column_count,
+                            Q_shared,
+                            K_shared_2,
+                            V_shared_2,
+                            scores_scale,
+                            scores_sum,
+                            logsum,
+                            1,
+                            block_M,
+                            block_N,
+                            dim,
+                            scale,
+                        )
+                if T.ceildiv(column_count, block_N) % 2 == 0:
+                    Compute(
+                        acc_s,
+                        acc_s_cast,
+                        acc_o,
+                        scores_max,
+                        scores_max_prev,
+                        T.ceildiv(column_count, block_N) * block_N - block_N,
+                        column_count,
+                        Q_shared,
+                        K_shared_2,
+                        V_shared_2,
+                        scores_scale,
+                        scores_sum,
+                        logsum,
+                        0,
+                        block_M,
+                        block_N,
+                        dim,
+                        scale,
+                    )
                 else:
-                    T.annotate_consumer_reg_alloc()
-                    T.fill(acc_o, 0)
-                    T.fill(logsum, 0)
-                    T.fill(scores_max, -T.infinity(accum_dtype))
-                    T.mbarrier_wait_parity(mbarrier=mbars[8], parity=0)
-                    for bi in T.serial(block_count):
-                        k = block_offset[bi]
-                        for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(bx * block_M + i >= k + j, 0, -T.infinity(acc_s.dtype))
+                    Compute(
+                        acc_s,
+                        acc_s_cast,
+                        acc_o,
+                        scores_max,
+                        scores_max_prev,
+                        T.ceildiv(column_count, block_N) * block_N - block_N,
+                        column_count,
+                        Q_shared,
+                        K_shared_1,
+                        V_shared_1,
+                        scores_scale,
+                        scores_sum,
+                        logsum,
+                        0,
+                        block_M,
+                        block_N,
+                        dim,
+                        scale,
+                    )
+            for i, j in T.Parallel(block_M, dim):
+                acc_o[i, j] /= logsum[i]
+            T.copy(acc_o, O_shared)
+            T.copy(O_shared, Output[bz, by, bx * block_M : (bx + 1) * block_M, :])
 
-                        T.mbarrier_wait_parity(mbarrier=mbars[bi % 2], parity=((bi & 3) >> 1))
-                        T.gemm(Q_shared, K_shared[bi % 2, :, :], acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                        T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 4])
-
-                        T.copy(scores_max, scores_max_prev)
-
-                        T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                        for i in T.Parallel(block_M):
-                            scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
-
-                        for i in T.Parallel(block_M):
-                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-                        for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                        for i, j in T.Parallel(block_M, dim):
-                            acc_o[i, j] = acc_o[i, j] * scores_scale[i]
-
-                        T.copy(acc_s, acc_s_cast)
-                        T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 2], parity=((bi & 3) >> 1))
-                        T.gemm(acc_s_cast, V_shared[bi % 2, :, :], acc_o, policy=T.GemmWarpPolicy.FullRow)
-
-                        T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 6])
-
-                        T.reduce_sum(acc_s, scores_sum, dim=1)
-
-                        for i in T.Parallel(block_M):
-                            logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-
-                    if column_count != 0:
-                        Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, 0, bz, by)
-                        for bi in T.serial(T.ceildiv(column_count, block_N) - 1):
-                            k = bi * block_N
-                            if bi % 2 == 0:
-                                Prefetch(K, V, K_shared_2, V_shared_2, column_index, column_count, k + block_N, bz, by)
-
-                                Compute(
-                                    acc_s,
-                                    acc_s_cast,
-                                    acc_o,
-                                    scores_max,
-                                    scores_max_prev,
-                                    k,
-                                    column_count,
-                                    Q_shared,
-                                    K_shared_1,
-                                    V_shared_1,
-                                    scores_scale,
-                                    scores_sum,
-                                    logsum,
-                                    1,
-                                )
-                            else:
-                                Prefetch(K, V, K_shared_1, V_shared_1, column_index, column_count, k + block_N, bz, by)
-
-                                Compute(
-                                    acc_s,
-                                    acc_s_cast,
-                                    acc_o,
-                                    scores_max,
-                                    scores_max_prev,
-                                    k,
-                                    column_count,
-                                    Q_shared,
-                                    K_shared_2,
-                                    V_shared_2,
-                                    scores_scale,
-                                    scores_sum,
-                                    logsum,
-                                    1,
-                                )
-                        if T.ceildiv(column_count, block_N) % 2 == 0:
-                            Compute(
-                                acc_s,
-                                acc_s_cast,
-                                acc_o,
-                                scores_max,
-                                scores_max_prev,
-                                T.ceildiv(column_count, block_N) * block_N - block_N,
-                                column_count,
-                                Q_shared,
-                                K_shared_2,
-                                V_shared_2,
-                                scores_scale,
-                                scores_sum,
-                                logsum,
-                                0,
-                            )
-                        else:
-                            Compute(
-                                acc_s,
-                                acc_s_cast,
-                                acc_o,
-                                scores_max,
-                                scores_max_prev,
-                                T.ceildiv(column_count, block_N) * block_N - block_N,
-                                column_count,
-                                Q_shared,
-                                K_shared_1,
-                                V_shared_1,
-                                scores_scale,
-                                scores_sum,
-                                logsum,
-                                0,
-                            )
-                    for i, j in T.Parallel(block_M, dim):
-                        acc_o[i, j] /= logsum[i]
-                    T.copy(acc_o, O_shared)
-                    T.copy(O_shared, Output[bz, by, bx * block_M : (bx + 1) * block_M, :])
-
-        return vs_sparse_flashattn_ws
-
-    return kernel_func(block_M, block_N, num_stages, threads)
+    return Output
 
 
 @triton.jit
@@ -525,8 +543,6 @@ def vertical_slash_sparse_attention(
         block_size_N,
     )
 
-    tl_kernel = _tl_vs_sparse_flashattn(batch_size, num_heads, context_size, head_dim, v_idx.shape[2], s_idx.shape[2])
-
     def run(is_triton: bool = True):
         if is_triton:
             out = _triton_mixed_sparse_attention(
@@ -543,7 +559,9 @@ def vertical_slash_sparse_attention(
                 block_size_N,
             )
         else:
-            out = tl_kernel(query, key, value, block_count, block_offset, column_count, column_index)
+            out = _tl_vs_sparse_flashattn(
+                query, key, value, block_count, block_offset, column_count, column_index, v_idx.shape[2], s_idx.shape[2]
+            )
         return out[..., :context_size, :head_dim]
 
     return run
@@ -656,10 +674,11 @@ def run_regression_perf(batch=1, heads=1, seq_len=16384, head_dim=64, vertical_s
         block_size_M,
         block_size_N,
     )
-    tl_kernel = _tl_vs_sparse_flashattn(batch_size, num_heads, context_size, head_dim, vertical_topk.shape[-1], slash.shape[-1])
 
     def run_kernel_only():
-        tl_kernel(query, key, value, block_count, block_offset, column_count, column_index)
+        _tl_vs_sparse_flashattn(
+            query, key, value, block_count, block_offset, column_count, column_index, vertical_topk.shape[-1], slash.shape[-1]
+        )
 
     return do_bench(run_kernel_only, backend="cupti")
 
