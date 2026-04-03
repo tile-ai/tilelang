@@ -270,6 +270,49 @@ public:
     linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
   }
 
+  // Visit kSharedMemoryLivenessBoundary bounded scopes
+  void VisitNewScopes(const AttrStmtNode *op)  {
+    scope_.push_back(StmtEntry());
+    StmtEntry e;
+    e.stmt = op;
+    UpdateStmtAttr(op, scope_level_);
+    int64_t begin_index = static_cast<int64_t>(linear_seq_.size());
+    // before scope.
+    linear_seq_.push_back(e);
+    bool has_tail_stmt = false;
+    const AttrStmtNode *tail_stmt = nullptr;
+    auto body = op->body.as<SeqStmtNode>();
+    if (op->body.as<SeqStmtNode>()) {
+      for (auto &sub_stmt : body->seq) {
+        if (sub_stmt.as<AttrStmtNode>() &&
+            sub_stmt.as<AttrStmtNode>()->attr_key == attr::kSharedMemoryLivenessBoundary) {
+          has_tail_stmt = true;
+          tail_stmt = sub_stmt.as<AttrStmtNode>();
+        } else {
+          StmtExprVisitor::VisitStmt(sub_stmt);
+        }
+      }
+    } else {
+      StmtExprVisitor::VisitStmt(op->body);
+    }
+    // after scope.
+    e.touched = std::move(scope_.back().touched);
+    scope_.pop_back();
+    int64_t end_index = static_cast<int64_t>(linear_seq_.size());
+    ICHECK_GT(end_index, begin_index);
+    // The paired entries serve as scope sentinels once we flatten the
+    // control-flow tree.
+    e.scope_pair_offset = begin_index - end_index;
+    linear_seq_.push_back(e);
+    // record the pointer to end index.
+    ICHECK_NE(end_index, 0U);
+    linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
+    // visit tail statement.
+    if (has_tail_stmt) {
+      StmtExprVisitor::VisitStmt_(tail_stmt);
+    }
+  }
+
   void VisitStmt_(const AttrStmtNode *op) final {
     // Only record the outer most thread extent.
     if (op->attr_key == tir::attr::thread_extent && !in_thread_env_) {
@@ -283,7 +326,7 @@ public:
     } else if (op->attr_key == "kWarpSpecializationScope") {
       VisitWarpSpecializationBody(op->body);
     } else if (op->attr_key == "kSharedMemoryLivenessBoundary") {
-      VisitNewScope(op);
+      VisitNewScopes(op);
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }
