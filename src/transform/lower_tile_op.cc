@@ -1093,10 +1093,9 @@ private:
     auto lowered = tile_op->Lower(
         LowerArgs{target_, thread_bounds, thread_var_->var, callback,
                   mbarrier_callback, layout_map_, buffer_remap_,
-                  let_var_to_expr,
-                  /*in_pipeline=*/pipelined_depth_ > 0, mbar_phase_expr,
-                  pipeline_num_stages, mbar_stage_expr, &mbarrier_buffer_,
-                  cluster_size_},
+                  let_var_to_expr, /*in_pipeline=*/pipelined_depth_ > 0,
+                  mbar_phase_expr, pipeline_num_stages, mbar_stage_expr,
+                  &mbarrier_buffer_, cluster_size_},
         analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);

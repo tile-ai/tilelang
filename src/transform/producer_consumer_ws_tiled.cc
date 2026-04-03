@@ -762,9 +762,12 @@ static PrimExpr RewriteCopyToTmaCopy(const Call &copy_call,
               copy_call->span);
 }
 
-/// Annotate all ForNodes in a SIMT producer statement with
-/// `kParallelAsyncWithoutAsyncCommitWait = true` so that InjectPTXAsyncCopy
-/// (called from LowerTileOp) does not emit commit_group + wait_group(0).
+/// Annotate SIMT producer statements so the enclosing transform owns cp.async
+/// synchronization.
+/// - ForNodes get `kParallelAsyncWithoutAsyncCommitWait = true` so
+///   InjectPTXAsyncCopy does not emit commit_group + wait_group(0).
+/// - Tile-op copy calls get `kAsyncCopyNoImplicitCommitWait` so copy.cc does
+///   not emit its own implicit commit/wait either.
 /// This allows the WS pass to emit its own commit_group +
 /// cp_async_barrier_noinc, tying cp.async completion to the forward mbarrier.
 class SimtProducerAnnotator : public StmtExprMutator {
@@ -781,6 +784,19 @@ private:
     annotations.Set(attr::kParallelAsyncWithoutAsyncCommitWait, Bool(true));
     return For(op->loop_var, op->min, op->extent, op->kind, body,
                op->thread_binding, annotations, op->step, op->span);
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    static const Op &copy_op = Op::Get("tl.tileop.copy");
+    static const Op &async_copy_op = Op::Get("tl.tileop.async_copy");
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (!call->op.same_as(copy_op) && !call->op.same_as(async_copy_op)) {
+      return call;
+    }
+    auto annotations = call->annotations;
+    annotations.Set(attr::kAsyncCopyNoImplicitCommitWait,
+                    IntImm(DataType::Int(32), 1));
+    return Call(call->dtype, call->op, call->args, annotations, call->span);
   }
 };
 

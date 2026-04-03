@@ -241,8 +241,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     if is_hopper(target):
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tilelang.transform.OptimizeCPAsyncSync()(mod)
-    mod = tilelang.transform.Simplify()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     # ConfigIndexBitwidth must be applied after FlattenBuffer

@@ -455,5 +455,8 @@ def run_regression_perf(m=4096, n=4096, k=4096, fast_dequant=True):
 
 
 if __name__ == "__main__":
-    main(256, 256, 256, True)
-    main(256, 256, 256, False)
+    # main(256, 256, 256, True)
+    # main(256, 256, 256, False)
+    tilelang.disable_cache()
+    latency = run_regression_perf()
+    print(f"latency is {latency}")

@@ -915,12 +915,13 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
   // Check if target is CuTeDSL backend
   bool is_cutedsl = TargetIsCuTeDSL(target);
   bool is_async_copy = GetIsAsyncCopy();
+  bool no_implicit_commit_wait = GetNoImplicitAsyncCommitWait();
 
-  if (is_async_copy) {
+  if (is_async_copy || no_implicit_commit_wait) {
     bool cp_async_supported = CheckCPAsyncCopy(target, layout_map, analyzer);
     ICHECK(cp_async_supported)
-        << "T.async_copy must lower to cp.async, but constraints were not "
-           "satisfied. Got src="
+        << "Explicit async copy semantics require cp.async lowering, but "
+           "constraints were not satisfied. Got src="
         << src->name << " (scope=" << src.scope() << ", dtype=" << src->dtype
         << "), dst=" << dst->name << " (scope=" << dst.scope()
         << ", dtype=" << dst->dtype << ").";
@@ -1010,13 +1011,17 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 // - T.copy (auto cp.async) keeps synchronous semantics by committing and
 //   waiting after the loop.
 // - T.async_copy commits but does not wait (explicit async semantics).
+// - Copies annotated with kAsyncCopyNoImplicitCommitWait emit only cp.async;
+//   an enclosing pass is responsible for commit/wait placement.
 Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
                                 arith::Analyzer *analyzer) const {
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
   bool enable_async_copy =
       pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-  if ((!enable_async_copy || !T.in_pipeline) && !GetIsAsyncCopy()) {
+  bool no_implicit_commit_wait = GetNoImplicitAsyncCommitWait();
+  bool explicit_async_semantics = no_implicit_commit_wait || GetIsAsyncCopy();
+  if ((!enable_async_copy || !T.in_pipeline) && !explicit_async_semantics) {
     return LowerNormalCopy(T, analyzer);
   }
 
@@ -1044,13 +1049,16 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
   CPAsyncStoreRewriter cp_async_rewriter;
   Stmt cp_async_loop = cp_async_rewriter.Rewrite(lowered_loop);
   if (!cp_async_rewriter.RewriteSuccess()) {
-    if (GetIsAsyncCopy()) {
-      LOG(FATAL) << "T.async_copy cannot be lowered to cp.async: no eligible "
-                    "global->shared store was rewritten.";
+    if (explicit_async_semantics) {
+      LOG(FATAL) << "Explicit async copy semantics require cp.async lowering, "
+                    "but no eligible global->shared store was rewritten.";
     }
     LOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
                     "no eligible global->shared store.";
     return LowerNormalCopy(T, analyzer);
+  }
+  if (no_implicit_commit_wait) {
+    return cp_async_loop;
   }
   Stmt commit_group =
       Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));

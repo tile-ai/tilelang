@@ -235,9 +235,67 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     Stmt body = VisitStmt(op->body);
     auto annotations = op->annotations;
+    // Keep the raw buffer-store cp.async path under outer pipeline-managed
+    // commit/wait semantics as well.
     annotations.Set(attr::kParallelAsyncWithoutAsyncCommitWait, Bool(true));
     return For(op->loop_var, op->min, op->extent, op->kind, body,
                op->thread_binding, annotations, op->step, op->span);
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    static const Op &copy_op = Op::Get("tl.tileop.copy");
+    static const Op &async_copy_op = Op::Get("tl.tileop.async_copy");
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (!call->op.same_as(copy_op) && !call->op.same_as(async_copy_op)) {
+      return call;
+    }
+    // Tile-op copies lower through copy.cc, so they need an explicit
+    // per-copy marker to suppress their own implicit commit/wait.
+    auto annotations = call->annotations;
+    annotations.Set(attr::kAsyncCopyNoImplicitCommitWait,
+                    IntImm(DataType::Int(32), 1));
+    return Call(call->dtype, call->op, call->args, annotations, call->span);
+  }
+};
+
+class AsyncCommitWaitAttrLowerer : public StmtExprMutator {
+public:
+  static Stmt Lower(const Stmt &stmt) {
+    AsyncCommitWaitAttrLowerer lowerer;
+    return lowerer.VisitStmt(stmt);
+  }
+
+private:
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::async_commit_queue_scope) {
+      Stmt body = VisitStmt(op->body);
+      Stmt commit = Evaluate(
+          Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
+      if (is_no_op(body)) {
+        return commit;
+      }
+      return SeqStmt({body, commit});
+    }
+    if (op->attr_key == tir::attr::async_wait_queue_scope) {
+      auto wait_attrs = GetAsyncWaitAttributes(op);
+      Stmt body = op->body;
+      if (const auto *inner = op->body.as<AttrStmtNode>()) {
+        if (inner->attr_key == tir::attr::async_wait_inflight_count) {
+          body = inner->body;
+        }
+      }
+      body = VisitStmt(body);
+      Stmt wait = Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
+                                {wait_attrs.second}));
+      if (is_no_op(body)) {
+        return wait;
+      }
+      return SeqStmt({wait, body});
+    }
+    if (op->attr_key == tir::attr::async_wait_inflight_count) {
+      return VisitStmt(op->body);
+    }
+    return StmtExprMutator::VisitStmt_(op);
   }
 };
 
@@ -458,16 +516,34 @@ public:
     }
 
     // Step 2: Emit the pipeline prologue, body and epilogue.
-    Stmt prologue = EmitImpl(pipeline_loop_->min,
-                             pipeline_loop_->min + max_stage_, true, true);
-    Stmt body =
+    Optional<Integer> pipeline_num_stages =
+        GetPipelineNumStages(pipeline_loop_.get());
+    Stmt prologue =
+        StripPipelineContextAttrs(EmitImpl(pipeline_loop_->min,
+                                           pipeline_loop_->min + max_stage_,
+                                           true, true));
+    Stmt body = StripPipelineContextAttrs(
         EmitImpl(pipeline_loop_->min + max_stage_,
-                 pipeline_loop_->min + pipeline_loop_->extent, false, false);
-
-    Stmt epilogue = EmitImpl(
+                 pipeline_loop_->min + pipeline_loop_->extent, false, false));
+    Stmt epilogue = StripPipelineContextAttrs(EmitImpl(
         pipeline_loop_->min + pipeline_loop_->extent,
-        pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true);
-    SeqStmt stmt = SeqStmt({prologue, body, epilogue});
+        pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true));
+
+    Array<Stmt> pipeline_parts;
+    for (const Stmt &part : {prologue, body, epilogue}) {
+      for (const Stmt &stmt : FlattenTopLevelSeq(part)) {
+        pipeline_parts.push_back(stmt);
+      }
+    }
+
+    Stmt stmt = pipeline_parts.size() == 1 ? pipeline_parts[0] : SeqStmt(pipeline_parts);
+    stmt = AsyncPipelineLoopWaitRelaxer(this)(stmt);
+    Array<Stmt> relaxed_pipeline_parts = FlattenTopLevelSeq(stmt);
+    relaxed_pipeline_parts =
+        RelaxTrailingConsumerWaits(std::move(relaxed_pipeline_parts),
+                                   PipelinedRetainGroups(pipeline_num_stages));
+    stmt = relaxed_pipeline_parts.size() == 1 ? relaxed_pipeline_parts[0]
+                                              : SeqStmt(relaxed_pipeline_parts);
 
     // Step 3: Make a new block that contains new buffer allocations after
     // pipeline rewriting.
@@ -477,6 +553,14 @@ public:
     for (const auto &alloc : local_allocs_) {
       alloc_buffers.push_back(buffer_remap_.Get(alloc).value_or(alloc));
       buffer_data_to_buffer_.erase(alloc->data);
+    }
+    if (pipeline_num_stages) {
+      if (pipeline_num_stages.value()->value > 1) {
+        stmt = AttrStmt(Integer(0), kPipelineMVBContextNumStages,
+                        Downcast<PrimExpr>(pipeline_num_stages.value()), stmt);
+      }
+      stmt = AttrStmt(Integer(0), kPipelineContextNumStages,
+                      Downcast<PrimExpr>(pipeline_num_stages.value()), stmt);
     }
     Block block = MakeBlock(stmt, buffer_data_to_buffer_);
     block.CopyOnWrite()->alloc_buffers = std::move(alloc_buffers);
@@ -681,6 +765,23 @@ private:
     Stmt stmt;
   };
 
+  enum class AsyncSyncStmtKind {
+    kOther,
+    kCommit,
+    kWaitStatic,
+    kWaitDynamic
+  };
+
+  struct ClassifiedAsyncSyncStmt {
+    AsyncSyncStmtKind kind{AsyncSyncStmtKind::kOther};
+    int wait_n{0};
+  };
+
+  struct AsyncSyncSummary {
+    int commit{0};
+    int wait{0};
+  };
+
   Stmt WrapLoopDependentWrappers(Stmt stmt,
                                  const PrimExpr &normalized_access_index) const {
     for (auto it = loop_var_if_wrappers_.rbegin();
@@ -718,6 +819,617 @@ private:
     return stmt;
   }
 
+  static bool IsAsyncCommitQueueScope(const AttrStmtNode *attr) {
+    return attr && attr->attr_key == tir::attr::async_commit_queue_scope;
+  }
+
+  static bool IsAsyncWaitQueueScope(const AttrStmtNode *attr) {
+    return attr && attr->attr_key == tir::attr::async_wait_queue_scope;
+  }
+
+  static bool IsAsyncWaitInflightCount(const AttrStmtNode *attr) {
+    return attr && attr->attr_key == tir::attr::async_wait_inflight_count;
+  }
+
+  static int PipelinedRetainGroups(const Optional<Integer> &pipeline_num_stages) {
+    int retain = 1;
+    if (pipeline_num_stages) {
+      retain = std::max(
+          0, static_cast<int>(pipeline_num_stages.value()->value) - 1);
+    }
+    return retain;
+  }
+
+  Stmt StripPipelineContextAttrs(Stmt stmt) const {
+    while (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (attr->attr_key != kPipelineContextNumStages &&
+          attr->attr_key != kPipelineMVBContextNumStages) {
+        break;
+      }
+      stmt = attr->body;
+    }
+    return stmt;
+  }
+
+  Array<Stmt> FlattenTopLevelSeq(const Stmt &stmt) const {
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      return seq->seq;
+    }
+    return {stmt};
+  }
+
+  std::optional<int> TryGetStaticAsyncWaitCount(const AttrStmtNode *attr) const {
+    if (!IsAsyncWaitQueueScope(attr)) {
+      return std::nullopt;
+    }
+    const auto *inner = attr->body.as<AttrStmtNode>();
+    if (!IsAsyncWaitInflightCount(inner)) {
+      return std::nullopt;
+    }
+    const auto *imm = inner->value.as<IntImmNode>();
+    if (!imm) {
+      return std::nullopt;
+    }
+    return static_cast<int>(imm->value);
+  }
+
+  Stmt MakeStaticAsyncWaitStmtLike(const AttrStmtNode *attr, int new_wait_n) const {
+    const auto *inner = attr->body.as<AttrStmtNode>();
+    if (!IsAsyncWaitInflightCount(inner)) {
+      return AttrStmt(attr->node, attr->attr_key, attr->value, attr->body, attr->span);
+    }
+    PrimExpr new_wait = make_const(inner->value.dtype(), new_wait_n);
+    Stmt new_inner =
+        AttrStmt(inner->node, inner->attr_key, new_wait, inner->body, inner->span);
+    return AttrStmt(attr->node, attr->attr_key, attr->value, new_inner, attr->span);
+  }
+
+  ClassifiedAsyncSyncStmt ClassifySimpleAsyncSyncStmt(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return ClassifySimpleAsyncSyncStmt(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (IsAsyncWaitQueueScope(attr)) {
+        if (auto wait_n = TryGetStaticAsyncWaitCount(attr)) {
+          return {AsyncSyncStmtKind::kWaitStatic, *wait_n};
+        }
+        return {AsyncSyncStmtKind::kWaitDynamic, 0};
+      }
+      if (IsAsyncCommitQueueScope(attr)) {
+        return {AsyncSyncStmtKind::kCommit, 0};
+      }
+      if (IsAsyncWaitInflightCount(attr)) {
+        return {};
+      }
+      return ClassifySimpleAsyncSyncStmt(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return ClassifySimpleAsyncSyncStmt(seq->seq[0]);
+      }
+      return {};
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return ClassifySimpleAsyncSyncStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return ClassifySimpleAsyncSyncStmt(realize->block->body);
+      }
+    }
+    return {};
+  }
+
+  bool ContainsAsyncSyncScopes(const Stmt &stmt) const {
+    bool found = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+      if (found) {
+        return;
+      }
+      if (const auto *attr = obj.as<AttrStmtNode>()) {
+        if (IsAsyncCommitQueueScope(attr) || IsAsyncWaitQueueScope(attr)) {
+          found = true;
+        }
+      }
+    });
+    return found;
+  }
+
+  bool ContainsAsyncCommitScopes(const Stmt &stmt) const {
+    bool found = false;
+    PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+      if (found) {
+        return;
+      }
+      if (const auto *attr = obj.as<AttrStmtNode>()) {
+        if (IsAsyncCommitQueueScope(attr)) {
+          found = true;
+        }
+      }
+    });
+    return found;
+  }
+
+  AsyncSyncSummary SummarizeAsyncSyncScopes(const Stmt &stmt) const {
+    AsyncSyncSummary summary;
+    PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+      if (const auto *attr = obj.as<AttrStmtNode>()) {
+        if (IsAsyncCommitQueueScope(attr)) {
+          ++summary.commit;
+        } else if (IsAsyncWaitQueueScope(attr)) {
+          ++summary.wait;
+        }
+      }
+    });
+    return summary;
+  }
+
+  std::optional<int> TryGetDeterministicNoWaitCommitGroups(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return TryGetDeterministicNoWaitCommitGroups(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (IsAsyncWaitQueueScope(attr) || IsAsyncWaitInflightCount(attr)) {
+        return std::nullopt;
+      }
+      if (IsAsyncCommitQueueScope(attr)) {
+        auto body_commit_groups = TryGetDeterministicNoWaitCommitGroups(attr->body);
+        if (!body_commit_groups.has_value()) {
+          return std::nullopt;
+        }
+        return *body_commit_groups + 1;
+      }
+      return TryGetDeterministicNoWaitCommitGroups(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      int commit_groups = 0;
+      for (const Stmt &s : seq->seq) {
+        auto part = TryGetDeterministicNoWaitCommitGroups(s);
+        if (!part.has_value()) {
+          return std::nullopt;
+        }
+        commit_groups += *part;
+      }
+      return commit_groups;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return TryGetDeterministicNoWaitCommitGroups(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (!is_one(realize->predicate)) {
+        return std::nullopt;
+      }
+      return TryGetDeterministicNoWaitCommitGroups(realize->block->body);
+    }
+    if (const auto *for_node = stmt.as<ForNode>()) {
+      if (for_node->thread_binding.defined()) {
+        return std::nullopt;
+      }
+      const auto *extent_imm = for_node->extent.as<IntImmNode>();
+      if (extent_imm == nullptr || extent_imm->value < 0) {
+        return std::nullopt;
+      }
+      auto part = TryGetDeterministicNoWaitCommitGroups(for_node->body);
+      if (!part.has_value()) {
+        return std::nullopt;
+      }
+      return *part * static_cast<int>(extent_imm->value);
+    }
+    if (stmt.as<IfThenElseNode>()) {
+      return std::nullopt;
+    }
+    if (ContainsAsyncSyncScopes(stmt)) {
+      return std::nullopt;
+    }
+    return 0;
+  }
+
+  int GuaranteedNewGroupsBeforeNextWait(const Array<Stmt> &body, int start_idx) const {
+    int guaranteed_groups = 0;
+    for (int i = start_idx, n = static_cast<int>(body.size()); i < n; ++i) {
+      AsyncSyncSummary summary = SummarizeAsyncSyncScopes(body[i]);
+      if (summary.wait > 0) {
+        break;
+      }
+      if (summary.commit == 0) {
+        continue;
+      }
+      if (auto commits = TryGetDeterministicNoWaitCommitGroups(body[i])) {
+        guaranteed_groups += *commits;
+        continue;
+      }
+      break;
+    }
+    return guaranteed_groups;
+  }
+
+  Stmt RewriteWaitStaticInSimpleWrapper(const Stmt &stmt, int new_wait_n,
+                                        bool *changed) const {
+    ClassifiedAsyncSyncStmt cls = ClassifySimpleAsyncSyncStmt(stmt);
+    if (cls.kind != AsyncSyncStmtKind::kWaitStatic) {
+      return stmt;
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (IsAsyncWaitQueueScope(attr)) {
+        *changed = true;
+        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+      }
+    }
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      Stmt new_body =
+          RewriteWaitStaticInSimpleWrapper(let->body, new_wait_n, changed);
+      if (*changed) {
+        return LetStmt(let->var, let->value, new_body, let->span);
+      }
+      return stmt;
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      Stmt new_body =
+          RewriteWaitStaticInSimpleWrapper(attr->body, new_wait_n, changed);
+      if (*changed) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
+                        attr->span);
+      }
+      return stmt;
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        Stmt inner =
+            RewriteWaitStaticInSimpleWrapper(seq->seq[0], new_wait_n, changed);
+        if (*changed) {
+          return SeqStmt({inner});
+        }
+      }
+      return stmt;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      Stmt inner =
+          RewriteWaitStaticInSimpleWrapper(block->body, new_wait_n, changed);
+      if (*changed) {
+        Block new_block = Downcast<Block>(stmt);
+        new_block.CopyOnWrite()->body = inner;
+        return new_block;
+      }
+      return stmt;
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        Stmt inner = RewriteWaitStaticInSimpleWrapper(realize->block->body,
+                                                      new_wait_n, changed);
+        if (*changed) {
+          Block new_block = realize->block;
+          new_block.CopyOnWrite()->body = inner;
+          return BlockRealize(realize->iter_values, realize->predicate, new_block,
+                              realize->span);
+        }
+      }
+      return stmt;
+    }
+    return stmt;
+  }
+
+  std::optional<int> TryGetHeadStaticWaitCount(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return TryGetHeadStaticWaitCount(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (IsAsyncWaitQueueScope(attr)) {
+        return TryGetStaticAsyncWaitCount(attr);
+      }
+      if (IsAsyncWaitInflightCount(attr)) {
+        return std::nullopt;
+      }
+      return TryGetHeadStaticWaitCount(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.empty()) {
+        return std::nullopt;
+      }
+      return TryGetHeadStaticWaitCount(seq->seq[0]);
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return TryGetHeadStaticWaitCount(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return TryGetHeadStaticWaitCount(realize->block->body);
+      }
+    }
+    return std::nullopt;
+  }
+
+  Stmt RewriteHeadStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
+                                      bool *changed) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      Stmt new_body =
+          RewriteHeadStaticWaitInWrapper(let->body, new_wait_n, changed);
+      if (*changed) {
+        return LetStmt(let->var, let->value, new_body, let->span);
+      }
+      return stmt;
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      if (IsAsyncWaitQueueScope(attr)) {
+        *changed = true;
+        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+      }
+      Stmt new_body =
+          RewriteHeadStaticWaitInWrapper(attr->body, new_wait_n, changed);
+      if (*changed) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
+                        attr->span);
+      }
+      return stmt;
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.empty()) {
+        return stmt;
+      }
+      Array<Stmt> new_seq = seq->seq;
+      new_seq.Set(0, RewriteHeadStaticWaitInWrapper(seq->seq[0], new_wait_n, changed));
+      if (*changed) {
+        return SeqStmt(new_seq);
+      }
+      return stmt;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      Stmt new_body =
+          RewriteHeadStaticWaitInWrapper(block->body, new_wait_n, changed);
+      if (*changed) {
+        Block new_block = Downcast<Block>(stmt);
+        new_block.CopyOnWrite()->body = new_body;
+        return new_block;
+      }
+      return stmt;
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        Stmt new_body = RewriteHeadStaticWaitInWrapper(realize->block->body,
+                                                       new_wait_n, changed);
+        if (*changed) {
+          Block new_block = realize->block;
+          new_block.CopyOnWrite()->body = new_body;
+          return BlockRealize(realize->iter_values, realize->predicate, new_block,
+                              realize->span);
+        }
+      }
+      return stmt;
+    }
+    return stmt;
+  }
+
+  Stmt MaybeRelaxLoopWaits(const For &loop, int pre_outstanding_lb) const {
+    int retain = PipelinedRetainGroups(GetPipelineNumStages(loop.get()));
+    if (retain <= 0 || !loop.defined()) {
+      return loop;
+    }
+    const auto *seq = loop->body.as<SeqStmtNode>();
+    if (!seq || seq->seq.empty()) {
+      return loop;
+    }
+
+    Array<Stmt> body = seq->seq;
+    bool changed = false;
+    int outstanding_lb = std::max(0, pre_outstanding_lb);
+    int groups_since_wait_lb = 0;
+    bool seen_wait_boundary = false;
+
+    for (int i = 0, n = static_cast<int>(body.size()); i < n; ++i) {
+      ClassifiedAsyncSyncStmt cls = ClassifySimpleAsyncSyncStmt(body[i]);
+      if (cls.kind == AsyncSyncStmtKind::kCommit) {
+        ++outstanding_lb;
+        ++groups_since_wait_lb;
+        continue;
+      }
+      if (cls.kind == AsyncSyncStmtKind::kWaitDynamic) {
+        seen_wait_boundary = true;
+        outstanding_lb = 0;
+        groups_since_wait_lb = 0;
+        continue;
+      }
+      if (cls.kind == AsyncSyncStmtKind::kWaitStatic) {
+        int effective_wait_n = cls.wait_n;
+        if (cls.wait_n == 0) {
+          int groups_after_wait_lb =
+              GuaranteedNewGroupsBeforeNextWait(body, i + 1);
+          int per_sync_groups = groups_since_wait_lb;
+          bool uses_head_fallback =
+              (per_sync_groups == 0 && !seen_wait_boundary);
+          if (uses_head_fallback) {
+            per_sync_groups = 1;
+          }
+          int candidate_wait_n =
+              std::max(0, std::min(retain * per_sync_groups, 7));
+          bool enough_pre_outstanding =
+              !uses_head_fallback || outstanding_lb >= (candidate_wait_n + 1);
+          if (candidate_wait_n > 0 && enough_pre_outstanding &&
+              (!uses_head_fallback || groups_after_wait_lb > 0)) {
+            bool changed_wait = false;
+            body.Set(i, RewriteWaitStaticInSimpleWrapper(
+                            body[i], candidate_wait_n, &changed_wait));
+            if (changed_wait) {
+              changed = true;
+              effective_wait_n = candidate_wait_n;
+            }
+          }
+        }
+        seen_wait_boundary = true;
+        outstanding_lb = std::min(outstanding_lb, effective_wait_n);
+        groups_since_wait_lb = 0;
+        continue;
+      }
+
+      AsyncSyncSummary summary = SummarizeAsyncSyncScopes(body[i]);
+      if (summary.wait == 0) {
+        if (auto commits = TryGetDeterministicNoWaitCommitGroups(body[i])) {
+          outstanding_lb += *commits;
+          groups_since_wait_lb += *commits;
+          continue;
+        }
+      }
+      if (summary.wait > 0) {
+        seen_wait_boundary = true;
+      }
+      outstanding_lb = 0;
+      groups_since_wait_lb = 0;
+    }
+
+    if (!changed) {
+      return loop;
+    }
+    For new_loop = loop;
+    new_loop.CopyOnWrite()->body = body.size() == 1 ? body[0] : SeqStmt(body);
+    return new_loop;
+  }
+
+  Stmt RelaxLoopWaitsInSimpleWrapper(const Stmt &stmt, int pre_outstanding_lb,
+                                     bool *changed) const {
+    if (const auto *loop = stmt.as<ForNode>()) {
+      Stmt relaxed = MaybeRelaxLoopWaits(Downcast<For>(stmt), pre_outstanding_lb);
+      *changed = !relaxed.same_as(stmt);
+      return relaxed;
+    }
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      Stmt new_body =
+          RelaxLoopWaitsInSimpleWrapper(let->body, pre_outstanding_lb, changed);
+      if (*changed) {
+        return LetStmt(let->var, let->value, new_body, let->span);
+      }
+      return stmt;
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      Stmt new_body =
+          RelaxLoopWaitsInSimpleWrapper(attr->body, pre_outstanding_lb, changed);
+      if (*changed) {
+        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
+                        attr->span);
+      }
+      return stmt;
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        Stmt inner = RelaxLoopWaitsInSimpleWrapper(seq->seq[0], pre_outstanding_lb,
+                                                   changed);
+        if (*changed) {
+          return SeqStmt({inner});
+        }
+      }
+      return stmt;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      Stmt new_body =
+          RelaxLoopWaitsInSimpleWrapper(block->body, pre_outstanding_lb, changed);
+      if (*changed) {
+        Block new_block = Downcast<Block>(stmt);
+        new_block.CopyOnWrite()->body = new_body;
+        return new_block;
+      }
+      return stmt;
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        Stmt new_body = RelaxLoopWaitsInSimpleWrapper(realize->block->body,
+                                                      pre_outstanding_lb, changed);
+        if (*changed) {
+          Block new_block = realize->block;
+          new_block.CopyOnWrite()->body = new_body;
+          return BlockRealize(realize->iter_values, realize->predicate, new_block,
+                              realize->span);
+        }
+      }
+      return stmt;
+    }
+    return stmt;
+  }
+
+  class AsyncPipelineLoopWaitRelaxer : public StmtExprMutator {
+  public:
+    explicit AsyncPipelineLoopWaitRelaxer(const PipelineRewriter *rewriter)
+        : rewriter_(rewriter) {}
+
+    Stmt VisitStmt_(const SeqStmtNode *op) final {
+      Array<Stmt> visited;
+      visited.reserve(op->seq.size());
+      for (const Stmt &stmt : op->seq) {
+        visited.push_back(this->VisitStmt(stmt));
+      }
+
+      int outstanding_lb = 0;
+      for (int i = 0, n = static_cast<int>(visited.size()); i < n; ++i) {
+        Stmt current = visited[i];
+        bool changed_loop = false;
+        current = rewriter_->RelaxLoopWaitsInSimpleWrapper(current, outstanding_lb,
+                                                           &changed_loop);
+        if (changed_loop) {
+          visited.Set(i, current);
+        }
+        ClassifiedAsyncSyncStmt cls =
+            rewriter_->ClassifySimpleAsyncSyncStmt(current);
+        if (cls.kind == AsyncSyncStmtKind::kCommit) {
+          ++outstanding_lb;
+          continue;
+        }
+        if (cls.kind == AsyncSyncStmtKind::kWaitStatic) {
+          outstanding_lb = std::min(outstanding_lb, cls.wait_n);
+          continue;
+        }
+        if (cls.kind == AsyncSyncStmtKind::kWaitDynamic) {
+          outstanding_lb = 0;
+          continue;
+        }
+        AsyncSyncSummary summary = rewriter_->SummarizeAsyncSyncScopes(current);
+        if (summary.wait == 0) {
+          if (auto commits =
+                  rewriter_->TryGetDeterministicNoWaitCommitGroups(current)) {
+            outstanding_lb += *commits;
+            continue;
+          }
+        }
+        if (summary.wait > 0) {
+          outstanding_lb = 0;
+        }
+      }
+
+      if (visited.empty()) {
+        return Evaluate(0);
+      }
+      if (visited.size() == 1) {
+        return visited[0];
+      }
+      return SeqStmt(visited);
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+  };
+
+  Array<Stmt> RelaxTrailingConsumerWaits(Array<Stmt> seq,
+                                         int retain) const {
+    if (retain <= 0 || seq.size() <= 1) {
+      return seq;
+    }
+    std::vector<int> suffix_wait_indices;
+    for (int i = static_cast<int>(seq.size()) - 1; i >= 0; --i) {
+      if (ContainsAsyncCommitScopes(seq[i])) {
+        break;
+      }
+      auto head_wait = TryGetHeadStaticWaitCount(seq[i]);
+      if (!head_wait.has_value() || *head_wait != 0) {
+        break;
+      }
+      suffix_wait_indices.push_back(i);
+    }
+    if (suffix_wait_indices.size() <= 1) {
+      return seq;
+    }
+    for (size_t pos = 1; pos < suffix_wait_indices.size(); ++pos) {
+      bool changed = false;
+      int idx = suffix_wait_indices[pos];
+      seq.Set(idx, RewriteHeadStaticWaitInWrapper(seq[idx], retain, &changed));
+    }
+    return seq;
+  }
+
   void PopulateWaitCounts(
       const std::vector<RewrittenStmtInfo> &new_stmts,
       arith::Analyzer *ana_normalized,
@@ -729,6 +1441,7 @@ private:
           (*async_states_local)[new_stmts[i].stage].seen.insert(
               write_region->buffer.get());
         }
+        continue;
       }
 
       int producer_stage_idx = -1;
@@ -905,6 +1618,35 @@ private:
       return BlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
 
+    if (unroll_loop) {
+      if (const auto *extent_imm = extent.as<IntImmNode>()) {
+        if (extent_imm->value > 1) {
+          Array<Stmt> expanded;
+          expanded.reserve(static_cast<size_t>(extent_imm->value));
+          for (int64_t iter = 0; iter < extent_imm->value; ++iter) {
+            PrimExpr unit_start =
+                analyzer_.Simplify(start + IntImm(extent.dtype(), iter));
+            PrimExpr unit_end =
+                analyzer_.Simplify(start + IntImm(extent.dtype(), iter + 1));
+            Stmt unit_stmt = EmitImpl(unit_start, unit_end, false, need_bound_check);
+            expanded.push_back(StripPipelineContextAttrs(unit_stmt));
+          }
+          Stmt result = expanded.size() == 1 ? expanded[0] : SeqStmt(expanded);
+          if (pipeline_num_stages) {
+            if (pipeline_num_stages.value()->value > 1) {
+              result = AttrStmt(Integer(0), kPipelineMVBContextNumStages,
+                                Downcast<PrimExpr>(pipeline_num_stages.value()),
+                                result);
+            }
+            result = AttrStmt(Integer(0), kPipelineContextNumStages,
+                              Downcast<PrimExpr>(pipeline_num_stages.value()),
+                              result);
+          }
+          return result;
+        }
+      }
+    }
+
     bool is_unit_loop = analyzer_.CanProveEqual(extent, 1);
     if (is_unit_loop) {
       new_loop_var = start; // use constants as the loop var for unit loops
@@ -962,6 +1704,10 @@ private:
       if (!is_unit_loop) {
         Var loop_iter = Downcast<Var>(new_loop_var);
         inbound = Substitute(inbound, {{loop_iter, loop_iter + delta}});
+      }
+      inbound = ana_normalized.Simplify(inbound);
+      if (is_zero(inbound)) {
+        continue;
       }
       new_block = Downcast<Block>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
@@ -1996,12 +2742,29 @@ private:
     Stmt pipeline = rewriter.BuildPipeline();
     subtree_modified_ = true;
 
+    auto unwrap_outer_attrs = [](Stmt stmt) {
+      std::vector<AttrStmt> attrs;
+      while (const auto *attr = stmt.as<AttrStmtNode>()) {
+        attrs.push_back(Downcast<AttrStmt>(stmt));
+        stmt = attr->body;
+      }
+      return std::make_pair(attrs, stmt);
+    };
+    auto rewrap_outer_attrs = [](Stmt stmt, const std::vector<AttrStmt> &attrs) {
+      for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
+        stmt = AttrStmt((*it)->node, (*it)->attr_key, (*it)->value, stmt,
+                        (*it)->span);
+      }
+      return stmt;
+    };
+
     // Update barrier_init annotations for expanded barrier buffers.
     // For pipeline_mbar (ISP-created): add new entry with arrive_count=1 per
     // slot. For user barriers (T.alloc_barrier): replicate existing arrive
     // counts across the expanded slots.
     {
-      BlockRealize br = Downcast<BlockRealize>(pipeline);
+      auto [outer_attrs, inner_stmt] = unwrap_outer_attrs(pipeline);
+      BlockRealize br = Downcast<BlockRealize>(inner_stmt);
       Block block = br->block;
       BlockNode *bn = block.CopyOnWrite();
 
@@ -2052,8 +2815,9 @@ private:
 
       if (changed) {
         bn->annotations.Set("barrier_init", updated_init);
-        pipeline =
-            BlockRealize(br->iter_values, br->predicate, block, br->span);
+        pipeline = rewrap_outer_attrs(
+            BlockRealize(br->iter_values, br->predicate, block, br->span),
+            outer_attrs);
       }
     }
 
@@ -2069,19 +2833,24 @@ private:
     };
     if (!rewrap_fns.empty()) {
       if (pipeline_body_from_block) {
-        BlockRealize pipeline_realize = Downcast<BlockRealize>(pipeline);
+        auto [outer_attrs, inner_stmt] = unwrap_outer_attrs(pipeline);
+        BlockRealize pipeline_realize = Downcast<BlockRealize>(inner_stmt);
         Block pipeline_block = pipeline_realize->block;
         {
           BlockNode *block_node = pipeline_block.CopyOnWrite();
           block_node->body = apply_wrappers(block_node->body);
         }
-        pipeline = BlockRealize(pipeline_realize->iter_values,
-                                pipeline_realize->predicate, pipeline_block,
-                                pipeline_realize->span);
+        pipeline = rewrap_outer_attrs(
+            BlockRealize(pipeline_realize->iter_values,
+                         pipeline_realize->predicate, pipeline_block,
+                         pipeline_realize->span),
+            outer_attrs);
       } else {
         pipeline = apply_wrappers(pipeline);
       }
     }
+
+    pipeline = AsyncCommitWaitAttrLowerer::Lower(pipeline);
 
     if (const auto *realize = op->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;

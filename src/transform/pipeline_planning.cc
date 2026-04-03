@@ -474,6 +474,10 @@ public:
     ICHECK(target.defined())
         << "Pipeline_Planning: Require the target attribute";
     substituter.target_ = target.value();
+    substituter.disable_tma_lower_ =
+        tvm::transform::PassContext::Current()
+            ->GetConfig<Bool>(kDisableTMALower, Bool(false))
+            .value();
     return substituter.VisitStmt(f->body);
   }
 
@@ -603,7 +607,7 @@ private:
     pinfo.writes = std::move(collector.GetWrites());
     pinfo.original_stmt_index = idx;
     pinfo.copy_stage = collector.GetGlobalCopyPattern();
-    pinfo.tma_copy = collector.GetTmaCopyPattern();
+    pinfo.tma_copy = collector.GetTmaCopyPattern() && !disable_tma_lower_;
     auto async_info = AnalyzeAsyncIntrinsics(block->body);
     pinfo.cp_async_call_count = async_info.cp_async_call_count;
     pinfo.cp_async_commit_count = async_info.cp_async_commit_count;
@@ -1737,6 +1741,7 @@ private:
 
   Map<Var, Buffer> buffer_data_to_buffer_;
   Target target_;
+  bool disable_tma_lower_{false};
   bool use_async_copy_{};
 };
 

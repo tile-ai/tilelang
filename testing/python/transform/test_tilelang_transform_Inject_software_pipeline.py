@@ -55,6 +55,7 @@ def _count_attrs_and_calls(func):
 
 def _collect_attr_values(func, attr_key):
     values = []
+    stmt = func.body if hasattr(func, "body") else func
 
     def _visit(node):
         if isinstance(node, tvm.tir.AttrStmt) and str(node.attr_key) == attr_key:
@@ -62,7 +63,7 @@ def _collect_attr_values(func, attr_key):
             if isinstance(value, tvm.tir.IntImm):
                 values.append(int(value.value))
 
-    post_order_visit(func.body, _visit)
+    post_order_visit(stmt, _visit)
     return values
 
 
@@ -75,6 +76,56 @@ def _collect_attr_value_nodes(func, attr_key):
 
     post_order_visit(func.body, _visit)
     return values
+
+
+def _collect_wait_args(func):
+    wait_args = []
+    stmt = func.body if hasattr(func, "body") else func
+
+    def _visit(node):
+        if (
+            isinstance(node, tvm.tir.Call)
+            and isinstance(node.op, tvm.ir.Op)
+            and str(node.op.name) == "tir.ptx_wait_group"
+            and len(node.args) == 1
+        ):
+            arg = node.args[0]
+            if isinstance(arg, tvm.tir.IntImm):
+                wait_args.append(int(arg.value))
+
+    post_order_visit(stmt, _visit)
+    return wait_args
+
+
+def _find_pipelined_loop(func):
+    loops = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tir.For) and "tl_pipelined_num_stages" in node.annotations:
+            loops.append(node)
+
+    post_order_visit(func.body, _visit)
+    assert loops, "Expected at least one loop annotated with tl_pipelined_num_stages"
+    return loops[0]
+
+
+def _count_copy_calls_with_annotation(func, annotation_key):
+    annotated = 0
+    total = 0
+
+    def _visit(node):
+        nonlocal annotated, total
+        if not isinstance(node, tvm.tir.Call) or not isinstance(node.op, tvm.ir.Op):
+            return
+        if str(node.op.name) not in {"tl.tileop.copy", "tl.tileop.async_copy"}:
+            return
+        total += 1
+        value = node.annotations.get(annotation_key) if node.annotations else None
+        if isinstance(value, tvm.tir.IntImm) and int(value.value) != 0:
+            annotated += 1
+
+    post_order_visit(func.body, _visit)
+    return annotated, total
 
 
 def test_trival_pipeline():
@@ -195,15 +246,11 @@ def test_async_pipeline_groups_multiple_copy_producers():
 
     attrs, calls = _count_attrs_and_calls(mod["main"])
     assert attrs.get("async_scope", 0) > 0
-    assert attrs.get("async_commit_queue_scope", 0) > 0
-    assert attrs.get("async_wait_queue_scope", 0) > 0
-    assert all(
-        isinstance(value, tvm.tir.IntImm)
-        for value in _collect_attr_value_nodes(mod["main"], "async_wait_inflight_count")
-    )
-    assert 1 in _collect_attr_values(mod["main"], "async_wait_inflight_count")
-    assert calls.get("tir.ptx_commit_group", 0) == 0
-    assert calls.get("tir.ptx_wait_group", 0) == 0
+    assert attrs.get("async_commit_queue_scope", 0) == 0
+    assert attrs.get("async_wait_queue_scope", 0) == 0
+    assert attrs.get("async_wait_inflight_count", 0) == 0
+    assert calls.get("tir.ptx_commit_group", 0) > 0
+    assert 1 in _collect_wait_args(mod["main"])
 
 
 def test_async_pipeline_only_wraps_producer_statements_from_explicit_group_annotations():
@@ -253,10 +300,88 @@ def test_async_pipeline_only_wraps_producer_statements_from_explicit_group_annot
     mod = tl.transform.LowerOpaqueBlock()(mod)
     mod = tl.transform.Simplify()(mod)
 
-    attrs, _ = _count_attrs_and_calls(mod["main"])
-    # Two producer statements are replicated into prologue / steady / epilogue.
-    assert attrs.get("async_scope", 0) == 6
-    assert attrs.get("async_commit_queue_scope", 0) == 3
+    attrs, calls = _count_attrs_and_calls(mod["main"])
+    # Dead prologue/epilogue producer clones are now dropped during injection,
+    # so only the live producer copies remain wrapped.
+    assert attrs.get("async_scope", 0) == 4
+    assert attrs.get("async_commit_queue_scope", 0) == 0
+    assert calls.get("tir.ptx_commit_group", 0) == 2
+
+
+def test_async_pipeline_marks_copy_ops_for_pipeline_managed_cp_async_sync():
+    @T.prim_func
+    def before(
+        A: T.Tensor((16, 16), T.float32),
+        B: T.Tensor((16, 16), T.float32),
+        C: T.Tensor((16, 16), T.float32),
+    ):
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 0, 1],
+                    "software_pipeline_order": [0, 1, 2],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 1, 0],
+                    "software_pipeline_async_producer_groups": [0, 0, -1],
+                },
+            ):
+                    with T.block("compute"):
+                        T.reads(A[tx, i], B[tx, i])
+                        T.writes(C[tx, i])
+                        A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                        B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                        T.copy(A[tx, i : i + 1], A_shared[tx, 0:1])
+                        T.copy(B[tx, i : i + 1], B_shared[tx, 0:1])
+                        C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    annotated, total = _count_copy_calls_with_annotation(
+        mod["main"], "no_implicit_async_commit_wait"
+    )
+    assert total > 0
+    assert annotated == total
+
+
+def test_async_pipeline_relaxes_loop_wait_and_splits_trailing_drain():
+    @T.prim_func
+    def before(A: T.Tensor((32,), T.uint8), B: T.Tensor((32,), T.uint8)):
+        S = T.alloc_buffer((4,), dtype=T.uint8, scope="shared")
+        for i in T.serial(
+            0,
+            4,
+            annotations={
+                "software_pipeline_stage": [0, 2],
+                "software_pipeline_order": [0, 1],
+                "software_pipeline_async_stages": [0],
+                "software_pipeline_async_producers": [1, 0],
+                "software_pipeline_async_producer_groups": [0, -1],
+            },
+        ):
+            with T.block("copy"):
+                T.reads(A[i * 4 : i * 4 + 4])
+                T.writes(S[0:4])
+                T.copy(A[i * 4 : i * 4 + 4], S[0:4])
+            with T.block("consume"):
+                T.reads(S[0:4])
+                T.writes(B[i * 4 : i * 4 + 4])
+                for j in range(4):
+                    B[i * 4 + j] = S[j]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    mod = tl.transform.Simplify()(mod)
+
+    func = mod["main"]
+    loop = _find_pipelined_loop(func)
+    loop_waits = _collect_wait_args(loop.body)
+    all_waits = _collect_wait_args(func)
+
+    assert loop_waits == [2], f"Expected relaxed loop wait to keep two groups in flight, got {loop_waits}"
+    assert all_waits == [2, 2, 0], f"Expected trailing waits to split into retain+drain, got {all_waits}"
 
 
 if __name__ == "__main__":

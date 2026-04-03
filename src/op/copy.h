@@ -6,6 +6,7 @@
 #ifndef TVM_TL_OP_COPY_H_
 #define TVM_TL_OP_COPY_H_
 
+#include "builtin.h"
 #include "operator.h"
 #include "parallel.h"
 
@@ -124,6 +125,8 @@ public:
   //   - "disable_tma": Bool, whether to disable TMA acceleration
   //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
   //   2=last)
+  //   - attr::kAsyncCopyNoImplicitCommitWait: IntImm/Bool, suppress implicit
+  //     cp.async commit/wait because an enclosing transform manages them
   //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
   //     layout hint applied to the outermost generated parallel loop of this
   //     copy's SIMT loop nest.
@@ -178,6 +181,15 @@ public:
     }
     // Backward-compatibility with historical annotation key.
     if (auto val = annotations.Get("force_cp_async")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
+  bool GetNoImplicitAsyncCommitWait() const {
+    if (auto val = annotations.Get(attr::kAsyncCopyNoImplicitCommitWait)) {
       if (auto int_val = val->as<IntImmNode>()) {
         return int_val->value != 0;
       }
