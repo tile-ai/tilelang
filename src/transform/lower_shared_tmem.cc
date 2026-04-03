@@ -15,20 +15,113 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <unordered_set>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+
+/*!
+ * \brief Collect TMEM buffers explicitly deallocated on fallthrough paths.
+ *
+ * A "fallthrough path" is one that reaches the end of the statement without
+ * hitting thread_return().  Buffers deallocated on every such path already
+ * have an explicit dealloc, so we can skip the auto-dealloc at block end.
+ *
+ * \return {buffers deallocated on fallthrough, whether the stmt can
+ * fallthrough}
+ */
+static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
+  if (!stmt.defined())
+    return {{}, true};
+
+  // Unwrap transparent wrapper nodes
+  if (auto *n = stmt.as<LetStmtNode>())
+    return CollectFallthroughDeallocs(n->body);
+  if (auto *n = stmt.as<AttrStmtNode>())
+    return CollectFallthroughDeallocs(n->body);
+  if (auto *n = stmt.as<BlockNode>())
+    return CollectFallthroughDeallocs(n->body);
+  if (auto *n = stmt.as<BlockRealizeNode>())
+    return CollectFallthroughDeallocs(n->block->body);
+  if (auto *n = stmt.as<ForNode>())
+    return CollectFallthroughDeallocs(n->body);
+
+  // Sequential: accumulate deallocs; stop if any child doesn't fallthrough
+  if (auto *seq = stmt.as<SeqStmtNode>()) {
+    VarSet deallocs;
+    for (const auto &child : seq->seq) {
+      auto [d, ft] = CollectFallthroughDeallocs(child);
+      if (!ft)
+        return {{}, false};
+      deallocs.insert(d.begin(), d.end());
+    }
+    return {std::move(deallocs), true};
+  }
+
+  // Branch: collect deallocs only from branches that can fallthrough
+  if (auto *iff = stmt.as<IfThenElseNode>()) {
+    auto [then_d, then_ft] = CollectFallthroughDeallocs(iff->then_case);
+    auto [else_d, else_ft] =
+        iff->else_case.defined()
+            ? CollectFallthroughDeallocs(iff->else_case.value())
+            : std::pair<VarSet, bool>{{}, true};
+    VarSet deallocs;
+    if (then_ft)
+      deallocs.insert(then_d.begin(), then_d.end());
+    if (else_ft)
+      deallocs.insert(else_d.begin(), else_d.end());
+    return {std::move(deallocs), then_ft || else_ft};
+  }
+
+  // Leaf: detect deallocate_tmem and thread_return
+  if (auto *eval = stmt.as<EvaluateNode>()) {
+    if (auto *call = eval->value.as<CallNode>()) {
+      if (call->op.same_as(tl::deallocate_tmem())) {
+        ICHECK_EQ(call->args.size(), 1U);
+        auto *buf = call->args[0].as<VarNode>();
+        ICHECK(buf) << "tl.deallocate_tmem expects a buffer data Var";
+        return {{tvm::ffi::GetRef<Var>(buf)}, true};
+      }
+      if (call->op.same_as(builtin::thread_return())) {
+        return {{}, false};
+      }
+    }
+  }
+
+  return {{}, true};
+}
+
 class SharedTmemRewriter : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt body) {
+  static Stmt Rewrite(Stmt body, Target target) {
     SharedTmemRewriter rewriter;
+    rewriter.target_ = std::move(target);
     return rewriter(body);
   }
 
 private:
+  int GetNumColsAllocated(const Buffer &buffer) const {
+    ICHECK_EQ(buffer->shape.size(), 2U);
+
+    auto analyzer = std::make_shared<arith::Analyzer>();
+    arith::ConstIntBound phy_col_bounds =
+        analyzer->const_int_bound(buffer->shape[1]);
+    int num_cols_required = phy_col_bounds->max_value;
+    ICHECK(num_cols_required <= 512)
+        << "The number of columns required for tmem buffer " << buffer->name
+        << " is " << num_cols_required
+        << ", which exceeds the maximum of 512 columns";
+
+    int num_cols_allocated = 32; // Align num_cols_allocated to power of 2
+    for (; num_cols_allocated < num_cols_required; num_cols_allocated *= 2) {
+    }
+    return num_cols_allocated;
+  }
+
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = tvm::ffi::GetRef<Block>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
@@ -63,6 +156,8 @@ private:
     }
 
     ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
+
+    auto [fallthrough_deallocs, _] = CollectFallthroughDeallocs(op->body);
 
     for (auto buffer : tmem_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -145,22 +240,22 @@ private:
       auto data = buffer->data;
       auto old_buffer = buffer_data_to_buffer_.at(data);
       auto new_buffer = buffer_remap_.at(old_buffer);
+      int num_cols_allocated = GetNumColsAllocated(old_buffer);
 
-      // Tmem physical coord range analysis
-      ICHECK(old_buffer->shape.size() == 2);
+      // Check that the number of rows doesn't exceed the tmem limit
+      {
+        auto analyzer = std::make_shared<arith::Analyzer>();
+        arith::ConstIntBound phy_row_bounds =
+            analyzer->const_int_bound(old_buffer->shape[0]);
+        int num_rows_required = phy_row_bounds->max_value;
+        ICHECK(num_rows_required <= 128)
+            << "The number of rows required for tmem buffer "
+            << old_buffer->name << " is " << num_rows_required
+            << ", which exceeds the maximum of 128 rows";
+      }
 
-      auto analyzer = std::make_shared<arith::Analyzer>();
-      arith::ConstIntBound phy_col_bounds =
-          analyzer->const_int_bound(old_buffer->shape[1]);
-      int num_cols_required = phy_col_bounds->max_value;
-      ICHECK(num_cols_required <= 512)
-          << "The number of columns required for tmem buffer "
-          << old_buffer->name << " is " << num_cols_required
-          << ", which exceeds the maximum of 512 columns";
-
-      int num_cols_allocated = 32; // Align num_cols_allocated to power of 2
-      for (; num_cols_allocated < num_cols_required; num_cols_allocated *= 2)
-        ;
+      tmem_num_cols_allocated_.insert({data, num_cols_allocated});
+      tmem_call_annotations_.insert({data, tmem_call_ann});
 
       auto new_buffer_access = new_buffer.access_ptr(1, DataType::Handle(), 1,
                                                      PrimExpr(0), PrimExpr(1));
@@ -168,10 +263,12 @@ private:
                              {new_buffer_access, PrimExpr(num_cols_allocated)},
                              tmem_call_ann);
       init_mtmem_calls_.push_back(Evaluate(alloc_call));
-      auto dealloc_call = Call(
-          DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
-          {new_buffer_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
-      dealloc_tmem_calls_.push_back(Evaluate(dealloc_call));
+      if (!fallthrough_deallocs.count(data)) {
+        auto dealloc_call = Call(
+            DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
+            {new_buffer_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
+        dealloc_tmem_calls_.push_back(Evaluate(dealloc_call));
+      }
     }
     auto compare_by_buffer_name = [&](const Stmt &a, const Stmt &b) {
       auto call_a = a.as<EvaluateNode>()->value.as<CallNode>();
@@ -184,8 +281,8 @@ private:
               compare_by_buffer_name);
 
     Array<Stmt> new_body;
-    auto target = Target::Current();
-    auto warp_size = TargetGetWarpSize(target);
+    ICHECK(target_.defined()) << "LowerSharedTmem requires a bound target";
+    auto warp_size = TargetGetWarpSize(target_);
     auto thread_var_div_warp_size =
         FloorDiv(thread_var_->var, IntImm(thread_var_->var->dtype, warp_size));
     new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
@@ -197,11 +294,17 @@ private:
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
     new_body.push_back(block->body);
-    new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
-                                  dealloc_tmem_calls_.size() > 1
-                                      ? SeqStmt(dealloc_tmem_calls_)
-                                      : dealloc_tmem_calls_.back(),
-                                  Stmt()));
+    if (!dealloc_tmem_calls_.empty()) {
+      if (tmem_call_ann.find("use_2cta") != tmem_call_ann.end()) {
+        new_body.push_back(
+            Evaluate(Call(DataType::Handle(), tl::cluster_sync(), {})));
+      }
+      new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
+                                    dealloc_tmem_calls_.size() > 1
+                                        ? SeqStmt(dealloc_tmem_calls_)
+                                        : dealloc_tmem_calls_.back(),
+                                    Stmt()));
+    }
 
     auto block_ptr = block.CopyOnWrite();
     block_ptr->annotations.erase(attr::kLayoutMap);
@@ -261,6 +364,30 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::deallocate_tmem())) {
+      ICHECK_EQ(op->args.size(), 1U);
+      Var buffer_data = Downcast<Var>(op->args[0]);
+      auto num_cols_it = tmem_num_cols_allocated_.find(buffer_data);
+      ICHECK(num_cols_it != tmem_num_cols_allocated_.end())
+          << "tl.deallocate_tmem expects a TMEM buffer allocated in the same "
+             "or an enclosing block";
+      ICHECK(buffer_data_to_buffer_.count(buffer_data))
+          << "TMEM buffer for tl.deallocate_tmem is not tracked";
+      Buffer old_buffer = buffer_data_to_buffer_.at(buffer_data);
+      ICHECK(buffer_remap_.count(old_buffer))
+          << "TMEM buffer for tl.deallocate_tmem has not been remapped";
+      Buffer new_buffer = buffer_remap_[old_buffer];
+      auto new_buffer_access = new_buffer.access_ptr(1, DataType::Handle(), 1,
+                                                     PrimExpr(0), PrimExpr(1));
+
+      Map<String, ObjectRef> ann;
+      auto ann_it = tmem_call_annotations_.find(buffer_data);
+      if (ann_it != tmem_call_annotations_.end()) {
+        ann = ann_it->second;
+      }
+      return Call(DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
+                  {new_buffer_access, PrimExpr(num_cols_it->second)}, ann);
+    }
     if (op->op.same_as(builtin::tvm_access_ptr())) {
       ICHECK_EQ(op->args.size(), 5U);
       Var buffer_data = Downcast<Var>(op->args[1]);
@@ -299,19 +426,23 @@ private:
   // This is a workaround for cpu backend,
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_;
+  Target target_;
   Map<Var, Var> var_remap_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Buffer> buffer_remap_;
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
+  std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual>
+      tmem_num_cols_allocated_;
+  std::unordered_map<Var, Map<String, ObjectRef>, ObjectPtrHash, ObjectPtrEqual>
+      tmem_call_annotations_;
   Map<Buffer, Layout> layout_map_;
 };
 
 PrimFunc LowerSharedTmem(PrimFunc f) {
   auto target = f->GetAttr<Target>(tvm::attr::kTarget);
   ICHECK(target.defined()) << "LowerSharedTmem: Require the target attribute";
-  SharedTmemRewriter rewriter;
-  f.CopyOnWrite()->body = rewriter.Rewrite(f->body);
+  f.CopyOnWrite()->body = SharedTmemRewriter::Rewrite(f->body, target.value());
   return f;
 }
 
