@@ -8,7 +8,7 @@ def matmul(A, B, C, block_M, block_N, block_K, split_k, dtype=T.float16, accum_d
     splitK = K // split_k
 
     A: T.Tensor((M, K), dtype)
-    B: T.Tensor((N, K), dtype)
+    B: T.Tensor((K, N), dtype)
     C: T.Tensor((M, N), out_dtype)
 
     with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):
