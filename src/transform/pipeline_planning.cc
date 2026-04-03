@@ -252,7 +252,8 @@ public:
 
 private:
   static bool IsGlobalLikeBuffer(const Buffer &buffer) {
-    return IsGlobalBuffer(buffer) || (buffer.defined() && buffer.scope().empty());
+    return IsGlobalBuffer(buffer) ||
+           (buffer.defined() && buffer.scope().empty());
   }
 
   void HandleTileOp(const TileOperator &tile_op) {
@@ -694,7 +695,8 @@ private:
   }
 
   static bool IsGlobalLikeBuffer(const Buffer &buffer) {
-    return IsGlobalBuffer(buffer) || (buffer.defined() && buffer.scope().empty());
+    return IsGlobalBuffer(buffer) ||
+           (buffer.defined() && buffer.scope().empty());
   }
 
   void ClassifyCopyLikeStage(const Stmt &stmt, PipelineStageInfo *pinfo) const {
@@ -733,8 +735,7 @@ private:
     }
 
     if (const auto *im2col = copy_tile_op.value().as<Conv2DIm2ColOpNode>()) {
-      if (!IsGlobalLikeBuffer(im2col->src_) ||
-          !IsSharedBuffer(im2col->dst_)) {
+      if (!IsGlobalLikeBuffer(im2col->src_) || !IsSharedBuffer(im2col->dst_)) {
         return;
       }
       pinfo->copy_stage = true;
@@ -742,7 +743,8 @@ private:
     }
   }
 
-  void AnalyzeCopyLastUse(std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+  void AnalyzeCopyLastUse(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     for (auto &pinfo : *pipeline_stage_infos) {
       if (!pinfo.is_first_stage()) {
         continue;
@@ -762,7 +764,8 @@ private:
 
         if (!pinfo.is_copy_stage() ||
             (pinfo.cp_async_group >= 0 &&
-             pinfo.cp_async_group == (*pipeline_stage_infos)[i].cp_async_group)) {
+             pinfo.cp_async_group ==
+                 (*pipeline_stage_infos)[i].cp_async_group)) {
           continue;
         }
 
@@ -856,10 +859,11 @@ private:
     return true;
   }
 
-  void MaybeAnnotateLegacyAsyncPipelineLoop(
-      const Stmt &pipeline_body_root, const Array<Stmt> &pipeline_stmts,
-      const Array<Integer> &order_array, const Array<Integer> &stage_array,
-      Map<String, Any> *annotations) {
+  void MaybeAnnotateLegacyAsyncPipelineLoop(const Stmt &pipeline_body_root,
+                                            const Array<Stmt> &pipeline_stmts,
+                                            const Array<Integer> &order_array,
+                                            const Array<Integer> &stage_array,
+                                            Map<String, Any> *annotations) {
     if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
       return;
     }
@@ -1935,8 +1939,8 @@ private:
 
       std::vector<int> stmt_indices_by_order(pipeline_stage_infos.size());
       std::iota(stmt_indices_by_order.begin(), stmt_indices_by_order.end(), 0);
-      std::stable_sort(stmt_indices_by_order.begin(), stmt_indices_by_order.end(),
-                       [&](int lhs, int rhs) {
+      std::stable_sort(stmt_indices_by_order.begin(),
+                       stmt_indices_by_order.end(), [&](int lhs, int rhs) {
                          if (pipeline_stage_infos[lhs].order !=
                              pipeline_stage_infos[rhs].order) {
                            return pipeline_stage_infos[lhs].order <
@@ -1947,7 +1951,8 @@ private:
       std::map<std::pair<int, int>, int> implicit_group_ids;
       for (int stmt_idx : stmt_indices_by_order) {
         const auto &pinfo = pipeline_stage_infos[stmt_idx];
-        if (!IsAsyncProducerCandidate(pinfo) || async_group_ids[stmt_idx] != -1) {
+        if (!IsAsyncProducerCandidate(pinfo) ||
+            async_group_ids[stmt_idx] != -1) {
           continue;
         }
         auto key = std::make_pair(pinfo.stage, pinfo.last_use_stmt_index);

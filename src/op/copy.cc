@@ -897,8 +897,8 @@ bool CopyNode::CheckPipelineManagedCPAsyncCopy() const {
          CheckCPAsyncCopyPreconditions();
 }
 
-bool CopyNode::CheckPipelineManagedCPAsyncCopy(Target target,
-                                               arith::Analyzer *analyzer) const {
+bool CopyNode::CheckPipelineManagedCPAsyncCopy(
+    Target target, arith::Analyzer *analyzer) const {
   return CheckPipelineManagedCPAsyncCopy() &&
          CheckCPAsyncCopy(target, LayoutMap(), analyzer);
 }

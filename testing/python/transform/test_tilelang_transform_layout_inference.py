@@ -99,6 +99,7 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
         tvm.ir.structural_equal(mod, ref_mod)
         # tvm.ir.assert_structural_equal(mod, ref_mod)
 
+
 if __name__ == "__main__":
     # tilelang.testing.main()
     test_loop_tail_split(64, 64, 32, 128, 8, T.float16)

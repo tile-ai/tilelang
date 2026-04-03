@@ -229,7 +229,8 @@ bool ContainsExplicitAsyncIntrinsics(const Stmt &stmt) {
 
 class SimtProducerAnnotator : public StmtExprMutator {
 public:
-  static Stmt Annotate(const Stmt &stmt, Optional<Target> target = Optional<Target>()) {
+  static Stmt Annotate(const Stmt &stmt,
+                       Optional<Target> target = Optional<Target>()) {
     SimtProducerAnnotator annotator(std::move(target));
     return annotator.VisitStmt(stmt);
   }
@@ -289,8 +290,8 @@ private:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::async_commit_queue_scope) {
       Stmt body = VisitStmt(op->body);
-      Stmt commit = Evaluate(
-          Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
+      Stmt commit =
+          Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
       if (is_no_op(body)) {
         return commit;
       }
@@ -505,8 +506,7 @@ public:
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
                    const Array<Buffer> &local_allocs, const For &pipeline_loop,
-                   const PipelineInfo &pipeline_info,
-                   Optional<Target> target,
+                   const PipelineInfo &pipeline_info, Optional<Target> target,
                    const std::vector<LetWrapper> &loop_var_let_wrappers,
                    const std::vector<IfWrapper> &loop_var_if_wrappers)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
@@ -540,10 +540,8 @@ public:
     // Step 2: Emit the pipeline prologue, body and epilogue.
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
-    Stmt prologue =
-        StripPipelineContextAttrs(EmitImpl(pipeline_loop_->min,
-                                           pipeline_loop_->min + max_stage_,
-                                           true, true));
+    Stmt prologue = StripPipelineContextAttrs(EmitImpl(
+        pipeline_loop_->min, pipeline_loop_->min + max_stage_, true, true));
     Stmt body = StripPipelineContextAttrs(
         EmitImpl(pipeline_loop_->min + max_stage_,
                  pipeline_loop_->min + pipeline_loop_->extent, false, false));
@@ -558,7 +556,8 @@ public:
       }
     }
 
-    Stmt stmt = pipeline_parts.size() == 1 ? pipeline_parts[0] : SeqStmt(pipeline_parts);
+    Stmt stmt = pipeline_parts.size() == 1 ? pipeline_parts[0]
+                                           : SeqStmt(pipeline_parts);
     stmt = AsyncPipelineLoopWaitRelaxer(this)(stmt);
     Array<Stmt> relaxed_pipeline_parts = FlattenTopLevelSeq(stmt);
     relaxed_pipeline_parts =
@@ -788,12 +787,7 @@ private:
     Stmt stmt;
   };
 
-  enum class AsyncSyncStmtKind {
-    kOther,
-    kCommit,
-    kWaitStatic,
-    kWaitDynamic
-  };
+  enum class AsyncSyncStmtKind { kOther, kCommit, kWaitStatic, kWaitDynamic };
 
   struct ClassifiedAsyncSyncStmt {
     AsyncSyncStmtKind kind{AsyncSyncStmtKind::kOther};
@@ -805,14 +799,14 @@ private:
     int wait{0};
   };
 
-  Stmt WrapLoopDependentWrappers(Stmt stmt,
-                                 const PrimExpr &normalized_access_index) const {
+  Stmt
+  WrapLoopDependentWrappers(Stmt stmt,
+                            const PrimExpr &normalized_access_index) const {
     for (auto it = loop_var_if_wrappers_.rbegin();
          it != loop_var_if_wrappers_.rend(); ++it) {
       const auto &iw = *it;
-      PrimExpr substituted_condition =
-          Substitute(iw.condition,
-                     {{pipeline_loop_->loop_var, normalized_access_index}});
+      PrimExpr substituted_condition = Substitute(
+          iw.condition, {{pipeline_loop_->loop_var, normalized_access_index}});
       stmt = IfThenElse(substituted_condition, stmt, Stmt(), iw.span);
     }
     for (auto it = loop_var_let_wrappers_.rbegin();
@@ -834,9 +828,8 @@ private:
     PrimExpr ns = IntImm(DataType::Int(32), pipeline_num_stages.value()->value);
     PrimExpr stage_expr =
         analyzer_.Simplify(FloorMod(normalized_access_index, ns));
-    PrimExpr parity_expr = analyzer_.Simplify(
-        FloorMod(FloorDiv(normalized_access_index, ns),
-                 IntImm(DataType::Int(32), 2)));
+    PrimExpr parity_expr = analyzer_.Simplify(FloorMod(
+        FloorDiv(normalized_access_index, ns), IntImm(DataType::Int(32), 2)));
     stmt = AttrStmt(Integer(0), kPipelineMVBParityExpr, parity_expr, stmt);
     stmt = AttrStmt(Integer(0), kPipelineMVBStageExpr, stage_expr, stmt);
     return stmt;
@@ -854,11 +847,12 @@ private:
     return attr && attr->attr_key == tir::attr::async_wait_inflight_count;
   }
 
-  static int PipelinedRetainGroups(const Optional<Integer> &pipeline_num_stages) {
+  static int
+  PipelinedRetainGroups(const Optional<Integer> &pipeline_num_stages) {
     int retain = 1;
     if (pipeline_num_stages) {
-      retain = std::max(
-          0, static_cast<int>(pipeline_num_stages.value()->value) - 1);
+      retain =
+          std::max(0, static_cast<int>(pipeline_num_stages.value()->value) - 1);
     }
     return retain;
   }
@@ -881,7 +875,8 @@ private:
     return {stmt};
   }
 
-  std::optional<int> TryGetStaticAsyncWaitCount(const AttrStmtNode *attr) const {
+  std::optional<int>
+  TryGetStaticAsyncWaitCount(const AttrStmtNode *attr) const {
     if (!IsAsyncWaitQueueScope(attr)) {
       return std::nullopt;
     }
@@ -896,15 +891,18 @@ private:
     return static_cast<int>(imm->value);
   }
 
-  Stmt MakeStaticAsyncWaitStmtLike(const AttrStmtNode *attr, int new_wait_n) const {
+  Stmt MakeStaticAsyncWaitStmtLike(const AttrStmtNode *attr,
+                                   int new_wait_n) const {
     const auto *inner = attr->body.as<AttrStmtNode>();
     if (!IsAsyncWaitInflightCount(inner)) {
-      return AttrStmt(attr->node, attr->attr_key, attr->value, attr->body, attr->span);
+      return AttrStmt(attr->node, attr->attr_key, attr->value, attr->body,
+                      attr->span);
     }
     PrimExpr new_wait = make_const(inner->value.dtype(), new_wait_n);
-    Stmt new_inner =
-        AttrStmt(inner->node, inner->attr_key, new_wait, inner->body, inner->span);
-    return AttrStmt(attr->node, attr->attr_key, attr->value, new_inner, attr->span);
+    Stmt new_inner = AttrStmt(inner->node, inner->attr_key, new_wait,
+                              inner->body, inner->span);
+    return AttrStmt(attr->node, attr->attr_key, attr->value, new_inner,
+                    attr->span);
   }
 
   ClassifiedAsyncSyncStmt ClassifySimpleAsyncSyncStmt(const Stmt &stmt) const {
@@ -987,7 +985,8 @@ private:
     return summary;
   }
 
-  std::optional<int> TryGetDeterministicNoWaitCommitGroups(const Stmt &stmt) const {
+  std::optional<int>
+  TryGetDeterministicNoWaitCommitGroups(const Stmt &stmt) const {
     if (const auto *let = stmt.as<LetStmtNode>()) {
       return TryGetDeterministicNoWaitCommitGroups(let->body);
     }
@@ -996,7 +995,8 @@ private:
         return std::nullopt;
       }
       if (IsAsyncCommitQueueScope(attr)) {
-        auto body_commit_groups = TryGetDeterministicNoWaitCommitGroups(attr->body);
+        auto body_commit_groups =
+            TryGetDeterministicNoWaitCommitGroups(attr->body);
         if (!body_commit_groups.has_value()) {
           return std::nullopt;
         }
@@ -1047,7 +1047,8 @@ private:
     return 0;
   }
 
-  int GuaranteedNewGroupsBeforeNextWait(const Array<Stmt> &body, int start_idx) const {
+  int GuaranteedNewGroupsBeforeNextWait(const Array<Stmt> &body,
+                                        int start_idx) const {
     int guaranteed_groups = 0;
     for (int i = start_idx, n = static_cast<int>(body.size()); i < n; ++i) {
       AsyncSyncSummary summary = SummarizeAsyncSyncScopes(body[i]);
@@ -1122,8 +1123,8 @@ private:
         if (*changed) {
           Block new_block = realize->block;
           new_block.CopyOnWrite()->body = inner;
-          return BlockRealize(realize->iter_values, realize->predicate, new_block,
-                              realize->span);
+          return BlockRealize(realize->iter_values, realize->predicate,
+                              new_block, realize->span);
         }
       }
       return stmt;
@@ -1224,7 +1225,8 @@ private:
         return stmt;
       }
       Array<Stmt> new_seq = seq->seq;
-      new_seq.Set(0, RewriteHeadStaticWaitInWrapper(seq->seq[0], new_wait_n, changed));
+      new_seq.Set(
+          0, RewriteHeadStaticWaitInWrapper(seq->seq[0], new_wait_n, changed));
       if (*changed) {
         return SeqStmt(new_seq);
       }
@@ -1247,8 +1249,8 @@ private:
         if (*changed) {
           Block new_block = realize->block;
           new_block.CopyOnWrite()->body = new_body;
-          return BlockRealize(realize->iter_values, realize->predicate, new_block,
-                              realize->span);
+          return BlockRealize(realize->iter_values, realize->predicate,
+                              new_block, realize->span);
         }
       }
       return stmt;
@@ -1410,7 +1412,8 @@ private:
   Stmt RelaxLoopWaitsInSimpleWrapper(const Stmt &stmt, int pre_outstanding_lb,
                                      bool *changed) const {
     if (const auto *loop = stmt.as<ForNode>()) {
-      Stmt relaxed = MaybeRelaxLoopWaits(Downcast<For>(stmt), pre_outstanding_lb);
+      Stmt relaxed =
+          MaybeRelaxLoopWaits(Downcast<For>(stmt), pre_outstanding_lb);
       *changed = !relaxed.same_as(stmt);
       return relaxed;
     }
@@ -1423,8 +1426,8 @@ private:
       return stmt;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      Stmt new_body =
-          RelaxLoopWaitsInSimpleWrapper(attr->body, pre_outstanding_lb, changed);
+      Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
+          attr->body, pre_outstanding_lb, changed);
       if (*changed) {
         return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
                         attr->span);
@@ -1433,8 +1436,8 @@ private:
     }
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
       if (seq->seq.size() == 1) {
-        Stmt inner = RelaxLoopWaitsInSimpleWrapper(seq->seq[0], pre_outstanding_lb,
-                                                   changed);
+        Stmt inner = RelaxLoopWaitsInSimpleWrapper(seq->seq[0],
+                                                   pre_outstanding_lb, changed);
         if (*changed) {
           return SeqStmt({inner});
         }
@@ -1442,8 +1445,8 @@ private:
       return stmt;
     }
     if (const auto *block = stmt.as<BlockNode>()) {
-      Stmt new_body =
-          RelaxLoopWaitsInSimpleWrapper(block->body, pre_outstanding_lb, changed);
+      Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
+          block->body, pre_outstanding_lb, changed);
       if (*changed) {
         Block new_block = Downcast<Block>(stmt);
         new_block.CopyOnWrite()->body = new_body;
@@ -1453,13 +1456,13 @@ private:
     }
     if (const auto *realize = stmt.as<BlockRealizeNode>()) {
       if (is_one(realize->predicate)) {
-        Stmt new_body = RelaxLoopWaitsInSimpleWrapper(realize->block->body,
-                                                      pre_outstanding_lb, changed);
+        Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
+            realize->block->body, pre_outstanding_lb, changed);
         if (*changed) {
           Block new_block = realize->block;
           new_block.CopyOnWrite()->body = new_body;
-          return BlockRealize(realize->iter_values, realize->predicate, new_block,
-                              realize->span);
+          return BlockRealize(realize->iter_values, realize->predicate,
+                              new_block, realize->span);
         }
       }
       return stmt;
@@ -1483,8 +1486,8 @@ private:
       for (int i = 0, n = static_cast<int>(visited.size()); i < n; ++i) {
         Stmt current = visited[i];
         bool changed_loop = false;
-        current = rewriter_->RelaxLoopWaitsInSimpleWrapper(current, outstanding_lb,
-                                                           &changed_loop);
+        current = rewriter_->RelaxLoopWaitsInSimpleWrapper(
+            current, outstanding_lb, &changed_loop);
         if (changed_loop) {
           visited.Set(i, current);
         }
@@ -1528,8 +1531,7 @@ private:
     const PipelineRewriter *rewriter_;
   };
 
-  Array<Stmt> RelaxTrailingConsumerWaits(Array<Stmt> seq,
-                                         int retain) const {
+  Array<Stmt> RelaxTrailingConsumerWaits(Array<Stmt> seq, int retain) const {
     if (retain <= 0 || seq.size() <= 1) {
       return seq;
     }
@@ -1621,7 +1623,8 @@ private:
 
       PrimExpr wait_count = [&]() {
         PrimExpr sum = PrimExpr(0);
-        for (const Optional<PrimExpr> &producer_head : producer_head_per_commit) {
+        for (const Optional<PrimExpr> &producer_head :
+             producer_head_per_commit) {
           if (producer_head &&
               ana_normalized->CanProve(producer_head.value() >= 0)) {
             sum += analyzer_.Simplify(producer_head.value() -
@@ -1693,16 +1696,20 @@ private:
           continue;
         }
         PrimExpr wait_count = ana_normalized->Simplify(pending_wait.wait_count);
-        if (state.predicate && !ana_normalized->CanProve(state.predicate.value())) {
-          PrimExpr predicate = ana_normalized->Simplify(state.predicate.value());
+        if (state.predicate &&
+            !ana_normalized->CanProve(state.predicate.value())) {
+          PrimExpr predicate =
+              ana_normalized->Simplify(state.predicate.value());
           if (is_zero(predicate)) {
             continue;
           }
-          merge_wait_before_stmt(pending_wait.insert_before, stage_id, wait_count);
+          merge_wait_before_stmt(pending_wait.insert_before, stage_id,
+                                 wait_count);
           continue;
         }
 
-        merge_wait_before_stmt(pending_wait.insert_before, stage_id, wait_count);
+        merge_wait_before_stmt(pending_wait.insert_before, stage_id,
+                               wait_count);
       }
     }
 
@@ -1712,7 +1719,8 @@ private:
         for (const auto &[stage_id, wait_count] : it->second) {
           Stmt wait_stmt = make_wait_stmt(stage_id, wait_count, Evaluate(0));
           if (auto state_it = async_states_local.find(stage_id);
-              state_it != async_states_local.end() && state_it->second.predicate &&
+              state_it != async_states_local.end() &&
+              state_it->second.predicate &&
               !ana_normalized->CanProve(state_it->second.predicate.value())) {
             PrimExpr predicate =
                 ana_normalized->Simplify(state_it->second.predicate.value());
@@ -1721,8 +1729,8 @@ private:
             }
             wait_stmt = IfThenElse(predicate, wait_stmt, Evaluate(0));
           }
-          result.push_back(
-              {new_stmts[i].stage, new_stmts[i].access_index, new_stmts[i].predicate, wait_stmt});
+          result.push_back({new_stmts[i].stage, new_stmts[i].access_index,
+                            new_stmts[i].predicate, wait_stmt});
         }
       }
 
@@ -1785,7 +1793,8 @@ private:
                 analyzer_.Simplify(start + IntImm(extent.dtype(), iter));
             PrimExpr unit_end =
                 analyzer_.Simplify(start + IntImm(extent.dtype(), iter + 1));
-            Stmt unit_stmt = EmitImpl(unit_start, unit_end, false, need_bound_check);
+            Stmt unit_stmt =
+                EmitImpl(unit_start, unit_end, false, need_bound_check);
             expanded.push_back(StripPipelineContextAttrs(unit_stmt));
           }
           Stmt result = expanded.size() == 1 ? expanded[0] : SeqStmt(expanded);
@@ -1870,9 +1879,8 @@ private:
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
 
       Stmt rewritten_stmt = BlockRealize({}, inbound, new_block);
-      rewritten_stmt =
-          WrapLoopDependentWrappers(std::move(rewritten_stmt),
-                                    normalized_access_index);
+      rewritten_stmt = WrapLoopDependentWrappers(std::move(rewritten_stmt),
+                                                 normalized_access_index);
       rewritten_stmt = WrapPipelineStageContext(std::move(rewritten_stmt),
                                                 normalized_access_index,
                                                 pipeline_num_stages);
@@ -1891,7 +1899,8 @@ private:
                 pipeline_anno.async_group_id, commit_group_id);
           } else {
             commit_group_id = it->second;
-            local_state.commit_groups[commit_group_id].push_back(new_stmts.size());
+            local_state.commit_groups[commit_group_id].push_back(
+                new_stmts.size());
           }
         } else if (local_state.commit_groups.empty() || local_state.consumed) {
           commit_group_id = local_state.commit_groups.size();
@@ -1911,22 +1920,17 @@ private:
             ana_normalized.CanProve(local_state.predicate.value())) {
           local_state.predicate = inbound;
         } else {
-          local_state.predicate = ana_normalized.Simplify(
-              local_state.predicate.value() & inbound);
+          local_state.predicate =
+              ana_normalized.Simplify(local_state.predicate.value() & inbound);
         }
-        rewritten_stmt = SimtProducerAnnotator::Annotate(rewritten_stmt, target_);
         rewritten_stmt =
-            AttrStmt(make_zero(DataType::Int(32)), tir::attr::async_scope, 1,
-                     rewritten_stmt);
+            SimtProducerAnnotator::Annotate(rewritten_stmt, target_);
+        rewritten_stmt = AttrStmt(make_zero(DataType::Int(32)),
+                                  tir::attr::async_scope, 1, rewritten_stmt);
       }
 
-      new_stmts.push_back({stage,
-                           inbound,
-                           new_block->reads,
-                           new_block->writes,
-                           normalized_access_index,
-                           is_async,
-                           rewritten_stmt});
+      new_stmts.push_back({stage, inbound, new_block->reads, new_block->writes,
+                           normalized_access_index, is_async, rewritten_stmt});
 
       for (const BufferRegion &read_region : new_block->reads) {
         for (const auto &kv : async_states_) {
@@ -1939,9 +1943,8 @@ private:
 
     PopulateWaitCounts(new_stmts, &ana_normalized, buffer_to_commit_group,
                        &async_states_local);
-    std::vector<FinalStmtInfo> final_stmts =
-        CompletePipelineLoopStatements(new_stmts, async_states_local,
-                                       &ana_normalized);
+    std::vector<FinalStmtInfo> final_stmts = CompletePipelineLoopStatements(
+        new_stmts, async_states_local, &ana_normalized);
 
     Array<Stmt> stmts;
     for (const auto &stmt_info : final_stmts) {
@@ -2528,7 +2531,8 @@ public:
   }
 
 private:
-  explicit PipelineInjector(Optional<String> global_symbol, Optional<Target> target)
+  explicit PipelineInjector(Optional<String> global_symbol,
+                            Optional<Target> target)
       : global_symbol_(std::move(global_symbol)), target_(std::move(target)) {}
 
   /*!
@@ -2591,8 +2595,8 @@ private:
     return false;
   }
 
-  Map<String, Any> StripPipelineAnnotations(
-      const Map<String, Any> &annotations) const {
+  Map<String, Any>
+  StripPipelineAnnotations(const Map<String, Any> &annotations) const {
     Map<String, Any> preserved_annotations;
     for (const auto &kv : annotations) {
       const String &key = kv.first;
@@ -2792,7 +2796,8 @@ private:
       }
     }
     Optional<Array<Integer>> pipeline_async_producers;
-    if (auto async_producers_anno = op->annotations.Get(kPipelineAsyncProducers)) {
+    if (auto async_producers_anno =
+            op->annotations.Get(kPipelineAsyncProducers)) {
       auto async_flags = Downcast<Array<Integer>>(async_producers_anno.value());
       CHECK_EQ(async_flags.size(), original_order.size())
           << "PrimFunc " << global_symbol_ << " has original order "
@@ -2805,7 +2810,8 @@ private:
     Optional<Array<Integer>> pipeline_async_producer_groups;
     if (auto async_groups_anno =
             op->annotations.Get(kPipelineAsyncProducerGroups)) {
-      auto async_group_ids = Downcast<Array<Integer>>(async_groups_anno.value());
+      auto async_group_ids =
+          Downcast<Array<Integer>>(async_groups_anno.value());
       CHECK_EQ(async_group_ids.size(), original_order.size())
           << "PrimFunc " << global_symbol_ << " has original order "
           << original_order.Map(
@@ -2821,16 +2827,16 @@ private:
           pipeline_async_producers
               ? (pipeline_async_producers.value()[i]->value != 0)
               : (pipeline_async_stages.count(stage) > 0);
-      bool is_async =
-          is_async_candidate &&
-          !ContainsExplicitAsyncIntrinsics(original_order[i]->body);
+      bool is_async = is_async_candidate &&
+                      !ContainsExplicitAsyncIntrinsics(original_order[i]->body);
       PipelineAnnotation stage_order{
           stage,
           /*order=*/static_cast<int>(pipeline_orders[i]->value),
           /*async=*/is_async,
           /*async_group_id=*/
           pipeline_async_producer_groups
-              ? static_cast<int>(pipeline_async_producer_groups.value()[i]->value)
+              ? static_cast<int>(
+                    pipeline_async_producer_groups.value()[i]->value)
               : -1};
       pipeline_info.emplace(original_order[i], stage_order);
     }
@@ -2847,8 +2853,8 @@ private:
       }
       return For(for_node->loop_var, for_node->min, for_node->extent,
                  for_node->kind, for_node->body, for_node->thread_binding,
-                 StripPipelineAnnotations(for_node->annotations), for_node->step,
-                 for_node->span);
+                 StripPipelineAnnotations(for_node->annotations),
+                 for_node->step, for_node->span);
     }
 
     // Step 3.5: Pipeline-level TMA barrier management.
@@ -2954,7 +2960,8 @@ private:
       }
       return std::make_pair(attrs, stmt);
     };
-    auto rewrap_outer_attrs = [](Stmt stmt, const std::vector<AttrStmt> &attrs) {
+    auto rewrap_outer_attrs = [](Stmt stmt,
+                                 const std::vector<AttrStmt> &attrs) {
       for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
         stmt = AttrStmt((*it)->node, (*it)->attr_key, (*it)->value, stmt,
                         (*it)->span);

@@ -789,7 +789,7 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
-  static const Op &copy_op = Op::Get("tl.tileop.copy");
+    static const Op &copy_op = Op::Get("tl.tileop.copy");
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (!call->op.same_as(copy_op) || !CanUsePipelineManagedCPAsyncCopy(call)) {
       return call;

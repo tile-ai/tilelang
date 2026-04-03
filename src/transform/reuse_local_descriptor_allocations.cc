@@ -32,8 +32,7 @@ bool IsLocalDescriptorScope(const Var &buffer_var) {
 
 bool IsDescriptorHoistBoundary(const AttrStmtNode *op) {
   return op->attr_key == tir::attr::thread_extent ||
-         op->attr_key == tir::attr::virtual_thread ||
-         op->attr_key == "target";
+         op->attr_key == tir::attr::virtual_thread || op->attr_key == "target";
 }
 
 bool IsReusableDescriptorAllocate(const AllocateNode *op) {
@@ -68,9 +67,9 @@ public:
 private:
   void VisitStmt_(const AllocateNode *op) final {
     if (IsReusableDescriptorAllocate(op)) {
-      allocs_.push_back(AllocSite{
-          op->buffer_var, op->dtype, op->extents, op->annotations,
-          MakeDescriptorSignature(op)});
+      allocs_.push_back(AllocSite{op->buffer_var, op->dtype, op->extents,
+                                  op->annotations,
+                                  MakeDescriptorSignature(op)});
     }
     StmtExprVisitor::VisitStmt_(op);
   }
@@ -87,9 +86,8 @@ private:
 
 class DescriptorVarRemapper : public StmtExprMutator {
 public:
-  DescriptorVarRemapper(
-      std::unordered_map<const VarNode *, Var> var_remap,
-      std::unordered_set<const VarNode *> removed_allocs)
+  DescriptorVarRemapper(std::unordered_map<const VarNode *, Var> var_remap,
+                        std::unordered_set<const VarNode *> removed_allocs)
       : var_remap_(std::move(var_remap)),
         removed_allocs_(std::move(removed_allocs)) {}
 

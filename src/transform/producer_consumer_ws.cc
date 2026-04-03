@@ -569,8 +569,7 @@ public:
         // Check Pattern 1: TMA producer + wait pair, optionally wrapped in a
         // simple guard/Block/Let/Attr shell.
         if (write_buffer_data.defined() || ContainsTmaLoad(flat_stmts[i])) {
-          blocks.push_back({AsyncProducerKind::kTma,
-                            flat_stmts[i],
+          blocks.push_back({AsyncProducerKind::kTma, flat_stmts[i],
                             Optional<Stmt>(flat_stmts[i + 1]),
                             write_buffer_data});
           i += 2;
@@ -3384,8 +3383,8 @@ private:
                 DataType::Int(32), parent_->pure_tma_preloop_fwd_base_ +
                                        parent_->pure_tma_preloop_fwd_cursor_++);
             Stmt producer_stmt = parent_->MergeAdjacentEquivalentIfs(
-                parent_->RewriteTmaStmtBarrierIdPreserveProtocol(
-                    op->seq[i], barrier_id));
+                parent_->RewriteTmaStmtBarrierIdPreserveProtocol(op->seq[i],
+                                                                 barrier_id));
             Stmt wait_stmt =
                 parent_->RewriteWaitBarrier(op->seq[i + 1], barrier_id);
             new_seq.push_back(producer_stmt);

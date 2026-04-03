@@ -327,21 +327,19 @@ def test_async_pipeline_marks_copy_ops_for_pipeline_managed_cp_async_sync():
                     "software_pipeline_async_producer_groups": [0, 0, -1],
                 },
             ):
-                    with T.block("compute"):
-                        T.reads(A[tx, i], B[tx, i])
-                        T.writes(C[tx, i])
-                        A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                        B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
-                        T.copy(A[tx, i : i + 1], A_shared[tx, 0:1])
-                        T.copy(B[tx, i : i + 1], B_shared[tx, 0:1])
-                        C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
+                with T.block("compute"):
+                    T.reads(A[tx, i], B[tx, i])
+                    T.writes(C[tx, i])
+                    A_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                    B_shared = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                    T.copy(A[tx, i : i + 1], A_shared[tx, 0:1])
+                    T.copy(B[tx, i : i + 1], B_shared[tx, 0:1])
+                    C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
-    annotated, total = _count_copy_calls_with_annotation(
-        mod["main"], "no_implicit_async_commit_wait"
-    )
+    annotated, total = _count_copy_calls_with_annotation(mod["main"], "no_implicit_async_commit_wait")
     assert total > 0
     assert annotated == total
 
@@ -374,9 +372,7 @@ def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
-    annotated, total = _count_copy_calls_with_annotation(
-        mod["main"], "no_implicit_async_commit_wait"
-    )
+    annotated, total = _count_copy_calls_with_annotation(mod["main"], "no_implicit_async_commit_wait")
     assert total > 0
     assert annotated == 0
 

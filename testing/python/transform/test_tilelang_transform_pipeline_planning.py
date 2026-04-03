@@ -191,9 +191,7 @@ def test_pipeline_planning_respects_disable_tma_lower_for_async_grouping():
                 T.copy(B[k * 32, bx * 128], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
 
-    with tvm.transform.PassContext(
-        config={tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True}
-    ):
+    with tvm.transform.PassContext(config={tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True}):
         mod = _run_pipeline_planning(before, hopper_target)
 
     annos = _collect_pipeline_loop_annotations(mod["main"])

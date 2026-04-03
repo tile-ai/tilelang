@@ -4,7 +4,6 @@ import tilelang
 from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, einsum
-import argparse
 import itertools
 from functools import lru_cache
 from typing import Tuple, Dict
