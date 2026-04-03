@@ -468,19 +468,20 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   LaunchConfigExtractor extractor;
   extractor(f->body);
   arith::Analyzer analyzer;
-  PrimExpr threadIdx_ext =
-      analyzer.Simplify(extractor.threadIdx_x_ext * extractor.threadIdx_y_ext *
-                        extractor.threadIdx_z_ext);
-  if (const IntImmNode *const threadIdx_ext_int =
-          threadIdx_ext.as<IntImmNode>()) {
-    if (threadIdx_ext_int->value == 1) {
-      // unable to extract the number of threads per block, hence directly
-      // return
-      return;
-    }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
-           << extractor.min_blocks_per_sm << ")";
+  const IntImmNode *xi =
+      analyzer.Simplify(extractor.threadIdx_x_ext).as<IntImmNode>();
+  const IntImmNode *yi =
+      analyzer.Simplify(extractor.threadIdx_y_ext).as<IntImmNode>();
+  const IntImmNode *zi =
+      analyzer.Simplify(extractor.threadIdx_z_ext).as<IntImmNode>();
+  if (!xi || !yi || !zi || xi->value * yi->value * zi->value <= 1) {
+    // unable to extract static block size, skip both hints
+    return;
   }
+  stream << " __block_size__((" << xi->value << ", " << yi->value << ", "
+         << zi->value << "))";
+  stream << " __launch_bounds__(" << xi->value * yi->value * zi->value << ", "
+         << extractor.min_blocks_per_sm << ")";
 }
 
 std::string CodeGenTileLangCUDA::Finish() {
