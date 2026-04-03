@@ -300,6 +300,8 @@ public:
 
   void VisitStmt_(const LetStmtNode *op) final { VisitNewScope(op); }
 
+  void VisitStmt_(const BlockNode *op) final { VisitNewScope(op); }
+
   // linearized access sequence.
   std::vector<StmtEntry> linear_seq_;
   // The storage scope of each buffer
@@ -609,6 +611,17 @@ public:
       return For(op->loop_var, op->min, op->extent, op->kind,
                  MakeAttach(svec, op->body), op->thread_binding,
                  op->annotations);
+    } else {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+  }
+
+  Stmt VisitStmt_(const BlockNode *op) final {
+    if (attach_map_.count(op)) {
+      auto &svec = attach_map_[op];
+      Stmt stmt = StmtExprMutator::VisitStmt_(op);
+      op = stmt.as<BlockNode>();
+      return Block({}, {}, {}, op->name_hint, MakeAttach(svec, op->body));
     } else {
       return StmtExprMutator::VisitStmt_(op);
     }
@@ -953,6 +966,32 @@ private:
       thread_scope_ = op;
     }
   }
+  void PlanBlockScope(const Object *op) {
+    if (!block_scope_stack_.empty() && block_scope_stack_.back() == op) {
+      // Exiting this block scope: erase free entries attached to it.
+      for (auto it = const_free_map_.begin(); it != const_free_map_.end();) {
+        if (it->second->attach_scope_ == op) {
+          it = const_free_map_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      for (auto it = sym_free_list_.begin(); it != sym_free_list_.end();) {
+        if ((*it)->attach_scope_ == op) {
+          it = sym_free_list_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      block_scope_stack_.pop_back();
+      block_scope_ =
+          block_scope_stack_.empty() ? nullptr : block_scope_stack_.back();
+    } else {
+      // Entering a new block scope.
+      block_scope_stack_.push_back(op);
+      block_scope_ = op;
+    }
+  }
 
   // Memory plan algorithm
   void
@@ -1007,7 +1046,14 @@ private:
             }
           }
           if (dst_entry == nullptr) {
-            dst_entry = FindAlloc(alloc, thread_scope_, storage_scope,
+            // For local allocations, prefer block scope to keep them
+            // inside the {} scope in codegen.
+            const Object *attach = thread_scope_;
+            if (storage_scope.rank == runtime::StorageRank::kLocal &&
+                block_scope_ != nullptr) {
+              attach = block_scope_;
+            }
+            dst_entry = FindAlloc(alloc, attach, storage_scope,
                                   entry.num_physical_dimensions, enable_reuse,
                                   reuse_require_exact_matched_dtype);
           }
@@ -1032,6 +1078,8 @@ private:
             PlanNewScope(op);
           }
         }
+      } else if (s.stmt->IsInstance<BlockNode>()) {
+        PlanBlockScope(s.stmt);
       }
       // scope_pair_offset <= 0 means it is either
       // - leaf stmt(offset = 0)
@@ -1179,6 +1227,10 @@ private:
   }
   // thread scope.
   const Object *thread_scope_{nullptr};
+  // block scope stack for keeping local allocations inside Block nodes.
+  std::vector<const Object *> block_scope_stack_;
+  // current innermost block scope (top of stack), or nullptr.
+  const Object *block_scope_{nullptr};
   // whether enable inplace detection.
   bool detect_inplace_{false};
   // Locations of free ops.

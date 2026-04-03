@@ -108,6 +108,12 @@ private:
     for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {
       body = AttrStmt(Integer(0), it->first, it->second, std::move(body));
     }
+    // Step 6. If the block had alloc_buffers, wrap the lowered body in an
+    // empty Block node so that codegen emits a {} scope, allowing local
+    // variable declarations to be scoped properly.
+    if (!new_block->alloc_buffers.empty()) {
+      body = Block({}, {}, {}, "", body);
+    }
     return body;
   }
   Stmt VisitStmt_(const BlockNode *op) final {
