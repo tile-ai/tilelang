@@ -591,7 +591,7 @@ else:
     bfloat16 = dtype("bfloat16")
     bfloat16x2 = dtype("bfloat16x2")
 
-_all_dtypes = {
+_all_dtypes = [
     "bool",
     "short",
     "int",
@@ -757,7 +757,7 @@ _all_dtypes = {
     "float4_e2m1fnx64",
     "bfloat16",
     "bfloat16x2",
-}
+]
 
 __all__ = list(_all_dtypes) + [
     "dtype",
