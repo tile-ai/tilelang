@@ -417,7 +417,9 @@ class AutotuneResult:
             "w",
             lambda f: json.dump(
                 {
-                    "out_idx": getattr(self.func, "out_idx_override", None),
+                    "out_idx": list(self.func.attrs["tilelang_out_idx"])
+                    if (self.func.attrs and "tilelang_out_idx" in self.func.attrs)
+                    else None,
                 },
                 f,
             ),

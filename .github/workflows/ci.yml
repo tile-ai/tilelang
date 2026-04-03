@@ -342,6 +342,12 @@ jobs:
             exit "${rc}"
           fi
 
+      - name: Clean up stale /tmp files (self-hosted runners)
+        if: startsWith(matrix.runner.name, 'self-hosted')
+        run: |
+          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
+          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
+
       - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
