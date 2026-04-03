@@ -934,12 +934,20 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
             std::string native_type = is_bf16x2 ? "__nv_bfloat162" : "__half2";
             for (int p = 0; p < num_pairs; ++p) {
               std::string field(1, access[p]);
-              std::string pair_lhs = "tl::from_uint1<" + native_type +
-                                     ">(*(uint1*)(&(" + vlhs + "." + field +
-                                     ")))";
-              std::string pair_rhs = "tl::from_uint1<" + native_type +
-                                     ">(*(uint1*)(&(" + vrhs + "." + field +
-                                     ")))";
+              std::string pair_lhs = "tl::from_uint1<";
+              pair_lhs += native_type;
+              pair_lhs += ">(*(uint1*)(&(";
+              pair_lhs += vlhs;
+              pair_lhs += ".";
+              pair_lhs += field;
+              pair_lhs += ")))";
+              std::string pair_rhs = "tl::from_uint1<";
+              pair_rhs += native_type;
+              pair_rhs += ">(*(uint1*)(&(";
+              pair_rhs += vrhs;
+              pair_rhs += ".";
+              pair_rhs += field;
+              pair_rhs += ")))";
               this->PrintIndent();
               stream << "*(uint1*)(&(" << sret << "." << field
                      << ")) = tl::to_uint1(tl::" << tl_func << "(" << pair_lhs
@@ -950,10 +958,16 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
             // reinterpreted as float2.
             for (int p = 0; p < num_pairs; ++p) {
               std::string field(1, access[p * 2]);
-              std::string pair_lhs =
-                  "*(float2*)(&(" + vlhs + "." + field + "))";
-              std::string pair_rhs =
-                  "*(float2*)(&(" + vrhs + "." + field + "))";
+              std::string pair_lhs = "*(float2*)(&(";
+              pair_lhs += vlhs;
+              pair_lhs += ".";
+              pair_lhs += field;
+              pair_lhs += "))";
+              std::string pair_rhs = "*(float2*)(&(";
+              pair_rhs += vrhs;
+              pair_rhs += ".";
+              pair_rhs += field;
+              pair_rhs += "))";
               this->PrintIndent();
               stream << "*(float2*)(&(" << sret << "." << field
                      << ")) = tl::" << tl_func << "(" << pair_lhs << ", "
