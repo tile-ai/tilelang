@@ -3354,10 +3354,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
       for (size_t si = 0; si < wg0_segments.size(); ++si) {
         // Insert liveness boundary between segments.
-        if (si > 0) {
-          segmented_stmts.push_back(AttrStmt(
-              Integer(0), attr::kSharedMemoryLivenessBoundary, 0, Evaluate(0)));
-        }
+        segmented_stmts.push_back(
+            AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                     Evaluate(0)));
 
         // Collect LetDecl info from current segment before converting to Stmt.
         auto wg0_lets = CollectLetDeclInfo(wg0_segments[si]);

@@ -510,6 +510,9 @@ public:
   }
 
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
+    if (wrapper.defined()) {
+      wrapper = Substitute(wrapper, {{old_var, new_var}});
+    }
     if (child) {
       child->SubstituteVar(old_var, new_var);
     }
