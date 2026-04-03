@@ -172,7 +172,7 @@ def main():
 
 
 def run_regression_perf():
-    b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)
+    b_c = torch.zeros((m, n), device="cuda", dtype=torch.float32)
     torch.cuda.synchronize()
 
     from tilelang.profiler import do_bench
