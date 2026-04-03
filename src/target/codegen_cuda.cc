@@ -3525,16 +3525,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
   CodeGenC::VisitStmt_(op);
 }
 
-void CodeGenTileLangCUDA::VisitStmt_(const BlockNode *op) {
-  PrintIndent();
-  stream << "{\n";
-  int block_scope = BeginScope();
-  PrintStmt(op->body);
-  this->EndScope(block_scope);
-  PrintIndent();
-  stream << "}\n";
-}
-
 void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
   std::string vid = AllocVarID(op->buffer_var.get());
