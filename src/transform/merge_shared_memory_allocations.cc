@@ -270,8 +270,8 @@ public:
     linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
   }
 
-  // Visit kSharedMemoryLivenessBoundary bounded scopes
-  void VisitNewScopes(const AttrStmtNode *op) {
+  // Visit kAutoScheduleSharedMemoryBoundary bounded scopes
+  void VisitBoundedNewScopes(const AttrStmtNode *op) {
     scope_.push_back(StmtEntry());
     StmtEntry e;
     e.stmt = op;
@@ -286,7 +286,7 @@ public:
       for (auto &sub_stmt : body->seq) {
         if (sub_stmt.as<AttrStmtNode>() &&
             sub_stmt.as<AttrStmtNode>()->attr_key ==
-                attr::kSharedMemoryLivenessBoundary) {
+                attr::kAutoScheduleSharedMemoryBoundary) {
           has_tail_stmt = true;
           tail_stmt = sub_stmt.as<AttrStmtNode>();
         } else {
@@ -326,8 +326,8 @@ public:
       VisitNewScope(op);
     } else if (op->attr_key == "kWarpSpecializationScope") {
       VisitWarpSpecializationBody(op->body);
-    } else if (op->attr_key == "kSharedMemoryLivenessBoundary") {
-      VisitNewScopes(op);
+    } else if (op->attr_key == "kAutoScheduleSharedMemoryBoundary") {
+      VisitBoundedNewScopes(op);
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }
