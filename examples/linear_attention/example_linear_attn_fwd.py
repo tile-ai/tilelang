@@ -30,7 +30,6 @@ def tl_fused_chunk_fwd_kernel(
 
     chunk_size = 64
     BK = BV = 64  # Set to 128 can be faster, but has some numerical differences with FLA
-    assert S % chunk_size == 0 and DK % BK == 0 and DV % BV == 0
     NK = T.ceildiv(DK, BK)
     NV = T.ceildiv(DV, BV)
     NT = T.ceildiv(S, chunk_size)
@@ -40,6 +39,8 @@ def tl_fused_chunk_fwd_kernel(
     V: T.Tensor([B, S, H, DV], dtype)  # type: ignore
     O: T.Tensor([B, S, H, DV], accum_dtype)  # type: ignore
     final_state = T.empty([B, H, DK, DV], accum_dtype)
+
+    assert S % chunk_size == 0 and DK % BK == 0 and DV % BV == 0
 
     with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
         i_b = i_bh // H

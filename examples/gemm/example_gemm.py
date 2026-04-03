@@ -2,7 +2,7 @@ import tilelang
 import tilelang.language as T
 
 
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit
 def matmul(A, B, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     M, N, K = T.const("M, N, K")
 
