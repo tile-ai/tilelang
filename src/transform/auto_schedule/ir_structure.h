@@ -113,6 +113,9 @@ public:
     return result;
   }
 
+  // Substitute a variable throughout this IR node
+  virtual void SubstituteVar(const Var &old_var, const Var &new_var) = 0;
+
   // Get warpgroup id for this node (-1 if not applicable)
   virtual int GetWarpgroupId() const { return -1; }
 
@@ -161,7 +164,7 @@ public:
   }
   void SetReadVars(const std::vector<Var> &vars) { read_vars_ = vars; }
   void SetWriteVars(const std::vector<Var> &vars) { write_vars_ = vars; }
-  void SubstituteVar(const Var &old_var, const Var &new_var) {
+  void SubstituteVar(const Var &old_var, const Var &new_var) override {
     for (auto &var : read_vars_) {
       if (var.same_as(old_var)) {
         var = new_var;
@@ -171,6 +174,9 @@ public:
       if (var.same_as(old_var)) {
         var = new_var;
       }
+    }
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      stmts[i] = Substitute(stmts[i], {{old_var, new_var}});
     }
   }
   void SetLatency(int64_t latency) override { latency_ = latency; }
@@ -340,6 +346,7 @@ private:
 class ControlNode : public IRStructure {
 public:
   For control; // The For operation
+  std::shared_ptr<TaskNode> task;
   std::shared_ptr<IRStructure> child;
 
   Kind GetKind() const override { return Kind::kControl; }
@@ -355,20 +362,59 @@ public:
     return child ? child->UsesTensorCore() : false;
   }
 
-  // Memory access regions (aggregate from child)
+  // Memory access regions (aggregate from child & task)
   std::vector<BufferRegion> GetReadRegions() const override {
-    return child ? child->GetReadRegions() : std::vector<BufferRegion>{};
+    std::vector<BufferRegion> regions =
+        child ? child->GetReadRegions() : std::vector<BufferRegion>{};
+    if (task) {
+      auto task_regions = task->GetReadRegions();
+      regions.insert(regions.end(), task_regions.begin(), task_regions.end());
+    }
+    return regions;
   }
   std::vector<BufferRegion> GetWriteRegions() const override {
-    return child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
+    std::vector<BufferRegion> regions =
+        child ? child->GetWriteRegions() : std::vector<BufferRegion>{};
+    if (task) {
+      auto task_regions = task->GetWriteRegions();
+      regions.insert(regions.end(), task_regions.begin(), task_regions.end());
+    }
+    return regions;
   }
 
-  // Variable access (aggregate from child)
+  // Variable access (aggregate from child & task)
   std::vector<Var> GetReadVars() const override {
-    return child ? child->GetReadVars() : std::vector<Var>{};
+    std::vector<Var> vars = child ? child->GetReadVars() : std::vector<Var>{};
+    if (task) {
+      auto task_vars = task->GetReadVars();
+      vars.insert(vars.end(), task_vars.begin(), task_vars.end());
+    }
+    return vars;
   }
   std::vector<Var> GetWriteVars() const override {
-    return child ? child->GetWriteVars() : std::vector<Var>{};
+    std::vector<Var> vars = child ? child->GetWriteVars() : std::vector<Var>{};
+    if (task) {
+      auto task_vars = task->GetWriteVars();
+      vars.insert(vars.end(), task_vars.begin(), task_vars.end());
+    }
+    return vars;
+  }
+  void SubstituteVar(const Var &old_var, const Var &new_var) override {
+    if (child) {
+      child->SubstituteVar(old_var, new_var);
+    }
+    if (task)
+      task->SubstituteVar(old_var, new_var);
+    // Also substitute in the For statement's min/extent/step
+    For new_for = control;
+    new_for.CopyOnWrite()->min = Substitute(control->min, {{old_var, new_var}});
+    new_for.CopyOnWrite()->extent =
+        Substitute(control->extent, {{old_var, new_var}});
+    if (control->step.has_value()) {
+      new_for.CopyOnWrite()->step =
+          Substitute(control->step.value(), {{old_var, new_var}});
+    }
+    control = new_for;
   }
 
   // Latency estimation (aggregate from child)
@@ -463,6 +509,15 @@ public:
     return child ? child->GetWriteVars() : std::vector<Var>{};
   }
 
+  void SubstituteVar(const Var &old_var, const Var &new_var) override {
+    if (child) {
+      child->SubstituteVar(old_var, new_var);
+    }
+    if (task) {
+      task->SubstituteVar(old_var, new_var);
+    }
+  }
+
   // Latency estimation (aggregate from child)
   int64_t GetLatency() const override { return latency_; }
   int64_t GetII() const override { return ii_; }
@@ -549,6 +604,22 @@ public:
     return child ? child->GetWriteVars() : std::vector<Var>{};
   }
 
+  void SubstituteVar(const Var &old_var, const Var &new_var) override {
+    if (child) {
+      child->SubstituteVar(old_var, new_var);
+    }
+    for (auto &stmts : before) {
+      for (auto &stmt : stmts) {
+        stmt = Substitute(stmt, {{old_var, new_var}});
+      }
+    }
+    for (auto &stmts : after) {
+      for (auto &stmt : stmts) {
+        stmt = Substitute(stmt, {{old_var, new_var}});
+      }
+    }
+  }
+
   // Latency estimation (aggregate from child)
   int64_t GetLatency() const override { return latency_; }
   int64_t GetII() const override { return ii_; }
@@ -620,6 +691,12 @@ public:
 
   std::vector<Var> GetReadVars() const override;
   std::vector<Var> GetWriteVars() const override;
+
+  void SubstituteVar(const Var &old_var, const Var &new_var) override {
+    for (auto &child : children) {
+      child->SubstituteVar(old_var, new_var);
+    }
+  }
 
   // Latency estimation (aggregate from all children)
   int64_t GetLatency() const override;

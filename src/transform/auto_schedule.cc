@@ -874,9 +874,6 @@ public:
             if (!HasDependency(node_i, node_j))
               continue;
 
-            // LOG(INFO) << "[ScheduleRecursive] Conflict var detection between
-            // " << i << " and " << j;
-
             if (stage_map[node_j] == stage_map[node_i])
               continue;
 
@@ -897,16 +894,10 @@ public:
 
             for (int k = j; k < n; ++k) {
               auto node_k = seq_body->children[k].get();
-              auto task_k = static_cast<TaskNode *>(node_k);
               if (rem_stage_j != stage_map[node_k])
                 continue;
               if (HasDependency(node_i, node_k)) {
-                for (size_t id = 0; id < task_k->stmts.size(); ++id) {
-                  task_k->stmts[id] = Substitute(
-                      task_k->stmts[id],
-                      {{node_i_let_stmt->var, cloned_let_stmt->var}});
-                }
-                task_k->SubstituteVar(node_i_let_stmt->var,
+                node_k->SubstituteVar(node_i_let_stmt->var,
                                       cloned_let_stmt->var);
                 stage_map[node_k] = rem_stage_j;
               }
@@ -1446,6 +1437,16 @@ protected:
       // Sequential For -> ControlNode
       auto control_node = std::make_shared<ControlNode>();
       control_node->control = GetRef<For>(op);
+      control_node->task = std::make_shared<TaskNode>();
+      control_node->task->stmts.push_back(
+          For(op->loop_var, op->min, op->extent, op->kind, Evaluate(0),
+              op->thread_binding, op->annotations, op->step, op->span));
+      AnalyzeResourceUsage(Evaluate(op->min), control_node->task.get(), true);
+      AnalyzeResourceUsage(Evaluate(op->extent), control_node->task.get(),
+                           true);
+      if (op->step.defined())
+        AnalyzeResourceUsage(Evaluate(GetRef<PrimExpr>(op->step.get())),
+                             control_node->task.get(), true);
 
       // Process the loop body
       VisitStmt(op->body);
@@ -1460,8 +1461,13 @@ protected:
       auto task_node = std::make_shared<TaskNode>();
       task_node->stmts.push_back(GetRef<Stmt>(op));
 
-      // Analyze the loop body for resource usage
+      // Analyze the loop body for resource usage)
       AnalyzeResourceUsage(op->body, task_node.get());
+      AnalyzeResourceUsage(Evaluate(op->min), task_node.get(), true);
+      AnalyzeResourceUsage(Evaluate(op->extent), task_node.get(), true);
+      if (op->step.defined())
+        AnalyzeResourceUsage(Evaluate(GetRef<PrimExpr>(op->step.get())),
+                             task_node.get(), true);
 
       root_ = std::move(task_node);
     }
@@ -2001,8 +2007,6 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
       final_body = RewriteAllocBuffers(final_body, buffer_infos);
     }
 
-    // LOG(INFO) << final_body << std::endl;
-
     final_body = ReNestLetStmts(final_body);
 
     // Create a new PrimFunc with the updated body
@@ -2120,7 +2124,33 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
       return nullptr;
     auto ctrl = static_cast<ControlNode *>(node);
     auto new_ctrl = std::make_shared<ControlNode>();
-    new_ctrl->control = ctrl->control;
+    // Apply var_remap to the For statement's min/extent/step so that renamed
+    // LetDecl variables are correctly referenced in the loop bounds.
+    if (!var_remap.empty()) {
+      For new_for = ctrl->control;
+      new_for.CopyOnWrite()->min = Substitute(ctrl->control->min, var_remap);
+      new_for.CopyOnWrite()->extent =
+          Substitute(ctrl->control->extent, var_remap);
+      if (ctrl->control->step.has_value()) {
+        new_for.CopyOnWrite()->step =
+            Substitute(ctrl->control->step.value(), var_remap);
+      }
+      new_ctrl->control = new_for;
+    } else {
+      new_ctrl->control = ctrl->control;
+    }
+    // Clone the task and apply var_remap so each warpgroup gets its own copy
+    // with correctly renamed LetDecl variables.
+    if (ctrl->task) {
+      auto cloned_task =
+          std::static_pointer_cast<TaskNode>(ctrl->task->Clone());
+      if (!var_remap.empty()) {
+        for (size_t i = 0; i < cloned_task->stmts.size(); ++i) {
+          cloned_task->stmts[i] = Substitute(cloned_task->stmts[i], var_remap);
+        }
+      }
+      new_ctrl->task = std::move(cloned_task);
+    }
     new_ctrl->SetPromote(ctrl->hasPromote());
     new_ctrl->child = CloneIRStructureWithWarpgroupFilter(
         ctrl->child.get(), warpgroup_id, var_remap);
@@ -2130,9 +2160,11 @@ CloneIRStructureWithWarpgroupFilter(IRStructure *node, int warpgroup_id,
       return nullptr;
     auto wrapper = static_cast<WrapperNode *>(node);
     auto new_wrapper = std::make_shared<WrapperNode>();
-    // Keep the wrapper statement as-is (do NOT rename LetStmt wrappers here;
-    // only LetDecl TaskNodes get renamed).
-    new_wrapper->wrapper = wrapper->wrapper;
+    // Apply var_remap to the wrapper statement so that renamed LetDecl
+    // variables are correctly substituted in LetStmt values / AttrStmt values.
+    new_wrapper->wrapper = var_remap.empty()
+                               ? wrapper->wrapper
+                               : Substitute(wrapper->wrapper, var_remap);
     new_wrapper->child = CloneIRStructureWithWarpgroupFilter(
         wrapper->child.get(), warpgroup_id, var_remap);
     return new_wrapper;
@@ -2224,9 +2256,29 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
             collect(child.get());
           }
         } else if (node->IsControl()) {
-          collect(static_cast<const ControlNode *>(node)->child.get());
+          auto ctrl = static_cast<const ControlNode *>(node);
+          collect(ctrl->task.get());
+          collect(ctrl->child.get());
+          // Also collect variable references from the For loop bounds
+          // (min, extent, step) so their LetDecls are not removed.
+          VarRefCollector for_collector;
+          for_collector(ctrl->control->min);
+          for_collector(ctrl->control->extent);
+          if (ctrl->control->step.has_value()) {
+            for_collector(ctrl->control->step.value());
+          }
+          referenced_vars.insert(for_collector.vars.begin(),
+                                 for_collector.vars.end());
         } else if (node->IsWrapper()) {
-          collect(static_cast<const WrapperNode *>(node)->child.get());
+          auto wrapper = static_cast<const WrapperNode *>(node);
+          collect(wrapper->task.get());
+          collect(wrapper->child.get());
+          // Also collect variable references from the wrapper statement
+          // (LetStmt value / AttrStmt value) so their LetDecls are not removed.
+          VarRefCollector wrapper_collector;
+          wrapper_collector(wrapper->wrapper);
+          referenced_vars.insert(wrapper_collector.vars.begin(),
+                                 wrapper_collector.vars.end());
         } else if (node->IsScheduleUnit()) {
           auto unit = static_cast<const ScheduleUnit *>(node);
           collect(unit->child.get());
@@ -2295,6 +2347,7 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
       auto ctrl = static_cast<const ControlNode *>(node.get());
       auto new_ctrl = std::make_shared<ControlNode>();
       new_ctrl->control = ctrl->control;
+      new_ctrl->task = ctrl->task;
       new_ctrl->SetPromote(ctrl->hasPromote());
       new_ctrl->child = filter_tree(ctrl->child);
       if (!new_ctrl->child)
@@ -2304,6 +2357,7 @@ RemoveUnusedLetDecls(std::shared_ptr<IRStructure> root) {
       auto wrapper = static_cast<const WrapperNode *>(node.get());
       auto new_wrapper = std::make_shared<WrapperNode>();
       new_wrapper->wrapper = wrapper->wrapper;
+      new_wrapper->task = wrapper->task;
       new_wrapper->child = filter_tree(wrapper->child);
       return new_wrapper;
     } else if (node->IsScheduleUnit()) {
@@ -3116,37 +3170,262 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       wg_epi_neutral_has_stmts
           ? irstructure_to_stmt(wg_epi_neutral_structure.get())
           : Evaluate(0);
-  Stmt then_body =
-      wg0_has_stmts ? irstructure_to_stmt(wg0_structure.get()) : Evaluate(0);
-  Stmt else_body =
-      wg1_has_stmts ? irstructure_to_stmt(wg1_structure.get()) : Evaluate(0);
+
+  // --- Segment the wg0/wg1 structures by ControlNode (for-loop) boundaries ---
+  // This produces multiple IfThenElse blocks separated by liveness boundary
+  // markers, so that the merge-shared-memory pass can reuse buffers across
+  // segments whose lifetimes do not overlap.
+
+  // Helper: segment a top-level SequenceNode's children into groups separated
+  // by ControlNode boundaries. Each ControlNode becomes its own segment;
+  // consecutive non-ControlNode children are grouped together.
+  auto SegmentSequenceChildren = [](IRStructure *structure)
+      -> std::vector<std::vector<std::shared_ptr<IRStructure>>> {
+    std::vector<std::vector<std::shared_ptr<IRStructure>>> segments;
+    if (!structure || !structure->IsSequence()) {
+      return segments;
+    }
+    auto seq = static_cast<SequenceNode *>(structure);
+
+    std::vector<std::shared_ptr<IRStructure>> current;
+    for (auto &child : seq->children) {
+      auto unit = static_cast<ScheduleUnit *>(child.get());
+      if (unit->child && unit->child->IsControl()) {
+        if (!current.empty()) {
+          segments.push_back(std::move(current));
+          current = {};
+        }
+        segments.push_back({child});
+      } else {
+        current.push_back(child);
+      }
+    }
+    if (!current.empty()) {
+      segments.push_back(std::move(current));
+    }
+
+    return segments;
+  };
+
+  // Helper: wrap a list of ScheduleUnit children back into a temporary
+  // SequenceNode and convert to Stmt.
+  auto SegmentToStmt =
+      [&irstructure_to_stmt](
+          const std::vector<std::shared_ptr<IRStructure>> &children) -> Stmt {
+    if (children.empty())
+      return Evaluate(0);
+    // Even for a single child we go through the SequenceNode path so that
+    // ScheduleUnit before/after stmts are emitted correctly.
+    auto tmp_seq = std::make_shared<SequenceNode>();
+    tmp_seq->children = children;
+    return irstructure_to_stmt(tmp_seq.get());
+  };
+
+  // Helper: build a single IfThenElse (with wg1 nesting) from a pair of Stmts.
+  auto MakeWarpgroupIf = [&condition, &wg1_condition](Stmt wg0_stmt,
+                                                      Stmt wg1_stmt) -> Stmt {
+    bool wg0_valid = !IsEvaluateZero(wg0_stmt);
+    bool wg1_valid = !IsEvaluateZero(wg1_stmt);
+    if (wg0_valid && wg1_valid) {
+      return IfThenElse(condition, wg0_stmt,
+                        IfThenElse(wg1_condition, wg1_stmt, Evaluate(0)));
+    } else if (wg0_valid) {
+      return IfThenElse(condition, wg0_stmt);
+    } else if (wg1_valid) {
+      return IfThenElse(wg1_condition, wg1_stmt);
+    }
+    return Evaluate(0);
+  };
+
+  // Helper: collect LetDecl {Var, PrimExpr} pairs from a segment's children.
+  // Returns them in order of appearance, which is the order they must be
+  // nested.
+  auto CollectLetDeclInfo =
+      [](const std::vector<std::shared_ptr<IRStructure>> &children)
+      -> std::vector<std::pair<Var, PrimExpr>> {
+    std::vector<std::pair<Var, PrimExpr>> result;
+    for (auto &child : children) {
+      auto unit = static_cast<ScheduleUnit *>(child.get());
+      IRStructure *inner = unit->child.get();
+      // Handle ScheduleUnit wrapping a TaskNode
+      if (inner && inner->IsTask()) {
+        auto task = static_cast<TaskNode *>(inner);
+        if (IsLetDeclTask(task)) {
+          const auto *let = task->stmts[0].as<LetStmtNode>();
+          result.push_back({let->var, let->value});
+        }
+      }
+    }
+    return result;
+  };
+
+  // Helper: given a Stmt and accumulated LetDecl pairs from previous segments,
+  // create fresh variables with copy_with_suffix, substitute all references
+  // in the Stmt, and wrap with LetStmt bindings.  Variables that are not
+  // referenced in the body (or in kept variables' value expressions) are
+  // pruned to avoid dead declarations.
+  auto WrapWithRenamedLetDecls =
+      [](Stmt body,
+         const std::vector<std::pair<Var, PrimExpr>> &accumulated_lets)
+      -> Stmt {
+    if (accumulated_lets.empty())
+      return body;
+
+    // Build substitution map: old_var -> new_var
+    Map<Var, PrimExpr> subst_map;
+    // Create fresh vars and accumulate them (in order)
+    std::vector<std::pair<Var, PrimExpr>> new_lets;
+    for (auto &[old_var, old_value] : accumulated_lets) {
+      auto new_var = old_var.copy_with_suffix("");
+      subst_map.Set(old_var, new_var);
+      PrimExpr new_value = Substitute(old_value, subst_map);
+      new_lets.push_back({new_var, new_value});
+    }
+
+    // Substitute all references in the body
+    body = Substitute(body, subst_map);
+
+    // Determine which variables are actually used.  Walk from innermost to
+    // outermost: a variable is "needed" if it appears in the body or in any
+    // already-needed variable's value expression.
+    std::vector<bool> needed(new_lets.size(), false);
+    // Start with variables used directly in the body.
+    for (size_t i = 0; i < new_lets.size(); ++i) {
+      const Var &v = new_lets[i].first;
+      if (UsesVar(body,
+                  [&v](const VarNode *node) { return node == v.get(); })) {
+        needed[i] = true;
+      }
+    }
+    // Propagate: if variable j is needed and its value uses variable i,
+    // then i is also needed.  Iterate until fixpoint.
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (size_t j = 0; j < new_lets.size(); ++j) {
+        if (!needed[j])
+          continue;
+        for (size_t i = 0; i < j; ++i) {
+          if (needed[i])
+            continue;
+          const Var &vi = new_lets[i].first;
+          if (UsesVar(new_lets[j].second, [&vi](const VarNode *node) {
+                return node == vi.get();
+              })) {
+            needed[i] = true;
+            changed = true;
+          }
+        }
+      }
+    }
+
+    // Wrap only needed LetStmt bindings (innermost first)
+    for (int i = static_cast<int>(new_lets.size()) - 1; i >= 0; --i) {
+      if (needed[i]) {
+        body = LetStmt(new_lets[i].first, new_lets[i].second, body);
+      }
+    }
+    return body;
+  };
 
   Stmt if_then_else;
   if (wg0_has_stmts && wg1_has_stmts) {
-    bool has_simt_copy = SimtCopyDetector::Detect(else_body);
-    if (has_simt_copy || !config.enable_set_max_nreg) {
-      if_then_else =
-          IfThenElse(condition, then_body,
-                     IfThenElse(wg1_condition, else_body, Evaluate(0)));
+    auto wg0_segments = SegmentSequenceChildren(wg0_structure.get());
+    auto wg1_segments = SegmentSequenceChildren(wg1_structure.get());
+
+    // Only apply segmented splitting when both sides have matching segment
+    // counts (they originate from the same root, split at ControlNode
+    // boundaries, so they should match). Otherwise fall back to the
+    // single-IfThenElse path.
+    if (!wg0_segments.empty() && !wg1_segments.empty() &&
+        wg0_segments.size() == wg1_segments.size() && wg0_segments.size() > 1) {
+      std::vector<Stmt> segmented_stmts;
+      bool has_simt_copy = false;
+      // Check for SIMT copy in any wg1 segment (needed for set_max_nreg
+      // decision).
+      {
+        Stmt full_wg1 = irstructure_to_stmt(wg1_structure.get());
+        has_simt_copy = SimtCopyDetector::Detect(full_wg1);
+      }
+
+      // Accumulate LetDecl info from previous segments for variable renaming.
+      std::vector<std::pair<Var, PrimExpr>> wg0_accumulated_lets;
+      std::vector<std::pair<Var, PrimExpr>> wg1_accumulated_lets;
+
+      for (size_t si = 0; si < wg0_segments.size(); ++si) {
+        // Insert liveness boundary between segments.
+        if (si > 0) {
+          segmented_stmts.push_back(AttrStmt(
+              Integer(0), attr::kSharedMemoryLivenessBoundary, 0, Evaluate(0)));
+        }
+
+        // Collect LetDecl info from current segment before converting to Stmt.
+        auto wg0_lets = CollectLetDeclInfo(wg0_segments[si]);
+        auto wg1_lets = CollectLetDeclInfo(wg1_segments[si]);
+
+        Stmt wg0_seg_stmt = SegmentToStmt(wg0_segments[si]);
+        Stmt wg1_seg_stmt = SegmentToStmt(wg1_segments[si]);
+
+        // For segments after the first, wrap with renamed LetDecl bindings
+        // from all previous segments so that variables remain in scope.
+        if (si > 0) {
+          wg0_seg_stmt =
+              WrapWithRenamedLetDecls(wg0_seg_stmt, wg0_accumulated_lets);
+          wg1_seg_stmt =
+              WrapWithRenamedLetDecls(wg1_seg_stmt, wg1_accumulated_lets);
+        }
+
+        // Accumulate this segment's LetDecls for future segments.
+        wg0_accumulated_lets.insert(wg0_accumulated_lets.end(),
+                                    wg0_lets.begin(), wg0_lets.end());
+        wg1_accumulated_lets.insert(wg1_accumulated_lets.end(),
+                                    wg1_lets.begin(), wg1_lets.end());
+
+        // Prepend set_max_nreg only to the first segment.
+        if (si == 0 && !has_simt_copy && config.enable_set_max_nreg) {
+          wg0_seg_stmt =
+              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                     {config.consumer_max_nreg, 1})),
+                       wg0_seg_stmt});
+          wg1_seg_stmt =
+              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                     {config.producer_max_nreg, 0})),
+                       wg1_seg_stmt});
+        }
+
+        segmented_stmts.push_back(MakeWarpgroupIf(wg0_seg_stmt, wg1_seg_stmt));
+      }
+      if_then_else = SeqStmt::Flatten(segmented_stmts);
     } else {
-      std::vector<Stmt> then_body_with_nreg{
-          Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                        {config.consumer_max_nreg, 1})),
-          then_body};
-      std::vector<Stmt> else_body_with_nreg{
-          Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                        {config.producer_max_nreg, 0})),
-          else_body};
-      if_then_else = IfThenElse(
-          condition, SeqStmt(then_body_with_nreg),
-          IfThenElse(wg1_condition, SeqStmt(else_body_with_nreg), Evaluate(0)));
+      // Fallback: single IfThenElse (original logic).
+      Stmt then_body = irstructure_to_stmt(wg0_structure.get());
+      Stmt else_body = irstructure_to_stmt(wg1_structure.get());
+      bool has_simt_copy = SimtCopyDetector::Detect(else_body);
+      if (has_simt_copy || !config.enable_set_max_nreg) {
+        if_then_else =
+            IfThenElse(condition, then_body,
+                       IfThenElse(wg1_condition, else_body, Evaluate(0)));
+      } else {
+        std::vector<Stmt> then_body_with_nreg{
+            Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                          {config.consumer_max_nreg, 1})),
+            then_body};
+        std::vector<Stmt> else_body_with_nreg{
+            Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                          {config.producer_max_nreg, 0})),
+            else_body};
+        if_then_else =
+            IfThenElse(condition, SeqStmt(then_body_with_nreg),
+                       IfThenElse(wg1_condition, SeqStmt(else_body_with_nreg),
+                                  Evaluate(0)));
+      }
     }
   } else if (wg0_has_stmts) {
     // Only warpgroup 0 has statements, execute unconditionally
-    if_then_else = then_body;
+    if_then_else = irstructure_to_stmt(wg0_structure.get());
   } else if (wg1_has_stmts) {
     // Only warpgroup 1 has statements, execute unconditionally
-    if_then_else = else_body;
+    if_then_else = irstructure_to_stmt(wg1_structure.get());
   } else {
     // Neither warpgroup 0 nor 1 has statements
     if_then_else = Evaluate(0);
