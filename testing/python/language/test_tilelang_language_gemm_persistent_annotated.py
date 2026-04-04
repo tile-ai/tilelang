@@ -4,6 +4,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tilelang import tvm
 
 
 def _assert_persistent_gemm_close(kernel, M: int, N: int, K: int) -> None:
@@ -13,6 +14,88 @@ def _assert_persistent_gemm_close(kernel, M: int, N: int, K: int) -> None:
     torch.cuda.synchronize()
     ref = (a.float() @ b.float()).half()
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
+
+
+def _make_mapping_kernel(
+    grid_x: int,
+    grid_y: int,
+    *,
+    order: str | None = None,
+    panel_size: int | None = None,
+    legacy_order: str | None = None,
+    legacy_panel_size: int | None = None,
+):
+    @T.prim_func
+    def func(O: T.Tensor((grid_y, grid_x), T.int32)):
+        with T.PersistentKernel(
+            grid_x,
+            grid_y,
+            threads=1,
+            order=order,
+            panel_size=panel_size,
+        ) as (bx, by):
+            if legacy_order is not None:
+                T.use_swizzle(panel_size=legacy_panel_size, order=legacy_order)
+            O[by, bx] = T.int32(1)
+
+    return func
+
+
+def _lower_with_tile_schedule(func, sm_num: int = 4):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(tvm.target.Target("cuda -arch=sm_80"))(mod)
+    mod = tilelang.transform.TileSchedule(sm_num)(mod)
+    return mod["main"]
+
+
+def _extract_store_indices(func):
+    state = {"w_var": None, "block_var": None, "indices": None, "has_legacy_attr": False}
+
+    def visitor(node):
+        if isinstance(node, tvm.tir.For) and node.loop_var.name == "w_tile_sched":
+            state["w_var"] = node.loop_var
+        elif isinstance(node, tvm.tir.AttrStmt) and node.attr_key == "thread_extent":
+            iter_var = node.node
+            if isinstance(iter_var, tvm.tir.IterVar) and iter_var.thread_tag == "blockIdx.x":
+                state["block_var"] = iter_var.var
+        elif isinstance(node, tvm.tir.AttrStmt) and node.attr_key == "threadblock_swizzle_pattern":
+            state["has_legacy_attr"] = True
+        elif isinstance(node, tvm.tir.BufferStore) and node.buffer.name == "O":
+            state["indices"] = node.indices
+
+    tvm.tir.stmt_functor.post_order_visit(func.body, visitor)
+    assert state["w_var"] is not None
+    assert state["block_var"] is not None
+    assert state["indices"] is not None
+    return state
+
+
+def _eval_index(expr, subst):
+    return int(tvm.arith.Analyzer().simplify(tvm.tir.stmt_functor.substitute(expr, subst)))
+
+
+def _expected_row(tile_linear: int, grid_x: int, grid_y: int, panel_size: int):
+    grid_size = grid_x * grid_y
+    panel_span = panel_size * grid_x
+    panel_offset = tile_linear % panel_span
+    panel_idx = tile_linear // panel_span
+    total_panel = (grid_size + panel_span - 1) // panel_span
+    stride = panel_size if panel_idx + 1 < total_panel else (grid_size - panel_idx * panel_span) // grid_x
+    col_idx = grid_x - 1 - panel_offset // stride if panel_idx & 1 else panel_offset // stride
+    row_idx = panel_offset % stride + panel_idx * panel_size
+    return row_idx, col_idx
+
+
+def _expected_column(tile_linear: int, grid_x: int, grid_y: int, panel_size: int):
+    grid_size = grid_x * grid_y
+    panel_span = panel_size * grid_y
+    panel_offset = tile_linear % panel_span
+    panel_idx = tile_linear // panel_span
+    total_panel = (grid_size + panel_span - 1) // panel_span
+    stride = panel_size if panel_idx + 1 < total_panel else (grid_size - panel_idx * panel_span) // grid_y
+    row_idx = grid_y - 1 - panel_offset // stride if panel_idx & 1 else panel_offset // stride
+    col_idx = panel_offset % stride + panel_idx * panel_size
+    return row_idx, col_idx
 
 
 def _compile_persistent_gemm(
@@ -25,6 +108,8 @@ def _compile_persistent_gemm(
     *,
     target: str,
     num_stages=3,
+    order: str | None = None,
+    panel_size: int | None = None,
     dtype=T.float16,
     accum_dtype=T.float32,
 ):
@@ -34,7 +119,13 @@ def _compile_persistent_gemm(
         B: T.Tensor((K, N), dtype),
         C: T.Tensor((M, N), dtype),
     ):
-        with T.PersistentKernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+        with T.PersistentKernel(
+            T.ceildiv(N, block_N),
+            T.ceildiv(M, block_M),
+            threads=128,
+            order=order,
+            panel_size=panel_size,
+        ) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -103,6 +194,101 @@ def test_persistent_annotated_gemm_stage3_waits_keep_persistent_phase_progress()
         target="cuda",
     )
     _assert_persistent_gemm_close(kernel_check, M, N, K)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("order", ["row", "column"])
+def test_persistent_annotated_gemm_supports_swizzled_tile_order(order):
+    M = N = K = 1024
+    kernel = _compile_persistent_gemm(
+        M,
+        N,
+        K,
+        128,
+        128,
+        32,
+        num_stages=2,
+        order=order,
+        panel_size=8,
+        target="cuda",
+    )
+    _assert_persistent_gemm_close(kernel, M, N, K)
+
+
+def test_tile_schedule_swizzles_row_major_persistent_kernel():
+    grid_x, grid_y, sm_num = 4, 3, 4
+    func = _make_mapping_kernel(grid_x, grid_y, order="row", panel_size=2)
+    lowered = _lower_with_tile_schedule(func, sm_num=sm_num)
+    info = _extract_store_indices(lowered)
+
+    for tile_linear in range(grid_x * grid_y):
+        w = tile_linear // sm_num
+        block = tile_linear % sm_num
+        subst = {
+            info["w_var"]: tvm.tir.IntImm("int32", w),
+            info["block_var"]: tvm.tir.IntImm("int32", block),
+        }
+        actual = tuple(_eval_index(idx, subst) for idx in info["indices"])
+        assert actual == _expected_row(tile_linear, grid_x, grid_y, 2)
+
+
+def test_tile_schedule_swizzles_column_major_persistent_kernel():
+    grid_x, grid_y, sm_num = 4, 3, 4
+    func = _make_mapping_kernel(grid_x, grid_y, order="column", panel_size=2)
+    lowered = _lower_with_tile_schedule(func, sm_num=sm_num)
+    info = _extract_store_indices(lowered)
+
+    for tile_linear in range(grid_x * grid_y):
+        w = tile_linear // sm_num
+        block = tile_linear % sm_num
+        subst = {
+            info["w_var"]: tvm.tir.IntImm("int32", w),
+            info["block_var"]: tvm.tir.IntImm("int32", block),
+        }
+        actual = tuple(_eval_index(idx, subst) for idx in info["indices"])
+        assert actual == _expected_column(tile_linear, grid_x, grid_y, 2)
+
+
+def test_persistent_kernel_swizzle_overrides_legacy_use_swizzle_annotation():
+    func = _make_mapping_kernel(
+        4,
+        3,
+        order="row",
+        panel_size=2,
+        legacy_order="column",
+        legacy_panel_size=3,
+    )
+    lowered = _lower_with_tile_schedule(func, sm_num=4)
+    info = _extract_store_indices(lowered)
+    assert info["has_legacy_attr"] is False
+
+    subst = {
+        info["w_var"]: tvm.tir.IntImm("int32", 1),
+        info["block_var"]: tvm.tir.IntImm("int32", 0),
+    }
+    actual = tuple(_eval_index(idx, subst) for idx in info["indices"])
+    assert actual == _expected_row(4, 4, 3, 2)
+    assert actual != _expected_column(4, 4, 3, 3)
+
+
+def test_tile_schedule_uses_legacy_use_swizzle_when_persistent_kernel_has_no_override():
+    func = _make_mapping_kernel(
+        4,
+        3,
+        legacy_order="column",
+        legacy_panel_size=3,
+    )
+    lowered = _lower_with_tile_schedule(func, sm_num=4)
+    info = _extract_store_indices(lowered)
+    assert info["has_legacy_attr"] is False
+
+    subst = {
+        info["w_var"]: tvm.tir.IntImm("int32", 1),
+        info["block_var"]: tvm.tir.IntImm("int32", 0),
+    }
+    actual = tuple(_eval_index(idx, subst) for idx in info["indices"])
+    assert actual == _expected_column(4, 4, 3, 3)
 
 
 if __name__ == "__main__":

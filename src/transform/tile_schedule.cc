@@ -14,6 +14,7 @@
 #include <tvm/tir/transform.h>
 
 #include "./common/attr.h"
+#include "./common/tile_scheduler.h"
 
 namespace tvm {
 namespace tl {
@@ -26,20 +27,7 @@ namespace {
 using tvm::ffi::Array;
 using tvm::ffi::GetRef;
 using tvm::ffi::Map;
-
-constexpr const char *kPersistentKernel = "tilelang.is_persistent_kernel";
-
-inline bool BlockRequestsPersistentTileSchedule(const Block &blk) {
-  if (!blk->annotations.defined() || !blk->annotations.count(kPersistentKernel))
-    return false;
-  auto ann = blk->annotations.Get(kPersistentKernel);
-  if (!ann)
-    return false;
-  // Kernel launch stores Python bool as Bool / IntImm in block annotations.
-  if (const auto *imm = ann.value().as<IntImmNode>())
-    return imm->value != 0;
-  return true;
-}
+using namespace tile_scheduler;
 
 inline Stmt UnwrapHostRoot(Stmt s) {
   if (const auto *br = s.as<BlockRealizeNode>()) {
@@ -113,27 +101,45 @@ std::optional<Stmt> TryPersistent2DGrid(Stmt device_body, int sm_num) {
   Block blk = realize->block;
   if (!IsDeviceMainBlock(blk.get()))
     return std::nullopt;
-  if (!BlockRequestsPersistentTileSchedule(blk))
-    return std::nullopt;
 
   PrimExpr Gx = blk_x.extent;
   PrimExpr Gy = blk_y.extent;
   Var bx_v = blk_x.iv->var;
   Var by_v = blk_y.iv->var;
-  PrimExpr total_tiles = Gx * Gy;
-  PrimExpr sm_imm = IntImm(DataType::Int(32), sm_num);
-  PrimExpr waves = ceildiv(total_tiles, sm_imm);
+  auto spec = ParseTileScheduleSpec(blk, sm_num);
+  if (!spec.has_value()) {
+    return std::nullopt;
+  }
+  ICHECK(spec->distribution_kind == DistributionKind::kPersistentStatic)
+      << "TileSchedule currently only materializes persistent_static";
 
+  PrimExpr total_tiles = Gx * Gy;
+  PrimExpr worker_count = IntImm(DataType::Int(32), spec->num_persistent_workers);
+  PrimExpr waves = ceildiv(total_tiles, worker_count);
   Var w = Var("w_tile_sched", waves.dtype());
-  PrimExpr tile_linear = sm_imm * w + bx_v;
+
+  auto stripped_body_and_legacy = StripLegacyThreadblockSwizzleAttr::Run(blk->body);
+  bool emit_override_warning = false;
+  TileScheduleSpec resolved_spec =
+      ResolveLegacyPermutation(spec.value(), stripped_body_and_legacy.second,
+                               &emit_override_warning);
+  if (emit_override_warning) {
+    LOG(WARNING) << "PersistentKernel swizzle overrides T.use_swizzle() for "
+                    "persistent kernels; TileSchedule will use the "
+                    "PersistentKernel order/panel_size.";
+  }
+
+  TileWorkBinding binding =
+      MakePersistentStaticTileWorkBinding(resolved_spec, bx_v, w, Gx, Gy);
 
   Map<Var, PrimExpr> repl;
-  repl.Set(bx_v, FloorMod(tile_linear, Gx));
-  repl.Set(by_v, FloorDiv(tile_linear, Gx));
-
-  Block new_blk = Downcast<Block>(Substitute(blk, repl));
+  repl.Set(bx_v, binding.tile_x);
+  repl.Set(by_v, binding.tile_y);
+  Block stripped_blk = blk;
+  stripped_blk.CopyOnWrite()->body = stripped_body_and_legacy.first;
+  Block new_blk = Downcast<Block>(Substitute(stripped_blk, repl));
   Stmt tile_body = new_blk->body;
-  Stmt guarded = IfThenElse(LT(tile_linear, total_tiles), tile_body);
+  Stmt guarded = IfThenElse(binding.is_valid, tile_body);
   ffi::Map<ffi::String, ffi::Any> wave_annotations;
   wave_annotations.Set(attr::kPipelinePhaseContinuation, Integer(1));
   Stmt wave_loop =
@@ -144,6 +150,11 @@ std::optional<Stmt> TryPersistent2DGrid(Stmt device_body, int sm_num) {
   bp->body = wave_loop;
   if (bp->annotations.defined()) {
     bp->annotations.erase(kPersistentKernel);
+    bp->annotations.erase(kTileScheduleKind);
+    bp->annotations.erase(kTilePermutationKind);
+    bp->annotations.erase(kTilePermutationPanelSize);
+    bp->annotations.erase(kLegacyPersistentSwizzleOrder);
+    bp->annotations.erase(kLegacyPersistentSwizzlePanelSize);
   }
 
   Stmt inner =
@@ -153,10 +164,10 @@ std::optional<Stmt> TryPersistent2DGrid(Stmt device_body, int sm_num) {
     inner = AttrStmt(tw->node, tw->attr_key, tw->value, inner);
   }
 
-  IterVar new_bx_iv = IterVar(Range(make_const(bx_v.dtype(), 0), sm_imm), bx_v,
+  IterVar new_bx_iv = IterVar(Range(make_const(bx_v.dtype(), 0), worker_count), bx_v,
                               blk_x.iv->iter_type, blk_x.iv->thread_tag);
   inner =
-      AttrStmt(new_bx_iv, tir::attr::thread_extent, sm_imm, inner);
+      AttrStmt(new_bx_iv, tir::attr::thread_extent, worker_count, inner);
   return inner;
 }
 

@@ -3,6 +3,8 @@
  * \brief Check attributes of the IR
  */
 
+#pragma once
+
 #include "tvm/tir/stmt.h"
 
 namespace tvm {
