@@ -98,6 +98,18 @@ def _expected_column(tile_linear: int, grid_x: int, grid_y: int, panel_size: int
     return row_idx, col_idx
 
 
+def _count_role_local_wave_loops(func):
+    count = 0
+
+    def visitor(node):
+        nonlocal count
+        if isinstance(node, tvm.tir.For) and node.loop_var.name == "w_tile_sched":
+            count += 1
+
+    tvm.tir.stmt_functor.post_order_visit(func.body, visitor)
+    return count
+
+
 def _compile_persistent_gemm(
     M,
     N,
@@ -289,6 +301,78 @@ def test_tile_schedule_uses_legacy_use_swizzle_when_persistent_kernel_has_no_ove
     }
     actual = tuple(_eval_index(idx, subst) for idx in info["indices"])
     assert actual == _expected_column(4, 4, 3, 3)
+
+
+def test_tile_schedule_materializes_role_local_wave_loops_for_warp_specialize():
+    @T.prim_func
+    def func(O: T.Tensor((4, 4), T.int32)):
+        with T.PersistentKernel(4, 4, threads=256) as (bx, by):
+            with T.ws(0):
+                O[by, bx] = T.int32(1)
+            for ko in T.serial(2):
+                with T.ws(1):
+                    T.evaluate(ko + bx)
+                with T.ws(0):
+                    T.evaluate(ko + by)
+            with T.ws(0):
+                O[by, bx] = T.int32(2)
+
+    lowered = _lower_with_tile_schedule(func, sm_num=4)
+    assert _count_role_local_wave_loops(lowered) >= 3
+
+
+@tilelang.testing.requires_cuda
+def test_persistent_kernel_supports_warp_specialize_role_local_scheduling():
+    @T.prim_func
+    def func(A: T.Tensor((256, 256), T.int32), O: T.Tensor((8, 8), T.int32)):
+        with T.PersistentKernel(8, 8, threads=256) as (bx, by):
+            tx = T.get_thread_binding()
+            with T.ws(1):
+                T.evaluate(A[by * 32 + tx % 32, bx * 32])
+            with T.ws(0):
+                O[by, bx] = A[by * 32, bx * 32]
+
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda -arch=sm_100")
+    a = torch.arange(256 * 256, device="cuda", dtype=torch.int32).reshape(256, 256)
+    o = kernel(a)
+    ref = a[::32, ::32].contiguous()
+    assert torch.equal(o, ref)
+
+
+def test_tile_schedule_materializes_role_local_wave_loops_for_raw_tx_roles():
+    @T.prim_func
+    def func(O: T.Tensor((4, 4), T.int32)):
+        with T.PersistentKernel(4, 4, threads=64) as (bx, by):
+            tx = T.get_thread_binding()
+            if tx < 32:
+                O[by, bx] = T.int32(1)
+            elif tx < 64:
+                T.evaluate(bx + by)
+            if tx == 0:
+                O[by, bx] = T.int32(2)
+
+    lowered = _lower_with_tile_schedule(func, sm_num=4)
+    assert _count_role_local_wave_loops(lowered) >= 2
+
+
+@tilelang.testing.requires_cuda
+def test_persistent_kernel_supports_raw_tx_role_local_scheduling():
+    @T.prim_func
+    def func(A: T.Tensor((256, 256), T.int32), O: T.Tensor((8, 8), T.int32)):
+        with T.PersistentKernel(8, 8, threads=64) as (bx, by):
+            tx = T.get_thread_binding()
+            if tx < 32:
+                T.evaluate(A[by * 32 + tx, bx * 32])
+            elif tx < 64:
+                T.evaluate(A[by * 32 + tx - 32, bx * 32])
+            if tx == 0:
+                O[by, bx] = A[by * 32, bx * 32]
+
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda -arch=sm_100")
+    a = torch.arange(256 * 256, device="cuda", dtype=torch.int32).reshape(256, 256)
+    o = kernel(a)
+    ref = a[::32, ::32].contiguous()
+    assert torch.equal(o, ref)
 
 
 if __name__ == "__main__":

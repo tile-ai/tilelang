@@ -4,6 +4,7 @@
  */
 
 #include <optional>
+#include <unordered_set>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
@@ -41,6 +42,190 @@ struct ThreadExtentAttr {
   IterVar iv;
   PrimExpr extent;
 };
+
+bool ContainsWarpSpecialize(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (const auto *attr = node.as<AttrStmtNode>()) {
+      if (attr->attr_key == "warp_specialize") {
+        found = true;
+      }
+    }
+  });
+  return found;
+}
+
+bool UsesTileCoords(const Stmt &stmt, const Var &bx, const Var &by) {
+  bool uses = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (const auto *var = node.as<VarNode>()) {
+      if (var == bx.get() || var == by.get()) {
+        uses = true;
+      }
+    }
+  });
+  return uses;
+}
+
+bool UsesOnlyAllowedVars(const PrimExpr &expr,
+                        const std::unordered_set<const VarNode *> &allowed) {
+  bool ok = true;
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (!ok) {
+      return;
+    }
+    if (const auto *var = node.as<VarNode>()) {
+      if (!allowed.count(var)) {
+        ok = false;
+      }
+    }
+  });
+  return ok;
+}
+
+bool IsThreadRoleSpecializedStmt(
+    const Stmt &stmt,
+    const std::unordered_set<const VarNode *> &allowed_thread_vars) {
+  if (ContainsWarpSpecialize(stmt)) {
+    return true;
+  }
+
+  std::function<bool(const Stmt &)> visit = [&](const Stmt &s) -> bool {
+    if (const auto *if_node = s.as<IfThenElseNode>()) {
+      if (!UsesOnlyAllowedVars(if_node->condition, allowed_thread_vars)) {
+        return false;
+      }
+      return true;
+    }
+    if (const auto *attr = s.as<AttrStmtNode>()) {
+      return visit(attr->body);
+    }
+    if (const auto *let = s.as<LetStmtNode>()) {
+      if (!UsesOnlyAllowedVars(let->value, allowed_thread_vars)) {
+        return false;
+      }
+      return visit(let->body);
+    }
+    if (const auto *realize = s.as<BlockRealizeNode>()) {
+      return visit(realize->block->body);
+    }
+    if (const auto *block = s.as<BlockNode>()) {
+      return visit(block->body);
+    }
+    return false;
+  };
+  return visit(stmt);
+}
+
+Stmt WrapStmtWithPersistentLoop(const Stmt &stmt, const Map<Var, PrimExpr> &repl,
+                                const TileWorkBinding &binding, const Var &w,
+                                const PrimExpr &waves) {
+  Stmt scheduled = Substitute(stmt, repl);
+  Stmt guarded = IfThenElse(binding.is_valid, scheduled);
+  ffi::Map<ffi::String, ffi::Any> wave_annotations;
+  wave_annotations.Set(attr::kPipelinePhaseContinuation, Integer(1));
+  return For(w, 0, waves, ForKind::kSerial, guarded, ffi::Optional<IterVar>(),
+             wave_annotations);
+}
+
+std::optional<Stmt> TryRoleLocalPersistentBody(const Stmt &body,
+                                               const Map<Var, PrimExpr> &repl,
+                                               const TileWorkBinding &binding,
+                                               const Var &w,
+                                               const PrimExpr &waves,
+                                               const Var &bx_v,
+                                               const Var &by_v,
+                                               const std::unordered_set<const VarNode *>
+                                                   &allowed_thread_vars) {
+  std::function<std::optional<Stmt>(const Stmt &)> visit =
+      [&](const Stmt &stmt) -> std::optional<Stmt> {
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      int region_start = -1;
+      bool has_role_local = false;
+      for (int i = 0; i < static_cast<int>(seq->seq.size()); ++i) {
+        const Stmt &child = seq->seq[i];
+        bool role_local =
+            IsThreadRoleSpecializedStmt(child, allowed_thread_vars);
+        bool uses_tiles = UsesTileCoords(child, bx_v, by_v);
+        if (region_start < 0 && (role_local || uses_tiles)) {
+          region_start = i;
+        }
+        has_role_local = has_role_local || role_local;
+      }
+
+      if (region_start < 0 || !has_role_local) {
+        return std::nullopt;
+      }
+
+      Array<Stmt> rewritten;
+      rewritten.reserve(seq->seq.size());
+      for (int i = 0; i < region_start; ++i) {
+        rewritten.push_back(seq->seq[i]);
+      }
+
+      Array<Stmt> uniform_suffix;
+      auto flush_uniform_suffix = [&]() {
+        if (uniform_suffix.empty()) {
+          return;
+        }
+        Stmt uniform_stmt =
+            uniform_suffix.size() == 1 ? uniform_suffix[0] : SeqStmt(uniform_suffix);
+        rewritten.push_back(
+            WrapStmtWithPersistentLoop(uniform_stmt, repl, binding, w, waves));
+        uniform_suffix.clear();
+      };
+
+      for (int i = region_start; i < static_cast<int>(seq->seq.size()); ++i) {
+        const Stmt &child = seq->seq[i];
+        if (IsThreadRoleSpecializedStmt(child, allowed_thread_vars)) {
+          flush_uniform_suffix();
+          rewritten.push_back(
+              WrapStmtWithPersistentLoop(child, repl, binding, w, waves));
+        } else {
+          uniform_suffix.push_back(child);
+        }
+      }
+      flush_uniform_suffix();
+      return SeqStmt(rewritten);
+    }
+
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      auto inner = visit(attr->body);
+      if (!inner.has_value()) {
+        return std::nullopt;
+      }
+      return AttrStmt(attr->node, attr->attr_key, attr->value, inner.value());
+    }
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      auto inner = visit(let->body);
+      if (!inner.has_value()) {
+        return std::nullopt;
+      }
+      return LetStmt(let->var, let->value, inner.value());
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      auto inner = visit(realize->block->body);
+      if (!inner.has_value()) {
+        return std::nullopt;
+      }
+      Block new_block = realize->block;
+      new_block.CopyOnWrite()->body = inner.value();
+      return BlockRealize(realize->iter_values, realize->predicate, new_block);
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      auto inner = visit(block->body);
+      if (!inner.has_value()) {
+        return std::nullopt;
+      }
+      Block new_block = GetRef<Block>(block);
+      new_block.CopyOnWrite()->body = inner.value();
+      return new_block;
+    }
+    return std::nullopt;
+  };
+
+  return visit(body);
+}
 
 std::optional<Stmt> TryPersistent2DGrid(Stmt device_body, int sm_num) {
   // Expect: AttrStmt(blockIdx.x) -> AttrStmt(blockIdx.y) -> [thread attrs] ->
@@ -84,6 +269,7 @@ std::optional<Stmt> TryPersistent2DGrid(Stmt device_body, int sm_num) {
   }
 
   Array<AttrStmt> thread_wrappers;
+  std::unordered_set<const VarNode *> allowed_thread_vars;
   while (const auto *a = cursor.as<AttrStmtNode>()) {
     if (a->attr_key != tir::attr::thread_extent)
       break;
@@ -92,6 +278,7 @@ std::optional<Stmt> TryPersistent2DGrid(Stmt device_body, int sm_num) {
     if (!(tag == "threadIdx.x" || tag == "threadIdx.y" || tag == "threadIdx.z"))
       break;
     thread_wrappers.push_back(GetRef<AttrStmt>(a));
+    allowed_thread_vars.insert(iv->var.get());
     cursor = a->body;
   }
 
@@ -138,16 +325,23 @@ std::optional<Stmt> TryPersistent2DGrid(Stmt device_body, int sm_num) {
   Block stripped_blk = blk;
   stripped_blk.CopyOnWrite()->body = stripped_body_and_legacy.first;
   Block new_blk = Downcast<Block>(Substitute(stripped_blk, repl));
-  Stmt tile_body = new_blk->body;
-  Stmt guarded = IfThenElse(binding.is_valid, tile_body);
-  ffi::Map<ffi::String, ffi::Any> wave_annotations;
-  wave_annotations.Set(attr::kPipelinePhaseContinuation, Integer(1));
-  Stmt wave_loop =
-      For(w, 0, waves, ForKind::kSerial, guarded, ffi::Optional<IterVar>(),
-          wave_annotations);
+  auto role_local_body =
+      TryRoleLocalPersistentBody(stripped_body_and_legacy.first, repl, binding,
+                                 w, waves, bx_v, by_v, allowed_thread_vars);
+  Stmt scheduled_body;
+  if (role_local_body.has_value()) {
+    scheduled_body = role_local_body.value();
+  } else {
+    Stmt tile_body = new_blk->body;
+    Stmt guarded = IfThenElse(binding.is_valid, tile_body);
+    ffi::Map<ffi::String, ffi::Any> wave_annotations;
+    wave_annotations.Set(attr::kPipelinePhaseContinuation, Integer(1));
+    scheduled_body = For(w, 0, waves, ForKind::kSerial, guarded,
+                         ffi::Optional<IterVar>(), wave_annotations);
+  }
 
   auto bp = new_blk.CopyOnWrite();
-  bp->body = wave_loop;
+  bp->body = scheduled_body;
   if (bp->annotations.defined()) {
     bp->annotations.erase(kPersistentKernel);
     bp->annotations.erase(kTileScheduleKind);
