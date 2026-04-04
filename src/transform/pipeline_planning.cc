@@ -7,6 +7,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../op/parallel.h"
 #include "../op/region.h"
 #include "../op/utils.h"
 #include "common/pipeline_utils.h"
@@ -258,6 +259,21 @@ private:
 
   void HandleTileOp(const TileOperator &tile_op) {
     if (tile_op.as<RegionOpNode>()) {
+      return;
+    }
+    if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
+      BufferRegionCollector nested(buffer_data_to_buffer_, chain_builder_,
+                                   target_);
+      nested(parallel->GetRoot());
+      reads_.insert(reads_.end(), nested.GetReads().begin(),
+                    nested.GetReads().end());
+      writes_.insert(writes_.end(), nested.GetWrites().begin(),
+                     nested.GetWrites().end());
+      is_global_copy_pattern_ =
+          is_global_copy_pattern_ || nested.GetGlobalCopyPattern();
+      is_tma_copy_ = is_tma_copy_ || nested.GetTmaCopyPattern();
+      has_non_copy_tile_op_ =
+          has_non_copy_tile_op_ || nested.HasNonCopyTileOp();
       return;
     }
     AddReadsWritesForTileOp(tile_op, &reads_, &writes_);
@@ -631,10 +647,35 @@ private:
   }
 
   bool IsPureCopyStmt(const Stmt &stmt) const {
+    auto is_global_like_buffer = [](const Buffer &buffer) {
+      return IsGlobalBuffer(buffer) ||
+             (buffer.defined() && buffer.scope().empty());
+    };
+    auto is_pure_raw_copy_value = [&](const PrimExpr &expr,
+                                      const auto &self) -> bool {
+      if (const auto *load = expr.as<BufferLoadNode>()) {
+        return is_global_like_buffer(load->buffer);
+      }
+      if (const auto *cast = expr.as<CastNode>()) {
+        return self(cast->value, self);
+      }
+      return false;
+    };
+
     bool saw_copy = false;
     bool saw_non_copy_tile_op = false;
+    bool saw_non_copy_buffer_store = false;
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (saw_non_copy_tile_op) {
+      if (saw_non_copy_tile_op || saw_non_copy_buffer_store) {
+        return;
+      }
+      if (const auto *store = node.as<BufferStoreNode>()) {
+        saw_copy = true;
+        if ((!IsSharedBuffer(store->buffer) &&
+             !IsLocalBuffer(store->buffer, /*allow_var=*/true)) ||
+            !is_pure_raw_copy_value(store->value, is_pure_raw_copy_value)) {
+          saw_non_copy_buffer_store = true;
+        }
         return;
       }
       const auto *call = node.as<CallNode>();
@@ -648,13 +689,21 @@ private:
       if (tile_op.as<RegionOpNode>()) {
         return;
       }
+      if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
+        if (IsPureCopyStmt(parallel->GetRoot())) {
+          saw_copy = true;
+        } else {
+          saw_non_copy_tile_op = true;
+        }
+        return;
+      }
       if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
         saw_copy = true;
       } else {
         saw_non_copy_tile_op = true;
       }
     });
-    return saw_copy && !saw_non_copy_tile_op;
+    return saw_copy && !saw_non_copy_tile_op && !saw_non_copy_buffer_store;
   }
 
   Optional<TileOperator> GetSinglePureCopyTileOp(const Stmt &stmt) const {

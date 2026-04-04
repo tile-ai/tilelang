@@ -417,6 +417,35 @@ private:
                               Map<Buffer, Layout> &result_map) const;
 };
 
+/*!
+ * \brief Check whether the copy has the basic buffer compatibility required by
+ *        cp.async.
+ *
+ * This validates only source/destination scopes and dtype equality. It does
+ * not consider target support, pass config, or vectorized transfer shape.
+ */
+bool HasCPAsyncCompatibleBufferPair(const CopyNode *copy);
+
+/*!
+ * \brief Check whether automatic cp.async lowering is enabled for the target.
+ *
+ * This combines target capability with the current `tl.enable_async_copy`
+ * pass-config gate.
+ */
+bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true);
+
+/*!
+ * \brief Check whether a generic T.copy may be automatically lowered to
+ *        cp.async.
+ *
+ * This excludes explicit T.tma_copy/T.async_copy annotations and combines the
+ * pass-config gate with CopyNode's cp.async legality checks.
+ */
+bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
+                           arith::Analyzer *analyzer,
+                           const LayoutMap &layout_map = LayoutMap(),
+                           bool default_enabled = true);
+
 class Copy : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Copy, TileOperator, CopyNode);

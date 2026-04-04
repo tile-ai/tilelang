@@ -98,16 +98,9 @@ std::string ClassifyCopy(const CopyNode *copy, Target target,
   }
 
   // Inside a pipelined loop, eligible copies may be lowered to cp.async.
-  if (in_pipeline) {
-    tvm::transform::PassContext pass_ctx =
-        tvm::transform::PassContext::Current();
-    bool enable_async_copy =
-        pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(false)).value();
-    if (enable_async_copy && TargetHasAsyncCopy(target) &&
-        IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst) &&
-        copy->src->dtype == copy->dst->dtype) {
-      return "cp_async";
-    }
+  if (in_pipeline && CanUseAutoCPAsyncCopy(copy, target, analyzer, LayoutMap(),
+                                           /*default_enabled=*/false)) {
+    return "cp_async";
   }
 
   return "sync";

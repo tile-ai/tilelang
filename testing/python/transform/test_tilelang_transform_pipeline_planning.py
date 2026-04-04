@@ -81,6 +81,43 @@ def test_simple_pipeline():
         assert tma_copies[2] == 0  # gemm is never TMA
 
 
+def test_pipeline_planning_recognizes_parallel_bufferstore_copy_stages():
+    @T.prim_func
+    def before(
+        A: T.Tensor((1024, 32), T.float32),
+        B: T.Tensor((32, 1024), T.float32),
+        C: T.Tensor((1024, 1024), T.float32),
+    ):
+        with T.Kernel(8, 8, threads=128) as (bx, by):
+            A_shared = T.alloc_shared((128, 32), T.float32)
+            B_shared = T.alloc_shared((32, 128), T.float32)
+            C_local = T.alloc_fragment((128, 128), T.float32)
+
+            T.clear(C_local)
+
+            for ko in T.Pipelined(32, num_stages=3):
+                for i, k in T.Parallel(128, 32):
+                    A_shared[i, k] = A[by * 128 + i, ko * 32 + k]
+                for k, j in T.Parallel(32, 128):
+                    B_shared[k, j] = B[ko * 32 + k, bx * 128 + j]
+                T.gemm(A_shared, B_shared, C_local)
+
+            T.copy(C_local, C[by * 128, bx * 128])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+    async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
+    async_groups = [int(v) for v in anno["software_pipeline_async_producer_groups"]]
+    assert stages == [0, 0, 2]
+    assert orders == [0, 1, 2]
+    assert async_producers == [1, 1, 0]
+    assert async_groups == [0, 0, -1]
+
+
 def test_pipeline_planning_marks_async_producers_per_statement():
     @T.prim_func
     def before(A: T.Tensor((1024, 32), T.float32), B: T.Tensor((32, 1024), T.float32), C: T.Tensor((1024, 1024), T.float32)):

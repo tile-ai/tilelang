@@ -892,6 +892,26 @@ bool CopyNode::CheckCPAsyncCopyPreconditions() const {
   return true;
 }
 
+bool HasCPAsyncCompatibleBufferPair(const CopyNode *copy) {
+  return copy != nullptr && copy->CheckCPAsyncCopyPreconditions();
+}
+
+bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled) {
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  return TargetHasAsyncCopy(target) &&
+         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
+             .value();
+}
+
+bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
+                           arith::Analyzer *analyzer,
+                           const LayoutMap &layout_map, bool default_enabled) {
+  return copy != nullptr && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
+         IsAutoAsyncCopyEnabled(target, default_enabled) &&
+         copy->CheckCPAsyncCopy(target, layout_map, analyzer);
+}
+
 bool CopyNode::CheckPipelineManagedCPAsyncCopy() const {
   return !GetIsTmaCopy() && !GetIsAsyncCopy() &&
          CheckCPAsyncCopyPreconditions();
