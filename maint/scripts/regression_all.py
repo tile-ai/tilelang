@@ -106,7 +106,6 @@ def regression_all(examples_root: str | os.PathLike[str] | None = None) -> None:
             text=True,
             env={
                 **os.environ,
-                "PYTHONNOUSERSITE": "1",
                 "TL_PERF_REGRESSION_FORMAT": "json",
             },
         )
