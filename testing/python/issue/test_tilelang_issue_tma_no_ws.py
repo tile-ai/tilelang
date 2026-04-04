@@ -365,6 +365,67 @@ def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_moves_preloop_tma_loads_into_producer_branch():
+    """Pre-loop TMA loads should issue on the producer side, with waits on the consumer side."""
+
+    seq_len = 128
+    dim = 64
+    block_m = 64
+    block_n = 64
+
+    @T.prim_func
+    def preloop_tma_prefix(
+        Q: T.Tensor((1, seq_len, 1, dim), T.float16),
+        K: T.Tensor((1, seq_len, 1, dim), T.float16),
+        V: T.Tensor((1, seq_len, 1, dim), T.float16),
+        O: T.Tensor((1, seq_len, 1, dim), T.float16),
+    ):
+        with T.Kernel(1, T.ceildiv(seq_len, block_m), 1, threads=256) as (bx, by, bz):
+            K_shared = T.alloc_shared((block_m, dim), dtype=T.float16)
+            V_shared = T.alloc_shared((block_m, dim), dtype=T.float16)
+            q = T.alloc_shared((block_n, dim), dtype=T.float16)
+            acc_k = T.alloc_fragment((block_m, block_n), dtype=T.float32)
+            acc_v = T.alloc_fragment((block_m, block_n), dtype=T.float32)
+            out = T.alloc_shared((block_m, dim), dtype=T.float16)
+
+            T.copy(K[bz, by * block_m : (by + 1) * block_m, bx, :], K_shared)
+            T.copy(V[bz, by * block_m : (by + 1) * block_m, bx, :], V_shared)
+
+            for k in T.Pipelined(0, T.ceildiv(seq_len, block_n), num_stages=2):
+                T.copy(Q[bz, k * block_n : (k + 1) * block_n, bx, :], q)
+                T.clear(acc_k)
+                T.clear(acc_v)
+                T.gemm(K_shared, q, acc_k, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(V_shared, q, acc_v, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+
+            T.copy(acc_k, out)
+            T.copy(out, O[bz, by * block_m : (by + 1) * block_m, bx, :])
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+    }
+    kernel = _compile_tvm_ffi(preloop_tma_prefix, pass_configs)
+
+    src = kernel.get_kernel_source()
+    producer_match = re.search(r"if \([^\n]*threadIdx\.x[^\n]*\) \{", src)
+    assert producer_match, src
+    producer_idx = producer_match.start()
+    consumer_idx = src.index("} else {", producer_idx)
+    prelude_src = src[:producer_idx]
+    producer_src = src[producer_idx:consumer_idx]
+    consumer_src = src[consumer_idx:]
+
+    assert "mbarrier_1" not in src
+    assert "tl::tma_load(K_desc" not in prelude_src
+    assert "tl::tma_load(V_desc" not in prelude_src
+    assert "tl::tma_load(K_desc" in producer_src
+    assert "tl::tma_load(V_desc" in producer_src
+    assert len(re.findall(r"mbarrier\[[0-9]+\]\.wait\(0\);", consumer_src)) >= 2
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_mixed_tma_cp_async_shared_stage_barriers():
     """Mixed TMA+cp.async groups should share one forward/bp barrier set."""
 

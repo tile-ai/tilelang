@@ -934,6 +934,85 @@ static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
   return Optional<Var>();
 }
 
+static bool IsPreludeTmaProducerStmt(const Stmt &stmt, Target target) {
+  const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
+  if (!call) {
+    return false;
+  }
+  auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+  if (!tile_op.defined()) {
+    return false;
+  }
+  if (const auto *copy = tile_op.as<CopyNode>()) {
+    return ClassifyCopy(copy, target) == TileStmtKind::kTmaProducer;
+  }
+  if (tile_op.as<Conv2DIm2ColOpNode>()) {
+    return TargetIsHopper(target);
+  }
+  return false;
+}
+
+static PrimExpr AnnotatePreludeTmaTileOp(const Call &tile_call,
+                                         const Buffer &barrier_buf,
+                                         PrimExpr barrier_id) {
+  PrimExpr rewritten;
+  auto tile_op = ParseOperator(tile_call);
+  if (tile_op.defined() && tile_op.as<CopyNode>()) {
+    rewritten = RewriteCopyToTmaCopy(tile_call, barrier_buf, barrier_id);
+  } else {
+    rewritten = AnnotateTileOpBarrier(tile_call, barrier_buf, barrier_id);
+  }
+  auto call = Downcast<Call>(rewritten);
+  auto annos = call->annotations;
+  annos.Set("emit_arrive", IntImm(DataType::Int(32), 1));
+  return Call(call->dtype, call->op, call->args, annos, call->span);
+}
+
+static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
+                                          const Buffer &barrier_buf,
+                                          PrimExpr barrier_id) {
+  if (const auto *eval = stmt.as<EvaluateNode>()) {
+    Call tile_call = Downcast<Call>(eval->value);
+    return Evaluate(AnnotatePreludeTmaTileOp(tile_call, barrier_buf,
+                                             std::move(barrier_id)));
+  }
+  if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+    ICHECK(!if_stmt->else_case.defined());
+    return IfThenElse(if_stmt->condition,
+                      RewritePreludeTmaProducerStmt(if_stmt->then_case,
+                                                    barrier_buf, barrier_id),
+                      std::nullopt, if_stmt->span);
+  }
+  if (const auto *attr = stmt.as<AttrStmtNode>()) {
+    return AttrStmt(
+        attr->node, attr->attr_key, attr->value,
+        RewritePreludeTmaProducerStmt(attr->body, barrier_buf, barrier_id),
+        attr->span);
+  }
+  if (const auto *let = stmt.as<LetStmtNode>()) {
+    return LetStmt(
+        let->var, let->value,
+        RewritePreludeTmaProducerStmt(let->body, barrier_buf, barrier_id),
+        let->span);
+  }
+  if (const auto *block = stmt.as<BlockNode>()) {
+    Block new_block = GetRef<Block>(block);
+    new_block.CopyOnWrite()->body =
+        RewritePreludeTmaProducerStmt(block->body, barrier_buf, barrier_id);
+    return new_block;
+  }
+  if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+    Block new_block = realize->block;
+    new_block.CopyOnWrite()->body = RewritePreludeTmaProducerStmt(
+        realize->block->body, barrier_buf, barrier_id);
+    return BlockRealize(realize->iter_values, realize->predicate, new_block,
+                        realize->span);
+  }
+  LOG(FATAL) << "Unsupported prelude TMA producer stmt wrapper: "
+             << stmt->GetTypeKey();
+  return stmt;
+}
+
 // ---------------------------------------------------------------------------
 // Main rewriter
 // ---------------------------------------------------------------------------
@@ -1112,7 +1191,9 @@ private:
     // barrier group — the last forward arrive covers everything.
     int num_fwd = num_producer_groups * num_stages;
     int num_bp = num_producer_groups * num_stages;
-    int total_barriers = num_fwd + num_bp;
+    int num_preloop_tma_fwd =
+        CountPreludeTmaProducerStmts(orig_block->body, pipeline_loop);
+    int total_barriers = num_fwd + num_bp + num_preloop_tma_fwd;
     Buffer barrier_buf =
         CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
     // arrive_counts are computed later (after producer_extent is finalized).
@@ -1179,10 +1260,15 @@ private:
       // Re-compute barrier layout with a single merged group.
       num_fwd = num_stages;
       num_bp = num_stages;
-      total_barriers = num_fwd + num_bp;
+      total_barriers = num_fwd + num_bp + num_preloop_tma_fwd;
       barrier_buf =
           CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
     }
+
+    ws_barrier_buf_ = barrier_buf;
+    preloop_tma_fwd_base_ = num_fwd + num_bp;
+    preloop_tma_fwd_count_ = num_preloop_tma_fwd;
+    preloop_tma_fwd_cursor_ = 0;
 
     std::vector<Array<Stmt>> producer_loop_prefix_stmts(num_producer_groups);
     std::vector<bool> moved_compute_stmts(consumer_compute_stmts.size(), false);
@@ -1252,6 +1338,9 @@ private:
     }
     for (int i = 0; i < num_bp; ++i) {
       arrive_counts.push_back(consumer_extent);
+    }
+    for (int i = 0; i < num_preloop_tma_fwd; ++i) {
+      arrive_counts.push_back(IntImm(DataType::Int(32), 1));
     }
 
     // --- Build producer body ---
@@ -1679,11 +1768,15 @@ private:
     // Rebuild BlockRealize.
     BlockRealize new_realize = GetRef<BlockRealize>(orig_realize);
     new_realize.CopyOnWrite()->block = new_block;
+    ws_barrier_buf_ = Buffer();
+    preloop_tma_fwd_base_ = -1;
+    preloop_tma_fwd_count_ = 0;
+    preloop_tma_fwd_cursor_ = 0;
     return new_realize;
   }
 
   // --- Find the first For loop with num_stages annotation ---
-  const ForNode *FindPipelineLoop(const Stmt &stmt) {
+  const ForNode *FindPipelineLoop(const Stmt &stmt) const {
     if (auto *for_node = stmt.as<ForNode>()) {
       if (for_node->annotations.Get("num_stages")) {
         return for_node;
@@ -1870,6 +1963,46 @@ private:
     return IfThenElse(LT(thread_iv_->var, consumer_extent), stmt);
   }
 
+  int CountPreludeTmaProducerStmts(const Stmt &stmt,
+                                   const ForNode *pipeline_loop) const {
+    if (stmt.get() == pipeline_loop) {
+      return 0;
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      int loop_idx = -1;
+      for (int i = 0; i < static_cast<int>(seq->seq.size()); ++i) {
+        if (FindPipelineLoop(seq->seq[i]) == pipeline_loop) {
+          loop_idx = i;
+          break;
+        }
+      }
+      if (loop_idx < 0) {
+        return 0;
+      }
+      int count = 0;
+      for (int i = 0; i < loop_idx; ++i) {
+        if (IsPreludeTmaProducerStmt(seq->seq[i], target_)) {
+          ++count;
+        }
+      }
+      count += CountPreludeTmaProducerStmts(seq->seq[loop_idx], pipeline_loop);
+      return count;
+    }
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return CountPreludeTmaProducerStmts(let->body, pipeline_loop);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      return CountPreludeTmaProducerStmts(realize->block->body, pipeline_loop);
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return CountPreludeTmaProducerStmts(block->body, pipeline_loop);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return CountPreludeTmaProducerStmts(attr->body, pipeline_loop);
+    }
+    return 0;
+  }
+
   ReplaceResult ReplacePipelineLoopInStmt(const Stmt &stmt,
                                           const ForNode *pipeline_loop,
                                           const Stmt &ws_body,
@@ -1879,13 +2012,10 @@ private:
     }
     if (auto *seq = stmt.as<SeqStmtNode>()) {
       Array<Stmt> new_seq;
-      bool found = false;
       // First pass: find which child contains the pipeline loop.
       int loop_idx = -1;
       for (int i = 0; i < static_cast<int>(seq->seq.size()); ++i) {
-        ReplaceResult probe = ReplacePipelineLoopInStmt(
-            seq->seq[i], pipeline_loop, ws_body, consumer_extent);
-        if (probe.found) {
+        if (FindPipelineLoop(seq->seq[i]) == pipeline_loop) {
           loop_idx = i;
           break;
         }
@@ -1898,6 +2028,19 @@ private:
       // move next to the branch that consumes them, or are duplicated when
       // both producer and consumer need the same definition.
       for (int i = 0; i < loop_idx; ++i) {
+        if (IsPreludeTmaProducerStmt(seq->seq[i], target_)) {
+          ICHECK_GE(preloop_tma_fwd_base_, 0);
+          ICHECK(ws_barrier_buf_.defined());
+          ICHECK_LT(preloop_tma_fwd_cursor_, preloop_tma_fwd_count_);
+          PrimExpr barrier_id =
+              IntImm(DataType::Int(32),
+                     preloop_tma_fwd_base_ + preloop_tma_fwd_cursor_++);
+          extracted_producer_init_.push_back(RewritePreludeTmaProducerStmt(
+              seq->seq[i], ws_barrier_buf_, barrier_id));
+          extracted_consumer_init_.push_back(MakeParityWait(
+              ws_barrier_buf_, barrier_id, IntImm(DataType::Int(32), 0)));
+          continue;
+        }
         switch (ClassifyPreludeStmt(seq->seq[i], buffer_data_to_buffer_,
                                     producer_prelude_live_seed_,
                                     consumer_prelude_live_seed_)) {
@@ -2007,6 +2150,10 @@ private:
   LocalLiveSet consumer_prelude_live_seed_;
   Array<Stmt> extracted_producer_init_;
   Array<Stmt> extracted_consumer_init_;
+  Buffer ws_barrier_buf_;
+  int preloop_tma_fwd_base_{-1};
+  int preloop_tma_fwd_count_{0};
+  int preloop_tma_fwd_cursor_{0};
 };
 
 // ---------------------------------------------------------------------------

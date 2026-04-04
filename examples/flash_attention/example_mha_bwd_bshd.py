@@ -362,6 +362,7 @@ def run_regression_perf():
     with torch.no_grad():
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
         kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N)
+        print(kernel.get_kernel_source())
     dQ = torch.zeros(BATCH, N_CTX, H, D_HEAD, device=device, dtype=torch.float32)
     dK = torch.zeros(BATCH, N_CTX, H, D_HEAD, device=device, dtype=torch.float16)
     dV = torch.zeros(BATCH, N_CTX, H, D_HEAD, device=device, dtype=torch.float16)
@@ -382,4 +383,6 @@ if __name__ == "__main__":
     parser.add_argument("--d_head", type=int, default=64, help="Head dimension")
     parser.add_argument("--causal", type=bool, default=False, help="Causal flag")
     args = parser.parse_args()
-    main(args.batch, args.h, args.n_ctx, args.d_head, args.causal)
+    # main(args.batch, args.h, args.n_ctx, args.d_head, args.causal)
+    latency = run_regression_perf()
+    print("latency:", latency)
