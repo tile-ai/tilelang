@@ -70,6 +70,45 @@ def test_tma_lower_no_warp_specialized_injects_mbarrier():
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tma_lower_1d_no_warp_specialized():
+    """Regression for issue #1842: 1D TMA load fails when warp specialization is disabled.
+
+    A single-dimension tensor copy (global -> shared -> global) using 1D bulk
+    TMA must compile and produce correct results when
+    ``tl.disable_warp_specialized=True``.
+    """
+
+    length = 7168
+
+    @T.prim_func
+    def tma_copy_1d(
+        a: T.Tensor((length,), T.float32),
+        out: T.Tensor((length,), T.float32),
+    ):
+        with T.Kernel(1, threads=256):
+            a_shared = T.alloc_shared((length,), T.float32)
+            T.copy(a, a_shared)
+            T.copy(a_shared, out)
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    }
+    kernel = _compile_tvm_ffi(tma_copy_1d, pass_configs, out_idx=[1])
+
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load" in src
+    assert "mbarrier_mem" in src
+    assert "tl::tma_store" in src
+
+    t = torch.randn((length,), device="cuda", dtype=torch.float32)
+    out = kernel(t)
+    torch.testing.assert_close(out, t)
+    torch.cuda.synchronize()
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tma_lower_no_warp_specialized_2d_descriptor_uses_args1_barrier():
     """Cover the 2D-descriptor TMA barrier rewrite path (barrier at args[1])."""
 

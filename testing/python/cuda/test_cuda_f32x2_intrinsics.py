@@ -120,12 +120,12 @@ def _make_auto_vec_binary_kernel(py_op, dtype_tl):
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, 2), dtype=dtype_tl),
-        B: T.Tensor((M, 2), dtype=dtype_tl),
-        C: T.Tensor((M, 2), dtype=dtype_tl),
+        A: T.Tensor((M, 4), dtype=dtype_tl),
+        B: T.Tensor((M, 4), dtype=dtype_tl),
+        C: T.Tensor((M, 4), dtype=dtype_tl),
     ):
         with T.Kernel(1, 1, threads=M) as (bx, by):
-            for i, v in T.Parallel(M, 2):
+            for i, v in T.Parallel(M, 4):
                 C[i, v] = py_op(A[i, v], B[i, v])
 
     return main

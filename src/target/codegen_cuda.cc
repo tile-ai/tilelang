@@ -870,7 +870,11 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
   // (__hadd2, __hsub2, etc.) are available on SM80+ (bf16) / SM53+ (fp16).
   // The tl::*2 C++ helpers have compile-time arch guards with scalar
   // fallbacks, so we can emit them unconditionally for 16-bit types.
-  if (t.lanes() == 2) {
+  //
+  // When lanes > 2 and is even, we decompose the vector operation into
+  // lanes/2 independent x2 packed operations on consecutive pairs.
+  int lanes = t.lanes();
+  if (lanes >= 2 && lanes % 2 == 0) {
     bool is_f32x2 = t.is_float() && t.bits() == 32;
     bool is_bf16x2 = t.is_bfloat16();
     bool is_fp16x2 = t.is_float16();
@@ -902,29 +906,77 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         tl_func = "max2";
 
       if (!tl_func.empty()) {
-        // For bfloat16x2 / float16x2 both map to uint1 in generated CUDA,
-        // so we must cast arguments to the correct native type and cast the
-        // result back to uint1.
-        bool need_cast = is_bf16x2 || is_fp16x2;
-        std::string native_type;
-        if (is_bf16x2)
-          native_type = "__nv_bfloat162";
-        else if (is_fp16x2)
-          native_type = "__half2";
+        // Decompose into lanes/2 independent x2 packed operations.
+        //
+        // Vector type → CUDA struct mapping:
+        //   bf16x2 -> uint1 {.x}          bf16x4 -> uint2 {.x, .y}
+        //   bf16x8 -> uint4 {.x,.y,.z,.w} (each field = one nv_bfloat162)
+        //   fp16x2 -> uint1 {.x}          fp16x4 -> uint2 {.x, .y}  ...
+        //   f32x2  -> float2 {.x, .y}     f32x4  -> float4 {.x,.y,.z,.w}
+        //
+        // For bf16/fp16: each 32-bit field already packs a pair of elements,
+        //   so we apply tl::*2 on each field directly.
+        // For f32: consecutive pairs of 32-bit fields form a float2,
+        //   so we apply tl::*2 on each float2 pair.
+        int num_pairs = lanes / 2;
+        static const char access[] = {'x', 'y', 'z', 'w'};
 
-        std::string lhs_str = PrintExpr(lhs);
-        std::string rhs_str = PrintExpr(rhs);
+        std::string sret = name_supply_->FreshName("_");
+        this->PrintIndent();
+        this->PrintType(t, stream);
+        stream << ' ' << sret << ";\n";
+        int ssa_scope = BeginScope();
+        {
+          std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.dtype());
+          std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
 
-        if (need_cast) {
-          std::string cast_lhs =
-              "tl::from_uint1<" + native_type + ">(" + lhs_str + ")";
-          std::string cast_rhs =
-              "tl::from_uint1<" + native_type + ">(" + rhs_str + ")";
-          os << "tl::to_uint1(tl::" << tl_func << "(" << cast_lhs << ", "
-             << cast_rhs << "))";
-        } else {
-          os << "tl::" << tl_func << "(" << lhs_str << ", " << rhs_str << ")";
+          if (is_bf16x2 || is_fp16x2) {
+            std::string native_type = is_bf16x2 ? "__nv_bfloat162" : "__half2";
+            for (int p = 0; p < num_pairs; ++p) {
+              std::string field(1, access[p]);
+              std::string pair_lhs = "tl::from_uint1<";
+              pair_lhs += native_type;
+              pair_lhs += ">(*(uint1*)(&(";
+              pair_lhs += vlhs;
+              pair_lhs += ".";
+              pair_lhs += field;
+              pair_lhs += ")))";
+              std::string pair_rhs = "tl::from_uint1<";
+              pair_rhs += native_type;
+              pair_rhs += ">(*(uint1*)(&(";
+              pair_rhs += vrhs;
+              pair_rhs += ".";
+              pair_rhs += field;
+              pair_rhs += ")))";
+              this->PrintIndent();
+              stream << "*(uint1*)(&(" << sret << "." << field
+                     << ")) = tl::to_uint1(tl::" << tl_func << "(" << pair_lhs
+                     << ", " << pair_rhs << "));\n";
+            }
+          } else {
+            // f32: apply tl::*2 on each consecutive pair of float fields,
+            // reinterpreted as float2.
+            for (int p = 0; p < num_pairs; ++p) {
+              std::string field(1, access[p * 2]);
+              std::string pair_lhs = "*(float2*)(&(";
+              pair_lhs += vlhs;
+              pair_lhs += ".";
+              pair_lhs += field;
+              pair_lhs += "))";
+              std::string pair_rhs = "*(float2*)(&(";
+              pair_rhs += vrhs;
+              pair_rhs += ".";
+              pair_rhs += field;
+              pair_rhs += "))";
+              this->PrintIndent();
+              stream << "*(float2*)(&(" << sret << "." << field
+                     << ")) = tl::" << tl_func << "(" << pair_lhs << ", "
+                     << pair_rhs << ");\n";
+            }
+          }
         }
+        EndScope(ssa_scope);
+        os << sret;
         return;
       }
     }
