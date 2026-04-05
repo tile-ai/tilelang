@@ -1379,8 +1379,10 @@ private:
       bool should_enable_async_copy =
           (enable_auto_async_copy && (pipelined_depth_ > 0)) ||
           parallel_prefer_async;
-      lowered = InjectPTXAsyncCopy(lowered, should_enable_async_copy,
-                                   parallel_async_without_async_commit_wait);
+      auto inject_result =
+          InjectPTXAsyncCopy(lowered, should_enable_async_copy,
+                             parallel_async_without_async_commit_wait);
+      lowered = inject_result.stmt;
     }
     return lowered;
   }

@@ -36,6 +36,8 @@ public:
       : enable_auto_async_copy_(enable_auto_async_copy),
         async_without_async_commit_wait_(async_without_async_commit_wait) {}
 
+  bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
+
   Stmt Finalize(Stmt body) {
     if (!pending_sync_copies_ || UseExplicitAsyncSemantics()) {
       pending_sync_copies_ = false;
@@ -277,6 +279,7 @@ public:
           TryInjectPTX(load, store, predicate.defined(),
                        predicate.defined() ? predicate.value() : PrimExpr());
       if (injected.defined()) {
+        injected_ptx_async_copy_ = true;
         if (!UseExplicitAsyncSemantics()) {
           pending_sync_copies_ = true;
           uncommitted_sync_copies_ = true;
@@ -707,17 +710,20 @@ private:
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;
+  bool injected_ptx_async_copy_{false};
   bool pending_sync_copies_{false};
   bool uncommitted_sync_copies_{false};
 };
 
 using namespace tir::transform;
 
-Stmt InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                        bool async_without_async_commit_wait) {
+PTXAsyncCopyInjectResult
+InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
+                   bool async_without_async_commit_wait) {
   PTXAsyncCopyInjector injector(enable_auto_async_copy,
                                 async_without_async_commit_wait);
-  return injector.Finalize(injector(body));
+  Stmt injected = injector(body);
+  return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }
 
 tvm::transform::Pass LowerPTXAsyncCopy() {
@@ -740,9 +746,10 @@ tvm::transform::Pass LowerPTXAsyncCopy() {
         ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
 
     auto *n = f.CopyOnWrite();
-    PTXAsyncCopyInjector injector(enable_auto_async_copy,
-                                  /*async_without_async_commit_wait=*/false);
-    n->body = injector.Finalize(injector(n->body));
+    auto inject_result =
+        InjectPTXAsyncCopy(n->body, enable_auto_async_copy,
+                           /*async_without_async_commit_wait=*/false);
+    n->body = inject_result.stmt;
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerPTXAsyncCopy", {});

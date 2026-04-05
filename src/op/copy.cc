@@ -30,22 +30,6 @@ using namespace tir;
 
 namespace {
 
-static bool ContainsPTXAsyncCopy(const Stmt &stmt) {
-  bool found = false;
-  PostOrderVisit(stmt, [&](const ObjectRef &obj) {
-    if (found) {
-      return;
-    }
-    if (const auto *call = obj.as<CallNode>()) {
-      if (call->op.same_as(builtin::ptx_cp_async()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
-        found = true;
-      }
-    }
-  });
-  return found;
-}
-
 /// Build a TMA leader-thread condition using tl_shuffle_elect.
 /// \param thread_extent The number of threads in the current group
 ///        (e.g., full block extent for non-WS, producer_extent for WS).
@@ -1105,10 +1089,11 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
 
   bool async_without_implicit_commit_wait =
       no_implicit_commit_wait || GetIsAsyncCopy();
-  Stmt cp_async_loop =
+  auto inject_result =
       InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
                          async_without_implicit_commit_wait);
-  if (!ContainsPTXAsyncCopy(cp_async_loop)) {
+  Stmt cp_async_loop = inject_result.stmt;
+  if (!inject_result.injected_ptx_async_copy) {
     LOG(WARNING) << "cp.async rewrite miss for copy src=" << src->name
                  << " (scope=" << src.scope() << ", dtype=" << src->dtype
                  << "), dst=" << dst->name << " (scope=" << dst.scope()
