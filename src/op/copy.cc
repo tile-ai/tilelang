@@ -666,8 +666,9 @@ bool CopyNode::CheckGlobalStrides(const Buffer &buffer,
                    << ", fallback to normal copy.";
       return false;
     }
-    if (const auto *stride = stride_bytes.as<IntImmNode>()) {
-      if (stride->value >= (1ULL << 40)) {
+    if (const int64_t *stride =
+            as_const_int(analyzer->Simplify(stride_bytes))) {
+      if (*stride >= (int64_t{1} << 40)) {
         LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
                      << stride_bytes << " for buffer " << buffer->name
                      << ", fallback to normal copy.";
@@ -874,26 +875,6 @@ bool CopyNode::CheckCPAsyncCopyPreconditions() const {
     return false;
   }
   return true;
-}
-
-bool HasCPAsyncCompatibleBufferPair(const CopyNode *copy) {
-  return copy != nullptr && copy->CheckCPAsyncCopyPreconditions();
-}
-
-bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled) {
-  using namespace tvm::transform;
-  PassContext pass_ctx = PassContext::Current();
-  return TargetHasAsyncCopy(target) &&
-         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
-             .value();
-}
-
-bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
-                           arith::Analyzer *analyzer,
-                           const LayoutMap &layout_map, bool default_enabled) {
-  return copy != nullptr && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
-         IsAutoAsyncCopyEnabled(target, default_enabled) &&
-         copy->CheckCPAsyncCopy(target, layout_map, analyzer);
 }
 
 bool CopyNode::CheckPipelineManagedCPAsyncCopy() const {

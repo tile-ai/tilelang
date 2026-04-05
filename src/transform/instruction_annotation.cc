@@ -50,6 +50,22 @@ namespace {
 /// Annotation key written by this pass.
 static constexpr const char *kInstructionKind = "tl_instruction_kind";
 
+static bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true) {
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  return TargetHasAsyncCopy(target) &&
+         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
+             .value();
+}
+
+static bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
+                                  arith::Analyzer *analyzer,
+                                  bool default_enabled = true) {
+  return copy != nullptr && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
+         IsAutoAsyncCopyEnabled(target, default_enabled) &&
+         copy->CheckCPAsyncCopy(target, LayoutMap(), analyzer);
+}
+
 // ---------------------------------------------------------------------------
 // Classify copy ops
 // ---------------------------------------------------------------------------
@@ -98,7 +114,7 @@ std::string ClassifyCopy(const CopyNode *copy, Target target,
   }
 
   // Inside a pipelined loop, eligible copies may be lowered to cp.async.
-  if (in_pipeline && CanUseAutoCPAsyncCopy(copy, target, analyzer, LayoutMap(),
+  if (in_pipeline && CanUseAutoCPAsyncCopy(copy, target, analyzer,
                                            /*default_enabled=*/false)) {
     return "cp_async";
   }

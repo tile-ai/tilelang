@@ -603,8 +603,8 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
     return false;
   }
   const auto *copy = tile_op.as<CopyNode>();
-  if (!copy || !HasCPAsyncCompatibleBufferPair(copy) || copy->GetIsTmaCopy() ||
-      copy->GetIsAsyncCopy()) {
+  if (copy == nullptr || !copy->CheckCPAsyncCopyPreconditions() ||
+      copy->GetIsTmaCopy() || copy->GetIsAsyncCopy()) {
     return false;
   }
 
