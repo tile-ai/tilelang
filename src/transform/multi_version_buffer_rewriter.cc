@@ -14,7 +14,9 @@
 #include <functional>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
+#include "../layout/layout.h"
 #include "../op/builtin.h"
 #include "../op/operator.h"
 #include "../op/region.h"
@@ -25,6 +27,92 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
+                 arith::Analyzer *analyzer) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Layout ExpandAnnotatedLayoutForMultiVersionedBuffer(const Layout &layout,
+                                                    const Buffer &old_buffer,
+                                                    const Buffer &new_buffer) {
+  if (!layout.defined() ||
+      new_buffer->shape.size() <= old_buffer->shape.size()) {
+    return Layout();
+  }
+
+  arith::Analyzer analyzer;
+  if (!ShapesEqual(layout->InputShape(), old_buffer->shape, &analyzer)) {
+    return Layout();
+  }
+
+  size_t leading_ndim = new_buffer->shape.size() - old_buffer->shape.size();
+  Array<PrimExpr> trailing_shape;
+  Array<PrimExpr> leading_shape;
+  for (size_t i = 0; i < leading_ndim; ++i) {
+    leading_shape.push_back(new_buffer->shape[i]);
+  }
+  for (size_t i = 0; i < old_buffer->shape.size(); ++i) {
+    trailing_shape.push_back(new_buffer->shape[leading_ndim + i]);
+  }
+  if (!ShapesEqual(trailing_shape, old_buffer->shape, &analyzer)) {
+    return Layout();
+  }
+
+  return layout->Expand(leading_shape);
+}
+
+bool UpdateExpandedLayoutMapForRemappedAllocs(
+    const std::vector<std::pair<Buffer, Buffer>> &remapped_allocs,
+    Map<String, Any> *annotations) {
+  if (remapped_allocs.empty() || !annotations->count(attr::kLayoutMap)) {
+    return false;
+  }
+
+  auto layout_map_ref = annotations->Get(attr::kLayoutMap);
+  if (!layout_map_ref.has_value()) {
+    return false;
+  }
+  auto layout_map = layout_map_ref.value().as<Map<Var, Layout>>();
+  if (!layout_map.has_value()) {
+    return false;
+  }
+
+  Map<Var, Layout> updated_layout_map = layout_map.value();
+  std::unordered_set<const VarNode *> visited;
+  bool changed = false;
+  for (const auto &[old_buffer, new_buffer] : remapped_allocs) {
+    if (!visited.insert(old_buffer->data.get()).second ||
+        !updated_layout_map.count(old_buffer->data)) {
+      continue;
+    }
+    Layout layout = updated_layout_map[old_buffer->data];
+    Layout expanded = ExpandAnnotatedLayoutForMultiVersionedBuffer(
+        layout, old_buffer, new_buffer);
+    if (!expanded.defined()) {
+      continue;
+    }
+    updated_layout_map.Set(old_buffer->data, expanded);
+    changed = true;
+  }
+
+  if (changed) {
+    annotations->Set(attr::kLayoutMap, updated_layout_map);
+  }
+  return changed;
+}
+
+} // namespace
 
 enum class Role : uint8_t { kConsumer, kProducer, kBoth };
 
@@ -455,15 +543,24 @@ private:
         Downcast<BlockRealize>(StmtExprMutator::VisitStmt_(op));
     Block block = block_realize->block;
     Array<Buffer> alloc_buffers;
+    std::vector<std::pair<Buffer, Buffer>> remapped_allocs;
     for (auto buffer : block->alloc_buffers) {
       if (buffer_remap_.count(buffer)) {
         Buffer new_buffer = buffer_remap_[buffer];
         alloc_buffers.push_back(new_buffer);
+        remapped_allocs.emplace_back(buffer, new_buffer);
       } else {
         alloc_buffers.push_back(buffer);
       }
     }
     block.CopyOnWrite()->alloc_buffers = std::move(alloc_buffers);
+
+    if (!remapped_allocs.empty()) {
+      auto ann = block->annotations;
+      if (UpdateExpandedLayoutMapForRemappedAllocs(remapped_allocs, &ann)) {
+        block.CopyOnWrite()->annotations = std::move(ann);
+      }
+    }
 
     // Update barrier_init annotation: replicate arrive counts for versioned
     // barrier buffers so lower_shared_barrier sees the correct count.

@@ -1,6 +1,7 @@
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
+from tilelang.layout import Layout
 import tilelang.testing
 from tvm.tir.stmt_functor import post_order_visit
 
@@ -126,6 +127,18 @@ def _count_copy_calls_with_annotation(func, annotation_key):
 
     post_order_visit(func.body, _visit)
     return annotated, total
+
+
+def _find_block_with_layout_map(func):
+    blocks = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tir.Block) and "layout_map" in node.annotations:
+            blocks.append(node)
+
+    post_order_visit(func.body, _visit)
+    assert blocks, "Expected at least one block with layout_map"
+    return blocks[0]
 
 
 def test_trival_pipeline():
@@ -450,6 +463,46 @@ def test_degenerate_pipeline_with_single_stage_is_not_expanded():
     assert "tl_pipelined_num_stages" not in func.script()
     assert "frag[k, i]" in func.script()
     assert "frag[2, i]" not in func.script()
+
+
+def test_inject_software_pipeline_expands_annotated_layout():
+    layout = Layout([8, 16], lambda i, j: i * 16 + j)
+
+    @T.prim_func
+    def before(A: T.Tensor((4, 8, 16), T.float16), B: T.Tensor((4, 8, 16), T.float16)):
+        with T.block("root"):
+            shared = T.alloc_buffer((8, 16), T.float16, scope="shared.dyn")
+            T.annotate_layout({shared: layout})
+            for k in T.serial(
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [0, 1],
+                },
+            ):
+                with T.block("load"):
+                    T.reads(A[k, 0:8, 0:16])
+                    T.writes(shared[0:8, 0:16])
+                    for i in T.serial(8):
+                        for j in T.serial(16):
+                            shared[i, j] = A[k, i, j]
+                with T.block("store"):
+                    T.reads(shared[0:8, 0:16])
+                    T.writes(B[k, 0:8, 0:16])
+                    for i in T.serial(8):
+                        for j in T.serial(16):
+                            B[k, i, j] = shared[i, j]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    block = _find_block_with_layout_map(mod["main"])
+    shared = next(buf for buf in block.alloc_buffers if buf.scope() == "shared.dyn")
+    layout_map = block.annotations["layout_map"]
+
+    assert [int(dim) for dim in shared.shape] == [2, 8, 16]
+    assert list(layout_map[shared.data].get_input_shape()) == [2, 8, 16]
+    assert layout_map[shared.data].is_equal(layout.expand([2]))
 
 
 if __name__ == "__main__":

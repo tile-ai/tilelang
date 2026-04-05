@@ -3,6 +3,7 @@
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers
  */
+#include <tvm/arith/analyzer.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/transform.h>
@@ -12,7 +13,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
+#include "../layout/layout.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/operator.h"
@@ -29,6 +32,92 @@ namespace tl {
 using namespace tir;
 using namespace ffi;
 namespace software_pipeline {
+
+namespace {
+
+bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
+                 arith::Analyzer *analyzer) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Layout ExpandAnnotatedLayoutForMultiVersionedBuffer(const Layout &layout,
+                                                    const Buffer &old_buffer,
+                                                    const Buffer &new_buffer) {
+  if (!layout.defined() ||
+      new_buffer->shape.size() <= old_buffer->shape.size()) {
+    return Layout();
+  }
+
+  arith::Analyzer analyzer;
+  if (!ShapesEqual(layout->InputShape(), old_buffer->shape, &analyzer)) {
+    return Layout();
+  }
+
+  size_t leading_ndim = new_buffer->shape.size() - old_buffer->shape.size();
+  Array<PrimExpr> trailing_shape;
+  Array<PrimExpr> leading_shape;
+  for (size_t i = 0; i < leading_ndim; ++i) {
+    leading_shape.push_back(new_buffer->shape[i]);
+  }
+  for (size_t i = 0; i < old_buffer->shape.size(); ++i) {
+    trailing_shape.push_back(new_buffer->shape[leading_ndim + i]);
+  }
+  if (!ShapesEqual(trailing_shape, old_buffer->shape, &analyzer)) {
+    return Layout();
+  }
+
+  return layout->Expand(leading_shape);
+}
+
+bool UpdateExpandedLayoutMapForRemappedAllocs(
+    const std::vector<std::pair<Buffer, Buffer>> &remapped_allocs,
+    Map<String, Any> *annotations) {
+  if (remapped_allocs.empty() || !annotations->count(attr::kLayoutMap)) {
+    return false;
+  }
+
+  auto layout_map_ref = annotations->Get(attr::kLayoutMap);
+  if (!layout_map_ref.has_value()) {
+    return false;
+  }
+  auto layout_map = layout_map_ref.value().as<Map<Var, Layout>>();
+  if (!layout_map.has_value()) {
+    return false;
+  }
+
+  Map<Var, Layout> updated_layout_map = layout_map.value();
+  std::unordered_set<const VarNode *> visited;
+  bool changed = false;
+  for (const auto &[old_buffer, new_buffer] : remapped_allocs) {
+    if (!visited.insert(old_buffer->data.get()).second ||
+        !updated_layout_map.count(old_buffer->data)) {
+      continue;
+    }
+    Layout layout = updated_layout_map[old_buffer->data];
+    Layout expanded = ExpandAnnotatedLayoutForMultiVersionedBuffer(
+        layout, old_buffer, new_buffer);
+    if (!expanded.defined()) {
+      continue;
+    }
+    updated_layout_map.Set(old_buffer->data, expanded);
+    changed = true;
+  }
+
+  if (changed) {
+    annotations->Set(attr::kLayoutMap, updated_layout_map);
+  }
+  return changed;
+}
+
+} // namespace
 
 struct LetWrapper {
   Var var;
@@ -3189,14 +3278,25 @@ private:
     // rewriting. This handles buffers allocated in this block but
     // multi-versioned during pipeline rewriting of inner loops.
     bool allocs_changed = false;
+    bool layout_changed = false;
     Array<Buffer> new_alloc_buffers;
+    std::vector<std::pair<Buffer, Buffer>> remapped_allocs;
     for (const auto &buffer : block->alloc_buffers) {
       if (auto remapped = pending_buffer_remap_.Get(buffer)) {
         new_alloc_buffers.push_back(remapped.value());
+        remapped_allocs.emplace_back(buffer, remapped.value());
         pending_buffer_remap_.erase(buffer);
         allocs_changed = true;
       } else {
         new_alloc_buffers.push_back(buffer);
+      }
+    }
+
+    if (!remapped_allocs.empty()) {
+      auto ann = block->annotations;
+      if (UpdateExpandedLayoutMapForRemappedAllocs(remapped_allocs, &ann)) {
+        block.CopyOnWrite()->annotations = std::move(ann);
+        layout_changed = true;
       }
     }
 
@@ -3240,7 +3340,7 @@ private:
       }
     }
 
-    bool modified = children_modified || allocs_changed;
+    bool modified = children_modified || allocs_changed || layout_changed;
     if (modified) {
       // Recalculate reads/writes only when the block was actually
       // modified by pipeline rewriting.  Unconditional recalculation

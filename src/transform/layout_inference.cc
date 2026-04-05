@@ -160,58 +160,6 @@ public:
               }
             }
           }
-          // After InjectSoftwarePipeline, multi-versioned buffers share
-          // the same data Var as the original but have an extra leading
-          // dimension (num_stages).
-          if (!shapes_equal) {
-            // Check for MVB-expanded buffer: trailing dims match.
-            size_t src_ndim = src_layout->InputShape().size();
-            size_t sib_ndim = sib->shape.size();
-            if (sib_ndim > src_ndim) {
-              bool trailing_match = true;
-              for (size_t i = 0; i < src_ndim; ++i) {
-                if (!analyzer_.CanProveEqual(
-                        src_layout->InputShape()[i],
-                        sib->shape[sib_ndim - src_ndim + i])) {
-                  trailing_match = false;
-                  break;
-                }
-              }
-              if (trailing_match) {
-                Array<PrimExpr> leading;
-                for (size_t i = 0; i < sib_ndim - src_ndim; ++i) {
-                  leading.push_back(sib->shape[i]);
-                }
-                Layout target = src_layout->Expand(leading);
-                if (layout_map.count(sib)) {
-                  ICHECK(target->IsEqual(layout_map[sib].get()))
-                      << "Expanded layout mismatch for MVB sibling " << sib;
-                } else {
-                  layout_map.Set(sib, target);
-                  if (update_queue && use_list_.count(sib)) {
-                    for (int idx : use_list_[sib]) {
-                      EnqueueWithPriority(idx, q, in_queue, cur_infer_id,
-                                          layout_map);
-                    }
-                  }
-                }
-                continue;
-              }
-            }
-            // Skip siblings whose total storage doesn't match.
-            PrimExpr src_product = Integer(1);
-            for (const auto &d : src_layout->InputShape())
-              src_product = src_product * d;
-            PrimExpr sib_product = Integer(1);
-            for (const auto &d : sib->shape)
-              sib_product = sib_product * d;
-            if (!analyzer_.CanProveEqual(
-                    src_product *
-                        Integer(GetElementStorageBits(src_buffer->dtype)),
-                    sib_product * Integer(GetElementStorageBits(sib->dtype)))) {
-              continue;
-            }
-          }
           Layout target_layout =
               shapes_equal
                   ? src_layout
@@ -453,43 +401,6 @@ public:
                 shapes_equal = false;
                 break;
               }
-            }
-          }
-
-          if (!shapes_equal) {
-            // Check for MVB-expanded buffer (extra leading dims).
-            size_t rep_ndim = rep_layout.value()->InputShape().size();
-            size_t buf_ndim = buf->shape.size();
-            if (buf_ndim > rep_ndim) {
-              bool trailing_match = true;
-              for (size_t i = 0; i < rep_ndim; ++i) {
-                if (!analyzer_.CanProveEqual(
-                        rep_layout.value()->InputShape()[i],
-                        buf->shape[buf_ndim - rep_ndim + i])) {
-                  trailing_match = false;
-                  break;
-                }
-              }
-              if (trailing_match) {
-                Array<PrimExpr> leading;
-                for (size_t i = 0; i < buf_ndim - rep_ndim; ++i) {
-                  leading.push_back(buf->shape[i]);
-                }
-                layout_map.Set(buf, rep_layout.value()->Expand(leading));
-                continue;
-              }
-            }
-            PrimExpr src_product = Integer(1);
-            for (const auto &d : rep_layout.value()->InputShape())
-              src_product = src_product * d;
-            PrimExpr buf_product = Integer(1);
-            for (const auto &d : buf->shape)
-              buf_product = buf_product * d;
-            if (!analyzer_.CanProveEqual(
-                    src_product *
-                        Integer(GetElementStorageBits(rep.value()->dtype)),
-                    buf_product * Integer(GetElementStorageBits(buf->dtype)))) {
-              continue;
             }
           }
           Layout reshaped =
@@ -871,45 +782,9 @@ private:
           if (shapes_equal) {
             annotated_layout_map_.Set(buffer, layout);
           } else {
-            // Check if buffer is an MVB-expanded version (extra leading
-            // stage dimensions, trailing dims match layout's InputShape).
-            size_t layout_ndim = layout->InputShape().size();
-            size_t buf_ndim = buffer->shape.size();
-            if (buf_ndim > layout_ndim) {
-              bool trailing_match = true;
-              for (size_t i = 0; i < layout_ndim; ++i) {
-                if (!analyzer_.CanProveEqual(
-                        layout->InputShape()[i],
-                        buffer->shape[buf_ndim - layout_ndim + i])) {
-                  trailing_match = false;
-                  break;
-                }
-              }
-              if (trailing_match) {
-                // Expand the layout with leading stage dimensions.
-                Array<PrimExpr> leading;
-                for (size_t i = 0; i < buf_ndim - layout_ndim; ++i) {
-                  leading.push_back(buffer->shape[i]);
-                }
-                annotated_layout_map_.Set(buffer, layout->Expand(leading));
-                continue;
-              }
-            }
             // Use the first buffer sharing this var as the base for dtype ratio
             int64_t base_bits = GetElementStorageBits(buffers[0]->dtype);
-            // Skip buffers whose total storage doesn't match.
-            PrimExpr layout_product = Integer(1);
-            for (const auto &d : layout->InputShape())
-              layout_product = layout_product * d;
-            PrimExpr buf_product = Integer(1);
-            for (const auto &d : buffer->shape)
-              buf_product = buf_product * d;
-            if (!analyzer_.CanProveEqual(
-                    layout_product * Integer(base_bits),
-                    buf_product *
-                        Integer(GetElementStorageBits(buffer->dtype)))) {
-              continue;
-            }
+
             auto reshaped_layout =
                 layout->Reshape(buffer->shape, &analyzer_, Integer(base_bits),
                                 Integer(GetElementStorageBits(buffer->dtype)));

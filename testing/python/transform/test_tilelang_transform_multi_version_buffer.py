@@ -2,6 +2,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 from tilelang.utils.target import determine_target
 import tilelang.language as T
+from tilelang.layout import Layout
 import tilelang.testing
 from tvm import tir
 
@@ -19,6 +20,18 @@ def _check(original, transformed):
     transformed = tir.transform.LowerOpaqueBlock()(transformed)
 
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
+
+
+def _find_block_with_layout_map(func):
+    blocks = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tir.Block) and "layout_map" in node.annotations:
+            blocks.append(node)
+
+    tvm.tir.stmt_functor.post_order_visit(func.body, _visit)
+    assert blocks, "Expected at least one block with layout_map"
+    return blocks[0]
 
 
 M = 512
@@ -138,6 +151,35 @@ def test_multi_version_buffer_with_let():
                     accum[i] = accum[i] + shared[k % 2, i]
 
     _check(before, after)
+
+
+def test_multi_version_buffer_expands_annotated_layout():
+    layout = Layout([8, 16], lambda i, j: i * 16 + j)
+
+    @T.prim_func
+    def before(A: T.Tensor((8, 16), T.float16), B: T.Tensor((8, 16), T.float16)):
+        with T.block("root"):
+            shared = T.alloc_buffer((8, 16), T.float16, scope="shared.dyn")
+            T.annotate_layout({shared: layout})
+            for _ in T.serial(4, annotations={"num_stages": T.int32(2)}):
+                for i in T.serial(8):
+                    for j in T.serial(16):
+                        shared[i, j] = A[i, j]
+                for i in T.serial(8):
+                    for j in T.serial(16):
+                        B[i, j] = shared[i, j]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MultiVersionBuffer()(mod)
+
+    block = _find_block_with_layout_map(mod["main"])
+    shared = next(buf for buf in block.alloc_buffers if buf.scope() == "shared.dyn")
+    layout_map = block.annotations["layout_map"]
+
+    assert [int(dim) for dim in shared.shape] == [2, 8, 16]
+    assert list(layout_map[shared.data].get_input_shape()) == [2, 8, 16]
+    assert layout_map[shared.data].is_equal(layout.expand([2]))
 
 
 if __name__ == "__main__":
