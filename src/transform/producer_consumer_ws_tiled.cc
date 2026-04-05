@@ -1022,8 +1022,7 @@ static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
     bool rewritten_{false};
   };
 
-  PreludeTmaProducerRewriter rewriter(std::move(barrier_buf),
-                                      std::move(barrier_id));
+  PreludeTmaProducerRewriter rewriter(barrier_buf, std::move(barrier_id));
   return rewriter.Rewrite(stmt);
 }
 
