@@ -92,15 +92,16 @@ GemmSPPy::GemmSPPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   data_ = std::move(node);
 }
 
-void GemmSPPyNode::GetAccessRegions(Array<BufferRegion> *reads,
-                                    Array<BufferRegion> *writes) const {
-  reads->push_back(aRegion_);
-  reads->push_back(eRegion_);
-  reads->push_back(bRegion_);
+AccessRegions GemmSPPyNode::GetAccessRegions() const {
+  AccessRegions result;
+  result.reads.push_back(aRegion_);
+  result.reads.push_back(eRegion_);
+  result.reads.push_back(bRegion_);
   if (!is_one(clear_accum)) {
-    reads->push_back(cRegion_);
+    result.reads.push_back(cRegion_);
   }
-  writes->push_back(cRegion_);
+  result.writes.push_back(cRegion_);
+  return result;
 }
 
 /**

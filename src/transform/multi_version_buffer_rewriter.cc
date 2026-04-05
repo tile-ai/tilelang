@@ -200,20 +200,18 @@ private:
       // GetBlockAccessRegion misses buffer references that are encoded as
       // tl.tileop.region Call args or as plain BufferLoad args whose
       // semantic role (read vs write) is only known to the tile-op.
-      // Use AddReadsWritesForTileOp (which knows every tile-op type) as
-      // the primary supplement, and fall back to RegionOp scanning for
-      // any ops not yet handled there.
+      // Let the tile-op report its own access regions, and fall back to
+      // RegionOp scanning for any ops that still do not expose them.
       if (auto *eval = stmt.as<EvaluateNode>()) {
         if (auto *call = eval->value.as<CallNode>()) {
           auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
           if (tile_op.defined()) {
-            Array<BufferRegion> op_reads, op_writes;
-            AddReadsWritesForTileOp(tile_op, &op_reads, &op_writes);
-            if (!op_reads.empty() || !op_writes.empty()) {
-              stmt_reads.insert(stmt_reads.end(), op_reads.begin(),
-                                op_reads.end());
-              stmt_writes.insert(stmt_writes.end(), op_writes.begin(),
-                                 op_writes.end());
+            AccessRegions access = tile_op->GetAccessRegions();
+            if (!access.reads.empty() || !access.writes.empty()) {
+              stmt_reads.insert(stmt_reads.end(), access.reads.begin(),
+                                access.reads.end());
+              stmt_writes.insert(stmt_writes.end(), access.writes.begin(),
+                                 access.writes.end());
             } else {
               // Fallback: scan RegionOp-encoded args.
               for (const auto &arg : call->args) {
@@ -523,8 +521,8 @@ private:
     bool pushed_explicit_version = false;
     bool pushed_explicit_parity = false;
     if (op->attr_key == kPipelineMVBContextNumStages) {
-      if (const auto *imm = op->value.as<IntImmNode>()) {
-        int num_stages = static_cast<int>(imm->value);
+      if (const int64_t *imm = as_const_int(op->value)) {
+        int num_stages = static_cast<int>(*imm);
         EnsureVersionedBuffers(SelectVersionedBuffers(op->body, num_stages),
                                num_stages);
       }
@@ -706,8 +704,8 @@ private:
           }
           PrimExpr offset =
               analyzer.Simplify(FloorMod(init_orig - init_cycle, 2));
-          if (auto *imm = offset.as<IntImmNode>()) {
-            if (imm->value % 2 != 0) {
+          if (const int64_t *imm = as_const_int(offset)) {
+            if (*imm % 2 != 0) {
               new_parity = FloorMod(parity_cycle + 1, 2);
             }
           }

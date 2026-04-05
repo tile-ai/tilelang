@@ -378,8 +378,8 @@ private:
   }
 
   int GetConstAccessMask(const PrimExpr &expr) const {
-    if (const auto *imm = expr.as<IntImmNode>()) {
-      return static_cast<int>(imm->value);
+    if (const int64_t *imm = as_const_int(expr)) {
+      return static_cast<int>(*imm);
     }
     return 3;
   }
@@ -481,8 +481,8 @@ private:
   }
 
   int GetConstAccessMask(const PrimExpr &expr) const {
-    if (const auto *imm = expr.as<IntImmNode>()) {
-      return static_cast<int>(imm->value);
+    if (const int64_t *imm = as_const_int(expr)) {
+      return static_cast<int>(*imm);
     }
     return 3;
   }
@@ -525,8 +525,8 @@ static Stmt makeParityWait(const Buffer &barrier_buf, PrimExpr barrier_id,
 
 static bool IsTrivialNoOpStmt(const Stmt &stmt) {
   if (const auto *eval = stmt.as<EvaluateNode>()) {
-    if (const auto *imm = eval->value.as<IntImmNode>()) {
-      return imm->value == 0;
+    if (const int64_t *imm = as_const_int(eval->value)) {
+      return *imm == 0;
     }
   }
   if (const auto *seq = stmt.as<SeqStmtNode>()) {

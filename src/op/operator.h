@@ -40,6 +40,11 @@ struct AccessRegion {
   int access_mask{kAccessReadWrite};
 };
 
+struct AccessRegions {
+  Array<BufferRegion> reads;
+  Array<BufferRegion> writes;
+};
+
 inline void AppendAccessRegionByMask(const AccessRegion &access,
                                      Array<BufferRegion> *reads,
                                      Array<BufferRegion> *writes) {
@@ -135,11 +140,12 @@ public:
 
   virtual TileOperator Clone() const = 0;
 
-  virtual void GetAccessRegions(Array<BufferRegion> *reads,
-                                Array<BufferRegion> *writes) const {
+  virtual AccessRegions GetAccessRegions() const {
+    AccessRegions result;
     for (const auto &access : access_regions_) {
-      AppendAccessRegionByMask(access, reads, writes);
+      AppendAccessRegionByMask(access, &result.reads, &result.writes);
     }
+    return result;
   }
 
   void SetAccessRegions(std::vector<AccessRegion> access_regions) {

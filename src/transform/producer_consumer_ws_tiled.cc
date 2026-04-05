@@ -511,8 +511,8 @@ private:
   }
 
   int GetConstAccessMask(const PrimExpr &expr) const {
-    if (const auto *imm = expr.as<IntImmNode>()) {
-      return static_cast<int>(imm->value);
+    if (const int64_t *imm = as_const_int(expr)) {
+      return static_cast<int>(*imm);
     }
     return 3;
   }
@@ -897,8 +897,8 @@ AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
 
     void MarkAccess(const PrimExpr &rw_expr) {
       int rw_mask = 3;
-      if (const auto *imm = rw_expr.as<IntImmNode>()) {
-        rw_mask = static_cast<int>(imm->value);
+      if (const int64_t *imm = as_const_int(rw_expr)) {
+        rw_mask = static_cast<int>(*imm);
       }
       if (rw_mask & 1) {
         result_.read = true;

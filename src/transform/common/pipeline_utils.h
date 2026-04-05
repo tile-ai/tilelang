@@ -5,23 +5,12 @@
  * Provides:
  *  - Pipeline annotation attribute keys
  *  - GetPipelineNumStages()  — extract num_stages from loop annotations
- *  - AddReadsWritesForTileOp() — collect buffer regions touched by a tile op
  *  - ComputeThreadBounds()  — derive thread bounds from an analyzer + IterVar
  */
 #ifndef TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 
 #include <tvm/tir/stmt.h>
-
-#include "../../op/atomic_add.h"
-#include "../../op/atomic_reduce.h"
-#include "../../op/copy.h"
-#include "../../op/fill.h"
-#include "../../op/finalize_reducer.h"
-#include "../../op/gemm.h"
-#include "../../op/gemm_sp.h"
-#include "../../op/operator.h"
-#include "../../op/reduce.h"
 
 namespace tvm {
 namespace tl {
@@ -91,22 +80,6 @@ inline Optional<Integer> GetPipelineNumStages(const ForNode *loop) {
     }
   }
   return Optional<Integer>();
-}
-
-// ---------------------------------------------------------------------------
-// AddReadsWritesForTileOp
-// ---------------------------------------------------------------------------
-
-/*!
- * \brief Collect the buffer regions read/written by a tile operator.
- *
- * Access collection is owned by the tile op itself; most ops use the default
- * mask-based implementation, while ops with conditional reads override it.
- */
-inline void AddReadsWritesForTileOp(const TileOperator &tile_op,
-                                    Array<BufferRegion> *reads,
-                                    Array<BufferRegion> *writes) {
-  tile_op->GetAccessRegions(reads, writes);
 }
 
 // ---------------------------------------------------------------------------

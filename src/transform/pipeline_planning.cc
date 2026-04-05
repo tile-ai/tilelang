@@ -7,6 +7,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
 #include "../op/utils.h"
@@ -276,7 +277,9 @@ private:
           has_non_copy_tile_op_ || nested.HasNonCopyTileOp();
       return;
     }
-    AddReadsWritesForTileOp(tile_op, &reads_, &writes_);
+    AccessRegions access = tile_op->GetAccessRegions();
+    reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
+    writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
     // Detect global->shared TMA copy pattern for pipeline planning.
     // Only mark T.copy (not T.tma_copy) — user-written T.tma_copy already
     // manages its own barriers and should not get a pipeline barrier.
@@ -597,9 +600,9 @@ private:
       } else if (call->op.same_as(builtin::ptx_wait_group())) {
         ++info.cp_async_wait_count;
         if (!call->args.empty()) {
-          if (const auto *imm = call->args[0].as<IntImmNode>()) {
+          if (const int64_t *imm = as_const_int(call->args[0])) {
             info.cp_async_wait_min_inflight = std::min(
-                info.cp_async_wait_min_inflight, static_cast<int>(imm->value));
+                info.cp_async_wait_min_inflight, static_cast<int>(*imm));
           } else {
             info.cp_async_wait_has_dynamic = true;
           }

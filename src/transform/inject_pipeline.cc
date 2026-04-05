@@ -78,12 +78,11 @@ private:
   void VisitExpr_(const CallNode *op) final {
     if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
         tile_op.defined()) {
-      Array<BufferRegion> reads, writes;
-      AddReadsWritesForTileOp(tile_op, &reads, &writes);
-      for (const auto &region : reads) {
+      AccessRegions access = tile_op->GetAccessRegions();
+      for (const auto &region : access.reads) {
         AddBuffer(region->buffer);
       }
-      for (const auto &region : writes) {
+      for (const auto &region : access.writes) {
         AddBuffer(region->buffer);
       }
       StmtExprVisitor::VisitExpr_(op);
@@ -134,7 +133,9 @@ private:
   void VisitExpr_(const CallNode *op) final {
     if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
         tile_op.defined()) {
-      AddReadsWritesForTileOp(tile_op, &reads_, &writes_);
+      AccessRegions access = tile_op->GetAccessRegions();
+      reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
+      writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
       StmtExprVisitor::VisitExpr_(op);
       return;
     }
@@ -198,6 +199,11 @@ struct BufferAccessInfo {
   int use = -1; // the last using stage of the buffer
 };
 
+// Detect whether a stage body already carries explicit async/cp.async
+// semantics. InjectSoftwarePipeline only wants to "upgrade" ordinary producer
+// stages into pipeline-managed async producers; if the body already contains
+// raw cp.async instructions or async queue attrs, re-marking it as async here
+// would stack two async protocols on the same stage.
 bool ContainsExplicitAsyncIntrinsics(const Stmt &stmt) {
   bool found = false;
   PostOrderVisit(stmt, [&](const ObjectRef &obj) {
@@ -799,6 +805,121 @@ private:
     int wait{0};
   };
 
+  struct DeterministicNoWaitCommitEffect {
+    bool deterministic{true};
+    bool has_wait{false};
+    int commit_groups{0};
+
+    static DeterministicNoWaitCommitEffect Unknown() {
+      DeterministicNoWaitCommitEffect effect;
+      effect.deterministic = false;
+      return effect;
+    }
+
+    static DeterministicNoWaitCommitEffect Wait() {
+      DeterministicNoWaitCommitEffect effect;
+      effect.has_wait = true;
+      return effect;
+    }
+  };
+
+  // Analyze a stmt for one specific question used by wait relaxation:
+  // can we prove that it contributes a deterministic number of commit groups
+  // without crossing a wait boundary? The analyzer exposes the effect as
+  // structured state instead of overloading std::optional<int> with both
+  // "unknown" and "has wait" meanings.
+  class DeterministicNoWaitCommitAnalyzer {
+  public:
+    explicit DeterministicNoWaitCommitAnalyzer(const PipelineRewriter *rewriter)
+        : rewriter_(rewriter) {}
+
+    DeterministicNoWaitCommitEffect Analyze(const Stmt &stmt) const {
+      if (const auto *let = stmt.as<LetStmtNode>()) {
+        return Analyze(let->body);
+      }
+      if (const auto *attr = stmt.as<AttrStmtNode>()) {
+        return AnalyzeAttr(attr);
+      }
+      if (const auto *seq = stmt.as<SeqStmtNode>()) {
+        DeterministicNoWaitCommitEffect effect;
+        for (const Stmt &s : seq->seq) {
+          effect = Combine(effect, Analyze(s));
+          if (!effect.deterministic) {
+            return effect;
+          }
+        }
+        return effect;
+      }
+      if (const auto *block = stmt.as<BlockNode>()) {
+        return Analyze(block->body);
+      }
+      if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+        if (!is_one(realize->predicate)) {
+          return DeterministicNoWaitCommitEffect::Unknown();
+        }
+        return Analyze(realize->block->body);
+      }
+      if (const auto *for_node = stmt.as<ForNode>()) {
+        return AnalyzeFor(for_node);
+      }
+      if (stmt.as<IfThenElseNode>()) {
+        return DeterministicNoWaitCommitEffect::Unknown();
+      }
+      if (rewriter_->ContainsAsyncSyncScopes(stmt)) {
+        return DeterministicNoWaitCommitEffect::Unknown();
+      }
+      return {};
+    }
+
+  private:
+    DeterministicNoWaitCommitEffect
+    AnalyzeAttr(const AttrStmtNode *attr) const {
+      if (PipelineRewriter::IsAsyncWaitQueueScope(attr) ||
+          PipelineRewriter::IsAsyncWaitInflightCount(attr)) {
+        return DeterministicNoWaitCommitEffect::Wait();
+      }
+      if (PipelineRewriter::IsAsyncCommitQueueScope(attr)) {
+        auto effect = Analyze(attr->body);
+        if (!effect.deterministic) {
+          return effect;
+        }
+        ++effect.commit_groups;
+        return effect;
+      }
+      return Analyze(attr->body);
+    }
+
+    DeterministicNoWaitCommitEffect AnalyzeFor(const ForNode *for_node) const {
+      if (for_node->thread_binding.defined()) {
+        return DeterministicNoWaitCommitEffect::Unknown();
+      }
+      const int64_t *extent_imm = as_const_int(for_node->extent);
+      if (extent_imm == nullptr || *extent_imm < 0) {
+        return DeterministicNoWaitCommitEffect::Unknown();
+      }
+      auto effect = Analyze(for_node->body);
+      if (!effect.deterministic) {
+        return effect;
+      }
+      effect.commit_groups *= static_cast<int>(*extent_imm);
+      return effect;
+    }
+
+    static DeterministicNoWaitCommitEffect
+    Combine(const DeterministicNoWaitCommitEffect &lhs,
+            const DeterministicNoWaitCommitEffect &rhs) {
+      if (!lhs.deterministic || !rhs.deterministic) {
+        return DeterministicNoWaitCommitEffect::Unknown();
+      }
+      DeterministicNoWaitCommitEffect effect;
+      effect.has_wait = lhs.has_wait || rhs.has_wait;
+      effect.commit_groups = lhs.commit_groups + rhs.commit_groups;
+      return effect;
+    }
+
+    const PipelineRewriter *rewriter_;
+  };
+
   Stmt
   WrapLoopDependentWrappers(Stmt stmt,
                             const PrimExpr &normalized_access_index) const {
@@ -884,11 +1005,11 @@ private:
     if (!IsAsyncWaitInflightCount(inner)) {
       return std::nullopt;
     }
-    const auto *imm = inner->value.as<IntImmNode>();
+    const int64_t *imm = as_const_int(inner->value);
     if (!imm) {
       return std::nullopt;
     }
-    return static_cast<int>(imm->value);
+    return static_cast<int>(*imm);
   }
 
   Stmt MakeStaticAsyncWaitStmtLike(const AttrStmtNode *attr,
@@ -987,64 +1108,11 @@ private:
 
   std::optional<int>
   TryGetDeterministicNoWaitCommitGroups(const Stmt &stmt) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return TryGetDeterministicNoWaitCommitGroups(let->body);
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr) || IsAsyncWaitInflightCount(attr)) {
-        return std::nullopt;
-      }
-      if (IsAsyncCommitQueueScope(attr)) {
-        auto body_commit_groups =
-            TryGetDeterministicNoWaitCommitGroups(attr->body);
-        if (!body_commit_groups.has_value()) {
-          return std::nullopt;
-        }
-        return *body_commit_groups + 1;
-      }
-      return TryGetDeterministicNoWaitCommitGroups(attr->body);
-    }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      int commit_groups = 0;
-      for (const Stmt &s : seq->seq) {
-        auto part = TryGetDeterministicNoWaitCommitGroups(s);
-        if (!part.has_value()) {
-          return std::nullopt;
-        }
-        commit_groups += *part;
-      }
-      return commit_groups;
-    }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      return TryGetDeterministicNoWaitCommitGroups(block->body);
-    }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (!is_one(realize->predicate)) {
-        return std::nullopt;
-      }
-      return TryGetDeterministicNoWaitCommitGroups(realize->block->body);
-    }
-    if (const auto *for_node = stmt.as<ForNode>()) {
-      if (for_node->thread_binding.defined()) {
-        return std::nullopt;
-      }
-      const auto *extent_imm = for_node->extent.as<IntImmNode>();
-      if (extent_imm == nullptr || extent_imm->value < 0) {
-        return std::nullopt;
-      }
-      auto part = TryGetDeterministicNoWaitCommitGroups(for_node->body);
-      if (!part.has_value()) {
-        return std::nullopt;
-      }
-      return *part * static_cast<int>(extent_imm->value);
-    }
-    if (stmt.as<IfThenElseNode>()) {
+    auto effect = DeterministicNoWaitCommitAnalyzer(this).Analyze(stmt);
+    if (!effect.deterministic || effect.has_wait) {
       return std::nullopt;
     }
-    if (ContainsAsyncSyncScopes(stmt)) {
-      return std::nullopt;
-    }
-    return 0;
+    return effect.commit_groups;
   }
 
   int GuaranteedNewGroupsBeforeNextWait(const Array<Stmt> &body,
@@ -1784,11 +1852,11 @@ private:
     };
 
     if (unroll_loop) {
-      if (const auto *extent_imm = extent.as<IntImmNode>()) {
-        if (extent_imm->value > 1) {
+      if (const int64_t *extent_imm = as_const_int(extent)) {
+        if (*extent_imm > 1) {
           Array<Stmt> expanded;
-          expanded.reserve(static_cast<size_t>(extent_imm->value));
-          for (int64_t iter = 0; iter < extent_imm->value; ++iter) {
+          expanded.reserve(static_cast<size_t>(*extent_imm));
+          for (int64_t iter = 0; iter < *extent_imm; ++iter) {
             PrimExpr unit_start =
                 analyzer_.Simplify(start + IntImm(extent.dtype(), iter));
             PrimExpr unit_end =
@@ -2243,8 +2311,8 @@ public:
               tir::Substitute(user_parity, {{loop_var_, loop_min_}}));
           // New parity = (iteration_block + offset) % 2
           PrimExpr offset = IntImm(DataType::Int(32), 0);
-          if (auto *imm = user_parity_at_min.as<IntImmNode>()) {
-            offset = IntImm(DataType::Int(32), imm->value % 2);
+          if (const int64_t *imm = as_const_int(user_parity_at_min)) {
+            offset = IntImm(DataType::Int(32), *imm % 2);
           }
           PrimExpr new_parity = FloorMod(parity_cycle_ + offset, 2);
           Array<PrimExpr> new_args = call->args;
@@ -2827,6 +2895,10 @@ private:
           pipeline_async_producers
               ? (pipeline_async_producers.value()[i]->value != 0)
               : (pipeline_async_stages.count(stage) > 0);
+      // Stages that already spell out async behavior themselves keep that
+      // ownership. The pipeline pass only injects async producer semantics for
+      // "plain" producer stages that do not already contain cp.async / async
+      // queue operations.
       bool is_async = is_async_candidate &&
                       !ContainsExplicitAsyncIntrinsics(original_order[i]->body);
       PipelineAnnotation stage_order{

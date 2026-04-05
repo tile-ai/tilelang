@@ -47,13 +47,14 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   data_ = std::move(node);
 }
 
-void ReduceOpNode::GetAccessRegions(Array<BufferRegion> *reads,
-                                    Array<BufferRegion> *writes) const {
-  reads->push_back(srcRegion_);
+AccessRegions ReduceOpNode::GetAccessRegions() const {
+  AccessRegions result;
+  result.reads.push_back(srcRegion_);
   if (!clear) {
-    reads->push_back(dstRegion_);
+    result.reads.push_back(dstRegion_);
   }
-  writes->push_back(dstRegion_);
+  result.writes.push_back(dstRegion_);
+  return result;
 }
 
 TileOperator ReduceOpNode::Clone() const {
