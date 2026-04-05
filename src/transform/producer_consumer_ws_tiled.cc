@@ -832,6 +832,12 @@ struct BufferDataAccessInfo {
   bool HasAnyAccess() const { return read || write; }
 };
 
+struct PreludeTmaLoadPlan {
+  Stmt stmt;
+  const StmtNode *stmt_node{nullptr};
+  int wait_pos{-1};
+};
+
 static BufferDataAccessInfo
 AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
                         const BufferDataToBufferMap &buffer_map) {
@@ -912,6 +918,46 @@ AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
   return detector.Result();
 }
 
+static bool CollectPreludeStmtsToPipelineLoop(const Stmt &stmt,
+                                              const ForNode *pipeline_loop,
+                                              Array<Stmt> *prelude_stmts) {
+  if (stmt.get() == pipeline_loop) {
+    return true;
+  }
+  if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    for (int i = 0; i < static_cast<int>(seq->seq.size()); ++i) {
+      Array<Stmt> nested_prelude;
+      if (CollectPreludeStmtsToPipelineLoop(seq->seq[i], pipeline_loop,
+                                            &nested_prelude)) {
+        for (int j = 0; j < i; ++j) {
+          prelude_stmts->push_back(seq->seq[j]);
+        }
+        prelude_stmts->insert(prelude_stmts->end(), nested_prelude.begin(),
+                              nested_prelude.end());
+        return true;
+      }
+    }
+    return false;
+  }
+  if (const auto *let = stmt.as<LetStmtNode>()) {
+    return CollectPreludeStmtsToPipelineLoop(let->body, pipeline_loop,
+                                             prelude_stmts);
+  }
+  if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+    return CollectPreludeStmtsToPipelineLoop(realize->block->body,
+                                             pipeline_loop, prelude_stmts);
+  }
+  if (const auto *block = stmt.as<BlockNode>()) {
+    return CollectPreludeStmtsToPipelineLoop(block->body, pipeline_loop,
+                                             prelude_stmts);
+  }
+  if (const auto *attr = stmt.as<AttrStmtNode>()) {
+    return CollectPreludeStmtsToPipelineLoop(attr->body, pipeline_loop,
+                                             prelude_stmts);
+  }
+  return false;
+}
+
 static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
   const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
   if (!call) {
@@ -932,6 +978,53 @@ static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
     }
   }
   return Optional<Var>();
+}
+
+static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
+                                          const Buffer &barrier_buf,
+                                          PrimExpr barrier_id) {
+  class PreludeTmaProducerRewriter : public StmtExprMutator {
+  public:
+    PreludeTmaProducerRewriter(Buffer barrier_buf, PrimExpr barrier_id)
+        : barrier_buf_(std::move(barrier_buf)),
+          barrier_id_(std::move(barrier_id)) {}
+
+    Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
+
+  private:
+    PrimExpr VisitExpr_(const CallNode *op) final {
+      Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+      if (rewritten_) {
+        return call;
+      }
+      auto tile_op = ParseOperator(call);
+      if (!tile_op.defined()) {
+        return call;
+      }
+      PrimExpr rewritten_call;
+      if (tile_op.as<CopyNode>()) {
+        rewritten_call = RewriteCopyToTmaCopy(call, barrier_buf_, barrier_id_);
+      } else if (tile_op.as<Conv2DIm2ColOpNode>()) {
+        rewritten_call = AnnotateTileOpBarrier(call, barrier_buf_, barrier_id_);
+      } else {
+        return call;
+      }
+      Call new_call = Downcast<Call>(rewritten_call);
+      auto annotations = new_call->annotations;
+      annotations.Set("emit_arrive", IntImm(DataType::Int(32), 1));
+      rewritten_ = true;
+      return Call(new_call->dtype, new_call->op, new_call->args, annotations,
+                  new_call->span);
+    }
+
+    Buffer barrier_buf_;
+    PrimExpr barrier_id_;
+    bool rewritten_{false};
+  };
+
+  PreludeTmaProducerRewriter rewriter(std::move(barrier_buf),
+                                      std::move(barrier_id));
+  return rewriter.Rewrite(stmt);
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,6 +1185,7 @@ private:
 
     PrimExpr consumer_extent = thread_iv_->dom->extent;
     PrimExpr producer_extent = IntImm(DataType::Int(32), 128);
+    common_prelude_rewrites_.clear();
 
     bool has_simt_producer = false;
     bool has_cp_async_producer = false;
@@ -1112,10 +1206,6 @@ private:
     // barrier group — the last forward arrive covers everything.
     int num_fwd = num_producer_groups * num_stages;
     int num_bp = num_producer_groups * num_stages;
-    int total_barriers = num_fwd + num_bp;
-    Buffer barrier_buf =
-        CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
-    // arrive_counts are computed later (after producer_extent is finalized).
 
     buffer_data_to_buffer_ =
         BufferDataToBufferCollector::Collect(orig_block->body);
@@ -1125,6 +1215,40 @@ private:
         consumer_compute_stmts.push_back(flat_stmts[i]);
       }
     }
+
+    Array<Stmt> prelude_stmts;
+    CollectPreludeStmtsToPipelineLoop(orig_block->body, pipeline_loop,
+                                      &prelude_stmts);
+    std::vector<PreludeTmaLoadPlan> prelude_tma_plans;
+    for (const Stmt &stmt : prelude_stmts) {
+      if (ClassifyStmt(stmt, target_) != TileStmtKind::kTmaProducer) {
+        continue;
+      }
+      Optional<Var> write_buffer_data = ExtractProducerWriteBufferData(stmt);
+      if (!write_buffer_data.defined()) {
+        continue;
+      }
+      int first_read = -1;
+      for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
+        BufferDataAccessInfo access = AnalyzeBufferDataAccess(
+            consumer_compute_stmts[ci], write_buffer_data.value(),
+            buffer_data_to_buffer_);
+        if (access.read) {
+          first_read = static_cast<int>(ci);
+          break;
+        }
+      }
+      if (first_read < 0) {
+        continue;
+      }
+      prelude_tma_plans.push_back({stmt, stmt.get(), first_read});
+    }
+
+    int total_barriers = num_fwd + num_bp + prelude_tma_plans.size();
+    Buffer barrier_buf =
+        CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
+    // arrive_counts are computed later (after producer_extent is finalized).
+
     std::vector<int> wait_insert_pos(num_producer_groups, 0);
     std::vector<int> arrive_insert_pos(
         num_producer_groups, static_cast<int>(consumer_compute_stmts.size()));
@@ -1179,7 +1303,7 @@ private:
       // Re-compute barrier layout with a single merged group.
       num_fwd = num_stages;
       num_bp = num_stages;
-      total_barriers = num_fwd + num_bp;
+      total_barriers = num_fwd + num_bp + prelude_tma_plans.size();
       barrier_buf =
           CreateMBarrierBuffer(injected_mbarrier_name_, total_barriers);
     }
@@ -1252,6 +1376,30 @@ private:
     }
     for (int i = 0; i < num_bp; ++i) {
       arrive_counts.push_back(consumer_extent);
+    }
+    for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
+      arrive_counts.push_back(IntImm(DataType::Int(32), 1));
+    }
+
+    std::vector<Array<Stmt>> prelude_waits_before_consumer(
+        consumer_compute_stmts.size());
+    PrimExpr prelude_wait_guard =
+        needs_phase_counter ? EQ(consumer_phase_counter.value().Load(),
+                                 IntImm(DataType::Int(32), 0))
+                            : EQ(loop_var, loop_min);
+    int prelude_barrier_base = num_fwd + num_bp;
+    for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
+      PrimExpr barrier_id = IntImm(DataType::Int(32), prelude_barrier_base + i);
+      common_prelude_rewrites_.emplace(
+          prelude_tma_plans[i].stmt_node,
+          RewritePreludeTmaProducerStmt(prelude_tma_plans[i].stmt, barrier_buf,
+                                        barrier_id));
+      int wait_pos = prelude_tma_plans[i].wait_pos;
+      ICHECK_GE(wait_pos, 0);
+      ICHECK_LT(wait_pos, static_cast<int>(consumer_compute_stmts.size()));
+      prelude_waits_before_consumer[wait_pos].push_back(IfThenElse(
+          prelude_wait_guard, MakeParityWait(barrier_buf, barrier_id,
+                                             IntImm(DataType::Int(32), 0))));
     }
 
     // --- Build producer body ---
@@ -1391,6 +1539,9 @@ private:
     Array<Stmt> consumer_stmts;
     std::vector<bool> arrive_emitted(consumer_barrier_groups, false);
     for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
+      for (const auto &stmt : prelude_waits_before_consumer[ci]) {
+        consumer_stmts.push_back(stmt);
+      }
       for (int g = 0; g < consumer_barrier_groups; ++g) {
         if (wait_insert_pos[g] == static_cast<int>(ci)) {
           int fwd_base = g * num_stages;
@@ -1912,7 +2063,12 @@ private:
           extracted_consumer_init_.push_back(seq->seq[i]);
           break;
         case PreludeStmtPlacement::kKeepSharedPrelude:
-          new_seq.push_back(seq->seq[i]);
+          if (auto it = common_prelude_rewrites_.find(seq->seq[i].get());
+              it != common_prelude_rewrites_.end()) {
+            new_seq.push_back(it->second);
+          } else {
+            new_seq.push_back(seq->seq[i]);
+          }
           break;
         }
       }
@@ -2003,6 +2159,7 @@ private:
   Optional<PrimExpr> num_threads_; // total (consumer + producer)
   bool ws_transformed_{false};
   BufferDataToBufferMap buffer_data_to_buffer_;
+  std::unordered_map<const StmtNode *, Stmt> common_prelude_rewrites_;
   LocalLiveSet producer_prelude_live_seed_;
   LocalLiveSet consumer_prelude_live_seed_;
   Array<Stmt> extracted_producer_init_;

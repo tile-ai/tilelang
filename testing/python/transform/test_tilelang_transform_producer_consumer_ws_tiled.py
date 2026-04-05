@@ -79,6 +79,41 @@ def matmul_windowed_pipelined(
     return main
 
 
+def prelude_tma_wait_sink(block=64, iters=2, dtype="float16", threads=128):
+    """A tiled-WS kernel with pre-loop TMA loads consumed at different points."""
+
+    @T.prim_func
+    def main(
+        Q: T.Buffer((iters * block, block), dtype),
+        K_in: T.Buffer((block, block), dtype),
+        V_in: T.Buffer((block, block), dtype),
+        O: T.Buffer((block, block), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            K_shared = T.alloc_shared((block, block), dtype)
+            V_shared = T.alloc_shared((block, block), dtype)
+            q = T.alloc_shared((block, block), dtype)
+            acc0 = T.alloc_fragment((block, block), "float32")
+            acc1 = T.alloc_fragment((block, block), "float32")
+            out = T.alloc_fragment((block, block), "float32")
+
+            T.copy(K_in[0, 0], K_shared)
+            T.copy(V_in[0, 0], V_shared)
+            T.clear(out)
+            for ko in T.Pipelined(iters, num_stages=2):
+                T.copy(Q[ko * block, 0], q)
+                T.clear(acc0)
+                T.gemm(K_shared, q, acc0, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.clear(acc1)
+                T.gemm(V_shared, q, acc1, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                for i, j in T.Parallel(block, block):
+                    out[i, j] = acc0[i, j] + acc1[i, j]
+
+            T.copy(out, O[0, 0])
+
+    return main
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_stage1_dynamic_loop_start():
@@ -276,9 +311,31 @@ def test_tiled_ws_incompatible_layout_blocks_ws():
     assert "__launch_bounds__(256, 1)" not in src
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
+    """Pre-loop TMA loads should not emit immediate waits in the common prelude."""
+
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+    }
+    kernel = _compile_tvm_ffi(prelude_tma_wait_sink(), pass_configs, out_idx=[3])
+    src = kernel.get_kernel_source()
+
+    k_load = src.find("tl::tma_load(K_in_desc")
+    v_load = src.find("tl::tma_load(V_in_desc")
+    branch = src.find("if (128 <= ((int)threadIdx.x))")
+    first_wait = src.find(".wait(0)")
+
+    assert min(k_load, v_load, branch, first_wait) >= 0
+    assert k_load < v_load < branch < first_wait
+
+
 if __name__ == "__main__":
     test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()
     test_tiled_ws_stage3()
     test_tiled_ws_swizzled_layout_allows_ws()
     test_tiled_ws_incompatible_layout_blocks_ws()
+    test_tiled_ws_sinks_preloop_tma_waits_into_consumer()
