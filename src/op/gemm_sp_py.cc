@@ -52,10 +52,16 @@ using namespace tir;
 GemmSPPy::GemmSPPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPPyNode> node = tvm::ffi::make_object<GemmSPPyNode>();
 
-  node->aRegion_ = NormalizeToBufferRegion(args[0]);
-  node->eRegion_ = NormalizeToBufferRegion(args[1]);
-  node->bRegion_ = NormalizeToBufferRegion(args[2]);
-  node->cRegion_ = NormalizeToBufferRegion(args[3]);
+  auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
+  auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
+  auto c_access = NormalizeToAccessRegion(args[3], kAccessReadWrite);
+
+  node->aRegion_ = a_access.region;
+  node->eRegion_ = e_access.region;
+  node->bRegion_ = b_access.region;
+  node->cRegion_ = c_access.region;
+  node->SetAccessRegions({a_access, e_access, b_access, c_access});
 
   node->A = node->aRegion_->buffer;
   node->E = node->eRegion_->buffer;
@@ -84,6 +90,17 @@ GemmSPPy::GemmSPPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->wg_wait = args[17].as<IntImm>().value()->value;
   }
   data_ = std::move(node);
+}
+
+void GemmSPPyNode::GetAccessRegions(Array<BufferRegion> *reads,
+                                    Array<BufferRegion> *writes) const {
+  reads->push_back(aRegion_);
+  reads->push_back(eRegion_);
+  reads->push_back(bRegion_);
+  if (!is_one(clear_accum)) {
+    reads->push_back(cRegion_);
+  }
+  writes->push_back(cRegion_);
 }
 
 /**

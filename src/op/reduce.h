@@ -108,6 +108,8 @@ public:
   /// Infer memory layout for buffers
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
+  void GetAccessRegions(Array<BufferRegion> *reads,
+                        Array<BufferRegion> *writes) const override;
   static const Op &Get();
   TileOperator Clone() const;
 

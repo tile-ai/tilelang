@@ -33,8 +33,11 @@ using namespace tir;
 ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
   // Accept BufferRegion/BufferLoad for src/dst
-  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
-  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
+  auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
+  node->srcRegion_ = src_access.region;
+  node->dstRegion_ = dst_access.region;
+  node->SetAccessRegions({src_access, dst_access});
   node->src = node->srcRegion_->buffer;
   node->dst = node->dstRegion_->buffer;
   std::string reduce_type = args[2].as<StringImm>().value()->value;
@@ -42,6 +45,15 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->type = ReduceType(reduce_type);
   node->clear = args[4].as<Bool>().value();
   data_ = std::move(node);
+}
+
+void ReduceOpNode::GetAccessRegions(Array<BufferRegion> *reads,
+                                    Array<BufferRegion> *writes) const {
+  reads->push_back(srcRegion_);
+  if (!clear) {
+    reads->push_back(dstRegion_);
+  }
+  writes->push_back(dstRegion_);
 }
 
 TileOperator ReduceOpNode::Clone() const {
@@ -557,8 +569,11 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<CumSumOpNode> node = tvm::ffi::make_object<CumSumOpNode>();
   // node->src = vmap[GetVarFromAccessPtr(args[0])];
   // node->dst = vmap[GetVarFromAccessPtr(args[1])];
-  node->srcRegion_ = NormalizeToBufferRegion(args[0]);
-  node->dstRegion_ = NormalizeToBufferRegion(args[1]);
+  auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
+  node->srcRegion_ = src_access.region;
+  node->dstRegion_ = dst_access.region;
+  node->SetAccessRegions({src_access, dst_access});
   node->src = node->srcRegion_->buffer;
   node->dst = node->dstRegion_->buffer;
   node->dim = args[2].as<IntImm>().value()->value;

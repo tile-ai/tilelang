@@ -86,10 +86,15 @@ GemmSPWarpPolicyNode::computeWarpPartition(int M, int N, int block_size,
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
-  node->aRegion_ = NormalizeToBufferRegion(args[0]);
-  node->eRegion_ = NormalizeToBufferRegion(args[1]);
-  node->bRegion_ = NormalizeToBufferRegion(args[2]);
-  node->cRegion_ = NormalizeToBufferRegion(args[3]);
+  auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
+  auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
+  auto c_access = NormalizeToAccessRegion(args[3], kAccessReadWrite);
+  node->aRegion_ = a_access.region;
+  node->eRegion_ = e_access.region;
+  node->bRegion_ = b_access.region;
+  node->cRegion_ = c_access.region;
+  node->SetAccessRegions({a_access, e_access, b_access, c_access});
   node->a_ = node->aRegion_->buffer;
   node->e_ = node->eRegion_->buffer;
   node->b_ = node->bRegion_->buffer;
@@ -111,6 +116,17 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->wgWait_ = args[12].as<IntImm>().value()->value;
   }
   data_ = std::move(node);
+}
+
+void GemmSPNode::GetAccessRegions(Array<BufferRegion> *reads,
+                                  Array<BufferRegion> *writes) const {
+  reads->push_back(aRegion_);
+  reads->push_back(eRegion_);
+  reads->push_back(bRegion_);
+  if (!clearAccum_) {
+    reads->push_back(cRegion_);
+  }
+  writes->push_back(cRegion_);
 }
 
 /**

@@ -14,6 +14,8 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/stmt.h>
+#include <utility>
+#include <vector>
 
 #include "../layout/layout.h"
 
@@ -26,6 +28,31 @@ using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using AllocMBarrierCallback = std::function<int(int arrive_count)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
+
+enum AccessMask : int {
+  kAccessRead = 1,
+  kAccessWrite = 2,
+  kAccessReadWrite = kAccessRead | kAccessWrite,
+};
+
+struct AccessRegion {
+  BufferRegion region;
+  int access_mask{kAccessReadWrite};
+};
+
+inline void AppendAccessRegionByMask(const AccessRegion &access,
+                                     Array<BufferRegion> *reads,
+                                     Array<BufferRegion> *writes) {
+  if (!access.region.defined()) {
+    return;
+  }
+  if (access.access_mask & kAccessRead) {
+    reads->push_back(access.region);
+  }
+  if (access.access_mask & kAccessWrite) {
+    writes->push_back(access.region);
+  }
+}
 
 enum class InferLevel : uint8_t {
   kFree = 0,
@@ -108,7 +135,21 @@ public:
 
   virtual TileOperator Clone() const = 0;
 
+  virtual void GetAccessRegions(Array<BufferRegion> *reads,
+                                Array<BufferRegion> *writes) const {
+    for (const auto &access : access_regions_) {
+      AppendAccessRegionByMask(access, reads, writes);
+    }
+  }
+
+  void SetAccessRegions(std::vector<AccessRegion> access_regions) {
+    access_regions_ = std::move(access_regions);
+  }
+
   TVM_FFI_DECLARE_OBJECT_INFO("tl.TileOperator", TileOperatorNode, Object);
+
+protected:
+  std::vector<AccessRegion> access_regions_;
 };
 
 class TileOperator : public ObjectRef {

@@ -74,6 +74,8 @@ public:
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
+  void GetAccessRegions(Array<BufferRegion> *reads,
+                        Array<BufferRegion> *writes) const override;
 
   TileOperator Clone() const;
 
