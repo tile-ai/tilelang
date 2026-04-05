@@ -805,6 +805,30 @@ private:
     int wait{0};
   };
 
+  enum class HeadAsyncSyncKind {
+    kNone,
+    kCommit,
+    kWaitStatic,
+    kWaitDynamic,
+    kBlocked,
+  };
+
+  struct HeadAsyncSyncInfo {
+    HeadAsyncSyncKind kind{HeadAsyncSyncKind::kNone};
+    int wait_n{0};
+
+    bool IsBoundary() const {
+      return kind == HeadAsyncSyncKind::kCommit ||
+             kind == HeadAsyncSyncKind::kWaitDynamic ||
+             kind == HeadAsyncSyncKind::kBlocked;
+    }
+  };
+
+  enum class HeadSeqMode {
+    kSingletonOnly,
+    kTakeFirstElement,
+  };
+
   struct DeterministicNoWaitCommitEffect {
     bool deterministic{true};
     bool has_wait{false};
@@ -1026,40 +1050,60 @@ private:
                     attr->span);
   }
 
-  ClassifiedAsyncSyncStmt ClassifySimpleAsyncSyncStmt(const Stmt &stmt) const {
+  HeadAsyncSyncInfo AnalyzeHeadAsyncSync(const Stmt &stmt,
+                                         HeadSeqMode seq_mode) const {
     if (const auto *let = stmt.as<LetStmtNode>()) {
-      return ClassifySimpleAsyncSyncStmt(let->body);
+      return AnalyzeHeadAsyncSync(let->body, seq_mode);
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       if (IsAsyncWaitQueueScope(attr)) {
         if (auto wait_n = TryGetStaticAsyncWaitCount(attr)) {
-          return {AsyncSyncStmtKind::kWaitStatic, *wait_n};
+          return {HeadAsyncSyncKind::kWaitStatic, *wait_n};
         }
-        return {AsyncSyncStmtKind::kWaitDynamic, 0};
+        return {HeadAsyncSyncKind::kWaitDynamic, 0};
       }
       if (IsAsyncCommitQueueScope(attr)) {
-        return {AsyncSyncStmtKind::kCommit, 0};
+        return {HeadAsyncSyncKind::kCommit, 0};
       }
       if (IsAsyncWaitInflightCount(attr)) {
-        return {};
+        return {HeadAsyncSyncKind::kBlocked, 0};
       }
-      return ClassifySimpleAsyncSyncStmt(attr->body);
+      return AnalyzeHeadAsyncSync(attr->body, seq_mode);
     }
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.size() == 1) {
-        return ClassifySimpleAsyncSyncStmt(seq->seq[0]);
+      if (seq->seq.empty()) {
+        return {};
       }
-      return {};
+      if (seq_mode == HeadSeqMode::kSingletonOnly && seq->seq.size() != 1) {
+        return {HeadAsyncSyncKind::kBlocked, 0};
+      }
+      return AnalyzeHeadAsyncSync(seq->seq[0], seq_mode);
     }
     if (const auto *block = stmt.as<BlockNode>()) {
-      return ClassifySimpleAsyncSyncStmt(block->body);
+      return AnalyzeHeadAsyncSync(block->body, seq_mode);
     }
     if (const auto *realize = stmt.as<BlockRealizeNode>()) {
       if (is_one(realize->predicate)) {
-        return ClassifySimpleAsyncSyncStmt(realize->block->body);
+        return AnalyzeHeadAsyncSync(realize->block->body, seq_mode);
       }
+      return {HeadAsyncSyncKind::kBlocked, 0};
     }
     return {};
+  }
+
+  ClassifiedAsyncSyncStmt ClassifySimpleAsyncSyncStmt(const Stmt &stmt) const {
+    HeadAsyncSyncInfo info =
+        AnalyzeHeadAsyncSync(stmt, HeadSeqMode::kSingletonOnly);
+    switch (info.kind) {
+    case HeadAsyncSyncKind::kCommit:
+      return {AsyncSyncStmtKind::kCommit, 0};
+    case HeadAsyncSyncKind::kWaitStatic:
+      return {AsyncSyncStmtKind::kWaitStatic, info.wait_n};
+    case HeadAsyncSyncKind::kWaitDynamic:
+      return {AsyncSyncStmtKind::kWaitDynamic, 0};
+    default:
+      return {};
+    }
   }
 
   bool ContainsAsyncSyncScopes(const Stmt &stmt) const {
@@ -1201,31 +1245,10 @@ private:
   }
 
   std::optional<int> TryGetHeadStaticWaitCount(const Stmt &stmt) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return TryGetHeadStaticWaitCount(let->body);
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        return TryGetStaticAsyncWaitCount(attr);
-      }
-      if (IsAsyncWaitInflightCount(attr)) {
-        return std::nullopt;
-      }
-      return TryGetHeadStaticWaitCount(attr->body);
-    }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.empty()) {
-        return std::nullopt;
-      }
-      return TryGetHeadStaticWaitCount(seq->seq[0]);
-    }
-    if (const auto *block = stmt.as<BlockNode>()) {
-      return TryGetHeadStaticWaitCount(block->body);
-    }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        return TryGetHeadStaticWaitCount(realize->block->body);
-      }
+    HeadAsyncSyncInfo info =
+        AnalyzeHeadAsyncSync(stmt, HeadSeqMode::kTakeFirstElement);
+    if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
+      return info.wait_n;
     }
     return std::nullopt;
   }
@@ -1235,20 +1258,24 @@ private:
       return TryGetFirstStaticWaitCount(let->body);
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        return TryGetStaticAsyncWaitCount(attr);
+      HeadAsyncSyncInfo info =
+          AnalyzeHeadAsyncSync(stmt, HeadSeqMode::kTakeFirstElement);
+      if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
+        return info.wait_n;
       }
-      if (IsAsyncCommitQueueScope(attr) || IsAsyncWaitInflightCount(attr)) {
+      if (info.IsBoundary()) {
         return std::nullopt;
       }
       return TryGetFirstStaticWaitCount(attr->body);
     }
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
       for (const Stmt &elem : seq->seq) {
-        if (auto wait = TryGetFirstStaticWaitCount(elem)) {
-          return wait;
+        HeadAsyncSyncInfo info =
+            AnalyzeHeadAsyncSync(elem, HeadSeqMode::kTakeFirstElement);
+        if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
+          return info.wait_n;
         }
-        if (ContainsAsyncSyncScopes(elem)) {
+        if (info.IsBoundary() || ContainsAsyncSyncScopes(elem)) {
           return std::nullopt;
         }
       }
