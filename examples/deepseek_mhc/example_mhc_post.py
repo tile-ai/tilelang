@@ -108,17 +108,6 @@ def run_regression_perf(n: int = 4096, h: int = 2560, hc_mult: int = 4) -> float
     test_data = generate_test_data(n=n, h=h, hc_mult=hc_mult)
     out = torch.empty_like(test_data["residual"])
     post_layer_mix = test_data["post_layer_mix"].squeeze(-1)
-    print(
-        mhc_post_tilelang.get_kernel_source(
-            test_data["comb_res_mix"],
-            test_data["residual"],
-            post_layer_mix,
-            test_data["x"],
-            out,
-            hc_mult,
-            h,
-        )
-    )
 
     def run_kernel_only():
         mhc_post_tilelang(

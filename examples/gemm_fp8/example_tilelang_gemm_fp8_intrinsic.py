@@ -254,7 +254,4 @@ def run_regression_perf():
 
 
 if __name__ == "__main__":
-    # main()
-    tilelang.disable_cache()
-    latency = run_regression_perf()
-    print(f"latency is {latency} ms")
+    main()

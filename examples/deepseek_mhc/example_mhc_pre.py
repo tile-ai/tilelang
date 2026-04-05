@@ -446,36 +446,6 @@ def run_regression_perf(
     layer_input = torch.empty(num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device)
     gemm_out_mul = torch.empty(n_splits, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device)
     gemm_out_sqrsum = torch.empty(n_splits, num_tokens, dtype=torch.float32, device=residual.device)
-    print(
-        mhc_pre_gemm_sqrsum_tilelang.get_kernel_source(
-            residual_flat.view(num_tokens, hc_mult * hidden_size),
-            fn,
-            gemm_out_mul.squeeze(0),
-            gemm_out_sqrsum.squeeze(0),
-            hc_mult3,
-            hc_mult * hidden_size,
-        )
-    )
-    print(
-        mhc_pre_big_fuse_tilelang.get_kernel_source(
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            hc_scale,
-            hc_base,
-            residual_flat,
-            post_mix,
-            comb_mix,
-            layer_input,
-            hidden_size,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
-            n_splits,
-            hc_mult,
-        )
-    )
 
     def run_kernel_only():
         mhc_pre_gemm_sqrsum_tilelang(
@@ -521,5 +491,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # main()
-    test(n=2048, hidden_size=4096, hc_mult=4)
+    main()

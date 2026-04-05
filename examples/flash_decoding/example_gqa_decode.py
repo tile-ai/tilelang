@@ -4,6 +4,7 @@ import tilelang
 from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, einsum
+import argparse
 import itertools
 from functools import lru_cache
 from typing import Tuple, Dict
@@ -446,21 +447,17 @@ def run_regression_perf(batch: int = 1, heads: int = 32, groups: int = 8, kv_seq
     batch, heads, groups, kv_seqlen, dim = batch, heads, groups, kv_seqlen, dim
     config, _ = get_heuristic_config()
     kernel = flashattn(batch, heads, groups, kv_seqlen, dim, **config)
-    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
     return profiler.do_bench(backend="cupti")
 
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("--batch", type=int, default=1, help="batch size")
-    # parser.add_argument("--heads", type=int, default=32, help="heads")
-    # parser.add_argument("--groups", type=int, default=8, help="groups")
-    # parser.add_argument("--kv_seqlen", type=int, default=8192, help="kv sequence length")
-    # parser.add_argument("--dim", type=int, default=128, help="dim")
-    # parser.add_argument("--tune", action="store_true", help="tune configs")
-    # args = parser.parse_args()
-    # main(args.batch, args.heads, args.groups, args.kv_seqlen, args.dim, args.tune)
-    tilelang.disable_cache()
-    latency = run_regression_perf()
-    print(f"latency is {latency}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch", type=int, default=1, help="batch size")
+    parser.add_argument("--heads", type=int, default=32, help="heads")
+    parser.add_argument("--groups", type=int, default=8, help="groups")
+    parser.add_argument("--kv_seqlen", type=int, default=8192, help="kv sequence length")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--tune", action="store_true", help="tune configs")
+    args = parser.parse_args()
+    main(args.batch, args.heads, args.groups, args.kv_seqlen, args.dim, args.tune)
