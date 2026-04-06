@@ -232,6 +232,7 @@ def Kernel(
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
     is_cpu: bool = False,
     prelude: str | None = None,
+    attrs: dict | None = None,
 ):
     """Tools to quickly construct a GPU kernel launch frame.
 
@@ -295,7 +296,7 @@ def Kernel(
     if Builder.current() is None:
         raise JITNoBuilderError("T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
-    attrs: dict = {}
+    attrs = {} if attrs is None else dict(attrs)
 
     if not is_cpu and threads is None:
         threads = 128  # default thread number
@@ -327,6 +328,33 @@ def Kernel(
             attrs["cluster_dims"] = cluster_dims
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
+
+
+def PersistentKernel(*args, **kwargs):
+    attrs = kwargs.pop("attrs", None)
+    attrs = {} if attrs is None else dict(attrs)
+    attrs["tilelang.tile_schedule_kind"] = "persistent_static"
+    order = kwargs.pop("order", None)
+    panel_size = kwargs.pop("panel_size", None)
+    if (order is None) != (panel_size is None):
+        raise ValueError("PersistentKernel expects `order` and `panel_size` to be provided together.")
+    if order is not None:
+        if order not in {"row", "column"}:
+            raise ValueError(f"PersistentKernel `order` must be 'row' or 'column', got {order!r}.")
+        if not isinstance(panel_size, int) or panel_size <= 0:
+            raise ValueError(
+                f"PersistentKernel `panel_size` must be a positive integer, got {panel_size!r}."
+            )
+        attrs["tilelang.tile_permutation_kind"] = f"swizzle_{order}"
+        attrs["tilelang.tile_permutation_panel_size"] = panel_size
+        # Keep legacy attrs for compatibility with older lowering paths.
+        attrs["tilelang.persistent_swizzle_order"] = order
+        attrs["tilelang.persistent_swizzle_panel_size"] = panel_size
+    else:
+        attrs["tilelang.tile_permutation_kind"] = "identity"
+    attrs["tilelang.is_persistent_kernel"] = True
+    kwargs["attrs"] = attrs
+    return Kernel(*args, **kwargs)
 
 
 def get_thread_binding(dim: int = 0) -> Var:

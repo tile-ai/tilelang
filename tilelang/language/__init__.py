@@ -30,6 +30,7 @@ from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
+    PersistentKernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
     get_thread_binding,  # noqa: F401
     get_thread_bindings,  # noqa: F401
