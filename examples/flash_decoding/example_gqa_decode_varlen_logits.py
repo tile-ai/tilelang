@@ -34,100 +34,97 @@ def get_configs():
     return configs
 
 
-@tilelang.jit(out_idx=[-2, -1])
-def flashattn(
-    batch, heads, k_heads, max_seqlen_kv, total_seqlen_k, dim, has_sink, block_N=128, block_H=64, num_split=1, num_stages=1, threads=128
-):
-    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+@tilelang.jit
+def flashattn(Q, K, V, cu_seqlens_k, s_aux, max_seqlen_kv, has_sink, block_N=128, block_H=64, num_split=1, num_stages=1, threads=128):
+    batch, heads, k_heads, total_seqlen_k, dim = T.const("batch, heads, k_heads, total_seqlen_k, dim")
+    scale = T.pow(dim, -0.5) * 1.44269504  # log2(e)
     shape_q = [batch, heads, dim]
     shape_k = [total_seqlen_k, k_heads, dim]
     shape_v = [total_seqlen_k, k_heads, dim]
     shape_o = [batch, heads, dim]
-    shape_s = [batch, heads, math.ceil(max_seqlen_kv / block_N)]
+    shape_s = [batch, heads, T.ceildiv(max_seqlen_kv, block_N)]
     dtype = T.float16
     accum_dtype = T.float32
     kv_group_num = heads // k_heads
 
-    valid_block_H = min(block_H, kv_group_num)
+    valid_block_H = T.min(block_H, kv_group_num)
 
-    @T.prim_func
-    def flashattn_gqa_decode_no_split(
-        Q: T.Tensor(shape_q, dtype),
-        K: T.Tensor(shape_k, dtype),
-        V: T.Tensor(shape_v, dtype),
-        cu_seqlens_k: T.Tensor([batch + 1], T.int32),
-        s_aux: T.Tensor([heads], T.float32),
-        Output: T.Tensor(shape_o, dtype),
-        S: T.Tensor(shape_s, dtype),
-    ):
-        with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bid, hid, bz):
-            Q_shared = T.alloc_shared([block_H, dim], dtype)
-            K_shared = T.alloc_shared([block_N, dim], dtype)
-            V_shared = T.alloc_shared([block_N, dim], dtype)
-            O_shared = T.alloc_shared([valid_block_H, dim], dtype)
-            acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
-            acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
-            acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
-            scores_max = T.alloc_fragment([block_H], accum_dtype)
-            scores_max_prev = T.alloc_fragment([block_H], accum_dtype)
-            scores_scale = T.alloc_fragment([block_H], accum_dtype)
-            scores_sum = T.alloc_fragment([block_H], accum_dtype)
-            logsum = T.alloc_fragment([block_H], accum_dtype)
-            S_shared = T.alloc_shared([block_H, math.ceil(max_seqlen_kv / block_N)], accum_dtype)
-            S_shared_cast = T.alloc_shared([block_H, math.ceil(max_seqlen_kv / block_N)], dtype)
-            s_aux_shared = T.alloc_shared([block_H], T.float32)
+    Q: T.Tensor(shape_q, dtype)
+    K: T.Tensor(shape_k, dtype)
+    V: T.Tensor(shape_v, dtype)
+    cu_seqlens_k: T.Tensor([batch + 1], T.int32)
+    s_aux: T.Tensor([heads], T.float32)
+    Output = T.empty(shape_o, dtype)
+    S = T.empty(shape_s, dtype)
 
-            cur_kv_head = hid // (kv_group_num // valid_block_H)
+    with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bid, hid, bz):
+        Q_shared = T.alloc_shared([block_H, dim], dtype)
+        K_shared = T.alloc_shared([block_N, dim], dtype)
+        V_shared = T.alloc_shared([block_N, dim], dtype)
+        O_shared = T.alloc_shared([valid_block_H, dim], dtype)
+        acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
+        acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
+        acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
+        scores_max = T.alloc_fragment([block_H], accum_dtype)
+        scores_max_prev = T.alloc_fragment([block_H], accum_dtype)
+        scores_scale = T.alloc_fragment([block_H], accum_dtype)
+        scores_sum = T.alloc_fragment([block_H], accum_dtype)
+        logsum = T.alloc_fragment([block_H], accum_dtype)
+        S_shared = T.alloc_shared([block_H, T.ceildiv(max_seqlen_kv, block_N)], accum_dtype)
+        S_shared_cast = T.alloc_shared([block_H, T.ceildiv(max_seqlen_kv, block_N)], dtype)
+        s_aux_shared = T.alloc_shared([block_H], T.float32)
 
-            cur_start_k = cu_seqlens_k[bid]
-            cur_end_k = cu_seqlens_k[bid + 1]
-            cur_seqlen_k = cur_end_k - cur_start_k
+        cur_kv_head = hid // (kv_group_num // valid_block_H)
 
-            T.copy(Q[bid, hid * valid_block_H : hid * valid_block_H + block_H, :], Q_shared)
-            T.fill(acc_o, 0)
-            T.fill(logsum, 0)
+        cur_start_k = cu_seqlens_k[bid]
+        cur_end_k = cu_seqlens_k[bid + 1]
+        cur_seqlen_k = cur_end_k - cur_start_k
+
+        T.copy(Q[bid, hid * valid_block_H : hid * valid_block_H + block_H, :], Q_shared)
+        T.fill(acc_o, 0)
+        T.fill(logsum, 0)
+        T.fill(scores_max, -T.infinity(accum_dtype))
+
+        loop_range = T.ceildiv((cur_seqlen_k // num_split), block_N)
+        for k in T.Pipelined(loop_range, num_stages=num_stages):
+            T.copy(K[cur_start_k + k * block_N : cur_start_k + (k + 1) * block_N, cur_kv_head, :], K_shared)
+            T.clear(acc_s)
+            T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+            for i, j in T.Parallel(block_H, block_N):
+                acc_s[i, j] = T.if_then_else(k * block_N + j < cur_seqlen_k, acc_s[i, j], -T.infinity(accum_dtype))
+            T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
-
-            loop_range = T.ceildiv((cur_seqlen_k // num_split), block_N)
-            for k in T.Pipelined(loop_range, num_stages=num_stages):
-                T.copy(K[cur_start_k + k * block_N : cur_start_k + (k + 1) * block_N, cur_kv_head, :], K_shared)
-                T.clear(acc_s)
-                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                for i, j in T.Parallel(block_H, block_N):
-                    acc_s[i, j] = T.if_then_else(k * block_N + j < cur_seqlen_k, acc_s[i, j], -T.infinity(accum_dtype))
-                T.copy(scores_max, scores_max_prev)
-                T.fill(scores_max, -T.infinity(accum_dtype))
-                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                T.copy(scores_max, S_shared[:, k])
-                for i in T.Parallel(block_H):
-                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-                for i, j in T.Parallel(block_H, block_N):
-                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                T.reduce_sum(acc_s, scores_sum, dim=1)
-                for i in T.Parallel(block_H):
-                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                T.copy(acc_s, acc_s_cast)
-                for i, j in T.Parallel(block_H, dim):
-                    acc_o[i, j] *= scores_scale[i]
-                T.copy(V[cur_start_k + k * block_N : cur_start_k + (k + 1) * block_N, cur_kv_head, :], V_shared)
-                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
-
-            if has_sink:
-                T.copy(s_aux[hid * valid_block_H : hid * valid_block_H + block_H], s_aux_shared)
-                for i in T.Parallel(block_H):
-                    logsum[i] += s_aux_shared[i]
-            for i, j in T.Parallel(block_H, dim):
-                acc_o[i, j] /= logsum[i]
-            for h, k in T.Parallel(block_H, math.ceil(max_seqlen_kv / block_N)):
-                S_shared[h, k] = T.exp2((S_shared[h, k] - scores_max[h]) * scale) / logsum[h]
+            T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+            T.copy(scores_max, S_shared[:, k])
             for i in T.Parallel(block_H):
-                logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-            T.copy(acc_o[:valid_block_H, :], O_shared)
-            T.copy(O_shared, Output[bid, hid * valid_block_H : (hid + 1) * valid_block_H, :])
-            T.copy(S_shared, S_shared_cast)
-            T.copy(S_shared_cast[:valid_block_H, :], S[bid, hid * valid_block_H : (hid + 1) * valid_block_H, :])
+                scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+            for i, j in T.Parallel(block_H, block_N):
+                acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+            T.reduce_sum(acc_s, scores_sum, dim=1)
+            for i in T.Parallel(block_H):
+                logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+            T.copy(acc_s, acc_s_cast)
+            for i, j in T.Parallel(block_H, dim):
+                acc_o[i, j] *= scores_scale[i]
+            T.copy(V[cur_start_k + k * block_N : cur_start_k + (k + 1) * block_N, cur_kv_head, :], V_shared)
+            T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
-    return flashattn_gqa_decode_no_split
+        if has_sink:
+            T.copy(s_aux[hid * valid_block_H : hid * valid_block_H + block_H], s_aux_shared)
+            for i in T.Parallel(block_H):
+                logsum[i] += s_aux_shared[i]
+        for i, j in T.Parallel(block_H, dim):
+            acc_o[i, j] /= logsum[i]
+        for h, k in T.Parallel(block_H, T.ceildiv(max_seqlen_kv, block_N)):
+            S_shared[h, k] = T.exp2((S_shared[h, k] - scores_max[h]) * scale) / logsum[h]
+        for i in T.Parallel(block_H):
+            logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
+        T.copy(acc_o[:valid_block_H, :], O_shared)
+        T.copy(O_shared, Output[bid, hid * valid_block_H : (hid + 1) * valid_block_H, :])
+        T.copy(S_shared, S_shared_cast)
+        T.copy(S_shared_cast[:valid_block_H, :], S[bid, hid * valid_block_H : (hid + 1) * valid_block_H, :])
+
+    return Output, S
 
 
 def ref_attention(q, k, v, k_seqlens, q_heads, sink=None):
@@ -194,8 +191,7 @@ def test_varlen_decode_main(args):
         sink = torch.randn(q_heads, device="cuda", dtype=torch.float32) * 0.1 if args.test_sink else None
 
     # Run tilelang kernel
-    tl_kernel = flashattn(batch_size, q_heads, kv_heads, max_k_seqlen, total_k_tokens, head_size, args.test_sink)
-    O_tl, S_tl = tl_kernel(q, k_varlen, v_varlen, cu_seqlens_k, sink)
+    O_tl, S_tl = flashattn(q, k_varlen, v_varlen, cu_seqlens_k, sink, max_k_seqlen, args.test_sink)
     S_tl = torch.max_pool2d(S_tl, kernel_size=(q_heads, 1), stride=(q_heads, 1))
 
     # Mask out invalid S positions
@@ -267,13 +263,8 @@ def speed_benchmark_decode_comparison(args):
     if args.test_varlen:
         print(f"  K sequence lengths: {k_seqlens.tolist()}")
 
-    _, q_h, head_size = q_decode.shape
-    batch = cu_seqlens_k.size(0) - 1
-    k_h = k_varlen.size(1)
-    tl_kernel = flashattn(batch, q_h, k_h, args.k_seqlen, cu_seqlens_k[-1].item(), head_size, args.test_sink)
-
     def run_once():
-        tl_kernel(q_decode, k_varlen, v_varlen, cu_seqlens_k, sink)
+        flashattn(q_decode, k_varlen, v_varlen, cu_seqlens_k, sink, args.k_seqlen, args.test_sink)
 
     # Benchmark
     print("⚡ Benchmarking Tilelang kernel (100 iterations)...")

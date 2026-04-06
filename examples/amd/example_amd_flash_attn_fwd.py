@@ -105,12 +105,11 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs(), cache_input_tensors=True, supply_prog=supply_tensors_gpu)
-@tilelang.jit(out_idx=[3])
+@tilelang.jit
 def fast_flashattn(
-    batch,
-    heads,
-    seq_len,
-    dim,
+    Q,
+    K,
+    V,
     is_causal,
     groups,
     block_M: int,
@@ -124,137 +123,136 @@ def fast_flashattn(
     qk_coalesced_width: int,
     v_coalesced_width: int,
 ):
-    scale = (1.0 / dim) ** 0.5
+    batch, seq_len, heads, dim = T.const("batch, seq_len, heads, dim")
+    scale = T.pow(dim, -0.5)
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
     dtype = T.float16
     accum_dtype = T.float32
 
+    Q: T.Tensor(q_shape, dtype)
+    K: T.Tensor(kv_shape, dtype)
+    V: T.Tensor(kv_shape, dtype)
+    Output = T.empty(q_shape, dtype)
+
     vec_size = qk_coalesced_width
     v_vec_size = v_coalesced_width
 
-    @T.prim_func
-    def main(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
-        Output: T.Tensor(q_shape, dtype),
-    ):
-        with T.Kernel(num_split_q, batch * heads, threads=threads) as (b_split, byz_combined):
-            T.use_swizzle(panel_size, enable=enable_rasterization)
+    with T.Kernel(num_split_q, batch * heads, threads=threads) as (b_split, byz_combined):
+        T.use_swizzle(panel_size, enable=enable_rasterization)
 
-            bz = byz_combined // heads
-            by = byz_combined % heads
+        bz = byz_combined // heads
+        by = byz_combined % heads
 
-            num_q_blocks = T.ceildiv(seq_len, block_M)
+        num_q_blocks = T.ceildiv(seq_len, block_M)
 
-            bx = T.alloc_var(T.int32)
-            bx = b_split
+        bx = T.alloc_var(T.int32)
+        bx = b_split
 
-            while bx < num_q_blocks:
-                acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
-                m_i = T.alloc_fragment([block_M], accum_dtype)
-                l_i = T.alloc_fragment([block_M], accum_dtype)
-                T.fill(acc_o, 0)
-                T.fill(m_i, -T.infinity(accum_dtype))
-                T.fill(l_i, 0)
+        while bx < num_q_blocks:
+            acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
+            m_i = T.alloc_fragment([block_M], accum_dtype)
+            l_i = T.alloc_fragment([block_M], accum_dtype)
+            T.fill(acc_o, 0)
+            T.fill(m_i, -T.infinity(accum_dtype))
+            T.fill(l_i, 0)
 
-                current_bx = bx
-                q_block_offset = current_bx * block_M
+            current_bx = bx
+            q_block_offset = current_bx * block_M
 
-                Q_shared = T.alloc_shared([block_M, dim], dtype)
-                K_shared = T.alloc_shared([block_N, dim], dtype)
-                V_shared = T.alloc_shared([block_N, dim], dtype)
-                # P_shared is used to bridge the WMMA D-layout (acc_s output) to
-                # A-layout (acc_s_cast input for GEMM 2). On RDNA GPUs with WMMA,
-                # D and A have different register layouts, so a direct fragment-to-
-                # fragment copy would cause a layout conflict. Routing through shared
-                # memory correctly transposes the softmax values.
-                if IsRDNA():
-                    P_shared = T.alloc_shared([block_M, block_N], dtype)
-                # Use register fragment for P instead of shared memory to reduce LDS usage
-                acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
+            Q_shared = T.alloc_shared([block_M, dim], dtype)
+            K_shared = T.alloc_shared([block_N, dim], dtype)
+            V_shared = T.alloc_shared([block_N, dim], dtype)
+            # P_shared is used to bridge the WMMA D-layout (acc_s output) to
+            # A-layout (acc_s_cast input for GEMM 2). On RDNA GPUs with WMMA,
+            # D and A have different register layouts, so a direct fragment-to-
+            # fragment copy would cause a layout conflict. Routing through shared
+            # memory correctly transposes the softmax values.
+            if IsRDNA():
+                P_shared = T.alloc_shared([block_M, block_N], dtype)
+            # Use register fragment for P instead of shared memory to reduce LDS usage
+            acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
 
-                acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
-                m_prev = T.alloc_fragment([block_M], accum_dtype)
-                scale_factor = T.alloc_fragment([block_M], accum_dtype)
+            acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
+            m_prev = T.alloc_fragment([block_M], accum_dtype)
+            scale_factor = T.alloc_fragment([block_M], accum_dtype)
 
-                T.copy(Q[bz, q_block_offset : q_block_offset + block_M, by, :], Q_shared, coalesced_width=vec_size)
+            T.copy(Q[bz, q_block_offset : q_block_offset + block_M, by, :], Q_shared, coalesced_width=vec_size)
 
-                loop_end_k = T.ceildiv(q_block_offset + block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
+            loop_end_k = T.ceildiv(q_block_offset + block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
 
-                row_sum = T.alloc_fragment([block_M], accum_dtype)
+            row_sum = T.alloc_fragment([block_M], accum_dtype)
 
-                for k in T.Pipelined(loop_end_k, num_stages=num_stages):
-                    kv_idx = k * block_N
+            for k in T.Pipelined(loop_end_k, num_stages=num_stages):
+                kv_idx = k * block_N
 
-                    T.copy(K[bz, kv_idx : kv_idx + block_N, by // groups, :], K_shared, coalesced_width=vec_size)
-                    T.copy(V[bz, kv_idx : kv_idx + block_N, by // groups, :], V_shared, coalesced_width=v_vec_size)
+                T.copy(K[bz, kv_idx : kv_idx + block_N, by // groups, :], K_shared, coalesced_width=vec_size)
+                T.copy(V[bz, kv_idx : kv_idx + block_N, by // groups, :], V_shared, coalesced_width=v_vec_size)
 
-                    if is_causal:
-                        for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, 0, -T.infinity(acc_s.dtype))
-                    else:
-                        T.clear(acc_s)
-                    T.gemm(
-                        Q_shared,
-                        K_shared,
-                        acc_s,
-                        transpose_B=True,
-                        k_pack=k_pack,
-                        policy=GemmWarpPolicy.FullRow,
-                    )
-
-                    T.copy(m_i, m_prev)
-                    T.reduce_max(acc_s, m_i, dim=1, clear=False)
-                    for i in T.Parallel(block_M):
-                        m_i[i] = T.max(m_i[i], m_prev[i])
-
-                    for i in T.Parallel(block_M):
-                        sf = T.exp(m_prev[i] * scale - m_i[i] * scale)
-                        l_i[i] *= sf
-                        scale_factor[i] = sf
-
-                    for i, j in T.Parallel(block_M, dim):
-                        acc_o[i, j] *= scale_factor[i]
-
-                    # Compute softmax values
+                if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.exp(acc_s[i, j] * scale - m_i[i] * scale)
+                        acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, 0, -T.infinity(acc_s.dtype))
+                else:
+                    T.clear(acc_s)
+                T.gemm(
+                    Q_shared,
+                    K_shared,
+                    acc_s,
+                    transpose_B=True,
+                    k_pack=k_pack,
+                    policy=GemmWarpPolicy.FullRow,
+                )
 
-                    T.reduce_sum(acc_s, row_sum, dim=1)
-                    for i in T.Parallel(block_M):
-                        l_i[i] += row_sum[i]
-
-                    if IsRDNA():
-                        # Cast softmax values from f32 (acc_s, D-layout) to f16 (acc_s_cast, A-layout).
-                        # On RDNA with WMMA, D and A have different register layouts.
-                        # Route through shared memory (P_shared) to correctly bridge them:
-                        # 1) T.Parallel writes acc_s values to P_shared at D-layout coordinates.
-                        # 2) T.copy reads P_shared into acc_s_cast at A-layout coordinates.
-                        # This shared-memory transpose is only correct when block_M / threads
-                        # gives at most 2 warps (block_M=32 with 64 threads, or block_M=16 with 32 threads).
-                        for i, j in T.Parallel(block_M, block_N):
-                            P_shared[i, j] = T.cast(acc_s[i, j], dtype)
-                        T.copy(P_shared, acc_s_cast)
-                    else:
-                        # This avoids layout conflict between acc_s and acc_s_cast
-                        T.copy(acc_s, acc_s_cast)
-
-                    T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
-
-                l_inv = T.alloc_fragment([block_M], accum_dtype)
+                T.copy(m_i, m_prev)
+                T.reduce_max(acc_s, m_i, dim=1, clear=False)
                 for i in T.Parallel(block_M):
-                    safe_l = T.if_then_else(l_i[i] > 1e-6, l_i[i], 1.0)
-                    l_inv[i] = 1.0 / safe_l
+                    m_i[i] = T.max(m_i[i], m_prev[i])
+
+                for i in T.Parallel(block_M):
+                    sf = T.exp(m_prev[i] * scale - m_i[i] * scale)
+                    l_i[i] *= sf
+                    scale_factor[i] = sf
 
                 for i, j in T.Parallel(block_M, dim):
-                    Output[bz, q_block_offset + i, by, j] = acc_o[i, j] * l_inv[i]
+                    acc_o[i, j] *= scale_factor[i]
 
-                bx = current_bx + num_split_q
+                # Compute softmax values
+                for i, j in T.Parallel(block_M, block_N):
+                    acc_s[i, j] = T.exp(acc_s[i, j] * scale - m_i[i] * scale)
 
-    return main
+                T.reduce_sum(acc_s, row_sum, dim=1)
+                for i in T.Parallel(block_M):
+                    l_i[i] += row_sum[i]
+
+                if IsRDNA():
+                    # Cast softmax values from f32 (acc_s, D-layout) to f16 (acc_s_cast, A-layout).
+                    # On RDNA with WMMA, D and A have different register layouts.
+                    # Route through shared memory (P_shared) to correctly bridge them:
+                    # 1) T.Parallel writes acc_s values to P_shared at D-layout coordinates.
+                    # 2) T.copy reads P_shared into acc_s_cast at A-layout coordinates.
+                    # This shared-memory transpose is only correct when block_M / threads
+                    # gives at most 2 warps (block_M=32 with 64 threads, or block_M=16 with 32 threads).
+                    for i, j in T.Parallel(block_M, block_N):
+                        P_shared[i, j] = T.cast(acc_s[i, j], dtype)
+                    T.copy(P_shared, acc_s_cast)
+                else:
+                    # This avoids layout conflict between acc_s and acc_s_cast
+                    T.copy(acc_s, acc_s_cast)
+
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
+
+            l_inv = T.alloc_fragment([block_M], accum_dtype)
+            for i in T.Parallel(block_M):
+                safe_l = T.if_then_else(l_i[i] > 1e-6, l_i[i], 1.0)
+                l_inv[i] = 1.0 / safe_l
+
+            for i, j in T.Parallel(block_M, dim):
+                Output[bz, q_block_offset + i, by, j] = acc_o[i, j] * l_inv[i]
+
+            bx = current_bx + num_split_q
+
+    return Output
 
 
 def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is_causal: bool = False, groups: int = 1):
@@ -264,7 +262,7 @@ def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is
         total_flops *= 0.5
 
     print("Starting autotuning for FlashAttention-V2...")
-    kernel = fast_flashattn(batch, heads, seq_len, dim, is_causal, groups=groups)
+    kernel = fast_flashattn.compile(batch=batch, heads=heads, seq_len=seq_len, dim=dim, is_causal=is_causal, groups=groups)
     print(f"Autotuning finished. Best Configuration: {kernel.config}")
 
     ref_program_processed = partial(ref_program, is_causal=is_causal, groups=groups)

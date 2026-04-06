@@ -4,10 +4,17 @@ import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
 
+@tilelang.jit(
+    target="cuda",
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT: True,
+    },
+)
 def matmul(
-    M,
-    N,
-    K,
+    A,
+    B,
     block_M,
     block_N,
     block_K,
@@ -19,45 +26,44 @@ def matmul(
     num_stages,
     threads,
 ):
+    M, N, K = T.const("M, N, K")
     A_shape = (K, M) if trans_A else (M, K)
     B_shape = (N, K) if trans_B else (K, N)
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
-    @T.prim_func
-    def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
-    ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
-            mbar = T.alloc_barrier(1)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            C_shared = T.alloc_shared((block_M, block_N), out_dtype)
+    A: T.Tensor(A_shape, in_dtype)
+    B: T.Tensor(B_shape, in_dtype)
+    C = T.empty((M, N), out_dtype)
 
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(A[by * block_M, k * block_K], A_shared)
-                T.copy(B[bx * block_N, k * block_K], B_shared)
-                T.tcgen05_gemm(
-                    A_shared,
-                    B_shared,
-                    C_tmem,
-                    trans_A,
-                    trans_B,
-                    mbar=mbar,
-                    clear_accum=(k == 0),
-                )
-                T.mbarrier_wait_parity(mbar, k % 2)
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+        B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+        C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
+        mbar = T.alloc_barrier(1)
+        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+        C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            T.copy(C_tmem, C_local)
-            T.copy(C_local, C_shared)
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            T.copy(A[by * block_M, k * block_K], A_shared)
+            T.copy(B[bx * block_N, k * block_K], B_shared)
+            T.tcgen05_gemm(
+                A_shared,
+                B_shared,
+                C_tmem,
+                trans_A,
+                trans_B,
+                mbar=mbar,
+                clear_accum=(k == 0),
+            )
+            T.mbarrier_wait_parity(mbar, k % 2)
 
-            T.copy(C_shared, C[by * block_M, bx * block_N])
+        T.copy(C_tmem, C_local)
+        T.copy(C_local, C_shared)
 
-    return main
+        T.copy(C_shared, C[by * block_M, bx * block_N])
+
+    return C
 
 
 def calc_diff(x, y):
@@ -79,30 +85,20 @@ for tvm_fp8_dtype in [T.float8_e4m3fn, T.float8_e5m2]:
         print(f"running {tvm_fp8_dtype} -> {tvm_acc_dtype}")
         in_dtype, out_dtype, accum_dtype = tvm_fp8_dtype, tvm_acc_dtype, tvm_acc_dtype
 
-        func = matmul(
-            M,
-            N,
-            K,
-            block_M,
-            block_N,
-            block_K,
-            trans_A,
-            trans_B,
-            in_dtype,
-            out_dtype,
-            accum_dtype,
-            num_stages,
-            threads,
-        )
-        jit_kernel = tilelang.compile(
-            func,
-            out_idx=[2],
-            target="cuda",
-            pass_configs={
-                tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-                tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-                tilelang.PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT: True,
-            },
+        jit_kernel = matmul.compile(
+            M=M,
+            N=N,
+            K=K,
+            block_M=block_M,
+            block_N=block_N,
+            block_K=block_K,
+            trans_A=trans_A,
+            trans_B=trans_B,
+            in_dtype=in_dtype,
+            out_dtype=out_dtype,
+            accum_dtype=accum_dtype,
+            num_stages=num_stages,
+            threads=threads,
         )
         # jit_kernel.export_ptx("./dump.ptx")
         # jit_kernel.export_sources("./dump.cu")

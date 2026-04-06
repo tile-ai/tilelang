@@ -144,7 +144,7 @@ def main(
     total_flops = 2 * flops_per_matmul
 
     if tune:
-        kernel = flashattn(batch, heads, seq_q, seq_kv, dim, window_size, dtype=dtype)
+        kernel = flashattn.compile(batch=batch, heads=heads, seq_q=seq_q, seq_kv=seq_kv, dim=dim, window_size=window_size, dtype=dtype)
         print(f"Best latency: {kernel.latency}")
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
@@ -155,13 +155,13 @@ def main(
         threads = 256
         print(f"{block_M=}, {block_N=}, {num_stages=}, {threads=}")
 
-        kernel = flashattn(
-            batch,
-            heads,
-            seq_q,
-            seq_kv,
-            dim,
-            window_size,
+        kernel = flashattn.compile(
+            batch=batch,
+            heads=heads,
+            seq_q=seq_q,
+            seq_kv=seq_kv,
+            dim=dim,
+            window_size=window_size,
             block_M=block_M,
             block_N=block_N,
             num_stages=num_stages,

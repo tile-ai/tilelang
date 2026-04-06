@@ -14,47 +14,40 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs())
-@tilelang.jit(out_idx=[1, 2])
-def tl_topk(
-    M,
-    N,
-    topk,
-    blk_m,
-    threads=128,
-):
+@tilelang.jit
+def tl_topk(logits, topk, blk_m, threads=128):
+    M, N = T.const("M, N")
     dtype = T.float32
 
-    @T.prim_func
-    def topk_kernel(
-        logits: T.Tensor([M, N], dtype),
-        topk_gates: T.Tensor([M, topk], dtype),
-        topk_indices: T.Tensor([M, topk], T.int32),
-    ):
-        with T.Kernel(T.ceildiv(M, blk_m), threads=threads) as bx:
-            logits_frag = T.alloc_fragment([blk_m, N], dtype=dtype)
-            max_val = T.alloc_fragment([blk_m], dtype=dtype)
-            expand_max_idx = T.alloc_fragment([blk_m, N], T.int32)
-            max_idx = T.alloc_fragment([blk_m], T.int32)
+    logits: T.Tensor([M, N], dtype)
+    topk_gates = T.empty([M, topk], dtype)
+    topk_indices = T.empty([M, topk], T.int32)
 
-            T.copy(logits[bx * blk_m, 0], logits_frag)
+    with T.Kernel(T.ceildiv(M, blk_m), threads=threads) as bx:
+        logits_frag = T.alloc_fragment([blk_m, N], dtype=dtype)
+        max_val = T.alloc_fragment([blk_m], dtype=dtype)
+        expand_max_idx = T.alloc_fragment([blk_m, N], T.int32)
+        max_idx = T.alloc_fragment([blk_m], T.int32)
 
-            for k in T.serial(topk):
-                T.fill(expand_max_idx, -1)
-                T.reduce_max(logits_frag, max_val, dim=1, clear=True)
+        T.copy(logits[bx * blk_m, 0], logits_frag)
 
-                for i, j in T.Parallel(blk_m, N):
-                    expand_max_idx[i, j] = T.if_then_else(max_val[i] == logits_frag[i, j], j, expand_max_idx[i, j])
+        for k in T.serial(topk):
+            T.fill(expand_max_idx, -1)
+            T.reduce_max(logits_frag, max_val, dim=1, clear=True)
 
-                T.reduce_max(expand_max_idx, max_idx, dim=1, clear=True)
+            for i, j in T.Parallel(blk_m, N):
+                expand_max_idx[i, j] = T.if_then_else(max_val[i] == logits_frag[i, j], j, expand_max_idx[i, j])
 
-                for i, j in T.Parallel(blk_m, N):
-                    logits_frag[i, j] = T.if_then_else(max_val[i] == logits_frag[i, j], -10000.0, logits_frag[i, j])
+            T.reduce_max(expand_max_idx, max_idx, dim=1, clear=True)
 
-                for i in T.Parallel(blk_m):
-                    topk_gates[bx * blk_m + i, k] = max_val[i]
-                    topk_indices[bx * blk_m + i, k] = max_idx[i]
+            for i, j in T.Parallel(blk_m, N):
+                logits_frag[i, j] = T.if_then_else(max_val[i] == logits_frag[i, j], -10000.0, logits_frag[i, j])
 
-    return topk_kernel
+            for i in T.Parallel(blk_m):
+                topk_gates[bx * blk_m + i, k] = max_val[i]
+                topk_indices[bx * blk_m + i, k] = max_idx[i]
+
+    return topk_gates, topk_indices
 
 
 def ref_program(logits, top_k):
@@ -74,8 +67,7 @@ def main(argv=None):
 
     logits = torch.rand((M, N), device="cuda", dtype=torch.float32)
 
-    kernel = tl_topk(M=M, N=N, topk=topk, blk_m=blk_m)
-    tl_gates, tl_indices = kernel(logits)
+    tl_gates, tl_indices = tl_topk(logits, topk)
 
     torch_gates, torch_indices = ref_program(logits, topk)
 
@@ -84,8 +76,9 @@ def main(argv=None):
     torch.testing.assert_close(tl_indices, torch_indices)
 
     # profile
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
-    tilelang_latency = profiler.do_bench()
+    from tilelang.profiler import do_bench
+
+    tilelang_latency = do_bench(lambda: tl_topk(logits, topk, blk_m=blk_m))
     print(f"Tilelang latency: {tilelang_latency}")
 
 
@@ -101,16 +94,16 @@ def run_regression_perf(argv=None):
 
     logits = torch.rand((M, N), device="cuda", dtype=torch.float32)
 
-    kernel = tl_topk(M=M, N=N, topk=topk, blk_m=blk_m)
-    tl_gates, tl_indices = kernel(logits)
+    tl_gates, tl_indices = tl_topk(logits, topk, blk_m=blk_m)
 
     torch_gates, torch_indices = ref_program(logits, topk)
 
     torch.testing.assert_close(tl_gates, torch_gates)
     torch.testing.assert_close(tl_indices, torch_indices)
 
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
-    return profiler.do_bench(backend="cupti")
+    from tilelang.profiler import do_bench
+
+    return do_bench(lambda: tl_topk(logits, topk, blk_m=blk_m))
 
 
 if __name__ == "__main__":

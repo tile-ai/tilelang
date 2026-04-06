@@ -9,13 +9,27 @@ from varlen_utils import generate_random_padding_mask, generate_qkv
 
 
 @tilelang.jit(
-    out_idx=[6],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64, num_stages=1, threads=128):
-    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+def flashattn(
+    Q_unpad,
+    K_unpad,
+    V_unpad,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    batch_size,
+    groups,
+    max_seqlen_q,
+    is_causal,
+    block_M=64,
+    block_N=64,
+    num_stages=1,
+    threads=128,
+):
+    UQ, UKV, heads, dim = T.const("UQ, UKV, heads, dim")
+    scale = T.pow(dim, -0.5) * 1.44269504  # log2(e)
     head_kv = heads // groups
     q_shape = [UQ, heads, dim]
     kv_shape = [UKV, head_kv, dim]
@@ -23,107 +37,102 @@ def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, bl
     dtype = T.float16
     accum_dtype = T.float32
 
-    @T.prim_func
-    def main(
-        Q_unpad: T.Tensor(q_shape, dtype),
-        K_unpad: T.Tensor(kv_shape, dtype),
-        V_unpad: T.Tensor(kv_shape, dtype),
-        cu_seqlens_q: T.Tensor([batch_size + 1], T.int32),
-        cu_seqlens_k: T.Tensor([batch_size + 1], T.int32),
-        max_seqlen_q: T.int32,
-        Output_unpad: T.Tensor(o_shape, dtype),
-    ):
-        with T.Kernel(T.ceildiv(max_seqlen_q, block_M), heads, batch_size, threads=threads) as (bx, by, bz):
-            Q_shared = T.alloc_shared([block_M, dim], dtype)
-            K_shared = T.alloc_shared([block_N, dim], dtype)
-            V_shared = T.alloc_shared([block_N, dim], dtype)
-            O_shared = T.alloc_shared([block_M, dim], dtype)
-            acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
-            acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
-            acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
-            scores_max = T.alloc_fragment([block_M], accum_dtype)
-            scores_max_prev = T.alloc_fragment([block_M], accum_dtype)
-            scores_scale = T.alloc_fragment([block_M], accum_dtype)
-            scores_sum = T.alloc_fragment([block_M], accum_dtype)
-            logsum = T.alloc_fragment([block_M], accum_dtype)
+    Q_unpad: T.Tensor(q_shape, dtype)
+    K_unpad: T.Tensor(kv_shape, dtype)
+    V_unpad: T.Tensor(kv_shape, dtype)
+    cu_seqlens_q: T.Tensor([batch_size + 1], T.int32)
+    cu_seqlens_k: T.Tensor([batch_size + 1], T.int32)
+    Output_unpad = T.empty(o_shape, dtype)
 
-            batch_idx = bz
-            head_idx = by
-            kv_head_idx = head_idx // groups
+    with T.Kernel(T.ceildiv(max_seqlen_q, block_M), heads, batch_size, threads=threads) as (bx, by, bz):
+        Q_shared = T.alloc_shared([block_M, dim], dtype)
+        K_shared = T.alloc_shared([block_N, dim], dtype)
+        V_shared = T.alloc_shared([block_N, dim], dtype)
+        O_shared = T.alloc_shared([block_M, dim], dtype)
+        acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
+        acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
+        acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
+        scores_max = T.alloc_fragment([block_M], accum_dtype)
+        scores_max_prev = T.alloc_fragment([block_M], accum_dtype)
+        scores_scale = T.alloc_fragment([block_M], accum_dtype)
+        scores_sum = T.alloc_fragment([block_M], accum_dtype)
+        logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            q_start_idx = cu_seqlens_q[batch_idx]
-            kv_start_idx = cu_seqlens_k[batch_idx]
-            q_end_idx = cu_seqlens_q[batch_idx + 1]
-            k_end_idx = cu_seqlens_k[batch_idx + 1]
+        batch_idx = bz
+        head_idx = by
+        kv_head_idx = head_idx // groups
 
-            q_current_seqlen = q_end_idx - q_start_idx
-            kv_current_seqlen = k_end_idx - kv_start_idx
+        q_start_idx = cu_seqlens_q[batch_idx]
+        kv_start_idx = cu_seqlens_k[batch_idx]
+        q_end_idx = cu_seqlens_q[batch_idx + 1]
+        k_end_idx = cu_seqlens_k[batch_idx + 1]
 
-            T.copy(Q_unpad[q_start_idx + bx * block_M : q_start_idx + (bx + 1) * block_M, head_idx, :], Q_shared)
+        q_current_seqlen = q_end_idx - q_start_idx
+        kv_current_seqlen = k_end_idx - kv_start_idx
 
-            T.fill(acc_o, 0)
-            T.fill(logsum, 0)
-            T.fill(scores_max, -T.infinity(accum_dtype))
+        T.copy(Q_unpad[q_start_idx + bx * block_M : q_start_idx + (bx + 1) * block_M, head_idx, :], Q_shared)
 
-            offset = kv_current_seqlen - q_current_seqlen  # always align on the right
-            max_visible_k_idx = offset + (bx + 1) * block_M
-            loop_range = (
-                T.min(T.ceildiv(max_visible_k_idx, block_N), T.ceildiv(kv_current_seqlen, block_N))
-                if is_causal
-                else T.ceildiv(kv_current_seqlen, block_N)
-            )
+        T.fill(acc_o, 0)
+        T.fill(logsum, 0)
+        T.fill(scores_max, -T.infinity(accum_dtype))
 
-            for k in T.Pipelined(loop_range, num_stages=num_stages):
-                T.copy(K_unpad[kv_start_idx + k * block_N : kv_start_idx + (k + 1) * block_N, kv_head_idx, :], K_shared)
+        offset = kv_current_seqlen - q_current_seqlen  # always align on the right
+        max_visible_k_idx = offset + (bx + 1) * block_M
+        loop_range = (
+            T.min(T.ceildiv(max_visible_k_idx, block_N), T.ceildiv(kv_current_seqlen, block_N))
+            if is_causal
+            else T.ceildiv(kv_current_seqlen, block_N)
+        )
 
-                if is_causal:
-                    for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(
-                            (bx * block_M + i + offset < k * block_N + j)
-                            or (bx * block_M + i >= q_current_seqlen or k * block_N + j >= kv_current_seqlen),
-                            -1e9,
-                            0,
-                        )
-                else:
-                    for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(
-                            (bx * block_M + i >= q_current_seqlen or k * block_N + j >= kv_current_seqlen), -1e9, 0
-                        )
+        for k in T.Pipelined(loop_range, num_stages=num_stages):
+            T.copy(K_unpad[kv_start_idx + k * block_N : kv_start_idx + (k + 1) * block_N, kv_head_idx, :], K_shared)
 
-                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-
-                T.copy(scores_max, scores_max_prev)
-                T.fill(scores_max, -T.infinity(accum_dtype))
-                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                for i in T.Parallel(block_M):
-                    scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
-
-                for i in T.Parallel(block_M):
-                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+            if is_causal:
                 for i, j in T.Parallel(block_M, block_N):
-                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                T.reduce_sum(acc_s, scores_sum, dim=1)
-                for i in T.Parallel(block_M):
-                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                T.copy(acc_s, acc_s_cast)
+                    acc_s[i, j] = T.if_then_else(
+                        (bx * block_M + i + offset < k * block_N + j)
+                        or (bx * block_M + i >= q_current_seqlen or k * block_N + j >= kv_current_seqlen),
+                        -1e9,
+                        0,
+                    )
+            else:
+                for i, j in T.Parallel(block_M, block_N):
+                    acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or k * block_N + j >= kv_current_seqlen), -1e9, 0)
 
-                for i, j in T.Parallel(block_M, dim):
-                    acc_o[i, j] *= scores_scale[i]
+            T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
-                T.copy(V_unpad[kv_start_idx + k * block_N : kv_start_idx + (k + 1) * block_N, kv_head_idx, :], V_shared)
+            T.copy(scores_max, scores_max_prev)
+            T.fill(scores_max, -T.infinity(accum_dtype))
+            T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+            for i in T.Parallel(block_M):
+                scores_max[i] = T.max(scores_max[i], scores_max_prev[i])
 
-                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+            for i in T.Parallel(block_M):
+                scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+            for i, j in T.Parallel(block_M, block_N):
+                acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+            T.reduce_sum(acc_s, scores_sum, dim=1)
+            for i in T.Parallel(block_M):
+                logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+            T.copy(acc_s, acc_s_cast)
 
             for i, j in T.Parallel(block_M, dim):
-                # When sq > skv, some tokens can see nothing
-                acc_o[i, j] = 0 if is_causal and bx * block_M + i + offset < 0 else acc_o[i, j] / logsum[i]
+                acc_o[i, j] *= scores_scale[i]
 
-            T.copy(acc_o, O_shared)
-            for i, d in T.Parallel(block_M, dim):
-                if bx * block_M + i < q_current_seqlen:
-                    Output_unpad[q_start_idx + bx * block_M + i, head_idx, d] = O_shared[i, d]
+            T.copy(V_unpad[kv_start_idx + k * block_N : kv_start_idx + (k + 1) * block_N, kv_head_idx, :], V_shared)
 
-    return main
+            T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+
+        for i, j in T.Parallel(block_M, dim):
+            # When sq > skv, some tokens can see nothing
+            acc_o[i, j] = 0 if is_causal and bx * block_M + i + offset < 0 else acc_o[i, j] / logsum[i]
+
+        T.copy(acc_o, O_shared)
+        for i, d in T.Parallel(block_M, dim):
+            if bx * block_M + i < q_current_seqlen:
+                Output_unpad[q_start_idx + bx * block_M + i, head_idx, d] = O_shared[i, d]
+
+    return Output_unpad
 
 
 def main(
@@ -168,12 +177,21 @@ def main(
         _,
     ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
 
-    UQ = q_unpad.shape[0]
-    UKV = k_unpad.shape[0]
-
-    kernel = flashattn(batch, groups, UQ, UKV, heads, dim, is_causal, block_M=128, block_N=128, num_stages=2, threads=256)
-
-    out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
+    out_unpad = flashattn(
+        q_unpad,
+        k_unpad,
+        v_unpad,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        batch,
+        groups,
+        max_seqlen_q,
+        is_causal,
+        block_M=128,
+        block_N=128,
+        num_stages=2,
+        threads=256,
+    )
     out = output_pad_fn(out_unpad)
 
     import flash_attn
@@ -193,7 +211,25 @@ def main(
     torch.testing.assert_close(out, fa_out, rtol=1e-2, atol=1e-2)
 
     print("All checks passed.✅")
-    latency = do_bench(lambda: kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q), _n_warmup=5, _n_repeat=5)
+    latency = do_bench(
+        lambda: flashattn(
+            q_unpad,
+            k_unpad,
+            v_unpad,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            batch,
+            groups,
+            max_seqlen_q,
+            is_causal,
+            block_M=128,
+            block_N=128,
+            num_stages=2,
+            threads=256,
+        ),
+        _n_warmup=5,
+        _n_repeat=5,
+    )
     print("Tile-lang: {:.2f} ms".format(latency))
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 

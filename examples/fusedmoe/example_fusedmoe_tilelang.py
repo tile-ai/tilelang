@@ -10,22 +10,21 @@ from example_fusedmoe_torch import *
 
 @tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 def moe_forward_tilelang_shared(
-    d_hidden,
-    d_expert,
-    n_shared_experts,
+    input,
+    shared_W_gate,
+    shared_W_up,
+    shared_W_down,
+    up_logits,
+    output,
     dtype,
-    num_tokens,
     block_token=128,
     block_dhidden=128,
     block_dexpert=128,
     threads=256,
     num_stages=1,
 ):
+    dhidden, dexpert, num_tokens = T.const("dhidden, dexpert, num_tokens")
     scale = 1.44269504  # log2(e)
-
-    # Parameters
-    dhidden = d_hidden
-    dexpert = d_expert * n_shared_experts
 
     # Tensors: Note that input shape is reshape to (num_tokens, dhidden)
     input_shape = (num_tokens, dhidden)
@@ -35,62 +34,58 @@ def moe_forward_tilelang_shared(
 
     accum_type = T.float32
 
-    @T.prim_func
-    def kernel_shared(
-        input: T.Tensor(input_shape, dtype),  # type: ignore
-        shared_W_gate: T.Tensor(shared_W_gate_shape, dtype),  # type: ignore
-        shared_W_up: T.Tensor(shared_W_up_shape, dtype),  # type: ignore
-        shared_W_down: T.Tensor(shared_W_down_shape, dtype),  # type: ignore
-        up_logits: T.Tensor((num_tokens, dexpert), dtype),  # type: ignore
-        output: T.Tensor(input_shape, dtype),  # type: ignore
-    ):
-        # Step 1: Compute gate and up logits
-        with T.Kernel(T.ceildiv(num_tokens, block_token), T.ceildiv(dexpert, block_dexpert), threads=threads) as (bx, by):
-            # Split the block to shared experts and routed experts
-            input_shared = T.alloc_fragment((block_token, block_dhidden), dtype=dtype)
-            W_gate_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
-            W_up_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
-            # Shared experts: no need to check expert_indices
+    input: T.Tensor(input_shape, dtype)  # type: ignore
+    shared_W_gate: T.Tensor(shared_W_gate_shape, dtype)  # type: ignore
+    shared_W_up: T.Tensor(shared_W_up_shape, dtype)  # type: ignore
+    shared_W_down: T.Tensor(shared_W_down_shape, dtype)  # type: ignore
+    up_logits: T.Tensor((num_tokens, dexpert), dtype)  # type: ignore
+    output: T.Tensor(input_shape, dtype)  # type: ignore
 
-            gate_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_type)
-            up_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_type)
+    # Step 1: Compute gate and up logits
+    with T.Kernel(T.ceildiv(num_tokens, block_token), T.ceildiv(dexpert, block_dexpert), threads=threads) as (bx, by):
+        # Split the block to shared experts and routed experts
+        input_shared = T.alloc_fragment((block_token, block_dhidden), dtype=dtype)
+        W_gate_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
+        W_up_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
+        # Shared experts: no need to check expert_indices
 
-            T.use_swizzle(10)
-            T.clear(gate_logits_local)
-            T.clear(up_logits_local)
+        gate_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_type)
+        up_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_type)
 
-            # Parallel for gate and up matmul
-            for k in T.Pipelined(T.ceildiv(dhidden, block_dhidden), num_stages=num_stages):
-                T.copy(input[bx * block_token, k * block_dhidden], input_shared)
-                T.copy(shared_W_gate[by * block_dexpert, k * block_dhidden], W_gate_shared)
-                T.copy(shared_W_up[by * block_dexpert, k * block_dhidden], W_up_shared)
-                T.gemm(input_shared, W_gate_shared, gate_logits_local, transpose_B=True)
-                T.gemm(input_shared, W_up_shared, up_logits_local, transpose_B=True)
+        T.use_swizzle(10)
+        T.clear(gate_logits_local)
+        T.clear(up_logits_local)
 
-            # Fuse with SiLU and element-wise product
-            for i, j in T.Parallel(block_token, block_dexpert):
-                gate_logits_local[i, j] = gate_logits_local[i, j] * (1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale)))
-                up_logits_local[i, j] = up_logits_local[i, j] * gate_logits_local[i, j]
+        # Parallel for gate and up matmul
+        for k in T.Pipelined(T.ceildiv(dhidden, block_dhidden), num_stages=num_stages):
+            T.copy(input[bx * block_token, k * block_dhidden], input_shared)
+            T.copy(shared_W_gate[by * block_dexpert, k * block_dhidden], W_gate_shared)
+            T.copy(shared_W_up[by * block_dexpert, k * block_dhidden], W_up_shared)
+            T.gemm(input_shared, W_gate_shared, gate_logits_local, transpose_B=True)
+            T.gemm(input_shared, W_up_shared, up_logits_local, transpose_B=True)
 
-            T.copy(up_logits_local, up_logits[bx * block_token, by * block_dexpert])
+        # Fuse with SiLU and element-wise product
+        for i, j in T.Parallel(block_token, block_dexpert):
+            gate_logits_local[i, j] = gate_logits_local[i, j] * (1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale)))
+            up_logits_local[i, j] = up_logits_local[i, j] * gate_logits_local[i, j]
 
-        # Step 2: Compute down logits
-        with T.Kernel(T.ceildiv(num_tokens, block_token), T.ceildiv(dhidden, block_dhidden), threads=threads) as (bx, by):
-            up_logits_shared = T.alloc_fragment((block_token, block_dexpert), dtype=dtype)
-            W_down_shared = T.alloc_shared((block_dhidden, block_dexpert), dtype=dtype)
-            output_local = T.alloc_fragment((block_token, block_dhidden), dtype=accum_type)
+        T.copy(up_logits_local, up_logits[bx * block_token, by * block_dexpert])
 
-            T.use_swizzle(10)
-            T.clear(output_local)
+    # Step 2: Compute down logits
+    with T.Kernel(T.ceildiv(num_tokens, block_token), T.ceildiv(dhidden, block_dhidden), threads=threads) as (bx, by):
+        up_logits_shared = T.alloc_fragment((block_token, block_dexpert), dtype=dtype)
+        W_down_shared = T.alloc_shared((block_dhidden, block_dexpert), dtype=dtype)
+        output_local = T.alloc_fragment((block_token, block_dhidden), dtype=accum_type)
 
-            for k in T.Pipelined(T.ceildiv(dexpert, block_dexpert), num_stages=num_stages):
-                T.copy(up_logits[bx * block_token, k * block_dexpert], up_logits_shared)
-                T.copy(shared_W_down[by * block_dhidden, k * block_dexpert], W_down_shared)
-                T.gemm(up_logits_shared, W_down_shared, output_local, transpose_B=True)
+        T.use_swizzle(10)
+        T.clear(output_local)
 
-            T.copy(output_local, output[bx * block_token, by * block_dhidden])
+        for k in T.Pipelined(T.ceildiv(dexpert, block_dexpert), num_stages=num_stages):
+            T.copy(up_logits[bx * block_token, k * block_dexpert], up_logits_shared)
+            T.copy(shared_W_down[by * block_dhidden, k * block_dexpert], W_down_shared)
+            T.gemm(up_logits_shared, W_down_shared, output_local, transpose_B=True)
 
-    return kernel_shared
+        T.copy(output_local, output[bx * block_token, by * block_dhidden])
 
 
 @tilelang.jit(
@@ -100,9 +95,17 @@ def moe_forward_tilelang_shared(
     }
 )
 def moe_forward_tilelang_routed(
-    d_hidden,
-    d_expert,
-    n_routed_experts,
+    input,
+    routed_expert_gate,
+    routed_expert_up,
+    routed_expert_down,
+    routed_expert_weights,
+    group_sizes,
+    group_offsets,
+    group_padded_offsets,
+    group_idx_for_bx,
+    up_logits,
+    output,
     dtype,
     group_sum,
     group_count,
@@ -112,12 +115,8 @@ def moe_forward_tilelang_routed(
     threads=256,
     num_stages=1,
 ):
+    dhidden, dexpert, n_routed_experts = T.const("dhidden, dexpert, n_routed_experts")
     scale = 1.44269504  # log2(e)
-
-    # Parameters
-    dhidden = d_hidden
-    dexpert = d_expert
-    n_routed_experts = n_routed_experts
 
     # Group info
     # group_sum = sum(group_sizes_list)
@@ -135,106 +134,100 @@ def moe_forward_tilelang_routed(
     routed_expert_weights_shape = group_sum
     group_sizes_shape = n_routed_experts
 
-    @T.prim_func
-    def kernel(
-        input: T.Tensor(input_shape, dtype),  # type: ignore
-        routed_expert_gate: T.Tensor(routed_expert_gate_shape, dtype),  # type: ignore
-        routed_expert_up: T.Tensor(routed_expert_up_shape, dtype),  # type: ignore
-        routed_expert_down: T.Tensor(routed_expert_down_shape, dtype),  # type: ignore
-        routed_expert_weights: T.Tensor(routed_expert_weights_shape, dtype),  # type: ignore
-        group_sizes: T.Tensor(group_sizes_shape, T.int32),  # type: ignore
-        group_offsets: T.Tensor(group_sizes_shape, T.int32),  # type: ignore
-        group_padded_offsets: T.Tensor(group_sizes_shape, T.int32),  # type: ignore
-        group_idx_for_bx: T.Tensor((M,), T.int32),  # type: ignore
-        up_logits: T.Tensor(intermediate_shape, dtype),  # type: ignore
-        output: T.Tensor(input_shape, dtype),  # type: ignore
-    ):
-        # Step 1: Compute gate and up logits
-        with T.Kernel(M, T.ceildiv(dexpert, block_dexpert), threads=threads) as (bx, by):
-            input_shared = T.alloc_fragment((block_token, block_dhidden), dtype=dtype)
-            routed_expert_gate_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
-            routed_expert_up_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
+    input: T.Tensor(input_shape, dtype)  # type: ignore
+    routed_expert_gate: T.Tensor(routed_expert_gate_shape, dtype)  # type: ignore
+    routed_expert_up: T.Tensor(routed_expert_up_shape, dtype)  # type: ignore
+    routed_expert_down: T.Tensor(routed_expert_down_shape, dtype)  # type: ignore
+    routed_expert_weights: T.Tensor(routed_expert_weights_shape, dtype)  # type: ignore
+    group_sizes: T.Tensor(group_sizes_shape, T.int32)  # type: ignore
+    group_offsets: T.Tensor(group_sizes_shape, T.int32)  # type: ignore
+    group_padded_offsets: T.Tensor(group_sizes_shape, T.int32)  # type: ignore
+    group_idx_for_bx: T.Tensor((M,), T.int32)  # type: ignore
+    up_logits: T.Tensor(intermediate_shape, dtype)  # type: ignore
+    output: T.Tensor(input_shape, dtype)  # type: ignore
 
-            gate_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
-            up_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
+    # Step 1: Compute gate and up logits
+    with T.Kernel(M, T.ceildiv(dexpert, block_dexpert), threads=threads) as (bx, by):
+        input_shared = T.alloc_fragment((block_token, block_dhidden), dtype=dtype)
+        routed_expert_gate_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
+        routed_expert_up_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
 
-            T.use_swizzle(10)
+        gate_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
+        up_logits_local = T.alloc_fragment((block_token, block_dexpert), dtype=accum_dtype)
 
-            m_start_padded = bx * block_token
+        T.use_swizzle(10)
 
-            cur_group_idx = group_idx_for_bx[bx]
+        m_start_padded = bx * block_token
 
-            cur_group_size = group_sizes[cur_group_idx]
-            m_start = m_start_padded - group_padded_offsets[cur_group_idx] + group_offsets[cur_group_idx]
-            actual_rows = T.max(0, T.min(block_token, cur_group_size - (m_start_padded - group_padded_offsets[cur_group_idx])))
+        cur_group_idx = group_idx_for_bx[bx]
 
-            T.clear(gate_logits_local)
-            T.clear(up_logits_local)
+        cur_group_size = group_sizes[cur_group_idx]
+        m_start = m_start_padded - group_padded_offsets[cur_group_idx] + group_offsets[cur_group_idx]
+        actual_rows = T.max(0, T.min(block_token, cur_group_size - (m_start_padded - group_padded_offsets[cur_group_idx])))
 
-            for k in T.Pipelined(T.ceildiv(dhidden, block_dhidden), num_stages=num_stages):
-                T.copy(
-                    input[m_start : m_start + block_token, k * block_dhidden : (k + 1) * block_dhidden],
-                    input_shared,
-                )
-                T.copy(
-                    routed_expert_gate[
-                        cur_group_idx, by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
-                    ],
-                    routed_expert_gate_shared,
-                )
-                T.gemm(input_shared, routed_expert_gate_shared, gate_logits_local, transpose_B=True)
-                T.copy(
-                    routed_expert_up[
-                        cur_group_idx, by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
-                    ],
-                    routed_expert_up_shared,
-                )
-                T.gemm(input_shared, routed_expert_up_shared, up_logits_local, transpose_B=True)
+        T.clear(gate_logits_local)
+        T.clear(up_logits_local)
 
-            for i, j in T.Parallel(block_token, block_dexpert):
-                gate_logits_local[i, j] = gate_logits_local[i, j] * (1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale)))
-                up_logits_local[i, j] = up_logits_local[i, j] * gate_logits_local[i, j]
+        for k in T.Pipelined(T.ceildiv(dhidden, block_dhidden), num_stages=num_stages):
+            T.copy(
+                input[m_start : m_start + block_token, k * block_dhidden : (k + 1) * block_dhidden],
+                input_shared,
+            )
+            T.copy(
+                routed_expert_gate[
+                    cur_group_idx, by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden
+                ],
+                routed_expert_gate_shared,
+            )
+            T.gemm(input_shared, routed_expert_gate_shared, gate_logits_local, transpose_B=True)
+            T.copy(
+                routed_expert_up[cur_group_idx, by * block_dexpert : (by + 1) * block_dexpert, k * block_dhidden : (k + 1) * block_dhidden],
+                routed_expert_up_shared,
+            )
+            T.gemm(input_shared, routed_expert_up_shared, up_logits_local, transpose_B=True)
 
-            for i, j in T.Parallel(block_token, block_dexpert):
-                if i < actual_rows:
-                    up_logits[m_start + i, by * block_dexpert + j] = up_logits_local[i, j]
+        for i, j in T.Parallel(block_token, block_dexpert):
+            gate_logits_local[i, j] = gate_logits_local[i, j] * (1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale)))
+            up_logits_local[i, j] = up_logits_local[i, j] * gate_logits_local[i, j]
 
-        # Step 2: Compute down logits
-        with T.Kernel(M, T.ceildiv(dhidden, block_dhidden), threads=threads) as (bx, by):
-            up_logits_shared = T.alloc_fragment((block_token, block_dexpert), dtype=dtype)
-            routed_expert_down_shared = T.alloc_shared((block_dhidden, block_dexpert), dtype=dtype)
-            output_local = T.alloc_fragment((block_token, block_dhidden), dtype=accum_dtype)
+        for i, j in T.Parallel(block_token, block_dexpert):
+            if i < actual_rows:
+                up_logits[m_start + i, by * block_dexpert + j] = up_logits_local[i, j]
 
-            T.use_swizzle(10)
+    # Step 2: Compute down logits
+    with T.Kernel(M, T.ceildiv(dhidden, block_dhidden), threads=threads) as (bx, by):
+        up_logits_shared = T.alloc_fragment((block_token, block_dexpert), dtype=dtype)
+        routed_expert_down_shared = T.alloc_shared((block_dhidden, block_dexpert), dtype=dtype)
+        output_local = T.alloc_fragment((block_token, block_dhidden), dtype=accum_dtype)
 
-            m_start_padded = bx * block_token
+        T.use_swizzle(10)
 
-            cur_group_idx = group_idx_for_bx[bx]
+        m_start_padded = bx * block_token
 
-            cur_group_size = group_sizes[cur_group_idx]
-            m_start = m_start_padded - group_padded_offsets[cur_group_idx] + group_offsets[cur_group_idx]
-            actual_rows = T.max(0, T.min(block_token, cur_group_size - (m_start_padded - group_padded_offsets[cur_group_idx])))
+        cur_group_idx = group_idx_for_bx[bx]
 
-            T.clear(output_local)
+        cur_group_size = group_sizes[cur_group_idx]
+        m_start = m_start_padded - group_padded_offsets[cur_group_idx] + group_offsets[cur_group_idx]
+        actual_rows = T.max(0, T.min(block_token, cur_group_size - (m_start_padded - group_padded_offsets[cur_group_idx])))
 
-            for k in T.Pipelined(T.ceildiv(dexpert, block_dexpert), num_stages=num_stages):
-                T.copy(
-                    up_logits[m_start : m_start + block_token, k * block_dexpert : (k + 1) * block_dexpert],
-                    up_logits_shared,
-                )
-                T.copy(
-                    routed_expert_down[
-                        cur_group_idx, by * block_dhidden : (by + 1) * block_dhidden, k * block_dexpert : (k + 1) * block_dexpert
-                    ],
-                    routed_expert_down_shared,
-                )
-                T.gemm(up_logits_shared, routed_expert_down_shared, output_local, transpose_B=True)
+        T.clear(output_local)
 
-            for i, j in T.Parallel(block_token, block_dhidden):
-                if i < actual_rows:
-                    output[m_start + i, by * block_dhidden + j] = output_local[i, j] * routed_expert_weights[m_start + i]
+        for k in T.Pipelined(T.ceildiv(dexpert, block_dexpert), num_stages=num_stages):
+            T.copy(
+                up_logits[m_start : m_start + block_token, k * block_dexpert : (k + 1) * block_dexpert],
+                up_logits_shared,
+            )
+            T.copy(
+                routed_expert_down[
+                    cur_group_idx, by * block_dhidden : (by + 1) * block_dhidden, k * block_dexpert : (k + 1) * block_dexpert
+                ],
+                routed_expert_down_shared,
+            )
+            T.gemm(up_logits_shared, routed_expert_down_shared, output_local, transpose_B=True)
 
-    return kernel
+        for i, j in T.Parallel(block_token, block_dhidden):
+            if i < actual_rows:
+                output[m_start + i, by * block_dhidden + j] = output_local[i, j] * routed_expert_weights[m_start + i]
 
 
 class Expert(nn.Module):
@@ -458,17 +451,16 @@ def custom_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
 
     dtype_str = T.float16
 
-    shared_kernel = moe_forward_tilelang_shared(
-        config["d_hidden"],
-        config["d_expert"],
-        config["n_shared_experts"],
-        dtype=dtype_str,
+    shared_kernel = moe_forward_tilelang_shared.compile(
+        dhidden=config["d_hidden"],
+        dexpert=config["d_expert"] * config["n_shared_experts"],
         num_tokens=config["batch_size"] * config["seq_len"],
+        dtype=dtype_str,
     )
-    routed_kernel = moe_forward_tilelang_routed(
-        config["d_hidden"],
-        config["d_expert"],
-        config["n_routed_experts"],
+    routed_kernel = moe_forward_tilelang_routed.compile(
+        dhidden=config["d_hidden"],
+        dexpert=config["d_expert"],
+        n_routed_experts=config["n_routed_experts"],
         dtype=dtype_str,
         group_sum=config["batch_size"] * config["seq_len"] * config["n_experts_per_token"],
         group_count=config["n_routed_experts"],
@@ -526,17 +518,16 @@ def run_regression_perf(
 
     dtype_str = "float16"
 
-    shared_kernel = moe_forward_tilelang_shared(
-        config["d_hidden"],
-        config["d_expert"],
-        config["n_shared_experts"],
-        dtype=dtype_str,
+    shared_kernel = moe_forward_tilelang_shared.compile(
+        dhidden=config["d_hidden"],
+        dexpert=config["d_expert"] * config["n_shared_experts"],
         num_tokens=config["batch_size"] * config["seq_len"],
+        dtype=dtype_str,
     )
-    routed_kernel = moe_forward_tilelang_routed(
-        config["d_hidden"],
-        config["d_expert"],
-        config["n_routed_experts"],
+    routed_kernel = moe_forward_tilelang_routed.compile(
+        dhidden=config["d_hidden"],
+        dexpert=config["d_expert"],
+        n_routed_experts=config["n_routed_experts"],
         dtype=dtype_str,
         group_sum=config["batch_size"] * config["seq_len"] * config["n_experts_per_token"],
         group_count=config["n_routed_experts"],
