@@ -944,10 +944,20 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
     return CopyInst::kCPAsync;
   }
 
+  // Plain T.copy does not auto-upgrade to TMA loads anymore. Store-side TMA
+  // remains allowed because it is self-synchronized locally and does not
+  // participate in pipeline producer scheduling.
+  if (!GetDisableTMA()) {
+    bool is_cutedsl = TargetIsCuTeDSL(target);
+    if (!is_cutedsl && !buffer_oob &&
+        CheckBulkStore1D(target, layout_map, analyzer)) {
+      return CopyInst::kBulkStore1D;
+    } else if (CheckBulkStore(target, analyzer)) {
+      return CopyInst::kBulkStore;
+    }
+  }
+
   // Check tensor memory operations first (highest priority for SM100/Blackwell)
-  // 1d tma access can not support out of bound access. Auto-TMA is only
-  // enabled when an earlier pass rewrites the op to explicit
-  // tl.tileop.tma_copy.
   if (CheckLDSMCopy(target)) {
     return CopyInst::kLDSM;
   } else if (CheckSTSMCopy(target)) {

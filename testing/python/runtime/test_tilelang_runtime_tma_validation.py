@@ -79,14 +79,17 @@ def test_tma_host_codegen_aligns_tvm_ffi_stack_alloca_for_descriptor():
     ):
         with T.Kernel(T.ceildiv(m, block_m), T.ceildiv(k, block_k), threads=threads) as (pid_m, pid_k):
             x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
-            T.fill(x_shared, 0)
-            T.copy(
+            mbar = T.alloc_barrier(1)
+            T.tma_copy(
                 x[
                     pid_m * block_m : (pid_m + 1) * block_m,
                     pid_k * block_k : (pid_k + 1) * block_k,
                 ],
                 x_shared,
+                barrier=mbar,
             )
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
             T.copy(
                 x_shared,
                 y[
