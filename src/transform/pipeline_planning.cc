@@ -1931,8 +1931,8 @@ private:
     // Preserve the original TileLang pipelining depth for downstream scheduling
     // (e.g. cp.async wait_group relaxation/splitting). We intentionally do NOT
     // keep the legacy key "num_stages" here because multiple downstream passes
-    // (e.g. MultiVersionBuffer/WarpSpecialized) treat it as an active pipeline
-    // marker and do not support nested pipelines.
+    // (e.g. internal buffer versioning / warp specialization) treat it as an
+    // active pipeline marker and do not support nested pipelines.
     annotations.Set("tl_pipelined_num_stages", Integer(num_stages));
 
     std::vector<Integer> orders, stages;

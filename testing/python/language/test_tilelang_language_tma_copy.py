@@ -4,7 +4,7 @@ For TMA loads (global -> shared):
   T.tma_copy() emits only expect_tx + tma_load (no arrive, no wait).
   The user must explicitly call T.barrier_arrive() and T.mbarrier_wait_parity().
   This allows multiple tma_copy operations to share a single barrier arrive.
-  MultiVersionBuffer expands the barrier to num_stages versions automatically.
+  Pipeline buffer versioning expands the barrier to num_stages versions automatically.
 
 For TMA stores (shared -> global):
   T.tma_copy() emits tma_store + tma_store_arrive (no wait).

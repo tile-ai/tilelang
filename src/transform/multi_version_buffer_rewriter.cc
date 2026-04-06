@@ -4,12 +4,10 @@
  */
 
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
 
 #include <functional>
 #include <unordered_set>
@@ -22,6 +20,7 @@
 #include "../op/region.h"
 #include "../op/utils.h"
 #include "common/pipeline_utils.h"
+#include "multi_version_buffer_rewriter.h"
 
 namespace tvm {
 namespace tl {
@@ -219,8 +218,8 @@ private:
 
 class MultiVersionBufferRewriter : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f, bool barrier_only = false) {
-    auto rewriter = MultiVersionBufferRewriter(barrier_only);
+  static PrimFunc Substitute(PrimFunc f) {
+    auto rewriter = MultiVersionBufferRewriter();
     rewriter.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : rewriter.buffer_lca_) {
       Var buffer_var = buffer->data;
@@ -231,8 +230,7 @@ public:
   }
 
 private:
-  explicit MultiVersionBufferRewriter(bool barrier_only = false)
-      : barrier_only_(barrier_only) {}
+  explicit MultiVersionBufferRewriter() = default;
 
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
@@ -497,7 +495,7 @@ private:
       }
     }
 
-    if (num_stages <= 1 || barrier_only_) {
+    if (num_stages <= 1) {
       Array<Buffer> filtered;
       for (const Buffer &buffer : versioned_buffers) {
         if (buffer.scope() == "shared.barrier") {
@@ -850,7 +848,6 @@ private:
     return Call(call->dtype, call->op, new_args, call->annotations, call->span);
   }
 
-  bool barrier_only_;
   PrimExpr version_index_;
   PrimExpr parity_cycle_; // (k / num_stages) % 2 for mbarrier parity rewriting
   Var pipeline_loop_var_; // loop variable of the pipelined loop
@@ -869,18 +866,8 @@ private:
   std::unordered_map<const BlockNode *, Array<Buffer>> block_alloc_buffers_;
 };
 
-using namespace tir::transform;
-
-tvm::transform::Pass MultiVersionBuffer(bool barrier_only) {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return MultiVersionBufferRewriter::Substitute(f, barrier_only);
-  };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MultiVersionBuffer", {});
-}
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.MultiVersionBuffer", MultiVersionBuffer);
+PrimFunc ApplyMultiVersionBufferRewriter(PrimFunc f) {
+  return MultiVersionBufferRewriter::Substitute(std::move(f));
 }
 
 } // namespace tl

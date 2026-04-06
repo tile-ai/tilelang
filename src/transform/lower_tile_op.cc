@@ -231,17 +231,17 @@ public:
 
     // If any TMA copies allocated mbarriers, inject the barrier buffer
     // into the tilelang_root block with a barrier_init annotation.
-    // MultiVersionBuffer will expand it for pipelining, and
+    // Pipeline buffer versioning expands it for pipelining, and
     // LowerSharedBarrier will process it into ptx_init_barrier_thread_count.
     if (substituter.mbarrier_count_ > 0) {
       ICHECK(substituter.mbarrier_buffer_.defined())
           << "mbarrier_buffer_ must have been created by AllocMBarrier "
              "callback";
       Buffer mbar_buf = substituter.mbarrier_buffer_.value();
-      // Update buffer shape in-place to final count.  We use const_cast
+      // Update buffer shape in-place to final count. We use const_cast
       // because CopyOnWrite would create a new BufferNode, breaking identity
-      // with BufferLoad references already in the body.  MultiVersionBuffer
-      // relies on buffer identity to remap accesses correctly.
+      // with BufferLoad references already in the body. Pipeline buffer
+      // versioning relies on buffer identity to remap accesses correctly.
       const_cast<BufferNode *>(mbar_buf.get())->shape = {
           IntImm(DataType::Int(32), substituter.mbarrier_count_)};
 

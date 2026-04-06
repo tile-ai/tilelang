@@ -2516,8 +2516,8 @@ private:
 /// [N * num_stages], rewrite barrier indices to include stage offset, and
 /// rewrite mbarrier_wait_parity parity expressions.
 ///
-/// This is the unified barrier multi-versioning pass that replaces the
-/// late MVB(barrier_only=true) fixup in OptimizeForTarget.
+/// This is the unified barrier multi-versioning path that replaces the old
+/// late barrier-only fixup in OptimizeForTarget.
 /// Returns a map of old→new barrier buffers for outer block alloc_buffers
 /// update.
 Map<Buffer, Buffer> ExpandPipelineBarriers(
@@ -3156,7 +3156,7 @@ private:
     // including buffers from outer blocks.
     // Step 4.5: Expand all barrier buffers for pipelining.
     // This handles both ISP-created pipeline_mbar AND user-written
-    // T.alloc_barrier, so that no late MVB(barrier_only) is needed.
+    // T.alloc_barrier, so that no late standalone barrier-only fixup is needed.
     // Must run BEFORE local_allocs is copied from block_local_allocs.
     {
       Optional<Integer> pipelined_ns = GetPipelineNumStages(op);

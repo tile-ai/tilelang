@@ -241,28 +241,12 @@ def LoopUnswitching():
     return _ffi_api.LoopUnswitching()  # type: ignore
 
 
-def MultiVersionBuffer(barrier_only: bool = False):
-    """MultiVersionBuffer
-
-    Parameters
-    ----------
-    barrier_only : bool
-        If True, only version barrier buffers (shared.barrier scope).
-        Data buffer versioning is left to InjectSoftwarePipeline.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.MultiVersionBuffer(barrier_only)  # type: ignore
-
-
 def ProducerConsumerWarpSpecialized():
-    """Producer-Consumer Warp Specialization for TMA pipelines.
+    """Producer-consumer warp specialization at the tile-op level.
 
-    Splits pipelined loops with TMA loads into producer (TMA copy) and
-    consumer (compute) warp groups with mbarrier-based synchronization.
+    This pass runs before LayoutInference and LowerTileOp. It rewrites
+    eligible pipelined tile-op loops into warp-specialized producer and
+    consumer branches with explicit barrier synchronization.
 
     Returns
     -------
@@ -273,20 +257,17 @@ def ProducerConsumerWarpSpecialized():
 
 
 def ProducerConsumerWarpSpecializedTiled():
-    """Producer-Consumer Warp Specialization at the tile-op level.
+    """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
 
-    This pass runs before LayoutInference and LowerTileOp.  It reads
-    ``tl_instruction_kind`` annotations and splits pipelined loops into
-    warp-specialized producer/consumer branches with explicit barrier
-    synchronization.  TMA-annotated copies are converted to
-    ``tl.tileop.tma_copy`` with barrier references.
+    The tiled tile-op implementation is now the canonical
+    ``ProducerConsumerWarpSpecialized`` pass.
 
     Returns
     -------
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.ProducerConsumerWarpSpecializedTiled()  # type: ignore
+    return ProducerConsumerWarpSpecialized()
 
 
 def AnnotateWarpGroupRegAlloc():

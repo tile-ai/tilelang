@@ -1788,7 +1788,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
       // Internal mbarrier (T.copy()): allocate a single barrier slot.
-      // MultiVersionBuffer will expand it for pipelining stages.
+      // Pipeline buffer versioning expands it per stage when needed.
       barrier_base_id = T.AllocMBarrier(1);
       PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
       mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
@@ -2026,7 +2026,7 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
       // Internal mbarrier (T.copy()): allocate a single barrier slot.
-      // MultiVersionBuffer will expand it for pipelining stages.
+      // Pipeline buffer versioning expands it per stage when needed.
       barrier_base_id = T.AllocMBarrier(1);
       PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
       mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
@@ -2284,8 +2284,8 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
     mbar_handle = Downcast<PrimExpr>(user_barrier.value());
     barrier_base_id = 0;
   } else if (T.AllocMBarrier) {
-    // Allocate a single barrier slot; MultiVersionBuffer will
-    // expand it for pipelining stages.
+    // Allocate a single barrier slot; pipeline buffer versioning expands it
+    // per stage when needed.
     barrier_base_id = T.AllocMBarrier(1);
     PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
     mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
