@@ -234,12 +234,7 @@ def test_tiled_ws_swizzled_layout_allows_ws():
             B_shared = T.alloc_shared((block_K, block_N), "float16")
             C_local = T.alloc_fragment((block_M, block_N), "float32")
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzled_layout(A_shared),
-                    B_shared: make_swizzled_layout(B_shared),
-                }
-            )
+            T.annotate_layout({A_shared: make_swizzled_layout(A_shared), B_shared: make_swizzled_layout(B_shared)})
 
             T.clear(C_local)
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
@@ -248,10 +243,7 @@ def test_tiled_ws_swizzled_layout_allows_ws():
                 T.gemm(A_shared, B_shared, C_local)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(gemm_swizzled, pass_configs, out_idx=[2])
     src = kernel.get_kernel_source()
 
@@ -300,10 +292,7 @@ def test_tiled_ws_incompatible_layout_blocks_ws():
                 T.copy(x[pid_m * block_m, 0], x_shared)
                 T.copy(x_shared, y[pid_m * block_m, 0])
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(copy_with_padded_layout, pass_configs, out_idx=[1])
     src = kernel.get_kernel_source()
 
@@ -316,10 +305,7 @@ def test_tiled_ws_incompatible_layout_blocks_ws():
 def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
     """Pre-loop TMA loads should not emit immediate waits in the common prelude."""
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(prelude_tma_wait_sink(), pass_configs, out_idx=[3])
     src = kernel.get_kernel_source()
 

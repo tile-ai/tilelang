@@ -86,10 +86,7 @@ def run_gemm_ss(
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
 
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
@@ -189,11 +186,7 @@ def matmul_rs(
             A_frag = T.alloc_fragment(A_frag_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
-            T.annotate_layout(
-                {
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                }
-            )
+            T.annotate_layout({A_shared: tilelang.layout.make_swizzled_layout(A_shared)})
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
                     T.copy(A[k * block_K, by * block_M], A_shared)
@@ -244,10 +237,7 @@ def run_gemm_rs(
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
@@ -346,11 +336,7 @@ def matmul_sr(
             B_frag = T.alloc_fragment(B_frag_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
-            T.annotate_layout(
-                {
-                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                }
-            )
+            T.annotate_layout({B_shared: tilelang.layout.make_swizzled_layout(B_shared)})
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
                     T.copy(A[k * block_K, by * block_M], A_shared)
@@ -401,10 +387,7 @@ def run_gemm_sr(
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
@@ -506,10 +489,7 @@ def matmul_rr(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
             T.annotate_layout(
-                {
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                }
+                {A_shared: tilelang.layout.make_swizzled_layout(A_shared), B_shared: tilelang.layout.make_swizzled_layout(B_shared)}
             )
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
@@ -562,10 +542,7 @@ def run_gemm_rr(
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 

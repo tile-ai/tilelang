@@ -21,9 +21,7 @@ def get_bwd_configs():
 
 @tilelang.jit(
     out_idx=[3, 4],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_fwd(
     batch,
@@ -132,9 +130,7 @@ def flashattn_fwd(
 
 @tilelang.jit(
     out_idx=[2],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
@@ -171,9 +167,7 @@ def make_dq_layout(dQ):
 
 @tilelang.jit(
     out_idx=[1],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
@@ -195,11 +189,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: T.dtype = T.flo
     return flash_bwd_post
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    }
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def flashattn_bwd(
     batch,
     heads,
@@ -255,11 +245,7 @@ def flashattn_bwd(
             dv_shared = T.alloc_shared([block_M, dim], dtype)
             dk_shared = T.alloc_shared([block_M, dim], dtype)
 
-            T.annotate_layout(
-                {
-                    dQ: make_dq_layout(dQ),
-                }
-            )
+            T.annotate_layout({dQ: make_dq_layout(dQ)})
             T.copy(K[bz, bx, by * block_M : (by + 1) * block_M, :], K_shared)
             T.copy(V[bz, bx, by * block_M : (by + 1) * block_M, :], V_shared)
             T.clear(dv)
@@ -461,10 +447,7 @@ def main(BATCH: int = 1, H: int = 1, N_CTX: int = 512, D_HEAD: int = 128, window
     dsinks_ref, sinks.grad = sinks.grad.clone(), None
 
     # Checks
-    rtol, atol = {
-        T.float16: (1e-2, 1e-2),
-        T.bfloat16: (2e-2, 2e-2),
-    }[dtype]
+    rtol, atol = {T.float16: (1e-2, 1e-2), T.bfloat16: (2e-2, 2e-2)}[dtype]
     assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f"O max err: {(O - O_ref).abs().max()}"
     assert torch.allclose(dV, dV_ref, rtol=rtol, atol=atol), f"dV max err: {(dV - dV_ref).abs().max()}"
     assert torch.allclose(dK, dK_ref, rtol=rtol, atol=atol), f"dK max err: {(dK - dK_ref).abs().max()}"

@@ -333,10 +333,7 @@ def run_flash_mla_triton(q, block_table, blocked_k, max_seqlen_pad, block_size, 
     return out_flash, None, t
 
 
-FUNC_TABLE = {
-    "torch": run_torch_mla,
-    "flash_mla_triton": run_flash_mla_triton,
-}
+FUNC_TABLE = {"torch": run_torch_mla, "flash_mla_triton": run_flash_mla_triton}
 
 
 def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):

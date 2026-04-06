@@ -6,9 +6,7 @@ import tilelang.testing
 
 @tilelang.jit(
     out_idx=[-1],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False},
 )
 def bitwise_reduce(
     M,

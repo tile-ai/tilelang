@@ -18,6 +18,8 @@
 #include "../layout/layout.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
+#include "../op/gemm.h"
+#include "../op/gemm_py.h"
 #include "../op/operator.h"
 #include "../op/region.h"
 #include "../op/utils.h"
@@ -372,6 +374,41 @@ private:
 
   Optional<Target> target_;
   mutable arith::Analyzer analyzer_;
+};
+
+class TileOpMbarPhaseAnnotator : public StmtExprMutator {
+public:
+  static Stmt Annotate(const Stmt &stmt, PrimExpr phase_expr) {
+    TileOpMbarPhaseAnnotator annotator(std::move(phase_expr));
+    return annotator.VisitStmt(stmt);
+  }
+
+private:
+  explicit TileOpMbarPhaseAnnotator(PrimExpr phase_expr)
+      : phase_expr_(std::move(phase_expr)) {}
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (!IsMbarPhaseConsumer(call)) {
+      return call;
+    }
+    if (call->annotations.count(attr::kPipelineMbarPhaseExpr)) {
+      return call;
+    }
+    auto annotations = call->annotations;
+    annotations.Set(attr::kPipelineMbarPhaseExpr, phase_expr_);
+    return Call(call->dtype, call->op, call->args, annotations, call->span);
+  }
+
+  bool IsMbarPhaseConsumer(const Call &call) const {
+    auto tile_op = ParseOperator(call);
+    return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
+                                 tile_op.as<Conv2DIm2ColOpNode>() != nullptr ||
+                                 tile_op.as<GemmNode>() != nullptr ||
+                                 tile_op.as<GemmPyNode>() != nullptr);
+  }
+
+  PrimExpr phase_expr_;
 };
 
 class AsyncCommitWaitAttrLowerer : public StmtExprMutator {
@@ -1067,6 +1104,25 @@ private:
     stmt = AttrStmt(Integer(0), kPipelineMVBParityExpr, parity_expr, stmt);
     stmt = AttrStmt(Integer(0), kPipelineMVBStageExpr, stage_expr, stmt);
     return stmt;
+  }
+
+  Optional<PrimExpr>
+  ComputePipelineMbarPhaseExpr(const PrimExpr &normalized_access_index,
+                               const Optional<Integer> &pipeline_num_stages) {
+    if (!pipeline_num_stages) {
+      return Optional<PrimExpr>();
+    }
+    PrimExpr parity_expr;
+    if (pipeline_num_stages.value()->value <= 1) {
+      parity_expr =
+          FloorMod(normalized_access_index, IntImm(DataType::Int(32), 2));
+    } else {
+      PrimExpr ns =
+          IntImm(DataType::Int(32), pipeline_num_stages.value()->value);
+      parity_expr = FloorMod(FloorDiv(normalized_access_index, ns),
+                             IntImm(DataType::Int(32), 2));
+    }
+    return analyzer_.Simplify(parity_expr);
   }
 
   static bool IsAsyncCommitQueueScope(const AttrStmtNode *attr) {
@@ -2068,6 +2124,8 @@ private:
       rewritten_stmt = WrapPipelineStageContext(std::move(rewritten_stmt),
                                                 normalized_access_index,
                                                 pipeline_num_stages);
+      Optional<PrimExpr> pipeline_mbar_phase = ComputePipelineMbarPhaseExpr(
+          normalized_access_index, pipeline_num_stages);
 
       bool is_async = pipeline_anno.async;
       if (is_async) {
@@ -2111,6 +2169,10 @@ private:
             SimtProducerAnnotator::Annotate(rewritten_stmt, target_);
         rewritten_stmt = AttrStmt(make_zero(DataType::Int(32)),
                                   tir::attr::async_scope, 1, rewritten_stmt);
+      }
+      if (pipeline_mbar_phase) {
+        rewritten_stmt = TileOpMbarPhaseAnnotator::Annotate(
+            rewritten_stmt, pipeline_mbar_phase.value());
       }
 
       new_stmts.push_back({stage, inbound, new_block->reads, new_block->writes,
@@ -3069,10 +3131,7 @@ private:
               : max_stage + 1;
       // Clamp to at least 1 so we always allocate at least one barrier slot.
       pipeline_depth = std::max(pipeline_depth, 1);
-      bool disable_tma = tvm::transform::PassContext::Current()
-                             ->GetConfig<Bool>(kDisableTMALower, Bool(false))
-                             .value();
-      if (max_stage > 0 && !disable_tma) {
+      if (max_stage > 0) {
         if (auto tma_copies_anno = op->annotations.Get(kPipelineTmaCopies)) {
           auto tma_copies = Downcast<Array<Integer>>(tma_copies_anno.value());
           if (tma_copies.size() == original_order.size()) {

@@ -293,9 +293,9 @@ protected:
   /*!
    * \brief Get the copy instruction type.
    */
-  CopyInst GetCopyInst(Target target, bool disable_tma_lower,
-                       const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                       bool buffer_oob = false, bool in_pipeline = false) const;
+  CopyInst GetCopyInst(Target target, const LayoutMap &layout_map,
+                       arith::Analyzer *analyzer,
+                       bool buffer_oob = false) const;
 
   /*!
    * \brief Generate lowering for bulk/global-to-shared copy.

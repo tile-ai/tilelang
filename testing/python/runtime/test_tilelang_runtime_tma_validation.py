@@ -97,11 +97,7 @@ def test_tma_host_codegen_aligns_tvm_ffi_stack_alloca_for_descriptor():
 
     kernel = _compile_tvm_ffi(
         tma_copy_2d_desc,
-        pass_configs={
-            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
 
     source = kernel.get_host_source()

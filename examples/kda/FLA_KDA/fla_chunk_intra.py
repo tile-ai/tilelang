@@ -18,11 +18,7 @@ SOLVE_TRIL_DOT_PRECISION = tl.constexpr("tf32")
 # ============================================================================
 
 
-@triton.heuristics(
-    {
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[triton.Config({"BK": BK}, num_warps=num_warps) for BK in [32, 64] for num_warps in [1, 2, 4]],
     key=["H", "K", "BC"],
@@ -326,11 +322,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     tl.store(p_Akk33, b_Ai33.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.heuristics(
-    {
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps, num_stages=num_stages) for num_warps in [1, 2, 4, 8] for num_stages in [2, 3, 4]],
     key=["BK", "NC", "BT"],

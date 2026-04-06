@@ -30,11 +30,7 @@ def _is_any_dtype(obj: object) -> bool:
     return isinstance(obj, (ir.Type, str, type, torch.dtype, dtype))
 
 
-_PYTHON_DTYPE_TO_STR = {
-    bool: "bool",
-    int: "int32",
-    float: "float32",
-}
+_PYTHON_DTYPE_TO_STR = {bool: "bool", int: "int32", float: "float32"}
 
 _NUMPY_DTYPE_TO_STR = {
     np.bool_: "bool",

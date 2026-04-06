@@ -196,19 +196,13 @@ def check_region_bound(expect_region, var_dom, mode, predicate=None):
 def test_region_bound_not_independent():
     # (i, i+2) and (i+2, i+4) are dependent, this the lowerbound is not available
     i = tvm.tir.Var("i", "int32")
-    var_dom = {
-        i: tvm.ir.Range(begin=0, end=64),
-    }
+    var_dom = {i: tvm.ir.Range(begin=0, end=64)}
     check_region_bound({(i, i + 2): None, (i + 2, i + 4): None}, var_dom, mode="lowerbound")
     check_region_bound({(i, i + 2): (0, 65), (i + 2, i + 4): (2, 67)}, var_dom, mode="upperbound")
 
     # when only a subset of access indices are affine
     i, j, k = tvm.tir.Var("i", "int32"), tvm.tir.Var("j", "int32"), tvm.tir.Var("k", "int32")
-    var_dom = {
-        i: tvm.ir.Range(begin=0, end=16),
-        j: tvm.ir.Range(begin=0, end=16),
-        k: tvm.ir.Range(begin=0, end=16),
-    }
+    var_dom = {i: tvm.ir.Range(begin=0, end=16), j: tvm.ir.Range(begin=0, end=16), k: tvm.ir.Range(begin=0, end=16)}
     check_region_bound(
         {i // 4: None, j * 4 + i % 4: None, tir.truncdiv(k, 2): None},
         var_dom,
@@ -232,9 +226,7 @@ def test_region_bound_stride_too_wide():
 
 def test_region_bound_small_stride():
     i = tvm.tir.Var("i", "int32")
-    var_dom = {
-        i: tvm.ir.Range(begin=0, end=64),
-    }
+    var_dom = {i: tvm.ir.Range(begin=0, end=64)}
     check_region_bound({(i * 4, i * 4 + 8): (0, 260)}, var_dom, mode="lowerbound")
 
 
@@ -242,10 +234,7 @@ def test_region_lower_bound_split_predicate():
     x_o = tvm.tir.Var("xo", "int32")
     x_i = tvm.tir.Var("xi", "int32")
     x = x_o * 4 + x_i
-    var_dom = {
-        x_o: tvm.ir.Range(begin=0, end=16),
-        x_i: tvm.ir.Range(begin=0, end=4),
-    }
+    var_dom = {x_o: tvm.ir.Range(begin=0, end=16), x_i: tvm.ir.Range(begin=0, end=4)}
     check_region_bound({(x * 4, x * 4 + 8): (0, 256)}, var_dom, predicate=x < 63, mode="lowerbound")
 
     check_region_bound(
@@ -264,20 +253,14 @@ def test_region_lower_bound_multiple_variables():
     i = div(x, 16)
     j = div(mod(x, 16), 4) * 8 + mod(x, 4) + div(wid, 32) * 4
     k = wid % 32
-    var_dom = {
-        x: tvm.ir.Range(begin=0, end=32),
-        wid: tvm.ir.Range(begin=0, end=64),
-    }
+    var_dom = {x: tvm.ir.Range(begin=0, end=32), wid: tvm.ir.Range(begin=0, end=64)}
     check_region_bound({i: (0, 2), j: (0, 32), k: (0, 32)}, var_dom, mode="lowerbound")
 
 
 def test_region_lower_bound_negative_scale():
     i = tvm.tir.Var("i", "int32")
     j = tvm.tir.Var("j", "int32")
-    var_dom = {
-        i: tvm.ir.Range(begin=0, end=4),
-        j: tvm.ir.Range(begin=0, end=4),
-    }
+    var_dom = {i: tvm.ir.Range(begin=0, end=4), j: tvm.ir.Range(begin=0, end=4)}
     check_region_bound({(1 - i, 5 - i): (-2, 5), (20 - j * 4, 36 - j * 4): (8, 36)}, var_dom, mode="lowerbound")
 
 
@@ -287,9 +270,7 @@ def test_region_lower_bound_for_non_perfect_tile():
     h3 = tvm.tir.Var("h3", "int32")
 
     # non-uniform tiling, single inner variable
-    var_dom = {
-        h2: tvm.ir.Range(begin=0, end=10),
-    }
+    var_dom = {h2: tvm.ir.Range(begin=0, end=10)}
     check_region_bound(
         {
             h3 * 8 + h2: {
@@ -308,10 +289,7 @@ def test_region_lower_bound_for_non_perfect_tile():
     )
 
     # non-uniform tiling, two inner variables
-    var_dom = {
-        h1: tvm.ir.Range(begin=0, end=5),
-        h2: tvm.ir.Range(begin=0, end=2),
-    }
+    var_dom = {h1: tvm.ir.Range(begin=0, end=5), h2: tvm.ir.Range(begin=0, end=2)}
     check_region_bound(
         {
             h3 * 8 + h2 * 5 + h1: {
@@ -345,10 +323,7 @@ def test_region_lower_bound_for_non_perfect_tile():
 
 
 def test_region_lower_bound_unfusable():
-    var_dom = {
-        tvm.tir.Var("i", "int32"): tvm.ir.Range(8),
-        tvm.tir.Var("j", "int32"): tvm.ir.Range(4),
-    }
+    var_dom = {tvm.tir.Var("i", "int32"): tvm.ir.Range(8), tvm.tir.Var("j", "int32"): tvm.ir.Range(4)}
     i, j = var_dom
     check_region_bound({(i + j) // 2: (0, 6)}, var_dom, mode="lowerbound")
 

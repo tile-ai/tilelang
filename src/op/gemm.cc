@@ -100,6 +100,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  node->annotations_ = annotations;
   data_ = std::move(node);
 }
 
@@ -572,8 +573,12 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     if (isTcgen05_) {
       return tcgen5mma_call;
     }
-    Stmt wait_stmt = Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
-                                   {mbar_, T.mbar_phase_expr}));
+    PrimExpr mbar_phase = T.mbar_phase_expr;
+    if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
+      mbar_phase = explicit_phase.value();
+    }
+    Stmt wait_stmt = Evaluate(
+        Call(DataType::Handle(), mbarrier_wait_parity(), {mbar_, mbar_phase}));
     return SeqStmt({tcgen5mma_call, wait_stmt});
   }
 

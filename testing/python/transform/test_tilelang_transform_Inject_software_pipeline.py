@@ -437,11 +437,7 @@ def test_degenerate_pipeline_with_single_stage_is_not_expanded():
             scale = T.alloc_fragment((128,), T.float32)
             for k in T.serial(
                 4,
-                annotations={
-                    "software_pipeline_stage": [2, 2],
-                    "software_pipeline_order": [0, 1],
-                    "tl_pipelined_num_stages": 2,
-                },
+                annotations={"software_pipeline_stage": [2, 2], "software_pipeline_order": [0, 1], "tl_pipelined_num_stages": 2},
             ):
                 for i in T.Parallel(128):
                     split[i] = T.Cast("float32", frag[k, i])
@@ -475,10 +471,7 @@ def test_inject_software_pipeline_expands_annotated_layout():
             T.annotate_layout({shared: layout})
             for k in T.serial(
                 4,
-                annotations={
-                    "software_pipeline_stage": [0, 1],
-                    "software_pipeline_order": [0, 1],
-                },
+                annotations={"software_pipeline_stage": [0, 1], "software_pipeline_order": [0, 1]},
             ):
                 with T.block("load"):
                     T.reads(A[k, 0:8, 0:16])

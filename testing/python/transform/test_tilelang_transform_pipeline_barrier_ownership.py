@@ -1,9 +1,8 @@
 """Regression tests for pipeline barrier ownership.
 
-Verifies that InjectSoftwarePipeline creates pipeline barriers at the
-correct size so that LowerTileOp uses them instead of allocating separate
-per-copy internal barriers.  The late MVB(barrier_only=True) fixup should
-NOT be needed.
+Plain pipelined T.copy should stay on the synchronous path in non-WS kernels.
+Explicit TMA-style producers such as im2col still own pipeline barriers when
+their lowering requires them.
 """
 
 import pytest
@@ -26,8 +25,8 @@ def _check_hopper():
 
 
 @pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
-def test_nonws_tma_gemm_num_stages_3_has_multislot_pipeline_barrier():
-    """Non-WS pipelined TMA GEMM with num_stages=3 must produce pipeline_mbar[3]."""
+def test_nonws_plain_copy_gemm_num_stages_3_stays_sync():
+    """Non-WS pipelined GEMM should not auto-upgrade plain T.copy to TMA."""
     M, N, K = 512, 512, 512
     block_M, block_N, block_K = 128, 128, 32
 
@@ -52,20 +51,16 @@ def test_nonws_tma_gemm_num_stages_3_has_multislot_pipeline_barrier():
         gemm,
         out_idx=-1,
         execution_backend="tvm_ffi",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     src = kernel.get_kernel_source()
-    assert "pipeline_mbar_mem[3]" in src, "Expected pipeline_mbar_mem[3] for num_stages=3 non-WS TMA GEMM"
-    # No fallback internal barriers
-    assert "mbarrier_1" not in src, "Should not have fallback mbarrier_1 when pipeline barrier is provided"
+    assert "tl::tma_load" not in src, "Non-WS plain T.copy should stay synchronous"
+    assert "pipeline_mbar_mem" not in src, "Non-WS plain T.copy should not allocate pipeline TMA barriers"
 
 
 @pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
-def test_nonws_tma_gemm_num_stages_1_stays_single_slot():
-    """Non-WS pipelined TMA GEMM with num_stages=1 must NOT create multi-slot barriers."""
+def test_nonws_plain_copy_gemm_num_stages_1_stays_sync():
+    """num_stages=1 should also keep non-WS plain T.copy on the sync path."""
     M, N, K = 512, 512, 512
     block_M, block_N, block_K = 128, 128, 32
 
@@ -90,18 +85,11 @@ def test_nonws_tma_gemm_num_stages_1_stays_single_slot():
         gemm,
         out_idx=-1,
         execution_backend="tvm_ffi",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     src = kernel.get_kernel_source()
-    # pipeline_mbar[1] is acceptable; multi-slot is not
-    assert "pipeline_mbar_mem[1]" in src, "Expected pipeline_mbar_mem[1] for num_stages=1"
-    for n in [2, 3, 4, 5, 6]:
-        assert f"pipeline_mbar_mem[{n}]" not in src, f"num_stages=1 must not create multi-slot pipeline_mbar_mem[{n}]"
-    # No fallback internal barriers
-    assert "mbarrier_1" not in src, "Should not have fallback mbarrier_1"
+    assert "tl::tma_load" not in src, "Non-WS plain T.copy should stay synchronous"
+    assert "pipeline_mbar_mem" not in src, "Non-WS plain T.copy should not allocate pipeline TMA barriers"
 
 
 @pytest.mark.skipif(not _check_hopper(), reason="Requires Hopper GPU (sm_90)")
@@ -140,10 +128,7 @@ def test_nonws_im2col_tma_num_stages_3_uses_pipeline_barrier():
         conv,
         out_idx=-1,
         execution_backend="tvm_ffi",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     src = kernel.get_kernel_source()
     assert f"pipeline_mbar_mem[{num_stages}]" in src, f"Expected pipeline_mbar_mem[{num_stages}] for non-WS im2col TMA pipeline"
@@ -154,7 +139,7 @@ def test_nonws_im2col_tma_num_stages_3_uses_pipeline_barrier():
 
 
 if __name__ == "__main__":
-    test_nonws_tma_gemm_num_stages_3_has_multislot_pipeline_barrier()
-    test_nonws_tma_gemm_num_stages_1_stays_single_slot()
+    test_nonws_plain_copy_gemm_num_stages_3_stays_sync()
+    test_nonws_plain_copy_gemm_num_stages_1_stays_sync()
     test_nonws_im2col_tma_num_stages_3_uses_pipeline_barrier()
     print("All pipeline barrier ownership tests passed!")

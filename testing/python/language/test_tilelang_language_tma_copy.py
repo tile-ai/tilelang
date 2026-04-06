@@ -84,9 +84,7 @@ def run_gemm_tma_copy(num_stages):
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
@@ -183,9 +181,7 @@ def run_gemm_tma_copy_store(num_stages):
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()

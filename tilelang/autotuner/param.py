@@ -419,7 +419,7 @@ class AutotuneResult:
                 {
                     "out_idx": list(self.func.attrs["tilelang_out_idx"])
                     if (self.func.attrs and "tilelang_out_idx" in self.func.attrs)
-                    else None,
+                    else None
                 },
                 f,
             ),
@@ -432,10 +432,7 @@ class AutotuneResult:
             str(path / LATENCY_PATH),
             "w",
             lambda f: json.dump(
-                {
-                    "latency": self.latency,
-                    "ref_latency": self.ref_latency,
-                },
+                {"latency": self.latency, "ref_latency": self.ref_latency},
                 f,
             ),
         )

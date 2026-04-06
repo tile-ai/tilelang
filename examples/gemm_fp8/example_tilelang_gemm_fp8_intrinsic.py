@@ -129,12 +129,7 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzle_layout(A_shared),
-                    B_shared: make_swizzle_layout(B_shared),
-                }
-            )
+            T.annotate_layout({A_shared: make_swizzle_layout(A_shared), B_shared: make_swizzle_layout(B_shared)})
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -202,12 +197,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     if in_dtype in {torch.int8, torch.int32}:
         A = torch.randint(-128, 128, (M, K), dtype=torch.int8).to(in_dtype).cuda()
         B = torch.randint(-128, 128, (N, K), dtype=torch.int8).to(in_dtype).cuda()
-    elif in_dtype in {
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-        torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-    }:
+    elif in_dtype in {torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz}:
         A = torch.randn(M, K).to(in_dtype).cuda()
         B = torch.randn(N, K).to(in_dtype).cuda()
     else:

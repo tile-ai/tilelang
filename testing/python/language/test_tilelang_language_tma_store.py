@@ -76,9 +76,7 @@ def run_gemm_tma_store(num_stages):
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     kernel_source = kernel.get_kernel_source()
     print(kernel_source)

@@ -127,11 +127,7 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.half,
-    "bfloat16": torch.bfloat16,
-    "float": torch.float,
-}
+_STR_DTYPE_TO_TORCH_DTYPE = {"half": torch.half, "bfloat16": torch.bfloat16, "float": torch.float}
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding)
 
@@ -222,10 +218,7 @@ class HfRunner:
 
         outputs: List[Tuple[List[List[int]], List[str]]] = []
         for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
+            processor_kwargs: Dict[str, Any] = {"text": prompt, "return_tensors": "pt"}
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
 
@@ -291,10 +284,7 @@ class HfRunner:
     ) -> List[List[torch.Tensor]]:
         all_logprobs: List[List[torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
+            processor_kwargs: Dict[str, Any] = {"text": prompt, "return_tensors": "pt"}
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
 
@@ -336,10 +326,7 @@ class HfRunner:
         all_output_strs: List[str] = []
 
         for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
+            processor_kwargs: Dict[str, Any] = {"text": prompt, "return_tensors": "pt"}
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
 

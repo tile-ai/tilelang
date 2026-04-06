@@ -54,7 +54,7 @@ print(f"{iters_per_tile=} ")
 sm_patition_factor = max(blocking_tiles // total_sm, 1)
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False})
+@tilelang.jit
 def tl_matmul_streamk(
     M,
     N,

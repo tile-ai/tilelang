@@ -81,9 +81,6 @@ class PassConfigKey(str, Enum):
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
     """Bitwidth for configuration indices. Default: 32"""
 
-    TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
-    """Disable TMA (Tensor Memory Access) lowering. Default: False"""
-
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
     """Disable safe memory access optimization. Default: False"""
 

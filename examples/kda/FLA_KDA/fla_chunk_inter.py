@@ -11,11 +11,7 @@ BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem("ampere") else [16, 32]
 
 
-@triton.heuristics(
-    {
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[
         triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)

@@ -7,11 +7,7 @@ import tilelang.language as T
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10},
 )
 def mhc_post_tilelang(a, b, c, d, x, hc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024) -> tilelang.JITKernel:
     # rename for shorter code
@@ -60,6 +56,11 @@ def mhc_post(
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
     out = torch.empty_like(residual)
+    print(
+        mhc_post_tilelang.get_kernel_source(
+            comb_res_mix, residual, post_layer_mix.squeeze(-1), x, out, residual.shape[-2], residual.shape[-1]
+        )
+    )
     mhc_post_tilelang(comb_res_mix, residual, post_layer_mix.squeeze(-1), x, out, residual.shape[-2], residual.shape[-1])
     return out
 
@@ -88,12 +89,7 @@ def generate_test_data(
     post_layer_mix = torch.randn((n, hc_mult, 1), dtype=torch.float32, device=device)
     comb_res_mix = torch.randn((n, hc_mult, hc_mult), dtype=torch.float32, device=device)
 
-    return {
-        "x": x,
-        "residual": residual,
-        "post_layer_mix": post_layer_mix,
-        "comb_res_mix": comb_res_mix,
-    }
+    return {"x": x, "residual": residual, "post_layer_mix": post_layer_mix, "comb_res_mix": comb_res_mix}
 
 
 def test(n: int, h: int) -> None:
@@ -134,4 +130,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    tilelang.disable_cache()
+    test(n=4096, h=2560)

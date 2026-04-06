@@ -97,12 +97,7 @@ _PTX_DTYPE_MAP = {
 _FP32_TO_TF32 = {"fp32": "tf32", "f32": "tf32", "float32": "tf32"}
 
 # Canonical PTX dtype -> cutlass scalar type (for output dtypes only).
-_PTX_TO_CUTLASS_TYPE = {
-    "f16": cutlass.Float16,
-    "bf16": cutlass.BFloat16,
-    "f32": cutlass.Float32,
-    "s32": cutlass.Int32,
-}
+_PTX_TO_CUTLASS_TYPE = {"f16": cutlass.Float16, "bf16": cutlass.BFloat16, "f32": cutlass.Float32, "s32": cutlass.Int32}
 
 
 def _wgmma_num_c_regs(M, N, C_dtype):

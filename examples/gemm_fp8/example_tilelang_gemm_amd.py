@@ -37,15 +37,7 @@ def get_configs():
 
     for m, n, k, stages, t, kp, gemm_type in itertools.product(block_Ms, block_Ns, block_Ks, num_stages, num_threads, k_packs, gemm_types):
         valid_configs.append(
-            {
-                "block_M": m,
-                "block_N": n,
-                "block_K": k,
-                "num_stages": stages,
-                "num_threads": t,
-                "k_pack": kp,
-                "gemm_type": gemm_type,
-            }
+            {"block_M": m, "block_N": n, "block_K": k, "num_stages": stages, "num_threads": t, "k_pack": kp, "gemm_type": gemm_type}
         )
     return valid_configs
 

@@ -10,9 +10,7 @@ from varlen_utils import generate_random_padding_mask, generate_qkv
 
 @tilelang.jit(
     out_idx=[6],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn(batch_size, groups, UQ, UKV, heads, dim, is_causal, block_M=64, block_N=64, num_stages=1, threads=128):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)

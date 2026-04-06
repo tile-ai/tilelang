@@ -25,10 +25,7 @@ def run_reshape(N, M, dtype):
     jit_kernel = tl.compile(
         program,
         out_idx=-1,
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = jit_kernel.get_profiler()
 
@@ -68,10 +65,7 @@ def run_reshape_smem_1d_2_2d(N, M, dtype):
     jit_kernel = tl.compile(
         program,
         out_idx=-1,
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = jit_kernel.get_profiler()
 
@@ -110,10 +104,7 @@ def run_reshape_smem_2d_2_1d(N, M, dtype):
     jit_kernel = tl.compile(
         program,
         out_idx=-1,
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = jit_kernel.get_profiler()
 
@@ -153,10 +144,7 @@ def run_reshape_fragment(N, M, dtype):
     jit_kernel = tl.compile(
         program,
         out_idx=-1,
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = jit_kernel.get_profiler()
 
@@ -182,11 +170,7 @@ def reshape_layout_transform_shared(N, M, dtype):
         with T.Kernel(1, threads=32) as _:
             A_shared = T.alloc_shared((N // M, M), dtype, scope="shared")
 
-            T.annotate_layout(
-                {
-                    A_shared: make_mma_swizzle_layout(A_shared),
-                }
-            )
+            T.annotate_layout({A_shared: make_mma_swizzle_layout(A_shared)})
             T.copy(A, A_shared)
             A_shared_reshape = T.reshape(A_shared, [N])
             T.copy(A_shared_reshape, B)
@@ -199,10 +183,7 @@ def run_reshape_layout_transform_shared(N, M, dtype):
     jit_kernel = tl.compile(
         program,
         out_idx=-1,
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = jit_kernel.get_profiler()
 
@@ -242,10 +223,7 @@ def run_reduce_after_reshape(N, M, dtype):
     jit_kernel = tl.compile(
         program,
         out_idx=-1,
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = jit_kernel.get_profiler()
 

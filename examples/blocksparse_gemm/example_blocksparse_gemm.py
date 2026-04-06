@@ -26,14 +26,7 @@ def get_configs():
     _configs = list(itertools.product(block_M, block_N, block_K, num_stages, thread_num, enable_rasterization))
 
     return [
-        {
-            "block_M": c[0],
-            "block_N": c[1],
-            "block_K": c[2],
-            "num_stages": c[3],
-            "thread_num": c[4],
-            "enable_rasteration": c[5],
-        }
+        {"block_M": c[0], "block_N": c[1], "block_K": c[2], "num_stages": c[3], "thread_num": c[4], "enable_rasteration": c[5]}
         for c in _configs
     ]
 

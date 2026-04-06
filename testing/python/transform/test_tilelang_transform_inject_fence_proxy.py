@@ -557,14 +557,7 @@ def test_regression_0219_fence_no_fence_inserted():
         T.func_attr(
             {
                 "target": T.target(
-                    {
-                        "arch": "sm_90a",
-                        "keys": ["cuda", "gpu"],
-                        "kind": "cuda",
-                        "max_num_threads": 1024,
-                        "tag": "",
-                        "thread_warp_size": 32,
-                    }
+                    {"arch": "sm_90a", "keys": ["cuda", "gpu"], "kind": "cuda", "max_num_threads": 1024, "tag": "", "thread_warp_size": 32}
                 ),
                 "tir.is_global_func": True,
                 "tir.noalias": True,
@@ -715,14 +708,7 @@ def test_regression_0219_fence_no_fence_inserted():
         T.func_attr(
             {
                 "target": T.target(
-                    {
-                        "arch": "sm_90a",
-                        "keys": ["cuda", "gpu"],
-                        "kind": "cuda",
-                        "max_num_threads": 1024,
-                        "tag": "",
-                        "thread_warp_size": 32,
-                    }
+                    {"arch": "sm_90a", "keys": ["cuda", "gpu"], "kind": "cuda", "max_num_threads": 1024, "tag": "", "thread_warp_size": 32}
                 ),
                 "tir.is_global_func": True,
                 "tir.noalias": True,

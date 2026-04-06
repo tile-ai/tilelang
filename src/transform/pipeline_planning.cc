@@ -280,17 +280,13 @@ private:
     AccessRegions access = tile_op->GetAccessRegions();
     reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
     writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
-    // Detect global->shared TMA copy pattern for pipeline planning.
-    // Only mark T.copy (not T.tma_copy) — user-written T.tma_copy already
-    // manages its own barriers and should not get a pipeline barrier.
+    // Detect explicit TMA-like producer ops for pipeline planning.
+    // Plain T.copy no longer auto-upgrades to TMA in the generic pipeline
+    // path; only warp-specialized rewriting may turn it into
+    // tl.tileop.tma_copy.
     if (const auto *copy = tile_op.as<CopyNode>()) {
       if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
         is_global_copy_pattern_ = true;
-        arith::Analyzer analyzer;
-        if (!copy->GetIsTmaCopy() &&
-            copy->CheckBulkLoad(target_, &analyzer, /*check_last_dim=*/false)) {
-          is_tma_copy_ = true;
-        }
       }
     }
     // Conv2D im2col always uses TMA on Hopper.
@@ -508,10 +504,6 @@ public:
     ICHECK(target.defined())
         << "Pipeline_Planning: Require the target attribute";
     substituter.target_ = target.value();
-    substituter.disable_tma_lower_ =
-        tvm::transform::PassContext::Current()
-            ->GetConfig<Bool>(kDisableTMALower, Bool(false))
-            .value();
     return substituter.VisitStmt(f->body);
   }
 
@@ -778,11 +770,6 @@ private:
         return;
       }
       pinfo->copy_stage = true;
-      if (!copy->GetIsTmaCopy() && !disable_tma_lower_) {
-        arith::Analyzer analyzer;
-        pinfo->tma_copy = copy->CheckBulkLoad(target_, &analyzer,
-                                              /*check_last_dim=*/false);
-      }
       return;
     }
 
@@ -791,7 +778,7 @@ private:
         return;
       }
       pinfo->copy_stage = true;
-      pinfo->tma_copy = TargetIsHopper(target_) && !disable_tma_lower_;
+      pinfo->tma_copy = TargetIsHopper(target_);
     }
   }
 
@@ -978,7 +965,7 @@ private:
         collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
     pinfo.copy_stage = pure_copy_stage;
     pinfo.tma_copy = pure_copy_stage && !pinfo.conditional_execution &&
-                     collector.GetTmaCopyPattern() && !disable_tma_lower_;
+                     collector.GetTmaCopyPattern();
     auto async_info = AnalyzeAsyncIntrinsics(block->body);
     pinfo.cp_async_call_count = async_info.cp_async_call_count;
     pinfo.cp_async_commit_count = async_info.cp_async_commit_count;
@@ -2111,7 +2098,6 @@ private:
 
   Map<Var, Buffer> buffer_data_to_buffer_;
   Target target_;
-  bool disable_tma_lower_{false};
   bool use_async_copy_{};
 };
 

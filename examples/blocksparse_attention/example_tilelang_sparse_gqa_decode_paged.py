@@ -14,9 +14,7 @@ from heuristic import num_splits_heuristic
 
 @tilelang.jit(
     out_idx=[-1],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn(batch, heads, heads_kv, dim, dim_v, block_N, block_H, page_block_size, num_stages, threads, num_pages):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)

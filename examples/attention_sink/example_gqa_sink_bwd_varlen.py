@@ -22,9 +22,7 @@ def get_bwd_configs():
 
 @tilelang.jit(
     out_idx=[6, 7],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_fwd(
     batch_size,
@@ -216,9 +214,7 @@ def flashattn_fwd(
 
 @tilelang.jit(
     out_idx=[3],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_bwd_preprocess(batch_size, heads, UQ, N_CTX, max_seq_len, dim, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
@@ -269,9 +265,7 @@ def make_dq_layout(dQ):
 
 @tilelang.jit(
     out_idx=[1],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_bwd_postprocess(UQ, heads, dim, dtype: T.dtype = T.float16):
     accum_dtype = T.float32
@@ -293,11 +287,7 @@ def flashattn_bwd_postprocess(UQ, heads, dim, dtype: T.dtype = T.float16):
     return flash_bwd_post
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    }
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def flashattn_bwd(
     batch_size,
     groups,
@@ -365,11 +355,7 @@ def flashattn_bwd(
             q_current_seqlen = q_end_idx - q_start_idx
             kv_current_seqlen = k_end_idx - kv_start_idx
 
-            T.annotate_layout(
-                {
-                    dQ: make_dq_layout(dQ),
-                }
-            )
+            T.annotate_layout({dQ: make_dq_layout(dQ)})
             T.copy(K[kv_start_idx + by * block_M : kv_start_idx + (by + 1) * block_M, bx // groups, :], K_shared)
             T.copy(V[kv_start_idx + by * block_M : kv_start_idx + (by + 1) * block_M, bx // groups, :], V_shared)
             T.clear(dv)

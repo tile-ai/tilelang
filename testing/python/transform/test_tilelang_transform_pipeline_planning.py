@@ -209,7 +209,7 @@ def test_pipeline_planning_does_not_mark_fill_as_async_producer_for_predicated_c
     assert async_groups == [-1, 0, -1, -1, -1]
 
 
-def test_pipeline_planning_respects_disable_tma_lower_for_async_grouping():
+def test_pipeline_planning_keeps_plain_hopper_pipeline_copies_sync():
     hopper_target = tvm.target.Target("cuda -arch=sm_90a")
 
     @T.prim_func
@@ -228,16 +228,13 @@ def test_pipeline_planning_respects_disable_tma_lower_for_async_grouping():
                 T.copy(B[k * 32, bx * 128], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
 
-    with tvm.transform.PassContext(config={tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True}):
-        mod = _run_pipeline_planning(before, hopper_target)
+    mod = _run_pipeline_planning(before, hopper_target)
 
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
     anno = annos[0]
     tma_copies = [int(v) for v in anno["software_pipeline_tma_copies"]]
-    async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
     assert tma_copies[:2] == [0, 0]
-    assert async_producers[:2] == [1, 1]
 
 
 def test_pipeline_planning_binds_commit_to_cp_async_stage():

@@ -172,9 +172,7 @@ def test_split():
     assert_iter_sum_pattern({fld(x * 2, 4): (4, 0, 1), flm(x * 2, 4): (2, 0, 2)}, var_dom([(x, 8)]))
 
     assert_iter_sum_pattern(
-        {
-            fld(x * 2, 4) * 4 + flm(x * 2, 4): (8, 0, 2),
-        },
+        {fld(x * 2, 4) * 4 + flm(x * 2, 4): (8, 0, 2)},
         var_dom([(x, 8)]),
     )
 
@@ -962,20 +960,12 @@ class TestPadding:
         # be surjective on missing (padded // LCM)
         (
             {x: 240},
-            {
-                flm(x + 10, 3): (3, 0),
-                flm(fld(x + 10, 3), 4): (4, 0),
-                flm(fld(fld(x + 10, 3), 4), 5): (5, 0),
-            },
+            {flm(x + 10, 3): (3, 0), flm(fld(x + 10, 3), 4): (4, 0), flm(fld(fld(x + 10, 3), 4), 5): (5, 0)},
         ),
         # different offsets on splits
         (
             {x: 240},
-            {
-                flm(x + 1, 3): (3, 0),
-                flm(fld(x + 10, 3) + 2, 4): (4, 0),
-                flm(fld(fld(x + 10, 3), 4) + 3, 5): (5, 0),
-            },
+            {flm(x + 1, 3): (3, 0), flm(fld(x + 10, 3) + 2, 4): (4, 0), flm(fld(fld(x + 10, 3), 4) + 3, 5): (5, 0)},
         ),
     )
 
@@ -989,12 +979,7 @@ class TestPadding:
         # be surjective on missing (padded // LCM)
         (
             {x: 240},
-            {
-                flm(x + 10, 3),
-                flm(fld(x + 10, 3), 4),
-                flm(fld(fld(x + 10, 3), 4), 5),
-                fld(fld(fld(x + 10, 3), 4), 5),
-            },
+            {flm(x + 10, 3), flm(fld(x + 10, 3), 4), flm(fld(fld(x + 10, 3), 4), 5), fld(fld(fld(x + 10, 3), 4), 5)},
         ),
         # original extent is smaller than the divident
         # it is not surjective wrt to the region [0, 16)
@@ -1025,9 +1010,7 @@ def test_overlapped_fuse():
 
     # non-bijective fuse of two
     assert_iter_sum_pattern(
-        {
-            x * 7 + y: (22, 0, 1),
-        },
+        {x * 7 + y: (22, 0, 1)},
         var_dom([(x, 3), (y, 8)]),
         check_level="surjective",
     )
@@ -1035,9 +1018,7 @@ def test_overlapped_fuse():
 
     # non-bijective fuse of three
     assert_iter_sum_pattern(
-        {
-            x * 18 + y * 7 + z: (40, 0, 1),
-        },
+        {x * 18 + y * 7 + z: (40, 0, 1)},
         var_dom([(x, 2), (y, 3), (z, 8)]),
         check_level="surjective",
     )
@@ -1049,9 +1030,7 @@ def test_overlapped_fuse():
 
     # with predicate
     assert_iter_sum_pattern(
-        {
-            a * 40 + b * 20 + x * 18 + y * 3 + z: (125, 6, 1),
-        },
+        {a * 40 + b * 20 + x * 18 + y * 3 + z: (125, 6, 1)},
         var_dom([(a, 3), (b, 2), (x, 2), (y, 6), (z, 8)]),
         predicate=tvm.tir.all(z < 4, x * 6 + y > 1, x * 6 + y < 10),
         check_level="surjective",
@@ -1279,10 +1258,7 @@ def test_detect_iter_map_with_bufferload_recursion():
     buffer = tvm.tir.decl_buffer((n,), "int32", name="seqlen")
 
     indices = [(buffer[i] + j) // divisor]
-    iter_vars = {
-        i: tvm.ir.Range(tvm.tir.const(0, "int32"), n),
-        j: tvm.ir.Range(tvm.tir.const(0, "int32"), m),
-    }
+    iter_vars = {i: tvm.ir.Range(tvm.tir.const(0, "int32"), n), j: tvm.ir.Range(tvm.tir.const(0, "int32"), m)}
 
     result = tvm.arith.detect_iter_map(indices, iter_vars)
     assert len(result.indices) == 0

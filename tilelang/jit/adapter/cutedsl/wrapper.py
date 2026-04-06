@@ -621,8 +621,7 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.uint8": cutlass.Uint8,
       "torch.int16": cutlass.Int16,
       "torch.uint16": cutlass.Uint16,
-      "torch.uchar": cutlass.Uint8,
-  }}
+      "torch.uchar": cutlass.Uint8}}
 
 {cubin_gen_code}
 

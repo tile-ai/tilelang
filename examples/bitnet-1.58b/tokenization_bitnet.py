@@ -38,15 +38,13 @@ VOCAB_FILES_NAMES = {"vocab_file": "tokenizer.model"}
 
 PRETRAINED_VOCAB_FILES_MAP = {
     "vocab_file": {
-        "hf-internal-testing/llama-tokenizer": "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer.model",
+        "hf-internal-testing/llama-tokenizer": "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer.model"
     },
     "tokenizer_file": {
-        "hf-internal-testing/llama-tokenizer": "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer_config.json",
+        "hf-internal-testing/llama-tokenizer": "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer_config.json"
     },
 }
-PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
-    "hf-internal-testing/llama-tokenizer": 2048,
-}
+PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {"hf-internal-testing/llama-tokenizer": 2048}
 SPIECE_UNDERLINE = "▁"
 
 B_INST, E_INST = "[INST]", "[/INST]"

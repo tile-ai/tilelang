@@ -220,16 +220,7 @@ def get_bwd_configs():
 
     configs = []
     for m, n, stages, t, r, p in itertools.product(block_M, block_N, num_stages, threads, enable_rasterization, panel_size):
-        configs.append(
-            {
-                "block_M": m,
-                "block_N": n,
-                "num_stages": stages,
-                "threads": t,
-                "enable_rasterization": r,
-                "panel_size": p,
-            }
-        )
+        configs.append({"block_M": m, "block_N": n, "num_stages": stages, "threads": t, "enable_rasterization": r, "panel_size": p})
 
     return configs
 

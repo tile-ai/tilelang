@@ -731,10 +731,7 @@ class BitnetFlashAttention2(BitnetAttention):
         )
 
 
-LLAMA_ATTENTION_CLASSES = {
-    "eager": BitnetAttention,
-    "flash_attention_2": BitnetFlashAttention2,
-}
+LLAMA_ATTENTION_CLASSES = {"eager": BitnetAttention, "flash_attention_2": BitnetFlashAttention2}
 
 
 class BitnetDecoderLayer(nn.Module):

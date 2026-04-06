@@ -97,10 +97,7 @@ def tilelang_recompute_w_u_fwd(
             U_Beta_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
 
             T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                }
+                {K_shared: tilelang.layout.make_swizzled_layout(K_shared), V_shared: tilelang.layout.make_swizzled_layout(V_shared)}
             )
 
             T.disable_warp_group_reg_alloc()

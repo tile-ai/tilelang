@@ -4,9 +4,9 @@
  *
  * This pass runs **before** LayoutInference and LowerTileOp, operating on
  * high-level tile ops (`tl.tileop.copy`, `tl.tileop.gemm`, etc.).
- * It reads the `tl_instruction_kind` annotations placed by
- * InstructionAnnotation and splits pipelined loops into warp-specialized
- * producer/consumer branches with explicit barrier synchronization.
+ * It recognizes pipelined producer/consumer structure directly from tile-op
+ * semantics and splits eligible loops into warp-specialized branches with
+ * explicit barrier synchronization.
  *
  * The output IR is equivalent to a hand-written warp-specialized kernel:
  *   - TMA-annotated copies become `tl.tileop.tma_copy` with barrier refs
@@ -14,7 +14,6 @@
  *   - The loop body is wrapped in `if (threadIdx.x >= consumer_extent)`
  *
  * Prerequisites:
- *   - InstructionAnnotation must have run (tile ops carry tl_instruction_kind)
  *   - MultiVersionBuffer must have run (shared buffers are already expanded
  *     for pipelining and accesses include the stage index)
  *
@@ -36,6 +35,7 @@
 #include "../op/copy.h"
 #include "../op/fill.h"
 #include "../op/gemm.h"
+#include "../op/gemm_py.h"
 #include "../op/operator.h"
 #include "../op/region.h"
 #include "../op/utils.h"
@@ -681,7 +681,8 @@ static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
   // Generic T.copy(): check if TMA is possible
   {
     arith::Analyzer analyzer;
-    if (copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/true)) {
+    if (!copy->GetDisableTMA() &&
+        copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/true)) {
       return TileStmtKind::kTmaProducer;
     }
   }
@@ -811,6 +812,41 @@ private:
 
   Target target_;
   mutable arith::Analyzer analyzer_;
+};
+
+class TileOpMbarPhaseAnnotator : public StmtExprMutator {
+public:
+  static Stmt Annotate(const Stmt &stmt, PrimExpr phase_expr) {
+    TileOpMbarPhaseAnnotator annotator(std::move(phase_expr));
+    return annotator.VisitStmt(stmt);
+  }
+
+private:
+  explicit TileOpMbarPhaseAnnotator(PrimExpr phase_expr)
+      : phase_expr_(std::move(phase_expr)) {}
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (!IsMbarPhaseConsumer(call)) {
+      return call;
+    }
+    if (call->annotations.count(attr::kPipelineMbarPhaseExpr)) {
+      return call;
+    }
+    auto annotations = call->annotations;
+    annotations.Set(attr::kPipelineMbarPhaseExpr, phase_expr_);
+    return Call(call->dtype, call->op, call->args, annotations, call->span);
+  }
+
+  bool IsMbarPhaseConsumer(const Call &call) const {
+    auto tile_op = ParseOperator(call);
+    return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
+                                 tile_op.as<Conv2DIm2ColOpNode>() != nullptr ||
+                                 tile_op.as<GemmNode>() != nullptr ||
+                                 tile_op.as<GemmPyNode>() != nullptr);
+  }
+
+  PrimExpr phase_expr_;
 };
 
 /// Annotate a tile-op Call (e.g., c2d_im2col) with a barrier reference.
@@ -1615,6 +1651,10 @@ private:
           consumer_body, loop_var, loop_min, num_stages,
           consumer_phase_counter.value().StageExpr(num_stages));
     }
+    producer_body =
+        TileOpMbarPhaseAnnotator::Annotate(producer_body, p_parity_expr);
+    consumer_body =
+        TileOpMbarPhaseAnnotator::Annotate(consumer_body, c_parity_expr);
 
     // --- Build loops (strip pipeline annotations) ---
     // WS handles pipeline overlap via barriers, so strip all pipeline-
@@ -1629,16 +1669,8 @@ private:
       }
     }
 
-    // Wrap the producer body in a pipeline-context AttrStmt so that
-    // LowerTileOp enables cp.async injection for SIMT producers
-    // (pipelined_depth_ > 0) without triggering re-pipelining.
-    Stmt producer_body_with_ctx =
-        AttrStmt(StringImm("tl.pipeline_context_num_stages"),
-                 "tl.pipeline_context_num_stages",
-                 IntImm(DataType::Int(32), num_stages), producer_body);
-
     For producer_loop(loop_var, loop_min, loop_extent, ForKind::kSerial,
-                      producer_body_with_ctx, Optional<IterVar>(), loop_annos);
+                      producer_body, Optional<IterVar>(), loop_annos);
     For consumer_loop(loop_var, loop_min, loop_extent, ForKind::kSerial,
                       consumer_body, Optional<IterVar>(), loop_annos);
 

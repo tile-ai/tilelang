@@ -78,8 +78,7 @@ static bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
  * collapses BulkLoad/BulkLoad1D/BulkStore/BulkStore1D into "tma" and skips
  * checks that require layout information.
  */
-std::string ClassifyCopy(const CopyNode *copy, Target target,
-                         bool disable_tma_lower, bool in_pipeline,
+std::string ClassifyCopy(const CopyNode *copy, Target target, bool in_pipeline,
                          arith::Analyzer *analyzer) {
   // Explicit T.tma_copy() — always TMA.
   if (copy->GetIsTmaCopy()) {
@@ -98,14 +97,8 @@ std::string ClassifyCopy(const CopyNode *copy, Target target,
     return "cp_async";
   }
 
-  // Generic T.copy() — run coarse checks in priority order.
-  if (!disable_tma_lower) {
-    // CheckBulkLoad / CheckBulkStore only need target + scope + shape.
-    if (copy->CheckBulkLoad(target, analyzer, /*check_last_dim=*/true) ||
-        copy->CheckBulkStore(target, analyzer, /*check_last_dim=*/true)) {
-      return "tma";
-    }
-  }
+  // Generic T.copy() stays synchronous here. Auto-TMA is only introduced by
+  // warp-specialized rewriting, which rewrites the op to explicit T.tma_copy.
 
   // LDSM / STSM / TMem — these are synchronous from the WS perspective.
   if (copy->CheckLDSMCopy(target) || copy->CheckSTSMCopy(target) ||
@@ -157,12 +150,6 @@ public:
 
     InstructionAnnotator annotator;
     annotator.target_ = target.value();
-
-    tvm::transform::PassContext pass_ctx =
-        tvm::transform::PassContext::Current();
-    annotator.disable_tma_lower_ =
-        pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
-
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = annotator.VisitStmt(f->body);
     return f;
@@ -208,8 +195,7 @@ private:
     std::string kind;
 
     if (auto *copy_node = tile_op.as<CopyNode>()) {
-      kind = ClassifyCopy(copy_node, target_, disable_tma_lower_, in_pipeline_,
-                          &analyzer_);
+      kind = ClassifyCopy(copy_node, target_, in_pipeline_, &analyzer_);
     } else if (auto *gemm_node = tile_op.as<GemmNode>()) {
       kind = ClassifyGemm(gemm_node, block_size_, target_);
     } else {
@@ -224,7 +210,6 @@ private:
   }
 
   Target target_;
-  bool disable_tma_lower_{false};
   bool in_pipeline_{false};
   int block_size_{0};
   arith::Analyzer analyzer_;

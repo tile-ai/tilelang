@@ -21,14 +21,7 @@ def get_configs():
     valid_configs = []
 
     for m, n, k, stages in itertools.product(block_Ms, block_Ns, block_Ks, num_stages):
-        valid_configs.append(
-            {
-                "block_M": m,
-                "block_N": n,
-                "block_K": k,
-                "num_stages": stages,
-            }
-        )
+        valid_configs.append({"block_M": m, "block_N": n, "block_K": k, "num_stages": stages})
     return valid_configs
 
 
@@ -111,12 +104,7 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b * k_pack), in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzled_layout(A_shared),
-                    C_local: mfma_emitter.make_mfma_store_layout(C_local),
-                }
-            )
+            T.annotate_layout({A_shared: make_swizzled_layout(A_shared), C_local: mfma_emitter.make_mfma_store_layout(C_local)})
 
             num_ko = K // block_K
             num_ki = block_K // (k_pack * micro_size_k)

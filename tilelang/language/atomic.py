@@ -8,14 +8,7 @@ from tvm.tir import PrimExpr, Buffer, op
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 from tilelang.language.utils import get_extent
 
-_MEMORY_ORDER_ID_MAP = {
-    "relaxed": 0,
-    "consume": 1,
-    "acquire": 2,
-    "release": 3,
-    "acq_rel": 4,
-    "seq_cst": 5,
-}
+_MEMORY_ORDER_ID_MAP = {"relaxed": 0, "consume": 1, "acquire": 2, "release": 3, "acq_rel": 4, "seq_cst": 5}
 
 
 def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False) -> PrimExpr:

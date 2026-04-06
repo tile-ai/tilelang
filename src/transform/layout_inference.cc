@@ -24,11 +24,10 @@
 #include "../op/region.h"
 #include "../op/utils.h"
 #include "../target/utils.h"
-#include "common/pipeline_utils.h"
-
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
+#include "common/pipeline_utils.h"
 #include "common/union_find.h"
 #include "layout_reducer.h"
 #include "parallel_loop_layout_validator.h"
@@ -103,7 +102,6 @@ public:
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
     arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     auto buffer_oob = buffer_oob_vec_[cur_infer_id];
-    bool in_pipeline = in_pipeline_vec_[cur_infer_id];
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
                            << "] is null inside run_infer_step.";
@@ -131,7 +129,7 @@ public:
                                                      buffer_oob,
                                                      {},
                                                      let_var_to_expr_,
-                                                     in_pipeline},
+                                                     false},
                                      level);
 
     // Process the returned updates
@@ -314,10 +312,6 @@ public:
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
-    ICHECK_EQ(in_pipeline_vec_.size(), infer_list_.size())
-        << "Size mismatch: in_pipeline_vec_ and infer_list_ must match in "
-           "length.";
-
     DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
     for (int i = 0; i < infer_list_stmt_.size(); ++i) {
       DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
@@ -575,7 +569,6 @@ private:
       // Add the tile operator to infer_list_
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
-      in_pipeline_vec_.push_back(pipelined_depth_ > 0);
     }
   }
 
@@ -639,17 +632,6 @@ private:
   }
 
   void VisitStmt_(const ForNode *op) final {
-    bool enter_pipelined = false;
-    if (auto num_stages_anno = op->annotations.Get("num_stages")) {
-      const auto *imm = num_stages_anno->as<IntImmNode>();
-      ICHECK(imm) << "For annotation num_stages must be IntImm, but got "
-                  << num_stages_anno.value();
-      enter_pipelined = imm->value > 0;
-    }
-    if (enter_pipelined) {
-      ++pipelined_depth_;
-    }
-
     if (op->kind == ForKind::kParallel) {
       auto infer = ParallelOp(tvm::ffi::GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
@@ -722,18 +704,12 @@ private:
       });
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
-      in_pipeline_vec_.push_back(pipelined_depth_ > 0);
       thread_var_vec_.push_back(thread_var_);
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
       buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
-    }
-
-    if (enter_pipelined) {
-      ICHECK_GT(pipelined_depth_, 0);
-      --pipelined_depth_;
     }
   }
 
@@ -796,15 +772,6 @@ private:
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
-    bool enter_pipelined = false;
-    if (op->attr_key == kPipelineContextNumStages) {
-      if (const auto *imm = op->value.as<IntImmNode>()) {
-        if (imm->value > 0) {
-          ++pipelined_depth_;
-          enter_pipelined = true;
-        }
-      }
-    }
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
@@ -813,10 +780,6 @@ private:
       }
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
-    if (enter_pipelined) {
-      ICHECK_GT(pipelined_depth_, 0);
-      --pipelined_depth_;
-    }
   }
 
   void VisitStmt_(const LetStmtNode *op) final {
@@ -1010,10 +973,6 @@ private:
   Map<Var, PrimExpr> let_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
-  // Whether the corresponding op was observed inside a pipelined loop
-  // (i.e., a surrounding For annotated with num_stages > 0).
-  std::vector<bool> in_pipeline_vec_;
-  int pipelined_depth_{0};
   // Fragment buffers that have accesses outside of TileOps.
   // These "floating" buffers need fully replicated layouts since their
   // access patterns cannot be inferred from TileOp semantics.

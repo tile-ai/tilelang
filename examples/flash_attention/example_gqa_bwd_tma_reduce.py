@@ -8,9 +8,7 @@ import argparse
 
 @tilelang.jit(
     out_idx=[3, 4],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, groups=1):
     scale = (1.0 / dim_qk) ** 0.5 * 1.44269504  # log2(e)
@@ -86,9 +84,7 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
 
 @tilelang.jit(
     out_idx=[2],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim_v):
     dtype = T.float16
@@ -126,9 +122,7 @@ def make_dq_layout(dQ):
 
 @tilelang.jit(
     out_idx=[3, 4, 5],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn_bwd_postprocess(batch, heads, head_kv, seq_len, dim_qk, dim_v):
     dtype = T.float16
@@ -151,23 +145,14 @@ def flashattn_bwd_postprocess(batch, heads, head_kv, seq_len, dim_qk, dim_v):
             T.annotate_layout({dQ: make_dq_layout(dQ)})
             T.copy(dQ[bz, bx * blk : (bx + 1) * blk, by, :], dQ_out[bz, bx * blk : (bx + 1) * blk, by, :])
         with T.Kernel(T.ceildiv(seq_len, blk), head_kv, batch, threads=128) as (bx, by, bz):
-            T.annotate_layout(
-                {
-                    dK: make_dq_layout(dK),
-                    dV: make_dq_layout(dV),
-                }
-            )
+            T.annotate_layout({dK: make_dq_layout(dK), dV: make_dq_layout(dV)})
             T.copy(dK[bz, bx * blk : (bx + 1) * blk, by, :], dK_out[bz, bx * blk : (bx + 1) * blk, by, :])
             T.copy(dV[bz, bx * blk : (bx + 1) * blk, by, :], dV_out[bz, bx * blk : (bx + 1) * blk, by, :])
 
     return flash_bwd_post
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    }
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, threads=256, num_stages=2, groups=1):
     sm_scale = (1.0 / dim_qk) ** 0.5
     scale = (1.0 / dim_qk) ** 0.5 * 1.44269504  # log2(e)
@@ -250,11 +235,7 @@ def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, bl
     return flash_bwd
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    }
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def flashattn_bwd_split_novarlen(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, threads=256, num_stages=2, groups=1):
     sm_scale = (1.0 / dim_qk) ** 0.5
     scale = (1.0 / dim_qk) ** 0.5 * 1.44269504  # log2(e)
@@ -297,11 +278,7 @@ def flashattn_bwd_split_novarlen(batch, heads, seq_len, dim_qk, dim_v, is_causal
             dv_shared = T.alloc_shared([block_M, dim_v], dtype)
             dk_shared = T.alloc_shared([block_M, dim_qk], dtype)
 
-            T.annotate_layout(
-                {
-                    dQ: make_dq_layout(dQ),
-                }
-            )
+            T.annotate_layout({dQ: make_dq_layout(dQ)})
 
             T.copy(K[bz, by * block_M : (by + 1) * block_M, bx // groups, :], K_shared)
             T.copy(V[bz, by * block_M : (by + 1) * block_M, bx // groups, :], V_shared)

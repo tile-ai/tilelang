@@ -318,12 +318,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.data.name,
-                        "type": "ctypes.c_void_p",
-                    }
-                )
+                function_args.append({"name": buffer.data.name, "type": "ctypes.c_void_p"})
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:

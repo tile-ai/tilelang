@@ -1193,7 +1193,4 @@ def get_lop3_intrin_group(
     if is_ladder_stage3:
         func_name += "_offset"
 
-    return {
-        "func_name": func_name,
-        "c_source": import_c_map[key],
-    }
+    return {"func_name": func_name, "c_source": import_c_map[key]}

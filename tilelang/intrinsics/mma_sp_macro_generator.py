@@ -61,62 +61,14 @@ class SparseTensorCoreIntrinEmitter:
     }
 
     E_FACTOR_MAP = {  # e_kdim = mma_kdim // e_factor
-        "float": {
-            "int16": 8,
-            "uint16": 8,
-        },
-        "float32": {
-            "int16": 8,
-            "uint16": 8,
-        },
-        "float16": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "bfloat16": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "int8": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "uint8": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "float8_e4m3": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "float8_e5m2": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
+        "float": {"int16": 8, "uint16": 8},
+        "float32": {"int16": 8, "uint16": 8},
+        "float16": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "bfloat16": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "int8": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "uint8": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "float8_e4m3": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "float8_e5m2": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
     }
 
     E_REPLICATE_FACTOR = {  # metadata replicate every 4 consecutive threads

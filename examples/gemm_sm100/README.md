@@ -87,7 +87,6 @@ block_M, block_N, block_K = 128, 256, 128
 
 # Compile kernel
 jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", pass_configs={
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,        # Required
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, # Required
 })
 

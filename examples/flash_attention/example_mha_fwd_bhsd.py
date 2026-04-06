@@ -16,9 +16,7 @@ def get_configs():
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(
     out_idx=[3],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, block_M=64, block_N=64, num_stages=1, threads=128):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)

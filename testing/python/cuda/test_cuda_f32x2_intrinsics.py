@@ -29,11 +29,7 @@ M = 128  # number of threads / element-pairs
 # Dtype helpers
 # ---------------------------------------------------------------------------
 
-_DTYPE_MAP = {
-    "float32": (T.float32, torch.float32),
-    "bfloat16": (T.bfloat16, torch.bfloat16),
-    "float16": (T.float16, torch.float16),
-}
+_DTYPE_MAP = {"float32": (T.float32, torch.float32), "bfloat16": (T.bfloat16, torch.bfloat16), "float16": (T.float16, torch.float16)}
 
 # ---------------------------------------------------------------------------
 # Generic kernel builders using T.Ramp for packed x2 access
@@ -108,11 +104,7 @@ def _lower_to_cuda_source(func, target: str = SM80_TARGET) -> str:
 # ---------------------------------------------------------------------------
 
 # Map from Python operator string to (lambda, tl_func_name)
-_AUTO_VEC_OPS = {
-    "add": (lambda a, b: a + b, "add2"),
-    "sub": (lambda a, b: a - b, "sub2"),
-    "mul": (lambda a, b: a * b, "mul2"),
-}
+_AUTO_VEC_OPS = {"add": (lambda a, b: a + b, "add2"), "sub": (lambda a, b: a - b, "sub2"), "mul": (lambda a, b: a * b, "mul2")}
 
 
 def _make_auto_vec_binary_kernel(py_op, dtype_tl):
@@ -148,10 +140,7 @@ _BINARY_OPS = [
 _DTYPES = ["float32", "bfloat16", "float16"]
 
 # Native cast types expected in codegen for 16-bit packed types
-_NATIVE_CAST_TYPE = {
-    "bfloat16": "__nv_bfloat162",
-    "float16": "__half2",
-}
+_NATIVE_CAST_TYPE = {"bfloat16": "__nv_bfloat162", "float16": "__half2"}
 
 # Torch reference functions
 _TORCH_REFS = {

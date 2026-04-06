@@ -18,13 +18,7 @@ from einops import rearrange
 import tilelang
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    }
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
 def tilelang_kernel_fwd(
     batch,
     heads,
@@ -155,11 +149,7 @@ def tilelang_kernel_fwd(
     return native_sparse_attention
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    }
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def tilelang_kernel_bwd_dkv(
     batch,
     heads,
@@ -317,11 +307,7 @@ def make_dq_layout(dQ):
     )
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    }
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def tilelang_kernel_bwd_dqkv(
     batch,
     heads,
@@ -480,9 +466,7 @@ def tilelang_kernel_bwd_dqkv(
 
 @tilelang.jit(
     out_idx=[2],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def tilelang_kernel_preprocess(
     batch,
@@ -522,9 +506,7 @@ def tilelang_kernel_preprocess(
 
 @tilelang.jit(
     out_idx=[2],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def tilelang_kernel_block_mask(
     batch,

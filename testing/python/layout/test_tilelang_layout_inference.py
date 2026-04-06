@@ -11,11 +11,7 @@ def _tilelang_issue_layout_free_inference_choose_smallest_replication():
             A_frag = T.alloc_fragment((128, 4), T.float)
             B_frag = T.alloc_fragment((128, 4), T.float)
             S_frag = T.alloc_fragment((4,), T.float)
-            T.annotate_layout(
-                {
-                    A_frag: T.Fragment(A_frag.shape, lambda i, j: (i, j)),
-                }
-            )
+            T.annotate_layout({A_frag: T.Fragment(A_frag.shape, lambda i, j: (i, j))})
             for i, j in T.Parallel(128, 4):
                 A_frag[i, j] = S_frag[j]
             for i, j in T.Parallel(128, 4):

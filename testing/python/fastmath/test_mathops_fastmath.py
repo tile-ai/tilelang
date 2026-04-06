@@ -70,9 +70,7 @@ def run_single_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=3
         main,
         out_idx=[1],
         target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False},
     )
 
     source_no_fastmath = kernel_no_fastmath.get_kernel_source()
@@ -108,9 +106,7 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, 
         main,
         out_idx=[2],
         target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False},
     )
 
     # Test with FAST_MATH enabled
@@ -118,9 +114,7 @@ def run_two_arg_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32, 
         main,
         out_idx=[2],
         target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
     )
 
     source_no_fastmath = kernel_no_fastmath.get_kernel_source()
@@ -171,9 +165,7 @@ def run_abs_test():
         main,
         out_idx=[1],
         target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False},
     )
 
     source = kernel.get_kernel_source()
@@ -208,9 +200,7 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=128, N=128, block_M=32,
         main,
         out_idx=[1],
         target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
     )
 
     source_fastmath = kernel_fastmath.get_kernel_source()

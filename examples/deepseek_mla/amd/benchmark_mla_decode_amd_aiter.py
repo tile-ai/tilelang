@@ -114,10 +114,7 @@ def run_mla_aiter(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
     return out_aiter, None, t
 
 
-FUNC_TABLE = {
-    "torch": run_torch_mla,
-    "mla_aiter": run_mla_aiter,
-}
+FUNC_TABLE = {"torch": run_torch_mla, "mla_aiter": run_mla_aiter}
 
 
 def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):

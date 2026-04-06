@@ -284,12 +284,7 @@ class TLCUDASourceWrapper:
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.data.name,
-                        "type": self._lookup_type(buffer.dtype) + "* __restrict__",
-                    }
-                )
+                function_args.append({"name": buffer.data.name, "type": self._lookup_type(buffer.dtype) + "* __restrict__"})
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
@@ -790,12 +785,7 @@ class TLCPUSourceWrapper:
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.name,
-                        "type": self._lookup_type(buffer.dtype) + "*",
-                    }
-                )
+                function_args.append({"name": buffer.name, "type": self._lookup_type(buffer.dtype) + "*"})
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
@@ -877,9 +867,7 @@ class TLCPUSourceWrapper:
         # Organize function information for code generation
         function_informations = {}
         for function_name in function_names:
-            function_informations[function_name] = {
-                "function_name": function_name,
-            }
+            function_informations[function_name] = {"function_name": function_name}
 
         # Create the call function wrapper for the CPU kernel
         call_func = self.create_call_func(code, function_informations)

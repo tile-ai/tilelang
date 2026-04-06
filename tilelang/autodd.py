@@ -1036,9 +1036,7 @@ async def main(args: Args):
         match="for VARS in EXPR: BODY",
         rewrite="VARS = ZEROS\nBODY",
         placeholders={"VARS", "EXPR", "BODY", "ZEROS"},
-        derived={
-            "ZEROS": lambda ph: expr_to_zeros(ph["VARS"]),
-        },
+        derived={"ZEROS": lambda ph: expr_to_zeros(ph["VARS"])},
     )
 
     with_bind_0 = ASTPatRewrite.from_code(
@@ -1047,9 +1045,7 @@ async def main(args: Args):
         match="with EXPR as VARS: BODY",
         rewrite="with EXPR:\n  VARS = ZEROS\n  BODY",
         placeholders={"VARS", "EXPR", "BODY", "ZEROS"},
-        derived={
-            "ZEROS": lambda ph: expr_to_zeros(ph["VARS"]),
-        },
+        derived={"ZEROS": lambda ph: expr_to_zeros(ph["VARS"])},
     )
 
     assign_rhs_1 = ASTPatRewrite.from_code(

@@ -100,11 +100,7 @@ def recompute_w_u_fwd_kernel(
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.heuristics(
-    {
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps, num_stages=num_stages) for num_warps in [2, 4] for num_stages in [2, 3, 4]],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
