@@ -909,15 +909,17 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         // Decompose into lanes/2 independent x2 packed operations.
         //
         // Vector type → CUDA struct mapping:
-        //   bf16x2 -> uint1 {.x}          bf16x4 -> uint2 {.x, .y}
-        //   bf16x8 -> uint4 {.x,.y,.z,.w} (each field = one nv_bfloat162)
-        //   fp16x2 -> uint1 {.x}          fp16x4 -> uint2 {.x, .y}  ...
-        //   f32x2  -> float2 {.x, .y}     f32x4  -> float4 {.x,.y,.z,.w}
+        //   bf16/fp16 x2..x8  -> uint1..uint4  (one packed x2 pair per field)
+        //   bf16/fp16 x12/x16 -> ulonglong3/4 (two packed x2 pairs per field)
+        //   f32x2  -> float2 {.x, .y}
+        //   f32x4  -> float4 {.x,.y,.z,.w}
+        //   f32x6/x8 -> ulonglong3/4 (one float2 pair per field)
         //
         // For bf16/fp16: each 32-bit field already packs a pair of elements,
-        //   so we apply tl::*2 on each field directly.
-        // For f32: consecutive pairs of 32-bit fields form a float2,
-        //   so we apply tl::*2 on each float2 pair.
+        //   so we apply tl::*2 on each field directly for <= 8 lanes. For
+        //   12/16 lanes, each 64-bit field stores two x2 pairs.
+        // For f32: float4 stores pairs at {x,z}; ulonglong3/4 stores one
+        //   float2 pair per field at {x,y,z,w}.
         int num_pairs = lanes / 2;
         static const char access[] = {'x', 'y', 'z', 'w'};
 
@@ -933,31 +935,66 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
           if (is_bf16x2 || is_fp16x2) {
             std::string native_type = is_bf16x2 ? "__nv_bfloat162" : "__half2";
             for (int p = 0; p < num_pairs; ++p) {
-              std::string field(1, access[p]);
+              int field_idx = lanes <= 8 ? p : (p / 2);
+              ICHECK_LT(field_idx, 4);
+              int pair_offset = lanes <= 8 ? 0 : (p % 2);
+              std::string field(1, access[field_idx]);
               std::string pair_lhs = "tl::from_uint1<";
               pair_lhs += native_type;
-              pair_lhs += ">(*(uint1*)(&(";
-              pair_lhs += vlhs;
-              pair_lhs += ".";
-              pair_lhs += field;
-              pair_lhs += ")))";
+              pair_lhs += ">(";
+              if (lanes <= 8) {
+                pair_lhs += "*(uint1*)(&(";
+                pair_lhs += vlhs;
+                pair_lhs += ".";
+                pair_lhs += field;
+                pair_lhs += "))";
+              } else {
+                pair_lhs += "*(((uint1*)(&(";
+                pair_lhs += vlhs;
+                pair_lhs += ".";
+                pair_lhs += field;
+                pair_lhs += "))) + ";
+                pair_lhs += std::to_string(pair_offset);
+                pair_lhs += ")";
+              }
+              pair_lhs += ")";
               std::string pair_rhs = "tl::from_uint1<";
               pair_rhs += native_type;
-              pair_rhs += ">(*(uint1*)(&(";
-              pair_rhs += vrhs;
-              pair_rhs += ".";
-              pair_rhs += field;
-              pair_rhs += ")))";
+              pair_rhs += ">(";
+              if (lanes <= 8) {
+                pair_rhs += "*(uint1*)(&(";
+                pair_rhs += vrhs;
+                pair_rhs += ".";
+                pair_rhs += field;
+                pair_rhs += "))";
+              } else {
+                pair_rhs += "*(((uint1*)(&(";
+                pair_rhs += vrhs;
+                pair_rhs += ".";
+                pair_rhs += field;
+                pair_rhs += "))) + ";
+                pair_rhs += std::to_string(pair_offset);
+                pair_rhs += ")";
+              }
+              pair_rhs += ")";
               this->PrintIndent();
-              stream << "*(uint1*)(&(" << sret << "." << field
-                     << ")) = tl::to_uint1(tl::" << tl_func << "(" << pair_lhs
-                     << ", " << pair_rhs << "));\n";
+              if (lanes <= 8) {
+                stream << "*(uint1*)(&(" << sret << "." << field
+                       << ")) = tl::to_uint1(tl::" << tl_func << "(" << pair_lhs
+                       << ", " << pair_rhs << "));\n";
+              } else {
+                stream << "*(((uint1*)(&(" << sret << "." << field << "))) + "
+                       << pair_offset << ") = tl::to_uint1(tl::" << tl_func
+                       << "(" << pair_lhs << ", " << pair_rhs << "));\n";
+              }
             }
           } else {
             // f32: apply tl::*2 on each consecutive pair of float fields,
             // reinterpreted as float2.
             for (int p = 0; p < num_pairs; ++p) {
-              std::string field(1, access[p * 2]);
+              int field_idx = lanes <= 4 ? (p * 2) : p;
+              ICHECK_LT(field_idx, 4);
+              std::string field(1, access[field_idx]);
               std::string pair_lhs = "*(float2*)(&(";
               pair_lhs += vlhs;
               pair_lhs += ".";

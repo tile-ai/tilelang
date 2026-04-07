@@ -115,17 +115,17 @@ _AUTO_VEC_OPS = {
 }
 
 
-def _make_auto_vec_binary_kernel(py_op, dtype_tl):
+def _make_auto_vec_binary_kernel(py_op, dtype_tl, width: int = 4):
     """Build a kernel that uses T.Parallel to let the vectoriser emit tl::<op>2."""
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, 4), dtype=dtype_tl),
-        B: T.Tensor((M, 4), dtype=dtype_tl),
-        C: T.Tensor((M, 4), dtype=dtype_tl),
+        A: T.Tensor((M, width), dtype=dtype_tl),
+        B: T.Tensor((M, width), dtype=dtype_tl),
+        C: T.Tensor((M, width), dtype=dtype_tl),
     ):
         with T.Kernel(1, 1, threads=M) as (bx, by):
-            for i, v in T.Parallel(M, 4):
+            for i, v in T.Parallel(M, width):
                 C[i, v] = py_op(A[i, v], B[i, v])
 
     return main
@@ -219,11 +219,25 @@ _AUTO_VEC_OP_NAMES = list(_AUTO_VEC_OPS.keys())  # ["add", "sub", "mul"]
 # float32: auto-vectorization should emit tl::<op>2 on SM100+
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("op_key", _AUTO_VEC_OP_NAMES)
-def test_codegen_auto_vec_f32_sm100(op_key):
+def test_codegen_auto_vec_f32(op_key):
     py_op, tl_func = _AUTO_VEC_OPS[op_key]
     func = _make_auto_vec_binary_kernel(py_op, T.float32)
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
     assert f"tl::{tl_func}" in src, f"Expected tl::{tl_func} in SM100 auto-vectorised CUDA source for float32 {op_key}"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@pytest.mark.parametrize("op_key", _AUTO_VEC_OP_NAMES)
+def test_codegen_auto_vec_f32_width8(op_key):
+    py_op, tl_func = _AUTO_VEC_OPS[op_key]
+    func = _make_auto_vec_binary_kernel(py_op, T.float32, width=8)
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "\x00" not in src, "Generated CUDA source should not contain embedded NUL bytes"
+    for field in "xyzw":
+        assert f".{field})) = tl::{tl_func}(" in src, (
+            f"Expected {field}-field packed tl::{tl_func} emission in width-8 float32 auto-vectorised source"
+        )
 
 
 # float32: auto-vectorization should NOT emit tl::<op>2 before SM100
