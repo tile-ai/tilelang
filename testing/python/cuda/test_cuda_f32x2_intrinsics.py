@@ -107,18 +107,35 @@ def _lower_to_cuda_source(func, target: str = SM80_TARGET) -> str:
 _AUTO_VEC_OPS = {"add": (lambda a, b: a + b, "add2"), "sub": (lambda a, b: a - b, "sub2"), "mul": (lambda a, b: a * b, "mul2")}
 
 
-def _make_auto_vec_binary_kernel(py_op, dtype_tl):
+def _make_auto_vec_binary_kernel(py_op, dtype_tl, width: int = 4):
     """Build a kernel that uses T.Parallel to let the vectoriser emit tl::<op>2."""
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, 4), dtype=dtype_tl),
-        B: T.Tensor((M, 4), dtype=dtype_tl),
-        C: T.Tensor((M, 4), dtype=dtype_tl),
+        A: T.Tensor((M, width), dtype=dtype_tl),
+        B: T.Tensor((M, width), dtype=dtype_tl),
+        C: T.Tensor((M, width), dtype=dtype_tl),
     ):
         with T.Kernel(1, 1, threads=M) as (bx, by):
-            for i, v in T.Parallel(M, 4):
+            for i, v in T.Parallel(M, width):
                 C[i, v] = py_op(A[i, v], B[i, v])
+
+    return main
+
+
+def _make_auto_vec_fma_kernel(dtype_tl, width: int = 4):
+    """Build a kernel that lets CUDA codegen fuse mul + add into tl::fma2."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, width), dtype=dtype_tl),
+        B: T.Tensor((M, width), dtype=dtype_tl),
+        C: T.Tensor((M, width), dtype=dtype_tl),
+        D: T.Tensor((M, width), dtype=dtype_tl),
+    ):
+        with T.Kernel(1, 1, threads=M) as (bx, by):
+            for i, v in T.Parallel(M, width):
+                D[i, v] = A[i, v] * B[i, v] + C[i, v]
 
     return main
 
@@ -208,11 +225,25 @@ _AUTO_VEC_OP_NAMES = list(_AUTO_VEC_OPS.keys())  # ["add", "sub", "mul"]
 # float32: auto-vectorization should emit tl::<op>2 on SM100+
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("op_key", _AUTO_VEC_OP_NAMES)
-def test_codegen_auto_vec_f32_sm100(op_key):
+def test_codegen_auto_vec_f32(op_key):
     py_op, tl_func = _AUTO_VEC_OPS[op_key]
     func = _make_auto_vec_binary_kernel(py_op, T.float32)
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
     assert f"tl::{tl_func}" in src, f"Expected tl::{tl_func} in SM100 auto-vectorised CUDA source for float32 {op_key}"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@pytest.mark.parametrize("op_key", _AUTO_VEC_OP_NAMES)
+def test_codegen_auto_vec_f32_width8(op_key):
+    py_op, tl_func = _AUTO_VEC_OPS[op_key]
+    func = _make_auto_vec_binary_kernel(py_op, T.float32, width=8)
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "\x00" not in src, "Generated CUDA source should not contain embedded NUL bytes"
+    for field in "xyzw":
+        assert f".{field})) = tl::{tl_func}(" in src, (
+            f"Expected {field}-field packed tl::{tl_func} emission in width-8 float32 auto-vectorised source"
+        )
 
 
 # float32: auto-vectorization should NOT emit tl::<op>2 before SM100
@@ -223,6 +254,23 @@ def test_codegen_auto_vec_f32_no_sm80(op_key):
     func = _make_auto_vec_binary_kernel(py_op, T.float32)
     src = _lower_to_cuda_source(func, target=SM80_TARGET)
     assert f"tl::{tl_func}" not in src, f"tl::{tl_func} should NOT appear in SM80 auto-vectorised CUDA source for float32 {op_key}"
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_auto_vec_fma_f32():
+    func = _make_auto_vec_fma_kernel(T.float32)
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::fma2" in src, "Expected tl::fma2 in SM100 auto-vectorised CUDA source for float32 mul+add"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype_name", ["bfloat16", "float16"])
+def test_codegen_auto_vec_fma_half_types(dtype_name):
+    dtype_tl, _ = _DTYPE_MAP[dtype_name]
+    func = _make_auto_vec_fma_kernel(dtype_tl, width=8)
+    src = _lower_to_cuda_source(func, target=SM80_TARGET)
+    assert "tl::fma2" in src, f"Expected tl::fma2 in CUDA source for {dtype_name} mul+add"
+    assert _NATIVE_CAST_TYPE[dtype_name] in src, f"Expected {_NATIVE_CAST_TYPE[dtype_name]} cast in CUDA source for {dtype_name}"
 
 
 # bfloat16 / float16: auto-vectorization should emit tl::<op>2 on any target

@@ -24,6 +24,28 @@ namespace codegen {
 using namespace tvm::tl::codegen;
 using namespace ffi;
 
+namespace {
+
+bool CanEmitPackedX2Math(DataType t) {
+  int lanes = t.lanes();
+  if (lanes < 2 || lanes % 2 != 0) {
+    return false;
+  }
+
+  if (t.is_bfloat16() || t.is_float16()) {
+    return true;
+  }
+
+  if (t.is_float() && t.bits() == 32) {
+    Target cur_target = Target::Current(/*allow_not_defined=*/true);
+    return cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100);
+  }
+
+  return false;
+}
+
+} // namespace
+
 struct CUDAMath {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_float()) {
@@ -875,26 +897,38 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
   // lanes/2 independent x2 packed operations on consecutive pairs.
   int lanes = t.lanes();
   if (lanes >= 2 && lanes % 2 == 0) {
-    bool is_f32x2 = t.is_float() && t.bits() == 32;
     bool is_bf16x2 = t.is_bfloat16();
     bool is_fp16x2 = t.is_float16();
-
-    // For f32x2, only emit packed ops on SM100+ (no native instructions
-    // before that). For bf16x2/fp16x2, the C++ helpers always have fallbacks.
-    bool should_emit = false;
-    if (is_bf16x2 || is_fp16x2) {
-      should_emit = true;
-    } else if (is_f32x2) {
-      Target cur_target = Target::Current(/*allow_not_defined=*/true);
-      should_emit =
-          cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100);
-    }
-
-    if (should_emit) {
-      // Map TIR binary-op strings to tl:: packed helpers.
-      // Note: fma (ternary) and abs (unary) cannot appear here.
+    if (CanEmitPackedX2Math(t)) {
       std::string tl_func;
-      if (op == "+")
+      bool use_fma = false;
+      PrimExpr fma_a, fma_b, fma_c;
+
+      if (op == "+") {
+        // Fuse packed mul+add here instead of relying on NVCC to recover
+        // packed FMA from tl::mul2/tl::add2 (or the underlying __fmul2 /
+        // __fadd2-style helpers). Once the pairwise ops are emitted as
+        // separate calls, NVCC does not reliably contract them back to fma2.
+        auto try_fuse_mul_add = [&](const PrimExpr &maybe_mul,
+                                    const PrimExpr &addend) -> bool {
+          const MulNode *mul = maybe_mul.as<MulNode>();
+          if (mul == nullptr || mul->dtype != t || mul->a.dtype() != t ||
+              mul->b.dtype() != t || addend.dtype() != t) {
+            return false;
+          }
+          tl_func = "fma2";
+          use_fma = true;
+          fma_a = mul->a;
+          fma_b = mul->b;
+          fma_c = addend;
+          return true;
+        };
+        if (!try_fuse_mul_add(lhs, rhs)) {
+          try_fuse_mul_add(rhs, lhs);
+        }
+      }
+
+      if (tl_func.empty() && op == "+")
         tl_func = "add2";
       else if (op == "-")
         tl_func = "sub2";
@@ -909,15 +943,17 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         // Decompose into lanes/2 independent x2 packed operations.
         //
         // Vector type → CUDA struct mapping:
-        //   bf16x2 -> uint1 {.x}          bf16x4 -> uint2 {.x, .y}
-        //   bf16x8 -> uint4 {.x,.y,.z,.w} (each field = one nv_bfloat162)
-        //   fp16x2 -> uint1 {.x}          fp16x4 -> uint2 {.x, .y}  ...
-        //   f32x2  -> float2 {.x, .y}     f32x4  -> float4 {.x,.y,.z,.w}
+        //   bf16/fp16 x2..x8  -> uint1..uint4  (one packed x2 pair per field)
+        //   bf16/fp16 x12/x16 -> ulonglong3/4 (two packed x2 pairs per field)
+        //   f32x2  -> float2 {.x, .y}
+        //   f32x4  -> float4 {.x,.y,.z,.w}
+        //   f32x6/x8 -> ulonglong3/4 (one float2 pair per field)
         //
         // For bf16/fp16: each 32-bit field already packs a pair of elements,
-        //   so we apply tl::*2 on each field directly.
-        // For f32: consecutive pairs of 32-bit fields form a float2,
-        //   so we apply tl::*2 on each float2 pair.
+        //   so we apply tl::*2 on each field directly for <= 8 lanes. For
+        //   12/16 lanes, each 64-bit field stores two x2 pairs.
+        // For f32: float4 stores pairs at {x,z}; ulonglong3/4 stores one
+        //   float2 pair per field at {x,y,z,w}.
         int num_pairs = lanes / 2;
         static const char access[] = {'x', 'y', 'z', 'w'};
 
@@ -927,51 +963,95 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         stream << ' ' << sret << ";\n";
         int ssa_scope = BeginScope();
         {
-          std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.dtype());
-          std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
+          std::vector<std::string> packed_vecs;
+          if (use_fma) {
+            packed_vecs = {
+                SSAGetID(PrintExpr(fma_a), fma_a.dtype()),
+                SSAGetID(PrintExpr(fma_b), fma_b.dtype()),
+                SSAGetID(PrintExpr(fma_c), fma_c.dtype()),
+            };
+          } else {
+            packed_vecs = {
+                SSAGetID(PrintExpr(lhs), lhs.dtype()),
+                SSAGetID(PrintExpr(rhs), rhs.dtype()),
+            };
+          }
 
           if (is_bf16x2 || is_fp16x2) {
             std::string native_type = is_bf16x2 ? "__nv_bfloat162" : "__half2";
+            auto make_half_pair = [&](const std::string &vec_name,
+                                      const std::string &field,
+                                      int pair_offset) {
+              std::string pair = "tl::from_uint1<";
+              pair += native_type;
+              pair += ">(";
+              if (lanes <= 8) {
+                pair += "*(uint1*)(&(";
+                pair += vec_name;
+                pair += ".";
+                pair += field;
+                pair += "))";
+              } else {
+                pair += "*(((uint1*)(&(";
+                pair += vec_name;
+                pair += ".";
+                pair += field;
+                pair += "))) + ";
+                pair += std::to_string(pair_offset);
+                pair += ")";
+              }
+              pair += ")";
+              return pair;
+            };
             for (int p = 0; p < num_pairs; ++p) {
-              std::string field(1, access[p]);
-              std::string pair_lhs = "tl::from_uint1<";
-              pair_lhs += native_type;
-              pair_lhs += ">(*(uint1*)(&(";
-              pair_lhs += vlhs;
-              pair_lhs += ".";
-              pair_lhs += field;
-              pair_lhs += ")))";
-              std::string pair_rhs = "tl::from_uint1<";
-              pair_rhs += native_type;
-              pair_rhs += ">(*(uint1*)(&(";
-              pair_rhs += vrhs;
-              pair_rhs += ".";
-              pair_rhs += field;
-              pair_rhs += ")))";
+              int field_idx = lanes <= 8 ? p : (p / 2);
+              ICHECK_LT(field_idx, 4);
+              int pair_offset = lanes <= 8 ? 0 : (p % 2);
+              std::string field(1, access[field_idx]);
+              std::vector<std::string> pair_args;
+              pair_args.reserve(packed_vecs.size());
+              for (const auto &vec_name : packed_vecs) {
+                pair_args.push_back(
+                    make_half_pair(vec_name, field, pair_offset));
+              }
               this->PrintIndent();
-              stream << "*(uint1*)(&(" << sret << "." << field
-                     << ")) = tl::to_uint1(tl::" << tl_func << "(" << pair_lhs
-                     << ", " << pair_rhs << "));\n";
+              if (lanes <= 8) {
+                stream << "*(uint1*)(&(" << sret << "." << field
+                       << ")) = tl::to_uint1(tl::" << tl_func << "(";
+              } else {
+                stream << "*(((uint1*)(&(" << sret << "." << field << "))) + "
+                       << pair_offset << ") = tl::to_uint1(tl::" << tl_func
+                       << "(";
+              }
+              stream << pair_args[0];
+              for (size_t i = 1; i < pair_args.size(); ++i) {
+                stream << ", " << pair_args[i];
+              }
+              stream << "));\n";
             }
           } else {
             // f32: apply tl::*2 on each consecutive pair of float fields,
             // reinterpreted as float2.
+            auto make_float_pair = [&](const std::string &vec_name,
+                                       const std::string &field) {
+              return "*(float2*)(&(" + vec_name + "." + field + "))";
+            };
             for (int p = 0; p < num_pairs; ++p) {
-              std::string field(1, access[p * 2]);
-              std::string pair_lhs = "*(float2*)(&(";
-              pair_lhs += vlhs;
-              pair_lhs += ".";
-              pair_lhs += field;
-              pair_lhs += "))";
-              std::string pair_rhs = "*(float2*)(&(";
-              pair_rhs += vrhs;
-              pair_rhs += ".";
-              pair_rhs += field;
-              pair_rhs += "))";
+              int field_idx = lanes <= 4 ? (p * 2) : p;
+              ICHECK_LT(field_idx, 4);
+              std::string field(1, access[field_idx]);
+              std::vector<std::string> pair_args;
+              pair_args.reserve(packed_vecs.size());
+              for (const auto &vec_name : packed_vecs) {
+                pair_args.push_back(make_float_pair(vec_name, field));
+              }
               this->PrintIndent();
               stream << "*(float2*)(&(" << sret << "." << field
-                     << ")) = tl::" << tl_func << "(" << pair_lhs << ", "
-                     << pair_rhs << ");\n";
+                     << ")) = tl::" << tl_func << "(" << pair_args[0];
+              for (size_t i = 1; i < pair_args.size(); ++i) {
+                stream << ", " << pair_args[i];
+              }
+              stream << ");\n";
             }
           }
         }
@@ -3329,6 +3409,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // the correct native type (__nv_bfloat162 or __half2) and cast the
     // result back to uint1 to avoid the ambiguous uint1 bridge overload.
     std::string op_name;
+    std::vector<PrimExpr> packed_args(op->args.begin(), op->args.end());
     if (op->op.same_as(tl::add2()))
       op_name = "add2";
     else if (op->op.same_as(tl::sub2()))
@@ -3344,6 +3425,27 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     else
       op_name = "abs2";
 
+    if (op->op.same_as(tl::add2()) && op->args.size() == 2) {
+      // Keep explicit packed helper trees on the same fused path for the
+      // same reason as PrintVecBinaryOp: NVCC will not reliably rewrite
+      // tl::mul2(...) + tl::add2(...) back into packed fma2 on its own.
+      auto try_fuse_mul_add = [&](const PrimExpr &mul_expr,
+                                  const PrimExpr &addend) -> bool {
+        const CallNode *mul_call = mul_expr.as<CallNode>();
+        if (mul_call == nullptr || !mul_call->op.same_as(tl::mul2()) ||
+            mul_call->args.size() != 2 || mul_call->dtype != op->dtype ||
+            addend.dtype() != op->dtype) {
+          return false;
+        }
+        op_name = "fma2";
+        packed_args = {mul_call->args[0], mul_call->args[1], addend};
+        return true;
+      };
+      if (!try_fuse_mul_add(op->args[0], op->args[1])) {
+        try_fuse_mul_add(op->args[1], op->args[0]);
+      }
+    }
+
     DataType dtype = op->dtype;
     bool need_cast = dtype.is_bfloat16() || dtype.is_float16();
     std::string native_type;
@@ -3354,8 +3456,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
 
     // Helper lambda to print a casted argument expression.
-    auto print_arg = [&](int idx) -> std::string {
-      std::string arg_str = PrintExpr(op->args[idx]);
+    auto print_arg = [&](const PrimExpr &arg) -> std::string {
+      std::string arg_str = PrintExpr(arg);
       if (need_cast) {
         return "tl::from_uint1<" + native_type + ">(" + arg_str + ")";
       }
@@ -3368,9 +3470,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "tl::" << op_name << "(";
     }
 
-    os << print_arg(0);
-    for (size_t i = 1; i < op->args.size(); ++i) {
-      os << ", " << print_arg(i);
+    os << print_arg(packed_args[0]);
+    for (size_t i = 1; i < packed_args.size(); ++i) {
+      os << ", " << print_arg(packed_args[i]);
     }
     os << ")";
 
