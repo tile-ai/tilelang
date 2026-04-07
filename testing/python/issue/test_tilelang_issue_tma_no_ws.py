@@ -2,6 +2,7 @@ import re
 
 import tilelang
 import tilelang.testing
+from tilelang.contrib import nvcc as tl_nvcc
 from tilelang import language as T
 from tilelang.layout import make_cutlass_metadata_layout
 import torch
@@ -196,6 +197,9 @@ def test_num_stages_zero_pure_tma_does_not_auto_warp_specialize():
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
     assert "__launch_bounds__(160, 1)" not in src
+    # When block-size hint is enabled, we will not emit single-arg launch-bounds.
+    # When it is disabled, we may still omit launch-bounds in this test, but
+    # never emit the two-arg form here.
     assert "if (32 <= ((int)threadIdx.x))" not in src
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
@@ -244,7 +248,14 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
-    assert "__block_size__((160, 1, 1))" in src
+    cuda_ver = tl_nvcc.get_cuda_version()
+    cc = torch.cuda.get_device_capability(0)
+    use_block_hint = cuda_ver >= (12, 9) and cc >= (9, 0)
+    if use_block_hint:
+        # __block_size__ may be suppressed when cluster launch metadata is present.
+        assert "__block_size__((160, 1, 1))" in src or "__launch_bounds__(160)" in src
+    else:
+        assert "__launch_bounds__(160)" in src
     assert "if (32 <= ((int)threadIdx.x))" in src
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
@@ -287,8 +298,15 @@ def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
 
     src = kernel.get_kernel_source()
     assert "cp_async_gs<16>" in src
-    assert "__block_size__((32, 1, 1))" in src
-    assert "__block_size__((160, 1, 1))" not in src
+    cuda_ver = tl_nvcc.get_cuda_version()
+    cc = torch.cuda.get_device_capability(0)
+    use_block_hint = cuda_ver >= (12, 9) and cc >= (9, 0)
+    if use_block_hint:
+        # __block_size__ may be suppressed when cluster launch metadata is present.
+        assert "__block_size__((32, 1, 1))" in src or "__launch_bounds__(32)" in src
+    else:
+        assert "__launch_bounds__(32)" in src
+    assert "__launch_bounds__(160)" not in src
     assert "if (32 <= ((int)threadIdx.x))" not in src
 
     x = torch.randint(0, 256, (4 * bytes_per_copy,), device="cuda", dtype=torch.uint8)

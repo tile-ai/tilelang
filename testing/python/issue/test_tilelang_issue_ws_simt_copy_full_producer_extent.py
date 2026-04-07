@@ -2,8 +2,10 @@ import re
 
 import tilelang
 import tilelang.testing
+from tilelang.contrib import nvcc as tl_nvcc
 from tilelang import language as T
 from tilelang.layout import make_cutlass_metadata_layout
+import torch
 
 
 def _compile_tvm_ffi(func, pass_configs=None):
@@ -64,7 +66,14 @@ def test_ws_keeps_full_producer_extent_for_lowered_simt_copy():
     src = kernel.get_kernel_source()
     flat_src = " ".join(src.split())
 
-    assert "__block_size__((512, 1, 1))" in src
+    cuda_ver = tl_nvcc.get_cuda_version()
+    cc = torch.cuda.get_device_capability(0)
+    use_block_hint = cuda_ver >= (12, 9) and cc >= (9, 0)
+    if use_block_hint:
+        # __block_size__ may be suppressed when cluster launch metadata is present.
+        assert "__block_size__((512, 1, 1))" in src or "__launch_bounds__(512)" in src
+    else:
+        assert "__launch_bounds__(512)" in src
     assert "if (256 <= ((int)threadIdx.x)) {" in flat_src
     assert "tl::tl_shuffle_elect<256>()" in src
     assert re.search(r"tl::__sync_thread_partial<\d+, 256>\(\);", src), src

@@ -63,8 +63,8 @@ def annotate_min_blocks_per_sm(n: int):
 
     When set, the generated CUDA kernel uses
     ``__launch_bounds__(maxThreadsPerBlock, minBlocksPerMultiprocessor)``
-    (second argument is ``n``).  Without this annotation, codegen emits
-    ``__block_size__`` instead; the two are not combined (ptxas rejects both).
+    (second argument is ``n``).  Without this annotation, codegen uses a
+    single-argument ``__launch_bounds__(maxThreadsPerBlock)``.
     A larger ``n`` hints the compiler to limit
     register usage so that more blocks can reside on each SM simultaneously,
     which can improve occupancy at the cost of potentially more register
