@@ -905,6 +905,10 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
       PrimExpr fma_a, fma_b, fma_c;
 
       if (op == "+") {
+        // Fuse packed mul+add here instead of relying on NVCC to recover
+        // packed FMA from tl::mul2/tl::add2 (or the underlying __fmul2 /
+        // __fadd2-style helpers). Once the pairwise ops are emitted as
+        // separate calls, NVCC does not reliably contract them back to fma2.
         auto try_fuse_mul_add = [&](const PrimExpr &maybe_mul,
                                     const PrimExpr &addend) -> bool {
           const MulNode *mul = maybe_mul.as<MulNode>();
@@ -3422,6 +3426,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       op_name = "abs2";
 
     if (op->op.same_as(tl::add2()) && op->args.size() == 2) {
+      // Keep explicit packed helper trees on the same fused path for the
+      // same reason as PrintVecBinaryOp: NVCC will not reliably rewrite
+      // tl::mul2(...) + tl::add2(...) back into packed fma2 on its own.
       auto try_fuse_mul_add = [&](const PrimExpr &mul_expr,
                                   const PrimExpr &addend) -> bool {
         const CallNode *mul_call = mul_expr.as<CallNode>();
