@@ -131,6 +131,23 @@ def _make_auto_vec_binary_kernel(py_op, dtype_tl, width: int = 4):
     return main
 
 
+def _make_auto_vec_fma_kernel(dtype_tl, width: int = 4):
+    """Build a kernel that lets CUDA codegen fuse mul + add into tl::fma2."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, width), dtype=dtype_tl),
+        B: T.Tensor((M, width), dtype=dtype_tl),
+        C: T.Tensor((M, width), dtype=dtype_tl),
+        D: T.Tensor((M, width), dtype=dtype_tl),
+    ):
+        with T.Kernel(1, 1, threads=M) as (bx, by):
+            for i, v in T.Parallel(M, width):
+                D[i, v] = A[i, v] * B[i, v] + C[i, v]
+
+    return main
+
+
 # ===================================================================
 # Parametrised op / dtype lists
 # ===================================================================
@@ -248,6 +265,23 @@ def test_codegen_auto_vec_f32_no_sm80(op_key):
     func = _make_auto_vec_binary_kernel(py_op, T.float32)
     src = _lower_to_cuda_source(func, target=SM80_TARGET)
     assert f"tl::{tl_func}" not in src, f"tl::{tl_func} should NOT appear in SM80 auto-vectorised CUDA source for float32 {op_key}"
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_auto_vec_fma_f32():
+    func = _make_auto_vec_fma_kernel(T.float32)
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::fma2" in src, "Expected tl::fma2 in SM100 auto-vectorised CUDA source for float32 mul+add"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype_name", ["bfloat16", "float16"])
+def test_codegen_auto_vec_fma_half_types(dtype_name):
+    dtype_tl, _ = _DTYPE_MAP[dtype_name]
+    func = _make_auto_vec_fma_kernel(dtype_tl, width=8)
+    src = _lower_to_cuda_source(func, target=SM80_TARGET)
+    assert "tl::fma2" in src, f"Expected tl::fma2 in CUDA source for {dtype_name} mul+add"
+    assert _NATIVE_CAST_TYPE[dtype_name] in src, f"Expected {_NATIVE_CAST_TYPE[dtype_name]} cast in CUDA source for {dtype_name}"
 
 
 # bfloat16 / float16: auto-vectorization should emit tl::<op>2 on any target
