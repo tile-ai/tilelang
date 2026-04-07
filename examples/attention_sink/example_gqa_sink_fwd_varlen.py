@@ -17,7 +17,9 @@ from varlen_utils import generate_random_padding_mask, generate_qkv
 
 @tilelang.jit(
     out_idx=[7],
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def flashattn_sink(
     batch_size,

@@ -432,7 +432,10 @@ class AutotuneResult:
             str(path / LATENCY_PATH),
             "w",
             lambda f: json.dump(
-                {"latency": self.latency, "ref_latency": self.ref_latency},
+                {
+                    "latency": self.latency,
+                    "ref_latency": self.ref_latency,
+                },
                 f,
             ),
         )

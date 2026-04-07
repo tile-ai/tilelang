@@ -268,7 +268,10 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             T.use_swizzle(10)
 
             T.annotate_layout(
-                {dO_shared: tilelang.layout.make_swizzled_layout(dO_shared), Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)}
+                {
+                    dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
+                    Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
+                }
             )
 
             if use_final_state_gradient:

@@ -224,7 +224,9 @@ def decode_metadata(meta: torch.Tensor) -> torch.Tensor:
 
 @tilelang.jit(
     out_idx=[1, 2],
-    pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
+    pass_configs={
+        tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
+    },
 )
 def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
     e_factor, e_dtype = ARCH_INFO["8.0"]

@@ -162,7 +162,10 @@ def tilelang_chunk_gated_delta_rule_fwd_h(
             G_fragment = T.alloc_fragment((block_S, block_DV), dtype=gate_dtype)
 
             T.annotate_layout(
-                {U_shared: tilelang.layout.make_swizzled_layout(U_shared), G_shared: tilelang.layout.make_swizzled_layout(G_shared)}
+                {
+                    U_shared: tilelang.layout.make_swizzled_layout(U_shared),
+                    G_shared: tilelang.layout.make_swizzled_layout(G_shared),
+                }
             )
 
             T.use_swizzle(10)

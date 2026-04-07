@@ -251,7 +251,11 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
             thread_binding = T.get_thread_binding(0)
             rk = T.get_thread_binding(1)
 
-            T.annotate_layout({A_shared: make_swizzle_layout(A_shared)})
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                }
+            )
 
             T.use_swizzle(panel_size=10)
 

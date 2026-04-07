@@ -361,7 +361,11 @@ def get_index_map(block: tir.Block, layout: list[str] | None = None) -> tuple[ti
             "C": (IterKind.kIter_I, IterKind.kIter_J, None),
         }[kind]
 
-        spatial_iter = {"A": IterKind.kIter_I, "B": IterKind.kIter_J, "C": None}[kind]
+        spatial_iter = {
+            "A": IterKind.kIter_I,
+            "B": IterKind.kIter_J,
+            "C": None,
+        }[kind]
 
         if layout == "n":
             return [IterKind.kIter_S, primary_iter, secondary_iter]

@@ -47,14 +47,23 @@ def get_configs(user_config=None):
                 continue
 
             for num_stages in config.num_stages_range:
-                valid_configs.append({"block_M": block_M, "block_N": block_N, "num_stages": num_stages, "threads": threads})
+                valid_configs.append(
+                    {
+                        "block_M": block_M,
+                        "block_N": block_N,
+                        "num_stages": num_stages,
+                        "threads": threads,
+                    }
+                )
     return valid_configs
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(
     out_idx=[3],
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def flashattn(batch, heads, seq_len, dim, is_causal, groups=1, block_M=64, block_N=64, num_stages=0, threads=128):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)

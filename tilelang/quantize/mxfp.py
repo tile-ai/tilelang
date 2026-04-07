@@ -91,10 +91,15 @@ def get_mxfp_intrin_group(
     if use_twiddling:
         key += "_twiddling"
 
-    import_c_map = {"fp4_to_bf16_twiddling": decode_f4_to_bf16_twiddling}
+    import_c_map = {
+        "fp4_to_bf16_twiddling": decode_f4_to_bf16_twiddling,
+    }
 
     func_name = f"decode_fp{source_bit}_to_{dtype_map[out_dtype]}"
     if use_twiddling:
         func_name += "_twiddling"
 
-    return {"func_name": func_name, "c_source": import_c_map[key]}
+    return {
+        "func_name": func_name,
+        "c_source": import_c_map[key],
+    }

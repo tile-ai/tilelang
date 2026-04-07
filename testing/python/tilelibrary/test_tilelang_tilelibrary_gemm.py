@@ -186,7 +186,11 @@ def matmul_rs(
             A_frag = T.alloc_fragment(A_frag_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
-            T.annotate_layout({A_shared: tilelang.layout.make_swizzled_layout(A_shared)})
+            T.annotate_layout(
+                {
+                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                }
+            )
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
                     T.copy(A[k * block_K, by * block_M], A_shared)
@@ -336,7 +340,11 @@ def matmul_sr(
             B_frag = T.alloc_fragment(B_frag_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
-            T.annotate_layout({B_shared: tilelang.layout.make_swizzled_layout(B_shared)})
+            T.annotate_layout(
+                {
+                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                }
+            )
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
                     T.copy(A[k * block_K, by * block_M], A_shared)
@@ -489,7 +497,10 @@ def matmul_rr(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
             T.annotate_layout(
-                {A_shared: tilelang.layout.make_swizzled_layout(A_shared), B_shared: tilelang.layout.make_swizzled_layout(B_shared)}
+                {
+                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                }
             )
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:

@@ -9,7 +9,9 @@ import math
 
 @tilelang.jit(
     out_idx=[8],
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split, block_size, softmax_scale=None):
     if softmax_scale is None:

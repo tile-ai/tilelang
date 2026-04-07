@@ -212,7 +212,10 @@ def tilelang_chunk_o_bwd_dqkwg(
             T.use_swizzle(10)
 
             T.annotate_layout(
-                {q_shared: tilelang.layout.make_swizzled_layout(q_shared), k_shared: tilelang.layout.make_swizzled_layout(k_shared)}
+                {
+                    q_shared: tilelang.layout.make_swizzled_layout(q_shared),
+                    k_shared: tilelang.layout.make_swizzled_layout(k_shared),
+                }
             )
 
             T.clear(dg_last_local_0)

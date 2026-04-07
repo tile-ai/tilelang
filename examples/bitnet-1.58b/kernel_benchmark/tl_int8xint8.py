@@ -116,7 +116,12 @@ def tl_matmul(
 
             thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
 
-            T.annotate_layout({A_shared: make_swizzle_layout(A_shared), B_shared: make_swizzle_layout(B_shared)})
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)

@@ -78,7 +78,9 @@ def run_ieee_math_test(
         main_func,
         out_idx=out_idx,
         target="cuda",
-        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False},
+        pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        },
     )
 
     print(f"\n=== Testing {mathop_name} with rounding mode {rounding_mode} ===")
@@ -198,7 +200,9 @@ def test_ieee_frsqrt_rn_only():
         main,
         out_idx=[1],
         target="cuda",
-        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False},
+        pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        },
     )
 
     print("\n=== Testing ieee_frsqrt (rn only) ===")

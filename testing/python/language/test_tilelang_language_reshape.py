@@ -170,7 +170,11 @@ def reshape_layout_transform_shared(N, M, dtype):
         with T.Kernel(1, threads=32) as _:
             A_shared = T.alloc_shared((N // M, M), dtype, scope="shared")
 
-            T.annotate_layout({A_shared: make_mma_swizzle_layout(A_shared)})
+            T.annotate_layout(
+                {
+                    A_shared: make_mma_swizzle_layout(A_shared),
+                }
+            )
             T.copy(A, A_shared)
             A_shared_reshape = T.reshape(A_shared, [N])
             T.copy(A_shared_reshape, B)

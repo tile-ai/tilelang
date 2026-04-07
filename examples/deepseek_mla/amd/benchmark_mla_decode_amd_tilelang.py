@@ -16,13 +16,23 @@ def get_configs():
 
     _configs = list(itertools.product(BLOCK_N, BLOCK_H, num_split, threads))
 
-    return [{"block_N": c[0], "block_H": c[1], "num_split": c[2], "threads": c[3]} for c in _configs]
+    return [
+        {
+            "block_N": c[0],
+            "block_H": c[1],
+            "num_split": c[2],
+            "threads": c[3],
+        }
+        for c in _configs
+    ]
 
 
 @tilelang.autotune(configs=get_configs())
 @tilelang.jit(
     out_idx=[6],
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def flashmla_decode(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, threads=128):
     scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)

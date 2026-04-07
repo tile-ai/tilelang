@@ -605,7 +605,11 @@ class JITKernel(Generic[_P, _T]):
         if self.latency is None:
             raise ValueError("Tuning results are not available. Please tune the kernel first.")
 
-        return {"latency": self.latency, "config": self.config, "ref_latency": self.ref_latency}
+        return {
+            "latency": self.latency,
+            "config": self.config,
+            "ref_latency": self.ref_latency,
+        }
 
     @property
     def out_idx(self) -> list[int]:

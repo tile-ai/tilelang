@@ -59,7 +59,16 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     """Ensure that at least one test is collected. Error out if all tests are skipped."""
-    known_types = {"failed", "passed", "skipped", "deselected", "xfailed", "xpassed", "warnings", "error"}
+    known_types = {
+        "failed",
+        "passed",
+        "skipped",
+        "deselected",
+        "xfailed",
+        "xpassed",
+        "warnings",
+        "error",
+    }
     if sum(len(terminalreporter.stats.get(k, [])) for k in known_types.difference({"skipped", "deselected"})) == 0:
         terminalreporter.write_sep(
             "!",

@@ -2,7 +2,9 @@ import torch
 import tilelang
 import tilelang.language as T
 
-pass_configs = {tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True}
+pass_configs = {
+    tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+}
 
 
 def convert_to_uint16(x):

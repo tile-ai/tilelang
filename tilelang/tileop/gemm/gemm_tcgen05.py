@@ -22,7 +22,14 @@ from tvm.arith import Analyzer
 from typing import Callable
 
 
-_FLOAT8_DTYPES = {"float8_e4m3", "float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fn", "float8_e5m2fnuz"}
+_FLOAT8_DTYPES = {
+    "float8_e4m3",
+    "float8_e4m3fn",
+    "float8_e4m3fnuz",
+    "float8_e5m2",
+    "float8_e5m2fn",
+    "float8_e5m2fnuz",
+}
 
 
 class GemmTCGEN5(GemmBase):

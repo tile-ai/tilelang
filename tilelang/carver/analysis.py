@@ -129,7 +129,10 @@ def normalize_prim_func(sch: tir.Schedule) -> list[BlockInfo] | None:
         return None
 
     def _iter_kind(i: tir.IterVar) -> str:
-        return {tir.IterVar.DataPar: "S", tir.IterVar.CommReduce: "R"}.get(i.iter_type, "O")
+        return {
+            tir.IterVar.DataPar: "S",
+            tir.IterVar.CommReduce: "R",
+        }.get(i.iter_type, "O")
 
     blocks: list[BlockInfo] = []
     for block, loops, iters, is_reduction in zip(*result):

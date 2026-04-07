@@ -83,7 +83,9 @@ supply_prog = SupplyProg()
 
 
 @tilelang.jit(
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def mqa_attn_return_logits(
     heads,

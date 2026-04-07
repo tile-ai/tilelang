@@ -9,7 +9,9 @@ import argparse
 
 @tilelang.jit(
     out_idx=[6],
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
     compile_flags=[
         "-O3",
         "-Wno-deprecated-declarations",

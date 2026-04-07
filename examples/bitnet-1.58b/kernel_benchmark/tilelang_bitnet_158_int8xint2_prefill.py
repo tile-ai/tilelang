@@ -223,7 +223,12 @@ def bitnet_158_int8xint2_prefill(
 
             thread_bindings = T.get_thread_binding(0)
 
-            T.annotate_layout({A_shared: make_swizzle_layout(A_shared), B_dequantize_shared: make_swizzle_layout(B_dequantize_shared)})
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_dequantize_shared: make_swizzle_layout(B_dequantize_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)

@@ -149,7 +149,11 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                 B_dequantize_prev_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
                 Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
 
-                T.annotate_layout({B_shared: tilelang.layout.make_swizzled_layout(B_shared)})
+                T.annotate_layout(
+                    {
+                        B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                    }
+                )
 
                 T.clear(Ct_local)
                 for k in T.Pipelined(K // (block_K * split), num_stages=num_stages):
@@ -189,7 +193,11 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                 Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
                 Ct_shared = T.alloc_shared((block_N, block_M), out_dtype)
 
-                T.annotate_layout({B_shared: tilelang.layout.make_swizzled_layout(B_shared)})
+                T.annotate_layout(
+                    {
+                        B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                    }
+                )
 
                 T.clear(Ct_local)
                 for k in T.Pipelined(K // block_K, num_stages=num_stages):

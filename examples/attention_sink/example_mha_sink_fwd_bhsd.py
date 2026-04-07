@@ -18,7 +18,9 @@ def get_configs():
 @autotune(configs=get_configs(), warmup=500, rep=100)
 @tilelang.jit(
     out_idx=[3],
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def flashattn(
     batch,
