@@ -66,7 +66,7 @@ class GemmWMMA(GemmBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var, mbar_phase_expr: tir.PrimExpr | None = None):
         thread_nums = thread_bounds.extent
         wmma_emitter = self._make_emitter(target, thread_nums, thread_var=thread_var)
 
