@@ -481,9 +481,10 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
     return;
   }
   int64_t total_threads = xi->value * yi->value * zi->value;
-  // ptxas rejects both .reqntid (__block_size__) and .maxntid (__launch_bounds__)
-  // on the same kernel; use launch_bounds only when the user set occupancy via
-  // annotate_min_blocks_per_sm, otherwise emit block_size for a fixed thread block.
+  // ptxas rejects both .reqntid (__block_size__) and .maxntid
+  // (__launch_bounds__) on the same kernel; use launch_bounds only when the
+  // user set occupancy via annotate_min_blocks_per_sm, otherwise emit
+  // block_size for a fixed thread block.
   if (extractor.saw_min_blocks_per_sm_attr) {
     stream << " __launch_bounds__(" << total_threads << ", "
            << extractor.min_blocks_per_sm << ")";
