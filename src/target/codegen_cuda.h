@@ -25,7 +25,7 @@ public:
   std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
-  void PrintExtraAttrs(const PrimFunc &f);
+  void PrintExtraAttrs(const PrimFunc &f, std::ostream &os) final;
   void VisitStmt_(const ForNode *op) final;
   void PrintStorageSync(const CallNode *op) final;
   void PrintStorageScope(const std::string &scope,
@@ -155,6 +155,7 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
+  bool allow_block_size_hint_{false};
   // Map from VarNode to packed buffer variable name for fp4 packed storage
   std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,

@@ -22,6 +22,34 @@ from tilelang.engine.phase import (
 )
 
 
+def _allow_block_size_hint(target: Target) -> bool:
+    """Return True iff CUDA codegen should emit __block_size__ instead of __launch_bounds__.
+
+    __block_size__ requires NVCC >= 12.9, SM >= 9.0, and must not be used with
+    the sm_90a (or any future *a) variant because NVCC rejects the 3-tuple form
+    when cluster-launch metadata is present.
+    """
+    if target.kind.name != "cuda":
+        return False
+    try:
+        arch = getattr(target, "arch", "")  # e.g. "sm_90", "sm_90a", "sm_100"
+        if arch.endswith("a"):
+            return False
+        major, minor = nvcc.parse_compute_version(nvcc.get_target_compute_version(target))
+        return nvcc.get_cuda_version() >= (12, 9) and (major, minor) >= (9, 0)
+    except Exception:
+        return False
+
+
+def _annotate_device_mod(device_mod: tvm.IRModule, attrs: dict) -> tvm.IRModule:
+    """Return a copy of *device_mod* with *attrs* added to every PrimFunc."""
+    new_funcs = {
+        gv: (func.with_attr(attrs) if isinstance(func, tir.PrimFunc) else func)
+        for gv, func in device_mod.functions.items()
+    }
+    return tvm.IRModule(new_funcs).with_attrs(device_mod.attrs)
+
+
 def is_cpu_device_backend(target: Target):
     return target.kind.name == "c"
 
@@ -265,6 +293,12 @@ def lower(
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
+
+    # Pass codegen hints to every device PrimFunc via TIR attributes.
+    if target.kind.name == "cuda":
+        device_mod = _annotate_device_mod(
+            device_mod, {"tl.allow_block_size_hint": int(_allow_block_size_hint(target))}
+        )
 
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
 
