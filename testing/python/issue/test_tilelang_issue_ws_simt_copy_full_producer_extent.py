@@ -64,7 +64,7 @@ def test_ws_keeps_full_producer_extent_for_lowered_simt_copy():
     src = kernel.get_kernel_source()
     flat_src = " ".join(src.split())
 
-    assert "__launch_bounds__(512, 1)" in src
+    assert "__block_size__((512, 1, 1))" in src
     assert "if (256 <= ((int)threadIdx.x)) {" in flat_src
     assert "tl::tl_shuffle_elect<256>()" in src
     assert re.search(r"tl::__sync_thread_partial<\d+, 256>\(\);", src), src

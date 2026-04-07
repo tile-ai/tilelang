@@ -61,9 +61,11 @@ def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
 def annotate_min_blocks_per_sm(n: int):
     """Annotate the minimum number of thread blocks per SM (multiprocessor).
 
-    When set, this value is passed as the second argument of
-    ``__launch_bounds__(maxThreadsPerBlock, minBlocksPerMultiprocessor)`` in
-    the generated CUDA kernel.  A larger value hints the compiler to limit
+    When set, the generated CUDA kernel uses
+    ``__launch_bounds__(maxThreadsPerBlock, minBlocksPerMultiprocessor)``
+    (second argument is ``n``).  Without this annotation, codegen emits
+    ``__block_size__`` instead; the two are not combined (ptxas rejects both).
+    A larger ``n`` hints the compiler to limit
     register usage so that more blocks can reside on each SM simultaneously,
     which can improve occupancy at the cost of potentially more register
     spilling.

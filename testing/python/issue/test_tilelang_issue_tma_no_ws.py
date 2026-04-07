@@ -244,7 +244,7 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
-    assert "__launch_bounds__(160, 1)" in src
+    assert "__block_size__((160, 1, 1))" in src
     assert "if (32 <= ((int)threadIdx.x))" in src
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
@@ -287,8 +287,8 @@ def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
 
     src = kernel.get_kernel_source()
     assert "cp_async_gs<16>" in src
-    assert "__launch_bounds__(32, 1)" in src
-    assert "__launch_bounds__(160, 1)" not in src
+    assert "__block_size__((32, 1, 1))" in src
+    assert "__block_size__((160, 1, 1))" not in src
     assert "if (32 <= ((int)threadIdx.x))" not in src
 
     x = torch.randint(0, 256, (4 * bytes_per_copy,), device="cuda", dtype=torch.uint8)

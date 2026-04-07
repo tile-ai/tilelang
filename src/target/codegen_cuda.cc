@@ -418,6 +418,7 @@ private:
         threadIdx_z_ext = op->value;
       }
     } else if (op->attr_key == tl::attr::kMinBlocksPerSM) {
+      saw_min_blocks_per_sm_attr = true;
       if (const IntImmNode *v = op->value.as<IntImmNode>()) {
         min_blocks_per_sm = v->value;
       }
@@ -429,7 +430,8 @@ public:
   PrimExpr threadIdx_x_ext = Integer(1);
   PrimExpr threadIdx_y_ext = Integer(1);
   PrimExpr threadIdx_z_ext = Integer(1);
-  int64_t min_blocks_per_sm = 1; // default to 1
+  bool saw_min_blocks_per_sm_attr = false;
+  int64_t min_blocks_per_sm = 1; // only used when saw_min_blocks_per_sm_attr
 };
 
 class ClusterInfoExtractor : public tir::StmtVisitor {
@@ -478,10 +480,17 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
     // unable to extract static block size, skip both hints
     return;
   }
-  stream << " __block_size__((" << xi->value << ", " << yi->value << ", "
-         << zi->value << "))";
-  stream << " __launch_bounds__(" << xi->value * yi->value * zi->value << ", "
-         << extractor.min_blocks_per_sm << ")";
+  int64_t total_threads = xi->value * yi->value * zi->value;
+  // ptxas rejects both .reqntid (__block_size__) and .maxntid (__launch_bounds__)
+  // on the same kernel; use launch_bounds only when the user set occupancy via
+  // annotate_min_blocks_per_sm, otherwise emit block_size for a fixed thread block.
+  if (extractor.saw_min_blocks_per_sm_attr) {
+    stream << " __launch_bounds__(" << total_threads << ", "
+           << extractor.min_blocks_per_sm << ")";
+  } else {
+    stream << " __block_size__((" << xi->value << ", " << yi->value << ", "
+           << zi->value << "))";
+  }
 }
 
 std::string CodeGenTileLangCUDA::Finish() {

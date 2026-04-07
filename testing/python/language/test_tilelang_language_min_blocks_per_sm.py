@@ -22,9 +22,10 @@ def _kernel_min_blocks_per_sm():
 
 
 def test_annotate_min_blocks_per_sm_launch_bounds():
-    """Codegen should emit the second __launch_bounds__ argument from the annotation."""
+    """Codegen should emit __launch_bounds__ (not __block_size__) when annotated."""
     src = _kernel_min_blocks_per_sm.get_kernel_source()
     assert "__launch_bounds__(128, 2)" in src
+    assert "__block_size__" not in src
 
 
 if __name__ == "__main__":
