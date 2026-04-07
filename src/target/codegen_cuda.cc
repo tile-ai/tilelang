@@ -434,8 +434,7 @@ public:
   int64_t min_blocks_per_sm = 1; // only used when saw_min_blocks_per_sm_attr
 };
 
-namespace {
-}  // namespace
+namespace {} // namespace
 
 class ClusterInfoExtractor : public tir::StmtVisitor {
 private:
@@ -4285,10 +4284,10 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   CodeGenC::PrintType(func->ret_type, os);
   // NOTE: Do NOT emit __block_size__ / __launch_bounds__ here.
   // PrintFunctionSignature is used for forward declarations; those must not
-  // carry kernel-hint attributes because (a) NVCC rejects duplicate __block_size__
-  // when both the declaration and the definition carry it alongside TMA code, and
-  // (b) the definition already emits the hint via the explicit PrintExtraAttrs
-  // call in AddFunction.
+  // carry kernel-hint attributes because (a) NVCC rejects duplicate
+  // __block_size__ when both the declaration and the definition carry it
+  // alongside TMA code, and (b) the definition already emits the hint via the
+  // explicit PrintExtraAttrs call in AddFunction.
   bool no_alias = func->HasNonzeroAttr(tir::attr::kNoAlias);
   // NVCC has issues with __restrict__ on kernel parameters when using PDL
   // (Programmatic Dependent Launch) synchronization. Suppress the annotation
@@ -4398,9 +4397,11 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   }
 
   // Whether codegen is allowed to emit the __block_size__ hint for this kernel.
-  // This is decided by the Python compiler driver and passed down via TIR attrs.
-  allow_block_size_hint_ =
-      f->GetAttr<Integer>("tl.allow_block_size_hint").value_or(Integer(0))->value != 0;
+  // This is decided by the Python compiler driver and passed down via TIR
+  // attrs.
+  allow_block_size_hint_ = f->GetAttr<Integer>("tl.allow_block_size_hint")
+                               .value_or(Integer(0))
+                               ->value != 0;
 
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);

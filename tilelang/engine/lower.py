@@ -43,10 +43,7 @@ def _allow_block_size_hint(target: Target) -> bool:
 
 def _annotate_device_mod(device_mod: tvm.IRModule, attrs: dict) -> tvm.IRModule:
     """Return a copy of *device_mod* with *attrs* added to every PrimFunc."""
-    new_funcs = {
-        gv: (func.with_attr(attrs) if isinstance(func, tir.PrimFunc) else func)
-        for gv, func in device_mod.functions.items()
-    }
+    new_funcs = {gv: (func.with_attr(attrs) if isinstance(func, tir.PrimFunc) else func) for gv, func in device_mod.functions.items()}
     return tvm.IRModule(new_funcs).with_attrs(device_mod.attrs)
 
 
@@ -296,9 +293,7 @@ def lower(
 
     # Pass codegen hints to every device PrimFunc via TIR attributes.
     if target.kind.name == "cuda":
-        device_mod = _annotate_device_mod(
-            device_mod, {"tl.allow_block_size_hint": int(_allow_block_size_hint(target))}
-        )
+        device_mod = _annotate_device_mod(device_mod, {"tl.allow_block_size_hint": int(_allow_block_size_hint(target))})
 
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
 
