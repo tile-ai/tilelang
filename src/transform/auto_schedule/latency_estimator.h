@@ -1,6 +1,7 @@
 #pragma once
 
 #include <tvm/runtime/logging.h>
+#include <tvm/target/target.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
@@ -9,6 +10,7 @@
 #include <tvm/tir/stmt_functor.h>
 
 #include "../../op/builtin.h"
+#include "../../target/utils.h"
 #include "./ir_structure.h"
 #include <functional>
 #include <memory>
@@ -25,11 +27,11 @@ namespace tl {
 using namespace tir;
 using ffi::String;
 
-// Latency estimator for H100 GPU
+// Latency estimator for GPU with configurable hardware parameters
 class LatencyEstimator {
 public:
-  // H100 latency parameters (in cycles)
-  struct H100Params {
+  // GPU latency parameters (H100 defaults, in cycles)
+  struct GPUParams {
     // Base latencies
     int64_t global_memory_read = 1000; // Global memory read latency
     int64_t global_memory_write =
@@ -81,7 +83,35 @@ public:
            // etc.)
   };
 
-  LatencyEstimator() = default;
+  struct B200Params : GPUParams {
+    B200Params() {
+      global_memory_read = 714;
+      global_memory_write = 571;
+      shared_memory_read = 19;
+      shared_memory_write = 19;
+      cuda_core_operation = 3;
+      tma_operation = 71;
+      tensor_core_base_latency = 23;
+      tensor_core_throughput = 9300;
+      wgmma_base_latency = 29;
+      wgmma_per_tile_latency = 1;
+      global_memory_bandwidth = 109;
+      add_throughput = 6;
+      sub_throughput = 6;
+      mul_throughput = 6;
+      min_max_throughput = 6;
+      cmp_throughput = 6;
+      logic_throughput = 6;
+      bitwise_throughput = 6;
+      shift_throughput = 6;
+    }
+  };
+
+  explicit LatencyEstimator(Target target = Target()) {
+    if (target.defined() && TargetIsSm100(target)) {
+      params_ = B200Params();
+    }
+  }
 
   // Set thread count for parallel execution
   void SetThreadCount(int64_t thread_count) { thread_count_ = thread_count; }
@@ -328,7 +358,7 @@ public:
   }
 
 private:
-  H100Params params_;
+  GPUParams params_;
   int64_t thread_count_ = 1; // Default to 1 (no parallelism)
 
   // Operation counter visitor with latency estimation
@@ -343,14 +373,14 @@ private:
 
     int64_t total_latency = 0;
     int64_t thread_count = 1; // Thread count for parallel execution
-    const LatencyEstimator::H100Params *params = nullptr;
+    const LatencyEstimator::GPUParams *params = nullptr;
 
     // Track loop dimensions for loop-invariant detection
     std::vector<LoopDimension> loop_stack;
     std::unordered_map<const VarNode *, int> var_to_depth;
 
     OperationCounter(int64_t thread_count = 1,
-                     const LatencyEstimator::H100Params *params = nullptr)
+                     const LatencyEstimator::GPUParams *params = nullptr)
         : thread_count(thread_count), params(params) {}
 
     // Operator to visit a statement
