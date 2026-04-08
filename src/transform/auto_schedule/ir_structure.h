@@ -748,6 +748,7 @@ enum class MemoryType {
   kGlobal,   // Global memory (DRAM)
   kShared,   // Shared memory (L1/shared)
   kRegister, // Register/local memory
+  kTmem,     // Tensor memory (shared.tmem, Blackwell/sm_100 only)
   kUnknown   // Unknown memory type
 };
 
@@ -755,6 +756,8 @@ enum class MemoryType {
 inline MemoryType GetMemoryTypeFromScope(const String &scope) {
   if (scope == "global") {
     return MemoryType::kGlobal;
+  } else if (scope == "shared.tmem") {
+    return MemoryType::kTmem;
   } else if (scope == "shared" || scope == "shared.dyn") {
     return MemoryType::kShared;
   } else if (scope == "local" || scope == "local.var" ||

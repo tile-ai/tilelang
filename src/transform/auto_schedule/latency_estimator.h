@@ -42,6 +42,9 @@ public:
     int64_t cuda_core_operation =
         4;                       // Basic CUDA core operation (add, mul, etc.)
     int64_t tma_operation = 100; // TMA operation latency
+    int64_t tmem_read = 0;       // Tensor memory read latency (0 = not present)
+    int64_t tmem_write = 0;     // Tensor memory write latency (0 = not present)
+    int64_t tmem_bandwidth = 0; // Tensor memory bandwidth in bytes/cycle
 
     // Tensor Core shape-aware parameters
     int64_t tensor_core_base_latency =
@@ -104,6 +107,9 @@ public:
       logic_throughput = 6;
       bitwise_throughput = 6;
       shift_throughput = 6;
+      tmem_read = 1;
+      tmem_write = 1;
+      tmem_bandwidth = 0;
     }
   };
 
@@ -127,6 +133,7 @@ public:
     int64_t global_memory_bytes = 0;
     int64_t shared_memory_bytes = 0;
     int64_t register_bytes = 0;
+    int64_t tmem_bytes = 0;
 
     // Estimate latency from memory accesses and track bandwidth usage
     for (const auto &region : task->GetReadRegions()) {
@@ -151,8 +158,11 @@ public:
       case MemoryType::kRegister:
         register_bytes += access_bytes;
         break;
+      case MemoryType::kTmem:
+        tmem_bytes += access_bytes;
+        break;
       default:
-        global_memory_bytes += access_bytes; // Conservative
+        global_memory_bytes += access_bytes;
         break;
       }
     }
@@ -179,8 +189,11 @@ public:
       case MemoryType::kRegister:
         register_bytes += access_bytes;
         break;
+      case MemoryType::kTmem:
+        tmem_bytes += access_bytes;
+        break;
       default:
-        global_memory_bytes += access_bytes; // Conservative
+        global_memory_bytes += access_bytes;
         break;
       }
     }
@@ -247,6 +260,8 @@ public:
 
     bool has_tma = task->UsesTMACore();
     bool has_tensor = task->UsesTensorCore();
+    // if (has_tensor && !has_tma) LOG(FATAL) << memory_latency << " " <<
+    // compute_latency;
 
     if (has_tma && !has_tensor) {
       // Case 1: Only TMA operations (no Tensor Core)
@@ -779,8 +794,13 @@ private:
                (access_bytes - 128) / params_.shared_memory_bandwidth;
       }
     case MemoryType::kRegister:
-      // Register access latency is constant and very small
       return params_.register_access;
+    case MemoryType::kTmem:
+      if (params_.tmem_read == 0) {
+        return params_.global_memory_read +
+               (access_bytes - 32) / params_.global_memory_bandwidth;
+      }
+      return is_read ? params_.tmem_read : params_.tmem_write;
     default:
       // Unknown memory type, use global memory as conservative estimate
       if (is_read) {
