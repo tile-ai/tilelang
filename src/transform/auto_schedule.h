@@ -10,6 +10,8 @@
 #include "./auto_schedule/ir_structure.h"
 #include "./auto_schedule/latency_estimator.h"
 #include "./auto_schedule/memory_detector.h"
+#include "./auto_schedule/schedule_builder.h"
+#include "./auto_schedule/warpgroup_partition.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/expr.h>

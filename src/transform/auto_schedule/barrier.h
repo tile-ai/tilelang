@@ -28,7 +28,7 @@ using ffi::Map;
 
 // Calculate the size in bytes of a buffer. Returns 0 if the size cannot be
 // determined at compile time.
-size_t GetBufferSize(const Buffer &buffer) {
+inline size_t GetBufferSize(const Buffer &buffer) {
   size_t elem_size = buffer->dtype.bits() * buffer->dtype.lanes() / 8;
   PrimExpr size = IntImm(DataType::Int(64), elem_size);
   for (const auto &dim : buffer->shape) {
@@ -44,7 +44,7 @@ size_t GetBufferSize(const Buffer &buffer) {
 }
 
 // Helper function to rewrite alloc_buffer for multi-version support
-Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
+inline Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
   // Create a copy of the buffer
   ObjectPtr<BufferNode> new_buffer =
       tvm::ffi::make_object<BufferNode>(*(buffer.get()));
@@ -84,7 +84,7 @@ static Buffer makeBarrierBuffer(PrimExpr arrive_count, const std::string &name,
   return buffer;
 }
 
-bool IsEvaluateZero(const tvm::tir::Stmt &stmt) {
+inline bool IsEvaluateZero(const tvm::tir::Stmt &stmt) {
   if (const EvaluateNode *eval_node = stmt.as<EvaluateNode>()) {
     if (is_const_int(eval_node->value, 0)) {
       return true;
