@@ -1177,32 +1177,26 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tir::attr::async_commit_queue_scope) {
-    const IntImmNode *queue_id = op->value.as<IntImmNode>();
-    ICHECK(queue_id && queue_id->value == 0)
-        << "For CUDA, the index of an async queue must be 0.";
-    this->VisitStmt(op->body);
-    auto commit_group = Call(DataType::Void(), builtin::ptx_commit_group(), {});
-    this->VisitExpr(commit_group, this->stream);
-    return;
-  } else if (op->attr_key == tir::attr::async_wait_queue_scope) {
-    auto wait_attrs = GetAsyncWaitAttributes(op);
-    auto queue_id = wait_attrs.first.as<IntImmNode>();
-    ICHECK(queue_id && queue_id->value == 0)
-        << "For CUDA, the index of an async queue must be 0.";
-    auto wait_cnt = wait_attrs.second;
-    auto wait_group =
-        Call(DataType::Void(), builtin::ptx_wait_group(), {wait_cnt});
-    this->VisitExpr(wait_group, this->stream);
-    auto inner = op->body.as<AttrStmtNode>();
-    ICHECK(inner);
-    this->VisitStmt(inner->body);
-    return;
-  } else if (op->attr_key == "threadblock_swizzle_pattern") {
+  if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
-    const StringImmNode *pattern = op->value.as<StringImmNode>();
-    ICHECK(pattern);
-    this->stream << "const dim3 blockIdx = " << pattern->value << "();\n";
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tir::builtin::tvm_tuple()) &&
+          call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        ICHECK(name_node && size_node) << "threadblock_swizzle_pattern expects "
+                                          "tvm_tuple(device_func, panel_size)";
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    }
+    ICHECK(!func_name.empty() && panel_size > 0)
+        << "threadblock_swizzle_pattern: failed to extract func_name and "
+           "panel_size";
+    this->stream << "const dim3 blockIdx = tl::" << func_name << "("
+                 << panel_size << ");\n";
     this->VisitStmt(op->body);
     return;
   }

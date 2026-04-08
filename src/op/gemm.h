@@ -146,6 +146,7 @@ public:
   tir::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   mutable GemmWarpPolicy policy_;
+  Map<String, ObjectRef> annotations_;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
   static void RegisterReflection() {
@@ -173,17 +174,20 @@ public:
         .def_ro("isTcgen05", &GemmNode::isTcgen05_)
         .def_ro("mbar", &GemmNode::mbar_)
         .def_ro("cCoords", &GemmNode::cCoords_)
-        .def_ro("policy", &GemmNode::policy_);
+        .def_ro("policy", &GemmNode::policy_)
+        .def_ro("annotations", &GemmNode::annotations_);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
+  AccessRegions GetAccessRegions() const override;
 
   TileOperator Clone() const;
 
-private:
   GemmInst getGemmInst(int block_size, Target target) const;
+
+private:
   bool allowTcgen5Mma(Target target) const;
   bool allowWgmma(int block_size, Target target) const;
 

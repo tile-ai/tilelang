@@ -109,7 +109,7 @@ def prepare_output(
 
 @tilelang.jit(
     out_idx=[-4, -3, -2, -1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def tilelang_chunk_o_bwd_dqkwg(
     # task config

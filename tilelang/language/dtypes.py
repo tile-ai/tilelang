@@ -30,11 +30,7 @@ def _is_any_dtype(obj: object) -> bool:
     return isinstance(obj, (ir.Type, str, type, torch.dtype, dtype))
 
 
-_PYTHON_DTYPE_TO_STR = {
-    bool: "bool",
-    int: "int32",
-    float: "float32",
-}
+_PYTHON_DTYPE_TO_STR = {bool: "bool", int: "int32", float: "float32"}
 
 _NUMPY_DTYPE_TO_STR = {
     np.bool_: "bool",
@@ -591,7 +587,7 @@ else:
     bfloat16 = dtype("bfloat16")
     bfloat16x2 = dtype("bfloat16x2")
 
-_all_dtypes = {
+_all_dtypes = [
     "bool",
     "short",
     "int",
@@ -757,7 +753,7 @@ _all_dtypes = {
     "float4_e2m1fnx64",
     "bfloat16",
     "bfloat16x2",
-}
+]
 
 __all__ = list(_all_dtypes) + [
     "dtype",

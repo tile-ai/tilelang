@@ -53,9 +53,14 @@ using namespace tir;
 Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
-  node->aRegion_ = NormalizeToBufferRegion(args[0]);
-  node->bRegion_ = NormalizeToBufferRegion(args[1]);
-  node->cRegion_ = NormalizeToBufferRegion(args[2]);
+  auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto b_access = NormalizeToAccessRegion(args[1], kAccessRead);
+  auto c_access = NormalizeToAccessRegion(args[2], kAccessReadWrite);
+
+  node->aRegion_ = a_access.region;
+  node->bRegion_ = b_access.region;
+  node->cRegion_ = c_access.region;
+  node->SetAccessRegions({a_access, b_access, c_access});
 
   node->a_ = node->aRegion_->buffer;
   node->b_ = node->bRegion_->buffer;
@@ -95,7 +100,19 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  node->annotations_ = annotations;
   data_ = std::move(node);
+}
+
+AccessRegions GemmNode::GetAccessRegions() const {
+  AccessRegions result;
+  result.reads.push_back(aRegion_);
+  result.reads.push_back(bRegion_);
+  if (!is_one(clearAccum_)) {
+    result.reads.push_back(cRegion_);
+  }
+  result.writes.push_back(cRegion_);
+  return result;
 }
 
 /**
@@ -556,8 +573,12 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     if (isTcgen05_) {
       return tcgen5mma_call;
     }
-    Stmt wait_stmt = Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
-                                   {mbar_, T.mbar_phase_expr}));
+    PrimExpr mbar_phase = T.mbar_phase_expr;
+    if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
+      mbar_phase = explicit_phase.value();
+    }
+    Stmt wait_stmt = Evaluate(
+        Call(DataType::Handle(), mbarrier_wait_parity(), {mbar_, mbar_phase}));
     return SeqStmt({tcgen5mma_call, wait_stmt});
   }
 

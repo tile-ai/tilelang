@@ -242,6 +242,18 @@ private:
       auto new_buffer = buffer_remap_.at(old_buffer);
       int num_cols_allocated = GetNumColsAllocated(old_buffer);
 
+      // Check that the number of rows doesn't exceed the tmem limit
+      {
+        auto analyzer = std::make_shared<arith::Analyzer>();
+        arith::ConstIntBound phy_row_bounds =
+            analyzer->const_int_bound(old_buffer->shape[0]);
+        int num_rows_required = phy_row_bounds->max_value;
+        ICHECK(num_rows_required <= 128)
+            << "The number of rows required for tmem buffer "
+            << old_buffer->name << " is " << num_rows_required
+            << ", which exceeds the maximum of 128 rows";
+      }
+
       tmem_num_cols_allocated_.insert({data, num_cols_allocated});
       tmem_call_annotations_.insert({data, tmem_call_ann});
 

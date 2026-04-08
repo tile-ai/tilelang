@@ -22,15 +22,13 @@ using namespace tir;
 
 Transpose::Transpose(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<TransposeNode> node = tvm::ffi::make_object<TransposeNode>();
-  Array<Range> rgs[2];
-  Buffer bf[2];
-  for (int i = 0; i < 2; i++) {
-    auto region = NormalizeToBufferRegion(args[i]);
-    rgs[i] = region->region;
-    bf[i] = region->buffer;
-  }
-  std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
-  std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
+  auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
+  node->src = src_access.region->buffer;
+  node->dst = dst_access.region->buffer;
+  node->src_range = src_access.region->region;
+  node->dst_range = dst_access.region->region;
+  node->SetAccessRegions({src_access, dst_access});
   data_ = std::move(node);
 }
 

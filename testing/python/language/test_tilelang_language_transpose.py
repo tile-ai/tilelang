@@ -46,10 +46,7 @@ def run_tilelang_transpose(M=128, N=128, block_M=128, block_N=128, dtype=T.float
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
@@ -88,10 +85,7 @@ def run_tilelang_transpose_square(M=256, block_M=128, dtype=T.float16):
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     a = torch.randn(M, M, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)

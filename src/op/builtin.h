@@ -34,6 +34,16 @@ static constexpr const char *kLoopPreferAsync = "parallel_prefer_async";
 // for injected cp.async in this parallel loop subtree. Value should be Bool.
 static constexpr const char *kParallelAsyncWithoutAsyncCommitWait =
     "parallel_async_without_async_commit_wait";
+// Copy-op annotation key controlling whether cp.async commit/wait are managed
+// by an enclosing transform (e.g. software pipeline / warp specialization).
+// Value should be IntImm/Bool-like truthy scalar.
+static constexpr const char *kAsyncCopyNoImplicitCommitWait =
+    "no_implicit_async_commit_wait";
+// Tile-op annotation key carrying an explicit mbarrier parity expression.
+// Pipeline transforms set this on ops whose lowering would otherwise infer
+// parity from surrounding loop context.
+static constexpr const char *kPipelineMbarPhaseExpr =
+    "tl.pipeline_mbar_phase_expr";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.
@@ -46,9 +56,21 @@ static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 } // namespace attr
 
+inline Optional<PrimExpr>
+GetAnnotatedMbarPhaseExpr(const Map<String, ObjectRef> &annotations) {
+  if (auto val = annotations.Get(attr::kPipelineMbarPhaseExpr)) {
+    if (val.value()->IsInstance<PrimExprNode>()) {
+      return Downcast<PrimExpr>(val.value());
+    }
+    LOG(FATAL) << "Annotation `" << attr::kPipelineMbarPhaseExpr
+               << "` expects a PrimExpr value, but got "
+               << val.value().GetTypeKey();
+  }
+  return Optional<PrimExpr>();
+}
+
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
     "tl.debug_merge_shared_memory_allocations";
-static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 // PrimFunc attribute: set by LowerTileOp to indicate TMA operations were
 // actually generated.  Read by OptimizeForTarget to pick the right pipeline.
 static constexpr const char *kHasTMA = "tl.has_tma";
@@ -57,6 +79,9 @@ static constexpr const char *kDisableSafeMemoryLegalize =
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
+// Deprecated compatibility-only pass config. It is no longer consumed by the
+// lowering pipeline, but remains registered so legacy kernels keep working.
+static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kEnableAggressiveSharedMemoryMerge =
     "tl.enable_aggressive_shared_memory_merge";
 static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
@@ -724,6 +749,19 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
  *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
  */
 TVM_DLL const Op &tcgen05_mma_arrive();
+
+/*!
+ * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
+ * bar.sync). Matches PTX \c tcgen05.fence::before_thread_sync (DeepGEMM /
+ * Blackwell UMMA sequencing).
+ */
+TVM_DLL const Op &tcgen05_before_thread_sync();
+
+/*!
+ * \brief TCGEN05 fence after a thread-block-wide sync. Matches PTX \c
+ * tcgen05.fence::after_thread_sync.
+ */
+TVM_DLL const Op &tcgen05_after_thread_sync();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor

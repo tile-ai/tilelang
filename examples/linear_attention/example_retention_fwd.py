@@ -6,7 +6,7 @@ from tilelang.profiler import do_bench
 import argparse
 
 
-@tl.jit(out_idx=3, pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
+@tl.jit(out_idx=3, pass_configs={"tl.disable_warp_specialized": True})
 def chunk_retention_fwd_kernel(
     B,
     S,
