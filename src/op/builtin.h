@@ -54,6 +54,11 @@ static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 // argument of __launch_bounds__(maxThreads, minBlocksPerMultiprocessor).
 // Type: Integer
 static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
+// An AttrStmt marker that generates a C/CUDA lexical scope `{ ... }` in
+// codegen.  Allocations nested inside this scope cannot be hoisted past
+// the boundary by StorageRewrite, giving the underlying compiler accurate
+// variable lifetime information for register allocation.
+static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 } // namespace attr
 
 inline Optional<PrimExpr>

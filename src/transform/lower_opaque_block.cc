@@ -104,7 +104,13 @@ private:
       body = Allocate(buffer->data, buffer->dtype, allocation_shape,
                       const_true(), std::move(body), allocate_annotations);
     }
-    // Step 5. Insert attribute statements converted from pragmas
+    // Step 5. If the block had local allocations, wrap them in a lexical
+    // scope boundary so that StorageRewrite does not hoist them out.
+    if (!new_block->alloc_buffers.empty()) {
+      body = AttrStmt(Integer(0), tl::attr::kLexicalAllocScope, Integer(1),
+                      std::move(body));
+    }
+    // Step 6. Insert attribute statements converted from pragmas
     for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {
       body = AttrStmt(Integer(0), it->first, it->second, std::move(body));
     }

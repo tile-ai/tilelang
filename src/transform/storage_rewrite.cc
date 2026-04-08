@@ -285,6 +285,8 @@ public:
       VisitNewScope(op);
     } else if (op->attr_key == tir::attr::virtual_thread) {
       VisitNewScope(op);
+    } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
+      VisitNewScope(op);
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }
@@ -575,6 +577,7 @@ public:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent ||
         op->attr_key == tir::attr::virtual_thread ||
+        op->attr_key == tl::attr::kLexicalAllocScope ||
         tir::attr::IsPragmaKey(op->attr_key)) {
       // remake all the allocation at the attach scope.
       if (attach_map_.count(op)) {
@@ -1022,6 +1025,33 @@ private:
             op->attr_key == tir::attr::virtual_thread ||
             tir::attr::IsPragmaKey(op->attr_key)) {
           PlanNewScope(op);
+        } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
+          if (s.scope_pair_offset > 0) {
+            // Entering: save current thread_scope_ and redirect
+            // allocations to this lexical scope.
+            lexical_scope_stack_.push_back(thread_scope_);
+            thread_scope_ = op;
+          } else {
+            // Exiting: clean up free lists for this scope and restore.
+            for (auto it = const_free_map_.begin();
+                 it != const_free_map_.end();) {
+              if (it->second->attach_scope_ == op) {
+                it = const_free_map_.erase(it);
+              } else {
+                ++it;
+              }
+            }
+            for (auto it = sym_free_list_.begin();
+                 it != sym_free_list_.end();) {
+              if ((*it)->attach_scope_ == op) {
+                it = sym_free_list_.erase(it);
+              } else {
+                ++it;
+              }
+            }
+            thread_scope_ = lexical_scope_stack_.back();
+            lexical_scope_stack_.pop_back();
+          }
         } else {
           ICHECK(op->attr_key == tir::attr::extern_scope);
         }
@@ -1179,6 +1209,8 @@ private:
   }
   // thread scope.
   const Object *thread_scope_{nullptr};
+  // Saved thread_scope_ values for nested lexical_alloc_scope.
+  std::vector<const Object *> lexical_scope_stack_;
   // whether enable inplace detection.
   bool detect_inplace_{false};
   // Locations of free ops.
