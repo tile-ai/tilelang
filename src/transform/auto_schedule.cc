@@ -518,7 +518,7 @@ private:
     }
 
     // Estimate latency and initiation interval for this task
-    LatencyEstimator latency_estimator;
+    LatencyEstimator latency_estimator(target_);
     latency_estimator.SetThreadCount(thread_count_);
     latency_estimator.Estimate(task_node);
   }
@@ -540,7 +540,7 @@ private:
     }
 
     // Estimate latency and initiation interval for this task
-    LatencyEstimator latency_estimator;
+    LatencyEstimator latency_estimator(target_);
     latency_estimator.SetThreadCount(thread_count_);
     latency_estimator.Estimate(task_node);
   }
