@@ -297,8 +297,8 @@ public:
           if (const auto *seq = body.as<SeqStmtNode>()) {
             for (const auto &sub_stmt : seq->seq) {
               if (const auto *attr = sub_stmt.as<AttrStmtNode>();
-                  attr && attr->attr_key ==
-                              attr::kAutoScheduleSharedMemoryBoundary) {
+                  attr &&
+                  attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
                 has_tail_stmt = true;
                 tail_stmt = attr;
               } else {

@@ -1202,9 +1202,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
 
     for (size_t si = 0; si < wg0_segments.size(); ++si) {
       // Insert liveness boundary between segments.
-      segmented_stmts.push_back(
-          AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
-                    Evaluate(0)));
+      segmented_stmts.push_back(AttrStmt(
+          Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
 
       // Collect LetDecl info from current segment before converting to Stmt.
       auto wg0_lets = CollectLetDeclInfo(wg0_segments[si]);
@@ -1223,28 +1222,27 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
       }
 
       // Accumulate this segment's LetDecls for future segments.
-      wg0_accumulated_lets.insert(wg0_accumulated_lets.end(),
-                                  wg0_lets.begin(), wg0_lets.end());
-      wg1_accumulated_lets.insert(wg1_accumulated_lets.end(),
-                                  wg1_lets.begin(), wg1_lets.end());
+      wg0_accumulated_lets.insert(wg0_accumulated_lets.end(), wg0_lets.begin(),
+                                  wg0_lets.end());
+      wg1_accumulated_lets.insert(wg1_accumulated_lets.end(), wg1_lets.begin(),
+                                  wg1_lets.end());
 
       // Prepend set_max_nreg only to the first segment.
       if (si == 0 && !has_simt_copy && config.enable_set_max_nreg) {
         wg0_seg_stmt =
             SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                    {config.consumer_max_nreg, 1})),
-                      wg0_seg_stmt});
+                                   {config.consumer_max_nreg, 1})),
+                     wg0_seg_stmt});
         wg1_seg_stmt =
             SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                    {config.producer_max_nreg, 0})),
-                      wg1_seg_stmt});
+                                   {config.producer_max_nreg, 0})),
+                     wg1_seg_stmt});
       }
 
       segmented_stmts.push_back(MakeWarpgroupIf(wg0_seg_stmt, wg1_seg_stmt));
     }
-    segmented_stmts.push_back(
-        AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
-                  Evaluate(0)));
+    segmented_stmts.push_back(AttrStmt(
+        Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0, Evaluate(0)));
     if_then_else = SeqStmt::Flatten(segmented_stmts);
   } else if (wg0_has_stmts) {
     // Only warpgroup 0 has statements, execute unconditionally
@@ -1325,8 +1323,9 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     combined_stmt = pro_and_warpgroup_stmt;
   }
 
-  return SeqStmt({AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
-                     Evaluate(0)), combined_stmt});
+  return SeqStmt({AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary,
+                           0, Evaluate(0)),
+                  combined_stmt});
 }
 
 } // namespace tl
