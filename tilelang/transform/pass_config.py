@@ -272,8 +272,7 @@ class PassConfigKey(str, Enum):
 
 _DEPRECATED_PASS_CONFIG_MESSAGES = {
     PassConfigKey.TL_DISABLE_TMA_LOWER.value: (
-        "`tl.disable_tma_lower` is deprecated and will be removed in v0.1.10. "
-        "Use `T.copy(..., disable_tma=True)` per-copy instead."
+        "`tl.disable_tma_lower` is deprecated and will be removed in v0.1.10. Use `T.copy(..., disable_tma=True)` per-copy instead."
     ),
 }
 

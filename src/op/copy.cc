@@ -948,10 +948,9 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
   // remains allowed because it is self-synchronized locally and does not
   // participate in pipeline producer scheduling.
   // Also honour the (deprecated) global pass config for backward compat.
-  if (!GetDisableTMA() &&
-      !tvm::transform::PassContext::Current()
-           ->GetConfig<Bool>(kDisableTMALower, Bool(false))
-           .value()) {
+  if (!GetDisableTMA() && !tvm::transform::PassContext::Current()
+                               ->GetConfig<Bool>(kDisableTMALower, Bool(false))
+                               .value()) {
     bool is_cutedsl = TargetIsCuTeDSL(target);
     if (!is_cutedsl && !buffer_oob &&
         CheckBulkStore1D(target, layout_map, analyzer)) {
