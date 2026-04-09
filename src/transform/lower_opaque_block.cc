@@ -30,6 +30,7 @@
 #include <utility>
 
 #include "../op/builtin.h"
+#include "common/attr.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -244,7 +245,7 @@ private:
     pragma_attrs->clear();
     for (const auto &kv : annotations) {
       const String &key = kv.first;
-      if (tir::attr::IsPragmaKey(key)) {
+      if (tir::attr::IsPragmaKey(key) || key == tl::attr::kCodeBlockSource) {
         pragma_attrs->emplace_back(key, ConvertAttrValue(key, kv.second));
       } else if (key == tl::attr::kLocalVarInit) {
         if (auto local_init_map = kv.second.try_cast<Map<Var, PrimExpr>>()) {

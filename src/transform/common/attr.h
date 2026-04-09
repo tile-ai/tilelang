@@ -27,6 +27,7 @@ namespace attr {
 // Attributes to mark CUDA sync calls
 constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";
 constexpr const char *kHasGridSync = "has_cuda_pdl_sync";
+constexpr const char *kCodeBlockSource = "code_block_source";
 } // namespace attr
 
 } // namespace tl

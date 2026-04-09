@@ -265,12 +265,12 @@ def lower(
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
-
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
+    kernel_source = codegen_mod.inspect_source()
 
     if enable_host_codegen:
         host_mod = host_codegen(host_mod, target_host, target=target)
         host_mod.import_module(codegen_mod)
-        return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source(), rt_mod=host_mod)
+        return CompiledArtifact(host_mod, device_mod, params, kernel_source, rt_mod=host_mod)
 
-    return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source())
+    return CompiledArtifact(host_mod, device_mod, params, kernel_source)

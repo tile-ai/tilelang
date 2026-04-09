@@ -9,6 +9,7 @@
 #include <tvm/tir/op.h>
 
 #include <cmath>
+#include <regex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -4627,8 +4628,55 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   }
 }
 
+std::string RewriteExternalKernelName(const std::string &source,
+                                      const std::string &target_name) {
+  static const std::regex kKernelPattern(
+      R"((?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+))");
+
+  std::vector<std::smatch> matches;
+  for (auto it =
+           std::sregex_iterator(source.begin(), source.end(), kKernelPattern);
+       it != std::sregex_iterator(); ++it) {
+    matches.push_back(*it);
+  }
+
+  ICHECK(!matches.empty()) << "T.CUDASourceCodeKernel expects external CUDA "
+                              "source to declare at least one "
+                              "__global__ kernel";
+
+  for (const auto &match : matches) {
+    if (match[1].str() == target_name) {
+      return source;
+    }
+  }
+
+  ICHECK_EQ(matches.size(), 1U)
+      << "T.CUDASourceCodeKernel expects external CUDA source to either "
+         "already use "
+         "the generated kernel symbol `"
+      << target_name
+      << "` or contain exactly one __global__ kernel declaration";
+
+  std::string rewritten = source;
+  rewritten.replace(static_cast<size_t>(matches[0].position(1)),
+                    static_cast<size_t>(matches[0].length(1)), target_name);
+  return rewritten;
+}
+
 void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
                                       const PrimFunc &f) {
+  auto code_block_source = f->GetAttr<String>(tl::attr::kCodeBlockSource);
+  if (code_block_source) {
+    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+    ICHECK(global_symbol) << "CodeGenTileLangCUDA: Expect PrimFunc to have the "
+                             "global_symbol attribute";
+    stream << RewriteExternalKernelName(
+                  static_cast<std::string>(code_block_source.value()),
+                  static_cast<std::string>(global_symbol.value()))
+           << "\n\n";
+    return;
+  }
+
   // If the function has already been forward-declared, this is a
   // no-op.
   CodeGenC::DeclareFunction(gvar, f);
