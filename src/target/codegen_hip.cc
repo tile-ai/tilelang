@@ -1321,7 +1321,8 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
       // bfloat16x16 is a struct with data[16] — use aggregate initialization.
       os << "bfloat16x16{";
       for (int i = 0; i < 16; ++i) {
-        if (i != 0) os << ", ";
+        if (i != 0)
+          os << ", ";
         os << v;
       }
       os << '}';
@@ -1349,7 +1350,8 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
       if (i != 0)
         os << ", ";
       os << "([&]{ union { float2 f; unsigned long long u; } _tmp;"
-         << " _tmp.f = make_float2(" << v << ", " << v << "); return _tmp.u; }())";
+         << " _tmp.f = make_float2(" << v << ", " << v
+         << "); return _tmp.u; }())";
     }
     os << ')';
     return;
@@ -1361,7 +1363,8 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
     std::string v = PrintExpr(op->value);
     os << "(float32x16){";
     for (int i = 0; i < 16; ++i) {
-      if (i != 0) os << ", ";
+      if (i != 0)
+        os << ", ";
       os << v;
     }
     os << '}';
@@ -1373,7 +1376,8 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
     std::string v = PrintExpr(op->value);
     os << "bfloat16x16{";
     for (int i = 0; i < 16; ++i) {
-      if (i != 0) os << ", ";
+      if (i != 0)
+        os << ", ";
       os << v;
     }
     os << '}';
@@ -1542,9 +1546,14 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
   if (t.is_bfloat16()) {
     if (t.lanes() == 16) {
       // bfloat16x16 is a struct with data[16] — use aggregate initialization.
-      if (i == 0) os << "bfloat16x16{";
+      if (i == 0)
+        os << "bfloat16x16{";
       os << value;
-      if (i != t.lanes() - 1) { os << ", "; } else { os << "}"; }
+      if (i != t.lanes() - 1) {
+        os << ", ";
+      } else {
+        os << "}";
+      }
       return;
     }
     if (i == 0) {
@@ -1567,9 +1576,14 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
 
   if (t.is_float() && t.bits() == 32 && t.lanes() == 16) {
     // float32x16 is a __vector_size__ type — use brace initialization.
-    if (i == 0) os << "(float32x16){";
+    if (i == 0)
+      os << "(float32x16){";
     os << value;
-    if (i != t.lanes() - 1) { os << ", "; } else { os << "}"; }
+    if (i != t.lanes() - 1) {
+      os << ", ";
+    } else {
+      os << "}";
+    }
     return;
   }
 
