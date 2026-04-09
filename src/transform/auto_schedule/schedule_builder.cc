@@ -657,5 +657,195 @@ void ScheduleUnitBuilder::ScheduleRecursive(
   LOG(FATAL) << "[ScheduleRecursive] Unknown IRStructure type" << node.get();
 }
 
+// --- Naive scheduling implementation ---
+
+bool NaiveAssignWarpgroupIds(IRStructure *root) {
+  if (!root)
+    LOG(FATAL) << "Empty root";
+
+  std::vector<TaskNodeWithContext> all_tasks;
+  CollectAllTaskNodesWithContext(root, all_tasks);
+  if (all_tasks.empty())
+    LOG(FATAL) << "No task";
+
+  // Simple producer/consumer assignment:
+  // TMA tasks → wg1 (producer), compute tasks → wg0 (consumer)
+  for (auto &task_ctx : all_tasks) {
+    TaskNode *task = task_ctx.task;
+    if (task->ContainsLoopBreak()) {
+      task->SetWarpgroupId(-1);
+      continue;
+    }
+    if (task->UsesTMACore() && !task->UsesTensorCore()) {
+      task->SetWarpgroupId(1); // producer
+    } else {
+      task->SetWarpgroupId(0); // consumer
+    }
+  }
+
+  // Collect prefix/suffix tasks and reset them to neutral
+  std::unordered_set<TaskNode *> prefix_tasks;
+  CollectPrefixTasks(root, prefix_tasks);
+  for (auto *task : prefix_tasks) {
+    task->SetWarpgroupId(-1);
+  }
+
+  int n = all_tasks.size();
+  TaskUnionFind uf(n);
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) {
+      if (UseSameRegisterRegion(all_tasks[i].task, all_tasks[j].task)) {
+        uf.unite(i, j);
+      }
+    }
+  }
+  std::unordered_set<TaskNode *> suffix_tasks;
+  CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
+  for (auto *task : suffix_tasks) {
+    task->SetWarpgroupId(-1);
+  }
+
+  return false; // no double_thread in naive mode
+}
+
+void ScheduleUnitBuilder::NaiveScheduleLoop(ControlNode *ctrl) {
+  if (!ctrl->child)
+    return;
+
+  // Flatten children
+  std::vector<std::shared_ptr<IRStructure>> flat_children;
+  if (!ctrl->child->IsSequence()) {
+    GatherTaskNodesSingle(ctrl->child, flat_children);
+  } else {
+    auto seq_node = static_cast<SequenceNode *>(ctrl->child.get());
+    GatherTaskNodes(seq_node->children, flat_children);
+  }
+  auto seq_node = std::make_shared<SequenceNode>();
+  seq_node->children = flat_children;
+  ctrl->child = std::move(seq_node);
+
+  auto seq_body = static_cast<SequenceNode *>(ctrl->child.get());
+
+  // Read num_stages from loop annotation
+  int num_stages = 1;
+  auto num_stages_val = ctrl->control.get()->annotations.Get("num_stages");
+  if (num_stages_val.has_value()) {
+    num_stages = num_stages_val.value().cast<IntImm>()->value;
+  }
+
+  // Assign pipeline stages and start times:
+  // - TMA load → stage 0, start_time = 0
+  // - Everything else → stage (num_stages - 1), start_time = num_stages
+  // - All task latencies set to 0, IIperIter = 1
+  std::map<IRStructure *, int> stage_map;
+  bool has_promoted = false;
+  for (auto &child : seq_body->children) {
+    IRStructure *node = child.get();
+    bool is_tma_load =
+        node->UsesTMACore() && !node->UsesTensorCore() && !node->UsesCUDACore();
+    if (is_tma_load && node->IsTask()) {
+      is_tma_load = static_cast<TaskNode *>(node)->HasTMALoad();
+    }
+    int stage = !is_tma_load ? 0 : (num_stages);
+    stage_map[node] = stage;
+    if (stage != num_stages) {
+      has_promoted = true;
+    }
+    node->SetStartTime(is_tma_load ? 0 : num_stages);
+    node->SetLatency(0);
+    node->SetII(0);
+  }
+
+  ctrl->SetIIperIter(1);
+
+  // Estimate overall latency
+  int64_t tripcount = 100;
+  const ForNode *for_node = ctrl->control.get();
+  PrimExpr loop_extent = for_node->extent;
+  PrimExpr loop_step = for_node->step.has_value()
+                           ? for_node->step.value()
+                           : IntImm(DataType::Int(32), 1);
+  if (const auto *extent_int = loop_extent.as<IntImmNode>()) {
+    if (const auto *step_int = loop_step.as<IntImmNode>()) {
+      int64_t extent = extent_int->value;
+      int64_t step = step_int->value;
+      if (step > 0) {
+        tripcount = (extent + step - 1) / step;
+      }
+    }
+  }
+  ctrl->SetII(tripcount);
+  ctrl->SetLatency(tripcount);
+
+  // Wrap in ScheduleUnits with assigned stages
+  for (auto &node : seq_body->children) {
+    auto unit = std::make_shared<ScheduleUnit>();
+    unit->stage = stage_map[node.get()];
+    unit->child = std::move(node);
+    node = std::move(unit);
+  }
+
+  if (has_promoted) {
+    ctrl->SetPromote(true);
+  }
+}
+
+void ScheduleUnitBuilder::NaiveScheduleRecursive(
+    std::shared_ptr<IRStructure> &node) {
+  if (!node)
+    return;
+
+  // Helper to wrap children in ScheduleUnits preserving order
+  auto WrapInScheduleUnits =
+      [](std::vector<std::shared_ptr<IRStructure>> &children) {
+        for (auto &child : children) {
+          auto unit = std::make_shared<ScheduleUnit>();
+          unit->stage = -1;
+          unit->child = std::move(child);
+          child = std::move(unit);
+        }
+      };
+
+  if (node->IsTask()) {
+    return;
+  } else if (node->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(node.get());
+    std::vector<std::shared_ptr<IRStructure>> origin_children;
+    GatherTaskNodes(seq->children, origin_children);
+    for (auto &child : origin_children) {
+      NaiveScheduleRecursive(child);
+    }
+    WrapInScheduleUnits(origin_children);
+    seq->children = origin_children;
+  } else if (node->IsControl()) {
+    auto ctrl = static_cast<ControlNode *>(node.get());
+    if (ctrl->child) {
+      if (ctrl->child->IsSequence() || ctrl->child->IsWrapper()) {
+        NaiveScheduleLoop(ctrl);
+      } else {
+        NaiveScheduleRecursive(ctrl->child);
+      }
+    }
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<WrapperNode *>(node.get());
+    std::vector<std::shared_ptr<IRStructure>> origin_children;
+    GatherTaskNodes({wrapper->task, wrapper->child}, origin_children);
+    for (auto &child : origin_children) {
+      NaiveScheduleRecursive(child);
+    }
+    auto seq_node = std::make_shared<SequenceNode>();
+    WrapInScheduleUnits(origin_children);
+    seq_node->children = origin_children;
+    node = seq_node;
+  } else {
+    LOG(FATAL) << "[NaiveScheduleRecursive] Unknown IRStructure type";
+  }
+}
+
+bool ScheduleUnitBuilder::NaiveBuild(std::shared_ptr<IRStructure> &root) {
+  NaiveScheduleRecursive(root);
+  return NaiveAssignWarpgroupIds(root.get());
+}
+
 } // namespace tl
 } // namespace tvm
