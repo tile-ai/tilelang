@@ -120,6 +120,31 @@ def test_no_transform_if_then_else_condition():
     _check(before, after)
 
 
+def test_local_to_memory_with_let_stmt():
+    """Test local → memory transform still triggers through LetStmt-bound loads."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        scale = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            factor = scale[i]
+            b[i] = a_frag[i] * factor
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        scale = T.alloc_local((16,), T.float32)
+        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+        for i in T.vectorized(16):
+            factor = scale[i]
+            b_local_cast[i] = T.Cast("float8_e4m3fn", a_frag[i] * factor)
+        for i_copy in T.vectorized(16):
+            b[i_copy] = b_local_cast[i_copy]
+
+    _check(before, after)
+
+
 # =============================================================================
 # CUDA Codegen Tests
 # =============================================================================
