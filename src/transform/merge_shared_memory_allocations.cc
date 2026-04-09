@@ -564,7 +564,8 @@ private:
     // Visit children first (strips boundaries, shared memory allocates, etc.)
     Stmt visited = StmtExprMutator::VisitStmt_(op);
     const auto *seq = visited.as<SeqStmtNode>();
-    if (!seq) return visited;
+    if (!seq)
+      return visited;
 
     // Helper: check if stmt is Evaluate(0) (remnant of stripped boundaries)
     auto is_noop = [](const Stmt &s) -> bool {
@@ -614,8 +615,10 @@ private:
       while (j < stmts.size()) {
         auto [bufs_j, inner_j] = unwrap_decl_buffers(stmts[j]);
         const auto *ite_j = inner_j.as<IfThenElseNode>();
-        if (!ite_j || !ite_j->else_case.defined()) break;
-        if (!expr_equal(cond, ite_j->condition)) break;
+        if (!ite_j || !ite_j->else_case.defined())
+          break;
+        if (!expr_equal(cond, ite_j->condition))
+          break;
         all_bufs.insert(all_bufs.end(), bufs_j.begin(), bufs_j.end());
         then_parts.push_back(ite_j->then_case);
         else_parts.push_back(ite_j->else_case.value());
@@ -639,7 +642,8 @@ private:
       }
     }
 
-    if (merged.size() == 1) return merged[0];
+    if (merged.size() == 1)
+      return merged[0];
     return SeqStmt(merged);
   }
 

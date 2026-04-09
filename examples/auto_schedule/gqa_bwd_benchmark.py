@@ -232,6 +232,7 @@ def flashattn_bwd_postprocess(total_q, total_kv, heads, head_kv, dim_qk, dim_v):
 # Backward kernels: 4 variants = {atomic, split} x {auto_schedule, no_auto_schedule}
 # =====================================================================
 
+
 def _flashattn_bwd_atomic_body(
     batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, dim_v, is_causal, block_M, block_N, threads=256, num_stages=2, groups=1
 ):
@@ -537,6 +538,7 @@ def flashattn_bwd_split_manual(
 # torch.autograd.Function wrappers
 # =====================================================================
 
+
 def _make_attention_class(use_split, use_auto_schedule):
     """Create an attention autograd Function for the given config."""
 
@@ -551,9 +553,7 @@ def _make_attention_class(use_split, use_auto_schedule):
 
     class _attention(torch.autograd.Function):
         @staticmethod
-        def forward(
-            ctx, q, k, v, seqlens_q, seqlens_k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, causal, groups=1
-        ):
+        def forward(ctx, q, k, v, seqlens_q, seqlens_k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, causal, groups=1):
             BATCH, N_CTX, H, D_HEAD_QK = q.shape
             D_HEAD_V = v.shape[-1]
             block_M = 128
@@ -600,9 +600,20 @@ def _make_attention_class(use_split, use_auto_schedule):
 
             if use_split:
                 kernel = bwd_kernel_fn(
-                    BATCH, total_q, total_kv, N_CTX, H, ctx.max_seqlen_q,
-                    D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N,
-                    threads=256, num_stages=1, groups=groups,
+                    BATCH,
+                    total_q,
+                    total_kv,
+                    N_CTX,
+                    H,
+                    ctx.max_seqlen_q,
+                    D_HEAD_QK,
+                    D_HEAD_V,
+                    ctx.causal,
+                    block_M,
+                    block_N,
+                    threads=256,
+                    num_stages=1,
+                    groups=groups,
                 )
                 mod_post = flashattn_bwd_postprocess(total_q, total_kv, H, HEAD_KV, D_HEAD_QK, D_HEAD_V)
                 dq = torch.zeros_like(q, dtype=torch.float32)
@@ -613,9 +624,20 @@ def _make_attention_class(use_split, use_auto_schedule):
                 dk, dv = dk.sum(0), dv.sum(0)
             else:
                 kernel = bwd_kernel_fn(
-                    BATCH, total_q, total_kv, N_CTX, H, ctx.max_seqlen_q,
-                    D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N,
-                    threads=256, num_stages=1, groups=groups,
+                    BATCH,
+                    total_q,
+                    total_kv,
+                    N_CTX,
+                    H,
+                    ctx.max_seqlen_q,
+                    D_HEAD_QK,
+                    D_HEAD_V,
+                    ctx.causal,
+                    block_M,
+                    block_N,
+                    threads=256,
+                    num_stages=1,
+                    groups=groups,
                 )
                 dq = torch.zeros_like(q, dtype=torch.float32)
                 dk = torch.zeros_like(k, dtype=torch.float32)
@@ -749,11 +771,7 @@ def main(
             correct = False
             print(f"  Correctness FAILED: {e}")
 
-        # Benchmark
-        def run_tl():
-            O_tl.backward(dO, retain_graph=True)
-
-        latency = do_bench(run_tl, warmup=500)
+        latency = do_bench(lambda: O_tl.backward(dO, retain_graph=True), warmup=500)  # noqa: B023
         tflops = total_flops / latency * 1e-9
         results.append((label, latency, tflops, correct))
         status = "PASS" if correct else "FAIL"
