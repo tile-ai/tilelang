@@ -9,7 +9,6 @@ Verifies that:
 import tilelang as tl
 import tilelang.language as T
 from tilelang import tvm
-from tvm import tir
 from tvm.tir.stmt_functor import post_order_visit
 import tilelang.testing
 
@@ -165,15 +164,11 @@ def test_codegen_emits_braces():
     # signature line, so a standalone "{" on its own line indicates our
     # lexical scope.
     import re
+
     standalone_open_braces = re.findall(r"^\s*\{\s*$", src, re.MULTILINE)
-    assert len(standalone_open_braces) >= 1, (
-        f"Expected at least 1 standalone '{{' for lexical scope, "
-        f"found {len(standalone_open_braces)}"
-    )
+    assert len(standalone_open_braces) >= 1, f"Expected at least 1 standalone '{{' for lexical scope, found {len(standalone_open_braces)}"
     # Verify the local allocation appears inside the scoped block
-    assert re.search(r"\{\s*\n\s*float\s+S\[", src), (
-        "Expected local variable declaration inside the lexical scope block"
-    )
+    assert re.search(r"\{\s*\n\s*float\s+S\[", src), "Expected local variable declaration inside the lexical scope block"
 
 
 if __name__ == "__main__":
