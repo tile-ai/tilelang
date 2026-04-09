@@ -14,13 +14,13 @@ sources get a local cast buffer (copy from memory → cast_buf → compute).
 
 Before:
     for vec in T.vectorized(16):
-        out_shared[vec] = T.cast(T.float32(x_frag[vec]) * scale[vec], "float8")
+        out_shared[vec] = T.cast(T.float32(x_frag[vec]) * scale[vec], T.float8_e4m3fn)
 
 After:
     for vec_copy in T.vectorized(16):                     # copy from memory
         scale_local_cast[vec_copy] = scale[vec_copy]
     for vec in T.vectorized(16):                           # compute (registers only)
-        out_local_cast[vec] = T.cast(T.float32(x_frag[vec]) * scale_local_cast[vec], "float8")
+        out_local_cast[vec] = T.cast(T.float32(x_frag[vec]) * scale_local_cast[vec], T.float8_e4m3fn)
     for vec_copy in T.vectorized(16):                      # copy to memory
         out_shared[vec_copy] = out_local_cast[vec_copy]
 """
