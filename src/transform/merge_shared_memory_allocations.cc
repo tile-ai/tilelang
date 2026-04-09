@@ -26,6 +26,7 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -552,7 +553,98 @@ private:
                         StmtExprMutator::VisitStmt(op->body));
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);
     }
+    if (op->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
+      // Strip boundary annotations after shared memory merging is done.
+      return StmtExprMutator::VisitStmt(op->body);
+    }
     return StmtMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    // Visit children first (strips boundaries, shared memory allocates, etc.)
+    Stmt visited = StmtExprMutator::VisitStmt_(op);
+    const auto *seq = visited.as<SeqStmtNode>();
+    if (!seq)
+      return visited;
+
+    // Helper: check if stmt is Evaluate(0) (remnant of stripped boundaries)
+    auto is_noop = [](const Stmt &s) -> bool {
+      const auto *e = s.as<EvaluateNode>();
+      return e && is_zero(e->value);
+    };
+
+    // Helper: peel off DeclBuffer layers, returning (buffers, inner stmt)
+    auto unwrap_decl_buffers =
+        [](Stmt s) -> std::pair<std::vector<Buffer>, Stmt> {
+      std::vector<Buffer> bufs;
+      while (const auto *d = s.as<DeclBufferNode>()) {
+        bufs.push_back(d->buffer);
+        s = d->body;
+      }
+      return {bufs, s};
+    };
+
+    // Filter out Evaluate(0) remnants
+    std::vector<Stmt> stmts;
+    for (const auto &s : seq->seq) {
+      if (!is_noop(s)) {
+        stmts.push_back(s);
+      }
+    }
+
+    // Merge consecutive DeclBuffer*(IfThenElse(same_cond, ...)) entries
+    tir::ExprDeepEqual expr_equal;
+    std::vector<Stmt> merged;
+    size_t i = 0;
+    while (i < stmts.size()) {
+      auto [bufs_i, inner_i] = unwrap_decl_buffers(stmts[i]);
+      const auto *ite_i = inner_i.as<IfThenElseNode>();
+      if (!ite_i || !ite_i->else_case.defined()) {
+        merged.push_back(stmts[i]);
+        ++i;
+        continue;
+      }
+
+      // Start a merge group
+      std::vector<Buffer> all_bufs(bufs_i);
+      std::vector<Stmt> then_parts{ite_i->then_case};
+      std::vector<Stmt> else_parts{ite_i->else_case.value()};
+      PrimExpr cond = ite_i->condition;
+
+      size_t j = i + 1;
+      while (j < stmts.size()) {
+        auto [bufs_j, inner_j] = unwrap_decl_buffers(stmts[j]);
+        const auto *ite_j = inner_j.as<IfThenElseNode>();
+        if (!ite_j || !ite_j->else_case.defined())
+          break;
+        if (!expr_equal(cond, ite_j->condition))
+          break;
+        all_bufs.insert(all_bufs.end(), bufs_j.begin(), bufs_j.end());
+        then_parts.push_back(ite_j->then_case);
+        else_parts.push_back(ite_j->else_case.value());
+        ++j;
+      }
+
+      if (j == i + 1) {
+        // No merge possible
+        merged.push_back(stmts[i]);
+        ++i;
+      } else {
+        // Build merged IfThenElse
+        Stmt body = IfThenElse(cond, SeqStmt::Flatten(then_parts),
+                               SeqStmt::Flatten(else_parts));
+        // Wrap with all DeclBuffers (innermost last)
+        for (int k = static_cast<int>(all_bufs.size()) - 1; k >= 0; --k) {
+          body = DeclBuffer(all_bufs[k], body);
+        }
+        merged.push_back(body);
+        i = j;
+      }
+    }
+
+    if (merged.size() == 1)
+      return merged[0];
+    return SeqStmt(merged);
   }
 
   Stmt VisitStmt_(const AllocateNode *op) final {
