@@ -957,6 +957,12 @@ private:
     }
   }
 
+  /*! \brief Return the effective attach scope: lexical_scope_ takes
+   *  precedence over thread_scope_ when set. */
+  const Object *effective_scope() const {
+    return lexical_scope_ ? lexical_scope_ : thread_scope_;
+  }
+
   // Memory plan algorithm
   void
   PlanMemory(const std::vector<StmtEntry> &seq,
@@ -993,7 +999,7 @@ private:
                 InplaceOpVerifier visitor;
                 StorageEntry *src_entry = alloc_map_.at(src);
                 if (src_entry->scope == storage_scope &&
-                    src_entry->attach_scope_ == thread_scope_ &&
+                    src_entry->attach_scope_ == effective_scope() &&
                     src_entry->elem_type == alloc->dtype.element_of() &&
                     visitor.Check(s.stmt, var, src)) {
                   uint64_t const_nbits =
@@ -1010,7 +1016,7 @@ private:
             }
           }
           if (dst_entry == nullptr) {
-            dst_entry = FindAlloc(alloc, thread_scope_, storage_scope,
+            dst_entry = FindAlloc(alloc, effective_scope(), storage_scope,
                                   entry.num_physical_dimensions, enable_reuse,
                                   reuse_require_exact_matched_dtype);
           }
@@ -1027,12 +1033,12 @@ private:
           PlanNewScope(op);
         } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
           if (s.scope_pair_offset > 0) {
-            // Entering: save current thread_scope_ and redirect
-            // allocations to this lexical scope.
-            lexical_scope_stack_.push_back(thread_scope_);
-            thread_scope_ = op;
+            // Entering: redirect allocation attachment to this scope.
+            // thread_scope_ is NOT touched so PlanNewScope keeps working.
+            lexical_scope_stack_.push_back(lexical_scope_);
+            lexical_scope_ = op;
           } else {
-            // Exiting: clean up free lists for this scope and restore.
+            // Exiting: clear free lists for this scope and restore.
             for (auto it = const_free_map_.begin();
                  it != const_free_map_.end();) {
               if (it->second->attach_scope_ == op) {
@@ -1049,7 +1055,7 @@ private:
                 ++it;
               }
             }
-            thread_scope_ = lexical_scope_stack_.back();
+            lexical_scope_ = lexical_scope_stack_.back();
             lexical_scope_stack_.pop_back();
           }
         } else {
@@ -1209,7 +1215,10 @@ private:
   }
   // thread scope.
   const Object *thread_scope_{nullptr};
-  // Saved thread_scope_ values for nested lexical_alloc_scope.
+  // Current lexical scope (set by lexical_alloc_scope, independent of
+  // thread_scope_ so that PlanNewScope's toggle protocol is preserved).
+  const Object *lexical_scope_{nullptr};
+  // Stack for nested lexical scopes.
   std::vector<const Object *> lexical_scope_stack_;
   // whether enable inplace detection.
   bool detect_inplace_{false};
