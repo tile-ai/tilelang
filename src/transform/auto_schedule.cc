@@ -349,6 +349,8 @@ private:
         static const auto copy_op = Op::Get("tl.tileop.copy");
         static const auto gemm_py_op = Op::Get("tl.tileop.gemm_py");
         static const auto gemm_op = Op::Get("tl.tileop.gemm");
+        static const auto wgmma_gemm_py_op = Op::Get("tl.tileop.wgmma_gemm_py");
+        static const auto wgmma_gemm_op = Op::Get("tl.tileop.wgmma_gemm");
         static const auto reduce_op = Op::Get("tl.tileop.reduce");
         static const auto fill_op = Op::Get("tl.tileop.fill");
         static const auto region_op = Op::Get("tl.tileop.region");
@@ -389,7 +391,9 @@ private:
             if (idx_global == 1 && idx_shared == 0)
               found_tma = true;
           }
-        } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op)) {
+        } else if (op->op.same_as(gemm_py_op) || op->op.same_as(gemm_op) ||
+                   op->op.same_as(wgmma_gemm_py_op) ||
+                   op->op.same_as(wgmma_gemm_op)) {
           found_tensor = true;
 
           int64_t m = op->args[5].as<IntImmNode>()->value;
