@@ -52,7 +52,7 @@ from tvm.tir.stmt_functor import post_order_visit, substitute
 from tvm.tir.transform import prim_func_pass
 
 # Cache the Op for if_then_else to avoid repeated lookups
-_IF_THEN_ELSE_OP = Op.get('tir.if_then_else')
+_IF_THEN_ELSE_OP = Op.get("tir.if_then_else")
 
 from tilelang.utils.language import is_fragment, is_global, is_local, is_local_var, is_shared
 
@@ -200,9 +200,9 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
     def _make_unique_name(self, base: str) -> str:
         """Generate a unique name with incrementing counter."""
-        name = f'{base}'
+        name = f"{base}"
         if self._var_counter > 0:
-            name += f'_{self._var_counter}'
+            name += f"_{self._var_counter}"
         self._var_counter += 1
         return name
 
@@ -263,8 +263,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
         # Build copy-from-memory loops (before compute)
         # Include store buffers that are also loaded (read-modify-write)
-        rmw_buffers = {buf: store_cast_buffers[buf] for buf in store_cast_buffers
-                       if buf in collector._seen_load_buffers}
+        rmw_buffers = {buf: store_cast_buffers[buf] for buf in store_cast_buffers if buf in collector._seen_load_buffers}
         all_copy_from: CastBufferMap = {**load_cast_buffers, **rmw_buffers}
         copy_from_loops = self._create_copy_loops_from_memory(op, all_copy_from, condition)
 
@@ -301,12 +300,12 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             if store.buffer in cast_buffers:
                 continue
 
-            cache_name = self._make_unique_name(f'{store.buffer.name}_local_cast')
+            cache_name = self._make_unique_name(f"{store.buffer.name}_local_cast")
             cast_buffer = tir.decl_buffer(
                 shape=(extent,),
                 dtype=store.buffer.dtype,
                 name=cache_name,
-                scope='local',
+                scope="local",
             )
             cast_buffers[store.buffer] = (cast_buffer, list(store.indices))
 
@@ -320,12 +319,12 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             if load.buffer in cast_buffers:
                 continue
 
-            cache_name = self._make_unique_name(f'{load.buffer.name}_local_cast')
+            cache_name = self._make_unique_name(f"{load.buffer.name}_local_cast")
             cast_buffer = tir.decl_buffer(
                 shape=(extent,),
                 dtype=load.buffer.dtype,
                 name=cache_name,
-                scope='local',
+                scope="local",
             )
             cast_buffers[load.buffer] = (cast_buffer, list(load.indices))
 
@@ -349,7 +348,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         copy_loops: list[For] = []
 
         for orig_buffer, (cast_buffer, orig_indices) in cast_buffers.items():
-            copy_var = Var(f'{op.loop_var.name}_copy', op.loop_var.dtype)
+            copy_var = Var(f"{op.loop_var.name}_copy", op.loop_var.dtype)
 
             # Substitute loop_var with copy_var in original indices
             new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
@@ -385,7 +384,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         copy_loops: list[For] = []
 
         for orig_buffer, (cast_buffer, orig_indices) in cast_buffers.items():
-            copy_var = Var(f'{op.loop_var.name}_copy', op.loop_var.dtype)
+            copy_var = Var(f"{op.loop_var.name}_copy", op.loop_var.dtype)
 
             # Substitute loop_var with copy_var in original indices
             new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
