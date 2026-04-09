@@ -832,6 +832,73 @@ inline int CountRegisterRegions(const IRStructure *node) {
   return static_cast<int>(reg_regions.size());
 }
 
+// Collect all ControlNodes at the top level of the IR tree
+// (does not recurse into ControlNodes themselves)
+inline void
+CollectTopLevelControlNodes(IRStructure *node,
+                            std::vector<ControlNode *> &control_nodes) {
+  if (!node)
+    return;
+  if (node->IsControl()) {
+    control_nodes.push_back(static_cast<ControlNode *>(node));
+  } else if (node->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(node);
+    for (auto &child : seq->children) {
+      CollectTopLevelControlNodes(child.get(), control_nodes);
+    }
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<WrapperNode *>(node);
+    CollectTopLevelControlNodes(wrapper->child.get(), control_nodes);
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<ScheduleUnit *>(node);
+    CollectTopLevelControlNodes(unit->child.get(), control_nodes);
+  }
+}
+
+// Collect all TaskNodes at the top level (not inside any ControlNode)
+inline void CollectTopLevelTaskNodes(IRStructure *node,
+                                     std::vector<TaskNode *> &task_nodes) {
+  if (!node)
+    return;
+  if (node->IsTask()) {
+    task_nodes.push_back(static_cast<TaskNode *>(node));
+  } else if (node->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(node);
+    for (auto &child : seq->children) {
+      CollectTopLevelTaskNodes(child.get(), task_nodes);
+    }
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<WrapperNode *>(node);
+    CollectTopLevelTaskNodes(wrapper->child.get(), task_nodes);
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<ScheduleUnit *>(node);
+    CollectTopLevelTaskNodes(unit->child.get(), task_nodes);
+  }
+}
+
+// Collect all top-level leaf items (TaskNodes and ControlNodes) in order.
+// Flattens through SequenceNode/WrapperNode/ScheduleUnit but stops at
+// TaskNode and ControlNode.
+inline void CollectTopLevelItems(IRStructure *node,
+                                 std::vector<IRStructure *> &items) {
+  if (!node)
+    return;
+  if (node->IsTask() || node->IsControl()) {
+    items.push_back(node);
+  } else if (node->IsSequence()) {
+    auto seq = static_cast<SequenceNode *>(node);
+    for (auto &child : seq->children) {
+      CollectTopLevelItems(child.get(), items);
+    }
+  } else if (node->IsWrapper()) {
+    auto wrapper = static_cast<WrapperNode *>(node);
+    CollectTopLevelItems(wrapper->child.get(), items);
+  } else if (node->IsScheduleUnit()) {
+    auto unit = static_cast<ScheduleUnit *>(node);
+    CollectTopLevelItems(unit->child.get(), items);
+  }
+}
+
 // Helper function to collect all TaskNodes with context information
 void CollectAllTaskNodesWithContext(
     IRStructure *node, std::vector<TaskNodeWithContext> &all_tasks,
