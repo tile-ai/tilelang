@@ -600,11 +600,6 @@ def main(batch=1, heads=64, kv_heads=1, kv_ctx=1024, dim=512, pe_dim=64):
 
         kernel = kernel_fn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
 
-        cuda_path = f"../debug/flashmla_{label}.cu"
-        with open(cuda_path, "w") as f:
-            f.write(kernel.get_kernel_source())
-        print(f"  CUDA source saved to {cuda_path}")
-
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
         # Correctness check
