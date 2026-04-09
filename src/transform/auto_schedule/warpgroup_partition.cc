@@ -1140,95 +1140,112 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     auto wg0_segments = SegmentSequenceChildren(wg0_structure.get());
     auto wg1_segments = SegmentSequenceChildren(wg1_structure.get());
 
-    // Only apply segmented splitting when both sides have matching segment
-    // counts (they originate from the same root, split at ControlNode
-    // boundaries, so they should match). Otherwise fall back to the
-    // single-IfThenElse path.
-    if (!wg0_segments.empty() && !wg1_segments.empty() &&
-        wg0_segments.size() == wg1_segments.size() && wg0_segments.size() > 1) {
-      std::vector<Stmt> segmented_stmts;
-      bool has_simt_copy = false;
-      // Check for SIMT copy in any wg1 segment (needed for set_max_nreg
-      // decision).
-      {
-        Stmt full_wg1 =
-            ConvertIRStructureToStmt(wg1_structure.get(), outer_enable_epi);
-        has_simt_copy = SimtCopyDetector::Detect(full_wg1);
-      }
+    // Helper: extract the For loop_var pointer from a Control segment
+    // (a segment with exactly one ScheduleUnit whose child is a ControlNode).
+    auto GetControlLoopVar =
+        [](const std::vector<std::shared_ptr<IRStructure>> &seg)
+        -> const VarNode * {
+      if (seg.size() != 1)
+        return nullptr;
+      auto unit = static_cast<ScheduleUnit *>(seg[0].get());
+      if (!unit->child || !unit->child->IsControl())
+        return nullptr;
+      auto ctrl = static_cast<ControlNode *>(unit->child.get());
+      return ctrl->control->loop_var.get();
+    };
 
-      // Accumulate LetDecl info from previous segments for variable renaming.
-      std::vector<std::pair<Var, PrimExpr>> wg0_accumulated_lets;
-      std::vector<std::pair<Var, PrimExpr>> wg1_accumulated_lets;
+    auto MergeNonControlSegments =
+        [&GetControlLoopVar](
+            std::vector<std::vector<std::shared_ptr<IRStructure>>> &segments) {
+          std::vector<std::vector<std::shared_ptr<IRStructure>>> merged;
+          std::vector<std::shared_ptr<IRStructure>> pending;
+          for (auto &seg : segments) {
+            auto lv = GetControlLoopVar(seg);
+            if (lv) {
+              // Control segment: prepend any pending non-Control children
+              merged.push_back(std::move(pending));
+              merged.push_back(std::move(seg));
+              pending.clear();
+            } else {
+              // Non-Control segment: accumulate for merging
+              pending.insert(pending.end(),
+                             std::make_move_iterator(seg.begin()),
+                             std::make_move_iterator(seg.end()));
+            }
+          }
+          // Trailing non-Control segments: append to last merged segment
+          merged.push_back(std::move(pending));
+          segments = std::move(merged);
+        };
 
-      for (size_t si = 0; si < wg0_segments.size(); ++si) {
-        // Insert liveness boundary between segments.
-        segmented_stmts.push_back(
-            AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
-                     Evaluate(0)));
+    MergeNonControlSegments(wg0_segments);
+    MergeNonControlSegments(wg1_segments);
 
-        // Collect LetDecl info from current segment before converting to Stmt.
-        auto wg0_lets = CollectLetDeclInfo(wg0_segments[si]);
-        auto wg1_lets = CollectLetDeclInfo(wg1_segments[si]);
+    ICHECK_EQ(wg0_segments.size(), wg1_segments.size())
+        << "Segment count mismatch between wg0 and wg1 after merging "
+           "non-Control segments";
 
-        Stmt wg0_seg_stmt = SegmentToStmt(wg0_segments[si]);
-        Stmt wg1_seg_stmt = SegmentToStmt(wg1_segments[si]);
-
-        // For segments after the first, wrap with renamed LetDecl bindings
-        // from all previous segments so that variables remain in scope.
-        if (si > 0) {
-          wg0_seg_stmt =
-              WrapWithRenamedLetDecls(wg0_seg_stmt, wg0_accumulated_lets);
-          wg1_seg_stmt =
-              WrapWithRenamedLetDecls(wg1_seg_stmt, wg1_accumulated_lets);
-        }
-
-        // Accumulate this segment's LetDecls for future segments.
-        wg0_accumulated_lets.insert(wg0_accumulated_lets.end(),
-                                    wg0_lets.begin(), wg0_lets.end());
-        wg1_accumulated_lets.insert(wg1_accumulated_lets.end(),
-                                    wg1_lets.begin(), wg1_lets.end());
-
-        // Prepend set_max_nreg only to the first segment.
-        if (si == 0 && !has_simt_copy && config.enable_set_max_nreg) {
-          wg0_seg_stmt =
-              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                     {config.consumer_max_nreg, 1})),
-                       wg0_seg_stmt});
-          wg1_seg_stmt =
-              SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                                     {config.producer_max_nreg, 0})),
-                       wg1_seg_stmt});
-        }
-
-        segmented_stmts.push_back(MakeWarpgroupIf(wg0_seg_stmt, wg1_seg_stmt));
-      }
-      if_then_else = SeqStmt::Flatten(segmented_stmts);
-    } else {
-      // Fallback: single IfThenElse (original logic).
-      Stmt then_body =
-          ConvertIRStructureToStmt(wg0_structure.get(), outer_enable_epi);
-      Stmt else_body =
+    // Apply segmented splitting
+    std::vector<Stmt> segmented_stmts;
+    bool has_simt_copy = false;
+    // Check for SIMT copy in any wg1 segment (needed for set_max_nreg
+    // decision).
+    {
+      Stmt full_wg1 =
           ConvertIRStructureToStmt(wg1_structure.get(), outer_enable_epi);
-      bool has_simt_copy = SimtCopyDetector::Detect(else_body);
-      if (has_simt_copy || !config.enable_set_max_nreg) {
-        if_then_else =
-            IfThenElse(condition, then_body,
-                       IfThenElse(wg1_condition, else_body, Evaluate(0)));
-      } else {
-        std::vector<Stmt> then_body_with_nreg{
-            Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                          {config.consumer_max_nreg, 1})),
-            then_body};
-        std::vector<Stmt> else_body_with_nreg{
-            Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
-                          {config.producer_max_nreg, 0})),
-            else_body};
-        if_then_else =
-            IfThenElse(condition, SeqStmt(then_body_with_nreg),
-                       IfThenElse(wg1_condition, SeqStmt(else_body_with_nreg),
-                                  Evaluate(0)));
-      }
+      has_simt_copy = SimtCopyDetector::Detect(full_wg1);
     }
+
+    // Accumulate LetDecl info from previous segments for variable renaming.
+    std::vector<std::pair<Var, PrimExpr>> wg0_accumulated_lets;
+    std::vector<std::pair<Var, PrimExpr>> wg1_accumulated_lets;
+
+    for (size_t si = 0; si < wg0_segments.size(); ++si) {
+      // Insert liveness boundary between segments.
+      segmented_stmts.push_back(
+          AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                    Evaluate(0)));
+
+      // Collect LetDecl info from current segment before converting to Stmt.
+      auto wg0_lets = CollectLetDeclInfo(wg0_segments[si]);
+      auto wg1_lets = CollectLetDeclInfo(wg1_segments[si]);
+
+      Stmt wg0_seg_stmt = SegmentToStmt(wg0_segments[si]);
+      Stmt wg1_seg_stmt = SegmentToStmt(wg1_segments[si]);
+
+      // For segments after the first, wrap with renamed LetDecl bindings
+      // from all previous segments so that variables remain in scope.
+      if (si > 0) {
+        wg0_seg_stmt =
+            WrapWithRenamedLetDecls(wg0_seg_stmt, wg0_accumulated_lets);
+        wg1_seg_stmt =
+            WrapWithRenamedLetDecls(wg1_seg_stmt, wg1_accumulated_lets);
+      }
+
+      // Accumulate this segment's LetDecls for future segments.
+      wg0_accumulated_lets.insert(wg0_accumulated_lets.end(),
+                                  wg0_lets.begin(), wg0_lets.end());
+      wg1_accumulated_lets.insert(wg1_accumulated_lets.end(),
+                                  wg1_lets.begin(), wg1_lets.end());
+
+      // Prepend set_max_nreg only to the first segment.
+      if (si == 0 && !has_simt_copy && config.enable_set_max_nreg) {
+        wg0_seg_stmt =
+            SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                    {config.consumer_max_nreg, 1})),
+                      wg0_seg_stmt});
+        wg1_seg_stmt =
+            SeqStmt({Evaluate(Call(DataType::Handle(), tl::set_max_nreg(),
+                                    {config.producer_max_nreg, 0})),
+                      wg1_seg_stmt});
+      }
+
+      segmented_stmts.push_back(MakeWarpgroupIf(wg0_seg_stmt, wg1_seg_stmt));
+    }
+    segmented_stmts.push_back(
+        AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                  Evaluate(0)));
+    if_then_else = SeqStmt::Flatten(segmented_stmts);
   } else if (wg0_has_stmts) {
     // Only warpgroup 0 has statements, execute unconditionally
     if_then_else =
@@ -1308,7 +1325,8 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     combined_stmt = pro_and_warpgroup_stmt;
   }
 
-  return combined_stmt;
+  return SeqStmt({AttrStmt(Integer(0), attr::kAutoScheduleSharedMemoryBoundary, 0,
+                     Evaluate(0)), combined_stmt});
 }
 
 } // namespace tl

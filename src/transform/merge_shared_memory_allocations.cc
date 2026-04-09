@@ -271,7 +271,12 @@ public:
     linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
   }
 
-  // Visit kAutoScheduleSharedMemoryBoundary bounded scopes
+  // Visit kAutoScheduleSharedMemoryBoundary bounded scopes.
+  //
+  // After ReNestLetStmts, the next boundary marker may be nested inside
+  // LetStmt / non-boundary AttrStmt chains rather than sitting as a direct
+  // sibling in a SeqStmt.  We therefore recursively peel through such
+  // wrappers to find the innermost SeqStmt and locate the boundary there.
   void VisitBoundedNewScopes(const AttrStmtNode *op) {
     scope_.push_back(StmtEntry());
     StmtEntry e;
@@ -282,34 +287,56 @@ public:
     linear_seq_.push_back(e);
     bool has_tail_stmt = false;
     const AttrStmtNode *tail_stmt = nullptr;
-    auto body = op->body.as<SeqStmtNode>();
-    if (op->body.as<SeqStmtNode>()) {
-      for (auto &sub_stmt : body->seq) {
-        if (sub_stmt.as<AttrStmtNode>() &&
-            sub_stmt.as<AttrStmtNode>()->attr_key ==
-                attr::kAutoScheduleSharedMemoryBoundary) {
-          has_tail_stmt = true;
-          tail_stmt = sub_stmt.as<AttrStmtNode>();
-        } else {
-          StmtExprVisitor::VisitStmt(sub_stmt);
-        }
-      }
-    } else {
-      StmtExprVisitor::VisitStmt(op->body);
-    }
+
+    // Recursively visit the body, peeling LetStmt / non-boundary AttrStmt
+    // wrappers.  When a SeqStmt is reached, scan its children for the next
+    // boundary marker.  Everything that is not the boundary is visited
+    // normally so that buffer accesses are recorded in this scope.
+    std::function<void(const Stmt &)> VisitBodyFindBoundary =
+        [&](const Stmt &body) {
+          if (const auto *seq = body.as<SeqStmtNode>()) {
+            for (const auto &sub_stmt : seq->seq) {
+              if (const auto *attr = sub_stmt.as<AttrStmtNode>();
+                  attr && attr->attr_key ==
+                              attr::kAutoScheduleSharedMemoryBoundary) {
+                has_tail_stmt = true;
+                tail_stmt = attr;
+              } else {
+                StmtExprVisitor::VisitStmt(sub_stmt);
+              }
+            }
+          } else if (const auto *let = body.as<LetStmtNode>()) {
+            // Record the let-binding variable/value, then recurse into body.
+            StmtExprVisitor::VisitExpr(let->value);
+            VisitBodyFindBoundary(let->body);
+          } else if (const auto *attr = body.as<AttrStmtNode>()) {
+            if (attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
+              // The body itself is a boundary — treat it as the tail.
+              has_tail_stmt = true;
+              tail_stmt = attr;
+            } else {
+              // Non-boundary AttrStmt wrapper — visit value and recurse.
+              StmtExprVisitor::VisitExpr(attr->value);
+              VisitBodyFindBoundary(attr->body);
+            }
+          } else {
+            // Any other statement — visit normally.
+            StmtExprVisitor::VisitStmt(body);
+          }
+        };
+
+    VisitBodyFindBoundary(op->body);
+
     // after scope.
     e.touched = std::move(scope_.back().touched);
     scope_.pop_back();
     int64_t end_index = static_cast<int64_t>(linear_seq_.size());
     ICHECK_GT(end_index, begin_index);
-    // The paired entries serve as scope sentinels once we flatten the
-    // control-flow tree.
     e.scope_pair_offset = begin_index - end_index;
     linear_seq_.push_back(e);
-    // record the pointer to end index.
     ICHECK_NE(end_index, 0U);
     linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
-    // visit tail statement.
+    // visit tail statement (the next boundary scope).
     if (has_tail_stmt) {
       StmtExprVisitor::VisitStmt_(tail_stmt);
     }

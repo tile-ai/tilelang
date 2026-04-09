@@ -865,9 +865,45 @@ private:
   }
 };
 
+// Recursively flatten all nested SeqStmt nodes throughout the IR tree.
+// This must run before LetStmtNester so that every SeqStmt it encounters
+// is already flat, preventing incorrect LetStmt/AttrStmt absorption across
+// nested SeqStmt boundaries.
+class SeqStmtFlattener : public StmtMutator {
+public:
+  Stmt VisitStmt_(const SeqStmtNode *op) override {
+    // First, recursively visit children.
+    Array<Stmt> visited;
+    for (const auto &s : op->seq) {
+      visited.push_back(this->VisitStmt(s));
+    }
+    // Then flatten: if any child is itself a SeqStmt, inline its children.
+    Array<Stmt> flat;
+    std::function<void(const Stmt &)> Flatten = [&](const Stmt &s) {
+      if (const auto *inner = s.as<SeqStmtNode>()) {
+        for (const auto &inner_s : inner->seq) {
+          Flatten(inner_s);
+        }
+      } else {
+        flat.push_back(s);
+      }
+    };
+    for (const auto &s : visited) {
+      Flatten(s);
+    }
+    if (flat.empty())
+      return Evaluate(0);
+    if (flat.size() == 1)
+      return flat[0];
+    return SeqStmt(flat);
+  }
+};
+
 Stmt ReNestLetStmts(const Stmt &stmt) {
+  SeqStmtFlattener flattener;
+  Stmt flat = flattener(stmt);
   LetStmtNester nester;
-  return nester(stmt);
+  return nester(flat);
 }
 
 // StmtMutator to rewrite alloc_buffers in Block nodes
