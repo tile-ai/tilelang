@@ -101,90 +101,210 @@ void GatherTaskNodesSingle(
   return GatherTaskNodes({node}, task_nodes);
 }
 
-void CollectPrefixTasks(IRStructure *node,
-                        std::unordered_set<TaskNode *> &prefix_tasks,
-                        bool &prefix_valid) {
-  if (!node)
-    return;
+bool SameBuffer(const BufferRegion &a, const BufferRegion &b) {
+  return a->buffer.same_as(b->buffer);
+}
 
-  if (!prefix_valid)
-    return;
+bool SameVar(const Var &a, const Var &b) { return a.same_as(b); }
 
-  if (node->IsSequence()) {
-    auto seq = static_cast<SequenceNode *>(node);
-    for (auto &child : seq->children) {
-      CollectPrefixTasks(child.get(), prefix_tasks, prefix_valid);
+bool HasDependency(const IRStructure *a, const IRStructure *b) {
+  if (a->IsTask()) {
+    const TaskNode *task_a = static_cast<const TaskNode *>(a);
+    if (task_a->ContainsLoopBreak())
+      return true;
+  }
+  if (b->IsTask()) {
+    const TaskNode *task_b = static_cast<const TaskNode *>(b);
+    if (task_b->ContainsLoopBreak())
+      return true;
+  }
+  for (const auto &write_region_a : a->GetWriteRegions()) {
+    for (const auto &read_region_b : b->GetReadRegions()) {
+      if (SameBuffer(write_region_a, read_region_b))
+        return true;
     }
-  } else if (node->IsControl()) {
-    auto ctrl = static_cast<ControlNode *>(node);
-    prefix_valid = false;
-  } else if (node->IsWrapper()) {
-    auto wrapper = static_cast<WrapperNode *>(node);
-    CollectPrefixTasks(wrapper->child.get(), prefix_tasks, prefix_valid);
-  } else if (node->IsScheduleUnit()) {
-    auto unit = static_cast<ScheduleUnit *>(node);
-    CollectPrefixTasks(unit->child.get(), prefix_tasks, prefix_valid);
-  } else if (node->IsTask()) {
-    if (CountRegisterRegions(node) == 0) {
-      auto task = static_cast<TaskNode *>(node);
-      prefix_tasks.insert(task);
+    for (const auto &write_region_b : b->GetWriteRegions()) {
+      if (SameBuffer(write_region_a, write_region_b))
+        return true;
+    }
+  }
+  for (const auto &read_region_a : a->GetReadRegions()) {
+    for (const auto &write_region_b : b->GetWriteRegions()) {
+      if (SameBuffer(read_region_a, write_region_b))
+        return true;
+    }
+  }
+  for (const auto &write_var_a : a->GetWriteVars()) {
+    for (const auto &read_var_b : b->GetReadVars()) {
+      if (SameVar(write_var_a, read_var_b))
+        return true;
+    }
+  }
+  return false;
+}
+
+bool HasRegisterDependency(const IRStructure *a, const IRStructure *b) {
+  if (a->IsTask()) {
+    const TaskNode *task_a = static_cast<const TaskNode *>(a);
+    if (task_a->ContainsLoopBreak())
+      return true;
+  }
+  if (b->IsTask()) {
+    const TaskNode *task_b = static_cast<const TaskNode *>(b);
+    if (task_b->ContainsLoopBreak())
+      return true;
+  }
+  for (const auto &write_region_a : a->GetWriteRegions()) {
+    if (IsSharedBuffer(write_region_a.get()->buffer))
+      continue;
+    for (const auto &read_region_b : b->GetReadRegions()) {
+      if (SameBuffer(write_region_a, read_region_b))
+        return true;
+    }
+    for (const auto &write_region_b : b->GetWriteRegions()) {
+      if (SameBuffer(write_region_a, write_region_b))
+        return true;
+    }
+  }
+  for (const auto &read_region_a : a->GetReadRegions()) {
+    if (IsSharedBuffer(read_region_a.get()->buffer))
+      continue;
+    for (const auto &write_region_b : b->GetWriteRegions()) {
+      if (SameBuffer(read_region_a, write_region_b))
+        return true;
+    }
+  }
+  return false;
+}
+
+std::set<Buffer> GetSharedDependencies(const IRStructure *a,
+                                       const IRStructure *b) {
+  std::set<Buffer> deps;
+  for (const auto &write_region_a : a->GetWriteRegions()) {
+    if (!IsSharedBuffer(write_region_a->buffer))
+      continue;
+    for (const auto &read_region_b : b->GetReadRegions()) {
+      if (SameBuffer(write_region_a, read_region_b))
+        deps.insert(write_region_a->buffer);
+    }
+    for (const auto &write_region_b : b->GetWriteRegions()) {
+      if (SameBuffer(write_region_a, write_region_b))
+        deps.insert(write_region_a->buffer);
+    }
+  }
+  for (const auto &read_region_a : a->GetReadRegions()) {
+    if (!IsSharedBuffer(read_region_a->buffer))
+      continue;
+    for (const auto &write_region_b : b->GetWriteRegions()) {
+      if (SameBuffer(read_region_a, write_region_b))
+        deps.insert(read_region_a->buffer);
+    }
+  }
+  return deps;
+}
+
+bool HasRegisterRegion(const IRStructure *node) {
+  return CountRegisterRegions(node) > 0;
+}
+
+bool HasResourceDependency(const IRStructure *a, const IRStructure *b) {
+  if (a->UsesTMACore() && b->UsesTMACore())
+    return true;
+  if (a->UsesTensorCore() && b->UsesTensorCore())
+    return true;
+  if (a->UsesCUDACore() && b->UsesCUDACore())
+    return true;
+  return false;
+}
+
+void CollectPrefixTasks(IRStructure *root,
+                        std::unordered_set<TaskNode *> &prefix_tasks) {
+  if (!root)
+    return;
+
+  // Collect all top-level items (TaskNodes and ControlNodes) in order
+  std::vector<IRStructure *> items;
+  CollectTopLevelItems(root, items);
+
+  // Walk forward: a task is prefix iff it has no register regions AND
+  // has no dependency with any previously-rejected (non-prefix) item.
+  // ControlNodes are always rejected.
+  std::vector<IRStructure *> rejected;
+  for (auto *item : items) {
+    if (item->IsControl()) {
+      rejected.push_back(item);
+      continue;
+    }
+    if (!item->IsTask()) {
+      rejected.push_back(item);
+      continue;
+    }
+    auto *task = static_cast<TaskNode *>(item);
+    if (CountRegisterRegions(task) != 0) {
+      rejected.push_back(task);
+      continue;
+    }
+    bool has_dep = false;
+    for (auto *rej : rejected) {
+      if (HasDependency(task, rej)) {
+        has_dep = true;
+        break;
+      }
+    }
+    if (has_dep) {
+      rejected.push_back(task);
     } else {
-      prefix_valid = false;
+      prefix_tasks.insert(task);
     }
-  } else {
-    LOG(FATAL);
   }
-}
-
-void CollectSuffixTaskCandidates(IRStructure *node,
-                                 std::vector<TaskNode *> &suffix_candidates,
-                                 bool &suffix_valid) {
-  if (!node)
-    return;
-
-  if (!suffix_valid)
-    return;
-
-  if (node->IsSequence()) {
-    auto seq = static_cast<SequenceNode *>(node);
-    for (auto it = seq->children.rbegin(); it != seq->children.rend(); ++it) {
-      CollectSuffixTaskCandidates(it->get(), suffix_candidates, suffix_valid);
-    }
-  } else if (node->IsControl()) {
-    auto ctrl = static_cast<ControlNode *>(node);
-    suffix_valid = false;
-  } else if (node->IsWrapper()) {
-    auto wrapper = static_cast<WrapperNode *>(node);
-    CollectSuffixTaskCandidates(wrapper->child.get(), suffix_candidates,
-                                suffix_valid);
-  } else if (node->IsScheduleUnit()) {
-    auto unit = static_cast<ScheduleUnit *>(node);
-    CollectSuffixTaskCandidates(unit->child.get(), suffix_candidates,
-                                suffix_valid);
-  } else if (node->IsTask()) {
-    auto task = static_cast<TaskNode *>(node);
-    suffix_candidates.push_back(task);
-  } else {
-    LOG(FATAL);
-  }
-}
-
-void CollectSuffixTaskCandidates(IRStructure *node,
-                                 std::vector<TaskNode *> &suffix_candidates) {
-  bool suffix_valid = true;
-  CollectSuffixTaskCandidates(node, suffix_candidates, suffix_valid);
 }
 
 void CollectSuffixTasks(IRStructure *root,
                         const std::vector<TaskNodeWithContext> &all_tasks,
                         const TaskUnionFind &uf,
                         std::unordered_set<TaskNode *> &suffix_tasks) {
-  std::vector<TaskNode *> suffix_candidates;
-  CollectSuffixTaskCandidates(root, suffix_candidates);
+  if (!root)
+    return;
 
-  std::unordered_set<TaskNode *> candidate_set(suffix_candidates.begin(),
-                                               suffix_candidates.end());
+  // Collect all top-level items in order
+  std::vector<IRStructure *> items;
+  CollectTopLevelItems(root, items);
 
+  // Walk backward: a task is a suffix candidate iff it has no dependency
+  // with any subsequently-rejected (non-suffix) item.
+  // ControlNodes are always rejected.
+  std::vector<IRStructure *> rejected;
+  std::unordered_set<TaskNode *> candidate_set;
+  for (int i = static_cast<int>(items.size()) - 1; i >= 0; --i) {
+    auto *item = items[i];
+    if (item->IsControl()) {
+      rejected.push_back(item);
+      continue;
+    }
+    if (!item->IsTask()) {
+      rejected.push_back(item);
+      continue;
+    }
+    auto *task = static_cast<TaskNode *>(item);
+    if (task->ContainsLoopBreak()) {
+      rejected.push_back(task);
+      continue;
+    }
+    bool has_dep = false;
+    for (auto *rej : rejected) {
+      if (HasDependency(task, rej)) {
+        has_dep = true;
+        break;
+      }
+    }
+    if (has_dep) {
+      rejected.push_back(task);
+    } else {
+      candidate_set.insert(task);
+    }
+  }
+
+  // Apply register region grouping via union-find
   std::unordered_map<TaskNode *, int> task_to_index;
   task_to_index.reserve(all_tasks.size());
   for (int i = 0; i < static_cast<int>(all_tasks.size()); ++i) {
@@ -198,26 +318,23 @@ void CollectSuffixTasks(IRStructure *root,
     component_tasks[root_idx].push_back(all_tasks[i].task);
   }
 
-  for (int i = 0; i < static_cast<int>(suffix_candidates.size()); ++i) {
-    TaskNode *task = suffix_candidates[i];
-    if (suffix_tasks.count(task)) {
+  for (TaskNode *task : candidate_set) {
+    if (suffix_tasks.count(task))
       continue;
-    }
+
     if (CountRegisterRegions(task) == 0) {
       suffix_tasks.insert(task);
       continue;
     }
 
     auto it = task_to_index.find(task);
-    if (it == task_to_index.end()) {
+    if (it == task_to_index.end())
       continue;
-    }
     int component_root = uf.find(it->second);
 
     auto comp_it = component_tasks.find(component_root);
-    if (comp_it == component_tasks.end()) {
+    if (comp_it == component_tasks.end())
       continue;
-    }
 
     bool all_in_candidates = true;
     for (TaskNode *component_task : comp_it->second) {
@@ -227,9 +344,8 @@ void CollectSuffixTasks(IRStructure *root,
       }
     }
 
-    if (!all_in_candidates) {
-      break;
-    }
+    if (!all_in_candidates)
+      continue;
 
     for (TaskNode *component_task : comp_it->second) {
       suffix_tasks.insert(component_task);
@@ -265,13 +381,10 @@ bool AssignWarpgroupIdsGlobal(IRStructure *root, bool enable_warp_partition) {
   }
 
   std::unordered_set<TaskNode *> prefix_tasks;
-  bool prefix_valid = true;
-  CollectPrefixTasks(root, prefix_tasks, prefix_valid);
+  CollectPrefixTasks(root, prefix_tasks);
 
   std::unordered_set<TaskNode *> suffix_tasks;
-  if (enable_warp_partition) {
-    CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
-  }
+  CollectSuffixTasks(root, all_tasks, uf, suffix_tasks);
 
   std::unordered_map<int, std::vector<int>> components;
   for (int i = 0; i < n; i++) {

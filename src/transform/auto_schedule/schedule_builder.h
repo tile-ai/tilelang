@@ -38,18 +38,34 @@ void GatherTaskNodesSingle(
     const std::shared_ptr<IRStructure> &node,
     std::vector<std::shared_ptr<IRStructure>> &task_nodes);
 
-void CollectPrefixTasks(IRStructure *node,
-                        std::unordered_set<TaskNode *> &prefix_tasks,
-                        bool &prefix_valid);
-void CollectSuffixTaskCandidates(IRStructure *node,
-                                 std::vector<TaskNode *> &suffix_candidates,
-                                 bool &suffix_valid);
-void CollectSuffixTaskCandidates(IRStructure *node,
-                                 std::vector<TaskNode *> &suffix_candidates);
+void CollectPrefixTasks(IRStructure *root,
+                        std::unordered_set<TaskNode *> &prefix_tasks);
 void CollectSuffixTasks(IRStructure *root,
                         const std::vector<TaskNodeWithContext> &all_tasks,
                         const TaskUnionFind &uf,
                         std::unordered_set<TaskNode *> &suffix_tasks);
+
+// Check if two regions refer to the same buffer
+bool SameBuffer(const BufferRegion &a, const BufferRegion &b);
+
+// Check if two variables are the same
+bool SameVar(const Var &a, const Var &b);
+
+bool HasDependency(const IRStructure *a, const IRStructure *b);
+
+// Check if two IRStructures have data dependency (excluding read-after-read)
+bool HasRegisterDependency(const IRStructure *a, const IRStructure *b);
+
+// Get shared buffers two IRStructures both access (excluding read-after-read)
+std::set<Buffer> GetSharedDependencies(const IRStructure *a,
+                                       const IRStructure *b);
+
+// Check if an IRStructure has any register region
+bool HasRegisterRegion(const IRStructure *node);
+
+// Check if two IRStructures have resource dependency (use same hardware
+// resource)
+bool HasResourceDependency(const IRStructure *a, const IRStructure *b);
 
 // Builder that collects ScheduleUnits from IRStructure
 class ScheduleUnitBuilder {
@@ -598,187 +614,6 @@ private:
   IterVar thread_var_; // Thread index variable for warpgroup partition
   bool enable_warp_partition_ = false;
   int64_t shared_memory_limit_ = 48 * 1024;
-
-  // Check if two regions refer to the same buffer
-  bool SameBuffer(const BufferRegion &a, const BufferRegion &b) const {
-    return a->buffer.same_as(b->buffer);
-  }
-
-  // Check if two variables are the same
-  bool SameVar(const Var &a, const Var &b) const { return a.same_as(b); }
-
-  // Check if two IRStructures have data dependency (excluding read-after-read)
-  bool HasDependency(const IRStructure *a, const IRStructure *b) const {
-    // Check if either node contains loop_break (if it's a TaskNode)
-    // Tasks with loop_break have control dependencies with all other tasks
-    // because loop_break can change control flow and affect execution order
-    if (a->IsTask()) {
-      const TaskNode *task_a = static_cast<const TaskNode *>(a);
-      if (task_a->ContainsLoopBreak()) {
-        // If task_a contains loop_break, it has dependency with b
-        // because loop_break affects control flow and execution order
-        return true;
-      }
-    }
-    if (b->IsTask()) {
-      const TaskNode *task_b = static_cast<const TaskNode *>(b);
-      if (task_b->ContainsLoopBreak()) {
-        // If task_b contains loop_break, it has dependency with a
-        // because loop_break affects control flow and execution order
-        return true;
-      }
-    }
-
-    // Check all combinations of accesses
-    // a writes, b reads (RAW)
-    // a reads, b writes (WAR)
-    // a writes, b writes (WAW)
-    // a reads, b reads (RAR) - no dependency
-
-    // For simplicity, we check if they access the same buffer
-    // and at least one of them writes to that buffer
-    for (const auto &write_region_a : a->GetWriteRegions()) {
-      for (const auto &read_region_b : b->GetReadRegions()) {
-        if (SameBuffer(write_region_a, read_region_b))
-          return true;
-      }
-      for (const auto &write_region_b : b->GetWriteRegions()) {
-        if (SameBuffer(write_region_a, write_region_b))
-          return true;
-      }
-    }
-    for (const auto &read_region_a : a->GetReadRegions()) {
-      for (const auto &write_region_b : b->GetWriteRegions()) {
-        if (SameBuffer(read_region_a, write_region_b))
-          return true;
-      }
-    }
-    for (const auto &write_var_a : a->GetWriteVars()) {
-      for (const auto &read_var_b : b->GetReadVars()) {
-        if (SameVar(write_var_a, read_var_b))
-          return true;
-      }
-    }
-    return false;
-  }
-
-  // Check if two IRStructures have data dependency (excluding read-after-read)
-  bool HasRegisterDependency(const IRStructure *a, const IRStructure *b) const {
-    // Check if either node contains loop_break (if it's a TaskNode)
-    // Tasks with loop_break have control dependencies with all other tasks
-    // because loop_break can change control flow and affect execution order
-    if (a->IsTask()) {
-      const TaskNode *task_a = static_cast<const TaskNode *>(a);
-      if (task_a->ContainsLoopBreak()) {
-        // If task_a contains loop_break, it has dependency with b
-        // because loop_break affects control flow and execution order
-        return true;
-      }
-    }
-    if (b->IsTask()) {
-      const TaskNode *task_b = static_cast<const TaskNode *>(b);
-      if (task_b->ContainsLoopBreak()) {
-        // If task_b contains loop_break, it has dependency with a
-        // because loop_break affects control flow and execution order
-        return true;
-      }
-    }
-
-    // Check all combinations of accesses
-    // a writes, b reads (RAW)
-    // a reads, b writes (WAR)
-    // a writes, b writes (WAW)
-    // a reads, b reads (RAR) - no dependency
-
-    // For simplicity, we check if they access the same buffer
-    // and at least one of them writes to that buffer
-    for (const auto &write_region_a : a->GetWriteRegions()) {
-      if (IsSharedBuffer(write_region_a.get()->buffer))
-        continue;
-      for (const auto &read_region_b : b->GetReadRegions()) {
-        if (SameBuffer(write_region_a, read_region_b))
-          return true;
-      }
-      for (const auto &write_region_b : b->GetWriteRegions()) {
-        if (SameBuffer(write_region_a, write_region_b))
-          return true;
-      }
-    }
-    for (const auto &read_region_a : a->GetReadRegions()) {
-      if (IsSharedBuffer(read_region_a.get()->buffer))
-        continue;
-      for (const auto &write_region_b : b->GetWriteRegions()) {
-        if (SameBuffer(read_region_a, write_region_b))
-          return true;
-      }
-    }
-    return false;
-  }
-
-  // Get shared buffers two IRStructures both access (excluding read-after-read)
-  std::set<Buffer> GetSharedDependencies(const IRStructure *a,
-                                         const IRStructure *b) const {
-    std::set<Buffer> deps;
-    for (const auto &write_region_a : a->GetWriteRegions()) {
-      if (!IsSharedBuffer(write_region_a->buffer))
-        continue;
-      for (const auto &read_region_b : b->GetReadRegions()) {
-        if (SameBuffer(write_region_a, read_region_b))
-          deps.insert(write_region_a->buffer);
-      }
-      for (const auto &write_region_b : b->GetWriteRegions()) {
-        if (SameBuffer(write_region_a, write_region_b))
-          deps.insert(write_region_a->buffer);
-      }
-    }
-    for (const auto &read_region_a : a->GetReadRegions()) {
-      if (!IsSharedBuffer(read_region_a->buffer))
-        continue;
-      for (const auto &write_region_b : b->GetWriteRegions()) {
-        if (SameBuffer(read_region_a, write_region_b))
-          deps.insert(read_region_a->buffer);
-      }
-    }
-    return deps;
-  }
-
-  // Check if an IRStructure has any register region
-  bool HasRegisterRegion(const IRStructure *node) const {
-    return CountRegisterRegions(node) > 0;
-  }
-
-  // Check if two IRStructures have resource dependency (use same hardware
-  // resource)
-  bool HasResourceDependency(const IRStructure *a, const IRStructure *b) const {
-    // Resource dependencies occur when two tasks use the same hardware resource
-    // that cannot be used simultaneously (or has limited throughput)
-
-    // Check TMA core dependency
-    if (a->UsesTMACore() && b->UsesTMACore()) {
-      return true; // Both use TMA core, cannot execute simultaneously
-    }
-
-    // Check Tensor core dependency
-    if (a->UsesTensorCore() && b->UsesTensorCore()) {
-      return true; // Both use Tensor core, cannot execute simultaneously
-    }
-
-    // Check CUDA core dependency (more nuanced - CUDA cores can often be
-    // pipelined) For now, we treat CUDA core as a shared resource with limited
-    // throughput Could be refined based on actual hardware constraints
-    if (a->UsesCUDACore() && b->UsesCUDACore()) {
-      // CUDA cores are more plentiful, but we still mark dependency for now
-      // This could be refined to allow some level of parallelism
-      return true;
-    }
-
-    // TODO: Add more specific resource dependency checks:
-    // - Memory bandwidth constraints (shared between TMA and other operations)
-    // - Shared memory bank conflicts
-    // - Register file limitations
-
-    return false;
-  }
 };
 
 } // namespace tl

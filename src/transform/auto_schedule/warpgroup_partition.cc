@@ -872,30 +872,68 @@ Stmt ApplyWarpgroupPartitionToIRStructure(
     LOG(FATAL);
   };
 
-  int last_warpgroup_task_top_level_index = -1;
+  // Determine which top-level neutral children should be epi (run after
+  // warpgroup-partitioned code). A neutral child is epi if it directly or
+  // transitively depends on warpgroup task output.
+  std::unordered_set<const Object *> wg_write_buffers;
+  std::unordered_set<int> depends_on_wg_output;
+  // Per-child write buffers and read buffers for neutral children
+  struct ChildBufferInfo {
+    std::unordered_set<const Object *> read_bufs;
+    std::unordered_set<const Object *> write_bufs;
+    bool all_neutral = true;
+  };
+  std::vector<ChildBufferInfo> child_infos;
   if (root->IsSequence()) {
     auto seq = static_cast<SequenceNode *>(root);
+    child_infos.resize(seq->children.size());
     for (size_t i = 0; i < seq->children.size(); ++i) {
       const auto &child = seq->children[i];
-      if (!child) {
+      if (!child)
         continue;
-      }
       auto unit = static_cast<ScheduleUnit *>(child.get());
       std::vector<TaskNodeWithContext> child_tasks;
       CollectAllTaskNodesWithContext(unit->child.get(), child_tasks);
+      auto &info = child_infos[i];
       for (const auto &task : child_tasks) {
         if (task.task->GetWarpgroupId() >= 0) {
-          last_warpgroup_task_top_level_index = static_cast<int>(i);
+          info.all_neutral = false;
+          for (const auto &wr : task.task->GetWriteRegions())
+            wg_write_buffers.insert(wr->buffer.get());
+        }
+        for (const auto &rd : task.task->GetReadRegions())
+          info.read_bufs.insert(rd->buffer.get());
+        for (const auto &wr : task.task->GetWriteRegions())
+          info.write_bufs.insert(wr->buffer.get());
+      }
+    }
+    // Transitive fixpoint: if a neutral child reads from wg_write_buffers,
+    // mark it as epi and add its write buffers to wg_write_buffers so that
+    // other neutral children that depend on it are also marked epi.
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (size_t i = 0; i < child_infos.size(); ++i) {
+        if (!child_infos[i].all_neutral)
+          continue;
+        if (depends_on_wg_output.count(static_cast<int>(i)))
+          continue;
+        for (const auto *buf : child_infos[i].read_bufs) {
+          if (wg_write_buffers.count(buf)) {
+            depends_on_wg_output.insert(static_cast<int>(i));
+            for (const auto *wb : child_infos[i].write_bufs)
+              wg_write_buffers.insert(wb);
+            changed = true;
+            break;
+          }
         }
       }
     }
   }
 
-  auto is_epi_top_level_index =
-      [last_warpgroup_task_top_level_index](int top_level_index) {
-        return last_warpgroup_task_top_level_index >= 0 &&
-               top_level_index > last_warpgroup_task_top_level_index;
-      };
+  auto is_epi_top_level_index = [&depends_on_wg_output](int top_level_index) {
+    return depends_on_wg_output.count(top_level_index) > 0;
+  };
   auto is_pro_top_level_index = [is_epi_top_level_index](int top_level_index) {
     return !is_epi_top_level_index(top_level_index);
   };
