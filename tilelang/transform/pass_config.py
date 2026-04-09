@@ -54,6 +54,11 @@ class PassConfigKey(str, Enum):
     TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
     """Enable auto schedule optimization. Default: False"""
 
+    TL_ENABLE_AGGRESSIVE_AUTO_SCHEDULE = "tl.enable_aggressive_auto_schedule"
+    """Enable aggressive auto schedule (Z3 + warpgroup partition). Default: True
+    When False, uses naive strategy (producer/consumer warpgroup assignment,
+    original order preserved, num_stages-based pipelining)."""
+
     TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
     """
         Enable fast math optimization. Default: False

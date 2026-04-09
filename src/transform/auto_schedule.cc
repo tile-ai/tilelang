@@ -606,17 +606,12 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     // Print the built IRStructure with all statements
     ICHECK(ir_structure) << "IRStructure is null (empty body?)";
 
-    // First print the summary view
-    // PrintIRStructure(ir_structure.get());
-
-    // Then print all statements
-    // PrintAllStmts(ir_structure.get());
+    // Check if aggressive auto-schedule is enabled
+    bool aggressive =
+        ctx->GetConfig<Bool>(kEnableAggressiveAutoSchedule, Bool(true)).value();
 
     // Build ScheduleUnits from IRStructure
     ScheduleUnitBuilder unit_builder;
-    // Get thread index variable for warpgroup partition
-    // First try to get from body_to_schedule, if not found, try from the entire
-    // function body
     thread_var = ThreadTagChecker::GetThreadVar(body_to_schedule);
     if (!thread_var.defined()) {
       thread_var = ThreadTagChecker::GetThreadVar(func->body);
@@ -629,7 +624,13 @@ tvm::transform::Pass AutoSchedule(const bool enable_epi) {
     }
     unit_builder.SetEnableWarpPartition(config.enable_warp_partition);
     unit_builder.SetSharedMemoryLimit(config.shared_memory_limit);
-    bool double_thread = unit_builder.Build(ir_structure);
+
+    bool double_thread;
+    if (!aggressive) {
+      double_thread = unit_builder.NaiveBuild(ir_structure);
+    } else {
+      double_thread = unit_builder.Build(ir_structure);
+    }
 
     if (!config.enable_warpgroup_partition) {
       Stmt new_body = ConvertIRStructureToStmt(ir_structure.get(), enable_epi);
