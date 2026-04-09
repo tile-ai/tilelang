@@ -164,7 +164,6 @@ def test_trival_pipeline():
         A = T.match_buffer(A_handle, (16, 1), strides=(1, 1))
         C = T.match_buffer(C_handle, (16, 1), strides=(1, 1))
         tx = T.launch_thread("threadIdx.x", 16)
-        T.attr(0, "lexical_alloc_scope", 1)
         B = T.decl_buffer((2, 16, 1), scope="shared")
         B[0, tx, 0] = A[tx, 0] * T.float32(2.0)
         C[tx, 0] = B[0, tx, 0] + T.float32(1.0)

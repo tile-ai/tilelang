@@ -104,12 +104,14 @@ private:
       body = Allocate(buffer->data, buffer->dtype, allocation_shape,
                       const_true(), std::move(body), allocate_annotations);
     }
-    // Step 5. If the block had local allocations *and* we are inside a
-    // loop, wrap them in a lexical scope boundary so that StorageRewrite
-    // does not hoist them out.  Top-level blocks are skipped because the
-    // function body already provides the lifetime boundary and the extra
-    // `{ }` in codegen would be pointless.
-    if (!new_block->alloc_buffers.empty() && inside_loop_ > 0) {
+    // Step 5. If the block had local (non-var) allocations *and* we are
+    // inside a loop, wrap them in a lexical scope boundary so that
+    // StorageRewrite does not hoist them out.
+    // - Top-level blocks are skipped (function body is the lifetime).
+    // - Blocks with only "local.var" allocations are skipped because those
+    //   scalar variables should remain hoistable and should not force extra
+    //   lexical braces in generated code.
+    if (inside_loop_ > 0 && HasNonVarLocalAlloc(new_block->alloc_buffers)) {
       body = AttrStmt(Integer(0), tl::attr::kLexicalAllocScope, Integer(1),
                       std::move(body));
     }
@@ -285,6 +287,18 @@ private:
         pragma_attrs->begin(), pragma_attrs->end(),
         [](const auto &p1, const auto &p2) { return p1.first < p2.first; });
     return preserved_annotations;
+  }
+
+  /*! \brief Return true when at least one buffer is in "local" scope
+   *  (excluding "local.var" which are simple scalar variables). */
+  static bool HasNonVarLocalAlloc(const Array<Buffer> &alloc_buffers) {
+    for (const Buffer &buffer : alloc_buffers) {
+      std::string scope = buffer.scope();
+      if (scope == "local" || scope == "") {
+        return true;
+      }
+    }
+    return false;
   }
 
   Buffer ResolveLocalVarBuffer(const Array<Buffer> &alloc_buffers) const {

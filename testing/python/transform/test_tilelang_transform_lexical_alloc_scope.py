@@ -107,7 +107,36 @@ def test_lower_opaque_block_skips_empty_alloc():
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Top-level block (not inside a loop) should NOT get the marker
+# Test 3: local.var-only block inside loop should NOT get the marker
+# ---------------------------------------------------------------------------
+def test_lower_opaque_block_skips_local_var_only_alloc():
+    """A block that allocates only local.var should not get lexical_alloc_scope."""
+    target = tvm.target.Target("cuda -arch=sm_80")
+
+    @T.prim_func
+    def func(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+    ):
+        T.func_attr({"global_symbol": "main", "target": target})
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        for _ in T.serial(4):
+            with T.block():
+                idx = T.alloc_var(T.int32)
+                idx = tx
+                B[tx] = A[idx]
+
+    mod = tvm.IRModule.from_expr(func)
+    mod = tl.transform.LowerOpaqueBlock()(mod)
+    lowered = mod["main"]
+
+    n = _count_attrs(lowered, "lexical_alloc_scope")
+    assert n == 0, f"Expected 0 lexical_alloc_scope for local.var-only block, got {n}"
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Top-level block (not inside a loop) should NOT get the marker
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_top_level():
     """A top-level block with alloc_buffers should NOT get lexical_alloc_scope."""
@@ -135,7 +164,7 @@ def test_lower_opaque_block_skips_top_level():
 
 
 # ---------------------------------------------------------------------------
-# Test 4: StorageRewrite preserves lexical_alloc_scope
+# Test 5: StorageRewrite preserves lexical_alloc_scope
 # ---------------------------------------------------------------------------
 def test_storage_rewrite_preserves_scope():
     """lexical_alloc_scope should survive StorageRewrite without crashing."""
@@ -169,7 +198,7 @@ def test_storage_rewrite_preserves_scope():
 
 
 # ---------------------------------------------------------------------------
-# Test 5: CUDA codegen emits { } for the scope
+# Test 6: CUDA codegen emits { } for the scope
 # ---------------------------------------------------------------------------
 @tilelang.testing.requires_cuda
 def test_codegen_emits_braces():
@@ -199,6 +228,7 @@ def test_codegen_emits_braces():
 if __name__ == "__main__":
     test_lower_opaque_block_inserts_lexical_alloc_scope()
     test_lower_opaque_block_skips_empty_alloc()
+    test_lower_opaque_block_skips_local_var_only_alloc()
     test_lower_opaque_block_skips_top_level()
     test_storage_rewrite_preserves_scope()
     test_codegen_emits_braces()
