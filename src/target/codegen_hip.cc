@@ -231,6 +231,15 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         ICHECK_EQ(lanes % 2, 0)
             << "only support even lane for float type with lanes > 4";
         os << "ulonglong" << lanes / 2;
+      } else if (lanes == 16) {
+        // float32x16 is the MFMA/WMMA accumulator type on AMD gfx9+ GPUs.
+        // It is defined in tl_templates/hip/common.h as a __vector_size__ type.
+        os << "float32x16";
+        return;
+      } else if (lanes == 32) {
+        // Represent as two float32x16 (handled by caller via struct/array).
+        os << "float32x32";
+        return;
       } else {
         fail = true;
       }
@@ -256,6 +265,11 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     } else if (lanes <= 8) {
       ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
       os << "uint" << lanes / 2;
+    } else if (lanes == 16) {
+      // bfloat16x16 is the MFMA input/accumulator type on AMD gfx9+ GPUs.
+      // Defined in tl_templates/hip/common.h as a struct with data[16].
+      os << "bfloat16x16";
+      return;
     } else {
       fail = true;
     }
@@ -467,6 +481,18 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
     return;
   }
 
+  // Handle 16-lane wide types used by MFMA/WMMA on AMD gfx9+.
+  if (t.lanes() == 16 && t.bits() == 32 && t.is_float()) {
+    // float32x16 is a __vector_size__ type — support array subscript access.
+    os << vec << "[" << i << "]";
+    return;
+  }
+  if (t.lanes() == 16 && t.is_bfloat16()) {
+    // bfloat16x16 is a struct with bfloat16_t data[16].
+    os << vec << ".data[" << i << "]";
+    return;
+  }
+
   static const char access[] = {'x', 'y', 'z', 'w'};
   ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
                         : (t.bits() == 16 || t.bits() == 32) ? 8
@@ -514,6 +540,17 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
                                            int i, const std::string &value) {
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
+
+  // Handle 16-lane wide types used by MFMA/WMMA on AMD gfx9+.
+  if (t.lanes() == 16 && t.bits() == 32 && t.is_float()) {
+    stream << vec << "[" << i << "] = " << value << ";\n";
+    return;
+  }
+  if (t.lanes() == 16 && t.is_bfloat16()) {
+    stream << vec << ".data[" << i << "] = " << value << ";\n";
+    return;
+  }
+
   ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
                         : (t.bits() == 16 || t.bits() == 32) ? 8
                                                              : 4));
@@ -1195,8 +1232,8 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
     ICHECK(!func_name.empty() && panel_size > 0)
         << "threadblock_swizzle_pattern: failed to extract func_name and "
            "panel_size";
-    this->stream << "const dim3 blockIdx = tl::" << func_name << "("
-                 << panel_size << ");\n";
+    this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
+                 << panel_size << ">();\n";
     this->VisitStmt(op->body);
     return;
   }
@@ -1280,6 +1317,16 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
 
   if (op->dtype.is_bfloat16()) {
     std::string v = PrintExpr(op->value);
+    if (lanes == 16) {
+      // bfloat16x16 is a struct with data[16] — use aggregate initialization.
+      os << "bfloat16x16{";
+      for (int i = 0; i < 16; ++i) {
+        if (i != 0) os << ", ";
+        os << v;
+      }
+      os << '}';
+      return;
+    }
     os << "make_";
     PrintType(op->dtype, os);
     os << '(';
@@ -1295,13 +1342,41 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
+    // HIP does not allow taking the address of a temporary, so use a union
+    // to reinterpret float2 as unsigned long long without UB or temp-address.
     os << "make_ulonglong4(";
     for (int i = 0; i < 4; ++i) {
       if (i != 0)
         os << ", ";
-      os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+      os << "([&]{ union { float2 f; unsigned long long u; } _tmp;"
+         << " _tmp.f = make_float2(" << v << ", " << v << "); return _tmp.u; }())";
     }
     os << ')';
+    return;
+  }
+
+  if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+      op->dtype.lanes() == 16) {
+    // float32x16 is a __vector_size__ type — initialize with brace list.
+    std::string v = PrintExpr(op->value);
+    os << "(float32x16){";
+    for (int i = 0; i < 16; ++i) {
+      if (i != 0) os << ", ";
+      os << v;
+    }
+    os << '}';
+    return;
+  }
+
+  if (op->dtype.is_bfloat16() && op->dtype.lanes() == 16) {
+    // bfloat16x16 is a struct with data[16].
+    std::string v = PrintExpr(op->value);
+    os << "bfloat16x16{";
+    for (int i = 0; i < 16; ++i) {
+      if (i != 0) os << ", ";
+      os << v;
+    }
+    os << '}';
     return;
   }
 
@@ -1465,6 +1540,13 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
   }
 
   if (t.is_bfloat16()) {
+    if (t.lanes() == 16) {
+      // bfloat16x16 is a struct with data[16] — use aggregate initialization.
+      if (i == 0) os << "bfloat16x16{";
+      os << value;
+      if (i != t.lanes() - 1) { os << ", "; } else { os << "}"; }
+      return;
+    }
     if (i == 0) {
       os << "make_";
       PrintType(t, os);
@@ -1480,6 +1562,14 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
         os << ")";
       }
     }
+    return;
+  }
+
+  if (t.is_float() && t.bits() == 32 && t.lanes() == 16) {
+    // float32x16 is a __vector_size__ type — use brace initialization.
+    if (i == 0) os << "(float32x16){";
+    os << value;
+    if (i != t.lanes() - 1) { os << ", "; } else { os << "}"; }
     return;
   }
 
