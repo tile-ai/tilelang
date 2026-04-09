@@ -390,7 +390,7 @@ def z3_schedule_loop_python(
             for i in range(len(buffer_sizes)):
                 solver.add(buffer_vars[i] >= 1)
                 solver.add(buffer_vars[i] <= num_stages)
-            solver.add(z3.Sum([buffer_vars[i] * buffer_sizes[i] for i in range(len(buffer_sizes))]) <= memory_limit)
+            # solver.add(z3.Sum([buffer_vars[i] * buffer_sizes[i] for i in range(len(buffer_sizes))]) <= memory_limit)
 
             # Add data dependency constraints with distance
             for u, v, distance in data_deps:
