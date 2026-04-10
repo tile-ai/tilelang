@@ -29,7 +29,9 @@
 #include <string>
 #include <utility>
 
+#include "../layout/layout.h"
 #include "../op/builtin.h"
+#include "../op/utils.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -67,8 +69,12 @@ private:
     ICHECK(op->iter_values.empty())
         << "Non-opaque blocks are not allowed in FlattenBuffer. Please "
            "call pass ConvertBlocksToOpaque before.";
-    // Step 1. Visit the body
+    // Step 1. Visit the body and track block nesting so we can distinguish
+    // the function-level root block from nested lexical blocks.
+    int current_block_nesting = block_nesting_;
+    ++block_nesting_;
     Block new_block = Downcast<Block>(this->VisitStmt(op->block));
+    --block_nesting_;
     PrimExpr predicate = this->VisitExpr(op->predicate);
     // Step 2. Transform the `predicate` to if-then-else
     Stmt body = new_block->body;
@@ -104,14 +110,17 @@ private:
       body = Allocate(buffer->data, buffer->dtype, allocation_shape,
                       const_true(), std::move(body), allocate_annotations);
     }
-    // Step 5. If the block had local (non-var) allocations *and* we are
-    // inside a loop, wrap them in a lexical scope boundary so that
-    // StorageRewrite does not hoist them out.
-    // - Top-level blocks are skipped (function body is the lifetime).
-    // - Blocks with only "local.var" allocations are skipped because those
-    //   scalar variables should remain hoistable and should not force extra
-    //   lexical braces in generated code.
-    if (inside_loop_ > 0 && HasNonVarLocalAlloc(new_block->alloc_buffers)) {
+    // Step 5. If a nested block had register-like local (non-var)
+    // allocations, wrap them in a lexical scope boundary so that
+    // StorageRewrite does not hoist them out of the block.
+    // The function-level root block is skipped because its lifetime already
+    // matches the enclosing function body and would only introduce a
+    // redundant outermost brace in generated code.
+    // Blocks with only "local.var" allocations are skipped because those
+    // scalar variables should remain hoistable and should not force extra
+    // lexical braces in generated code.
+    if (current_block_nesting > 0 &&
+        HasNonVarLocalAlloc(new_block->alloc_buffers, new_block->annotations)) {
       body = AttrStmt(Integer(0), tl::attr::kLexicalAllocScope, Integer(1),
                       std::move(body));
     }
@@ -137,10 +146,8 @@ private:
       // handling unit loop
       unit_loop_vars_[op->loop_var] = min;
     }
-    // Step 2. Visit recursively (track loop nesting depth)
-    ++inside_loop_;
+    // Step 2. Visit recursively
     Stmt body = this->VisitStmt(op->body);
-    --inside_loop_;
     // Step 3. Handle annotations
     std::vector<std::pair<std::string, PrimExpr>> pragma_attrs;
     Map<String, ffi::Any> new_annotations =
@@ -289,14 +296,67 @@ private:
     return preserved_annotations;
   }
 
-  /*! \brief Return true when at least one buffer is in "local" scope
-   *  (excluding "local.var" which are simple scalar variables). */
-  static bool HasNonVarLocalAlloc(const Array<Buffer> &alloc_buffers) {
-    for (const Buffer &buffer : alloc_buffers) {
-      std::string scope = buffer.scope();
-      if (scope == "local" || scope == "") {
-        return true;
+  /*! \brief Return true when at least one buffer is a register-like local
+   *  allocation whose lifetime should be bounded by a lexical scope.
+   *
+   *  We exclude:
+   *  - undefined / empty buffers
+   *  - global buffers
+   *  - shared / shared.dyn buffers
+   *  - fragment buffers, whose lifetime typically matches the enclosing
+   *    kernel/body region rather than a smaller lexical block
+   *  - other shared-like buffers not covered by IsSharedBuffer(), such as
+   *    "shared.barrier", "shared.cluster_barrier", "shared.tmem", and
+   *    "shared.tmem_addr"
+   *  - local.var buffers, which are simple scalar variables and should remain
+   *    hoistable.
+   */
+  static bool HasFragmentLayout(const Buffer &buffer,
+                                const Map<String, ffi::Any> &annotations) {
+    auto layout_map_ref = annotations.Get(tl::attr::kLayoutMap);
+    if (!layout_map_ref.has_value()) {
+      return false;
+    }
+    if (auto layout_map = layout_map_ref.value().as<Map<Var, Layout>>()) {
+      auto layout_it = layout_map.value().find(buffer->data);
+      if (layout_it != layout_map.value().end()) {
+        return (*layout_it).second.as<Fragment>().has_value();
       }
+    }
+    if (auto layout_map = layout_map_ref.value().as<Map<Buffer, Layout>>()) {
+      auto layout_it = layout_map.value().find(buffer);
+      if (layout_it != layout_map.value().end()) {
+        return (*layout_it).second.as<Fragment>().has_value();
+      }
+      for (const auto &kv : layout_map.value()) {
+        const Buffer &layout_buffer = kv.first;
+        if (layout_buffer.defined() &&
+            layout_buffer->data.same_as(buffer->data) &&
+            kv.second.as<Fragment>().has_value()) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  static bool HasNonVarLocalAlloc(const Array<Buffer> &alloc_buffers,
+                                  const Map<String, ffi::Any> &annotations) {
+    for (const Buffer &buffer : alloc_buffers) {
+      if (!buffer.defined()) {
+        continue;
+      }
+      std::string scope = buffer.scope();
+      bool is_shared_like =
+          IsSharedBuffer(buffer) || scope == "shared.barrier" ||
+          scope == "shared.cluster_barrier" || scope == "shared.tmem" ||
+          scope == "shared.tmem_addr";
+      if (IsGlobalBuffer(buffer) || IsFragmentBuffer(buffer) ||
+          HasFragmentLayout(buffer, annotations) || is_shared_like ||
+          IsLocalVarBuffer(buffer)) {
+        continue;
+      }
+      return true;
     }
     return false;
   }
@@ -331,10 +391,10 @@ private:
    */
   Optional<Array<Integer>> cluster_dims_{std::nullopt};
 
-  /*! \brief Nesting depth of for-loops.  lexical_alloc_scope is only
-   *  inserted when inside_loop_ > 0 so that top-level blocks do not
-   *  receive a redundant scope. */
-  int inside_loop_{0};
+  /*! \brief Nesting depth of opaque blocks.  The root block maps directly to
+   *  the function body, while nested blocks correspond to meaningful lexical
+   *  regions that should be preserved for allocation lifetime. */
+  int block_nesting_{0};
 };
 
 PrimFunc TLLowerOpaqueBlock(PrimFunc f) {
