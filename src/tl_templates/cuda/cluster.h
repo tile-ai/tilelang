@@ -105,7 +105,7 @@ TL_DEVICE int block_rank_in_cluster() {
 #endif
 }
 
-/* Cluster launch control for tile schedule (Avaiable on sm100) */
+/* Cluster launch control for tile schedule (Available on sm100) */
 
 TL_DEVICE void clc_try_cancel(void *result_ptr, void *mbar_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
