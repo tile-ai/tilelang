@@ -79,7 +79,7 @@ def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
             with T.block():
-                T.block_attr({"tl.force_lexical_alloc_scope": 1})
+                T.block_attr({"lexical_alloc_scope": 1})
                 S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                 S[tx] = A[tx]
                 B[tx] = S[tx]
@@ -228,7 +228,7 @@ def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         with T.block():
-            T.block_attr({"tl.force_lexical_alloc_scope": 1})
+            T.block_attr({"lexical_alloc_scope": 1})
             S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
             S[tx] = A[tx]
             B[tx] = S[tx]
@@ -323,7 +323,7 @@ def test_storage_rewrite_preserves_scope():
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
             with T.block():
-                T.block_attr({"tl.force_lexical_alloc_scope": 1})
+                T.block_attr({"lexical_alloc_scope": 1})
                 S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                 S[tx] = A[tx]
                 B[tx] = S[tx]
@@ -356,7 +356,7 @@ def test_codegen_emits_braces():
         with T.Kernel(1, threads=128):
             for k in T.serial(4):
                 with T.block():
-                    T.block_attr({"tl.force_lexical_alloc_scope": 1})
+                    T.block_attr({"lexical_alloc_scope": 1})
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     B[T.get_thread_binding(), k] = S[T.get_thread_binding()]
@@ -385,7 +385,7 @@ def test_codegen_skips_redundant_top_level_braces():
             T.clear(C)
             for k in T.serial(4):
                 with T.block():
-                    T.block_attr({"tl.force_lexical_alloc_scope": 1})
+                    T.block_attr({"lexical_alloc_scope": 1})
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     C[T.get_thread_binding()] = S[T.get_thread_binding()]

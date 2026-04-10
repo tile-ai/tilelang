@@ -312,7 +312,7 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       {
         BlockNode *n = block.CopyOnWrite();
         n->name_hint = global_symbol.value();
-        n->annotations.Set(tl::attr::kForceLexicalAllocScope,
+        n->annotations.Set(tl::attr::kLexicalAllocScope,
                            IntImm(DataType::Int(32), 1));
       }
       return BlockRealize(block_realize->iter_values, block_realize->predicate,
@@ -320,7 +320,7 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
     // warp with block realize node
     Map<String, ObjectRef> block_annotations;
-    block_annotations.Set(tl::attr::kForceLexicalAllocScope,
+    block_annotations.Set(tl::attr::kLexicalAllocScope,
                           IntImm(DataType::Int(32), 1));
     return BlockRealize(
         /*iter_values=*/Array<PrimExpr>(),

@@ -112,7 +112,7 @@ private:
     // gemm_py/gemm_sp_py). We intentionally avoid re-inferring this from the
     // lowered alloc_buffers here because provenance has already been blurred by
     // earlier allocation planning/hoisting passes.
-    if (HasForcedLexicalAllocScope(new_block->annotations)) {
+    if (HasLexicalAllocScopeAnnotation(new_block->annotations)) {
       body = AttrStmt(Integer(0), tl::attr::kLexicalAllocScope, Integer(1),
                       std::move(body));
     }
@@ -289,9 +289,8 @@ private:
   }
 
   static bool
-  HasForcedLexicalAllocScope(const Map<String, ffi::Any> &annotations) {
-    return annotations.find(tl::attr::kForceLexicalAllocScope) !=
-           annotations.end();
+  HasLexicalAllocScopeAnnotation(const Map<String, ffi::Any> &annotations) {
+    return annotations.find(tl::attr::kLexicalAllocScope) != annotations.end();
   }
 
   Buffer ResolveLocalVarBuffer(const Array<Buffer> &alloc_buffers) const {
