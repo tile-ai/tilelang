@@ -400,8 +400,48 @@ def test_e2e_fp8_manual_decouple():
     )
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9)
+def test_e2e_scalar_load_no_cast_buffer():
+    """Test that scalar memory load (b[0]) is not decoupled into a cast buffer.
+
+    When a vectorized loop stores to global with a scalar memory load in the
+    expression (e.g. c[i] = a_local[i] * b[0]), the scalar load's index does
+    not depend on the loop variable. It should remain in the compute loop as
+    a broadcast, not be extracted into a local cast buffer.
+
+    Previously this caused float32x32 codegen errors because both
+    VectorizePlanner and DecoupleTypeCast treated b[0] as a vector memory
+    access.
+    """
+
+    @tilelang.jit
+    def kernel_fn():
+        @T.prim_func
+        def main(
+            a: T.Tensor[(32,), T.float8_e4m3fn],
+            b: T.Tensor[(1,), T.float32],
+            c: T.Tensor[(32,), T.float8_e4m3fn],
+        ):
+            with T.Kernel(1, threads=32):
+                a_local = T.alloc_local((32,), T.float8_e4m3fn)
+                T.copy(a, a_local)
+
+                for i in T.vectorized(32):
+                    c[i] = a_local[i] * b[0]
+
+        return main
+
+    kernel = kernel_fn()
+    source = kernel.get_kernel_source()
+
+    assert "c_local_cast" in source, "Expected c_local_cast for store-side decoupling"
+    assert "b_local_cast" not in source, "Scalar load b[0] should not get a cast buffer"
+
+
 if __name__ == "__main__":
     test_no_transform_if_then_else_condition()
+    test_e2e_scalar_load_no_cast_buffer()
     test_e2e_bf16_global_to_frag()
     test_e2e_bf16_global_shared_frag()
     test_e2e_fp8_global_to_frag()

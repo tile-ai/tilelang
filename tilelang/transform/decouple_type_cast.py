@@ -149,11 +149,12 @@ class MemoryAccessCollector(PyStmtExprVisitor):
         self.visit_expr(op.value)
 
     def visit_buffer_load_(self, op: BufferLoad) -> None:
-        if is_global_or_shared_buffer(op.buffer) and op.buffer not in self._seen_load_buffers:
-            # Skip loads whose indices do not depend on loop_var (scalar access)
-            if any(_expr_depends_on_var(idx, self.loop_var) for idx in op.indices):
-                self.loads.append(op)
-                self._seen_load_buffers.add(op.buffer)
+        # Skip loads whose indices do not depend on loop_var (scalar access)
+        if (is_global_or_shared_buffer(op.buffer)
+                and op.buffer not in self._seen_load_buffers
+                and any(_expr_depends_on_var(idx, self.loop_var) for idx in op.indices)):
+            self.loads.append(op)
+            self._seen_load_buffers.add(op.buffer)
         # Skip indices traversal
 
     def visit_call_(self, op: Call) -> None:
