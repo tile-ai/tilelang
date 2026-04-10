@@ -947,7 +947,10 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
   // Plain T.copy does not auto-upgrade to TMA loads anymore. Store-side TMA
   // remains allowed because it is self-synchronized locally and does not
   // participate in pipeline producer scheduling.
-  if (!GetDisableTMA()) {
+  // Also honour the (deprecated) global pass config for backward compat.
+  if (!GetDisableTMA() && !tvm::transform::PassContext::Current()
+                               ->GetConfig<Bool>(kDisableTMALower, Bool(false))
+                               .value()) {
     bool is_cutedsl = TargetIsCuTeDSL(target);
     if (!is_cutedsl && !buffer_oob &&
         CheckBulkStore1D(target, layout_map, analyzer)) {

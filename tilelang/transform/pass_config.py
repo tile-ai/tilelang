@@ -86,11 +86,10 @@ class PassConfigKey(str, Enum):
     """Bitwidth for configuration indices. Default: 32"""
 
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
-    """Deprecated compatibility-only flag for legacy kernels.
+    """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
 
-    This flag no longer has any effect in the current lowering pipeline and is
-    kept only so older kernels do not fail pass-config validation. It will be
-    removed in v0.1.10.
+    Temporarily re-enabled for backward compatibility. Will be removed in
+    v0.1.10.
     """
 
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
@@ -273,9 +272,7 @@ class PassConfigKey(str, Enum):
 
 _DEPRECATED_PASS_CONFIG_MESSAGES = {
     PassConfigKey.TL_DISABLE_TMA_LOWER.value: (
-        "`tl.disable_tma_lower` is deprecated, kept only for backward "
-        "compatibility, has no effect in the current lowering pipeline, and "
-        "will be removed in v0.1.10."
+        "`tl.disable_tma_lower` is deprecated and will be removed in v0.1.10. Use `T.copy(..., disable_tma=True)` per-copy instead."
     ),
 }
 
