@@ -40,6 +40,7 @@ After:
 
 from __future__ import annotations
 
+from tvm import ir as tvm_ir
 from tvm import tir
 from tvm.ir import Op
 from tvm.tir import (
@@ -140,7 +141,6 @@ class MemoryAccessCollector(PyStmtExprVisitor):
         self.loop_var = loop_var
         self.stores: list[BufferStore] = []
         self.loads: list[BufferLoad] = []
-        self._seen_load_buffers: set[Buffer] = set()
 
     def visit_buffer_store_(self, op: BufferStore) -> None:
         if is_global_or_shared_buffer(op.buffer):
@@ -149,14 +149,11 @@ class MemoryAccessCollector(PyStmtExprVisitor):
         self.visit_expr(op.value)
 
     def visit_buffer_load_(self, op: BufferLoad) -> None:
-        # Skip loads whose indices do not depend on loop_var (scalar access)
-        if (
-            is_global_or_shared_buffer(op.buffer)
-            and op.buffer not in self._seen_load_buffers
-            and any(_expr_depends_on_var(idx, self.loop_var) for idx in op.indices)
-        ):
+        # Skip loads whose indices do not depend on loop_var (scalar access).
+        # Collect ALL qualifying loads (even from the same buffer with different
+        # indices, e.g. a[i] and a[i+32]) so each gets its own cast buffer.
+        if is_global_or_shared_buffer(op.buffer) and any(_expr_depends_on_var(idx, self.loop_var) for idx in op.indices):
             self.loads.append(op)
-            self._seen_load_buffers.add(op.buffer)
         # Skip indices traversal
 
     def visit_call_(self, op: Call) -> None:
@@ -208,9 +205,36 @@ def extract_if_condition(stmt: Stmt) -> tuple[tir.PrimExpr | None, Stmt]:
     return None, stmt
 
 
-# Type alias for cast buffer mapping
-# Maps original buffer -> (cast buffer, original indices)
-CastBufferMap = dict[Buffer, tuple[Buffer, list[tir.PrimExpr]]]
+# Cast entry: (original buffer, original indices, cast buffer)
+# Each unique (buffer, indices) pair gets its own entry, so that accesses
+# like a[i] and a[i+32] from the same buffer are handled correctly.
+CastEntry = tuple[Buffer, list[tir.PrimExpr], Buffer]
+
+
+def _buf_indices_match(
+    buf_a: Buffer,
+    indices_a: list[tir.PrimExpr],
+    buf_b: Buffer,
+    indices_b: list[tir.PrimExpr],
+) -> bool:
+    """Check if two (buffer, indices) pairs refer to the same access pattern."""
+    if not buf_a.same_as(buf_b):
+        return False
+    if len(indices_a) != len(indices_b):
+        return False
+    return all(tvm_ir.structural_equal(a, b) for a, b in zip(indices_a, indices_b))
+
+
+def _find_cast_entry(
+    entries: list[CastEntry],
+    buffer: Buffer,
+    indices: list[tir.PrimExpr],
+) -> Buffer | None:
+    """Find the cast buffer for a given (buffer, indices) pair, or None."""
+    for orig_buf, orig_indices, cast_buf in entries:
+        if _buf_indices_match(orig_buf, orig_indices, buffer, indices):
+            return cast_buf
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -285,84 +309,76 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         # Extract condition (from inlined body for correctness)
         condition, _ = extract_if_condition(inlined_body)
 
-        # Create cast buffers for stores (memory targets → local cast buffer)
-        store_cast_buffers = self._create_cast_buffers_for_stores(collector.stores, extent)
-        # Create cast buffers for loads (memory sources → local cast buffer)
-        # Skip buffers already covered by store_cast_buffers (read-modify-write)
-        load_cast_buffers = self._create_cast_buffers_for_loads(
-            [ld for ld in collector.loads if ld.buffer not in store_cast_buffers],
-            extent,
-        )
+        # Create cast entries for stores and loads
+        store_entries = self._create_cast_entries(collector.stores, extent)
+        # For loads, skip those already covered by a store entry (read-modify-write)
+        # by matching (buffer, indices). Loads with different indices from the same
+        # buffer still get their own cast buffer.
+        uncovered_loads = [ld for ld in collector.loads if _find_cast_entry(store_entries, ld.buffer, list(ld.indices)) is None]
+        load_entries = self._create_cast_entries(uncovered_loads, extent)
 
         # Build copy-from-memory loops (before compute)
-        # For read-modify-write (same buffer is both store target and load source),
-        # reuse the store-side cast buffer for the copy-from loop as well.
-        rmw_buffers = {buf: store_cast_buffers[buf] for buf in store_cast_buffers if buf in collector._seen_load_buffers}
-        all_copy_from: CastBufferMap = {**load_cast_buffers, **rmw_buffers}
-        copy_from_loops = self._create_copy_loops_from_memory(op, all_copy_from, condition)
+        # For read-modify-write, reuse the store-side cast buffer for copy-from.
+        rmw_entries = [
+            entry
+            for entry in store_entries
+            if any(_buf_indices_match(entry[0], entry[1], ld.buffer, list(ld.indices)) for ld in collector.loads)
+        ]
+        copy_from_loops = self._create_copy_loops(
+            op,
+            load_entries + rmw_entries,
+            direction="from_memory",
+            condition=condition,
+        )
 
-        # Build compute loop: replace both stores and loads in the *original* body
-        # For loads, merge store_cast_buffers so read-modify-write uses same local buffer
-        all_load_replacements: CastBufferMap = {**store_cast_buffers, **load_cast_buffers}
+        # Build compute loop: replace stores and loads in the *original* body
+        all_replacements = store_entries + load_entries
         compute_body = new_body
-        if store_cast_buffers:
-            compute_body = self._replace_stores_with_cast(compute_body, store_cast_buffers, op.loop_var)
-        if all_load_replacements:
-            compute_body = self._replace_loads_with_cast(compute_body, all_load_replacements, op.loop_var)
+        if all_replacements:
+            compute_body = self._replace_access(compute_body, store_entries, all_replacements, op.loop_var)
         compute_loop = self._make_vectorized_loop(op, compute_body)
 
         # Build copy-to-memory loops (after compute)
-        copy_to_loops = self._create_copy_loops_to_memory(op, store_cast_buffers, condition)
+        copy_to_loops = self._create_copy_loops(
+            op,
+            store_entries,
+            direction="to_memory",
+            condition=condition,
+        )
 
         # Combine: copy-from → compute → copy-to
         all_stmts = copy_from_loops + [compute_loop] + copy_to_loops
         result: Stmt = SeqStmt(all_stmts) if len(all_stmts) > 1 else all_stmts[0]
 
         # Wrap with buffer declarations and allocations
-        all_cast_buffers: CastBufferMap = {**store_cast_buffers, **load_cast_buffers}
-        result = self._wrap_with_allocations(result, all_cast_buffers)
+        result = self._wrap_with_allocations(result, store_entries + load_entries)
 
         return result
 
     # ----- helpers -----
 
-    def _create_cast_buffers_for_stores(self, stores: list[BufferStore], extent: int) -> CastBufferMap:
-        """Create local cast buffers for store targets (memory buffers)."""
-        cast_buffers: CastBufferMap = {}
+    def _create_cast_entries(self, accesses: list[BufferStore | BufferLoad], extent: int) -> list[CastEntry]:
+        """Create local cast buffers for memory accesses.
 
-        for store in stores:
-            if store.buffer in cast_buffers:
+        Each unique (buffer, indices) pair gets its own cast buffer.
+        """
+        entries: list[CastEntry] = []
+
+        for access in accesses:
+            indices = list(access.indices)
+            if _find_cast_entry(entries, access.buffer, indices) is not None:
                 continue
 
-            cache_name = self._make_unique_name(f"{store.buffer.name}_local_cast")
+            cache_name = self._make_unique_name(f"{access.buffer.name}_local_cast")
             cast_buffer = tir.decl_buffer(
                 shape=(extent,),
-                dtype=store.buffer.dtype,
+                dtype=access.buffer.dtype,
                 name=cache_name,
                 scope="local",
             )
-            cast_buffers[store.buffer] = (cast_buffer, list(store.indices))
+            entries.append((access.buffer, indices, cast_buffer))
 
-        return cast_buffers
-
-    def _create_cast_buffers_for_loads(self, loads: list[BufferLoad], extent: int) -> CastBufferMap:
-        """Create local cast buffers for load sources (memory buffers)."""
-        cast_buffers: CastBufferMap = {}
-
-        for load in loads:
-            if load.buffer in cast_buffers:
-                continue
-
-            cache_name = self._make_unique_name(f"{load.buffer.name}_local_cast")
-            cast_buffer = tir.decl_buffer(
-                shape=(extent,),
-                dtype=load.buffer.dtype,
-                name=cache_name,
-                scope="local",
-            )
-            cast_buffers[load.buffer] = (cast_buffer, list(load.indices))
-
-        return cast_buffers
+        return entries
 
     def _make_vectorized_loop(self, original: For, body: Stmt) -> For:
         """Create a vectorized For loop based on the original."""
@@ -377,11 +393,20 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             original.step,
         )
 
-    def _create_copy_loops_to_memory(self, op: For, cast_buffers: CastBufferMap, condition: tir.PrimExpr | None = None) -> list[For]:
-        """Create copy loops to transfer data from cast buffers to memory buffers."""
+    def _create_copy_loops(
+        self,
+        op: For,
+        entries: list[CastEntry],
+        direction: str,
+        condition: tir.PrimExpr | None = None,
+    ) -> list[For]:
+        """Create vectorized copy loops between memory and cast buffers.
+
+        direction: "to_memory" (cast → memory) or "from_memory" (memory → cast).
+        """
         copy_loops: list[For] = []
 
-        for orig_buffer, (cast_buffer, orig_indices) in cast_buffers.items():
+        for orig_buffer, orig_indices, cast_buffer in entries:
             # vectorized loop only has one iteration variable,
             # so we use the same name for the copy variable
             copy_var = Var(f"{op.loop_var.name}_copy", op.loop_var.dtype)
@@ -389,12 +414,18 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             # Substitute loop_var with copy_var in original indices
             new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
 
-            # cast buffer → memory
-            copy_store: Stmt = BufferStore(
-                orig_buffer,
-                BufferLoad(cast_buffer, [copy_var]),
-                new_indices,
-            )
+            if direction == "to_memory":
+                copy_store: Stmt = BufferStore(
+                    orig_buffer,
+                    BufferLoad(cast_buffer, [copy_var]),
+                    new_indices,
+                )
+            else:
+                copy_store = BufferStore(
+                    cast_buffer,
+                    BufferLoad(orig_buffer, new_indices),
+                    [copy_var],
+                )
 
             # Wrap with condition if present
             if condition is not None:
@@ -415,48 +446,10 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
         return copy_loops
 
-    def _create_copy_loops_from_memory(self, op: For, cast_buffers: CastBufferMap, condition: tir.PrimExpr | None = None) -> list[For]:
-        """Create copy loops to transfer data from memory buffers to cast buffers."""
-        copy_loops: list[For] = []
-
-        for orig_buffer, (cast_buffer, orig_indices) in cast_buffers.items():
-            # vectorized loop only has one iteration variable,
-            # so we use the same name for the copy variable
-            copy_var = Var(f"{op.loop_var.name}_copy", op.loop_var.dtype)
-
-            # Substitute loop_var with copy_var in original indices
-            new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
-
-            # memory → cast buffer
-            copy_store: Stmt = BufferStore(
-                cast_buffer,
-                BufferLoad(orig_buffer, new_indices),
-                [copy_var],
-            )
-
-            # Wrap with condition if present
-            if condition is not None:
-                new_condition = substitute(condition, {op.loop_var: copy_var})
-                copy_store = IfThenElse(new_condition, copy_store, None)
-
-            copy_loop = For(
-                copy_var,
-                op.min,
-                op.extent,
-                ForKind.VECTORIZED,
-                copy_store,
-                op.thread_binding,
-                op.annotations,
-                op.step,
-            )
-            copy_loops.append(copy_loop)
-
-        return copy_loops
-
-    def _wrap_with_allocations(self, body: Stmt, cast_buffers: CastBufferMap) -> Stmt:
+    def _wrap_with_allocations(self, body: Stmt, entries: list[CastEntry]) -> Stmt:
         """Wrap statement with buffer declarations and allocations."""
         result = body
-        for cast_buffer, _ in cast_buffers.values():
+        for _, _, cast_buffer in entries:
             result = DeclBuffer(cast_buffer, result)
             result = Allocate(
                 cast_buffer.data,
@@ -467,46 +460,38 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             )
         return result
 
-    def _replace_stores_with_cast(self, stmt: Stmt, cast_buffers: CastBufferMap, loop_var: Var) -> Stmt:
-        """Replace stores to memory buffers with stores to cast buffers."""
-        store_replacer = StoreReplacer(cast_buffers, loop_var)
-        return store_replacer.visit_stmt(stmt)
-
-    def _replace_loads_with_cast(self, stmt: Stmt, cast_buffers: CastBufferMap, loop_var: Var) -> Stmt:
-        """Replace loads from memory buffers with loads from cast buffers."""
-        load_replacer = LoadReplacer(cast_buffers, loop_var)
-        return load_replacer.visit_stmt(stmt)
+    def _replace_access(self, stmt: Stmt, store_entries: list[CastEntry], load_entries: list[CastEntry], loop_var: Var) -> Stmt:
+        """Replace memory accesses with cast buffer accesses."""
+        replacer = AccessReplacer(store_entries, load_entries, loop_var)
+        return replacer.visit_stmt(stmt)
 
 
 @tir.functor.mutator
-class StoreReplacer(tir.PyStmtExprMutator):
-    """Mutator to replace memory BufferStores with cast buffer BufferStores."""
+class AccessReplacer(tir.PyStmtExprMutator):
+    """Mutator to replace memory BufferStores/BufferLoads with cast buffer accesses.
 
-    def __init__(self, cast_buffers: CastBufferMap, loop_var: Var):
+    Matches by both buffer and indices (structural equality) so that accesses
+    like a[i] and a[i+32] from the same buffer map to different cast buffers.
+    """
+
+    def __init__(self, store_entries: list[CastEntry], load_entries: list[CastEntry], loop_var: Var):
         super().__init__()
-        self.cast_buffers = cast_buffers
+        self.store_entries = store_entries
+        self.load_entries = load_entries
         self.loop_var = loop_var
 
     def visit_buffer_store_(self, op: BufferStore) -> Stmt:
-        if op.buffer in self.cast_buffers:
-            cast_buffer, _ = self.cast_buffers[op.buffer]
-            return BufferStore(cast_buffer, op.value, [self.loop_var])
+        cast_buf = _find_cast_entry(self.store_entries, op.buffer, list(op.indices))
+        if cast_buf is not None:
+            # Replace store target but keep value as-is (loads in value will
+            # be replaced by visit_buffer_load_ during recursive traversal)
+            return BufferStore(cast_buf, self.visit_expr(op.value), [self.loop_var])
         return op
 
-
-@tir.functor.mutator
-class LoadReplacer(tir.PyStmtExprMutator):
-    """Mutator to replace memory BufferLoads with cast buffer BufferLoads."""
-
-    def __init__(self, cast_buffers: CastBufferMap, loop_var: Var):
-        super().__init__()
-        self.cast_buffers = cast_buffers
-        self.loop_var = loop_var
-
     def visit_buffer_load_(self, op: BufferLoad) -> tir.PrimExpr:
-        if op.buffer in self.cast_buffers:
-            cast_buffer, _ = self.cast_buffers[op.buffer]
-            return BufferLoad(cast_buffer, [self.loop_var])
+        cast_buf = _find_cast_entry(self.load_entries, op.buffer, list(op.indices))
+        if cast_buf is not None:
+            return BufferLoad(cast_buf, [self.loop_var])
         return op
 
 
