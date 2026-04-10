@@ -957,10 +957,19 @@ private:
     }
   }
 
-  /*! \brief Return the effective attach scope: lexical_scope_ takes
-   *  precedence over thread_scope_ when set. */
-  const Object *effective_scope() const {
-    return lexical_scope_ ? lexical_scope_ : thread_scope_;
+  /*! \brief Return the effective attach scope for the given storage scope.
+   *
+   * lexical_alloc_scope is intended to bound register/local-like allocations.
+   * Shared/global allocations should continue to follow thread_scope_ so we do
+   * not accidentally re-scope shared buffers nested inside a lexical block.
+   */
+  const Object *effective_scope(const StorageScope &storage_scope) const {
+    if (lexical_scope_ != nullptr &&
+        storage_scope.rank != StorageRank::kGlobal &&
+        storage_scope.rank != StorageRank::kShared) {
+      return lexical_scope_;
+    }
+    return thread_scope_;
   }
 
   // Memory plan algorithm
@@ -999,7 +1008,8 @@ private:
                 InplaceOpVerifier visitor;
                 StorageEntry *src_entry = alloc_map_.at(src);
                 if (src_entry->scope == storage_scope &&
-                    src_entry->attach_scope_ == effective_scope() &&
+                    src_entry->attach_scope_ ==
+                        effective_scope(storage_scope) &&
                     src_entry->elem_type == alloc->dtype.element_of() &&
                     visitor.Check(s.stmt, var, src)) {
                   uint64_t const_nbits =
@@ -1016,9 +1026,10 @@ private:
             }
           }
           if (dst_entry == nullptr) {
-            dst_entry = FindAlloc(alloc, effective_scope(), storage_scope,
-                                  entry.num_physical_dimensions, enable_reuse,
-                                  reuse_require_exact_matched_dtype);
+            dst_entry =
+                FindAlloc(alloc, effective_scope(storage_scope), storage_scope,
+                          entry.num_physical_dimensions, enable_reuse,
+                          reuse_require_exact_matched_dtype);
           }
           dst_entry->allocs.emplace_back(alloc);
           alloc_map_[var] = dst_entry;
