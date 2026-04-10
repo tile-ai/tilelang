@@ -610,6 +610,23 @@ TVM_DLL const Op &cluster_sync();
 TVM_DLL const Op &block_rank_in_cluster();
 
 /*!
+ * \brief Issue a Blackwell cluster launch control query that writes a 16-byte
+ * response into shared memory and signals completion on the given mbarrier.
+ *
+ * clc_try_cancel(result_ptr, mbar_ptr)
+ *
+ */
+TVM_DLL const Op &clc_try_cancel();
+
+/*!
+ * \brief Cluster-wide multicast variant of cluster launch control query.
+ *
+ * clc_try_cancel_multicast(result_ptr, mbar_ptr)
+ *
+ */
+TVM_DLL const Op &clc_try_cancel_multicast();
+
+/*!
  * \brief Synchronize all threads in a grid
  *
  * sync_grid()
