@@ -103,6 +103,23 @@ def _has_cast(stmt: Stmt) -> bool:
     return found
 
 
+def _contains_seq_stmt(stmt: Stmt) -> bool:
+    """Check if statement contains SeqStmt (multiple statements).
+
+    When the For body has SeqStmt, the transformation is more complex
+    and we skip the optimization for now.
+    """
+    found = False
+
+    def visitor(node) -> None:
+        nonlocal found
+        if isinstance(node, SeqStmt):
+            found = True
+
+    post_order_visit(stmt, visitor)
+    return found
+
+
 def _expr_depends_on_var(expr: tir.PrimExpr, var: Var) -> bool:
     """Check if an expression references the given Var."""
     found = False
@@ -293,6 +310,10 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         if not _has_cast(new_body):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
+        # Skip SeqStmt (multiple statements) — not supported yet
+        if _contains_seq_stmt(new_body):
+            return self._make_for(op, new_body) if new_body is not op.body else op
+
         # Inline LetStmts for analysis so BufferLoads behind Vars are visible
         inlined_body = inline_let_stmts(new_body)
 
@@ -331,9 +352,10 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             condition=condition,
         )
 
-        # Build compute loop: replace stores and loads in the *original* body
+        # Build compute loop: replace stores and loads in the *inlined* body
+        # so that indices match what the collector saw (LetStmt vars are expanded)
         all_replacements = store_entries + load_entries
-        compute_body = new_body
+        compute_body = inlined_body
         if all_replacements:
             compute_body = self._replace_access(compute_body, store_entries, all_replacements, op.loop_var)
         compute_loop = self._make_vectorized_loop(op, compute_body)
@@ -481,11 +503,12 @@ class AccessReplacer(tir.PyStmtExprMutator):
         self.loop_var = loop_var
 
     def visit_buffer_store_(self, op: BufferStore) -> Stmt:
+        new_value = self.visit_expr(op.value)
         cast_buf = _find_cast_entry(self.store_entries, op.buffer, list(op.indices))
         if cast_buf is not None:
-            # Replace store target but keep value as-is (loads in value will
-            # be replaced by visit_buffer_load_ during recursive traversal)
-            return BufferStore(cast_buf, self.visit_expr(op.value), [self.loop_var])
+            return BufferStore(cast_buf, new_value, [self.loop_var])
+        if new_value is not op.value:
+            return BufferStore(op.buffer, new_value, list(op.indices))
         return op
 
     def visit_buffer_load_(self, op: BufferLoad) -> tir.PrimExpr:
