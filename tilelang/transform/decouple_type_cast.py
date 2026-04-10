@@ -1,28 +1,41 @@
 """
 Decouple type cast vectorization constraints.
 
-When a vectorized loop contains Cast nodes, the vectorization width is
-constrained by the GCD of all involved dtypes. This pass decouples those
-constraints by replacing every shared/global buffer access with a local
-(register) cast buffer, so the compute loop only touches registers and each
-copy loop can independently maximize its vector width.
+When a vectorized loop has mixed-precision operations between local and memory
+buffers, the vectorization length would be constrained by the GCD of all
+involved dtypes.
 
-The transformation applies when a vectorized loop body contains at least one
-Cast node. All shared/global BufferStore targets get a local cast buffer
-(compute → cast_buf → copy to memory), and all shared/global BufferLoad
-sources get a local cast buffer (copy from memory → cast_buf → compute).
+This pass decouples the constraints by inserting a local buffer as an
+intermediate stage, allowing optimal vectorization for both computation and
+memory access.
 
+Mixed-precision is detected by the presence of Cast nodes in the loop body.
+
+Two cases are handled:
+
+Case 1: local → memory (store to memory with mixed types)
+---------------------------------------------------------
 Before:
     for vec in T.vectorized(16):
-        out_shared[vec] = T.cast(T.float32(x_frag[vec]) * scale[vec], T.float8_e4m3fn)
+        b[vec] = T.cast(a_frag[vec], "float4_e2m1fn")
 
 After:
-    for vec_copy in T.vectorized(16):                     # copy from memory
-        scale_local_cast[vec_copy] = scale[vec_copy]
-    for vec in T.vectorized(16):                           # compute (registers only)
-        out_local_cast[vec] = T.cast(T.float32(x_frag[vec]) * scale_local_cast[vec], T.float8_e4m3fn)
-    for vec_copy in T.vectorized(16):                      # copy to memory
-        out_shared[vec_copy] = out_local_cast[vec_copy]
+    for vec in T.vectorized(16):
+        cast_buf[vec] = T.cast(a_frag[vec], "float4_e2m1fn")  # compute
+    for vec_copy in T.vectorized(16):
+        b[vec_copy] = cast_buf[vec_copy]                      # copy to memory
+
+Case 2: memory → local (load from memory with different dtype)
+--------------------------------------------------------------
+Before:
+    for vec in T.vectorized(16):
+        a_frag[vec] = T.cast(b[vec], "float32")
+
+After:
+    for vec_copy in T.vectorized(16):
+        cast_buf[vec_copy] = b[vec_copy]                      # copy from memory
+    for vec in T.vectorized(16):
+        a_frag[vec] = T.cast(cast_buf[vec], "float32")        # compute
 """
 
 from __future__ import annotations
@@ -72,7 +85,7 @@ def is_global_or_shared_buffer(buffer: Buffer) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Detection: does the statement contain any Cast node?
+# Mixed-precision detection: check for Cast nodes in the statement tree
 # ---------------------------------------------------------------------------
 
 
@@ -186,12 +199,9 @@ CastBufferMap = dict[Buffer, tuple[Buffer, list[tir.PrimExpr]]]
 class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
     """Mutator that decouples type cast vectorization constraints.
 
-    When a vectorized loop body contains Cast nodes, this mutator replaces
-    every shared/global buffer access with a local cast buffer, splitting
-    the loop into:
-      1. copy-from-memory loops (for loads)
-      2. a compute loop (registers only)
-      3. copy-to-memory loops (for stores)
+    This mutator transforms vectorized loops that have mixed-precision
+    operations (detected by the presence of Cast nodes) by inserting local
+    cache buffers as intermediate stages.
     """
 
     def __init__(self):
@@ -222,7 +232,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
     # ----- entry point for each For loop -----
 
     def visit_for_(self, op: For) -> Stmt:
-        """Visit For nodes, transforming vectorized loops with Cast nodes."""
+        """Visit For nodes, transforming vectorized loops with mixed-type stores."""
         # Recursively visit body to handle nested loops
         new_body = self.visit_stmt(op.body)
 
@@ -262,7 +272,8 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         )
 
         # Build copy-from-memory loops (before compute)
-        # Include store buffers that are also loaded (read-modify-write)
+        # For read-modify-write (same buffer is both store target and load source),
+        # reuse the store-side cast buffer for the copy-from loop as well.
         rmw_buffers = {buf: store_cast_buffers[buf] for buf in store_cast_buffers if buf in collector._seen_load_buffers}
         all_copy_from: CastBufferMap = {**load_cast_buffers, **rmw_buffers}
         copy_from_loops = self._create_copy_loops_from_memory(op, all_copy_from, condition)
@@ -348,6 +359,8 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         copy_loops: list[For] = []
 
         for orig_buffer, (cast_buffer, orig_indices) in cast_buffers.items():
+            # vectorized loop only has one iteration variable,
+            # so we use the same name for the copy variable
             copy_var = Var(f"{op.loop_var.name}_copy", op.loop_var.dtype)
 
             # Substitute loop_var with copy_var in original indices
@@ -384,6 +397,8 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         copy_loops: list[For] = []
 
         for orig_buffer, (cast_buffer, orig_indices) in cast_buffers.items():
+            # vectorized loop only has one iteration variable,
+            # so we use the same name for the copy variable
             copy_var = Var(f"{op.loop_var.name}_copy", op.loop_var.dtype)
 
             # Substitute loop_var with copy_var in original indices
@@ -475,11 +490,10 @@ class LoadReplacer(tir.PyStmtExprMutator):
 def DecoupleTypeCast():
     """Create a TVM pass that decouples type cast vectorization constraints.
 
-    When a vectorized loop body contains Cast nodes, this pass replaces every
-    shared/global buffer access with a local (register) cast buffer. The loop
-    is split into copy-from-memory, compute (registers only), and
-    copy-to-memory phases, each of which can be independently vectorized at
-    its optimal width.
+    This pass inserts a local buffer as an intermediate stage for vectorized
+    loops where the body contains Cast nodes (mixed-precision operations).
+
+    This allows optimal vectorization for both computation and memory access.
 
     Note:
         This pass must be applied before VectorizeLoop and StorageRewrite passes,

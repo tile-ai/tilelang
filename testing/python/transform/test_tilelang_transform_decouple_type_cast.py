@@ -138,7 +138,7 @@ def test_local_to_memory_with_let_stmt():
         b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
         for i in T.vectorized(16):
             factor = scale[i]
-            b_local_cast[i] = T.Cast("float8_e4m3fn", a_frag[i] * factor)
+            b_local_cast[i] = T.cast(a_frag[i] * factor, T.float8_e4m3fn)
         for i_copy in T.vectorized(16):
             b[i_copy] = b_local_cast[i_copy]
 
