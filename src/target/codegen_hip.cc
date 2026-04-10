@@ -231,6 +231,14 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         ICHECK_EQ(lanes % 2, 0)
             << "only support even lane for float type with lanes > 4";
         os << "ulonglong" << lanes / 2;
+      } else if (lanes == 16) {
+        // float32x16: GCC vector extension type used by MFMA accumulators.
+        os << "float32x16";
+        return;
+      } else if (lanes == 32) {
+        // float32x32: GCC vector extension type used by MFMA accumulators.
+        os << "float32x32";
+        return;
       } else {
         fail = true;
       }
@@ -256,6 +264,10 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     } else if (lanes <= 8) {
       ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
       os << "uint" << lanes / 2;
+    } else if (lanes == 16) {
+      // bfloat16x16: struct { bfloat16_t data[16]; } used by MFMA accumulators.
+      os << "bfloat16x16";
+      return;
     } else {
       fail = true;
     }
@@ -468,9 +480,10 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   }
 
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
-                        : (t.bits() == 16 || t.bits() == 32) ? 8
-                                                             : 4));
+  ICHECK(i >= 0 && i < (t.bits() == 8 ? 16 : (t.lanes() == 16) ? 16
+                        : (t.lanes() == 32) ? 32
+                        : (t.bits() == 16 || t.bits() == 32)    ? 8
+                                                                 : 4));
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     std::string type_name = t.is_int() ? "char" : "unsigned char";
     if (t.lanes() == 2 || t.lanes() == 3) {
@@ -479,6 +492,12 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       os << "((" << type_name << ")(" << ac << " >> " << i % 4 * 8 << "))";
     }
+  } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 && t.is_float()) {
+    // float32x16/float32x32: __attribute__((__vector_size__(...))) supports subscript.
+    os << vec << "[" << i << "]";
+  } else if (t.lanes() == 16 && t.is_bfloat16()) {
+    // bfloat16x16: struct { bfloat16_t data[16]; }
+    os << vec << ".data[" << i << "]";
   } else if (t.is_float16()) {
     os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
@@ -515,9 +534,10 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
 
-  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
-                        : (t.bits() == 16 || t.bits() == 32) ? 8
-                                                             : 4));
+  ICHECK(i >= 0 && i < (t.bits() == 8 ? 16 : (t.lanes() == 16) ? 16
+                        : (t.lanes() == 32) ? 32
+                        : (t.bits() == 16 || t.bits() == 32)    ? 8
+                                                                 : 4));
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
       stream << vec << '.' << access[i % t.lanes()] << "=" << "(" << value
@@ -531,6 +551,12 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
       }
       stream << "(" << value << " << " << i % 4 * 8 << ");\n";
     }
+  } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 && t.is_float()) {
+    // float32x16/float32x32: __attribute__((__vector_size__(...))) supports subscript.
+    stream << vec << "[" << i << "] = " << value << ";\n";
+  } else if (t.lanes() == 16 && t.is_bfloat16()) {
+    // bfloat16x16: struct { bfloat16_t data[16]; }
+    stream << vec << ".data[" << i << "] = " << value << ";\n";
   } else if (t.is_float16()) {
     stream << "*((half_t*)(&(((half2*)(&(" << vec << "." << access[i / 2]
            << ")))->" << access[i % 2] << "))) = " << value << ";\n";
@@ -975,7 +1001,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float8_e5m2fnuzx8", "long"},
         {"float8_e5m2x4", "fp8_e5_4_t"},
         {"float8_e5m2x8", "long"},
-        {"float32x16", "float32x16"}};
+        {"float32x16", "float32x16"},
+        {"float32x32", "float32x32"}};
     std::string call_mfma_code = R"({
       *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
                     *((({B_dtype}*){b_ref}) + {b_bias}),
@@ -1310,6 +1337,33 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+      (op->dtype.lanes() == 16 || op->dtype.lanes() == 32)) {
+    // float32x16/float32x32: GCC vector extension — initialize with compound literal.
+    std::string v = PrintExpr(op->value);
+    os << "(float32x" << op->dtype.lanes() << "){";
+    for (int i = 0; i < op->dtype.lanes(); ++i) {
+      if (i != 0)
+        os << ", ";
+      os << v;
+    }
+    os << "}";
+    return;
+  }
+
+  if (op->dtype.is_bfloat16() && op->dtype.lanes() == 16) {
+    // bfloat16x16: struct aggregate initializer.
+    std::string v = PrintExpr(op->value);
+    os << "bfloat16x16{";
+    for (int i = 0; i < 16; ++i) {
+      if (i != 0)
+        os << ", ";
+      os << v;
+    }
+    os << "}";
+    return;
+  }
+
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
     bool fail = false;
     const int64_t *p = as_const_int(op->value);
@@ -1469,7 +1523,7 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
     return;
   }
 
-  if (t.is_bfloat16()) {
+  if (t.is_bfloat16() && t.lanes() != 16) {
     if (i == 0) {
       os << "make_";
       PrintType(t, os);
@@ -1485,6 +1539,30 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
         os << ")";
       }
     }
+    return;
+  }
+
+  if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 && t.is_float()) {
+    // float32x16/float32x32: compound literal.
+    if (i == 0)
+      os << "(float32x" << t.lanes() << "){";
+    os << value;
+    if (i != t.lanes() - 1)
+      os << ",";
+    else
+      os << "}";
+    return;
+  }
+
+  if (t.lanes() == 16 && t.is_bfloat16()) {
+    // bfloat16x16: struct aggregate initializer.
+    if (i == 0)
+      os << "bfloat16x16{";
+    os << value;
+    if (i != t.lanes() - 1)
+      os << ",";
+    else
+      os << "}";
     return;
   }
 
