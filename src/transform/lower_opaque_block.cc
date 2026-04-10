@@ -29,9 +29,7 @@
 #include <string>
 #include <utility>
 
-#include "../layout/layout.h"
 #include "../op/builtin.h"
-#include "../op/utils.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -71,7 +69,6 @@ private:
            "call pass ConvertBlocksToOpaque before.";
     // Step 1. Visit the body and track block nesting so we can distinguish
     // the function-level root block from nested lexical blocks.
-    int current_block_nesting = block_nesting_;
     ++block_nesting_;
     Block new_block = Downcast<Block>(this->VisitStmt(op->block));
     --block_nesting_;
@@ -110,17 +107,12 @@ private:
       body = Allocate(buffer->data, buffer->dtype, allocation_shape,
                       const_true(), std::move(body), allocate_annotations);
     }
-    // Step 5. If a nested block had register-like local (non-var)
-    // allocations, wrap them in a lexical scope boundary so that
-    // StorageRewrite does not hoist them out of the block.
-    // The function-level root block is skipped because its lifetime already
-    // matches the enclosing function body and would only introduce a
-    // redundant outermost brace in generated code.
-    // Blocks with only "local.var" allocations are skipped because those
-    // scalar variables should remain hoistable and should not force extra
-    // lexical braces in generated code.
-    if (current_block_nesting > 0 &&
-        HasNonVarLocalAlloc(new_block->alloc_buffers, new_block->annotations)) {
+    // Step 5. Materialize a lexical scope boundary only for blocks that were
+    // explicitly marked by an earlier semantic lowering pass (for example
+    // gemm_py/gemm_sp_py). We intentionally avoid re-inferring this from the
+    // lowered alloc_buffers here because provenance has already been blurred by
+    // earlier allocation planning/hoisting passes.
+    if (HasForcedLexicalAllocScope(new_block->annotations)) {
       body = AttrStmt(Integer(0), tl::attr::kLexicalAllocScope, Integer(1),
                       std::move(body));
     }
@@ -296,69 +288,10 @@ private:
     return preserved_annotations;
   }
 
-  /*! \brief Return true when at least one buffer is a register-like local
-   *  allocation whose lifetime should be bounded by a lexical scope.
-   *
-   *  We exclude:
-   *  - undefined / empty buffers
-   *  - global buffers
-   *  - shared / shared.dyn buffers
-   *  - fragment buffers, whose lifetime typically matches the enclosing
-   *    kernel/body region rather than a smaller lexical block
-   *  - other shared-like buffers not covered by IsSharedBuffer(), such as
-   *    "shared.barrier", "shared.cluster_barrier", "shared.tmem", and
-   *    "shared.tmem_addr"
-   *  - local.var buffers, which are simple scalar variables and should remain
-   *    hoistable.
-   */
-  static bool HasFragmentLayout(const Buffer &buffer,
-                                const Map<String, ffi::Any> &annotations) {
-    auto layout_map_ref = annotations.Get(tl::attr::kLayoutMap);
-    if (!layout_map_ref.has_value()) {
-      return false;
-    }
-    if (auto layout_map = layout_map_ref.value().as<Map<Var, Layout>>()) {
-      auto layout_it = layout_map.value().find(buffer->data);
-      if (layout_it != layout_map.value().end()) {
-        return (*layout_it).second.as<Fragment>().has_value();
-      }
-    }
-    if (auto layout_map = layout_map_ref.value().as<Map<Buffer, Layout>>()) {
-      auto layout_it = layout_map.value().find(buffer);
-      if (layout_it != layout_map.value().end()) {
-        return (*layout_it).second.as<Fragment>().has_value();
-      }
-      for (const auto &kv : layout_map.value()) {
-        const Buffer &layout_buffer = kv.first;
-        if (layout_buffer.defined() &&
-            layout_buffer->data.same_as(buffer->data) &&
-            kv.second.as<Fragment>().has_value()) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  static bool HasNonVarLocalAlloc(const Array<Buffer> &alloc_buffers,
-                                  const Map<String, ffi::Any> &annotations) {
-    for (const Buffer &buffer : alloc_buffers) {
-      if (!buffer.defined()) {
-        continue;
-      }
-      std::string scope = buffer.scope();
-      bool is_shared_like =
-          IsSharedBuffer(buffer) || scope == "shared.barrier" ||
-          scope == "shared.cluster_barrier" || scope == "shared.tmem" ||
-          scope == "shared.tmem_addr";
-      if (IsGlobalBuffer(buffer) || IsFragmentBuffer(buffer) ||
-          HasFragmentLayout(buffer, annotations) || is_shared_like ||
-          IsLocalVarBuffer(buffer)) {
-        continue;
-      }
-      return true;
-    }
-    return false;
+  static bool
+  HasForcedLexicalAllocScope(const Map<String, ffi::Any> &annotations) {
+    return annotations.find(tl::attr::kForceLexicalAllocScope) !=
+           annotations.end();
   }
 
   Buffer ResolveLocalVarBuffer(const Array<Buffer> &alloc_buffers) const {

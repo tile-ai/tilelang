@@ -260,17 +260,24 @@ Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       {
         BlockNode *n = block.CopyOnWrite();
         n->name_hint = global_symbol.value();
+        n->annotations.Set(tl::attr::kForceLexicalAllocScope,
+                           IntImm(DataType::Int(32), 1));
       }
       return BlockRealize(block_realize->iter_values, block_realize->predicate,
                           block);
     }
     // warp with block realize node
+    Map<String, ObjectRef> block_annotations;
+    block_annotations.Set(tl::attr::kForceLexicalAllocScope,
+                          IntImm(DataType::Int(32), 1));
     return BlockRealize(
         /*iter_values=*/Array<PrimExpr>(),
         /*predicate=*/const_true(),
         /*block=*/
         Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-              /*name_hint=*/global_symbol.value(), prim_func->body));
+              /*name_hint=*/global_symbol.value(), prim_func->body,
+              /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
+              /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
     LOG(FATAL) << "No lower function found for gemm_sp_py";
   }
