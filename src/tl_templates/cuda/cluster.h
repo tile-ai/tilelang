@@ -111,12 +111,12 @@ TL_DEVICE void clc_try_cancel(void *result_ptr, void *mbar_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
   uint32_t mbar_addr = smem_ptr_to_uint(mbar_ptr);
-  asm volatile(
-      "{\n\t"
-      "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes.b128 [%0], [%1];\n\t"
-      "}\n"
-      :
-      : "r"(result_addr), "r"(mbar_addr));
+  asm volatile("{\n\t"
+               "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::"
+               "complete_tx::bytes.b128 [%0], [%1];\n\t"
+               "}\n"
+               :
+               : "r"(result_addr), "r"(mbar_addr));
 #else
   TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
 #endif
@@ -126,12 +126,12 @@ TL_DEVICE void clc_try_cancel_multicast(void *result_ptr, void *mbar_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
   uint32_t mbar_addr = smem_ptr_to_uint(mbar_ptr);
-  asm volatile(
-      "{\n\t"
-      "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes.multicast::cluster::all.b128 [%0], [%1];\n\t"
-      "}\n"
-      :
-      : "r"(result_addr), "r"(mbar_addr));
+  asm volatile("{\n\t"
+               "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::"
+               "complete_tx::bytes.multicast::cluster::all.b128 [%0], [%1];\n\t"
+               "}\n"
+               :
+               : "r"(result_addr), "r"(mbar_addr));
 #else
   TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
 #endif
@@ -141,17 +141,17 @@ TL_DEVICE int clc_is_canceled(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
   uint32_t is_canceled = 0;
-  asm volatile(
-      "{\n\t"
-      ".reg .pred p1;\n\t"
-      ".reg .b128 clc_result;\n\t"
-      "ld.shared.b128 clc_result, [%1];\n\t"
-      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, clc_result;\n\t"
-      "selp.u32 %0, 1, 0, p1;\n\t"
-      "}\n"
-      : "=r"(is_canceled)
-      : "r"(result_addr)
-      : "memory");
+  asm volatile("{\n\t"
+               ".reg .pred p1;\n\t"
+               ".reg .b128 clc_result;\n\t"
+               "ld.shared.b128 clc_result, [%1];\n\t"
+               "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
+               "clc_result;\n\t"
+               "selp.u32 %0, 1, 0, p1;\n\t"
+               "}\n"
+               : "=r"(is_canceled)
+               : "r"(result_addr)
+               : "memory");
   return static_cast<int>(is_canceled);
 #else
   TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
@@ -167,8 +167,10 @@ TL_DEVICE uint32_t clc_get_first_ctaid_x(void const *result_ptr) {
       ".reg .pred p1;\n\t"
       ".reg .b128 clc_result;\n\t"
       "ld.shared.b128 clc_result, [%3];\n\t"
-      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, clc_result;\n\t"
-      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_result;\n\t"
+      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
+      "clc_result;\n\t"
+      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, "
+      "%1, %2, _}, clc_result;\n\t"
       "}\n"
       : "=r"(x), "=r"(y), "=r"(z)
       : "r"(result_addr)
@@ -188,8 +190,10 @@ TL_DEVICE uint32_t clc_get_first_ctaid_y(void const *result_ptr) {
       ".reg .pred p1;\n\t"
       ".reg .b128 clc_result;\n\t"
       "ld.shared.b128 clc_result, [%3];\n\t"
-      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, clc_result;\n\t"
-      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_result;\n\t"
+      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
+      "clc_result;\n\t"
+      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, "
+      "%1, %2, _}, clc_result;\n\t"
       "}\n"
       : "=r"(x), "=r"(y), "=r"(z)
       : "r"(result_addr)
@@ -209,8 +213,10 @@ TL_DEVICE uint32_t clc_get_first_ctaid_z(void const *result_ptr) {
       ".reg .pred p1;\n\t"
       ".reg .b128 clc_result;\n\t"
       "ld.shared.b128 clc_result, [%3];\n\t"
-      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, clc_result;\n\t"
-      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_result;\n\t"
+      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
+      "clc_result;\n\t"
+      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, "
+      "%1, %2, _}, clc_result;\n\t"
       "}\n"
       : "=r"(x), "=r"(y), "=r"(z)
       : "r"(result_addr)
