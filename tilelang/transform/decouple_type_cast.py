@@ -102,6 +102,19 @@ def _has_cast(stmt: Stmt) -> bool:
     return found
 
 
+def _expr_depends_on_var(expr: tir.PrimExpr, var: Var) -> bool:
+    """Check if an expression references the given Var."""
+    found = False
+
+    def visitor(node) -> None:
+        nonlocal found
+        if isinstance(node, Var) and node.same_as(var):
+            found = True
+
+    post_order_visit(expr, visitor)
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Collection: gather all shared/global BufferStores and BufferLoads
 # ---------------------------------------------------------------------------
@@ -116,10 +129,15 @@ class MemoryAccessCollector(PyStmtExprVisitor):
 
     BufferLoads in if_then_else conditions are skipped because conditions
     don't participate in the type-cast compute path.
+
+    BufferLoads whose indices do not depend on ``loop_var`` are skipped
+    because they are scalar accesses (e.g. ``b[0]``) that should remain
+    in the compute loop as broadcasts.
     """
 
-    def __init__(self):
+    def __init__(self, loop_var: Var):
         super().__init__()
+        self.loop_var = loop_var
         self.stores: list[BufferStore] = []
         self.loads: list[BufferLoad] = []
         self._seen_load_buffers: set[Buffer] = set()
@@ -132,8 +150,10 @@ class MemoryAccessCollector(PyStmtExprVisitor):
 
     def visit_buffer_load_(self, op: BufferLoad) -> None:
         if is_global_or_shared_buffer(op.buffer) and op.buffer not in self._seen_load_buffers:
-            self.loads.append(op)
-            self._seen_load_buffers.add(op.buffer)
+            # Skip loads whose indices do not depend on loop_var (scalar access)
+            if any(_expr_depends_on_var(idx, self.loop_var) for idx in op.indices):
+                self.loads.append(op)
+                self._seen_load_buffers.add(op.buffer)
         # Skip indices traversal
 
     def visit_call_(self, op: Call) -> None:
@@ -250,7 +270,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         inlined_body = inline_let_stmts(new_body)
 
         # Collect all shared/global stores and loads
-        collector = MemoryAccessCollector()
+        collector = MemoryAccessCollector(op.loop_var)
         collector.visit_stmt(inlined_body)
 
         if not collector.stores and not collector.loads:

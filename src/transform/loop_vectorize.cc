@@ -250,8 +250,25 @@ public:
         local_fragment_buffers.push_back(info);
       } else {
         // global, shared, shared.dyn
-        memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
-        has_global_or_shared_buffer = true;
+        // If indices don't depend on loop var (e.g. b[0]), treat as local —
+        // it will become a scalar broadcast, not a vector memory access,
+        // and DecoupleTypeCast won't create a cast buffer for it.
+        bool depends_on_loop_var =
+            !info.indices.empty() && inner_for_ &&
+            std::any_of(info.indices.begin(), info.indices.end(),
+                        [&](const PrimExpr &idx) {
+                          return UsesVar(idx, [&](const VarNode *v) {
+                            return v == inner_for_->loop_var.get();
+                          });
+                        });
+        if (depends_on_loop_var) {
+          memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
+          has_global_or_shared_buffer = true;
+        } else {
+          local_fragment_min =
+              arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
+          local_fragment_buffers.push_back(info);
+        }
       }
     }
 
