@@ -3826,8 +3826,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   int lanes = op->dtype.lanes();
   // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
-    HandleVolatileLoads(ref, op, os);
+    // For scalar fp4 loads from non-packed buffers, use tl_fp4_packed_load
+    // to correctly extract the nibble at the given index (the /2 in GetBufferRef
+    // maps two consecutive fp4 elements to the same byte, but reading that byte
+    // only returns the low nibble — the odd-indexed element is lost).
+    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+      std::string idx_str = PrintExpr(index);
+      std::string vid = GetVarID(buffer_var.get());
+      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
+    } else {
+      std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
+      HandleVolatileLoads(ref, op, os);
+    }
   } else {
     bool can_vector_load = false;
     arith::PVar<PrimExpr> base;
@@ -3899,11 +3909,24 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   }
 
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    std::string value = this->PrintExpr(op->value);
-    std::string ref =
-        this->GetBufferRef(value_dtype, op->buffer.get(), index_expr);
-    this->PrintIndent();
-    stream << ref << " = " << value << ";\n";
+    // For scalar fp4 stores to non-packed buffers, use tl_fp4_packed_store
+    // to correctly handle nibble-level writes. The /2 in GetBufferRef maps two
+    // consecutive fp4 elements to the same byte, and a plain assignment overwrites
+    // the entire byte — destroying the neighboring nibble.
+    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+      std::string idx_str = PrintExpr(index_expr);
+      std::string value = this->PrintExpr(op->value);
+      std::string vid = GetVarID(buffer_var.get());
+      this->PrintIndent();
+      stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << vid << ", " << idx_str
+             << ", " << value << ");\n";
+    } else {
+      std::string value = this->PrintExpr(op->value);
+      std::string ref =
+          this->GetBufferRef(value_dtype, op->buffer.get(), index_expr);
+      this->PrintIndent();
+      stream << ref << " = " << value << ";\n";
+    }
   } else {
     arith::PVar<PrimExpr> base;
     int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
