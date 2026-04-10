@@ -79,8 +79,8 @@ static constexpr const char *kDisableSafeMemoryLegalize =
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
-// Deprecated compatibility-only pass config. It is no longer consumed by the
-// lowering pipeline, but remains registered so legacy kernels keep working.
+// Deprecated pass config, temporarily re-enabled. Prevents plain T.copy()
+// from auto-lowering to TMA store. Will be removed in v0.1.10.
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kEnableAggressiveSharedMemoryMerge =
     "tl.enable_aggressive_shared_memory_merge";
