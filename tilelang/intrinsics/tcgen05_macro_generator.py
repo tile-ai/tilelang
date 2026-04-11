@@ -620,13 +620,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         )
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
-        meta = self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim)
-        if len(meta) != 5:
+        # Block-scaled MMA (.block_scale) does NOT support 2-CTA variant in this path.
+        self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim, disable_2cta=True)
+        if len(self.meta) != 5:
             raise ValueError(
                 f"Unsupported TCGEN5MMA configuration for block-scaled: M={m_dim}, N={n_dim}, "
                 f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
             )
-        atom_m, atom_n, atom_k, _enable_ws, enable_2cta = (int(x) for x in meta)
+        atom_m, atom_n, atom_k, _enable_ws, enable_2cta = (int(x) for x in self.meta)
         # Block-scaled MMA (.block_scale) does NOT support .ws variant per PTX ISA.
         # Force non-ws mode. atom_m=128 is required for cta_group::1 non-ws.
         enable_ws = 0

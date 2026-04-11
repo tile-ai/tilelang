@@ -86,15 +86,6 @@ TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr,
   }
 }
 
-TL_DEVICE void tcgen05_before_thread_sync() {
-  asm volatile("tcgen05.fence::before_thread_sync;");
-}
-
-TL_DEVICE void tcgen05_after_thread_sync() {
-  asm volatile("tcgen05.fence::after_thread_sync;");
-}
-
-
 // UTCCP: Copy scale factors from shared memory to tensor memory
 // Uses tcgen05.cp.cta_group::1.32x128b.warpx4 instruction
 // Must be called by one warp; only one elected thread issues the instruction.
