@@ -141,7 +141,7 @@ class GemmTCGEN5(GemmBase):
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
 
         if self.is_blockscaled:
-            return self._lower_blockscaled(mma_emitter, thread_bounds, thread_var)
+            return self._lower_blockscaled(mma_emitter, thread_bounds, thread_var, mbar_phase_expr)
 
         if not (self.is_gemm_ss() or self.is_gemm_ts()):
             raise ValueError(f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}")
@@ -210,8 +210,19 @@ class GemmTCGEN5(GemmBase):
             else _Simplify(_gemm_ss_cond, inline_let=True)
         )
 
-    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_var):
-        """Lower block-scaled MXFP8 GEMM to TIR."""
+    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_var,
+                           mbar_phase_expr: tir.PrimExpr | None = None):
+        """Lower block-scaled MXFP8 GEMM to TIR.
+
+        Block-scaled GEMM follows explicit-async TCGEN5MMA semantics: the MMA
+        issue posts completion to `mbar`, and the user (or pipeline pass) is
+        responsible for waiting on that barrier at the consumption point. We
+        therefore never auto-emit `mbarrier_wait_parity` here. This mirrors the
+        `is_tcgen05=True` branch of `_gemm_ss`. `mbar_phase_expr` is accepted
+        for API consistency with the rest of the `GemmPyNode.Lower` chain and
+        so that a future synchronous block-scaled path can use it without
+        needing another signature change.
+        """
         mbar = self.mbar
         if mbar is None:
             raise ValueError("Block-scaled GEMM requires a valid mbarrier")
@@ -225,6 +236,11 @@ class GemmTCGEN5(GemmBase):
         SFB_tmem = self.SFBRegion.buffer
         sf_a_id = self.sf_a_id
         sf_b_id = self.sf_b_id
+        # NOTE: mbar_phase_expr is intentionally unused in the current
+        # frontend, which always requests explicit-async semantics. Keep the
+        # parameter so the signature matches `_gemm_ss` and the call site in
+        # `lower()` does not need a special case.
+        del mbar_phase_expr
 
         analyzer = Analyzer()
         warp_size = 32

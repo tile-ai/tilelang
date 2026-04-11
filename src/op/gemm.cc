@@ -109,6 +109,12 @@ AccessRegions GemmNode::GetAccessRegions() const {
   if (!is_one(clearAccum_)) {
     result.reads.push_back(cRegion_);
   }
+  if (sfaRegion_.defined()) {
+    result.reads.push_back(sfaRegion_);
+  }
+  if (sfbRegion_.defined()) {
+    result.reads.push_back(sfbRegion_);
+  }
   result.writes.push_back(cRegion_);
   return result;
 }
