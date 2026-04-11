@@ -167,6 +167,9 @@ int to_CUtensorMapDataType(DataType dtype) {
     }
   } else if (dtype.is_bfloat16()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+  } else if (dtype.is_tensorfloat32()) {
+    // TensorFloat32 uses same memory layout as Float32
+    tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
   } else if (dtype.is_float8()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
   } else if (dtype.is_int()) {

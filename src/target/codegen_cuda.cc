@@ -713,6 +713,20 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       fail = true;
     }
     return;
+  } else if (t.is_tensorfloat32()) {
+    if (t.is_scalar()) {
+      os << "tfloat32_t";
+    } else if (lanes <= 4) {
+      os << "float" << lanes;
+    } else if (lanes <= 8) {
+      ICHECK_EQ(lanes % 2, 0)
+          << "only support even lane for tfloat32 type with lanes > 4";
+      os << "ulonglong" << lanes / 2;
+    } else {
+      fail = true;
+    }
+    if (!fail)
+      return;
   } else if (t == DataType::Bool()) {
     os << "bool";
     return;
@@ -2348,16 +2362,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)));\n";
     tl::codegen::Replacer replacer;
 
-    // TODO(lei): Type Workaround for TF32, should be removed when
-    // we introduced tfloat32_t in the frontend.
     std::string AType = tl::codegen::ptx::DTypeEnumToString(dtype_a_enum);
-    if (AType == "tl::DataType::kFloat32") {
-      AType = "tl::DataType::kTensorFloat32";
-    }
     std::string BType = tl::codegen::ptx::DTypeEnumToString(dtype_b_enum);
-    if (BType == "tl::DataType::kFloat32") {
-      BType = "tl::DataType::kTensorFloat32";
-    }
     std::string ARegType = tl::codegen::GetMMARegisterType(dtype_a_enum);
     if (ARegType == "float") {
       ARegType = "uint32_t";
@@ -4211,6 +4217,28 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << "std::numeric_limits<";
       p->PrintType(op->dtype, temp);
       temp << ">::quiet_NaN()";
+    } else {
+      p->PrintType(op->dtype, temp);
+      temp << '(' << std::hexfloat << op->value << 'f';
+      temp << "/*" << std::scientific << op->value << "*/";
+      temp << ')';
+    }
+    p->MarkConst(temp.str());
+    os << temp.str();
+    return;
+  }
+  // Type code is kTensorFloat32
+  // infinity() and quiet_NaN() for tfloat32_t are not inlined in CUTLASS
+  // currently
+  if (op->dtype.is_tensorfloat32()) {
+    std::ostringstream temp;
+    if (std::isinf(op->value)) {
+      if (op->value < 0) {
+        temp << "-";
+      }
+      temp << "tfloat32_t::bitcast(0x7f800000)";
+    } else if (std::isnan(op->value)) {
+      temp << "tfloat32_t::bitcast(0x7fffffff)";
     } else {
       p->PrintType(op->dtype, temp);
       temp << '(' << std::hexfloat << op->value << 'f';

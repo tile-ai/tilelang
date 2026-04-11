@@ -7,6 +7,8 @@ import tvm.script.ir_builder.tir._ffi_api as tb_ffi
 import numpy as np
 from tilelang import logger
 
+_TFLOAT32_TYPE_CODE = 129
+
 _T = TypeVar("_T")
 
 if TYPE_CHECKING:
@@ -134,6 +136,7 @@ _STR_TO_TVM_DTYPE_CALL = {
     "float8_e5m2": "Float8E5M2",
     "float8_e5m2fnuz": "Float8E5M2FNUZ",
     "float8_e8m0fnu": "Float8E8M0FNU",
+    "tfloat32": "TensorFloat32",
 }
 
 int_ = int
@@ -160,6 +163,8 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
         val = "Float" + self[5:]
     elif self.startswith("bfloat"):
         val = "BFloat" + self[6:]
+    elif self.startswith("tfloat"):
+        val = "TensorFloat" + self[6:]
     else:
         raise TypeError(f"Invalid type {self}")
     if "_" in val:
@@ -212,6 +217,8 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float4_e2m1fn":
         logger.info("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
         return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
+    elif dtype_str == "custom[tfloat32]":
+        return torch.float32
     elif dtype_str == "handle":
         return None
     elif dtype_str in _STR_TO_TORCH_DTYPE:
@@ -417,6 +424,13 @@ if TYPE_CHECKING:
     class float4_e2m1fnx64(dtype): ...
     class bfloat16(dtype): ...
     class bfloat16x2(dtype): ...
+    class tfloat32(dtype): ...
+    class tfloat32x2(dtype): ...
+    class tfloat32x4(dtype): ...
+    class tfloat32x8(dtype): ...
+    class tfloat32x16(dtype): ...
+    class tfloat32x32(dtype): ...
+    class tfloat32x64(dtype): ...
 
     # yapf: enable
 
@@ -586,6 +600,13 @@ else:
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
     bfloat16 = dtype("bfloat16")
     bfloat16x2 = dtype("bfloat16x2")
+    tfloat32 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 1))
+    tfloat32x2 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 2))
+    tfloat32x4 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 4))
+    tfloat32x8 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 8))
+    tfloat32x16 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 16))
+    tfloat32x32 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 32))
+    tfloat32x64 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 64))
 
 _all_dtypes = [
     "bool",
@@ -753,6 +774,13 @@ _all_dtypes = [
     "float4_e2m1fnx64",
     "bfloat16",
     "bfloat16x2",
+    "tfloat32",
+    "tfloat32x2",
+    "tfloat32x4",
+    "tfloat32x8",
+    "tfloat32x16",
+    "tfloat32x32",
+    "tfloat32x64",
 ]
 
 __all__ = list(_all_dtypes) + [

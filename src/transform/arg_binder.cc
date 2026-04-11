@@ -536,6 +536,15 @@ void ArgBinder::BindDLTensors(
       cond = cond || (code_match && v_type_bits == expect_bits &&
                       v_type_lanes == expect_lanes);
     }
+    // Allow tfloat32 to match float32 at runtime (same storage).
+    if (buffer->dtype.is_tensorfloat32()) {
+      PrimExpr code_float = IntImm(DataType::UInt(8), DataType::kFloat);
+      PrimExpr bits32 = IntImm(DataType::UInt(8), 32);
+      PrimExpr float32_ok =
+          (v_type_code == code_float && v_type_bits == bits32 &&
+           v_type_lanes == expect_lanes);
+      cond = cond || float32_ok;
+    }
     // Allow bool to match int8/uint8 at runtime, and also kDLBool(code=6).
     if (buffer->dtype.is_bool()) {
       PrimExpr code_int = IntImm(DataType::UInt(8), DataType::kInt);
