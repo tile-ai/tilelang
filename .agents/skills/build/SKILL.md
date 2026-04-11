@@ -31,14 +31,49 @@ pip install --no-build-isolation .
 
 After this, you can invoke `cmake --build build` directly to recompile only changed C++ files. This is useful when iterating on C++ code.
 
+## Alternative: cmake + PYTHONPATH (recommended for C++ development)
+
+For the fastest C++ iteration, bypass pip entirely and drive cmake directly:
+
+```bash
+# Configure (auto-detects CUDA; git submodules are initialised automatically)
+cmake -S . -B build
+
+# Build
+cmake --build build -j$(nproc)
+
+# Make the local tilelang package importable
+export PYTHONPATH=$(pwd):$PYTHONPATH
+```
+
+After the initial configure, recompiling is just `cmake --build build -j$(nproc)`. The runtime automatically discovers native libraries from `build/lib/` when it detects a dev checkout (see `tilelang/env.py`).
+
+Useful cmake options:
+
+| Flag | Purpose |
+|------|---------|
+| `-DUSE_CUDA=ON/OFF` | Enable/disable CUDA backend (ON by default) |
+| `-DUSE_ROCM=ON` | Enable ROCm/HIP backend |
+| `-DUSE_METAL=ON` | Enable Metal backend (default on macOS) |
+| `-DCMAKE_BUILD_TYPE=Debug` | Debug build with `TVM_LOG_DEBUG` enabled |
+
 ## Editable Installs
 
-**Never use `pip install -e .`** (editable install). When you install from source with `pip install .`, the local `./tilelang` directory is imported (not the installed copy). This is intentional and makes development convenient without editable mode. Editable installs break this assumption and cause import confusion.
+**Never use `pip install -e .`** (editable install). When running Python from the repo root, the local `./tilelang` directory is imported instead of the installed copy (because `.` is on `sys.path` by default). This makes editable installs unnecessary. Avoid `pip install -e .` as it can cause import confusion with this project's layout.
 
 ## Running Tests
 
+Most tests require a GPU.
+
 ```bash
 python -m pytest testing/python/ -x
+```
+
+Run a specific test file or test case:
+
+```bash
+python -m pytest testing/python/language/test_tilelang_language_copy.py -x
+python -m pytest testing/python/language/test_tilelang_language_copy.py -x -k "test_name"
 ```
 
 For Metal-specific tests (requires macOS with Apple Silicon):
