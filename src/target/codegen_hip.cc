@@ -480,10 +480,11 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   }
 
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < (t.bits() == 8 ? 16 : (t.lanes() == 16) ? 16
-                        : (t.lanes() == 32) ? 32
-                        : (t.bits() == 16 || t.bits() == 32)    ? 8
-                                                                 : 4));
+  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
+                        : (t.lanes() == 16)                  ? 16
+                        : (t.lanes() == 32)                  ? 32
+                        : (t.bits() == 16 || t.bits() == 32) ? 8
+                                                             : 4));
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     std::string type_name = t.is_int() ? "char" : "unsigned char";
     if (t.lanes() == 2 || t.lanes() == 3) {
@@ -492,8 +493,10 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       os << "((" << type_name << ")(" << ac << " >> " << i % 4 * 8 << "))";
     }
-  } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 && t.is_float()) {
-    // float32x16/float32x32: __attribute__((__vector_size__(...))) supports subscript.
+  } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 &&
+             t.is_float()) {
+    // float32x16/float32x32: __attribute__((__vector_size__(...))) supports
+    // subscript.
     os << vec << "[" << i << "]";
   } else if (t.lanes() == 16 && t.is_bfloat16()) {
     // bfloat16x16: struct { bfloat16_t data[16]; }
@@ -534,10 +537,11 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
 
-  ICHECK(i >= 0 && i < (t.bits() == 8 ? 16 : (t.lanes() == 16) ? 16
-                        : (t.lanes() == 32) ? 32
-                        : (t.bits() == 16 || t.bits() == 32)    ? 8
-                                                                 : 4));
+  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
+                        : (t.lanes() == 16)                  ? 16
+                        : (t.lanes() == 32)                  ? 32
+                        : (t.bits() == 16 || t.bits() == 32) ? 8
+                                                             : 4));
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
       stream << vec << '.' << access[i % t.lanes()] << "=" << "(" << value
@@ -551,8 +555,10 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
       }
       stream << "(" << value << " << " << i % 4 * 8 << ");\n";
     }
-  } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 && t.is_float()) {
-    // float32x16/float32x32: __attribute__((__vector_size__(...))) supports subscript.
+  } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 &&
+             t.is_float()) {
+    // float32x16/float32x32: __attribute__((__vector_size__(...))) supports
+    // subscript.
     stream << vec << "[" << i << "] = " << value << ";\n";
   } else if (t.lanes() == 16 && t.is_bfloat16()) {
     // bfloat16x16: struct { bfloat16_t data[16]; }
@@ -1348,7 +1354,8 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
 
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       (op->dtype.lanes() == 16 || op->dtype.lanes() == 32)) {
-    // float32x16/float32x32: GCC vector extension — initialize with compound literal.
+    // float32x16/float32x32: GCC vector extension — initialize with compound
+    // literal.
     std::string v = PrintExpr(op->value);
     os << "(float32x" << op->dtype.lanes() << "){";
     for (int i = 0; i < op->dtype.lanes(); ++i) {
