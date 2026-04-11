@@ -275,7 +275,7 @@ def tcgen05_gemm(
     )
 
 
-def blockscaled_gemm(
+def tcgen05_gemm_blockscaled(
     A: BufferLikeType,
     B: BufferLikeType,
     C: BufferLikeType,
@@ -289,16 +289,21 @@ def blockscaled_gemm(
     sf_a_id: int = 0,
     sf_b_id: int = 0,
 ) -> tir.PrimExpr:
-    """Block-scaled GEMM
-    Currently only support MXFP8 for SM100, lowered to tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale instructions.
+    """Explicit Blackwell TCGEN05 block-scaled GEMM without an implicit wait.
 
-    A, B are FP8 (E4M3/E5M2) in shared memory, C is accumulator in tensor memory.
-    SFA_tmem, SFB_tmem are E8M0 scale factors already in tensor memory.
+    This is the explicit asynchronous Blackwell TCGEN5MMA block-scaled
+    counterpart to `T.tcgen05_gemm(...)`, lowering to
+    `tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale`.
+
+    A and B are FP8 (E4M3/E5M2) in shared memory, C is the accumulator in
+    tensor memory, and SFA/SFB are E8M0 scale factors already resident in
+    tensor memory. As with `T.tcgen05_gemm(...)`, this API is explicit-async:
+    it issues the MMA and leaves synchronization to the user schedule.
 
     Args:
         A: FP8 input buffer A in shared memory.
         B: FP8 input buffer B in shared memory.
-        C: FP32 accumulator in tensor memory.
+        C: Accumulator in tensor memory.
         SFA_tmem: Scale factors for A in tensor memory.
         SFB_tmem: Scale factors for B in tensor memory.
         transpose_A: Whether A is MN-major. Default: False (K-major).
@@ -339,7 +344,7 @@ def blockscaled_gemm(
     M, N = C_shape
     K = A_shape[-2] if transpose_A else A_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert prim_expr_equal(K, K_B), f"T.blockscaled_gemm K shape check failed: K_A = {K}, K_B = {K_B}"
+    assert prim_expr_equal(K, K_B), f"T.tcgen05_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
 
     A_stride = retrieve_stride(A_region)
     B_stride = retrieve_stride(B_region)
@@ -366,8 +371,7 @@ def blockscaled_gemm(
     SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
     SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
 
-    assert mbar is not None, "mbar is required for blockscaled_gemm"
-    mbar_arg = mbar 
+    assert mbar is not None, "mbar is required for tcgen05_gemm_blockscaled"
 
     # Ensure sf_a_id and sf_b_id are PrimExpr
     if not isinstance(sf_a_id, tir.PrimExpr):

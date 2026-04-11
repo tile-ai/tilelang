@@ -60,7 +60,7 @@ from .gemm_op import (  # noqa: F401
     gemm,
     wgmma_gemm,
     tcgen05_gemm,
-    blockscaled_gemm,
+    tcgen05_gemm_blockscaled,
     make_blockscaled_gemm_layout,
 )
 from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401

@@ -111,7 +111,7 @@ def mxfp8_blockscaled_gemm(
                 T.sync_warp()
 
                 # sf_id selects which of the 4 packed E8M0 values to use
-                T.blockscaled_gemm(
+                T.tcgen05_gemm_blockscaled(
                     A_shared[k % num_stages, :, :],
                     B_shared[k % num_stages, :, :],
                     C_tmem,

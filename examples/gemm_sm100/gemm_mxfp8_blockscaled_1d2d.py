@@ -103,7 +103,7 @@ def mxfp8_blockscaled_gemm(
 
                 T.sync_warp()
 
-                T.blockscaled_gemm(
+                T.tcgen05_gemm_blockscaled(
                     A_shared[k % num_stages, :, :],
                     B_shared[k % num_stages, :, :],
                     C_tmem,
