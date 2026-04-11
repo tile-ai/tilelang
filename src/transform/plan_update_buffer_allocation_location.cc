@@ -303,7 +303,7 @@ private:
   const StmtNode *ResolveAllocationSite(const VarNode *buffer_var,
                                         const StmtNode *stmt) const {
     while (stmt != nullptr && stmt->IsInstance<ForNode>()) {
-      const auto *for_node = reinterpret_cast<const ForNode *>(stmt);
+      const auto *for_node = static_cast<const ForNode *>(stmt);
       auto header_it = for_header_vars_.find(for_node);
       if (header_it == for_header_vars_.end() ||
           !header_it->second.count(buffer_var)) {

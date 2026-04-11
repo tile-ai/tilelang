@@ -67,11 +67,8 @@ private:
     ICHECK(op->iter_values.empty())
         << "Non-opaque blocks are not allowed in FlattenBuffer. Please "
            "call pass ConvertBlocksToOpaque before.";
-    // Step 1. Visit the body and track block nesting so we can distinguish
-    // the function-level root block from nested lexical blocks.
-    ++block_nesting_;
+    // Step 1. Visit the body
     Block new_block = Downcast<Block>(this->VisitStmt(op->block));
-    --block_nesting_;
     PrimExpr predicate = this->VisitExpr(op->predicate);
     // Step 2. Transform the `predicate` to if-then-else
     Stmt body = new_block->body;
@@ -322,11 +319,6 @@ private:
   /*! \brief Cluster dims collected from tilelang.cluster_dims block annotation.
    */
   Optional<Array<Integer>> cluster_dims_{std::nullopt};
-
-  /*! \brief Nesting depth of opaque blocks.  The root block maps directly to
-   *  the function body, while nested blocks correspond to meaningful lexical
-   *  regions that should be preserved for allocation lifetime. */
-  int block_nesting_{0};
 };
 
 PrimFunc TLLowerOpaqueBlock(PrimFunc f) {
