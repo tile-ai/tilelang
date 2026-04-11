@@ -1253,6 +1253,89 @@ def ptx_tcgen05_mma_ts(
     )
 
 
+def ptx_tcgen05_mma_blockscaled_ss(
+    kind_dtype,
+    desc_a,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    sfa_ptr,
+    sfa_offset,
+    sfb_ptr,
+    sfb_offset,
+    reserved0=0,
+    reserved1=0,
+    variant=False,
+):
+    """TVM intrinsic for tcgen05.mma block-scaled (mxf8f6f4.block_scale) instructions.
+
+    16 args: kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
+    desc_val, scale_out, sfa_ptr, sfa_offset, sfb_ptr, sfb_offset,
+    reserved0, reserved1, enable_ws.
+    """
+    if isinstance(variant, str):
+        v = variant.lower()
+        if v in ("ws", "warp_specialized", "warp-specialized"):
+            enable_ws = True
+        elif v in ("default", "std", "ss"):
+            enable_ws = False
+        else:
+            raise ValueError(f"ptx_tcgen05_mma_blockscaled_ss: unknown variant: {variant}")
+    else:
+        enable_ws = bool(variant)
+
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_blockscaled_ss"),
+        kind_dtype,
+        desc_a,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        sfa_ptr,
+        sfa_offset,
+        sfb_ptr,
+        sfb_offset,
+        reserved0,
+        reserved1,
+        enable_ws,
+    )
+
+
+def ptx_tcgen05_cp(smem_desc, tmem_col, tmem_col_offset=0):
+    """TVM intrinsic for tcgen05 copy (shared memory to tensor memory).
+
+    Args:
+        smem_desc: Shared memory pointer for scale factor data.
+        tmem_col: TMEM data pointer (base column address).
+        tmem_col_offset: Offset in TMEM columns from base (default 0).
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_cp"),
+        smem_desc,
+        tmem_col,
+        tmem_col_offset,
+    )
+
+
+def ptx_tcgen05_sf_warp_transpose(smem_ptr):
+    """TVM intrinsic for warp-level transpose of scale factors in shared memory."""
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_sf_warp_transpose"),
+        smem_ptr,
+    )
+
+
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 

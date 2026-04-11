@@ -217,6 +217,21 @@ TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ts)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_blockscaled_ss)
+    .set_num_inputs(16)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_cp)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_sf_warp_transpose)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(deallocate_tmem)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",

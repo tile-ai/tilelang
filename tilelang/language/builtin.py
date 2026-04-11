@@ -1225,6 +1225,57 @@ def tcgen05_after_thread_sync():
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
 
 
+def tcgen05_before_thread_sync():
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tcgen05_before_thread_sync"))
+
+
+def tcgen05_after_thread_sync():
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
+    
+
+def tcgen05_cp(smem_src, tmem_dst, tmem_col_offset=0):
+    """Copy 128 scale factor elements from shared memory to tensor memory via UTCCP.
+
+    Internally builds the SMEM descriptor and extracts the TMEM column address.
+
+    Parameters
+    ----------
+    smem_src : BufferLikeType
+        Source buffer (region/slice) in shared memory containing 128 uint32 elements.
+    tmem_dst : BufferLikeType
+        Destination in tensor memory (buffer load or buffer).
+    tmem_col_offset : int
+        Offset in TMEM columns from the base address (default 0).
+        Each UTCCP call copies 128 uint32 = 4 TMEM columns.
+        Use offset=4 for the second chunk, 8 for the third, etc.
+    """
+    smem_ptr = retrieve_ptr(smem_src, access_type="r")
+    if isinstance(tmem_dst, (tir.Buffer,)):
+        tmem_ptr = tmem_dst.data
+    elif isinstance(tmem_dst, BufferLoad):
+        tmem_ptr = tmem_dst.buffer.data
+    elif isinstance(tmem_dst, BufferRegion):
+        tmem_ptr = tmem_dst.buffer.data
+    else:
+        tmem_ptr = tmem_dst
+    return tir.call_intrin("void", tir.op.Op.get("tl.ptx_tcgen05_cp"), smem_ptr, tmem_ptr, tmem_col_offset)
+
+
+def sf_warp_transpose(smem_src):
+    """Warp-level transpose of 128 uint32 scale factor elements in shared memory.
+
+    Must be called by exactly one warp (32 threads). Transposes a 4x32 block in-place
+    to prepare data for UTCCP copy to tensor memory.
+
+    Parameters
+    ----------
+    smem_src : BufferLikeType
+        Buffer (region/load) pointing to 128 uint32 elements in shared memory.
+    """
+    smem_ptr = retrieve_ptr(smem_src, access_type="rw")
+    return tir.call_intrin("void", tir.op.Op.get("tl.ptx_tcgen05_sf_warp_transpose"), smem_ptr)
+
+
 def ptx_mma_sm70(
     shape,
     A_layout,

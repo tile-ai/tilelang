@@ -273,3 +273,184 @@ def tcgen05_gemm(
         mbar,
         annotations=ann,
     )
+
+
+def blockscaled_gemm(
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    SFA_tmem: BufferLikeType,
+    SFB_tmem: BufferLikeType,
+    transpose_A: bool = False,
+    transpose_B: bool = False,
+    clear_accum=False,
+    wg_wait: int = 0,
+    mbar: BarrierType | None = None,
+    sf_a_id: int = 0,
+    sf_b_id: int = 0,
+) -> tir.PrimExpr:
+    """Block-scaled GEMM
+    Currently only support MXFP8 for SM100, lowered to tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale instructions.
+
+    A, B are FP8 (E4M3/E5M2) in shared memory, C is accumulator in tensor memory.
+    SFA_tmem, SFB_tmem are E8M0 scale factors already in tensor memory.
+
+    Args:
+        A: FP8 input buffer A in shared memory.
+        B: FP8 input buffer B in shared memory.
+        C: FP32 accumulator in tensor memory.
+        SFA_tmem: Scale factors for A in tensor memory.
+        SFB_tmem: Scale factors for B in tensor memory.
+        transpose_A: Whether A is MN-major. Default: False (K-major).
+        transpose_B: Whether B is K-major. Default: False (MN-major).
+        clear_accum: Whether to zero the accumulator.
+        wg_wait: Warp group wait identifier.
+        mbar: Mbarrier for MMA completion signaling.
+        sf_a_id: Scale factor ID for A (0-3).
+        sf_b_id: Scale factor ID for B (0-3).
+    """
+
+    def legalize(arg):
+        if isinstance(arg, tir.Var) and T.has_let_value(arg):
+            return T.get_let_value(arg).buffer
+        return arg
+
+    A = legalize(A)
+    B = legalize(B)
+    C = legalize(C)
+    SFA_tmem = legalize(SFA_tmem)
+    SFB_tmem = legalize(SFB_tmem)
+    mbar = legalize(mbar) if mbar is not None else None
+
+    A_region = to_buffer_region(A)
+    B_region = to_buffer_region(B)
+    C_region = to_buffer_region(C)
+    SFA_region = to_buffer_region(SFA_tmem)
+    SFB_region = to_buffer_region(SFB_tmem)
+
+    A_shape = retrieve_shape(A_region)
+    B_shape = retrieve_shape(B_region)
+    C_shape = retrieve_shape(C_region)
+
+    assert len(C_shape) == 2, "current only support C as a 2D tensor"
+    assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
+    assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
+
+    M, N = C_shape
+    K = A_shape[-2] if transpose_A else A_shape[-1]
+    K_B = B_shape[-1] if transpose_B else B_shape[-2]
+    assert prim_expr_equal(K, K_B), f"T.blockscaled_gemm K shape check failed: K_A = {K}, K_B = {K_B}"
+
+    A_stride = retrieve_stride(A_region)
+    B_stride = retrieve_stride(B_region)
+    stride_a = A_stride[-2]
+    stride_b = B_stride[-2]
+
+    A_offset = retrieve_offset(A_region)
+    B_offset = retrieve_offset(B_region)
+    offset_a = A_offset[-1]
+    offset_b = B_offset[-1]
+
+    if mbar is not None:
+        assert isinstance(mbar, (tir.Buffer, tir.BufferLoad)), (
+            f"mbar for tcgen5mma must be a tir.Buffer or tir.BufferLoad, but got {type(mbar)}"
+        )
+        mbar = to_buffer_region(mbar, access_type="rw")
+
+    C_coords = [r.min for r in C_region.region]
+
+    # Convert BufferRegion to tl.region calls for arguments
+    A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
+    B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
+    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+    SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
+    SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
+
+    assert mbar is not None, "mbar is required for blockscaled_gemm"
+    mbar_arg = mbar 
+
+    # Ensure sf_a_id and sf_b_id are PrimExpr
+    if not isinstance(sf_a_id, tir.PrimExpr):
+        sf_a_id = tir.const(sf_a_id, dtype="int32")
+    if not isinstance(sf_b_id, tir.PrimExpr):
+        sf_b_id = tir.const(sf_b_id, dtype="int32")
+
+    # Block-scaled always uses Square policy (1x1 warp partition)
+    policy = GemmWarpPolicy.Square
+
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.gemm"),
+        A_arg,
+        B_arg,
+        C_arg,
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        K,
+        policy,
+        clear_accum,
+        stride_a,
+        stride_b,
+        offset_a,
+        offset_b,
+        1,       # k_pack
+        wg_wait,
+        mbar,
+        C_coords[0],
+        C_coords[1],
+        SFA_arg,  # arg 19
+        SFB_arg,  # arg 20
+        sf_a_id,  # arg 21
+        sf_b_id,  # arg 22
+        annotations={"is_tcgen05": 1},
+    )
+
+
+def make_blockscaled_gemm_layout(
+    C: BufferLikeType,
+    A: BufferLikeType,
+    transpose_A: bool = False,
+) -> "Layout":
+    """Build the TMEM store layout for the C accumulator of a block-scaled GEMM.
+
+    Users must call ``T.annotate_layout({C_tmem: layout})`` with the returned layout
+    so that subsequent ``T.copy(C_tmem, ...)`` can be lowered correctly.
+
+    Args:
+        C: The TMEM accumulator buffer (block_M, block_N).
+        A: The FP8 operand A buffer (used to infer K and dtype).
+        transpose_A: Whether A is MN-major.
+
+    Returns:
+        A Layout object for C's TMEM storage.
+    """
+    from tilelang.intrinsics.tcgen05_macro_generator import TensorCoreIntrinEmitter
+
+    C_region = to_buffer_region(C)
+    A_region = to_buffer_region(A)
+
+    C_shape = retrieve_shape(C_region)
+    A_shape = retrieve_shape(A_region)
+
+    M, N = int(C_shape[0]), int(C_shape[1])
+    K = int(A_shape[-2] if transpose_A else A_shape[-1])
+    a_dtype = str(A_region.buffer.dtype)
+    accum_dtype = str(C_region.buffer.dtype)
+
+    emitter = TensorCoreIntrinEmitter(
+        a_dtype=a_dtype,
+        b_dtype=a_dtype,
+        accum_dtype=accum_dtype,
+        a_transposed=transpose_A,
+        b_transposed=False,
+        block_row_warps=1,
+        block_col_warps=1,
+        warp_row_tiles=M,
+        warp_col_tiles=N,
+        chunk=K,
+    )
+
+    c_buf = C_region.buffer if isinstance(C_region, tir.BufferRegion) else C
+    return emitter.make_mma_store_layout(c_buf)

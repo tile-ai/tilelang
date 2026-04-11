@@ -380,6 +380,21 @@ TVM_DLL const Op &ptx_tcgen05_mma_ss();
 TVM_DLL const Op &ptx_tcgen05_mma_ts();
 
 /*!
+ * \brief tvm intrinsic for tcgen05 block-scaled mma shared-shared instructions.
+ */
+TVM_DLL const Op &ptx_tcgen05_mma_blockscaled_ss();
+
+/*!
+ * \brief tvm intrinsic for tcgen05 copy (smem to tmem).
+ */
+TVM_DLL const Op &ptx_tcgen05_cp();
+
+/*!
+ * \brief tvm intrinsic for scale factor warp transpose in shared memory.
+ */
+TVM_DLL const Op &ptx_tcgen05_sf_warp_transpose();
+
+/*!
  * \brief Frontend TMEM deallocation marker.
  *
  * deallocate_tmem(tmem_buffer_data)

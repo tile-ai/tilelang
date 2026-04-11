@@ -526,4 +526,54 @@ TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat8_e5m2>(
       desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
+// ============================================================================
+// Block-scaled MMA variants: tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale
+// Used for MXFP8 block-scaled GEMM with scale factors in TMEM.
+// ============================================================================
+
+// Generic declaration: unsupported by default
+template <DataType C_type>
+TL_DEVICE void
+tcgen05mma_blockscaled_ss(uint64_t const & /*desc_a*/,
+                          uint64_t const & /*desc_b*/,
+                          uint32_t const & /*tmem_c*/,
+                          uint32_t const & /*scalec*/,
+                          uint32_t const & /*desc_val*/,
+                          uint32_t const & /*tmem_sfa*/,
+                          uint32_t const & /*tmem_sfb*/) {
+  static_assert(
+      always_false_v<std::integral_constant<int, static_cast<int>(C_type)>>,
+      "tl::tcgen05mma_blockscaled_ss: unsupported accumulator type");
+}
+
+// FP8 E4M3 block-scaled
+template <>
+TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val,
+    uint32_t const &tmem_sfa, uint32_t const &tmem_sfb) {
+  if (cute::elect_one_sync()) {
+    asm volatile(
+        "{\n\t"
+        ".reg .pred p;\n\t"
+        "setp.ne.b32 p, %4, 0;\n\t"
+        "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale [%0], %1, %2, "
+        "%3, [%5], [%6], p; \n\t"
+        "}\n"
+        :
+        : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(desc_val), "r"(scalec),
+          "r"(tmem_sfa), "r"(tmem_sfb));
+  }
+}
+
+// FP8 E5M2 maps to same instruction
+template <>
+TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e5m2>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val,
+    uint32_t const &tmem_sfa, uint32_t const &tmem_sfb) {
+  tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
+}
+
 } // namespace tl
