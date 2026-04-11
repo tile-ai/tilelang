@@ -1205,7 +1205,16 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == "threadblock_swizzle_pattern") {
+  if (op->attr_key == tl::attr::kLexicalAllocScope) {
+    PrintIndent();
+    stream << "{\n";
+    int scope = BeginScope();
+    PrintStmt(op->body);
+    EndScope(scope);
+    PrintIndent();
+    stream << "}\n";
+    return;
+  } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
     std::string func_name;
     int panel_size = 0;

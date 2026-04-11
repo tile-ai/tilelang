@@ -947,7 +947,10 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
   // Plain T.copy does not auto-upgrade to TMA loads anymore. Store-side TMA
   // remains allowed because it is self-synchronized locally and does not
   // participate in pipeline producer scheduling.
-  if (!GetDisableTMA()) {
+  // Also honour the (deprecated) global pass config for backward compat.
+  if (!GetDisableTMA() && !tvm::transform::PassContext::Current()
+                               ->GetConfig<Bool>(kDisableTMALower, Bool(false))
+                               .value()) {
     bool is_cutedsl = TargetIsCuTeDSL(target);
     if (!is_cutedsl && !buffer_oob &&
         CheckBulkStore1D(target, layout_map, analyzer)) {
@@ -1687,7 +1690,12 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   } else if (StructuralEqual()(shared_layout, linear_layout)) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
-    ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
+    if (shared_layout->InputDim() < 2) {
+      LOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
+                   << "dimension " << shared_layout->InputDim()
+                   << ", fallback to normal copy.";
+      return LowerNormalCopy(T, analyzer);
+    }
     const int ndim = static_cast<int>(shared_layout->InputDim());
     auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
     auto continuous = as_const_int(shared_layout->InputShape()[ndim - 1]);

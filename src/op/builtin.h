@@ -54,6 +54,14 @@ static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 // argument of __launch_bounds__(maxThreads, minBlocksPerMultiprocessor).
 // Type: Integer
 static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
+// lexical_alloc_scope may first appear as a Block annotation, requesting that
+// LowerOpaqueBlock materialize a lexical scope boundary for that block subtree.
+// After LowerOpaqueBlock, the same key appears as an AttrStmt marker that
+// generates a C/CUDA lexical scope `{ ... }` in codegen. Allocations nested
+// inside this scope cannot be hoisted past the boundary by StorageRewrite,
+// giving the underlying compiler accurate variable lifetime information for
+// register allocation.
+static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 } // namespace attr
 
 inline Optional<PrimExpr>
@@ -79,8 +87,8 @@ static constexpr const char *kDisableSafeMemoryLegalize =
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
-// Deprecated compatibility-only pass config. It is no longer consumed by the
-// lowering pipeline, but remains registered so legacy kernels keep working.
+// Deprecated pass config, temporarily re-enabled. Prevents plain T.copy()
+// from auto-lowering to TMA store. Will be removed in v0.1.10.
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kEnableAggressiveSharedMemoryMerge =
     "tl.enable_aggressive_shared_memory_merge";
