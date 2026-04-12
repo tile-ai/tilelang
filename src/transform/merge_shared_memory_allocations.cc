@@ -396,8 +396,8 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
-        op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
+    if (op->op.same_as(tl::tl_gemm_sp()) || op->op.same_as(tl::tma_load()) ||
+        op->op.same_as(tl::tma_store()) ||
         op->op.same_as(tl::initialize_wgmma_descriptor()) ||
         op->op.same_as(tl::initialize_tcgen05_descriptor())) {
       // These intrinsics introduce stricter SMEM alignment requirements; mark
@@ -854,10 +854,8 @@ private:
     DLOG(INFO) << "PlanAlignment";
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (const auto *call = node.as<CallNode>()) {
-        if (call->op.same_as(tl::tl_gemm()) ||
-            call->op.same_as(tl::tl_gemm_sp())) {
-          DLOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: "
-                     << call->op;
+        if (call->op.same_as(tl::tl_gemm_sp())) {
+          DLOG(INFO) << "PostOrderVisit CallNode tl_gemm_sp: " << call->op;
         }
       }
     });

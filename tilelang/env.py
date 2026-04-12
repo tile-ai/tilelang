@@ -272,10 +272,6 @@ class Environment:
         "TILELANG_CLEANUP_TEMP_FILES", "0"
     )  # cleanup temporary compiler files/dirs after compilation (default: keep for debugging)
 
-    # Kernel selection options
-    # Default to GEMM v2; set to "1"/"true"/"yes"/"on" to force v1
-    TILELANG_USE_GEMM_V1 = EnvVar("TILELANG_USE_GEMM_V1", "0")
-
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used
@@ -326,14 +322,6 @@ class Environment:
 
     def should_cleanup_temp_files(self) -> bool:
         return str(self.TILELANG_CLEANUP_TEMP_FILES).lower() in ("1", "true", "yes", "on")
-
-    def use_gemm_v1(self) -> bool:
-        """Return True if GEMM v1 should be used based on env.
-
-        Controlled by `TILELANG_USE_GEMM_V1`. Truthy values are one of
-        {"1", "true", "yes", "on"} (case-insensitive).
-        """
-        return str(self.TILELANG_USE_GEMM_V1).lower() in ("1", "true", "yes", "on")
 
     def get_default_target(self) -> str:
         """Get default compilation target from environment."""

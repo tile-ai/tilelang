@@ -365,8 +365,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const MaxNode *op,
  * ldmatrix/stmatrix helpers, mbarrier APIs, cooperative grid sync, WMMA/legacy
  * MMA intrinsics (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp), low-level PTX
  * asm helpers (ldg32, cp_async bulk/init/arrive/wait barriers), reinterpret
- * paths for special small-float encodings (e.g., float4 e2m1fn), tl::tl_gemm
- * and related external calls, and other TL runtime calls.
+ * paths for special small-float encodings (e.g., float4 e2m1fn),
+ * tl::tl_gemm_sp and related external calls, and other TL runtime calls.
  *
  * Side effects:
  * - Emits to `os` and the internal codegen output stream.
@@ -981,14 +981,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     }
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
-  } else if (op->op.same_as(tl::tl_gemm())) {
-    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, "
-                                    "A_ptr, B_ptr, C_ptr>, but got "
-                                 << op->args.size();
-
-    auto op_instance = Downcast<StringImm>(op->args[0]);
-    PrintCallExtern_(GetType(tvm::ffi::GetRef<PrimExpr>(op)),
-                     op_instance->value, op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::get_lane_idx())) {

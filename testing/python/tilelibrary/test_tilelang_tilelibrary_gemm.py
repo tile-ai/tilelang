@@ -45,7 +45,7 @@ def matmul(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_v2(A_shared, B_shared, C_local, trans_A, trans_B)
+                T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
                 # T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
@@ -201,7 +201,7 @@ def matmul_rs(
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
                 T.copy(A_shared, A_frag)
-                T.gemm_v2(A_frag, B_shared, C_local, trans_A, trans_B)
+                T.gemm(A_frag, B_shared, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
@@ -355,7 +355,7 @@ def matmul_sr(
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
                 T.copy(B_shared, B_frag)
-                T.gemm_v2(A_shared, B_frag, C_local, trans_A, trans_B)
+                T.gemm(A_shared, B_frag, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
@@ -513,7 +513,7 @@ def matmul_rr(
                     T.copy(B[k * block_K, bx * block_N], B_shared)
                 T.copy(A_shared, A_frag)
                 T.copy(B_shared, B_frag)
-                T.gemm_v2(A_frag, B_frag, C_local, trans_A, trans_B)
+                T.gemm(A_frag, B_frag, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main

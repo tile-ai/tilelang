@@ -107,7 +107,7 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   }
 
   // wgmma async intrinsics
-  if (call->op.same_as(tl_gemm()) || call->op.same_as(tl_gemm_sp())) {
+  if (call->op.same_as(tl_gemm_sp())) {
     return true;
   }
 

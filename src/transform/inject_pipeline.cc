@@ -19,7 +19,6 @@
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/gemm.h"
-#include "../op/gemm_py.h"
 #include "../op/operator.h"
 #include "../op/region.h"
 #include "../op/utils.h"
@@ -404,8 +403,7 @@ private:
     auto tile_op = ParseOperator(call);
     return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
                                  tile_op.as<Conv2DIm2ColOpNode>() != nullptr ||
-                                 tile_op.as<GemmNode>() != nullptr ||
-                                 tile_op.as<GemmPyNode>() != nullptr);
+                                 tile_op.as<GemmNode>() != nullptr);
   }
 
   PrimExpr phase_expr_;
