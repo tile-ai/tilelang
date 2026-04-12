@@ -29,21 +29,19 @@ def test_lower_fence_proxy():
         with T.Kernel(8):
             A_shared = T.decl_buffer((1, 8, 256), T.float16, scope="shared.dyn")
             B_shared = T.decl_buffer((1, 4, 512), T.float16, scope="shared.dyn")
-            E_shared = T.decl_buffer((1, 8, 16), T.uint8, scope="shared.dyn")
             C_local = T.decl_buffer((32,), scope="local")
             for i in T.unroll(16):
                 C_local[i * 2 : i * 2 + 2] = T.Broadcast(T.float32(0), 2)
             # A shared-memory generic store should trigger a fence before the
-            # following async-proxy sparse GEMM on Hopper (SM90+).
+            # following async-proxy GEMM on Hopper (SM90+).
             A_shared[0, 0, 0] = T.float16(0)
             T.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.tl_gemm_sp"),
-                "tl::gemm_sp_ss<128, 128, 64, 4, 1, 0, 0, 0, true>",
+                tir.op.Op.get("tl.tl_gemm"),
+                "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
                 T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
                 T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
                 T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
-                T.tvm_access_ptr(T.type_annotation(T.uint8), E_shared.data, 0, 128, 1),
             )
 
     @T.prim_func
@@ -51,7 +49,6 @@ def test_lower_fence_proxy():
         with T.Kernel(8):
             A_shared = T.decl_buffer((1, 8, 256), T.float16, scope="shared.dyn")
             B_shared = T.decl_buffer((1, 4, 512), T.float16, scope="shared.dyn")
-            E_shared = T.decl_buffer((1, 8, 16), T.uint8, scope="shared.dyn")
             C_local = T.decl_buffer((32,), scope="local")
             for i in T.unroll(16):
                 C_local[i * 2 : i * 2 + 2] = T.Broadcast(T.float32(0), 2)
@@ -59,12 +56,11 @@ def test_lower_fence_proxy():
             T.fence_proxy_async()
             T.call_intrin(
                 "handle",
-                tir.op.Op.get("tl.tl_gemm_sp"),
-                "tl::gemm_sp_ss<128, 128, 64, 4, 1, 0, 0, 0, true>",
+                tir.op.Op.get("tl.tl_gemm"),
+                "tl::gemm_ss<128, 128, 32, 4, 1, 0, 0, 0, 32, 128, 0, 0, true>",
                 T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 1),
                 T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, 0, 2048, 1),
                 T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
-                T.tvm_access_ptr(T.type_annotation(T.uint8), E_shared.data, 0, 128, 1),
             )
 
     _check(before, after)

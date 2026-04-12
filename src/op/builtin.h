@@ -694,6 +694,19 @@ TVM_DLL const Op &tvm_rdna_wmma();
 TVM_DLL const Op &tvm_rdna_wmma_store();
 
 /*!
+ * \brief tilelang intrinsic for general matrix multiplication (GEMM).
+ *
+ *  This op wraps a templated `tl::gemm_*<...>` call into the generated device
+ *  code. Python-side lowering backends that want to delegate to the C++
+ *  template implementations in `src/tl_templates/<target>/gemm*.h` can emit a
+ *  call to this builtin directly via
+ *    T.call_intrin("handle", "tl.tl_gemm", op_instance_str, A_ptr, B_ptr,
+ * C_ptr) where `op_instance_str` is the fully-instantiated `tl::gemm_ss<M, N,
+ * K, ...>` template string.
+ */
+TVM_DLL const Op &tl_gemm();
+
+/*!
  * \brief tilelang intrinsic for sparse matrix multiplication (GEMM with
  * sparsity).
  *
