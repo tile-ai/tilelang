@@ -18,6 +18,7 @@ from cutlass.cutlass_dsl import dsl_user_op  # noqa: F401
 # Import our custom implementations (will override if names conflict)
 from .utils import *  # noqa: F401,F403
 from .cpasync import *  # noqa: F401,F403
+from .gemm_v1 import *  # noqa: F401,F403
 from .reduce import *  # noqa: F401,F403
 from .ldsm import *  # noqa: F401,F403
 from .ptx_mma import *  # noqa: F401,F403
