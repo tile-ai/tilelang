@@ -120,6 +120,34 @@ def test_no_transform_if_then_else_condition():
     _check(before, after)
 
 
+def test_rmw_same_buffer_different_indices():
+    """RMW with different indices into the same buffer: a[i] = a[i] + a[i+32].
+
+    Both loads and the store target the same buffer but at different index
+    expressions. Each unique (buffer, indices) pair should get its own cast
+    buffer, and the RMW load `a[i]` should read from the same cast buffer the
+    store writes to (so the read-side copy-from and the write-side copy-to
+    share that buffer).
+    """
+
+    @T.prim_func
+    def before(a: T.Tensor[(64,), T.float8_e4m3fn]):
+        for i in T.vectorized(32):
+            a[i] = T.cast(
+                T.cast(a[i], T.float32) + T.cast(a[i + 32], T.float32),
+                T.float8_e4m3fn,
+            )
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = DecoupleTypeCast()(mod)
+
+    # Sanity checks: pass ran, two distinct cast buffers were created, and the
+    # RMW load site no longer references `a` directly in the compute body.
+    text = mod["main"].script()
+    assert "a_local_cast" in text, "Expected cast buffer for store-side of a[i]"
+    assert "a_local_cast_1" in text, "Expected second cast buffer for a[i+32]"
+
+
 def test_local_to_memory_with_let_stmt():
     """Test local → memory transform still triggers through LetStmt-bound loads."""
 

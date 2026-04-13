@@ -90,17 +90,35 @@ def is_global_or_shared_buffer(buffer: Buffer) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@tir.functor.visitor
+class _CastFinder(PyStmtExprVisitor):
+    """Find Cast nodes in a statement, skipping BufferLoad/BufferStore indices.
+
+    A Cast that only appears inside an index expression is not a mixed-precision
+    compute — it's just an index-type conversion — so it should not trigger the
+    decoupling transformation.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.found = False
+
+    def visit_cast_(self, op: Cast) -> None:
+        self.found = True
+        self.visit_expr(op.value)
+
+    def visit_buffer_store_(self, op: BufferStore) -> None:
+        self.visit_expr(op.value)
+
+    def visit_buffer_load_(self, op: BufferLoad) -> None:
+        pass
+
+
 def _has_cast(stmt: Stmt) -> bool:
-    """Check if a statement tree contains any Cast node."""
-    found = False
-
-    def visitor(node) -> None:
-        nonlocal found
-        if isinstance(node, Cast):
-            found = True
-
-    post_order_visit(stmt, visitor)
-    return found
+    """Check if a statement tree contains any Cast node outside of indices."""
+    finder = _CastFinder()
+    finder.visit_stmt(stmt)
+    return finder.found
 
 
 def _contains_seq_stmt(stmt: Stmt) -> bool:
@@ -353,11 +371,14 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         )
 
         # Build compute loop: replace stores and loads in the *inlined* body
-        # so that indices match what the collector saw (LetStmt vars are expanded)
-        all_replacements = store_entries + load_entries
+        # so that indices match what the collector saw (LetStmt vars are expanded).
+        # For RMW (a load whose (buffer, indices) matches a store entry), the load
+        # must be rewritten to the *same* cast buffer the store writes to, so we
+        # feed both store and load entries into the load-replacement table.
+        load_replacement_entries = store_entries + load_entries
         compute_body = inlined_body
-        if all_replacements:
-            compute_body = self._replace_access(compute_body, store_entries, all_replacements, op.loop_var)
+        if store_entries or load_entries:
+            compute_body = self._replace_access(compute_body, store_entries, load_replacement_entries, op.loop_var)
         compute_loop = self._make_vectorized_loop(op, compute_body)
 
         # Build copy-to-memory loops (after compute)
