@@ -537,7 +537,7 @@ void ArgBinder::BindDLTensors(
                       v_type_lanes == expect_lanes);
     }
     // Allow tfloat32 to match float32 at runtime (same storage).
-    if (buffer->dtype.is_tensorfloat32()) {
+    if (buffer->dtype.is_tfloat32()) {
       PrimExpr code_float = IntImm(DataType::UInt(8), DataType::kFloat);
       PrimExpr bits32 = IntImm(DataType::UInt(8), 32);
       PrimExpr float32_ok =

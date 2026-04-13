@@ -50,7 +50,7 @@ PrimExpr infinity_op(PrimExpr args) {
     }
   } else if (dtype.is_bfloat16()) {
     return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
-  } else if (dtype.is_tensorfloat32()) {
+  } else if (dtype.is_tfloat32()) {
     return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
   }
   LOG(FATAL) << "Cannot decide infinity for type " << dtype;

@@ -713,7 +713,7 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       fail = true;
     }
     return;
-  } else if (t.is_tensorfloat32()) {
+  } else if (t.is_tfloat32()) {
     if (t.is_scalar()) {
       os << "tfloat32_t";
     } else if (lanes <= 4) {
@@ -2539,13 +2539,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     tl::codegen::Replacer replacer;
 
     std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
-    if (AType == "tl::DataType::kFloat32") {
-      AType = "tl::DataType::kTensorFloat32";
-    }
     std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
-    if (BType == "tl::DataType::kFloat32") {
-      BType = "tl::DataType::kTensorFloat32";
-    }
 
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);
@@ -2614,13 +2608,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     tl::codegen::Replacer replacer;
     std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
-    if (AType == "tl::DataType::kFloat32") {
-      AType = "tl::DataType::kTensorFloat32";
-    }
     std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
-    if (BType == "tl::DataType::kFloat32") {
-      BType = "tl::DataType::kTensorFloat32";
-    }
 
     replacer.register_rule("(AType)", AType);
     replacer.register_rule("(BType)", BType);
@@ -4230,7 +4218,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   // Type code is kTensorFloat32
   // infinity() and quiet_NaN() for tfloat32_t are not inlined in CUTLASS
   // currently
-  if (op->dtype.is_tensorfloat32()) {
+  if (op->dtype.is_tfloat32()) {
     std::ostringstream temp;
     if (std::isinf(op->value)) {
       if (op->value < 0) {
