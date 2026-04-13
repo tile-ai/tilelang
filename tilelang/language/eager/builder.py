@@ -188,7 +188,6 @@ class Builder(BaseBuilder):
         self.current_macro_name = "<unknown-macro>"
         # stack to record caller fileline, not callee fileline
         self.macro_fileline_stack: list[tuple[str, int, str]] = []
-        self.prim_func_params: list[Buffer | Var] = []
 
     @classmethod
     def current(cls) -> Self:
@@ -702,7 +701,6 @@ class Builder(BaseBuilder):
 
     def prim_func_arg(self, name, value):
         if isinstance(value, (Buffer, Var)):
-            self.prim_func_params.append(value)
             return tir.arg(name, value)
         elif value is self.empty:
             raise ValueError(f"Argument `{name}` is not annotated")
