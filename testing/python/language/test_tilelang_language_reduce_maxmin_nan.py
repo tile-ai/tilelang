@@ -1,141 +1,106 @@
-import os
+"""Tests for the per-call ``nan_propagate`` kwarg on T.reduce_max / reduce_min /
+reduce_absmax for float16 and bfloat16 buffers (CUDA only)."""
+
+import math
+
+import torch
 
 import tilelang
 import tilelang.testing
 import tilelang.language as T
 
-_PRINT = os.environ.get("TILELANG_REDUCE_MAXMIN_NAN_PRINT") in ("1", "true", "yes")
+_DTYPES = [("float16", T.float16, torch.float16), ("bfloat16", T.bfloat16, torch.bfloat16)]
 
 
-def _compile_cuda(prim_func, *, pass_configs=None):
-    return tilelang.compile(
-        prim_func,
-        out_idx=-1,
-        target="cuda",
-        pass_configs=pass_configs or {},
-    )
+def _compile(prim_func):
+    return tilelang.compile(prim_func, out_idx=-1, target="cuda")
 
 
-def _kernel_reduce_max(length: int, dtype):
+def _make_reduce_kernel(reduce_fn, length, dtype, *, nan_propagate):
+
     @T.prim_func
     def kernel(a: T.Tensor((length,), dtype), out: T.Tensor((1,), dtype)):
         with T.Kernel(1, threads=32):
             frag = T.alloc_fragment((length,), dtype)
             out_frag = T.alloc_fragment((1,), dtype)
             T.copy(a, frag)
-            T.reduce_max(frag, out_frag)
+            reduce_fn(frag, out_frag, nan_propagate=nan_propagate)
             T.copy(out_frag, out)
 
     return kernel
 
 
-def test_reduce_max_fp16_nan_propagate_default():
-    k = _compile_cuda(_kernel_reduce_max(64, T.float16))
+# ---------------------------------------------------------------------------
+# Source-level checks: confirm the right reducer / intrinsic is emitted.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_max_default_uses_plain_op():
+    k = _compile(_make_reduce_kernel(T.reduce_max, 64, T.float16, nan_propagate=False))
     src = k.get_kernel_source()
-    if _PRINT:
-        print(k.adapter.prim_func.script())
-        print(src)
-    assert "tl::MaxOpNan" in src
-    assert "__hmax_nan" in src
+    assert "tl::MaxOp" in src and "MaxOpNan" not in src
+    assert "__hmax(" in src and "__hmax_nan" not in src
 
 
-def test_reduce_max_fp16_nan_propagate_false():
-    k = _compile_cuda(
-        _kernel_reduce_max(64, T.float16),
-        pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
-    )
-    src = k.get_kernel_source()
-    assert "tl::MaxOp" in src
-    assert "MaxOpNan" not in src
-    assert "__hmax(" in src
-
-
-def test_reduce_max_bf16_nan_propagate_default():
-    k = _compile_cuda(_kernel_reduce_max(64, T.bfloat16))
+@tilelang.testing.requires_cuda
+def test_reduce_max_nan_propagate_uses_nan_op():
+    k = _compile(_make_reduce_kernel(T.reduce_max, 64, T.float16, nan_propagate=True))
     src = k.get_kernel_source()
     assert "tl::MaxOpNan" in src
     assert "__hmax_nan" in src
 
 
-def test_reduce_max_bf16_nan_propagate_false():
-    k = _compile_cuda(
-        _kernel_reduce_max(64, T.bfloat16),
-        pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
-    )
-    src = k.get_kernel_source()
-    assert "tl::MaxOp" in src
-    assert "__hmax(" in src
-
-
-def _kernel_reduce_min(length: int, dtype):
-    @T.prim_func
-    def kernel(a: T.Tensor((length,), dtype), out: T.Tensor((1,), dtype)):
-        with T.Kernel(1, threads=32):
-            frag = T.alloc_fragment((length,), dtype)
-            out_frag = T.alloc_fragment((1,), dtype)
-            T.copy(a, frag)
-            T.reduce_min(frag, out_frag)
-            T.copy(out_frag, out)
-
-    return kernel
-
-
-def test_reduce_min_fp16_nan_propagate_default():
-    k = _compile_cuda(_kernel_reduce_min(64, T.float16))
+@tilelang.testing.requires_cuda
+def test_reduce_min_nan_propagate_uses_nan_op():
+    k = _compile(_make_reduce_kernel(T.reduce_min, 64, T.bfloat16, nan_propagate=True))
     src = k.get_kernel_source()
     assert "tl::MinOpNan" in src
     assert "__hmin_nan" in src
 
 
-def test_reduce_min_fp16_nan_propagate_false():
-    k = _compile_cuda(
-        _kernel_reduce_min(64, T.float16),
-        pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
-    )
-    src = k.get_kernel_source()
-    assert "tl::MinOp" in src
-    assert "MinOpNan" not in src
-    assert "__hmin(" in src
-
-
-def test_reduce_min_bf16_nan_propagate_false():
-    k = _compile_cuda(
-        _kernel_reduce_min(64, T.bfloat16),
-        pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
-    )
-    src = k.get_kernel_source()
-    assert "tl::MinOp" in src
-    assert "__hmin(" in src
-
-
-def _kernel_reduce_absmax(length: int, dtype):
-    @T.prim_func
-    def kernel(a: T.Tensor((length,), dtype), out: T.Tensor((1,), dtype)):
-        with T.Kernel(1, threads=32):
-            frag = T.alloc_fragment((length,), dtype)
-            out_frag = T.alloc_fragment((1,), dtype)
-            T.copy(a, frag)
-            T.reduce_absmax(frag, out_frag)
-            T.copy(out_frag, out)
-
-    return kernel
-
-
-def test_reduce_absmax_fp16_nan_propagate_default():
-    k = _compile_cuda(_kernel_reduce_absmax(64, T.float16))
+@tilelang.testing.requires_cuda
+def test_reduce_absmax_nan_propagate_uses_nan_op():
+    k = _compile(_make_reduce_kernel(T.reduce_absmax, 64, T.float16, nan_propagate=True))
     src = k.get_kernel_source()
     assert "tl::MaxOpNan" in src
     assert "__hmax_nan" in src
 
 
-def test_reduce_absmax_fp16_nan_propagate_false():
-    k = _compile_cuda(
-        _kernel_reduce_absmax(64, T.float16),
-        pass_configs={tilelang.PassConfigKey.TL_REDUCE_MAXMIN_NAN_PROPAGATE: False},
-    )
-    src = k.get_kernel_source()
-    assert "tl::MaxOp" in src
-    assert "__hmax(" in src
+# ---------------------------------------------------------------------------
+# Runtime behavioral checks: NaN actually propagates only when requested.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_max_runtime_nan_behavior():
+    for _, tl_dtype, torch_dtype in _DTYPES:
+        length = 64
+        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).cuda()
+        a[7] = float("nan")
+
+        k_default = _compile(_make_reduce_kernel(T.reduce_max, length, tl_dtype, nan_propagate=False))
+        k_nan = _compile(_make_reduce_kernel(T.reduce_max, length, tl_dtype, nan_propagate=True))
+
+        out_default = k_default(a)
+        out_nan = k_nan(a)
+
+        assert not math.isnan(out_default.float().item()), f"{tl_dtype}: default reduce_max should ignore NaN, got {out_default}"
+        assert math.isnan(out_nan.float().item()), f"{tl_dtype}: nan_propagate reduce_max should return NaN, got {out_nan}"
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_min_runtime_nan_behavior():
+    for _, tl_dtype, torch_dtype in _DTYPES:
+        length = 64
+        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).cuda()
+        a[13] = float("nan")
+
+        k_default = _compile(_make_reduce_kernel(T.reduce_min, length, tl_dtype, nan_propagate=False))
+        k_nan = _compile(_make_reduce_kernel(T.reduce_min, length, tl_dtype, nan_propagate=True))
+
+        assert not math.isnan(k_default(a).float().item())
+        assert math.isnan(k_nan(a).float().item())
 
 
 if __name__ == "__main__":

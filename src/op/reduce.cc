@@ -5,7 +5,6 @@
 
 #include "reduce.h"
 
-#include <tvm/ir/transform.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -43,6 +42,15 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->dim = args[3].as<IntImm>().value()->value;
   node->type = ReduceType(reduce_type);
   node->clear = args[4].as<Bool>().value();
+  // Optional annotation: "nan_propagate" — for fp16/bf16 max/min/absmax,
+  // when true, lower to CUDA __hmax_nan/__hmin_nan so NaNs propagate.
+  if (auto opt = annotations.Get("nan_propagate")) {
+    if (auto b = opt.value().as<Bool>()) {
+      node->nan_propagate = b.value();
+    } else if (auto i = opt.value().as<IntImm>()) {
+      node->nan_propagate = i.value()->value != 0;
+    }
+  }
   data_ = std::move(node);
 }
 
@@ -109,30 +117,24 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc,
   if (acc->dtype != rhs->dtype) {
     rhs = Cast(acc->dtype, rhs);
   }
-  bool nan_propagate = true;
-  if (tvm::transform::PassContext::Current().defined()) {
-    nan_propagate = tvm::transform::PassContext::Current()
-                        ->GetConfig<Bool>(kReduceMaxMinNanPropagate, Bool(true))
-                        .value();
-  }
-  const bool is_fp16_or_bf16 =
-      acc.dtype().is_float16() || acc.dtype().is_bfloat16();
+  const bool use_nan_op =
+      nan_propagate && (acc.dtype().is_float16() || acc.dtype().is_bfloat16());
   if (type->isSum()) {
     return acc + rhs;
   } else if (type->isAbsSum()) {
     return acc + Max(rhs, -rhs);
   } else if (type->isMax()) {
-    if (nan_propagate && is_fp16_or_bf16) {
+    if (use_nan_op) {
       return Call(acc.dtype(), tl::max_nan(), {acc, rhs});
     }
     return Max(acc, rhs);
   } else if (type->isMin()) {
-    if (nan_propagate && is_fp16_or_bf16) {
+    if (use_nan_op) {
       return Call(acc.dtype(), tl::min_nan(), {acc, rhs});
     }
     return Min(acc, rhs);
   } else if (type->isAbsMax()) {
-    if (nan_propagate && is_fp16_or_bf16) {
+    if (use_nan_op) {
       return Call(acc.dtype(), tl::max_nan(), {acc, tvm::abs(rhs)});
     }
     return Max(acc, tvm::abs(rhs));
@@ -148,22 +150,18 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc,
 }
 
 std::string ReduceOpNode::MakeCodegenReducer() const {
-  bool nan_propagate = true;
-  if (tvm::transform::PassContext::Current().defined()) {
-    nan_propagate = tvm::transform::PassContext::Current()
-                        ->GetConfig<Bool>(kReduceMaxMinNanPropagate, Bool(true))
-                        .value();
-  }
+  const bool use_nan_op =
+      nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16());
   if (type->isSum()) {
     return "tl::SumOp";
   } else if (type->isAbsSum()) {
     return "tl::SumOp";
   } else if (type->isMax()) {
-    return nan_propagate ? "tl::MaxOpNan" : "tl::MaxOp";
+    return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
   } else if (type->isMin()) {
-    return nan_propagate ? "tl::MinOpNan" : "tl::MinOp";
+    return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
   } else if (type->isAbsMax()) {
-    return nan_propagate ? "tl::MaxOpNan" : "tl::MaxOp";
+    return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
   } else if (type->isBitAnd()) {
     return "tl::BitAndOp";
   } else if (type->isBitOr()) {
@@ -247,6 +245,13 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  if (nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16()) &&
+      !TargetIsCuda(T.target)) {
+    LOG(FATAL) << "ReduceOp: nan_propagate=True for fp16/bf16 max/min/absmax "
+                  "is only supported on CUDA targets (requires "
+                  "__hmax_nan/__hmin_nan intrinsics). Target was: "
+               << T.target->str();
+  }
   auto get_buffer = [&](const Buffer &buf) {
     if (T.buffer_remap.count(buf))
       return T.buffer_remap[buf];

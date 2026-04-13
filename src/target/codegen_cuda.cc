@@ -5,7 +5,6 @@
 #include "codegen_cuda.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
-#include <tvm/ir/transform.h>
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
@@ -1442,25 +1441,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
   // TODO(wt): Consider vectorized reduction and impl for other dtypes
   DataType t = op->dtype;
-  bool nan_propagate = true;
-  if (tvm::transform::PassContext::Current().defined()) {
-    nan_propagate =
-        tvm::transform::PassContext::Current()
-            ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
-            .value();
-  }
-  const char *min_f16 = nan_propagate ? "__hmin_nan" : "__hmin";
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
-    os << "cutlass::bfloat16_t(" << min_f16 << "("
+    os << "cutlass::bfloat16_t(__hmin("
        << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
        << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
     return;
   }
 
   if (t.is_float16() && t.is_scalar()) {
-    os << "cutlass::half_t(" << min_f16 << "("
+    os << "cutlass::half_t(__hmin("
        << "(" << PrintExpr(op->a) << ").to_half(), "
        << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
@@ -1481,24 +1472,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
 void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   // TODO(wt): Consider vectorized reduction and impl for other dtypes
   DataType t = op->dtype;
-  bool nan_propagate = true;
-  if (tvm::transform::PassContext::Current().defined()) {
-    nan_propagate =
-        tvm::transform::PassContext::Current()
-            ->GetConfig<Bool>(tl::kReduceMaxMinNanPropagate, Bool(true))
-            .value();
-  }
-  const char *max_f16 = nan_propagate ? "__hmax_nan" : "__hmax";
+
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
-    os << "cutlass::bfloat16_t(" << max_f16 << "("
+    os << "cutlass::bfloat16_t(__hmax("
        << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
        << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
     return;
   }
 
   if (t.is_float16() && t.is_scalar()) {
-    os << "cutlass::half_t(" << max_f16 << "("
+    os << "cutlass::half_t(__hmax("
        << "(" << PrintExpr(op->a) << ").to_half(), "
        << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
