@@ -33,7 +33,7 @@ def kernel_any_sync():
     ):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
-            val = T.any_sync(0xFFFFFFFF, tx == 0)
+            val = T.any_sync(tx == 0)
             B[tx] = val
 
     return main
@@ -65,7 +65,7 @@ def kernel_all_sync():
     ):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
-            val = T.all_sync(0xFFFFFFFF, 1)
+            val = T.all_sync(1)
             B[tx] = val
 
     return main
@@ -96,7 +96,7 @@ def kernel_ballot_sync():
     ):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
-            mask = T.ballot_sync(0xFFFFFFFF, tx == 0)
+            mask = T.ballot_sync(tx == 0)
             B[tx] = T.cast(mask, "int64")
 
     return main
@@ -335,7 +335,7 @@ def kernel_match_any_sync():
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
             value = T.if_then_else(tx < 16, 1, 2)
-            peers = T.match_any_sync(0xFFFFFFFF, value)
+            peers = T.match_any_sync(value)
             B[tx] = T.cast(peers, "int32")
 
     return main
@@ -370,7 +370,7 @@ def kernel_match_all_sync_true():
     ):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
-            result = T.match_all_sync(0xFFFFFFFF, 7)
+            result = T.match_all_sync(7)
             B[tx] = T.cast(result, "int32")
 
     return main
@@ -386,7 +386,7 @@ def kernel_match_all_sync_false():
     ):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
-            result = T.match_all_sync(0xFFFFFFFF, tx)
+            result = T.match_all_sync(tx)
             B[tx] = T.cast(result, "int32")
 
     return main
