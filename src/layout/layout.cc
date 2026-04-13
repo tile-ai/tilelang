@@ -4,6 +4,7 @@
  */
 
 #include "layout.h"
+#include <tvm/ffi/error.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 
@@ -21,12 +22,278 @@ namespace tl {
 
 using namespace tir;
 
-static Var getPlaceholder(const std::string &s) {
-  static std::unordered_map<std::string, Var> map;
-  if (map.find(s) == map.end()) {
-    map[s] = Var(s);
+namespace {
+
+Array<Var> CreateReshapeVars(const Array<PrimExpr> &shape,
+                             arith::Analyzer *analyzer) {
+  Array<Var> vars;
+  vars.reserve(shape.size());
+  for (size_t i = 0; i < shape.size(); ++i) {
+    auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
+    analyzer->Bind(var, Range(0, shape[i]));
+    vars.push_back(var);
   }
-  return map[s];
+  return vars;
+}
+
+PrimExpr ComputeFlatIndex(const Array<PrimExpr> &shape,
+                          const Array<Var> &vars) {
+  PrimExpr flat_index = Integer(0);
+  for (size_t i = 0; i < shape.size(); ++i) {
+    PrimExpr stride = Integer(1);
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      stride = stride * shape[j];
+    }
+    flat_index = flat_index + vars[i] * stride;
+  }
+  return flat_index;
+}
+
+Array<PrimExpr> RecoverOriginalIndices(const Array<PrimExpr> &shape,
+                                       const PrimExpr &flat_index) {
+  Array<PrimExpr> original_indices;
+  PrimExpr remaining = flat_index;
+  for (size_t i = 0; i < shape.size(); ++i) {
+    PrimExpr stride = Integer(1);
+    for (size_t j = i + 1; j < shape.size(); ++j) {
+      stride = stride * shape[j];
+    }
+    original_indices.push_back(floordiv(remaining, stride));
+    remaining = floormod(remaining, stride);
+  }
+  return original_indices;
+}
+
+Array<PrimExpr> SubstituteForwardIndex(const Array<PrimExpr> &forward_index,
+                                       const Array<PrimExpr> &input_shape,
+                                       const Array<PrimExpr> &original_indices,
+                                       arith::Analyzer *analyzer) {
+  Array<PrimExpr> new_forward_index;
+  for (const auto &fwd_expr : forward_index) {
+    PrimExpr substituted = fwd_expr;
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+      substituted =
+          Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
+    }
+    new_forward_index.push_back(analyzer->Simplify(substituted));
+  }
+  return new_forward_index;
+}
+
+PrimExpr SubstituteReshapedExpr(const PrimExpr &expr,
+                                const Array<PrimExpr> &input_shape,
+                                const Array<PrimExpr> &original_indices,
+                                arith::Analyzer *analyzer) {
+  PrimExpr substituted = expr;
+  for (size_t i = 0; i < input_shape.size(); ++i) {
+    substituted =
+        Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
+  }
+  return analyzer->Simplify(substituted);
+}
+
+Array<PrimExpr> RestoreInputPlaceholders(const Array<PrimExpr> &forward_index,
+                                         const Array<Var> &vars) {
+  Array<PrimExpr> restored = forward_index;
+  for (size_t i = 0; i < vars.size(); ++i) {
+    restored = Substitute(restored, {{vars[i], InputPlaceholder(i)}});
+  }
+  return restored;
+}
+
+PrimExpr RestoreInputPlaceholders(const PrimExpr &expr,
+                                  const Array<Var> &vars) {
+  PrimExpr restored = expr;
+  for (size_t i = 0; i < vars.size(); ++i) {
+    restored = Substitute(restored, {{vars[i], InputPlaceholder(i)}});
+  }
+  return restored;
+}
+
+Layout TryPackedSubtypeReshape(const LayoutNode *layout_node,
+                               const Array<PrimExpr> &shape,
+                               arith::Analyzer *analyzer,
+                               const PrimExpr &old_elem_bits_expr,
+                               const PrimExpr &new_elem_bits_expr) {
+  const int64_t *old_elem_bits = as_const_int(old_elem_bits_expr);
+  const int64_t *new_elem_bits = as_const_int(new_elem_bits_expr);
+  if (old_elem_bits == nullptr || new_elem_bits == nullptr) {
+    return Layout();
+  }
+  if (*old_elem_bits <= 0 || *new_elem_bits <= 0) {
+    return Layout();
+  }
+
+  const Array<PrimExpr> &input_shape = layout_node->InputShape();
+
+  // Narrower target element, e.g. uint8 -> fp4.
+  // One old logical element now contains `pack_factor` new logical elements.
+  // The generic flat-index reshape would lose this packed-storage structure, so
+  // we materialize it as an extra trailing output dimension ("pack lane").
+  if (*old_elem_bits > *new_elem_bits && *old_elem_bits % *new_elem_bits == 0 &&
+      *new_elem_bits < 8) {
+    int64_t pack_factor = *old_elem_bits / *new_elem_bits;
+    Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
+    PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
+    PrimExpr old_flat_index = floordiv(flat_index, Integer(pack_factor));
+    PrimExpr lane_in_pack = floormod(flat_index, Integer(pack_factor));
+
+    Array<PrimExpr> original_indices =
+        RecoverOriginalIndices(input_shape, old_flat_index);
+    Array<PrimExpr> new_forward_index =
+        SubstituteForwardIndex(layout_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
+    new_forward_index.push_back(analyzer->Simplify(lane_in_pack));
+    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
+    return Layout(shape, new_forward_index);
+  }
+
+  // Wider target element, e.g. fp4 -> uint8.
+  // This is only valid if the current layout already exposes the packed
+  // sub-elements as its last output dimension.  We collapse that trailing pack
+  // lane back into the logical element index of the wider dtype.
+  if (*old_elem_bits < *new_elem_bits && *new_elem_bits % *old_elem_bits == 0 &&
+      *old_elem_bits < 8) {
+    int64_t pack_factor = *new_elem_bits / *old_elem_bits;
+    Array<PrimExpr> output_shape = layout_node->OutputShape();
+    if (output_shape.empty() ||
+        !analyzer->CanProveEqual(output_shape.back(), Integer(pack_factor))) {
+      return Layout();
+    }
+
+    Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
+    PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
+    PrimExpr old_flat_index = flat_index * Integer(pack_factor);
+    Array<PrimExpr> original_indices =
+        RecoverOriginalIndices(input_shape, old_flat_index);
+
+    Array<PrimExpr> expanded_forward_index =
+        SubstituteForwardIndex(layout_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
+    ICHECK_GT(expanded_forward_index.size(), 0);
+    Array<PrimExpr> new_forward_index;
+    new_forward_index.reserve(expanded_forward_index.size() - 1);
+    for (size_t i = 0; i + 1 < expanded_forward_index.size(); ++i) {
+      new_forward_index.push_back(expanded_forward_index[i]);
+    }
+    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
+    return Layout(shape, new_forward_index);
+  }
+
+  return Layout();
+}
+
+Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
+                                 const Array<PrimExpr> &shape,
+                                 arith::Analyzer *analyzer,
+                                 const PrimExpr &old_elem_bits_expr,
+                                 const PrimExpr &new_elem_bits_expr) {
+  const int64_t *old_elem_bits = as_const_int(old_elem_bits_expr);
+  const int64_t *new_elem_bits = as_const_int(new_elem_bits_expr);
+  if (old_elem_bits == nullptr || new_elem_bits == nullptr) {
+    return Fragment();
+  }
+  if (*old_elem_bits <= 0 || *new_elem_bits <= 0) {
+    return Fragment();
+  }
+
+  const Array<PrimExpr> &input_shape = fragment_node->InputShape();
+
+  // Same idea as Layout::Reshape above: preserve packed sub-byte storage by
+  // making the pack lane explicit in the fragment mapping instead of silently
+  // flattening it away.
+  if (*old_elem_bits > *new_elem_bits && *old_elem_bits % *new_elem_bits == 0 &&
+      *new_elem_bits < 8) {
+    int64_t pack_factor = *old_elem_bits / *new_elem_bits;
+    Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
+    PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
+    PrimExpr old_flat_index = floordiv(flat_index, Integer(pack_factor));
+    PrimExpr lane_in_pack = floormod(flat_index, Integer(pack_factor));
+
+    Array<PrimExpr> original_indices =
+        RecoverOriginalIndices(input_shape, old_flat_index);
+    Array<PrimExpr> new_forward_index =
+        SubstituteForwardIndex(fragment_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
+    new_forward_index.push_back(analyzer->Simplify(lane_in_pack));
+
+    PrimExpr new_forward_thread =
+        SubstituteReshapedExpr(fragment_node->GetForwardThread(), input_shape,
+                               original_indices, analyzer);
+    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
+    new_forward_thread = RestoreInputPlaceholders(new_forward_thread, new_vars);
+
+    Fragment reshaped(shape, new_forward_index, new_forward_thread,
+                      fragment_node->ReplicateExtent(), std::nullopt);
+    if (fragment_node->ThreadRange().defined()) {
+      reshaped = reshaped->BindThreadRange(fragment_node->ThreadRange());
+    }
+    return reshaped;
+  }
+
+  if (*old_elem_bits < *new_elem_bits && *new_elem_bits % *old_elem_bits == 0 &&
+      *old_elem_bits < 8) {
+    int64_t pack_factor = *new_elem_bits / *old_elem_bits;
+    Array<PrimExpr> output_shape = fragment_node->OutputShape();
+    if (output_shape.empty() ||
+        !analyzer->CanProveEqual(output_shape.back(), Integer(pack_factor))) {
+      return Fragment();
+    }
+
+    Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
+    PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
+    PrimExpr old_flat_index = flat_index * Integer(pack_factor);
+    Array<PrimExpr> original_indices =
+        RecoverOriginalIndices(input_shape, old_flat_index);
+
+    Array<PrimExpr> expanded_forward_index =
+        SubstituteForwardIndex(fragment_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
+    ICHECK_GT(expanded_forward_index.size(), 0);
+    Array<PrimExpr> new_forward_index;
+    new_forward_index.reserve(expanded_forward_index.size() - 1);
+    for (size_t i = 0; i + 1 < expanded_forward_index.size(); ++i) {
+      new_forward_index.push_back(expanded_forward_index[i]);
+    }
+
+    PrimExpr new_forward_thread =
+        SubstituteReshapedExpr(fragment_node->GetForwardThread(), input_shape,
+                               original_indices, analyzer);
+    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
+    new_forward_thread = RestoreInputPlaceholders(new_forward_thread, new_vars);
+
+    Fragment reshaped(shape, new_forward_index, new_forward_thread,
+                      fragment_node->ReplicateExtent(), std::nullopt);
+    if (fragment_node->ThreadRange().defined()) {
+      reshaped = reshaped->BindThreadRange(fragment_node->ThreadRange());
+    }
+    return reshaped;
+  }
+
+  return Fragment();
+}
+
+} // namespace
+
+static constexpr size_t kMaxPlaceholders = 16;
+
+static Var getPlaceholder(const std::string &s) {
+  // Pre-allocate all possible placeholders so the map is immutable after init.
+  // C++11 guarantees thread-safe initialization of function-local statics,
+  // so concurrent reads are safe without a mutex.
+  static const std::unordered_map<std::string, Var> map = []() {
+    std::unordered_map<std::string, Var> m;
+    m.reserve(kMaxPlaceholders + 1);
+    m["_rep"] = Var("_rep");
+    for (size_t i = 0; i < kMaxPlaceholders; ++i) {
+      std::string key{'_', char('i' + i)};
+      m[key] = Var(key);
+    }
+    return m;
+  }();
+  auto it = map.find(s);
+  ICHECK(it != map.end()) << "Unknown placeholder: " << s;
+  return it->second;
 }
 
 Var ReplicationPlaceholder() { return getPlaceholder("_rep"); }
@@ -157,6 +424,88 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
   }
 
   return result;
+}
+
+Layout LayoutNode::Repeat(int dim, int factor) const {
+  if (factor < 1) {
+    TVM_FFI_THROW(ValueError) << "factor must be >= 1, got " << factor;
+  }
+  if (factor == 1) {
+    return ffi::GetRef<Layout>(this);
+  }
+
+  const int ndim = static_cast<int>(InputDim());
+  if (ndim <= 0) {
+    TVM_FFI_THROW(ValueError) << "Cannot repeat a 0-dim layout";
+  }
+  int normalized_dim = dim;
+  if (normalized_dim < 0) {
+    normalized_dim += ndim;
+  }
+  if (normalized_dim < 0 || normalized_dim >= ndim) {
+    TVM_FFI_THROW(ValueError)
+        << "dim out of range: dim=" << dim << ", ndim=" << ndim;
+  }
+
+  Array<PrimExpr> new_input_size = input_size_;
+  PrimExpr extent_dim = input_size_[normalized_dim];
+  new_input_size.Set(normalized_dim, extent_dim * Integer(factor));
+
+  Map<Var, PrimExpr> vmap;
+  vmap.Set(InputPlaceholder(normalized_dim),
+           FloorMod(InputPlaceholder(normalized_dim), extent_dim));
+
+  Array<PrimExpr> new_forward_index;
+  new_forward_index.reserve(OutputDim() + 1);
+  new_forward_index.push_back(
+      FloorDiv(InputPlaceholder(normalized_dim), extent_dim));
+  for (const auto &e : forward_index_) {
+    new_forward_index.push_back(Substitute(e, vmap));
+  }
+
+  return Layout(new_input_size, new_forward_index);
+}
+
+Layout LayoutNode::Expand(const Array<PrimExpr> &leading_shape) const {
+  if (leading_shape.empty()) {
+    return ffi::GetRef<Layout>(this);
+  }
+
+  for (size_t i = 0; i < leading_shape.size(); ++i) {
+    if (auto imm = leading_shape[i].as<IntImm>()) {
+      if ((*imm)->value <= 0) {
+        TVM_FFI_THROW(ValueError)
+            << "leading_shape[" << i << "] must be > 0, got " << (*imm)->value;
+      }
+    }
+  }
+
+  const size_t offset = leading_shape.size();
+
+  Array<PrimExpr> new_input_size;
+  new_input_size.reserve(offset + InputDim());
+  for (const auto &s : leading_shape) {
+    new_input_size.push_back(s);
+  }
+  for (const auto &s : input_size_) {
+    new_input_size.push_back(s);
+  }
+
+  Map<Var, PrimExpr> vmap;
+  for (size_t i = 0; i < InputDim(); ++i) {
+    vmap.Set(InputPlaceholder(i), InputPlaceholder(i + offset));
+  }
+
+  Array<PrimExpr> new_forward_index;
+  new_forward_index.reserve(offset + OutputDim());
+  for (size_t i = 0; i < offset; ++i) {
+    new_forward_index.push_back(InputPlaceholder(i));
+  }
+  for (const auto &e : forward_index_) {
+    new_forward_index.push_back(Substitute(e, vmap));
+  }
+
+  return Layout(new_input_size, new_forward_index);
 }
 
 Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
@@ -330,59 +679,31 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
       << "InputShape() = " << InputShape() << " shape = " << shape
       << ", rescale_num = " << rescale_num << ", rescale_den = " << rescale_den;
 
-  // Step 2. Create new forward indices by reshaping
-  // For each dimension in the new shape, we create a placeholder variable
-  Array<Var> new_vars;
-  new_vars.reserve(shape.size());
-  for (size_t i = 0; i < shape.size(); ++i) {
-    auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
-    az->Bind(var, Range(0, shape[i]));
-    new_vars.push_back(var);
+  // The generic reshape below only reasons about a flat logical element index.
+  // For subtype-changing views on packed sub-byte dtypes, that is not enough:
+  // we must preserve which sub-element inside a packed storage slot is being
+  // referenced.  Handle that first, then fall back to the ordinary reshape.
+  if (auto packed =
+          TryPackedSubtypeReshape(this, shape, az, rescale_num, rescale_den);
+      packed.defined()) {
+    return packed;
   }
+
+  // Step 2. Create new forward indices by reshaping
+  Array<Var> new_vars = CreateReshapeVars(shape, az);
   // Step 3. Compute the flat index from new shape indices
   // flat_index = k0 * (s1 * s2 * ...) + k1 * (s2 * s3 * ...) + ... + kn
-  PrimExpr flat_index = Integer(0);
-  for (size_t i = 0; i < shape.size(); ++i) {
-    PrimExpr stride = Integer(1);
-    for (size_t j = i + 1; j < shape.size(); ++j) {
-      stride = stride * shape[j];
-    }
-    flat_index = flat_index + new_vars[i] * stride;
-  }
+  PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
   // Convert new flat index (in units of new elements) to the old flat index
   // (in units of old elements) using the rational rescale factor.
   // old_flat = floor((flat_index * rescale_den) / rescale_num)
   PrimExpr old_flat_index = floordiv(flat_index * rescale_den, rescale_num);
-  // Step 4. Convert flat index back to original shape indices
-  // For original shape [s0, s1, ..., sm]:
-  // i0 = flat_index // (s1 * s2 * ... * sm)
-  // i1 = (flat_index % (s1 * s2 * ... * sm)) // (s2 * s3 * ... * sm)
-  // ...
-  Array<PrimExpr> original_indices;
-  PrimExpr remaining = old_flat_index;
-  for (size_t i = 0; i < InputShape().size(); ++i) {
-    PrimExpr stride = Integer(1);
-    for (size_t j = i + 1; j < InputShape().size(); ++j) {
-      stride = stride * InputShape()[j];
-    }
-    original_indices.push_back(floordiv(remaining, stride));
-    remaining = floormod(remaining, stride);
-  }
+  Array<PrimExpr> original_indices =
+      RecoverOriginalIndices(InputShape(), old_flat_index);
   // Step 5. Substitute original indices into forward_index_
-  Array<PrimExpr> new_forward_index;
-  for (const auto &fwd_expr : forward_index_) {
-    PrimExpr substituted = fwd_expr;
-    // Replace each InputPlaceholder(i) with original_indices[i]
-    for (size_t i = 0; i < InputShape().size(); ++i) {
-      substituted =
-          Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
-    }
-    new_forward_index.push_back(az->Simplify(substituted));
-  }
-  for (size_t i = 0; i < new_vars.size(); ++i) {
-    new_forward_index =
-        Substitute(new_forward_index, {{new_vars[i], InputPlaceholder(i)}});
-  }
+  Array<PrimExpr> new_forward_index = SubstituteForwardIndex(
+      forward_index_, InputShape(), original_indices, az);
+  new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
   return Layout(shape, new_forward_index);
 }
 
@@ -412,62 +733,29 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
       << ", rescale_num = " << rescale_num << ", rescale_den = " << rescale_den
       << " input fragment layout is = " << DebugOutput();
 
-  // 2) Build flat index from new-shape indices
-  Array<Var> new_vars;
-  new_vars.reserve(shape.size());
-  for (size_t i = 0; i < shape.size(); ++i) {
-    // Cannot use InputPlaceholder(i) here, because it would cause name capture
-    // (variable capture) with InputPlaceholder(i) in upper scopes. Therefore,
-    // we must create a fresh variable here to avoid confusion when
-    // substituting.
-    auto var = Var(std::string("n_") + std::to_string(i), shape[i].dtype());
-    az->Bind(var, Range(0, shape[i]));
-    new_vars.push_back(var);
+  // Fragments need the same special handling as plain layouts so that packed
+  // subtype views keep a stable thread/data mapping through reshape.
+  if (auto packed =
+          TryPackedSubtypeReshape(this, shape, az, rescale_num, rescale_den);
+      packed.defined()) {
+    return packed;
   }
 
-  PrimExpr flat = Integer(0);
-  for (size_t i = 0; i < shape.size(); ++i) {
-    PrimExpr stride = Integer(1);
-    for (size_t j = i + 1; j < shape.size(); ++j)
-      stride = stride * shape[j];
-    flat = flat + new_vars[i] * stride;
-  }
+  // 2) Build flat index from new-shape indices
+  Array<Var> new_vars = CreateReshapeVars(shape, az);
+  PrimExpr flat = ComputeFlatIndex(shape, new_vars);
   // Convert to old flat index units using the rational rescale factor.
   // old_flat = floor((flat * rescale_den) / rescale_num)
   PrimExpr old_flat = floordiv(flat * rescale_den, rescale_num);
   // 3) Recover original indices from flat index
-  Array<PrimExpr> orig_indices;
-  PrimExpr remain = old_flat;
-  for (size_t i = 0; i < InputShape().size(); ++i) {
-    PrimExpr stride = Integer(1);
-    for (size_t j = i + 1; j < InputShape().size(); ++j)
-      stride = stride * InputShape()[j];
-    orig_indices.push_back(floordiv(remain, stride));
-    remain = floormod(remain, stride);
-  }
+  Array<PrimExpr> orig_indices = RecoverOriginalIndices(InputShape(), old_flat);
   // 4) Substitute old placeholders with expressions of new indices
-  Array<PrimExpr> new_forward_index;
-  for (const auto &e : forward_index_) {
-    PrimExpr cur = e;
-    for (size_t i = 0; i < InputShape().size(); ++i) {
-      cur = Substitute(cur, {{InputPlaceholder(i), orig_indices[i]}});
-    }
-    cur = az->Simplify(cur);
-    new_forward_index.push_back(cur);
-  }
-  PrimExpr new_forward_thread = forward_thread_;
-  for (size_t i = 0; i < InputShape().size(); ++i) {
-    new_forward_thread = Substitute(new_forward_thread,
-                                    {{InputPlaceholder(i), orig_indices[i]}});
-  }
-  new_forward_thread = az->Simplify(new_forward_thread);
-  for (size_t i = 0; i < new_vars.size(); ++i) {
-    auto var = new_vars[i];
-    new_forward_index =
-        Substitute(new_forward_index, {{var, InputPlaceholder(i)}});
-    new_forward_thread =
-        Substitute(new_forward_thread, {{var, InputPlaceholder(i)}});
-  }
+  Array<PrimExpr> new_forward_index =
+      SubstituteForwardIndex(forward_index_, InputShape(), orig_indices, az);
+  PrimExpr new_forward_thread =
+      SubstituteReshapedExpr(forward_thread_, InputShape(), orig_indices, az);
+  new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
+  new_forward_thread = RestoreInputPlaceholders(new_forward_thread, new_vars);
   Fragment reshaped(shape, new_forward_index, new_forward_thread,
                     ReplicateExtent(), std::nullopt);
   if (thread_range_.defined()) {
@@ -796,10 +1084,23 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.Layout_output_shape",
            [](Layout layout) { return layout->OutputShape(); })
       .def("tl.Layout_inverse", [](Layout layout) { return layout->Inverse(); })
+      .def("tl.Layout_reshape",
+           [](Layout layout, Array<PrimExpr> shape, PrimExpr rescale_num,
+              PrimExpr rescale_den) {
+             return layout->Reshape(shape, nullptr, rescale_num, rescale_den);
+           })
       .def("tl.Layout_index",
            [](Layout layout) { return layout->GetForwardIndex(); })
       .def("tl.Layout_forward_vars",
            [](Layout layout) { return layout->GetForwardVars(); })
+      .def("tl.Layout_repeat",
+           [](Layout layout, int dim, int factor) {
+             return layout->Repeat(dim, factor);
+           })
+      .def("tl.Layout_expand",
+           [](Layout layout, Array<PrimExpr> leading_shape) {
+             return layout->Expand(leading_shape);
+           })
       .def("tl.Layout_is_equal",
            [](Layout layout, Layout other) {
              const LayoutNode *other_node = other.as<LayoutNode>();
@@ -835,45 +1136,32 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.Fragment_condense_rep_var",
            [](Fragment fragment) { return fragment->CondenseReplicateVar(); })
       .def("tl.make_swizzled_layout",
-           [](int stride, int continuous, int element_size, bool k_inner,
-              bool allow_pad = true) {
-             if (allow_pad) {
-               return makeGemmABLayout(stride, continuous, continuous,
-                                       element_size, k_inner);
-             } else {
-               return makeGemmABLayoutHopper(stride, continuous, continuous,
-                                             element_size, k_inner);
-             }
+           [](const Buffer &buffer, bool k_inner, bool allow_pad) {
+             return makeSwizzledLayout(buffer, k_inner, allow_pad);
            })
       .def("tl.make_volta_swizzled_layout",
-           [](int stride, int mat_continuous, bool is_a, bool k_inner) {
-             return makeGemmVoltaABLayout(stride, mat_continuous, is_a,
-                                          k_inner);
+           [](const Buffer &buffer, bool is_a, bool k_inner) {
+             return makeVoltaSwizzledLayout(buffer, is_a, k_inner);
            })
       .def("tl.make_wgmma_swizzled_layout",
-           [](int stride, int mat_continuous, int continuity, int element_size,
-              bool k_inner) {
-             return makeGemmABLayoutHopper(stride, mat_continuous, continuity,
-                                           element_size, k_inner);
+           [](const Buffer &buffer, int continuity, bool k_inner) {
+             return makeWgmmaSwizzledLayout(buffer, continuity, k_inner);
            })
       .def("tl.make_tcgen05mma_swizzled_layout",
-           [](int stride, int mat_continuous, int continuity, int element_size,
-              bool k_inner) {
-             return makeGemmABLayoutSm100(stride, mat_continuous, continuity,
-                                          element_size, k_inner);
+           [](const Buffer &buffer, int continuity, bool k_inner) {
+             return makeTcgen05mmaSwizzledLayout(buffer, continuity, k_inner);
            })
       .def("tl.make_full_bank_swizzled_layout",
-           [](int stride, int continuous, int element_size) {
-             return makeFullBankSwizzleLayout(stride, continuous, element_size);
+           [](const Buffer &buffer) {
+             return makeFullBankSwizzleLayout(buffer);
            })
       .def("tl.make_half_bank_swizzled_layout",
-           [](int stride, int continuous, int element_size) {
-             return makeHalfBankSwizzleLayout(stride, continuous, element_size);
+           [](const Buffer &buffer) {
+             return makeHalfBankSwizzleLayout(buffer);
            })
       .def("tl.make_quarter_bank_swizzled_layout",
-           [](int stride, int continuous, int element_size) {
-             return makeQuarterBankSwizzleLayout(stride, continuous,
-                                                 element_size);
+           [](const Buffer &buffer) {
+             return makeQuarterBankSwizzleLayout(buffer);
            })
       .def("tl.make_linear_layout",
            [](Array<PrimExpr> shape) { return makeLinearLayout(shape); })

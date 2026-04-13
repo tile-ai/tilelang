@@ -18,6 +18,7 @@
 
 #include "../op/builtin.h"
 #include "./common/collector.h"
+#include "./common/mbarrier.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -56,9 +57,9 @@ public:
 private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(create_list_of_mbarrier()) ||
-          call->op.same_as(mbarrier_wait_parity()) ||
+      if (call->op.same_as(mbarrier_wait_parity()) ||
           call->op.same_as(builtin::ptx_arrive_barrier()) ||
+          call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
           call->op.same_as(builtin::ptx_cp_async_barrier())) {
         has_mbarrier_op_ = true;
       }

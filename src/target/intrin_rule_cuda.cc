@@ -122,6 +122,22 @@ static PrimExpr DispatchCUDAWarpActiveMask(const PrimExpr &e) {
               call->annotations);
 }
 
+static PrimExpr DispatchCUDAIsFinite(const PrimExpr &e) {
+  const CallNode *call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  ICHECK_EQ(call->args.size(), 1U);
+
+  DataType arg_dtype = call->args[0].dtype();
+  if (arg_dtype.is_float() &&
+      (arg_dtype.bits() == 32 || arg_dtype.bits() == 64)) {
+    Array<PrimExpr> new_args = {StringImm("isfinite"), call->args[0]};
+    return Call(call->dtype, builtin::call_pure_extern(), new_args,
+                call->annotations);
+  }
+
+  return e;
+}
+
 template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
   ICHECK(call != nullptr);
@@ -135,6 +151,9 @@ template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
 TVM_REGISTER_OP("tir.rsqrt")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
                                DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tir.isfinite")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAIsFinite);
 
 } // namespace intrin
 } // namespace codegen

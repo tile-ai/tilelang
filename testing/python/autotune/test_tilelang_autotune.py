@@ -1,13 +1,8 @@
 import itertools
-import logging
 
 import tilelang.testing
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
-
-# Configure logger
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 def ref_program(A, B):
@@ -16,108 +11,53 @@ def ref_program(A, B):
 
     Parameters
     ----------
-    A : numpy.ndarray
+    A : torch.Tensor
         The matrix with shape (M, K).
-    B : numpy.ndarray
+    B : torch.Tensor
         The matrix with shape (N, K).
 
     Returns
     -------
-    np.ndarray
+    torch.Tensor
         The result of A @ B.T, shape (M, N).
     """
     return A @ B.T
 
 
-def get_configs(M, N, K, with_roller=False):
-    """
-    Generate a list of configuration dictionaries that will be used for tuning.
+def get_configs():
+    block_M = [64]
+    block_N = [64]
+    block_K = [32]
+    num_stages = [0, 1]
+    thread_num = [128]
+    enable_rasterization = [False]
 
-    Parameters
-    ----------
-    with_roller : bool
-        Whether to enable bitblas roller to deduce search spaces
-
-    Returns
-    -------
-    list of dict
-        Each configuration dict includes various block sizes, pipeline stages,
-        thread numbers, and other parameters to explore during autotuning.
-    """
-    if with_roller:
-        from tilelang.carver.template import MatmulTemplate
-        from tilelang.carver.arch import CUDA
-        from tilelang.carver.roller.rasterization import NoRasterization
-
-        arch = CUDA("cuda")
-        topk = 20
-
-        # Simple TIR Compute Expression
-        carve_template = MatmulTemplate(
-            M=M,
-            N=N,
-            K=K,
-            in_dtype=T.float16,
-            out_dtype=T.float16,
-            accum_dtype=T.float16,
-        ).with_arch(arch)
-
-        func = carve_template.equivalent_function()
-        assert func is not None, "Function is None"
-
-        roller_hints = carve_template.recommend_hints(topk=topk)
-
-        if roller_hints is None:
-            raise ValueError("No Roller Hints Found for TensorCore Scheduling")
-
-        configs = []
-        for hint in roller_hints:
-            config = {}
-            block_m, block_n = hint.block
-            warp_m, warp_n = hint.warp
-            config["block_M"] = block_m
-            config["block_N"] = block_n
-            config["block_K"] = hint.rstep[0]
-            config["num_stages"] = 0
-            config["thread_num"] = (block_m * block_n) // (warp_m * warp_n) * 32
-            config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
-            configs.append(config)
-        for config in configs:
-            print(config)
-    else:
-        block_M = [64]
-        block_N = [64]
-        block_K = [32]
-        num_stages = [0, 1]
-        thread_num = [128]
-        enable_rasterization = [False]
-
-        _configs = list(
-            itertools.product(
-                block_M,
-                block_N,
-                block_K,
-                num_stages,
-                thread_num,
-                enable_rasterization,
-            )
+    _configs = list(
+        itertools.product(
+            block_M,
+            block_N,
+            block_K,
+            num_stages,
+            thread_num,
+            enable_rasterization,
         )
+    )
 
-        configs = [
-            {
-                "block_M": c[0],
-                "block_N": c[1],
-                "block_K": c[2],
-                "num_stages": c[3],
-                "thread_num": c[4],
-                "enable_rasteration": c[5],  # keep param name for backward-compat
-            }
-            for c in _configs
-        ]
+    configs = [
+        {
+            "block_M": c[0],
+            "block_N": c[1],
+            "block_K": c[2],
+            "num_stages": c[3],
+            "thread_num": c[4],
+            "enable_rasteration": c[5],  # keep param name for backward-compat
+        }
+        for c in _configs
+    ]
     return configs
 
 
-def matmul(M, N, K, with_roller):
+def matmul(M, N, K):
     """
     Create an autotuned matrix multiplication kernel for matrices of shape:
       - A: (M, K)
@@ -248,7 +188,7 @@ def matmul(M, N, K, with_roller):
         return main
 
     autotuner = (
-        AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller))
+        AutoTuner.from_kernel(kernel=kernel, configs=get_configs())
         .set_compile_args(
             out_idx=[-1],
         )
@@ -261,14 +201,12 @@ def matmul(M, N, K, with_roller):
 
 @tilelang.testing.requires_cuda
 def test_autotune_get_configs():
-    get_configs(1024, 1024, 1024, with_roller=True)
-    get_configs(1024, 1024, 1024, with_roller=False)
+    get_configs()
 
 
 @tilelang.testing.requires_cuda
 def test_autotune_matmul():
-    matmul(1024, 1024, 1024, with_roller=True)
-    matmul(1024, 1024, 1024, with_roller=False)
+    matmul(1024, 1024, 1024)
 
 
 if __name__ == "__main__":

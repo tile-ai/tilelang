@@ -10,6 +10,8 @@ def plot_layout(
     colormap: str = None,
     verbose: bool = False,
     formats: str | list[str] = "pdf",
+    view: str = "input",
+    grid_shape: tuple[int, int] | None = None,
 ) -> None:
     """
     Plot the layout mapping as a 2D grid visualization.
@@ -31,13 +33,30 @@ def plot_layout(
         If True, print mapping details.
     formats : str | list[str], optional
         Output format(s): "pdf", "png", "svg", "all", or comma-separated (default "pdf").
+    view : str, optional
+        For `T.Layout` only: choose which space is shown as the 2D grid.
+
+        - "input" (default): grid is input space, labels show output (flattened) coordinates.
+        - "output": grid is output space, labels show input coordinates.
+    grid_shape : tuple[int, int] | None, optional
+        For `view="input"` only: override the 2D grid shape (rows, cols). The
+        product must match the total number of input elements.
     """
     from tilelang.layout.fragment import Fragment
 
     if isinstance(layout, Fragment):
         _plot_fragment_layout(layout, save_directory, name, colormap or "RdPu", verbose, formats)
     elif isinstance(layout, T.Layout):
-        _plot_layout_map(layout, save_directory, name, colormap or "Spectral", verbose, formats)
+        _plot_layout_map(
+            layout,
+            save_directory,
+            name,
+            colormap or "Spectral",
+            verbose,
+            formats,
+            view=view,
+            grid_shape=grid_shape,
+        )
     else:
         raise TypeError(f"Expected T.Layout or T.Fragment, but got {type(layout).__name__}.")
 
@@ -256,13 +275,19 @@ def _plot_layout_map(
     colormap: str = "Spectral",
     verbose: bool = False,
     formats: str | list[str] = "pdf",
+    view: str = "input",
+    grid_shape: tuple[int, int] | None = None,
 ) -> None:
     """
     Visualize a Layout object as a 2D grid showing position mappings.
 
-    The grid represents the output space (viewed as 2D by keeping the last
-    dimension and flattening all preceding dimensions).  Each cell displays the
-    original input coordinate that maps to that output position.
+    By default (`view="input"`), the grid represents the input space (viewed as
+    2D by keeping the last dimension and flattening all preceding dimensions),
+    and each cell displays the output (flattened) coordinate.
+
+    With `view="output"`, the grid represents the output space (similarly viewed
+    as 2D), and each cell displays the original input coordinate that maps to
+    that output position.
 
     Parameters
     ----------
@@ -278,6 +303,12 @@ def _plot_layout_map(
         Print mapping details.
     formats : str | list[str]
         Output format(s).
+    view : str
+        Choose which space is shown as the 2D grid: "input" (default) or
+        "output".
+    grid_shape : tuple[int, int] | None
+        For `view="input"` only: override the 2D grid shape (rows, cols). The
+        product must match the total number of input elements.
     """
     import functools
     import operator
@@ -305,6 +336,13 @@ def _plot_layout_map(
             row = row * shape[k] + idx[k]
         return (row, idx[-1])
 
+    def _nd_to_flat(idx, shape):
+        """Convert an N-D index to a row-major flat index."""
+        flat = 0
+        for k in range(len(shape)):
+            flat = flat * shape[k] + idx[k]
+        return flat
+
     # -- collect all input→output mappings ---------------------------------
 
     mappings = []
@@ -322,123 +360,252 @@ def _plot_layout_map(
         for k in range(num_out_dims):
             output_shape[k] = max(output_shape[k], out_idx[k] + 1)
 
-    out_rows, out_cols = _flatten_to_2d(output_shape)
+    view_norm = (view or "output").strip().lower()
 
-    if verbose:
-        print(f"Input shape : {input_shape}")
-        print(f"Output shape: {output_shape}")
-        print(f"Grid size   : {out_rows} x {out_cols}")
-
-    # -- build the output grid ---------------------------------------------
-
-    grid_labels = [[None] * out_cols for _ in range(out_rows)]
-    grid_src_flat = np.full((out_rows, out_cols), -1, dtype=int)
-
-    for in_idx, out_idx in mappings:
-        out_r, out_c = _nd_to_2d(out_idx, output_shape)
-        # flat source index for colour mapping
-        src_flat = 0
-        for k in range(len(input_shape)):
-            src_flat = src_flat * input_shape[k] + in_idx[k]
-
-        grid_labels[out_r][out_c] = list(in_idx)
-        grid_src_flat[out_r, out_c] = src_flat
+    if view_norm in ("output", "out", "dst"):
+        out_rows, out_cols = _flatten_to_2d(output_shape)
 
         if verbose:
-            print(f"  {list(in_idx)} -> {list(out_idx)} -> grid[{out_r}, {out_c}]")
+            print(f"Input shape : {input_shape}")
+            print(f"Output shape: {output_shape}")
+            print(f"Grid size   : {out_rows} x {out_cols} (output view)")
 
-    # -- plotting ----------------------------------------------------------
+        # -- build the output grid ---------------------------------------------
 
-    cmap = plt.get_cmap(colormap, max(total_in, 2))
+        grid_labels = [[None] * out_cols for _ in range(out_rows)]
+        grid_src_flat = np.full((out_rows, out_cols), -1, dtype=int)
 
-    # dynamic sizing
-    max_dim = max(out_rows, out_cols, 1)
-    cell_size = max(0.5, min(1.2, 16.0 / max_dim))
+        for in_idx, out_idx in mappings:
+            out_r, out_c = _nd_to_2d(out_idx, output_shape)
+            src_flat = _nd_to_flat(in_idx, input_shape)
 
-    fig_w = cell_size * out_cols + 1.5
-    fig_h = cell_size * out_rows + 1.0
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+            grid_labels[out_r][out_c] = list(in_idx)
+            grid_src_flat[out_r, out_c] = src_flat
 
-    # font size: adapt to cell size and longest label
-    sample_label = "[" + ",".join(str(d - 1) for d in input_shape) + "]"
-    max_label_len = len(sample_label)
-    cell_pts = cell_size * 72  # approximate cell width in points
-    base_font = max(5, min(16, cell_pts * 0.9 / max(max_label_len * 0.55, 1)))
+            if verbose:
+                print(f"  {list(in_idx)} -> {list(out_idx)} -> grid[{out_r}, {out_c}]")
 
-    for i in range(out_rows):
-        for j in range(out_cols):
-            sf = grid_src_flat[i, j]
-            if sf >= 0:
-                color = cmap(sf / max(total_in - 1, 1))
-            else:
-                color = (0.95, 0.95, 0.95, 1.0)
+        # -- plotting ----------------------------------------------------------
 
-            rect = patches.Rectangle(
-                (j, i),
-                1,
-                1,
-                linewidth=0.8,
-                edgecolor="#aaaaaa",
-                facecolor=color,
-            )
-            ax.add_patch(rect)
+        cmap = plt.get_cmap(colormap, max(total_in, 2))
 
-            coords = grid_labels[i][j]
-            if coords is not None:
-                label = "[" + ",".join(str(x) for x in coords) + "]"
-                r, g, b = color[0], color[1], color[2]
-                brightness = r * 0.299 + g * 0.587 + b * 0.114
-                text_color = "white" if brightness < 0.5 else "black"
-                ax.text(
-                    j + 0.5,
-                    i + 0.5,
-                    label,
-                    ha="center",
-                    va="center",
-                    color=text_color,
-                    fontsize=base_font,
-                    fontfamily="monospace",
-                    fontweight="bold",
+        # dynamic sizing
+        max_dim = max(out_rows, out_cols, 1)
+        cell_size = max(0.5, min(1.2, 16.0 / max_dim))
+
+        fig_w = cell_size * out_cols + 1.5
+        fig_h = cell_size * out_rows + 1.0
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+        # font size: adapt to cell size and longest label
+        sample_label = "[" + ",".join(str(d - 1) for d in input_shape) + "]"
+        max_label_len = len(sample_label)
+        cell_pts = cell_size * 72  # approximate cell width in points
+        base_font = max(5, min(16, cell_pts * 0.9 / max(max_label_len * 0.55, 1)))
+
+        for i in range(out_rows):
+            for j in range(out_cols):
+                sf = grid_src_flat[i, j]
+                if sf >= 0:
+                    color = cmap(sf / max(total_in - 1, 1))
+                else:
+                    color = (0.95, 0.95, 0.95, 1.0)
+
+                rect = patches.Rectangle(
+                    (j, i),
+                    1,
+                    1,
+                    linewidth=0.8,
+                    edgecolor="#aaaaaa",
+                    facecolor=color,
                 )
+                ax.add_patch(rect)
 
-    # axis labels
-    label_font = max(5, min(10, base_font * 0.85))
-    # row labels on the left
-    for i in range(out_rows):
-        ax.text(-0.15, i + 0.5, str(i), ha="right", va="center", fontsize=label_font, color="#666666")
-    # column labels at the bottom
-    for j in range(out_cols):
-        ax.text(j + 0.5, out_rows + 0.15, str(j), ha="center", va="top", fontsize=label_font, color="#666666")
+                coords = grid_labels[i][j]
+                if coords is not None:
+                    label = "[" + ",".join(str(x) for x in coords) + "]"
+                    r, g, b = color[0], color[1], color[2]
+                    brightness = r * 0.299 + g * 0.587 + b * 0.114
+                    text_color = "white" if brightness < 0.5 else "black"
+                    ax.text(
+                        j + 0.5,
+                        i + 0.5,
+                        label,
+                        ha="center",
+                        va="center",
+                        color=text_color,
+                        fontsize=base_font,
+                        fontfamily="monospace",
+                        fontweight="bold",
+                    )
 
-    ax.set_xlim(-0.3, out_cols)
-    ax.set_ylim(-0.1, out_rows + 0.5)
-    ax.invert_yaxis()
-    ax.set_aspect("equal")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
-        spine.set_visible(False)
+        # axis labels
+        label_font = max(5, min(10, base_font * 0.85))
+        # row labels on the left
+        for i in range(out_rows):
+            ax.text(-0.15, i + 0.5, str(i), ha="right", va="center", fontsize=label_font, color="#666666")
+        # column labels at the bottom
+        for j in range(out_cols):
+            ax.text(j + 0.5, out_rows + 0.15, str(j), ha="center", va="top", fontsize=label_font, color="#666666")
 
-    # outer border
-    border = patches.Rectangle(
-        (0, 0),
-        out_cols,
-        out_rows,
-        linewidth=1.5,
-        edgecolor="#333333",
-        facecolor="none",
-    )
-    ax.add_patch(border)
+        ax.set_xlim(-0.3, out_cols)
+        ax.set_ylim(-0.1, out_rows + 0.5)
+        ax.invert_yaxis()
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
 
-    # title: show shape transformation
-    in_str = "x".join(str(d) for d in input_shape)
-    out_str = "x".join(str(d) for d in output_shape)
-    title_font = max(8, min(14, base_font * 1.1))
-    ax.set_title(f"[{in_str}] -> [{out_str}]", fontsize=title_font, color="#333333", pad=8)
+        # outer border
+        border = patches.Rectangle(
+            (0, 0),
+            out_cols,
+            out_rows,
+            linewidth=1.5,
+            edgecolor="#333333",
+            facecolor="none",
+        )
+        ax.add_patch(border)
 
-    plt.tight_layout()
-    _save_plot(plt, save_directory, name, formats)
-    plt.close()
+        # title: show shape transformation
+        in_str = "x".join(str(d) for d in input_shape)
+        out_str = "x".join(str(d) for d in output_shape)
+        title_font = max(8, min(14, base_font * 1.1))
+        ax.set_title(f"[{in_str}] -> [{out_str}]", fontsize=title_font, color="#333333", pad=8)
+
+        plt.tight_layout()
+        _save_plot(plt, save_directory, name, formats)
+        plt.close()
+        return
+
+    if view_norm in ("input", "in", "src"):
+        # Plot in input-space: keep the input arrangement, label by output.
+
+        if grid_shape is not None:
+            if len(grid_shape) != 2:
+                raise ValueError(f"grid_shape must be a (rows, cols) tuple, got: {grid_shape}")
+            in_rows, in_cols = int(grid_shape[0]), int(grid_shape[1])
+            if in_rows <= 0 or in_cols <= 0:
+                raise ValueError(f"grid_shape values must be positive, got: {grid_shape}")
+            if in_rows * in_cols != total_in:
+                raise ValueError(
+                    f"grid_shape product must match total input elements ({total_in}), got {in_rows}x{in_cols}={in_rows * in_cols}."
+                )
+        else:
+            in_rows, in_cols = _flatten_to_2d(input_shape)
+
+        if verbose:
+            print(f"Input shape : {input_shape}")
+            print(f"Output shape: {output_shape}")
+            print(f"Grid size   : {in_rows} x {in_cols} (input view)")
+
+        grid_out_flat = np.full((in_rows, in_cols), -1, dtype=int)
+        grid_labels = [[None] * in_cols for _ in range(in_rows)]
+
+        max_out_flat = -1
+        for in_idx, out_idx in mappings:
+            in_flat = _nd_to_flat(in_idx, input_shape)
+            if grid_shape is None:
+                in_r, in_c = _nd_to_2d(in_idx, input_shape)
+            else:
+                in_r, in_c = divmod(in_flat, in_cols)
+
+            out_flat = _nd_to_flat(out_idx, output_shape)
+            max_out_flat = max(max_out_flat, out_flat)
+
+            grid_out_flat[in_r, in_c] = out_flat
+            grid_labels[in_r][in_c] = str(out_flat)
+
+            if verbose:
+                print(f"  {list(in_idx)} -> {list(out_idx)} -> grid[{in_r}, {in_c}] = {out_flat}")
+
+        cmap_n = max(max_out_flat + 1, 2)
+        cmap = plt.get_cmap(colormap, cmap_n)
+
+        max_dim = max(in_rows, in_cols, 1)
+        cell_size = max(0.5, min(1.2, 16.0 / max_dim))
+
+        fig_w = cell_size * in_cols + 1.5
+        fig_h = cell_size * in_rows + 1.0
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+        sample_label = str(max_out_flat)
+        max_label_len = len(sample_label)
+        cell_pts = cell_size * 72  # approximate cell width in points
+        base_font = max(5, min(16, cell_pts * 0.9 / max(max_label_len * 0.55, 1)))
+
+        for i in range(in_rows):
+            for j in range(in_cols):
+                of = grid_out_flat[i, j]
+                if of >= 0:
+                    color = cmap(of / max(max_out_flat, 1))
+                else:
+                    color = (0.95, 0.95, 0.95, 1.0)
+
+                rect = patches.Rectangle(
+                    (j, i),
+                    1,
+                    1,
+                    linewidth=0.8,
+                    edgecolor="#aaaaaa",
+                    facecolor=color,
+                )
+                ax.add_patch(rect)
+
+                label = grid_labels[i][j]
+                if label is not None:
+                    r, g, b = color[0], color[1], color[2]
+                    brightness = r * 0.299 + g * 0.587 + b * 0.114
+                    text_color = "white" if brightness < 0.5 else "black"
+                    ax.text(
+                        j + 0.5,
+                        i + 0.5,
+                        label,
+                        ha="center",
+                        va="center",
+                        color=text_color,
+                        fontsize=base_font,
+                        fontfamily="monospace",
+                        fontweight="bold",
+                    )
+
+        label_font = max(5, min(10, base_font * 0.85))
+        for i in range(in_rows):
+            ax.text(-0.15, i + 0.5, str(i), ha="right", va="center", fontsize=label_font, color="#666666")
+        for j in range(in_cols):
+            ax.text(j + 0.5, in_rows + 0.15, str(j), ha="center", va="top", fontsize=label_font, color="#666666")
+
+        ax.set_xlim(-0.3, in_cols)
+        ax.set_ylim(-0.1, in_rows + 0.5)
+        ax.invert_yaxis()
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        border = patches.Rectangle(
+            (0, 0),
+            in_cols,
+            in_rows,
+            linewidth=1.5,
+            edgecolor="#333333",
+            facecolor="none",
+        )
+        ax.add_patch(border)
+
+        in_str = "x".join(str(d) for d in input_shape)
+        out_str = "x".join(str(d) for d in output_shape)
+        title_font = max(8, min(14, base_font * 1.1))
+        ax.set_title(f"[{in_str}] -> [{out_str}] (input view)", fontsize=title_font, color="#333333", pad=8)
+
+        plt.tight_layout()
+        _save_plot(plt, save_directory, name, formats)
+        plt.close()
+        return
+
+    raise ValueError(f"Unknown view '{view}'. Expected 'output' or 'input'.")
 
 
 # ---------------------------------------------------------------------------

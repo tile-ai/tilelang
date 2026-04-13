@@ -102,6 +102,7 @@ tilelang/jit/adapter/cython/.cycache
 # CMake
 cmake-build/
 cmake-build-*/
+CMakeFiles/
 
 # Git version for sdist
 .git_commit.txt
@@ -118,8 +119,8 @@ maint/host_checks/logs/*
 # csv
 *.csv
 
-# clang-tidy
-/run-clang-tidy.py
-
 # perf regression test
 .perf_regression/
+
+# agent skills folder
+.humanize*

@@ -14,6 +14,8 @@ def Parallel(
     *extents: int | tir.PrimExpr,
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
+    prefer_async: bool | None = None,
+    annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Tools to construct nested parallel for loop.
        This can be used to create element-wise tensor expression.
@@ -32,6 +34,17 @@ def Parallel(
         ``"parallel_loop_layout"`` annotation on the outermost parallel loop.
         For a k-dimensional ``T.Parallel(...)`` nest, the fragment's
         ``InputDim`` must equal ``k``.
+
+    prefer_async : Optional[bool]
+        Optional hint for PTX async-copy rewrite in this parallel loop subtree.
+        When set to ``True``, it requests cp.async injection even outside
+        pipelined loops. ``False``/``None`` keeps default behavior.
+        Internally lowered as loop annotation ``"parallel_prefer_async"``.
+
+    annotations : Optional[Dict[str, Any]]
+        Optional user-provided loop annotations attached to the outermost
+        generated parallel loop. For example:
+        ``{"parallel_async_without_async_commit_wait": True}``.
 
     Notes on layout constraints
     ---------------------------
@@ -62,14 +75,16 @@ def Parallel(
     res : frame.ForFrame
         The ForFrame.
     """
-    annotations: dict[str, Any] = {}
+    merged_annotations: dict[str, Any] = dict(annotations) if annotations is not None else {}
     if coalesced_width is not None:
-        annotations["coalesced_width"] = coalesced_width
+        merged_annotations["coalesced_width"] = coalesced_width
     if loop_layout is not None:
         # Pass through to C++ as the standard parallel loop layout key.
         # The builder will attach it only on the outermost parallel loop.
-        annotations["parallel_loop_layout"] = loop_layout
-    return _ffi_api.Parallel(extents, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
+        merged_annotations["parallel_loop_layout"] = loop_layout
+    if prefer_async is not None:
+        merged_annotations["parallel_prefer_async"] = prefer_async
+    return _ffi_api.Parallel(extents, merged_annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def Persistent(

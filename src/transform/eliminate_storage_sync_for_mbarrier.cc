@@ -54,6 +54,7 @@ public:
           return Stmt();
         }
       } else if (call->op.same_as(builtin::ptx_arrive_barrier()) ||
+                 call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
                  call->op.same_as(builtin::ptx_wait_barrier())) {
         in_mbarrier_region_ = true;
       }
@@ -81,7 +82,7 @@ public:
   Stmt VisitStmt_(const ForNode *op) final {
     PostOrderVisit(tvm::ffi::GetRef<For>(op), [&](const ObjectRef &node) {
       if (const auto *call = node.as<CallNode>()) {
-        if (call->op.same_as(create_list_of_mbarrier()) ||
+        if (call->op.same_as(builtin::ptx_init_barrier_thread_count()) ||
             call->op.same_as(mbarrier_wait_parity()) ||
             call->op.same_as(builtin::ptx_arrive_barrier()) ||
             call->op.same_as(builtin::ptx_cp_async_barrier())) {

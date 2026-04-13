@@ -18,15 +18,16 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
 #include "../op/utils.h"
 #include "../target/utils.h"
-
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
+#include "common/pipeline_utils.h"
 #include "common/union_find.h"
 #include "layout_reducer.h"
 #include "parallel_loop_layout_validator.h"
@@ -36,6 +37,18 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+int64_t GetElementStorageBits(DataType dtype) {
+  // Layout aliasing must be reasoned about in logical storage bits per element,
+  // not in bytes.  For sub-byte dtypes such as fp4, `dtype.bytes()` rounds up
+  // to 1 and loses the "two fp4 values share one byte" relationship that
+  // subtype-changing views rely on.
+  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+}
+
+} // namespace
 
 /*!
  * \brief collect the mapping from the buffer var to it allocated buffer
@@ -115,7 +128,8 @@ public:
                                                      cur_analyzer,
                                                      buffer_oob,
                                                      {},
-                                                     let_var_to_expr_},
+                                                     let_var_to_expr_,
+                                                     false},
                                      level);
 
     // Process the returned updates
@@ -147,9 +161,15 @@ public:
           Layout target_layout =
               shapes_equal
                   ? src_layout
-                  : src_layout->Reshape(sib->shape, &analyzer_,
-                                        Integer(src_buffer->dtype.bytes()),
-                                        Integer(sib->dtype.bytes()));
+                  // Alias buffers may reinterpret the same storage with a
+                  // different element width.  Reshape the inferred layout using
+                  // the old/new storage bit ratio so that layout inference
+                  // keeps the physical storage footprint unchanged while
+                  // allowing the logical element count to change.
+                  : src_layout->Reshape(
+                        sib->shape, &analyzer_,
+                        Integer(GetElementStorageBits(src_buffer->dtype)),
+                        Integer(GetElementStorageBits(sib->dtype)));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -212,25 +232,12 @@ public:
           // Try to merge swizzle layouts if both are swizzle layouts
           const Layout &existing = layout_map[buffer];
           if (!layout.as<Fragment>() && !existing.as<Fragment>()) {
-            auto input_shape = layout->InputShape();
-            if (input_shape.size() >= 2) {
-              size_t ndim = input_shape.size();
-              auto stride_expr = input_shape[ndim - 2].as<IntImmNode>();
-              auto continuous_expr = input_shape[ndim - 1].as<IntImmNode>();
-              if (stride_expr && continuous_expr) {
-                int stride = stride_expr->value;
-                int continuous = continuous_expr->value;
-                int element_size = buffer->dtype.bits();
-
-                if (auto merged = MergeSwizzleLayouts(
-                        existing, layout, stride, continuous, element_size)) {
-                  LOG(WARNING) << "Swizzle layout conflict for buffer "
-                               << buffer << ", merging to smaller granularity";
-                  layout_map.Set(buffer, merged.value());
-                  propagate_alias(buffer, merged.value());
-                  continue;
-                }
-              }
+            if (auto merged = MergeSwizzleLayouts(existing, layout, buffer)) {
+              LOG(WARNING) << "Swizzle layout conflict for buffer " << buffer
+                           << ", merging to smaller granularity";
+              layout_map.Set(buffer, merged.value());
+              propagate_alias(buffer, merged.value());
+              continue;
             }
           }
           // If not swizzle layouts or merge failed, raise error
@@ -305,7 +312,6 @@ public:
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
-
     DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
     for (int i = 0; i < infer_list_stmt_.size(); ++i) {
       DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
@@ -391,13 +397,13 @@ public:
               }
             }
           }
-
-          Layout reshaped = shapes_equal
-                                ? rep_layout.value()
-                                : rep_layout.value()->Reshape(
-                                      buf->shape, &analyzer_,
-                                      Integer(rep.value()->dtype.bytes()),
-                                      Integer(buf->dtype.bytes()));
+          Layout reshaped =
+              shapes_equal
+                  ? rep_layout.value()
+                  : rep_layout.value()->Reshape(
+                        buf->shape, &analyzer_,
+                        Integer(GetElementStorageBits(rep.value()->dtype)),
+                        Integer(GetElementStorageBits(buf->dtype)));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -528,17 +534,7 @@ private:
       }
       // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
-      if (analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto min_value = const_int_bound->min_value;
-        auto max_value = const_int_bound->max_value;
-        auto extent = max_value - min_value + 1;
-        auto dtype = thread_var_->var.dtype();
-        thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, min_value), IntImm(dtype, extent)));
-      } else {
-        thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
-      }
+      thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
 
       // Compute buffer oob for each buffer in the op
@@ -709,17 +705,7 @@ private:
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
       thread_var_vec_.push_back(thread_var_);
-      if (thread_var_.defined() &&
-          analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto dtype = thread_var_->var.dtype();
-        auto extent =
-            const_int_bound->max_value - const_int_bound->min_value + 1;
-        thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent)));
-      } else {
-        thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
-      }
+      thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
       buffer_oob_vec_.push_back(false);
     } else {
@@ -773,10 +759,11 @@ private:
             annotated_layout_map_.Set(buffer, layout);
           } else {
             // Use the first buffer sharing this var as the base for dtype ratio
-            int base_bytes = buffers[0]->dtype.bytes();
+            int64_t base_bits = GetElementStorageBits(buffers[0]->dtype);
+
             auto reshaped_layout =
-                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bytes),
-                                Integer(buffer->dtype.bytes()));
+                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bits),
+                                Integer(GetElementStorageBits(buffer->dtype)));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }
         }
@@ -817,6 +804,10 @@ private:
         }
       }
     });
+  }
+
+  Range CurrentThreadBounds() const {
+    return ComputeThreadBounds(thread_var_, analyzer_);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -949,17 +940,11 @@ private:
         // This is a floating access - record buffer with current thread_bounds
         if (floating_buffers_.find(buffer) != floating_buffers_.end())
           return; // Already recorded
-        Range thread_bounds = Range::FromMinExtent(0, 1);
-        if (thread_var_.defined() &&
-            analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-          auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-          auto dtype = thread_var_->var.dtype();
-          auto extent =
-              const_int_bound->max_value - const_int_bound->min_value + 1;
-          thread_bounds = Range::FromMinExtent(
-              IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent));
-        }
-        floating_buffers_[buffer] = thread_bounds;
+        floating_buffers_[buffer] = CurrentThreadBounds();
+      }
+
+      Range CurrentThreadBounds() const {
+        return ComputeThreadBounds(thread_var_, analyzer_);
       }
 
       const std::unordered_set<const Object *> &nodes_in_tileops_;

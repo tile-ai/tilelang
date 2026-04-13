@@ -27,14 +27,6 @@
 #endif
 
 #if (TILELANG_FP8_E4M3_VARIANT == TILELANG_FP8_E4M3_VARIANT_FN)
-#if defined(__clang__) && defined(__HIPCC__)
-#if !__is_identifier(__hip_fp8_e4m3)
-#define TILELANG_HAVE_FP8_E4M3_FN 1
-#endif
-#endif
-#endif
-
-#if defined(TILELANG_HAVE_FP8_E4M3_FN)
 using hip_fp8_e4_t = __hip_fp8_e4m3;
 using hip_fp8x2_e4_t = __hip_fp8x2_e4m3;
 using hip_fp8x4_e4_t = __hip_fp8x4_e4m3;
@@ -46,14 +38,6 @@ using hip_fp8x4_e4_t = __hip_fp8x4_e4m3_fnuz;
 #endif
 
 #if (TILELANG_FP8_E5M2_VARIANT == TILELANG_FP8_E5M2_VARIANT_FN)
-#if defined(__clang__) && defined(__HIPCC__)
-#if !__is_identifier(__hip_fp8_e5m2)
-#define TILELANG_HAVE_FP8_E5M2_FN 1
-#endif
-#endif
-#endif
-
-#if defined(TILELANG_HAVE_FP8_E5M2_FN)
 using hip_fp8_e5_t = __hip_fp8_e5m2;
 using hip_fp8x2_e5_t = __hip_fp8x2_e5m2;
 using hip_fp8x4_e5_t = __hip_fp8x4_e5m2;

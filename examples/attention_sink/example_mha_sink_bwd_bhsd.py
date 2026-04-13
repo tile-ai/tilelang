@@ -13,7 +13,7 @@ def get_bwd_configs():
     sm_version = sm_major * 10 + sm_minor
     if sm_version == 80:
         return 64, 32, 1, 128
-    elif sm_version == 90:
+    elif sm_version >= 90:
         return 128, 32, 2, 256
     else:
         raise ValueError(f"Unsupported SM version: {sm_version}")

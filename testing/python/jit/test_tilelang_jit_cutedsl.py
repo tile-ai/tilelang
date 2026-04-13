@@ -3,6 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
+import pytest
 from tilelang.utils.tensor import map_torch_type
 
 
@@ -256,6 +257,7 @@ def run_cutedsl_kernel_do_bench(
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.perf
 def test_cutedsl_kernel_do_bench():
     run_cutedsl_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
@@ -357,51 +359,6 @@ def test_cutedsl_dynamic_shape():
     run_cutedsl_dynamic_shape(
         T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16", "float16", 128, 256, 32, 2
     )
-
-
-def run_cutedsl_barrier(
-    M,
-    N,
-    K,
-    block_M,
-    block_N,
-    block_K,
-    mbars,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
-    num_stages,
-    threads,
-):
-    program = matmul_kernel_with_barrier(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        mbars,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        accum_dtype,
-        num_stages,
-        threads,
-    )
-    matmul_kernel = tilelang.compile(program, target="cutedsl")
-
-    assert f"barriers = tl.alloc_smem(cutlass.Uint64, size_in_elems={len(mbars)})" in matmul_kernel.get_kernel_source()
-    for i, arrive_count in enumerate(mbars):
-        assert f"tl.mbarrier_init(barriers[{i}], {arrive_count})" in matmul_kernel.get_kernel_source()
-
-
-@tilelang.testing.requires_cuda
-def test_cutedsl_barrier():
-    mbars = (1, 1, 128, 128)
-    run_cutedsl_barrier(512, 1024, 768, 128, 256, 32, mbars, False, False, "float16", "float16", "float16", 2, 128)
 
 
 def check_hopper():

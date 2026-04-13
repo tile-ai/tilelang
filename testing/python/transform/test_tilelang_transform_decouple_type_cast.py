@@ -211,5 +211,173 @@ def test_codegen_no_cast_buffer_same_dtype():
     assert "local_cast" not in source, "Should not have cast buffer when dtypes match"
 
 
+# =============================================================================
+# End-to-end correctness + vectorization tests for DecoupleTypeCast
+# =============================================================================
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10)
+def test_e2e_bf16_global_to_frag():
+    """bf16 global -> float32 frag -> bf16 global: roundtrip should be lossless.
+
+    With 1024 bf16 elements and 64 threads, each thread handles 16 bf16 = 256 bits,
+    so the kernel should use 256-bit load/store (load_global_256 / store_global_256).
+    """
+    import torch
+
+    @tilelang.jit(out_idx=[1])
+    def kernel_fn():
+        @T.prim_func
+        def main(
+            A: T.Tensor((1024,), dtype=T.bfloat16),
+            B: T.Tensor((1024,), dtype=T.bfloat16),
+        ):
+            with T.Kernel(1, threads=64):
+                a_frag = T.alloc_fragment((1024,), dtype=T.float32)
+                T.copy(A, a_frag)
+                T.copy(a_frag, B)
+
+        return main
+
+    kernel = kernel_fn()
+
+    # Check vectorization: 256-bit load/store
+    source = kernel.get_kernel_source()
+    assert "load_global_256" in source, "Expected 256-bit global load"
+    assert "store_global_256" in source, "Expected 256-bit global store"
+
+    # Correctness
+    a = torch.randn(1024, device="cuda", dtype=torch.bfloat16)
+    b = kernel(a)
+    torch.testing.assert_close(b, a, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8)
+def test_e2e_bf16_global_shared_frag():
+    """bf16 global -> shared -> float32 frag -> bf16 global: roundtrip should be lossless.
+
+    Shared memory path uses TMA for global->shared, then 128-bit for shared->local.
+    """
+    import torch
+
+    @tilelang.jit(out_idx=[1])
+    def kernel_fn():
+        @T.prim_func
+        def main(
+            A: T.Tensor((1024,), dtype=T.bfloat16),
+            B: T.Tensor((1024,), dtype=T.bfloat16),
+        ):
+            with T.Kernel(1, threads=64):
+                a_shared = T.alloc_shared((1024,), dtype=T.bfloat16)
+                a_frag = T.alloc_fragment((1024,), dtype=T.float32)
+                T.copy(A, a_shared)
+                T.copy(a_shared, a_frag)
+                T.copy(a_frag, B)
+
+        return main
+
+    kernel = kernel_fn()
+
+    # Check: shared path should NOT use 256-bit (shared doesn't support it)
+    source = kernel.get_kernel_source()
+    assert "uint4" in source, f"Expected uint4 store in {source}"
+
+    # Correctness
+    a = torch.randn(1024, device="cuda", dtype=torch.bfloat16)
+    b = kernel(a)
+    torch.testing.assert_close(b, a, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9)
+def test_e2e_fp8_global_to_frag():
+    """fp8 global -> float32 frag -> fp8 global: roundtrip should be lossless.
+
+    Verifies that cast constraints do not pollute the memory access layout.
+    With 1024 fp8 elements and 64 threads, each thread handles 16 fp8 = 128 bits,
+    so the kernel should use fp8_e4_16_t (128-bit) loads/stores.
+    """
+    import torch
+
+    @tilelang.jit(out_idx=[1])
+    def kernel_fn():
+        @T.prim_func
+        def main(
+            A: T.Tensor((1024,), dtype=T.float8_e4m3fn),
+            B: T.Tensor((1024,), dtype=T.float8_e4m3fn),
+        ):
+            with T.Kernel(1, threads=64):
+                a_frag = T.alloc_fragment((1024,), dtype=T.float32)
+                T.copy(A, a_frag)
+                T.copy(a_frag, B)
+
+        return main
+
+    kernel = kernel_fn()
+    source = kernel.get_kernel_source()
+    assert "fp8_e4_16_t" in source, (
+        "Expected fp8_e4_16_t (128-bit) loads/stores for N=1024. Cast constraints may be polluting layout decisions."
+    )
+
+    a = (torch.randn(1024, device="cuda", dtype=torch.float32) * 0.5).to(torch.float8_e4m3fn)
+    b = kernel(a)
+    torch.testing.assert_close(
+        b.to(torch.float32),
+        a.to(torch.float32),
+        rtol=0,
+        atol=0,
+    )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9)
+def test_e2e_fp8_manual_decouple():
+    """fp8 with manually decoupled copy stages: same result as auto-decoupled.
+
+    Tests: fp8 global -> fp8 frag -> float32 frag -> fp8 frag -> fp8 global
+    """
+    import torch
+
+    @tilelang.jit(out_idx=[1])
+    def kernel_fn():
+        @T.prim_func
+        def main(
+            A: T.Tensor((1024,), dtype=T.float8_e4m3fn),
+            B: T.Tensor((1024,), dtype=T.float8_e4m3fn),
+        ):
+            with T.Kernel(1, threads=64):
+                a_frag = T.alloc_fragment((1024,), dtype=T.float8_e4m3fn)
+                b_frag = T.alloc_fragment((1024,), dtype=T.float32)
+                c_frag = T.alloc_fragment((1024,), dtype=T.float8_e4m3fn)
+                T.copy(A, a_frag)
+                T.copy(a_frag, b_frag)
+                T.copy(b_frag, c_frag)
+                T.copy(c_frag, B)
+
+        return main
+
+    kernel = kernel_fn()
+
+    # Check vectorization
+    source = kernel.get_kernel_source()
+    assert "fp8_e4_16_t" in source, "Expected fp8_e4_16_t in kernel source"
+
+    # Correctness
+    a = (torch.randn(1024, device="cuda", dtype=torch.float32) * 0.5).to(torch.float8_e4m3fn)
+    b = kernel(a)
+    torch.testing.assert_close(
+        b.to(torch.float32),
+        a.to(torch.float32),
+        rtol=0,
+        atol=0,
+    )
+
+
 if __name__ == "__main__":
     test_no_transform_if_then_else_condition()
+    test_e2e_bf16_global_to_frag()
+    test_e2e_bf16_global_shared_frag()
+    test_e2e_fp8_global_to_frag()
+    test_e2e_fp8_manual_decouple()

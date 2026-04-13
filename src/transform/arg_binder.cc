@@ -313,6 +313,7 @@ inline PrimExpr TVMArrayGet(DataType t, Var arr,
 
 void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
                                    const PrimExpr &logical_stride_val,
+                                   const PrimExpr &dim_shape,
                                    const PrimExpr &is_null,
                                    const std::string &stride_element_name) {
   if (const VarNode *v = stride.as<VarNode>()) {
@@ -323,7 +324,10 @@ void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
         LOG(WARNING) << "TileLang: Detected zero-dimension in "
                      << stride_element_name << ". Relaxing stride check.";
       }
-      PrimExpr cond = (expected == logical_stride_val) || (expected == 0);
+      // Tolerate any stride value when dim size is 1 (torch 2.1 DLPack bug:
+      // forces stride=1 for size-1 dims regardless of logical stride).
+      PrimExpr cond = (expected == logical_stride_val) || (expected == 0) ||
+                      (dim_shape == 1);
       BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_,
                       is_null);
     } else {
@@ -336,7 +340,10 @@ void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
       LOG(WARNING) << "TileLang: Detected zero-dimension in "
                    << stride_element_name << ". Relaxing stride check.";
     }
-    PrimExpr cond = (expected == logical_stride_val) || (expected == 0);
+    // Tolerate any stride value when dim size is 1 (torch 2.1 DLPack bug:
+    // forces stride=1 for size-1 dims regardless of logical stride).
+    PrimExpr cond =
+        (expected == logical_stride_val) || (expected == 0) || (dim_shape == 1);
     BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_, is_null);
   }
 }
@@ -345,7 +352,8 @@ void ArgBinder::BindDLTensors(
     const std::vector<std::pair<Var, Buffer>> &buffer_def,
     const PrimExpr &device_type, const PrimExpr &device_id,
     const std::string &func_name,
-    const std::unordered_set<const VarNode *> &used_param_buffers) {
+    const std::unordered_set<const VarNode *> &used_param_buffers,
+    const std::unordered_set<const VarNode *> &used_shape_vars) {
   ffi::Array<Buffer> buffers;
   ffi::Array<Var> handles;
 
@@ -699,32 +707,38 @@ void ArgBinder::BindDLTensors(
             if (sources_it != shape_var_sources.end() &&
                 sources_it->second.size() > 1) {
               // This variable appears in multiple buffers
-              // Assert that at least one buffer is non-null
-              PrimExpr any_nonnull = const_false();
-              for (const auto &src : sources_it->second) {
-                bool buf_is_used = used_param_buffers.count(src.handle_ptr);
-                if (buf_is_used) {
-                  any_nonnull = const_true();
-                  break;
+              // If this shape var is actually used by the PrimFunc body, we
+              // must be able to bind it at runtime, so require at least one
+              // non-null carrier buffer. Otherwise (e.g. the var only exists
+              // in shapes of unused nullable buffers), allow all carriers to be
+              // NULL and bind the var to 0.
+              if (used_shape_vars.count(v)) {
+                PrimExpr any_nonnull = const_false();
+                for (const auto &src : sources_it->second) {
+                  bool buf_is_used = used_param_buffers.count(src.handle_ptr);
+                  if (buf_is_used) {
+                    any_nonnull = const_true();
+                    break;
+                  }
+                  Var src_is_null = is_null_map[src.buf_name];
+                  any_nonnull = Or(any_nonnull, Not(src_is_null));
                 }
-                Var src_is_null = is_null_map[src.buf_name];
-                any_nonnull = Or(any_nonnull, Not(src_is_null));
-              }
 
-              std::ostringstream err_msg;
-              err_msg << "Symbolic shape variable "
-                      << ffi::GetRef<Var>(v)->name_hint
-                      << " requires at least one non-null buffer among: ";
-              bool first = true;
-              for (const auto &src : sources_it->second) {
-                if (!first)
-                  err_msg << ", ";
-                err_msg << src.buf_name;
-                first = false;
-              }
+                std::ostringstream err_msg;
+                err_msg << "Symbolic shape variable "
+                        << ffi::GetRef<Var>(v)->name_hint
+                        << " requires at least one non-null buffer among: ";
+                bool first = true;
+                for (const auto &src : sources_it->second) {
+                  if (!first)
+                    err_msg << ", ";
+                  err_msg << src.buf_name;
+                  first = false;
+                }
 
-              init_nest_.emplace_back(AssertStmt(
-                  any_nonnull, tvm::tir::StringImm(err_msg.str()), nop));
+                init_nest_.emplace_back(AssertStmt(
+                    any_nonnull, tvm::tir::StringImm(err_msg.str()), nop));
+              }
 
               // Build cascaded if_then_else: if !is_null_a then a.shape[k] else
               // if !is_null_b then b.shape[k] ... We need to construct this in
@@ -859,8 +873,9 @@ void ArgBinder::BindDLTensors(
 
           // Relax stride check: if the expected stride is 0, allow any actual
           // stride. This happens when one of the subsequent dimensions is 0.
-          RelaxedStrideCheck(k, buffer->strides[k], logical_stride_val, is_null,
-                             stride_element_name(k));
+          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
+          RelaxedStrideCheck(k, buffer->strides[k], logical_stride_val,
+                             buffer->shape[k], is_null, stride_element_name(k));
         }
       }
     } else {
@@ -945,8 +960,9 @@ void ArgBinder::BindDLTensors(
 
           // Relax stride check: if the expected stride is 0, allow any actual
           // stride. This happens when one of the subsequent dimensions is 0.
-          RelaxedStrideCheck(k, buffer->strides[k], stride_val, is_null,
-                             stride_element_name(k));
+          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
+          RelaxedStrideCheck(k, buffer->strides[k], stride_val,
+                             buffer->shape[k], is_null, stride_element_name(k));
         }
       } else {
         PrimExpr stride_from_shape = 1;
@@ -966,8 +982,9 @@ void ArgBinder::BindDLTensors(
 
           // Relax stride check: if the expected stride is 0, allow any actual
           // stride. This happens when one of the subsequent dimensions is 0.
-          RelaxedStrideCheck(k, buffer->strides[k], stride_val, is_null,
-                             stride_element_name(k));
+          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
+          RelaxedStrideCheck(k, buffer->strides[k], stride_val,
+                             buffer->shape[k], is_null, stride_element_name(k));
         }
       }
     }

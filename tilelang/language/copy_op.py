@@ -11,6 +11,43 @@ from tilelang.language.utils import get_extent
 from tvm import ir, tir
 
 
+def _normalize_copy_regions(
+    src: BufferLikeType, dst: BufferLikeType
+) -> tuple[
+    tir.BufferRegion | tir.BufferLoad | tir.Buffer,
+    tir.BufferRegion | tir.BufferLoad | tir.Buffer,
+]:
+    # If both side are buffers, we should make sure their shapes are equal
+    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
+        ir.assert_structural_equal(src.shape, dst.shape)
+
+    src_extent = get_extent(src)
+    dst_extent = get_extent(dst)
+
+    src_is_scalar_load = src_extent is None and isinstance(src, tir.BufferLoad)
+    dst_is_scalar_load = dst_extent is None and isinstance(dst, tir.BufferLoad)
+
+    # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
+    # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
+    if src_is_scalar_load and dst_is_scalar_load:
+        return src, dst
+
+    assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
+    # Treat missing extent as length-matched ones for convenience. This provides limited
+    # broadcasting-like syntactic sugar, but does not implement general broadcasting support.
+    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
+    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
+
+    # Align and broadcast extents from the right (tail) side.
+    # This is majorly for supporting some syntactic sugar, not the whole broadcasting ability of copy op.
+    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
+
+    # Use legalized extents for src and dst respectively.
+    src = to_buffer_region(src, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
+    return src, dst
+
+
 def copy(
     src: BufferLikeType,
     dst: BufferLikeType,
@@ -46,41 +83,23 @@ def copy(
     - Accepts `Buffer`/`BufferRegion`/`BufferLoad` on either side. Extents are
       derived as follows: `Buffer -> shape`, `BufferRegion -> [r.extent]`,
       `BufferLoad -> extents from its inferred/encoded region`.
-    - If both `src` and `dst` are scalar `BufferLoad` without region extents,
-      lowers to a direct store: `dst[...] = src`.
-    - If one side is missing extents, it is treated as all-ones with the other
-      side's rank to enable broadcasting.
-    - Extents are right-aligned and legalized via `legalize_pairwise_extents`:
-      per tail-dimension, equal keeps as-is, a `1` broadcasts to the other,
-      otherwise a conservative `tir.max` is used to remain safe for dynamic
-      shapes.
+    - Normally, we require the extents of both sides to be the same. If they
+      differ, the copy instruction follows an internal rule to select one side
+      as the base range and create iteration space. This may generate unexpected
+      code. And if some dimensions are 1, unexpected errors may happen.
+    - Small Optimization: If both `src` and `dst` are scalar `BufferLoad` without
+      region extents, lowers to a direct store: `dst[...] = src[...]`.
+    - Syntactic Sugar: TileLang supports passing the head address of a buffer to represent
+      the whole buffer if there are no ambiguity. For example, T.copy(A, A_shared[i, j]).
+      To support this, we need some special shape checking. But remember currently we don't
+      support something like "broadcast".
     - The finalized extents are encoded with `tl.region` via `to_buffer_region`
       and passed through to the backend; low-level loop construction and any
       scope-specific decisions happen during lowering.
     """
-    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
-        ir.assert_structural_equal(src.shape, dst.shape)
-
-    src_extent = get_extent(src)
-    dst_extent = get_extent(dst)
-    # Combine the nested if statements into a single if statement as suggested by SIM102
-    if src_extent is None and dst_extent is None and isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
-        # check if the case is like this:
-        # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
-        # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
+    src, dst = _normalize_copy_regions(src, dst)
+    if isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
         return tir.BufferStore(dst.buffer, src, dst.indices)
-
-    assert src_extent or dst_extent, "Can't deduce copy extents from args"
-    # Treat missing extent as length-matched ones to enable broadcasting.
-    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
-    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-
-    # Align and broadcast extents from the right (tail) side.
-    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
-
-    # Use legalized extents for src and dst respectively.
-    src = to_buffer_region(src, access_type="r", extents=src_extent)
-    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
 
     # Build annotations dict
     ann = annotations.copy() if annotations else {}
@@ -99,6 +118,150 @@ def copy(
         ann["parallel_loop_layout"] = loop_layout
 
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
+
+
+def async_copy(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+    *,
+    coalesced_width: int | None = None,
+    annotations: dict | None = None,
+    loop_layout: Any | None = None,
+) -> tir.PrimExpr | tir.Stmt:
+    """Asynchronous copy primitive lowered through cp.async.
+
+    This operator is intended for explicitly asynchronous global->shared copy.
+    The backend enforces cp.async constraints and emits:
+      `ptx_cp_async(...)` + `ptx_commit_group()`.
+    No wait is auto-inserted for `T.async_copy`; synchronization is explicit.
+
+    Args:
+        src (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Source memory region
+        dst (Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion]): Destination memory region
+        coalesced_width (Optional[int], keyword-only): Width for coalesced memory access. Defaults to None.
+        annotations (Optional[dict], keyword-only): Additional annotations dict.
+        loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy loop.
+
+    Returns:
+        tir.Call: A handle to the async copy operation
+    """
+    src, dst = _normalize_copy_regions(src, dst)
+    if isinstance(src, tir.BufferLoad) and isinstance(dst, tir.BufferLoad):
+        return tir.BufferStore(dst.buffer, src, dst.indices)
+
+    ann = annotations.copy() if annotations else {}
+    if "coalesced_width" not in ann and coalesced_width is not None:
+        ann["coalesced_width"] = coalesced_width
+    if loop_layout is not None and "parallel_loop_layout" not in ann:
+        ann["parallel_loop_layout"] = loop_layout
+
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.async_copy"),
+        src,
+        dst,
+        annotations=ann if ann else None,
+    )
+
+
+def tma_copy(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+    *,
+    barrier=None,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    annotations: dict | None = None,
+) -> tir.PrimExpr | tir.Stmt:
+    """TMA copy with user-managed synchronization.
+
+    For **loads** (global -> shared): issues expect_tx + tma_load (no wait).
+    Unlike T.copy() which emits a full synchronous TMA sequence (arrive + load + wait),
+    T.tma_copy() emits only the producer part (expect_tx + tma_load).
+    The user manages synchronization explicitly via T.barrier_arrive() and
+    T.mbarrier_wait_parity(). ``barrier`` is required for loads.
+
+    For **stores** (shared -> global): issues tma_store + tma_store_arrive (no wait).
+    Unlike T.copy() which emits tma_store + tma_store_arrive + tma_store_wait,
+    T.tma_copy() omits the wait so the user can batch multiple stores before
+    calling T.tma_store_wait() explicitly. ``barrier`` is not needed for stores.
+
+    Args:
+        src: Source memory region (global or shared)
+        dst: Destination memory region (shared or global)
+        barrier: Mbarrier (from T.alloc_barrier()) for TMA load synchronization.
+            Required for loads (global -> shared). Not needed for stores.
+            The TMA load will arrive at this barrier with expected byte count.
+            The user must wait on the same barrier via T.mbarrier_wait_parity().
+        eviction_policy: Cache eviction policy. Defaults to None.
+        annotations: Additional annotations dict. Values in annotations take
+            precedence over individual arguments.
+
+    Returns:
+        tir.Call: A handle to the tma_copy operation
+    """
+    # If both side are buffers, we should make sure their shapes are equal
+    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
+        ir.assert_structural_equal(src.shape, dst.shape)
+
+    src_extent = get_extent(src)
+    dst_extent = get_extent(dst)
+
+    assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
+    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
+    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
+
+    src_extent, dst_extent = legalize_pairwise_extents(src_extent, dst_extent)
+
+    src = to_buffer_region(src, access_type="r", extents=src_extent)
+    dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
+
+    ann = annotations.copy() if annotations else {}
+
+    if barrier is not None:
+        from .builtin import _mbar_to_buffer_load
+
+        ann["barrier"] = _mbar_to_buffer_load(barrier)
+
+    if "eviction_policy" not in ann and eviction_policy is not None:
+        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
+
+
+def transpose(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+) -> tir.PrimExpr:
+    """Transpose a 2D buffer in shared memory: dst[j, i] = src[i, j].
+
+    Both src and dst should be shared memory buffers.
+    If src has shape (M, N), dst should have shape (N, M).
+
+    Args:
+        src: Source buffer or region of shape (..., M, N).
+        dst: Destination buffer or region of shape (..., N, M).
+
+    Returns:
+        tir.Call: A handle to the transpose operation.
+    """
+    src_extent = get_extent(src)
+    dst_extent = get_extent(dst)
+
+    assert src_extent is not None, "Cannot deduce extent for transpose src."
+    assert dst_extent is not None, "Cannot deduce extent for transpose dst."
+    assert len(src_extent) >= 2, "Transpose requires at least 2D buffers."
+    assert len(dst_extent) >= 2, "Transpose requires at least 2D buffers."
+
+    src = to_buffer_region(src, access_type="r")
+    dst = to_buffer_region(dst, access_type="w")
+
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.transpose"),
+        src,
+        dst,
+    )
 
 
 def c2d_im2col(

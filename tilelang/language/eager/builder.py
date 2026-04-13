@@ -181,6 +181,8 @@ class Builder(BaseBuilder):
         self.constexpr_var = set()
         self.eager_jit: EagerJITStage = "none"
         self.eager_jit_subs: dict[str, PrimExpr] = {}
+        self.func_pass_configs: dict[str, Any] | None = None
+        self.func_compile_flags: list[str] | str | None = None
         self.current_file = "<unknown>"
         self.current_line = 0
         self.current_macro_name = "<unknown-macro>"
@@ -432,6 +434,11 @@ class Builder(BaseBuilder):
         #   c = tl.alloc_var('float32')  # bind var `c`
         #   c = a                        # get and assign `c[0] = a_1[0]`
         #   ```
+        # Convert deferred comparison ops to PrimExpr so that Ref/alloc_var
+        # store paths below can recognise them as assignable values.
+        if isinstance(value, (EqualOp, NotEqualOp)):
+            value = value.asobject()
+
         if isinstance(orig_value, Ref) and isinstance(value, (int, float, PrimExpr)):
             orig_value.store(value)
             return orig_value
@@ -749,7 +756,6 @@ if TYPE_CHECKING:
         span: Span | None
         ir_gen: IRGenerator[_P, _T] | None
         orig_func: Callable[_P, _T] | None
-        out_idx_override: list[int] | None
 
 else:
     PrimFunc = tvm.tir.PrimFunc
@@ -930,6 +936,66 @@ def const(name: str, dtype: str = "int32") -> Var | tuple[Var, ...]:
             return builder.eager_jit_subs[name]
 
 
+def annotate_compile_flags(flags: list[str] | str) -> None:
+    """
+    Annotate additional device compile flags inside a function body.
+
+    The flags will be merged with any externally provided compile_flags
+    at compilation time. Can be placed before or after tensor type annotations.
+
+    Example::
+
+        @tilelang.jit
+        def kernel(A, B):
+            T.annotate_compile_flags(["--use_fast_math"])
+            ...
+    """
+    builder = Builder.current()
+    if builder is None:
+        raise JITNoBuilderError("T.annotate_compile_flags() can only be used inside @tilelang.jit or @T.prim_func")
+    if builder.eager_jit == "phase1":
+        return
+    builder.func_compile_flags = flags
+
+
+def annotate_pass_configs(configs: dict[str, Any]) -> None:
+    """
+    Annotate pass configuration inside a function body.
+
+    The configs will be merged with any externally provided pass_configs
+    at compilation time (function-level configs take lower priority, i.e.
+    external configs override). Can be placed before or after tensor type annotations.
+
+    Example::
+
+        @tilelang.jit
+        def kernel(A, B):
+            T.annotate_pass_configs({
+                PassConfigKey.TL_ENABLE_FAST_MATH: True})
+            ...
+    """
+    builder = Builder.current()
+    if builder is None:
+        raise JITNoBuilderError("T.annotate_pass_configs() can only be used inside @tilelang.jit or @T.prim_func")
+    if builder.eager_jit == "phase1":
+        return
+    builder.func_pass_configs = configs
+
+
+def _patch_prim_func_attrs(pf: PrimFunc, builder: Builder) -> PrimFunc:
+    """Attach function-level out_idx, pass_configs and compile_flags as PrimFunc attrs."""
+    if builder.out_idx:
+        pf = pf.with_attr("tilelang_out_idx", builder.out_idx)
+    if builder.func_pass_configs is not None:
+        pf = pf.with_attr("tilelang_pass_configs", builder.func_pass_configs)
+    if builder.func_compile_flags is not None:
+        flags = builder.func_compile_flags
+        if isinstance(flags, str):
+            flags = [flags]
+        pf = pf.with_attr("tilelang_compile_flags", flags)
+    return pf
+
+
 @dataclass
 class TirTemplate(Generic[_P, _T]):
     """
@@ -1014,8 +1080,7 @@ class TirTemplate(Generic[_P, _T]):
         with builder.prim_func(self.name):
             self.ir_gen.gen(builder)(**tensor_args, **kwargs)
         pf = builder.get()
-        if builder.out_idx:
-            pf.out_idx_override = builder.out_idx
+        pf = _patch_prim_func_attrs(pf, builder)
         return pf
 
 
@@ -1112,8 +1177,6 @@ class JITFunc(Generic[_P, _T]):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
             pf.orig_func = self.orig_func
-            if builder.out_idx:
-                pf.out_idx_override = builder.out_idx
             return TirTemplate.create(self.orig_func.__name__, pf, builder.constexpr_var, self.ir_gen)
         else:
             raise ValueError(f"Invalid jit mode: {self.mode}, expected 'lazy' or 'eager'")
@@ -1213,9 +1276,8 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> Prim
                 with builder.prim_func(func.__name__):
                     ir_gen.gen(builder)(**annot)
                 prim_func = builder.get()
+                prim_func = _patch_prim_func_attrs(prim_func, builder)
                 prim_func.orig_func = func
-                if builder.out_idx:
-                    prim_func.out_idx_override = builder.out_idx
                 return prim_func
             except Exception as e:
                 logger.fatal(f"Failed to build prim_func from {func.__name__}\nargs={annot}\nsource={ir_gen.source}")

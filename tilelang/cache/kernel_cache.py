@@ -22,6 +22,7 @@ from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang import __version__
+import platform
 
 
 class KernelCache:
@@ -56,13 +57,17 @@ class KernelCache:
     @staticmethod
     @functools.cache
     def _get_tilelang_lib_stamp() -> str | None:
-        """Return a cheap build-stamp for the TileLang runtime library.
+        """Return a content-based build-stamp for the TileLang runtime library.
 
         The kernel cache key historically only depended on `tilelang.__version__`
         and the TIR script. During development, C++ pass changes can change the
         generated kernel *without* changing the input TIR, leading to stale cache
-        hits. Including a library stamp (mtime+size) avoids this class of bugs
-        while keeping the cost low (computed once per process).
+        hits. Including a library stamp avoids this class of bugs.
+
+        We use a SHA-256 content hash of the library file instead of mtime so that
+        the cache key is stable across machines and fresh installs — two identical
+        builds of libtilelang.so will produce the same stamp regardless of when or
+        where they were installed.
         """
         import importlib
 
@@ -84,14 +89,17 @@ class KernelCache:
             for name in lib_names:
                 path = os.path.join(lib_dir, name)
                 if os.path.exists(path):
-                    st = os.stat(path)
-                    return f"{name}:{st.st_size}:{st.st_mtime_ns}"
+                    file_hash = sha256()
+                    with open(path, "rb") as f:
+                        for chunk in iter(lambda: f.read(1 << 20), b""):
+                            file_hash.update(chunk)
+                    return f"{name}:{file_hash.hexdigest()}"
         return None
 
     @staticmethod
     @functools.cache
     def _get_base_key() -> dict:
-        base = {"version": __version__}
+        base = {"version": __version__, "platform": platform.machine()}
         lib_stamp = KernelCache._get_tilelang_lib_stamp()
         if lib_stamp:
             base["tilelang_lib"] = lib_stamp

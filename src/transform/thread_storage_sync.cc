@@ -26,6 +26,7 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
+#include <algorithm>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
@@ -52,50 +53,158 @@ using arith::IRMutatorWithAnalyzer;
 using runtime::StorageRank;
 using runtime::StorageScope;
 
-// There are cases where necessary syncthreads is not inserted by
-// ThreadSyncInserter. For example, syncthreads is needed after async_wait_queue
-// in the second loop below, but since ThreadSyncInserter is not aware of the
-// asynchronous semantics, it cannot tell that the syncthreads is needed there.
+// Similar to ThreadSyncAfterWaitQueueInserter, but for explicit cp.async
+// synchronization intrinsics (ptx_wait_group).
 //
-// // Pipeline prologue
-// for i in range(125):
-//    async_commit_queue(0):
-//       async_scope:
-//          shared[(i + 3) % 4] = ...
-// ...
+// In TileLang, cp.async copies may be lowered to explicit ptx_cp_async +
+// ptx_commit_group, and pipelining can move ptx_wait_group away from the copy
+// statement it originally guarded. tvm_storage_sync barriers inserted by
+// ThreadSyncPlanner are based on memory conflicts and may end up *before* the
+// wait_group, which is incorrect for cp.async because __syncthreads() does not
+// wait for outstanding asynchronous copies.
 //
-// // Pipeline Epilogue
-// for i in range(3):
-//    async_wait_queue(0, 2 - i):
-//       local[...] = shared[(i + 125) % 4]
-
-// This class adds syncthreads after all async_wait_queue. That includes
-// syncthreads that can be inserted by ThreadSyncInserter as well, but
-// ThreadSyncInserter will not insert duplicate syncthreads if it finds an
-// existing one at the synchronization point.
-class ThreadSyncAfterWaitQueueInserter : public StmtExprMutator {
+// Correct usage requires:
+//   ptx_wait_group(N);
+//   tvm_storage_sync("shared");   // __syncthreads()
+// before any cross-thread consumption of the shared memory written by cp.async.
+//
+// This rewriter conservatively inserts a shared-memory storage sync
+// immediately after every ptx_wait_group statement unless an identical sync
+// already follows.
+class ThreadSyncAfterWaitGroupInserter : public StmtExprMutator {
 public:
-  explicit ThreadSyncAfterWaitQueueInserter(StorageScope sync_scope)
+  explicit ThreadSyncAfterWaitGroupInserter(StorageScope sync_scope)
       : sync_scope_(std::move(sync_scope)) {}
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tvm::tir::attr::async_wait_queue_scope) {
-      auto sync = Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
-                                {StringImm(sync_scope_.to_string())}));
-      auto inner = op->body.as<AttrStmtNode>();
-      ICHECK(inner &&
-             inner->attr_key == tvm::tir::attr::async_wait_inflight_count);
-      auto zero = make_zero(DataType::Int(32));
-      auto new_body = SeqStmt({sync, inner->body});
-      return AttrStmt(zero, tvm::tir::attr::async_wait_queue_scope, op->value,
-                      AttrStmt(zero, tvm::tir::attr::async_wait_inflight_count,
-                               inner->value, new_body));
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    Array<Stmt> visited;
+    visited.reserve(op->seq.size());
+    for (const Stmt &stmt : op->seq) {
+      visited.push_back(this->VisitStmt(stmt));
     }
-    return StmtExprMutator::VisitStmt_(op);
+
+    Array<Stmt> rewritten;
+    rewritten.reserve(visited.size());
+    for (int i = 0, n = static_cast<int>(visited.size()); i < n; ++i) {
+      const Stmt &stmt = visited[i];
+      rewritten.push_back(stmt);
+      if (IsWaitGroupStmt(stmt)) {
+        bool next_is_sync = false;
+        if (i + 1 < n && IsStorageSyncStmt(visited[i + 1])) {
+          next_is_sync = true;
+        }
+        if (!next_is_sync) {
+          rewritten.push_back(MakeStorageSyncStmt());
+        }
+      }
+    }
+
+    if (rewritten.empty()) {
+      return Evaluate(0);
+    }
+    if (rewritten.size() == 1) {
+      return rewritten[0];
+    }
+    return SeqStmt(rewritten);
   }
 
 private:
   StorageScope sync_scope_;
+
+  Stmt MakeStorageSyncStmt() const {
+    return Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
+                         {StringImm(sync_scope_.to_string())}));
+  }
+
+  bool IsWaitGroupStmt(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return IsWaitGroupStmt(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return IsWaitGroupStmt(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return IsWaitGroupStmt(seq->seq[0]);
+      }
+      return false;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return IsWaitGroupStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return IsWaitGroupStmt(realize->block->body);
+      }
+      return false;
+    }
+    if (const auto *iff = stmt.as<IfThenElseNode>()) {
+      if (!iff->else_case.defined()) {
+        return IsWaitGroupStmt(iff->then_case);
+      }
+      return false;
+    }
+
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    if (!call) {
+      return false;
+    }
+    return call->op.same_as(builtin::ptx_wait_group());
+  }
+
+  bool IsStorageSyncStmt(const Stmt &stmt) const {
+    if (const auto *let = stmt.as<LetStmtNode>()) {
+      return IsStorageSyncStmt(let->body);
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return IsStorageSyncStmt(attr->body);
+    }
+    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        return IsStorageSyncStmt(seq->seq[0]);
+      }
+      return false;
+    }
+    if (const auto *block = stmt.as<BlockNode>()) {
+      return IsStorageSyncStmt(block->body);
+    }
+    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+      if (is_one(realize->predicate)) {
+        return IsStorageSyncStmt(realize->block->body);
+      }
+      return false;
+    }
+    if (const auto *iff = stmt.as<IfThenElseNode>()) {
+      if (!iff->else_case.defined()) {
+        return IsStorageSyncStmt(iff->then_case);
+      }
+      return false;
+    }
+
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (!eval) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    if (!call) {
+      return false;
+    }
+    if (!call->op.same_as(builtin::tvm_storage_sync())) {
+      return false;
+    }
+    if (call->args.size() != 1) {
+      return false;
+    }
+    const auto *scope = call->args[0].as<StringImmNode>();
+    if (!scope) {
+      return false;
+    }
+    return scope->value == sync_scope_.to_string();
+  }
 };
 
 class ThreadSyncInserter : public StmtExprMutator {
@@ -436,42 +545,62 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
+struct ConditionThreadProperty {
+  bool depends_on_runtime{false};
+  bool is_block_uniform{true};
+  bool requires_hoist{false};
+
+  void Merge(const ConditionThreadProperty &other) {
+    depends_on_runtime = depends_on_runtime || other.depends_on_runtime;
+    is_block_uniform = is_block_uniform && other.is_block_uniform;
+    requires_hoist = requires_hoist || other.requires_hoist;
+  }
+};
+
 /*!
- * \brief Check if an if-condition depends on runtime-variable values.
+ * \brief Analyze whether an if-condition is runtime-dependent and/or uniform
+ * across all threads in a block.
  *
- * For sync hoisting decisions, we distinguish two types of non-uniform
- * conditions:
+ * For sync hoisting decisions we care about two independent properties:
  *
- * 1. Conditions that only depend on threadIdx (e.g., `threadIdx.x >= 512`):
- *    - The number of threads entering the if can be determined at compile time
- *    - ThreadPartialSyncRewriter can handle this by computing the thread count
- *    - No need to hoist sync
+ * 1. Does the condition depend on runtime values such as memory loads?
+ * 2. Even if it does, is it still block-uniform, i.e. identical for every
+ *    thread in the block?
  *
- * 2. Conditions that depend on runtime values (e.g., `shared_mem[tx] != -1`):
- *    - Cannot determine at compile time how many threads will enter
- *    - Must hoist sync to before the if to avoid potential deadlock
+ * Example:
+ * - `token_ids[tx] != -1` is runtime-dependent and non-uniform.
+ * - `batch_sizes[bx] > 0` is runtime-dependent but block-uniform.
  *
- * This checker identifies case (2) - conditions that depend on runtime values.
+ * Only runtime-dependent, non-uniform conditions need to force sync hoisting.
+ * In addition, some non-uniform threadIdx-only conditions still need hoisting
+ * when ThreadPartialSyncRewriter cannot handle them.
  */
-class RuntimeDependentConditionChecker : public IRMutatorWithAnalyzer {
+class ConditionThreadPropertyChecker : public IRMutatorWithAnalyzer {
 public:
-  explicit RuntimeDependentConditionChecker(arith::Analyzer *analyzer,
-                                            int warp_size = 32)
-      : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
+  explicit ConditionThreadPropertyChecker(
+      arith::Analyzer *analyzer, const Array<IterVar> &env_threads,
+      const std::unordered_map<const VarNode *, ConditionThreadProperty>
+          &let_var_properties,
+      int warp_size = 32)
+      : IRMutatorWithAnalyzer(analyzer), env_threads_(env_threads),
+        let_var_properties_(let_var_properties), warp_size_(warp_size) {}
 
   /*!
-   * \brief Check if expression depends on runtime-variable values.
-   * \return true if the expression depends on values that cannot be determined
-   *         at compile time (e.g., shared memory loads), false if it only
-   *         depends on compile-time known values (constants, threadIdx,
-   * blockIdx).
+   * \brief Analyze condition properties relevant to thread-sync hoisting.
    */
-  bool DependsOnRuntimeValue(const PrimExpr &expr, const IterVar &iv) {
-    depends_on_runtime_ = false;
+  ConditionThreadProperty AnalyzeExpr(const PrimExpr &expr) {
+    current_ = ConditionThreadProperty();
+    this->VisitExpr(expr);
+    return current_;
+  }
+
+  ConditionThreadProperty AnalyzeCondition(const PrimExpr &expr,
+                                           const IterVar &iv) {
+    current_ = ConditionThreadProperty();
     this->VisitExpr(expr);
     auto extent_opt = as_const_int(iv->dom->extent);
     ICHECK(extent_opt != nullptr)
-        << "DependsOnRuntimeValue: thread extent must be a "
+        << "AnalyzeCondition: thread extent must be a "
            "constant, but got: "
         << iv->dom->extent;
     int64_t thread_extent = *extent_opt;
@@ -480,36 +609,92 @@ public:
       auto count = analyzer_->z3_prover.CountSatisfyingValues(
           iv->var, thread_extent, /*min_consecutive=*/warp_size_);
       if (count < 0) {
-        // failed to count satisfying values, return true
-        depends_on_runtime_ = true;
+        // ThreadPartialSyncRewriter cannot safely lower this condition.
+        current_.requires_hoist = true;
       }
     }
-    return depends_on_runtime_;
+    return current_;
   }
 
 private:
+  StorageScope GetScope(Var buffer_var) const {
+    return StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+  }
+
+  bool IsThreadVar(const VarNode *op) const {
+    for (const auto &iv : env_threads_) {
+      if (iv->var.get() == op &&
+          runtime::ThreadScope::Create(iv->thread_tag).rank == 1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool IsThreadLocalScope(const StorageScope &scope) const {
+    switch (scope.rank) {
+    case StorageRank::kWarp:
+    case StorageRank::kLocal:
+    case StorageRank::kWMMAMatrixA:
+    case StorageRank::kWMMAMatrixB:
+    case StorageRank::kWMMAAccumulator:
+    case StorageRank::kAMXTMM:
+    case StorageRank::kMMAMatrixA:
+    case StorageRank::kMMAMatrixB:
+    case StorageRank::kMMAMatrixC:
+    case StorageRank::kMetalSimdGroup:
+      return true;
+    case StorageRank::kGlobal:
+    case StorageRank::kShared:
+    case StorageRank::kTexture:
+      return false;
+    }
+    return false;
+  }
+
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    if (IsThreadVar(op)) {
+      current_.is_block_uniform = false;
+    }
+    auto it = let_var_properties_.find(op);
+    if (it != let_var_properties_.end()) {
+      current_.Merge(it->second);
+    }
+    return GetRef<Var>(op);
+  }
+
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    // Any buffer load introduces runtime dependency
-    // (we don't know the buffer contents at compile time)
-    depends_on_runtime_ = true;
+    current_.depends_on_runtime = true;
+    // Do not mark local-scope loads as non-block-uniform solely based on
+    // storage scope.  Thread-local buffers (fragments) commonly hold
+    // block-uniform data when populated from block-uniform global addresses
+    // (e.g., T.copy(BlockMask[blockIdx.y, :], fragment)).  If the load
+    // indices actually depend on threadIdx, the recursive visit of indices
+    // below (via IRMutatorWithAnalyzer::VisitExpr_) will correctly set
+    // is_block_uniform = false through VisitExpr_(VarNode*).
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
-    // Check tvm_access_ptr and address_of - if used in condition, it's reading
-    // memory
     if (op->op.same_as(builtin::tvm_access_ptr()) ||
         op->op.same_as(builtin::address_of())) {
-      depends_on_runtime_ = true;
-      return IRMutatorWithAnalyzer::VisitExpr_(op);
+      current_.depends_on_runtime = true;
+      if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() >= 2) {
+        if (const auto *data_var = op->args[1].as<VarNode>()) {
+          if (IsThreadLocalScope(GetScope(GetRef<Var>(data_var)))) {
+            current_.is_block_uniform = false;
+          }
+        }
+      }
     }
-    // Other calls might also introduce runtime dependency
-    // but we'll be conservative and check children
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
 private:
-  bool depends_on_runtime_{false};
+  ConditionThreadProperty current_;
+  const Array<IterVar> &env_threads_;
+  const std::unordered_map<const VarNode *, ConditionThreadProperty>
+      &let_var_properties_;
   int warp_size_;
 };
 
@@ -666,8 +851,21 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     allow_append_ = false;
     // traverse body block
     {
+      auto let_prop = AnalyzeExprProperty(op->value);
+      auto it = let_var_properties_.find(op->var.get());
+      bool had_prev = it != let_var_properties_.end();
+      ConditionThreadProperty prev_prop;
+      if (had_prev) {
+        prev_prop = it->second;
+      }
+      let_var_properties_[op->var.get()] = let_prop;
       auto guard = MakeGuard(op->var, op->value);
       this->VisitStmt(op->body);
+      if (had_prev) {
+        let_var_properties_[op->var.get()] = prev_prop;
+      } else {
+        let_var_properties_.erase(op->var.get());
+      }
     }
   }
   void VisitStmt_(const BlockNode *op) final {
@@ -818,29 +1016,26 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     bool has_syncs_inside = !syncs_in_then.empty() || !syncs_in_else.empty();
 
     if (has_syncs_inside) {
-      // Check if the condition depends on runtime values (e.g., shared memory
-      // loads). If so, we cannot determine at compile time how many threads
-      // will enter the if, so we must hoist the sync to before the if to avoid
-      // potential deadlock.
+      // Runtime-dependent conditions are only problematic when they can differ
+      // across threads in the same block. Block-uniform runtime conditions
+      // such as `batch_sizes[blockIdx.z] > 0` are safe to keep in-place.
       //
-      // If the condition only depends on threadIdx (e.g., `threadIdx.x >=
-      // 512`), we use Z3 to check if the thread count is a multiple of 32.
-      // If not, ThreadPartialSyncRewriter cannot handle it properly, so we
-      // must also hoist the sync.
+      // Separately, some threadIdx-only non-uniform conditions still need
+      // hoisting when ThreadPartialSyncRewriter cannot lower them safely.
       arith::Analyzer analyzer;
       ConstrSet constr_set = GetConstrSet();
       constr_set.Populate(analyzer);
-      RuntimeDependentConditionChecker checker(&analyzer, warp_size_);
+      ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
+                                             let_var_properties_, warp_size_);
       IterVar tx = GetThreadVar("threadIdx.x");
-      bool depends_on_runtime =
-          checker.DependsOnRuntimeValue(op->condition, tx);
+      auto condition_prop = checker.AnalyzeCondition(op->condition, tx);
 
-      if (depends_on_runtime) {
-        // Condition depends on runtime values - must hoist sync
-        // Condition depends on runtime values - must hoist sync
+      if ((condition_prop.depends_on_runtime &&
+           !condition_prop.is_block_uniform) ||
+          condition_prop.requires_hoist) {
         LOG(WARNING)
             << "[ThreadSync] Hoisting sync from inside if to before if. "
-            << "Condition depends on runtime value: " << op->condition;
+            << "Condition is not safe for in-if sync: " << op->condition;
         for (const auto &sync : syncs_in_then) {
           syncs_inserted_.erase(sync);
         }
@@ -897,6 +1092,26 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         this->VisitExpr(a);
       }
       tma_depth_--;
+      return;
+    }
+
+    // Mark async cp.async load context so that tvm_access_ptr within the call
+    // can be tagged accordingly. This allows the sync planner to avoid
+    // inserting unnecessary barriers between back-to-back cp.async writes.
+    auto is_cp_async = [&]() {
+      if (auto opt = op->op.as<Op>()) {
+        const Op &call_op = opt.value();
+        return call_op.same_as(builtin::ptx_cp_async()) ||
+               call_op.same_as(tl::ptx_cp_async());
+      }
+      return false;
+    }();
+    if (is_cp_async) {
+      cp_async_depth_++;
+      for (const auto &a : op->args) {
+        this->VisitExpr(a);
+      }
+      cp_async_depth_--;
       return;
     }
 
@@ -989,14 +1204,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
               buffer_data_to_buffer_.at(tvm::ffi::GetRef<Var>(buffer_var));
           auto buffer_shape = buffer->shape;
           // convert 1d offset to multi-dimensional index
-          auto linear_to_indices = [this](PrimExpr offset,
-                                          const Array<PrimExpr> &shape) {
+          auto linear_to_indices = [](PrimExpr offset,
+                                      const Array<PrimExpr> &shape) {
             Array<PrimExpr> indices;
+            DataType index_dtype = offset.dtype();
+            ICHECK(index_dtype.is_int() || index_dtype.is_uint())
+                << "Expected integer offset dtype in tvm_access_ptr, but got "
+                << index_dtype;
             PrimExpr remaining = std::move(offset);
             for (size_t i = 0; i < shape.size(); ++i) {
-              PrimExpr stride = make_const(DataType::Int(32), 1);
+              PrimExpr stride = make_const(index_dtype, 1);
               for (size_t j = i + 1; j < shape.size(); ++j) {
-                stride = stride * shape[j];
+                PrimExpr dim = shape[j];
+                if (dim.dtype() != index_dtype) {
+                  dim = tir::Cast(index_dtype, dim);
+                }
+                stride = stride * dim;
               }
               PrimExpr idx = FloorDiv(remaining, stride);
               remaining = FloorMod(remaining, stride);
@@ -1025,12 +1248,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.scope = scope;
         if (flag->value & 1) {
           e.type = kRead;
-          e.is_async_copy = (tma_depth_ > 0);
+          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
         if (flag->value & 2) {
           e.type = kWrite;
-          e.is_async_copy = (tma_depth_ > 0);
+          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
       }
@@ -1038,7 +1261,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     } else if (op->op.same_as(builtin::tvm_storage_sync())) {
       ICHECK(allow_append_);
       const std::string &s = op->args[0].as<StringImmNode>()->value;
-      if (s != "warp") {
+      if (s != "warp" && s != "cluster") {
         StorageScope scope = StorageScope::Create(s);
         AccessEntry e{.cset = {constr_stack_}};
         e.threads = env_threads();
@@ -1246,6 +1469,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   const Array<IterVar> &env_threads() const { return env_threads_; }
 
 private:
+  ConditionThreadProperty AnalyzeExprProperty(const PrimExpr &expr) const {
+    arith::Analyzer analyzer;
+    ConstrSet constr_set = GetConstrSet();
+    constr_set.Populate(analyzer);
+    ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
+                                           let_var_properties_, warp_size_);
+    return checker.AnalyzeExpr(expr);
+  }
+
   bool Enabled(const VarNode *buf, const StorageScope &scope) {
     return in_device_env() && scope == sync_scope_;
   }
@@ -1258,6 +1490,8 @@ private:
   bool in_device_env_{false};
   // Nesting depth of tma_load/tma_load_im2col calls
   int tma_depth_{0};
+  // Nesting depth of cp.async calls (ptx_cp_async)
+  int cp_async_depth_{0};
   // Whether we're visiting the pointer argument expression of an atomic call
   // (e.g., atomic_add/atomic_max/atomic_load). When > 0, accesses produced by
   // the pointer metadata ops are tagged as atomic.
@@ -1266,6 +1500,10 @@ private:
   StmtEntry curr_stmt_;
   // The involving threads
   Array<IterVar> env_threads_;
+  // Thread-uniform/runtime properties for let-bound vars visible in the
+  // current lexical scope.
+  std::unordered_map<const VarNode *, ConditionThreadProperty>
+      let_var_properties_;
   // The buffer map
   Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope
@@ -1621,13 +1859,16 @@ private:
 
       // Handle Ramp expressions by creating a new index variable
       if (const RampNode *prev_ramp = prev_indice_bytes.as<RampNode>()) {
-        Var prev_idx("prev_idx", DataType::Int(32));
+        DataType prev_index_dtype = prev_ramp->base.dtype();
+        Var prev_idx("prev_idx", prev_index_dtype);
         analyzer.Bind(prev_idx, Range::FromMinExtent(0, prev_ramp->lanes));
+
         prev_indice_bytes = prev_ramp->base + prev_idx * prev_ramp->stride;
       }
 
       if (const RampNode *curr_ramp = curr_indice_bytes.as<RampNode>()) {
-        Var curr_idx("curr_idx", DataType::Int(32));
+        DataType curr_index_dtype = curr_ramp->base.dtype();
+        Var curr_idx("curr_idx", curr_index_dtype);
         analyzer.Bind(curr_idx, Range::FromMinExtent(0, curr_ramp->lanes));
         curr_indice_bytes = curr_ramp->base + curr_idx * curr_ramp->stride;
       }
@@ -1704,7 +1945,7 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   auto *n = func.CopyOnWrite();
   auto stmt = n->body;
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
-    stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
+    stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
   }
   // Get warp size from target, defaulting to 32 if not available
   int warp_size = 32;

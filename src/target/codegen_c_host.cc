@@ -373,7 +373,14 @@ void CodeGenCHost::VisitExpr_(const tvm::tir::CallNode *op,
       LOG(FATAL) << "Unknown stack alloca type " << type;
     }
     this->PrintIndent();
-    this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
+    if (type == "tvm_ffi_any") {
+      // TMA descriptors are materialized through tvm_ffi_any stack allocas and
+      // must satisfy CUDA's 64-byte alignment requirement for CUtensorMap.
+      this->stream << "__attribute__((aligned(64))) TVMFFIAny " << stack_name
+                   << "[" << size << "];\n";
+    } else {
+      this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
+    }
     os << stack_name;
   } else if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
     this->PrintCallPacked(op);

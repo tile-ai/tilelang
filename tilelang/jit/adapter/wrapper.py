@@ -172,6 +172,30 @@ KERNEL_LAUNCH_FUNC_CODE = """
 \t}}
 """
 
+# Cluster launch code for SM90+
+KERNEL_CLUSTER_LAUNCH_FUNC_CODE = """
+\t{{
+\t\tcudaLaunchConfig_t config;
+\t\tcudaLaunchAttribute attribute[2];
+\t\tattribute[0].id = cudaLaunchAttributeClusterDimension;
+\t\tattribute[0].val.clusterDim = {{{5}, {6}, {7}}};
+\t\tattribute[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+\t\tattribute[1].val.programmaticStreamSerializationAllowed = 1;
+\t\tconfig.attrs = attribute;
+\t\tconfig.numAttrs = 2;
+\t\tconfig.stream = stream;
+\t\tconfig.gridDim = {0};
+\t\tconfig.blockDim = {1};
+\t\tconfig.dynamicSmemBytes = {2};
+\t\tcudaError_t cluster_attr_result = cudaFuncSetAttribute({4}, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+\t\tif (cluster_attr_result != cudaSuccess) {{
+\t\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "Failed to set cluster attribute for {4}: %s", cudaGetErrorString(cluster_attr_result));
+\t\t\treturn -1;
+\t\t}}
+\t\tcudaLaunchKernelEx(&config, {4}, {3});
+\t}}
+"""
+
 
 class BaseWrapper(ABC):
     @abstractmethod
@@ -325,36 +349,24 @@ class TLCUDASourceWrapper:
                 call_args = f"\tvoid* {function_name}_args[] = {{{', '.join(args_array)}}};\n"
                 kernel_launch_code += call_args
                 # Using cudaLaunchCooperativeKernel to launch the kernel
+                assert self.cluster_dims[function_name] is None, "Cluster launch is not supported for cooperative groups"
                 kernel_launch_code += "\tTILELANG_CHECK(cudaLaunchCooperativeKernel((void*){}, {}, {}, {}, {}, stream));\n".format(
                     function_name, grid_str, block_str, function_name + "_args", smem_str
                 )
-            elif function_name in self.pdl_sync_map:
-                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
-                assert len(function_params) == len(args_list), (
-                    f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
-                )
-
-                call_args = ", ".join(args_list)
-
-                kernel_code = KERNEL_LAUNCH_FUNC_CODE.format(
-                    grid_str,
-                    block_str,
-                    smem_str,
-                    call_args,
-                    function_name,
-                )
-
-                kernel_launch_code += kernel_code
-                kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
-
             else:
                 args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
+
                 call_args = ", ".join(args_list)
-                kernel_launch_code += f"\t{function_name}<<<{grid_str}, {block_str}, {smem_str}, stream>>>({call_args});\n"
+                kernel_code = self.get_kernel_launch_code(
+                    function_name, grid_str, block_str, smem_str, call_args, self.cluster_dims[function_name]
+                )
+
+                kernel_launch_code += kernel_code
                 kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
+
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
@@ -446,10 +458,12 @@ class TLCUDASourceWrapper:
         dynamic_smem_buf_map = {}
         function_names = []
         use_cooperative_groups_map = {}
+        cluster_dims_map = {}
         for g_var, func in self.device_mod.functions.items():
             # Default block and grid configurations
             block_info = [1, 1, 1]
             grid_info = [1, 1, 1]
+            cluster_dims = None
             function_name = g_var.name_hint
             attrs = func.attrs
             dynamic_smem_buf = None
@@ -466,6 +480,10 @@ class TLCUDASourceWrapper:
                         block_info["xyz".index(tag[-1])] = extent
                     elif "blockIdx" in tag:
                         grid_info["xyz".index(tag[-1])] = extent
+            if "cluster_dims" in attrs:
+                # Extract cluster dimensions for SM90+ cluster launch
+                cluster_dims_attr = attrs["cluster_dims"]
+                cluster_dims = [int(cluster_dims_attr[i]) for i in range(len(cluster_dims_attr))]
 
             if "has_cuda_pdl_sync" in attrs:
                 self.pdl_sync_map[function_name] = 0
@@ -475,6 +493,7 @@ class TLCUDASourceWrapper:
             grid_info_map[function_name] = grid_info
             dynamic_smem_buf_map[function_name] = dynamic_smem_buf
             use_cooperative_groups_map[function_name] = use_cooperative_groups
+            cluster_dims_map[function_name] = cluster_dims
             function_names.append(function_name)
 
         # Store the mappings for use in code generation
@@ -482,6 +501,7 @@ class TLCUDASourceWrapper:
         self.grid_info = grid_info_map
         self.dynamic_smem_buf = dynamic_smem_buf_map
         self.use_cooperative_groups = use_cooperative_groups_map
+        self.cluster_dims = cluster_dims_map
 
         function_names_index = {}
         for g_var, func in self.host_mod.functions.items():
@@ -525,6 +545,12 @@ class TLCUDASourceWrapper:
                         unique_push_back(stride.name, str(stride.dtype))
 
         return list(dynamic_symbolic_set.items())
+
+    def get_kernel_launch_code(self, function_name, grid_str, block_str, smem_str, call_args, cluster_dims):
+        if cluster_dims is None:
+            return KERNEL_LAUNCH_FUNC_CODE.format(grid_str, block_str, smem_str, call_args, function_name)
+        else:
+            return KERNEL_CLUSTER_LAUNCH_FUNC_CODE.format(grid_str, block_str, smem_str, call_args, function_name, *cluster_dims)
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
@@ -578,6 +604,7 @@ class TLCUDASourceWrapper:
                 "grid_info": self.grid_info[function_name],
                 "dynamic_smem_buf": self.dynamic_smem_buf[function_name],
                 "function_params": function_params,
+                "cluster_dims": self.cluster_dims.get(function_name, None),
             }
 
         # Create the host function wrapper for the CUDA kernel
@@ -672,6 +699,10 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         # HIP code dont have function declaration, so we use '{\n' to split
         # __global__ void __launch_bounds__(128) kernel_kernel(float* __restrict__ A) {\n
         return declare_kernel_code.split("{")[0]
+
+    def get_kernel_launch_code(self, function_name, grid_str, block_str, smem_str, call_args, cluster_dims):
+        # HIP does not support cudaLaunchKernelEx; use <<<>>> syntax (same as pre-cluster-launch behavior)
+        return f"\t{function_name}<<<{grid_str}, {block_str}, {smem_str}, stream>>>({call_args});\n"
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
@@ -805,13 +836,16 @@ class TLCPUSourceWrapper:
         return host_func
 
     def parse_source_information(self):
-        with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
-            device_mod, host_mod = get_annotated_mod(self.mod, self.target)
-        assert len(device_mod.functions) >= 1, "Device module should have at least one function."
-        assert len(host_mod.functions) == 1, "Only support one function in host module."
+        if self.device_mod is None or self.host_mod is None:
+            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs), self.target:
+                device_mod, host_mod = get_annotated_mod(self.mod, self.target)
+            self.device_mod = device_mod
+            self.host_mod = host_mod
+        assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
+        assert len(self.host_mod.functions) == 1, "Only support one function in host module."
 
         function_names = []
-        for g_var, _ in device_mod.functions.items():
+        for g_var, _ in self.device_mod.functions.items():
             function_name = g_var.name_hint
             function_names.append(function_name)
 

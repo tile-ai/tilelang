@@ -542,7 +542,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_ctx", type=int, default=4096, help="Context size")
     parser.add_argument("--d_head", type=int, default=128, help="Head dimension")
     parser.add_argument("--groups", type=int, default=8, help="Groups")
-    parser.add_argument("--window_size", type=int, default=None, help="window size (default: None, which means full attention)")
+    parser.add_argument("--window_size", type=int, default=128, help="window size (default: None, which means full attention)")
     parser.add_argument("--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
     args = parser.parse_args()
     main(args.batch, args.h, args.n_ctx, args.d_head, args.groups, args.window_size, args.dtype)

@@ -20,9 +20,7 @@ except ImportError:
 import torch
 
 
-@tilelang.jit(
-    out_idx=[-1], pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
-)
+@tilelang.jit(out_idx=[-1], pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
 def tilelang_chunk_local_cumsum_scalar(
     # task config
     B,

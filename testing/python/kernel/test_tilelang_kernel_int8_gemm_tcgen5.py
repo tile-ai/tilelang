@@ -28,7 +28,7 @@ def matmul_nt(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype):
             for k in T.Pipelined(T.ceildiv(K, bK), num_stages=2):
                 T.copy(A[by * bM, k * bK], A_shared)
                 T.copy(B[bx * bN, k * bK], B_shared)
-                T.gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar, wg_wait=-1, clear_accum=k == 0)
+                T.tcgen05_gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar, clear_accum=k == 0)
                 T.mbarrier_wait_parity(mbar, k % 2)
 
             T.copy(C_tmem, C_local)
@@ -44,10 +44,7 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
         func,
         out_idx=-1,
         target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
 
     assert out_dtype in [T.int32], "Currently only int32 is supported"

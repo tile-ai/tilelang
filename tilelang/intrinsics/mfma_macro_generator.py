@@ -4,11 +4,14 @@ import tilelang.language as T
 from tvm import DataType
 from tvm import tir
 from tvm.ir import Range
+from tvm.target import Target
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.runtime import convert
 from .utils import mfma_store_index_map
 from typing import Literal, Callable
+import warnings
 
+from tilelang.utils.target import target_is_gfx950, determine_target
 from tilelang.utils import is_fragment
 from tilelang.language.utils import get_buffer_region_from_load
 from .mfma_layout import (
@@ -79,24 +82,30 @@ class MatrixCoreIntrinEmitter:
         is_m_first: bool | None = False,
         b_preshuffle: bool | None = False,
         thread_var: Var | None = None,
+        target: Target | None = None,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.accum_dtype = accum_dtype
         self.a_transposed = a_transposed
         self.b_transposed = b_transposed
+        if target is None:
+            warnings.warn("Target is not provided, using auto detection", stacklevel=2)
+            target = determine_target("auto", return_object=True)
+        self.target = target
         # Hint Information
         self.block_row_warps = block_row_warps
         self.block_col_warps = block_col_warps
         self.warp_row_tiles = warp_row_tiles
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
+        self._initialize_k_pack(k_pack)
         self._initialize_k_dim(a_dtype)
+        self._normalize_gfx950_f16_bf16_kpack()
         self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
         self._initialize_local_size(self.M_DIM, self.N_DIM, self.k_dim, self.WARP_SIZE)
         self._initialize_mfma_prefix(self.k_dim)
         self._initialize_micro_size(self.M_DIM, self.N_DIM, self.k_dim)
-        self._initialize_k_pack(k_pack)
         self._initialize_is_m_first(is_m_first)
         self._initialize_b_preshuffle(b_preshuffle)
 
@@ -116,8 +125,13 @@ class MatrixCoreIntrinEmitter:
 
         if a_dtype.bits == 32:
             self.k_dim = 4
-        elif a_dtype.bits in {16, 8}:
+        elif a_dtype.bits == 16:
             self.k_dim = 16
+        elif a_dtype.bits == 8:
+            if target_is_gfx950(self.target):
+                self.k_dim = 32
+            else:
+                self.k_dim = 16
         else:
             raise ValueError(f"Unsupported a_dtype = {a_dtype}")
 
@@ -157,7 +171,19 @@ class MatrixCoreIntrinEmitter:
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_i8"
         elif in_dtype_abbrv == "bf16":
             # HIP intrinsic uses ...x{K}bf16_1k without an underscore before bf16
-            self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}bf16_1k"
+            if k_dim == 32:
+                # GFX950: __builtin_amdgcn_mfma_f32_16x16x32_bf16
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_bf16"
+            else:
+                # CDNA2/3: __builtin_amdgcn_mfma_f32_16x16x16bf16_1k
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}bf16_1k"
+        elif in_dtype_abbrv == "f16":
+            # HIP 950 have _ before f16
+            if k_dim == 32:
+                # GFX950: __builtin_amdgcn_mfma_f32_16x16x32_f16
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_f16"
+            else:
+                self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
         else:
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
 
@@ -169,6 +195,17 @@ class MatrixCoreIntrinEmitter:
     def _initialize_k_pack(self, k_pack: int | None = None):
         if k_pack is not None:
             self.k_pack = k_pack
+
+    def _normalize_gfx950_f16_bf16_kpack(self):
+        is_f16_or_bf16 = self.a_dtype in {T.float16, T.bfloat16} and self.b_dtype in {T.float16, T.bfloat16}
+        # https://github.com/triton-lang/triton/blob/v3.6.0/third_party/amd/backend/compiler.py#L85-L89
+        if target_is_gfx950(self.target) and is_f16_or_bf16 and self.k_dim == 16 and self.k_pack == 2:
+            warnings.warn(
+                "On gfx950 with f16/bf16, remapping (k_dim=16, k_pack=2) to (k_dim=32, k_pack=1).",
+                stacklevel=3,
+            )
+            self.k_dim = 32
+            self.k_pack = 1
 
     def _initialize_is_m_first(self, is_m_first: bool | None = False):
         if is_m_first is not None:
@@ -291,6 +328,8 @@ class MatrixCoreIntrinEmitter:
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
+        # Leading dimensions (e.g. pipeline stage axis) – empty for 2-D buffers
+        A_other = [r.min for r in A_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -306,13 +345,13 @@ class MatrixCoreIntrinEmitter:
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k), warp_m * warp_row_tiles + i * micro_size_x)
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[A_base0 + l + row, A_base1 + r + col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + l + row, A_base1 + r + col)]
             else:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * (k_pack * micro_size_k))
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[A_base0 + l + row, A_base1 + r + col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + l + row, A_base1 + r + col)]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -333,6 +372,8 @@ class MatrixCoreIntrinEmitter:
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
+        # Leading dimensions (e.g. pipeline stage axis) – empty for 2-D buffers
+        B_other = [r.min for r in B_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -351,7 +392,7 @@ class MatrixCoreIntrinEmitter:
                             warp_n * warp_col_tiles + j * micro_size_y,
                             rk * chunk + ki * (k_pack * micro_size_k),
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[B_base0 + l + row, B_base1 + r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + l + row, B_base1 + r + col)]
 
             else:
                 for j in T.serial(warp_cols):
@@ -361,7 +402,7 @@ class MatrixCoreIntrinEmitter:
                             rk * chunk + ki * (k_pack * micro_size_k),
                             warp_n * warp_col_tiles + j * micro_size_y,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[B_base0 + l + row, B_base1 + r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + l + row, B_base1 + r + col)]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
@@ -697,6 +738,7 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         a_preshuffle: bool | None = False,
         b_preshuffle: bool | None = False,
         thread_var: Var | None = None,
+        target: Target | None = None,
     ):
         super().__init__(
             a_dtype=a_dtype,
@@ -714,6 +756,7 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
             k_pack=k_pack,
             is_m_first=is_m_first,
             thread_var=thread_var,
+            target=target,
         )
         self._initialize_preshuffle(a_preshuffle, b_preshuffle)
 

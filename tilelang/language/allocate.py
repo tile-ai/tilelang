@@ -169,6 +169,29 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     return buffer
 
 
+def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
+    """Allocate a cluster barrier buffer.
+
+    Args:
+        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated as a cluster barrier
+    """
+    # Normalize to list
+    if isinstance(arrive_count, int):
+        arrive_count = [arrive_count]
+    else:
+        arrive_count = list(arrive_count)
+    buffer = T.alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier")
+    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
+    # Use buffer.data as key to support multiple barrier buffer allocations
+    arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
+    block_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+
+    return buffer
+
+
 def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
@@ -177,7 +200,9 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
 
     Key properties and requirements:
         - The number of columns allocated must be a power of 2 and at least 32.
-        - TMEM allocations are dynamic and must be explicitly deallocated.
+        - TMEM allocations are dynamic. TileLang deallocates them automatically at
+          the end of the allocation block unless you call ``T.deallocate_tmem`` to
+          take manual control of the lifetime.
         - Both allocation and deallocation must be performed by the same warp.
         - The base address of the TMEM allocation is stored in shared memory and used as the offset for TCGEN5.MMA accumulator tensors.
         - Only TCGEN5.MMA and specific TMEM load/store instructions can access TMEM; all pre-processing must occur before data is loaded into TMEM, and all post-processing after data is retrieved.
@@ -191,7 +216,8 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
 
     Note:
         - TMEM is only available on supported architectures (e.g., Hopper and later).
-        - The buffer returned should be used according to TMEM access restrictions and deallocated appropriately.
+        - The buffer returned should be used according to TMEM access restrictions.
+          Use ``T.deallocate_tmem`` only when you need an earlier, explicit release.
     """
 
     assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"
@@ -281,6 +307,18 @@ def empty(shape, dtype: DType = _dtypes.float32) -> Tensor: ...
 
 
 def empty(*shape, dtype: DType = _dtypes.float32) -> Tensor:
+    """Declare the output tensor used in eager-style JIT.
+
+    Tensors allocated in this way should be returned as the output of the function.
+
+    Args:
+        shape (tuple): The shape of the tensor to allocate
+        dtype (str): The data type of the tensor (e.g., 'float32', 'int32')
+
+    Returns:
+        Tensor: The declared OutTensor object.
+    """
+
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
         return OutTensor(shape[0], dtype)
     elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):
@@ -289,3 +327,24 @@ def empty(*shape, dtype: DType = _dtypes.float32) -> Tensor:
         return OutTensor(shape, dtype)
     else:
         raise TypeError(f"Invalid shape {shape}")
+
+
+def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
+    """Allocate a global memory buffer as a global workspace.
+
+    NOTE: Memory allocated in this way doesn't go through torch allocator. Instead,
+    it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
+    recommend allocating workspace in Torch side and pass it to the kernel via arguments,
+    which is managed under the hood by the framework. This API is mainly for testing
+    purposes and some specific purposes.
+
+    Args:
+        shape (tuple): The shape of the buffer to allocate
+        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
+        scope (str, optional): The memory scope. Defaults to "global"
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated in global memory
+    """
+
+    return T.alloc_buffer(shape, dtype, scope=scope)

@@ -86,10 +86,15 @@ GemmSPWarpPolicyNode::computeWarpPartition(int M, int N, int block_size,
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
-  node->aRegion_ = NormalizeToBufferRegion(args[0]);
-  node->eRegion_ = NormalizeToBufferRegion(args[1]);
-  node->bRegion_ = NormalizeToBufferRegion(args[2]);
-  node->cRegion_ = NormalizeToBufferRegion(args[3]);
+  auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
+  auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
+  auto c_access = NormalizeToAccessRegion(args[3], kAccessReadWrite);
+  node->aRegion_ = a_access.region;
+  node->eRegion_ = e_access.region;
+  node->bRegion_ = b_access.region;
+  node->cRegion_ = c_access.region;
+  node->SetAccessRegions({a_access, e_access, b_access, c_access});
   node->a_ = node->aRegion_->buffer;
   node->e_ = node->eRegion_->buffer;
   node->b_ = node->bRegion_->buffer;
@@ -111,6 +116,18 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->wgWait_ = args[12].as<IntImm>().value()->value;
   }
   data_ = std::move(node);
+}
+
+AccessRegions GemmSPNode::GetAccessRegions() const {
+  AccessRegions result;
+  result.reads.push_back(aRegion_);
+  result.reads.push_back(eRegion_);
+  result.reads.push_back(bRegion_);
+  if (!clearAccum_) {
+    result.reads.push_back(cRegion_);
+  }
+  result.writes.push_back(cRegion_);
+  return result;
 }
 
 /**
@@ -157,11 +174,10 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_sp_ss";
-  ICHECK((a_.scope() == "shared" || a_.scope() == "shared.dyn") &&
-         (b_.scope() == "shared" || b_.scope() == "shared.dyn"))
+  ICHECK(IsSharedBuffer(a_) && IsSharedBuffer(b_))
       << "Only support shared.dyn scope for A and B, but received "
       << a_.scope() << " and " << b_.scope();
-  ICHECK((e_.scope() == "shared" || e_.scope() == "shared.dyn"))
+  ICHECK(IsSharedBuffer(e_))
       << "Only support shared.dyn scope for E as copy from smem to rmem are "
          "delegated to cute implementation, found "
       << e_.scope();
@@ -176,16 +192,20 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ss << ", " << wgWait_;
   }
   ss << ">";
-  auto A_buffer = T.buffer_remap.count(a_) ? T.buffer_remap[a_] : a_;
-  auto B_buffer = T.buffer_remap.count(b_) ? T.buffer_remap[b_] : b_;
-  auto C_buffer = T.buffer_remap[c_];
-  auto E_buffer = T.buffer_remap.count(e_) ? T.buffer_remap[e_] : e_;
+  // Build access pointers from regions to preserve stage-specific offsets
+  // from pipeline multi-versioning (matching dense GemmNode::Lower pattern).
+  PrimExpr Aptr =
+      MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Bptr =
+      MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Cptr =
+      MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
+  PrimExpr Eptr =
+      MakeAccessPtrFromRegion(eRegion_, /*r*/ 1, /*require_2d*/ false);
 
   auto new_call =
       Call(DataType::Handle(), tl::tl_gemm_sp(),
-           Array<PrimExpr>{StringImm(ss.str()), A_buffer.access_ptr(1),
-                           B_buffer.access_ptr(1), C_buffer.access_ptr(3),
-                           E_buffer.access_ptr(1)});
+           Array<PrimExpr>{StringImm(ss.str()), Aptr, Bptr, Cptr, Eptr});
   return Evaluate(new_call);
 }
 
@@ -239,26 +259,28 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
                         : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
                                             c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
-    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(a_)) {
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      results.Set(a_, makeGemmABLayoutHopper(mat_stride, mat_continuous,
-                                             mat_continuous, a_->dtype.bits(),
-                                             transA_ ? 1 : 2));
+      auto layout =
+          makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
+                                 a_->dtype.bits(), transA_ ? 1 : 2);
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
     } else {
       ICHECK(false) << "Not implemented";
     }
 
-    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(b_)) {
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
       const int64_t continuity =
           transB_ ? mat_continuous : mat_continuous / warp_n;
-      results.Set(b_,
-                  makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                         b_->dtype.bits(), transB_ ? 2 : 1));
+      auto layout =
+          makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
+                                 b_->dtype.bits(), transB_ ? 2 : 1);
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
     } else {
       ICHECK(false) << "WGMMA only support B in shared.";
     }
@@ -269,12 +291,13 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
                                             c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
 
-    if (a_.scope() == "shared" || a_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(a_)) {
       int dim_A = a_->shape.size();
       const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      results.Set(a_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                   a_->dtype.bits()));
+      auto layout = makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                 a_->dtype.bits());
+      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
     } else if (IsFragmentBuffer(a_)) {
       // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
       //                                   A->dtype.bits(), trans_A);
@@ -283,12 +306,13 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     } else {
       ICHECK(0);
     }
-    if (b_.scope() == "shared" || b_.scope() == "shared.dyn") {
+    if (IsSharedBuffer(b_)) {
       int dim_B = b_->shape.size();
       const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      results.Set(b_, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                   b_->dtype.bits()));
+      auto layout = makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                 b_->dtype.bits());
+      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
     } else if (IsFragmentBuffer(b_)) {
       // auto fragment =
       //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);

@@ -55,6 +55,9 @@ public:
       f = WithAttr(std::move(f), tl::attr::kLocalVarInit,
                    lower.local_var_init_map_);
     }
+    if (lower.cluster_dims_.has_value()) {
+      f = WithAttr(std::move(f), "cluster_dims", lower.cluster_dims_.value());
+    }
     return f;
   }
 
@@ -101,7 +104,16 @@ private:
       body = Allocate(buffer->data, buffer->dtype, allocation_shape,
                       const_true(), std::move(body), allocate_annotations);
     }
-    // Step 5. Insert attribute statements converted from pragmas
+    // Step 5. Materialize a lexical scope boundary only for blocks that were
+    // explicitly marked by an earlier semantic lowering pass (for example
+    // gemm/gemm_sp_py). We intentionally avoid re-inferring this from the
+    // lowered alloc_buffers here because provenance has already been blurred by
+    // earlier allocation planning/hoisting passes.
+    if (HasLexicalAllocScopeAnnotation(new_block->annotations)) {
+      body = AttrStmt(Integer(0), tl::attr::kLexicalAllocScope, Integer(1),
+                      std::move(body));
+    }
+    // Step 6. Insert attribute statements converted from pragmas
     for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {
       body = AttrStmt(Integer(0), it->first, it->second, std::move(body));
     }
@@ -254,6 +266,14 @@ private:
                      << "` to be a PrimExpr or Map<Var, PrimExpr>, but got "
                      << kv.second.GetTypeKey();
         }
+      } else if (key == "cluster_dims") {
+        if (auto arr = kv.second.try_cast<Array<Integer>>()) {
+          cluster_dims_ = arr.value();
+        } else {
+          LOG(FATAL) << "Expected `" << "cluster_dims"
+                     << "` to be an Array<Integer>, but got "
+                     << kv.second.GetTypeKey();
+        }
       } else if (!is_block) {
         // the loop annotation is preserved
         preserved_annotations.Set(key, kv.second);
@@ -263,6 +283,11 @@ private:
         pragma_attrs->begin(), pragma_attrs->end(),
         [](const auto &p1, const auto &p2) { return p1.first < p2.first; });
     return preserved_annotations;
+  }
+
+  static bool
+  HasLexicalAllocScopeAnnotation(const Map<String, ffi::Any> &annotations) {
+    return annotations.find(tl::attr::kLexicalAllocScope) != annotations.end();
   }
 
   Buffer ResolveLocalVarBuffer(const Array<Buffer> &alloc_buffers) const {
@@ -290,6 +315,10 @@ private:
 
   /*! \brief Local var initializers collected from block annotations. */
   Map<Var, PrimExpr> local_var_init_map_;
+
+  /*! \brief Cluster dims collected from tilelang.cluster_dims block annotation.
+   */
+  Optional<Array<Integer>> cluster_dims_{std::nullopt};
 };
 
 PrimFunc TLLowerOpaqueBlock(PrimFunc f) {

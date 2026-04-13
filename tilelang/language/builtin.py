@@ -252,11 +252,43 @@ def access_ptr(
     )
 
 
+def deallocate_tmem(tmem: tir.Buffer) -> None:
+    """Explicitly deallocate a TMEM buffer allocated by ``T.alloc_tmem``.
+
+    By default, TileLang inserts a TMEM deallocation automatically at the end
+    of the allocation block. Calling ``T.deallocate_tmem(buf)`` suppresses that
+    automatic tail deallocation for ``buf`` and lowers an explicit deallocation
+    at the call site instead.
+
+    Notes:
+    - The deallocation must obey the hardware TMEM rules: it should be issued by
+      the same warp that performed the allocation.
+    - Once this API is used, the buffer lifetime is user-managed for the current
+      block; deallocating too early or conditionally is the user's responsibility.
+
+    Args:
+        tmem: A TMEM buffer previously returned by ``T.alloc_tmem``.
+    """
+
+    if not isinstance(tmem, tir.Buffer):
+        raise TypeError(f"T.deallocate_tmem expects a tvm.tir.Buffer, but got {type(tmem)}.")
+    if tmem.scope() != "shared.tmem":
+        raise ValueError(f"T.deallocate_tmem expects a shared.tmem buffer, but got scope={tmem.scope()}.")
+
+    return evaluate(tir.call_intrin("handle", tir.op.Op.get("tl.deallocate_tmem"), tmem.data))
+
+
 def create_tma_descriptor(*args):
     """Create a Tensor Memory Access (TMA) descriptor.
 
-    Args:
-        *args: Variable arguments defining the TMA descriptor configuration
+    This is an internal API used by copy lowering. The argument list depends on
+    the tensor rank and encodes the full TMA descriptor configuration:
+
+        create_tma_descriptor(data_type, rank, global_addr,
+            global_shape..., global_stride..., smem_box..., smem_stride...,
+            interleave, swizzle, l2_promotion, oob_fill)
+
+    Total arguments: 7 + 4 * rank.
 
     Returns:
         tir.Call: A handle to the created TMA descriptor
@@ -264,15 +296,12 @@ def create_tma_descriptor(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.create_tma_descriptor"), *args)
 
 
-# NOTE(wt): T.create_list_of_mbarrier and T.get_mbarrier is now only an intermediate intrinsic
-# during transforms, and won't be exposed to frontend. For creating mbarriers, please use T.alloc_barrier instead.
-
-
 def tma_load(*args):
     """Perform a Tensor Memory Access (TMA) load operation.
 
-    Args:
-        *args: Variable arguments specifying the TMA load parameters
+    This is an internal API used by copy lowering. Arguments:
+
+        tma_load(descriptor, mbarrier, smem_addr, coord_0, ..., coord_n, eviction_policy)
 
     Returns:
         tir.Call: A handle to the TMA load operation
@@ -280,40 +309,56 @@ def tma_load(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args)
 
 
-def fence_proxy_async(*args):
-    """Create a fence for asynchronous proxy operations.
+def tma_load_2sm(*args):
+    """Perform a TMA load with 2SM (two Streaming Multiprocessors) on Blackwell.
 
-    Args:
-        *args: Variable arguments for fence configuration
+    This is an internal API. Same arguments as :func:`tma_load`, but with
+    the ``use_2cta`` annotation enabled for 2-CTA cooperative loading.
+
+    Returns:
+        tir.Call: A handle to the TMA load operation
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args, annotations={"use_2cta": 1})
+
+
+def fence_proxy_async():
+    """Issue a shared memory fence for asynchronous proxy operations.
+
+    Ensures that prior asynchronous operations (e.g. TMA stores) are visible
+    to subsequent memory accesses. Maps to ``fence.proxy.async.shared::cta``.
 
     Returns:
         tir.Call: A handle to the fence operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_proxy_async"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_proxy_async"))
 
 
-def tma_store_arrive(*args):
+def tma_store_arrive():
     """Signal the arrival of a TMA store operation.
 
-    Args:
-        *args: Variable arguments for the store arrival operation
+    Commits the current group of outstanding TMA store operations.
+    Maps to ``cp.async.bulk.commit_group``.
 
     Returns:
         tir.Call: A handle to the store arrive operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_arrive"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_arrive"))
 
 
-def tma_store_wait(*args):
+def tma_store_wait(count: int = 0):
     """Wait for completion of TMA store operations.
 
+    Waits until the number of outstanding TMA store groups is at most ``count``.
+    Maps to the PTX instruction ``cp.async.bulk.wait_group.read <count>``.
+
     Args:
-        *args: Variable arguments specifying which store operations to wait for
+        count (int): The maximum number of outstanding store groups allowed
+            to remain in flight. Defaults to 0 (wait for all stores to complete).
 
     Returns:
         tir.Call: A handle to the store wait operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_wait"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_wait"), count)
 
 
 def set_max_nreg(reg_count: int, is_inc: int):
@@ -364,6 +409,18 @@ def disable_warp_group_reg_alloc():
     return no_set_max_nreg()
 
 
+def ptx_arrive_cluster_barrier(mbarrier: BarrierType, cta_id: int | Var):
+    """Arrive at a shared barrier in cluster.
+
+    Args:
+        mbarrier: BarrierType
+            The memory barrier to arrive at
+        cta_id: int | Var
+            The peer CTA rank in cluster to arrive at.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_arrive_cluster_barrier"), mbarrier, cta_id)
+
+
 def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
     """Wait for memory barrier parity condition.
 
@@ -405,15 +462,22 @@ def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: BarrierType):
+def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
     """Arrive at memory barrier.
 
     Args:
         mbarrier: BarrierType
             The memory barrier to arrive at
+        cta_id: int | Var | None
+            The peer CTA rank in cluster to arrive at. (Only valid for cluster barriers)
+            If not provided, will arrive on current CTA's barrier.
     """
     mbarrier = _mbar_to_buffer_load(mbarrier)
-    return ptx_arrive_barrier(mbarrier)
+    if cta_id is not None:
+        assert mbarrier.buffer.scope() == "shared.cluster_barrier", f"mbarrier must be a cluster barrier, but got {mbarrier.buffer.scope}"
+        return ptx_arrive_cluster_barrier(mbarrier, cta_id)
+    else:
+        return ptx_arrive_barrier(mbarrier)
 
 
 def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):
@@ -1107,17 +1171,29 @@ def cp_async_barrier_noinc(barrier: BarrierType):
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
-def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr):
+def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr, arrive_2cta: bool = False):
     """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
 
     Parameters
     ----------
     mbar: tir.Buffer | BufferLoad | PrimExpr
         The mbarrier object in shared memory (e.g., Barrier*) or its address.
+    arrive_2cta: bool
+        Whether to also arrive at the peer CTA's barrier.
+        If set, will be lowered to umma_arrive_multicast_2x1SM.
     """
     if isinstance(mbar, (tir.Buffer, BufferLoad)):
         mbar = retrieve_ptr(mbar, access_type="rw")
-    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar)
+    ann = {"use_2cta": 1} if arrive_2cta else {}
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann)
+
+
+def tcgen05_before_thread_sync():
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_before_thread_sync"))
+
+
+def tcgen05_after_thread_sync():
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
 
 
 def ptx_mma_sm70(

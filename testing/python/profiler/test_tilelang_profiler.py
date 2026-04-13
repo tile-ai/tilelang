@@ -1,5 +1,6 @@
 import tilelang
 import tilelang.language as T
+import pytest
 
 
 @tilelang.jit(out_idx=[-1])
@@ -26,6 +27,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
     return gemm
 
 
+@pytest.mark.perf
 def test_profiler():
     kernel = matmul(1024, 1024, 1024, 128, 128, 32)
 

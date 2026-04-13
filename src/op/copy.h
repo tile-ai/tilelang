@@ -6,6 +6,7 @@
 #ifndef TVM_TL_OP_COPY_H_
 #define TVM_TL_OP_COPY_H_
 
+#include "builtin.h"
 #include "operator.h"
 #include "parallel.h"
 
@@ -15,17 +16,18 @@ using namespace tir;
 
 /// Copy instruction types for different memory access patterns
 enum class CopyInst : uint8_t {
-  kNormal = 0,    // utilize ldg/stg or cpasync or any buffer copy
+  kNormal = 0,    // utilize plain buffer copy
   kLDSM = 1,      // ldmatrix memory copy
   kSTSM = 2,      // stmatrix memory copy
   kBulkLoad = 3,  // utilize tma load
   kBulkStore = 4, // utilize tma store
+  kCPAsync = 5,   // cp.async global->shared copy
   // we should separate the bulk load and store for 1d and multi-dim
   // as they have different memory access patterns
-  kBulkLoad1D = 5,  // utilize tma load 1d
-  kBulkStore1D = 6, // utilize tma store 1d
-  kTMemLoad = 7,    // tcgen05.ld (tensor memory -> register)
-  kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
+  kBulkLoad1D = 6,  // utilize tma load 1d
+  kBulkStore1D = 7, // utilize tma store 1d
+  kTMemLoad = 8,    // tcgen05.ld (tensor memory -> register)
+  kTMemStore = 9,   // tcgen05.st (register -> tensor memory)
 };
 
 /// Convert CopyInst enum to string for debugging
@@ -41,6 +43,8 @@ inline const char *CopyInstToString(CopyInst inst) {
     return "BulkLoad";
   case CopyInst::kBulkStore:
     return "BulkStore";
+  case CopyInst::kCPAsync:
+    return "CPAsync";
   case CopyInst::kBulkLoad1D:
     return "BulkLoad1D";
   case CopyInst::kBulkStore1D:
@@ -121,6 +125,8 @@ public:
   //   - "disable_tma": Bool, whether to disable TMA acceleration
   //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
   //   2=last)
+  //   - attr::kAsyncCopyNoImplicitCommitWait: IntImm/Bool, suppress implicit
+  //     cp.async commit/wait because an enclosing transform manages them
   //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
   //     layout hint applied to the outermost generated parallel loop of this
   //     copy's SIMT loop nest.
@@ -149,6 +155,15 @@ public:
     return false;
   }
 
+  bool GetIsTmaCopy() const {
+    if (auto val = annotations.Get("is_tma_copy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
   int GetEvictionPolicy() const {
     if (auto val = annotations.Get("eviction_policy")) {
       if (auto int_val = val->as<IntImmNode>()) {
@@ -156,6 +171,30 @@ public:
       }
     }
     return 0; // default: evict_normal
+  }
+
+  bool GetIsAsyncCopy() const {
+    if (auto val = annotations.Get("is_async_copy")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    // Backward-compatibility with historical annotation key.
+    if (auto val = annotations.Get("force_cp_async")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
+  }
+
+  bool GetNoImplicitAsyncCommitWait() const {
+    if (auto val = annotations.Get(attr::kAsyncCopyNoImplicitCommitWait)) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value != 0;
+      }
+    }
+    return false;
   }
 
   /*!
@@ -227,13 +266,37 @@ public:
   bool CheckTMemStore(Target target) const;
 
   /*!
-   * \brief Get the copy instruction type.
+   * \brief Check target-independent cp.async prerequisites.
    */
-  CopyInst GetCopyInst(Target target, bool disable_tma_lower,
-                       const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                       bool buffer_oob) const;
+  bool CheckCPAsyncCopyPreconditions() const;
+
+  /*!
+   * \brief Check whether this copy can participate in pipeline-managed
+   * cp.async synchronization using only target-independent prerequisites.
+   */
+  bool CheckPipelineManagedCPAsyncCopy() const;
+
+  /*!
+   * \brief Check whether this copy can participate in pipeline-managed
+   * cp.async synchronization for a concrete target.
+   */
+  bool CheckPipelineManagedCPAsyncCopy(Target target,
+                                       arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Check if cp.async copy is supported.
+   */
+  bool CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
+                        arith::Analyzer *analyzer) const;
 
 protected:
+  /*!
+   * \brief Get the copy instruction type.
+   */
+  CopyInst GetCopyInst(Target target, const LayoutMap &layout_map,
+                       arith::Analyzer *analyzer,
+                       bool buffer_oob = false) const;
+
   /*!
    * \brief Generate lowering for bulk/global-to-shared copy.
    */
@@ -262,6 +325,11 @@ protected:
    * \brief Generate lowering for normal copy.
    */
   Stmt LowerNormalCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Generate lowering for cp.async global->shared copy.
+   */
+  Stmt LowerCPAsyncCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
@@ -314,6 +382,17 @@ protected:
    * @return Reference to the singleton TVM Op representing this operator.
    */
   TileOperator Clone() const;
+
+  /*!
+   * \brief Check that a global buffer's strides satisfy TMA requirements.
+   *
+   * Validates: contiguous innermost stride, 16-byte alignment for outer
+   * strides, and stride < 2^40.
+   *
+   * \return true if all stride checks pass.
+   */
+  static bool CheckGlobalStrides(const Buffer &buffer,
+                                 arith::Analyzer *analyzer);
 
 private:
   /*!
@@ -371,9 +450,10 @@ public:
   int padding_;  // Padding amount
   int dilation_; // Dilation factor
   int kernel_;   // Kernel size
-  int eviction_policy_; // Cache eviction policy
-  PrimExpr nhw_step_;   // Step size in NHW dimensions
-  PrimExpr c_step_;     // Step size in channel dimension
+  int eviction_policy_;                // Cache eviction policy
+  PrimExpr nhw_step_;                  // Step size in NHW dimensions
+  PrimExpr c_step_;                    // Step size in channel dimension
+  Map<String, ObjectRef> annotations_; // Annotations from Call node
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Conv2DIm2Col", Conv2DIm2ColOpNode,
                                     TileOperatorNode);

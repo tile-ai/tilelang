@@ -133,9 +133,9 @@ def sparse_mla_fwd(
 
             tx = T.get_thread_binding()
 
-            T.copy(Q[b_i, s_i, H0:H1, 0 : D // 2], Q_shared_l)
-            T.copy(Q[b_i, s_i, H0:H1, D // 2 : D], Q_shared_r)
-            T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
+            T.tma_copy(Q[b_i, s_i, H0:H1, 0 : D // 2], Q_shared_l, barrier=bar_q)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D // 2 : D], Q_shared_r, barrier=bar_q)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared, barrier=bar_q)
             T.barrier_arrive(bar_q)
 
             if tx < 128:
@@ -151,9 +151,9 @@ def sparse_mla_fwd(
 
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
                         acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0, -T.infinity(acc_s.dtype))
-                    T.gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True, wg_wait=-1)
+                    T.wgmma_gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True)
+                    T.wgmma_gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True)
+                    T.wgmma_gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True)
 
                     T.wait_wgmma(0)
 
@@ -187,9 +187,9 @@ def sparse_mla_fwd(
 
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
                         acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0, -T.infinity(acc_s.dtype))
-                    T.gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True, wg_wait=-1)
+                    T.wgmma_gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True)
+                    T.wgmma_gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True)
+                    T.wgmma_gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True)
 
                     T.wait_wgmma(0)
 
@@ -266,20 +266,23 @@ def sparse_mla_fwd(
                         indices_local = Indices[b_i, s_i, g_i, (i_i * 2) * BI + r * 16 + (tx - 256) // 8]
                         is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local <= max_kv_i
                         if is_kv_valid[r * 16 + (tx - 256) // 8]:
-                            with T.attr("default", "async_scope", 1):
-                                for u in T.serial(4):
-                                    for v in T.vectorized(8):
-                                        KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8 + v
-                                        ]
-                                        KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
-                                        ]
-                            with T.attr("default", "async_scope", 1):
-                                for v in T.vectorized(8):
-                                    K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[
-                                        b_i, indices_local, g_i, D + (tx - 256) % 8 * 8 + v
-                                    ]
+                            # Manually issue cp.async copies for KV_left, KV_right, and K_tail.
+                            for u in T.serial(4):
+                                T.ptx_cp_async(
+                                    T.access_ptr(KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                    T.access_ptr(KV[b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                    16,
+                                )
+                                T.ptx_cp_async(
+                                    T.access_ptr(KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                    T.access_ptr(KV[b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                    16,
+                                )
+                            T.ptx_cp_async(
+                                T.access_ptr(K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[b_i, indices_local, g_i, D + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     # Buffer 1
@@ -288,20 +291,23 @@ def sparse_mla_fwd(
                         indices_local = Indices[b_i, s_i, g_i, (i_i * 2 + 1) * BI + r * 16 + (tx - 256) // 8]
                         is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local <= max_kv_i
                         if is_kv_valid[r * 16 + (tx - 256) // 8]:
-                            with T.attr("default", "async_scope", 1):
-                                for u in T.serial(4):
-                                    for v in T.vectorized(8):
-                                        KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8 + v
-                                        ]
-                                        KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[
-                                            b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v
-                                        ]
-                            with T.attr("default", "async_scope", 1):
-                                for v in T.vectorized(8):
-                                    K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[
-                                        b_i, indices_local, g_i, D + (tx - 256) % 8 * 8 + v
-                                    ]
+                            # Manually issue cp.async copies for KV_left, KV_right, and K_tail.
+                            for u in T.serial(4):
+                                T.ptx_cp_async(
+                                    T.access_ptr(KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                    T.access_ptr(KV[b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                    16,
+                                )
+                                T.ptx_cp_async(
+                                    T.access_ptr(KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
+                                    T.access_ptr(KV[b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
+                                    16,
+                                )
+                            T.ptx_cp_async(
+                                T.access_ptr(K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
+                                T.access_ptr(KV[b_i, indices_local, g_i, D + (tx - 256) % 8 * 8], "r", 8),
+                                16,
+                            )
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
     return main
@@ -410,8 +416,6 @@ def test_sparse_mla_fwd_pipelined(
 
     tl_out, tl_lse = fn()
     ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
-    # print(f"tl_out: {tl_out}")
-    # print(f"ref_out: {ref_out}")
 
     torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
 
@@ -450,12 +454,12 @@ def run_regression_perf(B=1, S=4096, SKV=8192, H=128, HKV=1, DQK=576, DV=512, to
     CP0 = q_start_s_index == 0
     kernel = sparse_mla_fwd(batch, seq_len, seq_len_kv, heads, dim, tail_dim, topk, KV_stride, kv_group, None, True, CP0)
 
-    def run_kernel_only():
+    def fn():
         kernel(q, kv, indices, torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda"))
 
     from tilelang.profiler import do_bench
 
-    return do_bench(run_kernel_only, backend="cupti")
+    return do_bench(fn, backend="cupti")
 
 
 if __name__ == "__main__":

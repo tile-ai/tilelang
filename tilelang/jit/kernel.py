@@ -26,6 +26,7 @@ from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.transform import PassConfigKey
+from tilelang.transform.pass_config import normalize_pass_configs
 import logging
 import os
 
@@ -99,9 +100,7 @@ class JITKernel(Generic[_P, _T]):
         self.target_host = target_host
         self.verbose = verbose
 
-        if pass_configs is None:
-            pass_configs = {}
-        self.pass_configs = pass_configs
+        self.pass_configs = normalize_pass_configs(pass_configs)
 
         self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 
@@ -156,7 +155,7 @@ class JITKernel(Generic[_P, _T]):
         target: str | Target,
         target_host: str | Target,
         out_idx: list[int] | int,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch"],
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"],
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
@@ -237,7 +236,14 @@ class JITKernel(Generic[_P, _T]):
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "tvm_ffi"
         enable_device_compile = execution_backend == "tvm_ffi"
-        with tvm.transform.PassContext(opt_level=3, config=pass_configs), self.target:
+
+        # Additional pass instruments
+        pass_instruments = []
+        if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
+            dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
+            pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+
+        with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), self.target:
             artifact = tilelang.lower(
                 tilelang_func,
                 target=target,

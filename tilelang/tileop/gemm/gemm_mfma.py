@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .gemm_base import GemmBase
 from .inst import GemmInst
 from tilelang.layout import make_swizzled_layout
@@ -30,6 +32,7 @@ class GemmMFMA(GemmBase):
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
             k_pack=self.k_pack,
+            target=target,
         )
 
         if self.is_gemm_ss():
@@ -59,7 +62,14 @@ class GemmMFMA(GemmBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MFMA)
         warp_row_tiles = int(self.M // m_warp)
@@ -77,8 +87,10 @@ class GemmMFMA(GemmBase):
             chunk=self.chunk,
             thread_var=thread_var,
             k_pack=self.k_pack,
+            target=target,
         )
 
+        k_pack = mfma_emitter.k_pack
         in_dtype = self.in_dtype
         warp_rows = mfma_emitter.warp_rows
         warp_cols = mfma_emitter.warp_cols
@@ -99,7 +111,10 @@ class GemmMFMA(GemmBase):
 
         clear_accum = self.clear_accum
 
-        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+        assert block_K >= micro_size_k * k_pack, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k}) * k_pack ({k_pack})"
+        assert block_K % (micro_size_k * k_pack) == 0, (
+            f"block_K ({block_K}) must be divisible by micro_size_k ({micro_size_k}) * k_pack ({k_pack})"
+        )
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
 
@@ -112,11 +127,11 @@ class GemmMFMA(GemmBase):
                 B_shared into local fragments, then issues Matrix Core mfma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a * self.k_pack), in_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b * self.k_pack), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a * k_pack), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b * k_pack), in_dtype)
                 if clear_accum:
                     T.clear(C_buf)
-                for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
+                for ki in T.serial(0, (block_K // (micro_size_k * k_pack))):
                     # Load A into fragment
                     mfma_emitter.ldmatrix_a(
                         A_local,
@@ -147,12 +162,12 @@ class GemmMFMA(GemmBase):
                 B_shared into local fragments, then issues Matrix Core mfma ops,
                 accumulating into C_local.
                 """
-                A_local = T.alloc_local((warp_rows * local_size_a * self.k_pack), in_dtype)
+                A_local = T.alloc_local((warp_rows * local_size_a * k_pack), in_dtype)
 
                 if clear_accum:
                     T.clear(C_buf)
 
-                for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
+                for ki in T.serial(0, (block_K // (micro_size_k * k_pack))):
                     # Load A into fragment
                     mfma_emitter.ldmatrix_a(
                         A_local,
@@ -178,10 +193,10 @@ class GemmMFMA(GemmBase):
                 B_shared into local fragments, then issues Matrix Core mfma ops,
                 accumulating into C_local.
                 """
-                B_local = T.alloc_local((warp_cols * local_size_b * self.k_pack), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b * k_pack), in_dtype)
                 if clear_accum:
                     T.clear(C_buf)
-                for ki in T.serial(0, (block_K // (micro_size_k * self.k_pack))):
+                for ki in T.serial(0, (block_K // (micro_size_k * k_pack))):
                     # Load B into fragment
                     mfma_emitter.ldmatrix_b(
                         B_local,

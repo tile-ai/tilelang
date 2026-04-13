@@ -21,6 +21,9 @@ bool TargetIsRocm(Target target) {
 bool TargetIsMetal(Target target) {
   return target->GetTargetDeviceType() == kDLMetal;
 }
+bool TargetIsCPU(Target target) {
+  return target->GetTargetDeviceType() == kDLCPU;
+}
 
 int GetArchInt(Target target) {
   auto s = target->GetAttr<tvm::ffi::String>("arch");
@@ -85,6 +88,27 @@ bool TargetIsCDNA(Target target) {
   return false;
 }
 
+bool TargetIsRDNA(Target target) {
+  if (!TargetIsRocm(target))
+    return false;
+  if (target->attrs.count("mcpu")) {
+    std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
+    // gfx11xx, gfx12xx are RDNA architectures
+    return mcpu.find("gfx11") == 0 || mcpu.find("gfx12") == 0;
+  }
+  return false;
+}
+
+bool TargetIsGfx950(Target target) {
+  if (!TargetIsRocm(target))
+    return false;
+  if (target->attrs.count("mcpu")) {
+    std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
+    return mcpu.find("gfx950") != std::string::npos;
+  }
+  return false;
+}
+
 bool TargetHasAsyncCopy(Target target) {
   if (TargetIsCuda(target)) {
     int arch = GetArchInt(target);
@@ -129,6 +153,14 @@ bool TargetHasBulkCopy(Target target) {
     return false;
   int arch = GetArchInt(target);
   return arch >= 90;
+}
+
+bool TargetIsCuTeDSL(Target target) {
+  for (const auto &key : target->keys) {
+    if (key == "cutedsl")
+      return true;
+  }
+  return false;
 }
 
 bool TargetSupportVectorize256(Target target) {
@@ -277,6 +309,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsSM120(target); })
       .def("tl.TargetIsCDNA",
            [](Target target) { return TargetIsCDNA(target); })
+      .def("tl.TargetIsRDNA",
+           [](Target target) { return TargetIsRDNA(target); })
+      .def("tl.TargetIsGfx950",
+           [](Target target) { return TargetIsGfx950(target); })
       .def("tl.TargetHasAsyncCopy",
            [](Target target) { return TargetHasAsyncCopy(target); })
       .def("tl.TargetHasLdmatrix",

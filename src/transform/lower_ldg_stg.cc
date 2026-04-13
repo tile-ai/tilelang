@@ -11,8 +11,7 @@
  * 2. Converts Ramp-based global BufferStore to stg intrinsics
  * 3. Supports predicated loads (if_then_else with else=0)
  * 4. Supports predicated stores (if_then_else with empty then case)
- * 5. Skips loads in async scope (will be lowered to cp.async)
- * 6. Only enabled for CUDA targets
+ * 5. Only enabled for CUDA targets
  *
  * Pass configurations:
  * - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default:
@@ -30,6 +29,8 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../op/utils.h"
+#include "../target/utils.h"
 #include "tir/ir/buffer_common.h"
 
 namespace tvm {
@@ -43,21 +44,6 @@ public:
                                bool enable_predicated)
       : enable_non_predicated_(enable_non_predicated),
         enable_predicated_(enable_predicated) {}
-
-  Stmt VisitStmt_(const AttrStmtNode *attr) final {
-    if (attr->attr_key == tir::attr::async_scope) {
-      // Mark that we're inside an async scope
-      bool old_in_async = in_async_scope_;
-      in_async_scope_ = true;
-      auto body = this->VisitStmt(attr->body);
-      in_async_scope_ = old_in_async;
-      if (body.same_as(attr->body)) {
-        return tvm::ffi::GetRef<Stmt>(attr);
-      }
-      return AttrStmt(attr->node, attr->attr_key, attr->value, body);
-    }
-    return StmtExprMutator::VisitStmt_(attr);
-  }
 
   Stmt VisitStmt_(const BufferStoreNode *store) final {
     // Skip if non-predicated lowering is disabled
@@ -131,7 +117,7 @@ public:
 
       if (auto store = if_stmt->then_case.as<BufferStoreNode>()) {
         // Only handle global memory stores
-        if (store->buffer.scope() == "global") {
+        if (IsGlobalBuffer(store->buffer)) {
           // Assume buffer has been flattened by FlattenBuffer pass
           ICHECK(store->indices.size() == 1)
               << "Expected flattened buffer with single index, but got "
@@ -174,11 +160,6 @@ public:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *load) final {
-    // Skip loads in async scope (will be lowered to cp.async)
-    if (in_async_scope_) {
-      return StmtExprMutator::VisitExpr_(load);
-    }
-
     // Only handle global memory loads
     if (load->buffer.scope() != "global") {
       return StmtExprMutator::VisitExpr_(load);
@@ -245,11 +226,6 @@ public:
 
     // Check for if_then_else pattern for predicated loads
     if (call->op.same_as(builtin::if_then_else()) && call->args.size() == 3) {
-      // Skip if in async scope
-      if (in_async_scope_) {
-        return StmtExprMutator::VisitExpr_(call);
-      }
-
       PrimExpr condition = call->args[0];
       PrimExpr then_value = call->args[1];
       PrimExpr else_value = call->args[2];
@@ -271,7 +247,7 @@ public:
       if (else_is_zero) {
         // Check if then_value is a BufferLoad from global memory with Ramp
         if (auto load = then_value.as<BufferLoadNode>()) {
-          if (load->buffer.scope() == "global") {
+          if (IsGlobalBuffer(load->buffer)) {
             // Assume buffer has been flattened by FlattenBuffer pass
             ICHECK(load->indices.size() == 1)
                 << "Expected flattened buffer with single index, but got "
@@ -313,7 +289,6 @@ public:
   }
 
 private:
-  bool in_async_scope_{false};
   bool enable_non_predicated_{false};
   bool enable_predicated_{true};
   Optional<PrimExpr>
@@ -503,11 +478,9 @@ tvm::transform::Pass LowerLDGSTG() {
       return f;
     }
 
-    // Check if target has "cutedsl" key - skip for CuTeDSL backend
-    for (const auto &key : target->keys) {
-      if (key == "cutedsl") {
-        return f;
-      }
+    // Skip for CuTeDSL backend
+    if (tl::TargetIsCuTeDSL(target)) {
+      return f;
     }
 
     // Read pass configurations

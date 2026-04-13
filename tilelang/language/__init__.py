@@ -14,7 +14,7 @@ from . import overrides as _overrides  # noqa: F401
 from .eager import *  # noqa: F401
 from .tir.ir import *  # noqa: F401
 from tilelang.layout import Layout, Fragment  # noqa: F401
-from .proxy import ptr, make_tensor, Buffer, Tensor, StridedTensor, FragmentBuffer, SharedBuffer, LocalBuffer  # noqa: F401
+from .proxy import ptr, make_tensor, make_tensor_from_addr, Buffer, Tensor, StridedTensor, FragmentBuffer, SharedBuffer, LocalBuffer  # noqa: F401
 from .loop import (
     Parallel,  # noqa: F401
     Persistent,  # noqa: F401
@@ -43,6 +43,7 @@ from .allocate import (
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
     alloc_barrier,  # noqa: F401
+    alloc_cluster_barrier,  # noqa: F401
     alloc_tmem,  # noqa: F401
     alloc_reducer,  # noqa: F401
     alloc_descriptor,  # noqa: F401
@@ -50,10 +51,12 @@ from .allocate import (
     alloc_tcgen05_smem_desc,  # noqa: F401
     alloc_tcgen05_instr_desc,  # noqa: F401
     empty,  # noqa: F401
+    alloc_global,  # noqa: F401
 )
-from .copy_op import copy, c2d_im2col  # noqa: F401
+from tvm.script.parser.tir import allocate as allocate  # noqa: F401
+from .copy_op import copy, async_copy, tma_copy, transpose, c2d_im2col  # noqa: F401
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
-from .gemm_op import gemm, gemm_v1, gemm_v2  # noqa: F401
+from .gemm_op import gemm, wgmma_gemm, tcgen05_gemm  # noqa: F401
 from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401
 from .fill_op import fill, clear  # noqa: F401
 from .reduce_op import (
@@ -118,6 +121,7 @@ from .annotations import (  # noqa: F401
     annotate_safe_value,
     annotate_l2_hit_ratio,
     annotate_restrict_buffers,
+    annotate_min_blocks_per_sm,
 )
 
 from .random import (
@@ -129,6 +133,14 @@ from .random import (
 from .pdl import (
     pdl_trigger,  # noqa: F401
     pdl_sync,  # noqa: F401
+)
+
+from .cluster import (
+    cluster_arrive_relaxed,  # noqa: F401
+    cluster_arrive,  # noqa: F401
+    cluster_wait,  # noqa: F401
+    cluster_sync,  # noqa: F401
+    block_rank_in_cluster,  # noqa: F401
 )
 
 

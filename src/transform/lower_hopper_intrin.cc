@@ -12,7 +12,6 @@
 
 #include "../op/builtin.h"
 #include "../runtime/runtime.h"
-#include "./common/mbarrier.h"
 
 namespace tvm {
 namespace tl {
@@ -128,59 +127,27 @@ public:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    // Insert the prefetch TMA descriptor statement TO the beginning of the
-    // kernel
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         auto body = StmtExprMutator::VisitStmt(op->body);
-        if (prefetch_calls_.empty() && init_mbarrier_calls_.empty()) {
+        if (prefetch_calls_.empty()) {
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
           Array<Stmt> stmt_seq;
-
-          auto stmts = prefetch_calls_;
-          stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
-                       init_mbarrier_calls_.end());
           PrimExpr condition;
           if (!disable_shuffle_elect_) {
             condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
           } else {
             condition = EQ(iv->var, 0);
           }
+          auto stmts = prefetch_calls_;
           auto stmt_ = IfThenElse(condition,
                                   stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
           stmt_seq.push_back(stmt_);
-          if (!init_mbarrier_calls_.empty()) {
-            // Note from FlashAttention:
-            // Helps with visibility of barrier init operations across warps /
-            // cta / cluster Available as a separate function so as to batch
-            // inits across barriers and fence once Note : It must be composed
-            // with an appropriate sync instruction with the right scope to
-            // ensure visibility eg. __syncthreads() or a cluster_arrive() +
-            // cluster_wait()
-            Stmt mem_fence = Evaluate(Call(
-                DataType::Handle(), tvm::tl::ptx_fence_barrier_init(), {}));
-            stmt_seq.push_back(mem_fence);
-            Stmt mem_sync =
-                Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
-                              {StringImm("shared")}));
-            stmt_seq.push_back(mem_sync);
-          }
           stmt_seq.push_back(body);
-
           Stmt result = SeqStmt(stmt_seq);
-
-          if (!init_mbarrier_calls_.empty()) {
-            mbarrier_buffer_ = CreateMBarrierBuffer(
-                injected_mbarrier_name_, init_mbarrier_calls_.size());
-            result = DeclBuffer(mbarrier_buffer_, result);
-            result = Allocate(mbarrier_buffer_->data, mbarrier_buffer_->dtype,
-                              mbarrier_buffer_->shape, const_true(), result);
-          }
-
           prefetch_calls_.clear();
-          init_mbarrier_calls_.clear();
           return AttrStmt(op->node, op->attr_key, op->value, result);
         }
       }
@@ -205,16 +172,6 @@ public:
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
       }
       return var;
-    } else if (call->op.same_as(create_list_of_mbarrier())) {
-      ICHECK(init_mbarrier_calls_.empty());
-      int num_barriers = static_cast<int>(call->args.size());
-      for (int i = 0; i < num_barriers; i++) {
-        PrimExpr mbarrier = Call(DataType::Handle(), get_mbarrier(), {i});
-        init_mbarrier_calls_.push_back(Evaluate(
-            Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
-                 {mbarrier, call->args[i]})));
-      }
-      return 0;
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }
@@ -222,12 +179,10 @@ public:
 
 private:
   Array<Stmt> prefetch_calls_;
-  Array<Stmt> init_mbarrier_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
-  Buffer mbarrier_buffer_;
 };
 
 using namespace tir::transform;

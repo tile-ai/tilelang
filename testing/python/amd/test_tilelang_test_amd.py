@@ -103,7 +103,10 @@ def run_gemm(
         (False, True, 1),
         (True, True, 1),
         (True, False, 1),
+        (False, False, 2),
         (False, True, 2),
+        (True, True, 2),
+        (True, False, 2),
     ],
 )
 @tilelang.testing.requires_rocm

@@ -1,88 +1,106 @@
-from tilelang import tvm as tvm
-from tilelang.utils.target import determine_target
+"""Tests for TileLang `LowerTileOp` copy annotations affecting cp.async sync."""
+
 import tilelang as tl
 import tilelang.language as T
-import tilelang.testing
-import pytest
-
-auto_target = tvm.target.Target(determine_target("auto"))
+from tilelang import tvm
+from tvm.tir.stmt_functor import post_order_visit
 
 
-@pytest.mark.parametrize(
-    "block_M, block_N, block_K, threads, vec_load_b, dtype",
-    [
-        (64, 64, 32, 128, 8, T.float16),
-    ],
-)
-def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
-    N = tvm.te.var("n")
-    K = tvm.te.var("k")
+def _count_calls(func: tvm.tir.PrimFunc):
+    counts = {}
 
-    def before():
-        @T.prim_func
-        def main(
-            B: T.Tensor((K, N), dtype),
-        ):
-            with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
-                B_shared = T.alloc_shared((block_K, block_N), dtype)
-                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-                    T.copy(B[k * block_K, bx * block_N], B_shared)
+    def _visit(node):
+        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op):
+            name = str(node.op.name)
+            counts[name] = counts.get(name, 0) + 1
 
-        return tvm.IRModule({"main": main})
+    post_order_visit(func.body, _visit)
+    return counts
 
-    def after():
-        @T.prim_func
-        def main(
-            B: T.Tensor((K, N), dtype),
-        ):
-            with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
-                B_shared = T.alloc_shared((block_K, block_N), dtype)
-                thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
-                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-                    t = thread_bindings
-                    for i in T.unroll(0, block_N * block_K // (threads * vec_load_b)):
-                        if (k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b)) * N % vec_load_b == 0:
-                            for vec in T.vectorized(vec_load_b):
-                                B_shared[
-                                    i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                    t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                ] = T.if_then_else(
-                                    k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b) < K
-                                    and bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) < N,
-                                    B[
-                                        k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                        bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                    ],
-                                    T.float16(0),
-                                )
-                        else:
-                            for vec in T.serial(vec_load_b):
-                                B_shared[
-                                    i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                    t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                ] = T.if_then_else(
-                                    k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b) < K
-                                    and bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) < N,
-                                    B[
-                                        k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                        bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                    ],
-                                    T.float16(0),
-                                )
 
-        return tvm.IRModule({"main": main})
+def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
+    target = tvm.target.Target("cuda -arch=sm_80")
 
-    with tvm.transform.PassContext():
-        mod = tvm.tir.transform.BindTarget(auto_target)(before())
+    @T.prim_func
+    def before(
+        A: T.Tensor((16,), T.float32),
+        B: T.Tensor((16,), T.float32),
+    ):
+        T.func_attr({"global_symbol": "main", "target": target})
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 16)
+        S = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        T.copy(
+            A[0:16],
+            S,
+            annotations={"no_implicit_async_commit_wait": T.int32(1)},
+        )
+        B[tx] = S[tx]
+
+    mod = tvm.IRModule.from_expr(before)
+    with target:
         mod = tl.transform.LowerTileOp()(mod)
-        mod = tvm.tir.transform.Simplify()(mod)
-    ref_mod = tvm.tir.transform.BindTarget(auto_target)(after())
-    ref_mod = tvm.tir.transform.Simplify()(ref_mod)
-    # Note(tzj): The structures are equal except the argument in "T.reads" function.
-    # The difference is just between the first index and the indices range, which is totally equivalent
-    tvm.ir.structural_equal(mod, ref_mod)
-    # tvm.ir.assert_structural_equal(mod, ref_mod)
+    calls = _count_calls(mod["main"])
+
+    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tir.ptx_commit_group", 0) == 0
+    assert calls.get("tir.ptx_wait_group", 0) == 0
 
 
-if __name__ == "__main__":
-    tilelang.testing.main()
+def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
+    target = tvm.target.Target("cuda -arch=sm_80")
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((16,), T.float32),
+        B: T.Tensor((16,), T.float32),
+    ):
+        T.func_attr({"global_symbol": "main", "target": target})
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 16)
+        S = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        T.async_copy(
+            A[0:16],
+            S,
+            annotations={"no_implicit_async_commit_wait": T.int32(1)},
+        )
+        B[tx] = S[tx]
+
+    mod = tvm.IRModule.from_expr(before)
+    with target:
+        mod = tl.transform.LowerTileOp()(mod)
+    calls = _count_calls(mod["main"])
+
+    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tir.ptx_commit_group", 0) == 0
+    assert calls.get("tir.ptx_wait_group", 0) == 0
+
+
+def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_context():
+    target = tvm.target.Target("cuda -arch=sm_80")
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((16,), T.float32),
+        B: T.Tensor((16,), T.float32),
+    ):
+        T.func_attr({"global_symbol": "main", "target": target})
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 16)
+        S = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for i in T.parallel(
+            16,
+            annotations={"parallel_async_without_async_commit_wait": T.bool(True)},
+        ):
+            S[i] = A[i]
+        B[tx] = S[tx]
+
+    mod = tvm.IRModule.from_expr(before)
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+    calls = _count_calls(mod["main"])
+
+    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tir.ptx_commit_group", 0) == 0
+    assert calls.get("tir.ptx_wait_group", 0) == 0
