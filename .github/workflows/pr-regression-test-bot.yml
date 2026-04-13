@@ -41,7 +41,7 @@ jobs:
     steps:
       - name: Get commenter permission
         id: perm
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const username = context.payload.comment.user.login
@@ -241,7 +241,7 @@ jobs:
           path: regression_result.png
 
       - name: Post test results as PR comment
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
