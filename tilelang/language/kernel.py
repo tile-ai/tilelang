@@ -285,10 +285,6 @@ def Kernel(
         For example, use 2 or (2, 1, 1) to create 2-CTA clusters.
         When specified, the kernel will be launched using cudaLaunchKernelEx
         with cudaLaunchAttributeClusterDimension.
-    is_cpu : bool
-        Whether the kernel is running on CPU.
-        Thus we will not bind threadIdx.x, threadIdx.y, threadIdx.z.
-        and blockIdx.x, blockIdx.y, blockIdx.z.
     prelude : str
         The import c code of the kernel,
         will be injected before the generated kernel code.
@@ -348,12 +344,13 @@ def Kernel(
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
 
 
-# For CUDA Kernel blocks, we need to load the source code from a file or string.
+# For CUDA source kernels, we need to load the source code from a file or string.
 
 
-def _load_cuda_source(source: str) -> str:
+def _load_cuda_source(source_code_or_path: str | os.PathLike[str]) -> str:
+    source = os.fspath(source_code_or_path)
     if not isinstance(source, str) or not source.strip():
-        raise ValueError("source must be a non-empty source string or source path")
+        raise ValueError("source_code_or_path must be a non-empty source string or source path")
 
     expanded = os.path.expanduser(source)
     if os.path.isfile(expanded):
@@ -364,46 +361,15 @@ def _load_cuda_source(source: str) -> str:
     if any(marker in source for marker in source_markers):
         return source
 
-    if os.path.sep in source or source.endswith((".cu", ".cuh", ".cuda", ".cpp", ".cc", ".c")):
+    contains_path_sep = os.path.sep in source or (os.path.altsep is not None and os.path.altsep in source)
+    if contains_path_sep or source.endswith((".cu", ".cuh", ".cuda", ".cpp", ".cc", ".c")):
         raise FileNotFoundError(f"CUDA source file not found: {source}")
 
     return source
 
 
-def _launch_cuda_source_kernel(
-    source: str,
-    *blocks: int | tir.PrimExpr,
-    threads: int | list[int] | tuple | None = None,
-    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
-    prelude: str | None = None,
-) -> None:
-    from tilelang.language.eager.builder import Builder
-
-    if Builder.current() is None:
-        raise JITNoBuilderError(
-            "T.CUDASourceCodeKernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available."
-        )
-
-    if prelude is not None:
-        source = prelude + "\n" + source
-
-    attrs: dict = {}
-    threads = _normalize_threads(threads, is_cpu=False)
-    attrs["code_block_source"] = source
-
-    cluster_dims = _normalize_cluster_dims(cluster_dims)
-    if cluster_dims is not None:
-        attrs["cluster_dims"] = cluster_dims
-
-    with _ffi_api.KernelLaunch(blocks, threads, attrs):
-        # Keep the launch frame alive until SplitHostDevice can lift the
-        # external CUDA source pragma onto the device PrimFunc.
-        T_evaluate(tir.call_extern("int32", "__tl_source_kernel_marker"))
-
-
 def CUDASourceCodeKernel(
-    source_code: str | None = None,
-    source_path: str | None = None,
+    source_code_or_path: str | os.PathLike[str],
     *blocks: int | tir.PrimExpr,
     threads: int | list[int] | tuple | None = None,
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
@@ -417,8 +383,10 @@ def CUDASourceCodeKernel(
 
     Parameters
     ----------
-    source_path : str
-        The path to the CUDA source file or the CUDA source code.
+    source_code_or_path : str | os.PathLike[str]
+        Inline CUDA source code, or a path to a CUDA source file.
+        If the argument resolves to an existing file, the file contents are
+        loaded. Otherwise it is treated as inline CUDA source code.
     blocks : int
         A list of extent, can be 1-3 dimension, representing gridDim.(x|y|z)
     threads : int
@@ -438,21 +406,28 @@ def CUDASourceCodeKernel(
         The import c code of the kernel,
         will be injected before the generated kernel code.
     """
+    from tilelang.language.eager.builder import Builder
 
-    if source_code:
-        source = _load_cuda_source(source_code)
-    elif source_path:
-        source = _load_cuda_source(source_path)
-    else:
-        raise ValueError("Either source_code or source_path must be provided in CUDASourceCodeKernel.")
+    if Builder.current() is None:
+        raise JITNoBuilderError(
+            "T.CUDASourceCodeKernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available."
+        )
 
-    _launch_cuda_source_kernel(
-        source,
-        *blocks,
-        threads=threads,
-        cluster_dims=cluster_dims,
-        prelude=prelude,
-    )
+    source = _load_cuda_source(source_code_or_path)
+    if prelude is not None:
+        source = prelude + "\n" + source
+
+    attrs: dict = {"code_block_source": source}
+    threads = _normalize_threads(threads, is_cpu=False)
+
+    cluster_dims = _normalize_cluster_dims(cluster_dims)
+    if cluster_dims is not None:
+        attrs["cluster_dims"] = cluster_dims
+
+    with _ffi_api.KernelLaunch(blocks, threads, attrs):
+        # Keep the launch frame alive until SplitHostDevice can lift the
+        # external CUDA source pragma onto the device PrimFunc.
+        T_evaluate(tir.call_extern("int32", "__tl_source_kernel_marker"))
 
 
 def get_thread_binding(dim: int = 0) -> Var:

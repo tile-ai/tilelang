@@ -143,7 +143,12 @@ private:
     };
 
     for (const auto &param : host_params_) {
-      push(param);
+      // Buffer handle params belong to the host ABI only.  External CUDA
+      // source kernels should receive the lowered buffer data pointers plus
+      // any symbolic shape/stride vars, not the original DLTensor handles.
+      if (!host_buffer_map_.count(param)) {
+        push(param);
+      }
     }
 
     Array<tir::Buffer> buffers_to_declare;

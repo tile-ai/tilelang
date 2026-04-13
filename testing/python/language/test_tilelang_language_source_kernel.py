@@ -1,6 +1,8 @@
+import inspect
 import os
 import re
 import tempfile
+from pathlib import Path
 
 import tilelang
 import tilelang.language as T
@@ -17,7 +19,7 @@ extern "C" __global__ void external_copy(float* A, float* B, int n) {
 """
 
 
-def make_source_kernel(source: str):
+def make_source_kernel(source_code_or_path: str | os.PathLike[str]):
     N = T.dynamic("N")
 
     @T.prim_func
@@ -25,7 +27,7 @@ def make_source_kernel(source: str):
         A: T.Tensor((N,), T.float32),
         B: T.Tensor((N,), T.float32),
     ):
-        T.CUDASourceCodeKernel(source, T.ceildiv(N, 128), threads=128)
+        T.CUDASourceCodeKernel(source_code_or_path, T.ceildiv(N, 128), threads=128)
 
     return main
 
@@ -34,6 +36,14 @@ def get_single_device_function_name(device_mod) -> str:
     function_names = [g_var.name_hint for g_var in device_mod.functions]
     assert len(function_names) == 1
     return function_names[0]
+
+
+def test_source_kernel_api_signature():
+    params = inspect.signature(T.CUDASourceCodeKernel).parameters
+
+    assert "source_code_or_path" in params
+    assert "source_code" not in params
+    assert "source_path" not in params
 
 
 @tilelang.testing.requires_cuda
@@ -56,7 +66,7 @@ def test_source_kernel_loads_from_file():
         source_path = f.name
 
     try:
-        artifact = tilelang.lower(make_source_kernel(source_path), target="cuda")
+        artifact = tilelang.lower(make_source_kernel(Path(source_path)), target="cuda")
     finally:
         os.unlink(source_path)
 
