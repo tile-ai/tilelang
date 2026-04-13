@@ -29,6 +29,7 @@ def test_issue_1106():
     m = 200
     kernel = get_kernel(m)
     source = kernel.get_kernel_source()
+    print(source)
     # Ensure __syncthreads is not inside the for loop
     for_start = source.find("for (int i = 0;")
     for_end = source.find("__syncthreads")
