@@ -288,6 +288,16 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
   return false;
 }
 
+int TargetGetRDNAGeneration(Target target) {
+  if (!TargetIsRDNA(target)) return 0;
+  if (target->attrs.count("mcpu")) {
+    std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
+    if (mcpu.rfind("gfx11", 0) == 0) return 11;
+    if (mcpu.rfind("gfx12", 0) == 0) return 12;
+  }
+  return 0;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()

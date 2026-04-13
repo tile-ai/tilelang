@@ -15,6 +15,7 @@
 
 #include "../op/builtin.h"
 #include "target/source/ptx.h"
+#include "utils.h"
 
 namespace tvm {
 namespace codegen {
@@ -1021,32 +1022,53 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_ref = this->PrintExpr(op->args[10]);
     std::string c_bias = this->PrintExpr(op->args[11]);
 
+    // Get RDNA Generation
+    ICHECK(target_.defined()) << "CodeGenTileLangHIP target is not set";
+    int rdna_gen = tvm::tl::TargetGetRDNAGeneration(target_);
+    ICHECK(rdna_gen == 11 || rdna_gen == 12)
+      << "Unsupported RDNA target for WMMA: gfx" << target_->str();
+
     // Determine wmma builtin name from shape
     // shape = "f32_16x16x16_f16_w32" ->
     // "__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12" For gfx12 targets use
-    // the _gfx12 suffix variant.
-    std::string wmma_builtin = "__builtin_amdgcn_wmma_" + shape + "_gfx12";
+    // the _gfx12 suffix variant, which gfx11 targets don't have.
+    std::string wmma_builtin = "__builtin_amdgcn_wmma_" + shape;
+
+    int ab_half_elems = 16;
+    std::string ab_vec_typedef = "tl_v16f16";
+    if (rdna_gen == 12) {
+      wmma_builtin += "_gfx12";
+      ab_half_elems = 8;
+      ab_vec_typedef = "tl_v8f16";
+    }
 
     // Emit the WMMA call.
+    // For gfx12:
     // Signature: v8f32 = wmma_builtin(v8f16 a, v8f16 b, v8f32 c)
     // where v8f16 = __fp16 x 8, v8f32 = float x 8.
+    // For gfx11:
+    // Signature: v8f32 = wmma_builtin(v16f16 a, v16f16 b, v8f32 c)
+    // where v16f16 = __fp16 x 16, v8f32 = float x 8.
+    //
     // A/B buffers hold half_t (fp16), C/D buffers hold float.
-    // Each element index accesses a packed vector of 8 elements.
+    // Each element index accesses a packed vector of 8/16 elements.
     //
     // Using typedef'd vector types for the cast:
-    //   typedef __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16
-    //   tl_v8f16; typedef __attribute__((__vector_size__(8 * sizeof(float))))
+    //   typedef __attribute__((__vector_size__(8/16 * sizeof(__fp16)))) __fp16
+    //   tl_v8/16f16; typedef __attribute__((__vector_size__(8 * sizeof(float))))
     //   float tl_v8f32;
     std::string call_wmma_code = R"({
-      typedef __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16 tl_v8f16;
+      typedef __attribute__((__vector_size__({ab_half_elems} * sizeof(__fp16)))) __fp16 {ab_vec_typedef};
       typedef __attribute__((__vector_size__(8 * sizeof(float)))) float tl_v8f32;
       *((tl_v8f32*){c_ref} + {c_bias}) = {wmma_builtin}(
-          *((tl_v8f16*){a_ref} + {a_bias}),
-          *((tl_v8f16*){b_ref} + {b_bias}),
+          *(({ab_vec_typedef}*){a_ref} + {a_bias}),
+          *(({ab_vec_typedef}*){b_ref} + {b_bias}),
           *((tl_v8f32*){c_ref} + {c_bias}));
     })";
     Replacer wmma_replacer;
     wmma_replacer.register_rule("{wmma_builtin}", wmma_builtin);
+    wmma_replacer.register_rule("{ab_half_elems}", std::to_string(ab_half_elems));
+    wmma_replacer.register_rule("{ab_vec_typedef}", ab_vec_typedef);
     wmma_replacer.register_rule("{a_ref}", a_ref);
     wmma_replacer.register_rule("{a_bias}", a_bias);
     wmma_replacer.register_rule("{b_ref}", b_ref);

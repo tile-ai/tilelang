@@ -3,9 +3,13 @@
 Only supports the f16->f32, 16x16x16 variant with warp-size=32.
 
 Thread-data mapping (per AMDGPU ISA):
-  A[16][K=16]: thread t holds A[t//2][(t%2)*8 : (t%2)*8+8]  (8 fp16 = 4 f32 per thread)
-  B[K=16][16]: same mapping as A for the transposed dimension
-  C/D[16][16]: thread t holds D[t//2][(t%2)*8 : (t%2)*8+8]  (8 f32 per thread)
+  gfx11:
+    - A/B: duplicated across the two half-waves, so each logical input fragment
+      is distributed over an effective wave size of 16 lanes.
+    - C/D: distributed over the full wave32 output layout.
+  gfx12:
+    - A/B: distributed over the full wave32 input layout.
+    - C/D: distributed over the full wave32 output layout.
 """
 
 from __future__ import annotations
@@ -23,23 +27,23 @@ from tvm.runtime import convert
 from tilelang.language.utils import get_buffer_region_from_load
 from tilelang.utils import is_fragment
 from .wmma_layout import (
-    shared_16x16_to_local_32x8_layout_A,
-    shared_16x16_to_local_32x8_layout_B,
-    shared_16x16_to_local_32x8_layout_B_colmajor,
-    thread_id_shared_access_32x8_to_16x16_layout_A,
-    thread_id_shared_access_32x8_to_16x16_layout_B,
-    thread_id_shared_access_32x8_to_16x16_layout_B_colmajor,
-    wmma_store_index_map,
+    get_wmma_a_layout_funcs,
+    get_wmma_a_fragment_forward_func,
+    get_wmma_b_layout_funcs,
+    get_wmma_b_fragment_forward_func,
+    get_wmma_c_layout_funcs,
+    get_wmma_fragment_replicate_count,
+    get_wmma_store_index_map_func,
 )
 
 lift = convert
 
 
 class WMMAIntrinEmitter:
-    """Intrinsic emitter for AMD RDNA WMMA (16×16×16, warp-size=32).
+    """Intrinsic emitter for AMD RDNA WMMA (16x16x16, warp-size=32).
 
     Supports:
-      - fp16 -> fp32  (f32_16x16x16_f16_w32 / _gfx12)
+      - fp16 -> fp32  (f32_16x16x16_f16_w32, with `_gfx12` codegen suffix on gfx12)
     """
 
     M_DIM = 16
@@ -79,19 +83,39 @@ class WMMAIntrinEmitter:
         self.k_pack = k_pack
         self.thread_var = thread_var
         self.target = target
+        self.rdna_gen = self._detect_rdna_generation(target)
 
         self.micro_size_x = self.M_DIM
         self.micro_size_y = self.N_DIM
         self.micro_size_k = self.K_DIM
 
-        # Each thread holds 8 fp16 (A/B) or 8 fp32 (C/D)
-        self.local_size_a = (self.M_DIM * self.K_DIM) // self.WARP_SIZE  # = 8
-        self.local_size_b = (self.N_DIM * self.K_DIM) // self.WARP_SIZE  # = 8
-        self.local_size_out = (self.M_DIM * self.N_DIM) // self.WARP_SIZE  # = 8
+        # gfx11 duplicates A/B across half-waves, so the effective input fragment
+        # distribution uses 16 lanes instead of the full wave32 used by gfx12.
+        input_fragment_warp_size = (self.WARP_SIZE // 2) if self.rdna_gen == 11 else self.WARP_SIZE
+        self.local_size_a = (self.M_DIM * self.K_DIM) // input_fragment_warp_size
+        self.local_size_b = (self.N_DIM * self.K_DIM) // input_fragment_warp_size
+        # C/D outputs are distributed over the full wave32 layout on both gfx11 and gfx12.
+        self.local_size_out = (self.M_DIM * self.N_DIM) // self.WARP_SIZE
 
         self.warp_rows = warp_row_tiles // self.M_DIM
         self.warp_cols = warp_col_tiles // self.N_DIM
         self.threads = self.WARP_SIZE * block_row_warps * block_col_warps
+
+        self.a_forward_layout_fn, self.a_reverse_layout_fn = get_wmma_a_layout_funcs(
+            self.rdna_gen
+        )
+        self.a_fragment_forward_fn = get_wmma_a_fragment_forward_func(self.rdna_gen)
+        self.b_forward_layout_fn, self.b_reverse_layout_fn = get_wmma_b_layout_funcs(
+            self.rdna_gen, self.b_transposed
+        )
+        self.b_fragment_forward_fn = get_wmma_b_fragment_forward_func(
+            self.rdna_gen, self.b_transposed
+        )
+        self.c_forward_layout_fn, self.c_reverse_layout_fn = get_wmma_c_layout_funcs(
+            self.rdna_gen
+        )
+        self.fragment_replicate = get_wmma_fragment_replicate_count(self.rdna_gen)
+        self.store_index_map_fn = get_wmma_store_index_map_func(self.rdna_gen)
 
         # Build the wmma shape string used by T.tvm_rdna_wmma
         # shape = "f32_16x16x16_f16_w32" (or _gfx12 suffix is handled in codegen)
@@ -126,37 +150,13 @@ class WMMAIntrinEmitter:
     def get_ldmatrix_index_map(self, is_b: bool = False):
         """Return (forward, reverse) index maps for shared→local loading.
 
-        For WMMA gfx12:
-          - A is stored row-major [M, K]. Thread t loads A[t%16][(t//16)*8+local].
-          - B (non-transposed) is stored row-major [K, N].
-            Thread t loads B[t%16][(t//16)*8+local] (same shape/pattern as A).
-          - B (transposed) is stored [N, K].
-            Thread t loads B_T[t%16][(t//16)*8+local] (N-row, K-col).
+        The actual layout functions are chosen during __init__ based on rdna_gen:
+          - gfx11 uses half-wave duplicated A/B input layouts (32x16 naming).
+          - gfx12 uses full wave32 A/B input layouts (32x8 naming).
         """
-        transposed = self.b_transposed if is_b else self.a_transposed
         if not is_b:
-            # A matrix [M, K]
-            if transposed:
-                # A stored as [K, M]: row=K, col=M → same mapping but rotated
-                # In this case row index runs over K, col over M
-                # thread t: K-row = t%16, M-col = (t//16)*8+local
-                index_map = shared_16x16_to_local_32x8_layout_A
-                reverse_index_map = thread_id_shared_access_32x8_to_16x16_layout_A
-            else:
-                # A stored as [M, K]: row=M, col=K
-                index_map = shared_16x16_to_local_32x8_layout_A
-                reverse_index_map = thread_id_shared_access_32x8_to_16x16_layout_A
-        else:
-            # B matrix
-            if transposed:
-                # B stored as [N, K]: thread t: N-row = t%16, K-col = (t//16)*8+local
-                index_map = shared_16x16_to_local_32x8_layout_B_colmajor
-                reverse_index_map = thread_id_shared_access_32x8_to_16x16_layout_B_colmajor
-            else:
-                # B stored as [K, N]: thread t: K-row = t%16, N-col = (t//16)*8+local
-                index_map = shared_16x16_to_local_32x8_layout_B
-                reverse_index_map = thread_id_shared_access_32x8_to_16x16_layout_B
-        return index_map, reverse_index_map
+            return self.a_forward_layout_fn, self.a_reverse_layout_fn
+        return self.b_forward_layout_fn, self.b_reverse_layout_fn
 
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
         """Return the store index map.
@@ -166,7 +166,7 @@ class WMMAIntrinEmitter:
         """
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
         # forward: (thread_id, local_id) -> (row, col)
-        index_map = IndexMap.from_func(wmma_store_index_map, index_dtype=T.int32)
+        index_map = IndexMap.from_func(self.store_index_map_fn, index_dtype=T.int32)
         if not inverse:
             return index_map
         # inverse: (row, col) -> (thread_id, local_id)
@@ -317,13 +317,14 @@ class WMMAIntrinEmitter:
         M_DIM, N_DIM = self.M_DIM, self.N_DIM
         C_buf_dims = len(C_buf.shape)
         assert C_buf_dims in {2, 4}, "C_buf should be 2D or 4D"
+        store_index_map = self.store_index_map_fn
 
         @T.macro
         def _warp_stmatrix_shared(C_local_buf, C_buf, thread_binding):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             for i, j in T.grid(warp_rows, warp_cols):
                 for local_id in T.vectorized(local_size_out):
-                    row, col = T.meta_var(wmma_store_index_map(tx, local_id))
+                    row, col = T.meta_var(store_index_map(tx, local_id))
                     if C_buf_dims == 2:
                         C_buf[
                             (warp_m * warp_rows + i) * M_DIM + row,
@@ -339,7 +340,7 @@ class WMMAIntrinEmitter:
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             for i, j in T.grid(warp_rows, warp_cols):
                 for local_id in T.vectorized(local_size_out):
-                    row, col = T.meta_var(wmma_store_index_map(tx, local_id))
+                    row, col = T.meta_var(store_index_map(tx, local_id))
                     C_buf[
                         (pid_m * BLOCK_M + warp_m * warp_rows + i) * M_DIM + row,
                         (pid_n * BLOCK_N + warp_n * warp_cols + j) * N_DIM + col,
@@ -361,17 +362,6 @@ class WMMAIntrinEmitter:
 
         matrix_is_a = matrix == "A"
         transposed = self.a_transposed if matrix_is_a else self.b_transposed
-        index_map, _ = self.get_ldmatrix_index_map(is_b=not matrix_is_a)
-
-        inverse_load_layout = IndexMap.from_func(index_map, index_dtype=T.int32)
-
-        def forward_thread(i, j):
-            lane_id, _ = inverse_load_layout.map_indices([i, j])
-            return lane_id
-
-        def forward_index(i, j):
-            _, local_id = inverse_load_layout.map_indices([i, j])
-            return local_id
 
         micro_size_k = self.micro_size_k * self.k_pack
         if matrix_is_a:
@@ -385,29 +375,63 @@ class WMMAIntrinEmitter:
             else:
                 shape_atom = [micro_size_k, self.micro_size_y]
 
-        base_fragment = T.Fragment(
-            shape_atom,
-            forward_thread_fn=forward_thread,
-            forward_index_fn=forward_index,
-        )
+        """
+        gfx11 and gfx12 differ in how logical A/B fragment elements map to lanes.
+        
+        gfx11 duplicates each logical A/B element across the two half-waves
+        (lane t and lane t + 16). A single-owner forward_thread_fn cannot
+        faithfully represent this one-to-many ownership, so we model it with
+        T.Fragment(..., forward_fn=..., replicate=2), where `rep` selects the
+        lower/upper half-wave copy.
+        
+        gfx12 has a single unique owner for each logical element, so the
+        existing forward_thread_fn/forward_index_fn form is sufficient.
+        """
+        if self.rdna_gen == 11:
+            fragment_forward = (
+                self.a_fragment_forward_fn if matrix_is_a else self.b_fragment_forward_fn
+            )
+            assert fragment_forward is not None
+            base_fragment = T.Fragment(
+                shape_atom,
+                forward_fn=fragment_forward,
+                replicate=self.fragment_replicate,
+            )
+        else:
+            index_map, _ = self.get_ldmatrix_index_map(is_b=not matrix_is_a)
+            inverse_load_layout = IndexMap.from_func(index_map, index_dtype=T.int32)
+
+            def forward_thread(i, j):
+                lane_id, _ = inverse_load_layout.map_indices([i, j])
+                return lane_id
+
+            def forward_index(i, j):
+                _, local_id = inverse_load_layout.map_indices([i, j])
+                return local_id
+
+            base_fragment = T.Fragment(
+                shape_atom,
+                forward_thread_fn=forward_thread,
+                forward_index_fn=forward_index,
+            )
 
         warp_s = self.warp_rows if matrix_is_a else self.warp_cols
         warp_r = self.chunk // micro_size_k
         block_s = self.block_row_warps if matrix_is_a else self.block_col_warps
-        replicate = self.block_col_warps if matrix_is_a else self.block_row_warps
+        block_replicate = self.block_col_warps if matrix_is_a else self.block_row_warps
 
         if (matrix_is_a and not transposed) or (not matrix_is_a and transposed):
             warp_fragment = base_fragment.repeat([warp_s, warp_r], repeat_on_thread=False, lower_dim_first=False)
             if matrix_is_a:
-                block_fragment = warp_fragment.repeat([block_s, 1], repeat_on_thread=True, lower_dim_first=True).replicate(replicate)
+                block_fragment = warp_fragment.repeat([block_s, 1], repeat_on_thread=True, lower_dim_first=True).replicate(block_replicate)
             else:
-                block_fragment = warp_fragment.replicate(replicate).repeat([block_s, 1], repeat_on_thread=True, lower_dim_first=True)
+                block_fragment = warp_fragment.replicate(block_replicate).repeat([block_s, 1], repeat_on_thread=True, lower_dim_first=True)
         else:
             warp_fragment = base_fragment.repeat([warp_r, warp_s], repeat_on_thread=False, lower_dim_first=True)
             if matrix_is_a:
-                block_fragment = warp_fragment.repeat([1, block_s], repeat_on_thread=True, lower_dim_first=True).replicate(replicate)
+                block_fragment = warp_fragment.repeat([1, block_s], repeat_on_thread=True, lower_dim_first=True).replicate(block_replicate)
             else:
-                block_fragment = warp_fragment.replicate(replicate).repeat([1, block_s], repeat_on_thread=True, lower_dim_first=True)
+                block_fragment = warp_fragment.replicate(block_replicate).repeat([1, block_s], repeat_on_thread=True, lower_dim_first=True)
 
         return block_fragment
 
@@ -460,3 +484,17 @@ class WMMAIntrinEmitter:
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type: {type(obj)}")
+
+    
+    @staticmethod
+    def _detect_rdna_generation(target: Target | None) -> int:
+        if target is None:
+            raise ValueError("WMMAIntrinEmitter requires a HIP target to select WMMA layouts.")
+        if "mcpu" not in target.attrs:
+            raise ValueError("WMMAIntrinEmitter requires target.attrs['mcpu'] for WMMA layouts.")
+        mcpu = str(target.attrs["mcpu"])
+        if mcpu.startswith("gfx11"):
+            return 11
+        if mcpu.startswith("gfx12"):
+            return 12
+        raise ValueError(f"Unsupported RDNA target for WMMA layouts: {mcpu}")
