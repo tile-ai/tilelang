@@ -130,9 +130,9 @@ private:
       // Inject stride divisibility assumes for sub-byte dtypes.
       // E.g. for fp4 (pack_factor=2), non-last-dim strides must be even.
       for (const auto &e : stride_div_items) {
-        auto cond = EQ(
-            floormod(e.stride, make_const(e.stride.dtype(), e.pack_factor)),
-            make_zero(e.stride.dtype()));
+        auto cond =
+            EQ(floormod(e.stride, make_const(e.stride.dtype(), e.pack_factor)),
+               make_zero(e.stride.dtype()));
         std::stringstream ss;
         ss << "Sub-byte buffer stride must be divisible by " << e.pack_factor
            << ": stride `" << e.stride << "` from buffer ";
@@ -141,8 +141,8 @@ private:
             ss << ", ";
           ss << "`" << e.buffers[i]->name << "`";
         }
-        body = AttrStmt(cond, tir::attr::tilelang_assume,
-                        StringImm(ss.str()), body);
+        body = AttrStmt(cond, tir::attr::tilelang_assume, StringImm(ss.str()),
+                        body);
       }
       return body;
     }

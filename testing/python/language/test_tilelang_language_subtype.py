@@ -300,6 +300,7 @@ def test_subtype_complex_expressions_various(m, n):
     y = torch.randint(0, 256, (m * 2, n // 2), dtype=torch.uint8, device="cuda")
     complex_expr_kernel(x, y)
 
+
 # ---------------------------------------------------------------------------
 # Scalar fp4 store to StridedTensor with dynamic strides.
 # Before the fix the codegen wrote full bytes instead of nibbles, so
@@ -313,13 +314,12 @@ def test_subtype_fp4_dynamic_stride_store(block_size):
     """fp4 store via StridedTensor: dynamic strides must match static strides."""
     num_blocks, n, padding = 10, 64, 4
     fp4_bytes = 64  # 128 fp4 elems packed into 64 bytes
-    jit_kw = dict(out_idx=None, target="cuda",
-                  pass_configs={"tl.disable_data_race_check": True})
+    jit_kw = dict(out_idx=None, target="cuda", pass_configs={"tl.disable_data_race_check": True})
 
     def make_buf():
         row = fp4_bytes + padding
         back = torch.zeros(num_blocks, block_size * row, dtype=torch.uint8, device="cuda")
-        fp4 = back[:, :block_size * fp4_bytes].view(num_blocks, block_size, fp4_bytes).view(torch.int8)
+        fp4 = back[:, : block_size * fp4_bytes].view(num_blocks, block_size, fp4_bytes).view(torch.int8)
         return back, fp4
 
     torch.manual_seed(0)
@@ -337,7 +337,7 @@ def test_subtype_fp4_dynamic_stride_store(block_size):
         nb = T.dynamic("num_blocks")
         src: T.Tensor[(nv, 128), T.float4_e2m1fn]
         dst: T.StridedTensor[(nb, block_size, 128), (s0, s1, 1), T.float4_e2m1fn]
-        slots: T.Tensor[(nv,), "int32"]
+        slots: T.Tensor[(nv,), T.int32]
         with T.Kernel(nv, threads=32) as i:
             for k in T.serial(128):
                 dst[slots[i] // block_size, slots[i] % block_size, k] = src[i, k]
@@ -353,7 +353,7 @@ def test_subtype_fp4_dynamic_stride_store(block_size):
         ds1 = T.dynamic("ds1")
         src: T.Tensor[(nv, 128), T.float4_e2m1fn]
         dst: T.StridedTensor[(nb, block_size, 128), (ds0, ds1, 1), T.float4_e2m1fn]
-        slots: T.Tensor[(nv,), "int32"]
+        slots: T.Tensor[(nv,), T.int32]
         with T.Kernel(nv, threads=32) as i:
             for k in T.serial(128):
                 dst[slots[i] // block_size, slots[i] % block_size, k] = src[i, k]
@@ -362,8 +362,7 @@ def test_subtype_fp4_dynamic_stride_store(block_size):
     dynamic_kern(src, fp4_d, slots)
 
     assert torch.equal(back_s, back_d), (
-        f"static vs dynamic stride mismatch: "
-        f"{(back_s != back_d).sum().item()}/{back_s.numel()} bytes differ"
+        f"static vs dynamic stride mismatch: {(back_s != back_d).sum().item()}/{back_s.numel()} bytes differ"
     )
 
 
@@ -377,7 +376,7 @@ def test_subtype_fp4_scalar_store_codegen(n):
         nv = T.dynamic("n")
         src: T.Tensor[(nv, 128), T.float4_e2m1fn]
         dst: T.Tensor[(nv, 128), T.float4_e2m1fn]
-        perm: T.Tensor[(nv,), "int32"]
+        perm: T.Tensor[(nv,), T.int32]
         with T.Kernel(nv, threads=32) as i:
             for k in T.serial(128):
                 dst[perm[i], k] = src[i, k]
@@ -394,9 +393,7 @@ def test_subtype_fp4_scalar_store_codegen(n):
     inv[perm] = torch.arange(n, dtype=torch.int32, device="cuda")
     expected = src.view(torch.uint8)[inv.long()]
     actual = dst.view(torch.uint8)
-    assert torch.equal(expected, actual), (
-        f"scatter fp4 mismatch: {(expected != actual).sum().item()}/{actual.numel()} bytes differ"
-    )
+    assert torch.equal(expected, actual), f"scatter fp4 mismatch: {(expected != actual).sum().item()}/{actual.numel()} bytes differ"
 
 
 if __name__ == "__main__":
