@@ -300,6 +300,84 @@ def test_subtype_complex_expressions_various(m, n):
     y = torch.randint(0, 256, (m * 2, n // 2), dtype=torch.uint8, device="cuda")
     complex_expr_kernel(x, y)
 
+# ---------------------------------------------------------------------------
+# Scalar fp4 store to StridedTensor with dynamic strides.
+# Before the fix the codegen wrote full bytes instead of nibbles, so
+# consecutive fp4 elements sharing a byte would overwrite each other.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("block_size", [8, 16])
+def test_subtype_fp4_dynamic_stride_store(block_size):
+    """fp4 store via StridedTensor: dynamic strides must match static strides."""
+    num_blocks, n, padding = 10, 64, 4
+    fp4_bytes = 64  # 128 fp4 elems packed into 64 bytes
+    jit_kw = dict(out_idx=None, target="cuda",
+                  pass_configs={"tl.disable_data_race_check": True})
+
+    # -- kernel with compile-time constant strides (reference) --
+    @tilelang.jit(**jit_kw)
+    def static_kern(block_size: int, s0: int, s1: int) -> object:
+        n = T.dynamic("n")
+        num_blocks = T.dynamic("num_blocks")
+
+        @T.prim_func
+        def f(src: T.Tensor((n, 128), T.float4_e2m1fn),
+              dst: T.StridedTensor((num_blocks, block_size, 128),
+                                   (s0, s1, 1), T.float4_e2m1fn),
+              slots: T.Tensor((n,), "int32")) -> None:
+            with T.Kernel(n, threads=32) as i:
+                for k in T.serial(128):
+                    dst[slots[i] // block_size,
+                        slots[i] % block_size, k] = src[i, k]
+        return f
+
+    # -- kernel with runtime-resolved strides --
+    @tilelang.jit(**jit_kw)
+    def dynamic_kern(block_size: int) -> object:
+        n = T.dynamic("n")
+        num_blocks = T.dynamic("num_blocks")
+        ds0 = T.dynamic("ds0")
+        ds1 = T.dynamic("ds1")
+
+        @T.prim_func
+        def f(src: T.Tensor((n, 128), T.float4_e2m1fn),
+              dst: T.StridedTensor((num_blocks, block_size, 128),
+                                   (ds0, ds1, 1), T.float4_e2m1fn),
+              slots: T.Tensor((n,), "int32")) -> None:
+            with T.Kernel(n, threads=32) as i:
+                for k in T.serial(128):
+                    dst[slots[i] // block_size,
+                        slots[i] % block_size, k] = src[i, k]
+        return f
+
+    # -- helpers --
+    def make_buf():
+        row = fp4_bytes + padding
+        back = torch.zeros(num_blocks, block_size * row, dtype=torch.uint8, device="cuda")
+        fp4 = back[:, :block_size * fp4_bytes].view(num_blocks, block_size, fp4_bytes).view(torch.int8)
+        return back, fp4
+
+    torch.manual_seed(0)
+    src = torch.randint(0, 256, (n, 64), dtype=torch.uint8, device="cuda").view(torch.int8)
+    slots = torch.randperm(num_blocks * block_size, dtype=torch.int32, device="cuda")[:n]
+
+    # static (reference)
+    back_s, fp4_s = make_buf()
+    s0 = fp4_s.stride(0) * 2  # byte stride → fp4-element stride
+    s1 = fp4_s.stride(1) * 2
+    static_kern(block_size, s0, s1)(src, fp4_s, slots)
+
+    # dynamic
+    back_d, fp4_d = make_buf()
+    dynamic_kern(block_size)(src, fp4_d, slots)
+
+    assert torch.equal(back_s, back_d), (
+        f"static vs dynamic stride mismatch: "
+        f"{(back_s != back_d).sum().item()}/{back_s.numel()} bytes differ"
+    )
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
