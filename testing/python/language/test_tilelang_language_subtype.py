@@ -316,43 +316,6 @@ def test_subtype_fp4_dynamic_stride_store(block_size):
     jit_kw = dict(out_idx=None, target="cuda",
                   pass_configs={"tl.disable_data_race_check": True})
 
-    # -- kernel with compile-time constant strides (reference) --
-    @tilelang.jit(**jit_kw)
-    def static_kern(block_size: int, s0: int, s1: int) -> object:
-        n = T.dynamic("n")
-        num_blocks = T.dynamic("num_blocks")
-
-        @T.prim_func
-        def f(src: T.Tensor((n, 128), T.float4_e2m1fn),
-              dst: T.StridedTensor((num_blocks, block_size, 128),
-                                   (s0, s1, 1), T.float4_e2m1fn),
-              slots: T.Tensor((n,), "int32")) -> None:
-            with T.Kernel(n, threads=32) as i:
-                for k in T.serial(128):
-                    dst[slots[i] // block_size,
-                        slots[i] % block_size, k] = src[i, k]
-        return f
-
-    # -- kernel with runtime-resolved strides --
-    @tilelang.jit(**jit_kw)
-    def dynamic_kern(block_size: int) -> object:
-        n = T.dynamic("n")
-        num_blocks = T.dynamic("num_blocks")
-        ds0 = T.dynamic("ds0")
-        ds1 = T.dynamic("ds1")
-
-        @T.prim_func
-        def f(src: T.Tensor((n, 128), T.float4_e2m1fn),
-              dst: T.StridedTensor((num_blocks, block_size, 128),
-                                   (ds0, ds1, 1), T.float4_e2m1fn),
-              slots: T.Tensor((n,), "int32")) -> None:
-            with T.Kernel(n, threads=32) as i:
-                for k in T.serial(128):
-                    dst[slots[i] // block_size,
-                        slots[i] % block_size, k] = src[i, k]
-        return f
-
-    # -- helpers --
     def make_buf():
         row = fp4_bytes + padding
         back = torch.zeros(num_blocks, block_size * row, dtype=torch.uint8, device="cuda")
@@ -363,19 +326,76 @@ def test_subtype_fp4_dynamic_stride_store(block_size):
     src = torch.randint(0, 256, (n, 64), dtype=torch.uint8, device="cuda").view(torch.int8)
     slots = torch.randperm(num_blocks * block_size, dtype=torch.int32, device="cuda")[:n]
 
-    # static (reference)
+    # static (reference) — strides known at compile time
     back_s, fp4_s = make_buf()
     s0 = fp4_s.stride(0) * 2  # byte stride → fp4-element stride
     s1 = fp4_s.stride(1) * 2
-    static_kern(block_size, s0, s1)(src, fp4_s, slots)
 
-    # dynamic
+    @tilelang.jit(**jit_kw)
+    def static_kern(src, dst, slots):
+        nv = T.dynamic("n")
+        nb = T.dynamic("num_blocks")
+        src: T.Tensor[(nv, 128), T.float4_e2m1fn]
+        dst: T.StridedTensor[(nb, block_size, 128), (s0, s1, 1), T.float4_e2m1fn]
+        slots: T.Tensor[(nv,), "int32"]
+        with T.Kernel(nv, threads=32) as i:
+            for k in T.serial(128):
+                dst[slots[i] // block_size, slots[i] % block_size, k] = src[i, k]
+
+    static_kern(src, fp4_s, slots)
+
+    # dynamic — strides resolved at runtime
+    @tilelang.jit(**jit_kw)
+    def dynamic_kern(src, dst, slots):
+        nv = T.dynamic("n")
+        nb = T.dynamic("num_blocks")
+        ds0 = T.dynamic("ds0")
+        ds1 = T.dynamic("ds1")
+        src: T.Tensor[(nv, 128), T.float4_e2m1fn]
+        dst: T.StridedTensor[(nb, block_size, 128), (ds0, ds1, 1), T.float4_e2m1fn]
+        slots: T.Tensor[(nv,), "int32"]
+        with T.Kernel(nv, threads=32) as i:
+            for k in T.serial(128):
+                dst[slots[i] // block_size, slots[i] % block_size, k] = src[i, k]
+
     back_d, fp4_d = make_buf()
-    dynamic_kern(block_size)(src, fp4_d, slots)
+    dynamic_kern(src, fp4_d, slots)
 
     assert torch.equal(back_s, back_d), (
         f"static vs dynamic stride mismatch: "
         f"{(back_s != back_d).sum().item()}/{back_s.numel()} bytes differ"
+    )
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("n", [64, 128])
+def test_subtype_fp4_scalar_store_codegen(n):
+    """Scatter fp4 elements via indirection — forces scalar (non-vectorized) stores."""
+
+    @tilelang.jit(out_idx=None, pass_configs={"tl.disable_data_race_check": True})
+    def scatter_kern(src, dst, perm):
+        nv = T.dynamic("n")
+        src: T.Tensor[(nv, 128), T.float4_e2m1fn]
+        dst: T.Tensor[(nv, 128), T.float4_e2m1fn]
+        perm: T.Tensor[(nv,), "int32"]
+        with T.Kernel(nv, threads=32) as i:
+            for k in T.serial(128):
+                dst[perm[i], k] = src[i, k]
+
+    torch.manual_seed(42)
+    src = torch.randint(0, 256, (n, 64), dtype=torch.uint8, device="cuda").view(torch.int8)
+    dst = torch.zeros(n, 64, dtype=torch.uint8, device="cuda").view(torch.int8)
+    perm = torch.randperm(n, dtype=torch.int32, device="cuda")
+
+    scatter_kern(src, dst, perm)
+
+    # Invert the permutation and check src[inv[j]] == dst[j] at byte level
+    inv = torch.empty_like(perm)
+    inv[perm] = torch.arange(n, dtype=torch.int32, device="cuda")
+    expected = src.view(torch.uint8)[inv.long()]
+    actual = dst.view(torch.uint8)
+    assert torch.equal(expected, actual), (
+        f"scatter fp4 mismatch: {(expected != actual).sum().item()}/{actual.numel()} bytes differ"
     )
 
 
