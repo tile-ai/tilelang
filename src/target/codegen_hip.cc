@@ -1222,9 +1222,32 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
     return;
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
-    const StringImmNode *pattern = op->value.as<StringImmNode>();
-    ICHECK(pattern);
-    this->stream << "const dim3 blockIdx = " << pattern->value << "();\n";
+    std::string func_name;
+    int panel_size = 0;
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(tir::builtin::tvm_tuple()) &&
+          call->args.size() >= 2) {
+        const auto *name_node = call->args[0].as<StringImmNode>();
+        const auto *size_node = call->args[1].as<IntImmNode>();
+        ICHECK(name_node && size_node)
+            << "threadblock_swizzle_pattern expects "
+               "tvm_tuple(device_func, panel_size)";
+        func_name = name_node->value;
+        panel_size = static_cast<int>(size_node->value);
+      }
+    } else if (const auto *pattern = op->value.as<StringImmNode>()) {
+      // Backward-compatible path for older IR that stored the full callee name.
+      func_name = pattern->value;
+    }
+    ICHECK(!func_name.empty())
+        << "threadblock_swizzle_pattern expects either tvm_tuple(device_func, "
+           "panel_size) or a StringImm callee name";
+    if (panel_size > 0) {
+      this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
+                   << panel_size << ">();\n";
+    } else {
+      this->stream << "const dim3 blockIdx = " << func_name << "();\n";
+    }
     this->VisitStmt(op->body);
     return;
   }
