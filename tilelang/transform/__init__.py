@@ -165,17 +165,6 @@ def RewriteWgmmaSync():
     return _ffi_api.RewriteWgmmaSync()  # type: ignore
 
 
-def ReuseLocalDescriptorAllocations():
-    """Pool lexically-disjoint local descriptor allocations.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.ReuseLocalDescriptorAllocations()  # type: ignore
-
-
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 

@@ -1172,11 +1172,13 @@ private:
         }
       }
       PrimExpr phase_expr;
+      DataType loop_dtype = op->loop_var.dtype();
+      PrimExpr two = make_const(loop_dtype, 2);
       if (num_stages > 1) {
-        phase_expr = FloorMod(FloorDiv(op->loop_var, num_stages),
-                              IntImm(DataType::Int(32), 2));
+        PrimExpr num_stages_expr = make_const(loop_dtype, num_stages);
+        phase_expr = FloorMod(FloorDiv(op->loop_var, num_stages_expr), two);
       } else {
-        phase_expr = FloorMod(op->loop_var, IntImm(DataType::Int(32), 2));
+        phase_expr = FloorMod(op->loop_var, two);
       }
       loop_mbar_phase_stack_.push_back(analyzer_->Simplify(phase_expr));
       pushed_loop_mbar_phase = true;

@@ -3,11 +3,8 @@
  * \brief Lower 2SM TCGEN5MMA and related on Blackwell target
  *
  * This pass runs before LowerTileOp. At that point the IR still has T.gemm
- * (tl_gemm / tl.tileop.gemm_py Call), not the lowered tl::tcgen5mma_gemm_ss/ts.
- * We detect Gemm ops that will be lowered to TCGEN5MMA with use_2cta and set
- * block attr.
- *
- * Tilelang gemm defaults to v2 (GemmPyNode); we only support v2, not v1 (Gemm).
+ * (tl.tileop.gemm Call), not the lowered tl::tcgen5mma_gemm_ss/ts. We detect
+ * Gemm ops that will be lowered to TCGEN5MMA with use_2cta and set block attr.
  */
 
 // todo: consider mixture of 1cta/2cta tcgen5mma in the same kernel
@@ -20,7 +17,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../op/gemm_py.h"
+#include "../op/gemm.h"
 #include "../op/operator.h"
 #include "../target/utils.h"
 
@@ -62,9 +59,8 @@ static bool HasValidClusterDimsFor2Cta(const Stmt &body) {
 
 /**
  * \brief Detect 2SM TCGEN5MMA in the kernel (before LowerTileOp).
- * Looks for T.gemm (tl_gemm() Call); if it will be lowered to TCGEN5MMA with
- * use_2cta, sets the flag for the mutator to add block attr.
- * Only supports v2 (GemmPy); v1 (Gemm) is ignored.
+ * Looks for T.gemm (tl.tileop.gemm Call); if it will be lowered to TCGEN5MMA
+ * with use_2cta, sets the flag for the mutator to add block attr.
  */
 class Tcgen5_2SmLower : public StmtExprMutator {
 public:
@@ -76,7 +72,7 @@ private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
       TileOperator tile_op = ParseOperator(ffi::GetRef<Stmt>(op));
-      if (tile_op.defined() && tile_op.as<GemmPy>()) {
+      if (tile_op.defined() && tile_op.as<Gemm>()) {
         // Check if the user explicitly requested 2CTA via the use_2cta
         // annotation on the Call node (set by T.tcgen05_gemm(use_2cta=True)).
         if (call->annotations.count(attr::kUse2Cta)) {

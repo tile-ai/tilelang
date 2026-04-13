@@ -104,7 +104,16 @@ private:
       body = Allocate(buffer->data, buffer->dtype, allocation_shape,
                       const_true(), std::move(body), allocate_annotations);
     }
-    // Step 5. Insert attribute statements converted from pragmas
+    // Step 5. Materialize a lexical scope boundary only for blocks that were
+    // explicitly marked by an earlier semantic lowering pass (for example
+    // gemm/gemm_sp_py). We intentionally avoid re-inferring this from the
+    // lowered alloc_buffers here because provenance has already been blurred by
+    // earlier allocation planning/hoisting passes.
+    if (HasLexicalAllocScopeAnnotation(new_block->annotations)) {
+      body = AttrStmt(Integer(0), tl::attr::kLexicalAllocScope, Integer(1),
+                      std::move(body));
+    }
+    // Step 6. Insert attribute statements converted from pragmas
     for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {
       body = AttrStmt(Integer(0), it->first, it->second, std::move(body));
     }
@@ -274,6 +283,11 @@ private:
         pragma_attrs->begin(), pragma_attrs->end(),
         [](const auto &p1, const auto &p2) { return p1.first < p2.first; });
     return preserved_annotations;
+  }
+
+  static bool
+  HasLexicalAllocScopeAnnotation(const Map<String, ffi::Any> &annotations) {
+    return annotations.find(tl::attr::kLexicalAllocScope) != annotations.end();
   }
 
   Buffer ResolveLocalVarBuffer(const Array<Buffer> &alloc_buffers) const {
