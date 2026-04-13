@@ -7,7 +7,7 @@ import tvm.script.ir_builder.tir._ffi_api as tb_ffi
 import numpy as np
 from tilelang import logger
 
-_TFLOAT32_TYPE_CODE = 129
+_TFLOAT32_TYPE_CODE = 130
 
 _T = TypeVar("_T")
 
