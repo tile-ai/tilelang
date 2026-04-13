@@ -1422,7 +1422,6 @@ private:
   // without recomputing indices, since swizzle is encoded in TMA descriptor
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
-  int pipelined_depth_{0};
   // Pending barrier arrive-count overrides from multi-TMA cluster-copy
   // decomposition.  Maps barrier buffer data Var → new arrive count N.
   // Populated by LowerClusterCopy via UpdateBarrierArriveCallback and

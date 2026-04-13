@@ -11,8 +11,6 @@
 
 namespace tl {
 
-TL_DEVICE void cluster_unsupported_trap() { asm volatile("trap;"); }
-
 TL_DEVICE void cluster_arrive_relaxed() {
 #if defined(TILELANG_CLUSTER_ENABLED)
   asm volatile("barrier.cluster.arrive.relaxed.aligned;\n" : :);

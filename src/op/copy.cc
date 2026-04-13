@@ -964,6 +964,19 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
     }
   }
 
+  // cluster_mask != 0 means TMA multicast, which requires the
+  // descriptor-based TMA bulk-load path.  Force kBulkLoad before any other
+  // routing so we never silently fall through to kNormal.
+  if (GetClusterMask() != 0) {
+    ICHECK(CheckBulkLoad(target, analyzer))
+        << "cluster_mask=0x" << std::hex << GetClusterMask()
+        << " requires descriptor-based TMA (kBulkLoad), but the copy does not "
+           "meet TMA bulk-load constraints. src="
+        << src->name << " (scope=" << src.scope() << "), dst=" << dst->name
+        << " (scope=" << dst.scope() << ").";
+    return CopyInst::kBulkLoad;
+  }
+
   bool is_async_copy = GetIsAsyncCopy();
   bool no_implicit_commit_wait = GetNoImplicitAsyncCommitWait();
 

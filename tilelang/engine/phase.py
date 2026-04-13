@@ -1,38 +1,9 @@
 from __future__ import annotations
 from tvm import tir, IRModule
 from tvm.target import Target
-import tvm
 import tilelang
 from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma, is_hopper, have_pdl
-
-
-def _mod_uses_tma_barriers(mod: IRModule) -> bool:
-    """Return True if any PrimFunc in *mod* contains a ``create_barriers`` call.
-
-    ``LowerHopperIntrin`` emits ``create_barriers`` into every device function
-    that uses TMA/mbarrier and nowhere else.  Checking for that call after
-    lowering therefore tells us whether a given kernel actually needs the
-    128-byte shared-memory alignment that TMA descriptors require, without
-    forcing the alignment on every kernel that merely runs on a Hopper GPU.
-    """
-    found = [False]
-
-    def _visit(node):
-        if found[0]:
-            return
-        if isinstance(node, tir.Call):
-            op = getattr(node, "op", None)
-            if op is not None and getattr(op, "name", "").endswith("create_barriers"):
-                found[0] = True
-
-    for func in mod.functions.values():
-        if found[0]:
-            break
-        if isinstance(func, tir.PrimFunc):
-            tvm.tir.stmt_functor.post_order_visit(func.body, _visit)
-
-    return found[0]
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
