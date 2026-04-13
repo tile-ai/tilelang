@@ -159,11 +159,15 @@ Block-wide predicated sync
 
 Warp-shuffle (intra-warp data exchange)
 - `T.shfl_sync(mask, value, src_lane[, width])`: Broadcast value from `src_lane` to all lanes (`__shfl_sync`).
-- `T.shfl_xor(value, offset)`: XOR-swap across lanes (`__shfl_xor_sync`, full mask).
-- `T.shfl_down(value, offset)`: Shift down by `offset` lanes (`__shfl_down_sync`, full mask).
-- `T.shfl_up(value, offset)`: Shift up by `offset` lanes (`__shfl_up_sync`, full mask).
+- `T.shfl_xor(value, offset[, mask, width])`: XOR-swap across lanes (`__shfl_xor_sync`).
+- `T.shfl_down(value, offset[, mask, width])`: Shift down by `offset` lanes (`__shfl_down_sync`).
+- `T.shfl_up(value, offset[, mask, width])`: Shift up by `offset` lanes (`__shfl_up_sync`).
 
-> **Note on HIP:** `any_sync`/`all_sync` ignore the mask and call `__any`/`__all` directly. `ballot_sync`, `ballot`, and `activemask` call `__ballot` which returns `uint64` natively on 64-thread wavefronts — no truncation occurs. `syncthreads_count/and/or` have identical signatures on both platforms.
+Warp-match (CUDA sm_70+, not supported on HIP)
+- `T.match_any_sync(mask, value)` → `uint32`: Bitmask of lanes in `mask` whose `value` matches the calling lane's (`__match_any_sync`).
+- `T.match_all_sync(mask, value)` → `uint32`: Returns `mask` if all lanes in `mask` agree on `value`, else 0 (`__match_all_sync`). The C-level `int*` predicate output is hidden; reconstruct it as `result != 0`.
+
+> **Note on HIP:** `any_sync`/`all_sync` ignore the mask and call `__any`/`__all` directly. `ballot_sync`, `ballot`, and `activemask` call `__ballot` which returns `uint64` natively on 64-thread wavefronts — no truncation occurs. Shuffle intrinsics lower to `__shfl`/`__shfl_xor`/`__shfl_down`/`__shfl_up` (mask ignored). `syncthreads_count/and/or` have identical signatures on both platforms. `match_any_sync` and `match_all_sync` have no HIP equivalent and will fail to codegen on HIP.
 
 Atomics
 - `T.atomic_add(dst, value, memory_order=None, return_prev=False, use_tma=False)`.
