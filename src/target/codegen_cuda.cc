@@ -3827,9 +3827,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
     // For scalar fp4 loads from non-packed buffers, use tl_fp4_packed_load
-    // to correctly extract the nibble at the given index (the /2 in GetBufferRef
-    // maps two consecutive fp4 elements to the same byte, but reading that byte
-    // only returns the low nibble — the odd-indexed element is lost).
+    // to correctly extract the nibble at the given index (the /2 in
+    // GetBufferRef maps two consecutive fp4 elements to the same byte, but
+    // reading that byte only returns the low nibble — the odd-indexed element
+    // is lost).
     if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
       std::string idx_str = PrintExpr(index);
       std::string vid = GetVarID(buffer_var.get());
@@ -3911,8 +3912,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   if (value_dtype.lanes() == element_dtype.lanes()) {
     // For scalar fp4 stores to non-packed buffers, use tl_fp4_packed_store
     // to correctly handle nibble-level writes. The /2 in GetBufferRef maps two
-    // consecutive fp4 elements to the same byte, and a plain assignment overwrites
-    // the entire byte — destroying the neighboring nibble.
+    // consecutive fp4 elements to the same byte, and a plain assignment
+    // overwrites the entire byte — destroying the neighboring nibble.
     if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
       std::string idx_str = PrintExpr(index_expr);
       std::string value = this->PrintExpr(op->value);
