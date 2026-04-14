@@ -44,13 +44,13 @@ EMPIRICALLY VERIFIED hardware layouts for wmma_f32_16x16x16_f16_w32 (gfx11):
     Reverse: (thread, local) -> (M=(thread//16)+local*2, N=thread%16)
     Store: D[M=(t//16)+l*2][N=t%16] = d_vec[l]
 
-NOTE: 
-1.  A and D have DIFFERENT layouts (e.g. For gfx12, A uses t%16 for M, 
-    D uses (t//16)*8+l for M). This means they cannot be used interchangeably 
+NOTE:
+1.  A and D have DIFFERENT layouts (e.g. For gfx12, A uses t%16 for M,
+    D uses (t//16)*8+l for M). This means they cannot be used interchangeably
     without a layout change.
 2.  For gfx11, lane 16~31 share the same A/B data as lane 0~15.
 
-local_size = 8 (gfx12) | 16 (gfx11) 
+local_size = 8 (gfx12) | 16 (gfx11)
 """
 
 from tvm.runtime import convert
@@ -72,6 +72,24 @@ def shared_16x16_to_local_32x8_layout_A_gfx12(i, j):
 def thread_id_shared_access_32x8_to_16x16_layout_A_gfx12(thread_id, local_id):
     """Reverse: (thread, local) -> (i=M=thread%16, j=K=(thread//16)*8+local)."""
     return thread_id % 16, (thread_id // 16) * 8 + local_id
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# gfx12 A_T matrix (transposed storage, K x M): shared[K=16][M=16]
+# A_T[K=(t//16)*8+l][M=t%16]
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def shared_16x16_to_local_32x8_layout_A_colmajor_gfx12(i, j):
+    """Forward: A_T[i=K, j=M] -> (thread=(i//8)*16+j, local=i%8)."""
+    thread_id = (i // 8) * 16 + j  # (K//8)*16 + M
+    local_id = i % 8  # K%8
+    return thread_id, local_id
+
+
+def thread_id_shared_access_32x8_to_16x16_layout_A_colmajor_gfx12(thread_id, local_id):
+    """Reverse: (thread, local) -> (i=K=(thread//16)*8+local, j=M=thread%16)."""
+    return (thread_id // 16) * 8 + local_id, thread_id % 16
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -148,10 +166,10 @@ def wmma_store_index_map_gfx12(thread_id, local_id):
 
 
 def shared_16x16_to_local_32x16_layout_A_gfx11(i, j):
-    """ 
-        Forward: A[i=M, j=K] -> (thread=i, local=j%16).
-        ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
-        a warp.
+    """
+    Forward: A[i=M, j=K] -> (thread=i, local=j%16).
+    ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
+    a warp.
     """
     thread_id = i
     local_id = j % 16
@@ -164,16 +182,38 @@ def thread_id_shared_access_32x16_to_16x16_layout_A_gfx11(thread_id, local_id):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# gfx11 A_T matrix (transposed storage, K x M): shared[K=16][M=16]
+# A_T[K=l][M=t%16]
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def shared_16x16_to_local_32x16_layout_A_colmajor_gfx11(i, j):
+    """
+    Forward: A_T[i=K, j=M] -> (thread=M, local=K%16).
+    ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
+    a warp.
+    """
+    thread_id = j
+    local_id = i % 16
+    return thread_id, local_id
+
+
+def thread_id_shared_access_32x16_to_16x16_layout_A_colmajor_gfx11(thread_id, local_id):
+    """Reverse: (thread, local) -> (i=K=local, j=M=thread%16)"""
+    return local_id, thread_id % 16
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # gfx11 B matrix (non-transposed, K x N): shared[K=16][N=16]
 # B[K=l][N=t%16]
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def shared_16x16_to_local_32x16_layout_B_gfx11(i, j):
-    """ 
-        Forward: B[i=K, j=N] -> (thread=N, local=K%16).
-        ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
-        a warp.
+    """
+    Forward: B[i=K, j=N] -> (thread=N, local=K%16).
+    ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
+    a warp.
     """
     thread_id = j
     local_id = i % 16
@@ -192,10 +232,10 @@ def thread_id_shared_access_32x16_to_16x16_layout_B_gfx11(thread_id, local_id):
 
 
 def shared_16x16_to_local_32x16_layout_B_colmajor_gfx11(i, j):
-    """ 
-        Forward: B_T[i=N, j=K] -> (thread=i, local=j%16).
-        ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
-        a warp.
+    """
+    Forward: B_T[i=N, j=K] -> (thread=i, local=j%16).
+    ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
+    a warp.
     """
     thread_id = i
     local_id = j % 16
@@ -253,6 +293,12 @@ def fragment_forward_A_gfx11(i, j, rep):
     return thread_id + 16 * rep, local_id
 
 
+def fragment_forward_A_colmajor_gfx11(i, j, rep):
+    """Replicated fragment forward map for gfx11 transposed A."""
+    thread_id, local_id = shared_16x16_to_local_32x16_layout_A_colmajor_gfx11(i, j)
+    return thread_id + 16 * rep, local_id
+
+
 def fragment_forward_B_gfx11(i, j, rep):
     """Replicated fragment forward map for gfx11 B."""
     thread_id, local_id = shared_16x16_to_local_32x16_layout_B_gfx11(i, j)
@@ -274,14 +320,24 @@ def _unsupported_rdna_generation(rdna_gen: int):
     raise ValueError(f"Unsupported RDNA generation for WMMA layout: {rdna_gen}")
 
 
-def get_wmma_a_layout_funcs(rdna_gen: int):
+def get_wmma_a_layout_funcs(rdna_gen: int, transposed: bool):
     """Return (forward_map, reverse_map) for A layout."""
     if rdna_gen == 11:
+        if transposed:
+            return (
+                shared_16x16_to_local_32x16_layout_A_colmajor_gfx11,
+                thread_id_shared_access_32x16_to_16x16_layout_A_colmajor_gfx11,
+            )
         return (
             shared_16x16_to_local_32x16_layout_A_gfx11,
             thread_id_shared_access_32x16_to_16x16_layout_A_gfx11,
         )
     if rdna_gen == 12:
+        if transposed:
+            return (
+                shared_16x16_to_local_32x8_layout_A_colmajor_gfx12,
+                thread_id_shared_access_32x8_to_16x16_layout_A_colmajor_gfx12,
+            )
         return (
             shared_16x16_to_local_32x8_layout_A_gfx12,
             thread_id_shared_access_32x8_to_16x16_layout_A_gfx12,
@@ -338,10 +394,10 @@ def get_wmma_store_index_map_func(rdna_gen: int):
     _unsupported_rdna_generation(rdna_gen)
 
 
-def get_wmma_a_fragment_forward_func(rdna_gen: int):
+def get_wmma_a_fragment_forward_func(rdna_gen: int, transposed: bool):
     """Return the fragment forward function for A layout."""
     if rdna_gen == 11:
-        return fragment_forward_A_gfx11
+        return fragment_forward_A_colmajor_gfx11 if transposed else fragment_forward_A_gfx11
     if rdna_gen == 12:
         return None
     _unsupported_rdna_generation(rdna_gen)

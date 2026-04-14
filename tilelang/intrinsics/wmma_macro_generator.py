@@ -101,19 +101,11 @@ class WMMAIntrinEmitter:
         self.warp_cols = warp_col_tiles // self.N_DIM
         self.threads = self.WARP_SIZE * block_row_warps * block_col_warps
 
-        self.a_forward_layout_fn, self.a_reverse_layout_fn = get_wmma_a_layout_funcs(
-            self.rdna_gen
-        )
-        self.a_fragment_forward_fn = get_wmma_a_fragment_forward_func(self.rdna_gen)
-        self.b_forward_layout_fn, self.b_reverse_layout_fn = get_wmma_b_layout_funcs(
-            self.rdna_gen, self.b_transposed
-        )
-        self.b_fragment_forward_fn = get_wmma_b_fragment_forward_func(
-            self.rdna_gen, self.b_transposed
-        )
-        self.c_forward_layout_fn, self.c_reverse_layout_fn = get_wmma_c_layout_funcs(
-            self.rdna_gen
-        )
+        self.a_forward_layout_fn, self.a_reverse_layout_fn = get_wmma_a_layout_funcs(self.rdna_gen, self.a_transposed)
+        self.a_fragment_forward_fn = get_wmma_a_fragment_forward_func(self.rdna_gen, self.a_transposed)
+        self.b_forward_layout_fn, self.b_reverse_layout_fn = get_wmma_b_layout_funcs(self.rdna_gen, self.b_transposed)
+        self.b_fragment_forward_fn = get_wmma_b_fragment_forward_func(self.rdna_gen, self.b_transposed)
+        self.c_forward_layout_fn, self.c_reverse_layout_fn = get_wmma_c_layout_funcs(self.rdna_gen)
         self.fragment_replicate = get_wmma_fragment_replicate_count(self.rdna_gen)
         self.store_index_map_fn = get_wmma_store_index_map_func(self.rdna_gen)
 
@@ -204,17 +196,13 @@ class WMMAIntrinEmitter:
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k), warp_m * warp_row_tiles + i * micro_size_x)
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[
-                            tuple(A_other) + (A_base0 + l + row, A_base1 + r + col)
-                        ]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + l + row, A_base1 + r + col)]
             else:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * (k_pack * micro_size_k))
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[
-                            tuple(A_other) + (A_base0 + l + row, A_base1 + r + col)
-                        ]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + l + row, A_base1 + r + col)]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -250,17 +238,13 @@ class WMMAIntrinEmitter:
                     for local_id in T.vectorized(k_pack * local_size_b):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (warp_n * warp_col_tiles + j * micro_size_y, rk * chunk + ki * (k_pack * micro_size_k))
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[
-                            tuple(B_other) + (B_base0 + l + row, B_base1 + r + col)
-                        ]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + l + row, B_base1 + r + col)]
             else:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k), warp_n * warp_col_tiles + j * micro_size_y)
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[
-                            tuple(B_other) + (B_base0 + l + row, B_base1 + r + col)
-                        ]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + l + row, B_base1 + r + col)]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
@@ -391,20 +375,18 @@ class WMMAIntrinEmitter:
 
         """
         gfx11 and gfx12 differ in how logical A/B fragment elements map to lanes.
-        
+
         gfx11 duplicates each logical A/B element across the two half-waves
         (lane t and lane t + 16). A single-owner forward_thread_fn cannot
         faithfully represent this one-to-many ownership, so we model it with
         T.Fragment(..., forward_fn=..., replicate=2), where `rep` selects the
         lower/upper half-wave copy.
-        
+
         gfx12 has a single unique owner for each logical element, so the
         existing forward_thread_fn/forward_index_fn form is sufficient.
         """
         if self.rdna_gen == 11:
-            fragment_forward = (
-                self.a_fragment_forward_fn if matrix_is_a else self.b_fragment_forward_fn
-            )
+            fragment_forward = self.a_fragment_forward_fn if matrix_is_a else self.b_fragment_forward_fn
             assert fragment_forward is not None
             base_fragment = T.Fragment(
                 shape_atom,
@@ -499,7 +481,6 @@ class WMMAIntrinEmitter:
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type: {type(obj)}")
 
-    
     @staticmethod
     def _detect_rdna_generation(target: Target | None) -> int:
         if target is None:

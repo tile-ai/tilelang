@@ -1115,7 +1115,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(target_.defined()) << "CodeGenTileLangHIP target is not set";
     int rdna_gen = tvm::tl::TargetGetRDNAGeneration(target_);
     ICHECK(rdna_gen == 11 || rdna_gen == 12)
-      << "Unsupported RDNA target for WMMA: gfx" << target_->str();
+        << "Unsupported RDNA target for WMMA: gfx" << target_->str();
 
     // Determine wmma builtin name from shape
     // shape = "f32_16x16x16_f16_w32" ->
@@ -1144,8 +1144,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     //
     // Using typedef'd vector types for the cast:
     //   typedef __attribute__((__vector_size__(8/16 * sizeof(__fp16)))) __fp16
-    //   tl_v8/16f16; typedef __attribute__((__vector_size__(8 * sizeof(float))))
-    //   float tl_v8f32;
+    //   tl_v8/16f16; typedef __attribute__((__vector_size__(8 *
+    //   sizeof(float)))) float tl_v8f32;
     std::string call_wmma_code = R"({
       typedef __attribute__((__vector_size__({ab_half_elems} * sizeof(__fp16)))) __fp16 {ab_vec_typedef};
       typedef __attribute__((__vector_size__(8 * sizeof(float)))) float tl_v8f32;
@@ -1156,7 +1156,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     })";
     Replacer wmma_replacer;
     wmma_replacer.register_rule("{wmma_builtin}", wmma_builtin);
-    wmma_replacer.register_rule("{ab_half_elems}", std::to_string(ab_half_elems));
+    wmma_replacer.register_rule("{ab_half_elems}",
+                                std::to_string(ab_half_elems));
     wmma_replacer.register_rule("{ab_vec_typedef}", ab_vec_typedef);
     wmma_replacer.register_rule("{a_ref}", a_ref);
     wmma_replacer.register_rule("{a_bias}", a_bias);
