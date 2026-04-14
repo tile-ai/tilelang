@@ -123,16 +123,16 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
       auto all_threads = T.thread_bounds->extent;
       ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
          << ", " << thread_offset << ", tl::NamedBarrier<" << all_threads
-         << ">, " << batch_size << ", " << workspace_stride << ">::run";
+         << ">, " << batch_size << ", " << workspace_stride << ">::run_batch";
     } else if (TargetIsRocm(T.target)) {
       // HIP AllReduce has no Barrier type parameter.
       ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
          << ", " << thread_offset << ", " << batch_size << ", "
-         << workspace_stride << ">::run";
+         << workspace_stride << ">::run_batch";
     } else {
       ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
          << ", " << thread_offset << ", tl::SyncThreadsBarrier, " << batch_size
-         << ", " << workspace_stride << ">::run";
+         << ", " << workspace_stride << ">::run_batch";
     }
     int ws_size = workspace_stride * static_cast<int>(batch_size);
     PrimExpr workspace = T.AddWorkspace(ws_size, buffer->dtype);
