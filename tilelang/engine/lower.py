@@ -292,12 +292,8 @@ def _resolve_lower_pass_configs(
                     continue
                 if len(key_values) != len(prim_func_configs):
                     owners = ", ".join(name for name, _ in key_values)
-                    missing = ", ".join(
-                        name for name, configs in prim_func_configs if key not in configs
-                    )
-                    conflict_details.append(
-                        f"{key} set on [{owners}] but missing on [{missing}]"
-                    )
+                    missing = ", ".join(name for name, configs in prim_func_configs if key not in configs)
+                    conflict_details.append(f"{key} set on [{owners}] but missing on [{missing}]")
                     continue
 
                 first_value = key_values[0][1]

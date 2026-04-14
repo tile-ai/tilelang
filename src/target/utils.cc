@@ -357,8 +357,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetIsRocm(target); })
       .def("tl.TargetIsMetal",
            [](Target target) { return TargetIsMetal(target); })
-      .def("tl.TargetIsCPU",
-           [](Target target) { return TargetIsCPU(target); })
+      .def("tl.TargetIsCPU", [](Target target) { return TargetIsCPU(target); })
       .def("tl.TargetGetCPUArch",
            [](Target target) { return TargetGetCPUArch(target); })
       .def("tl.TargetIsVolta",

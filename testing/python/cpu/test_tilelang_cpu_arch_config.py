@@ -247,23 +247,24 @@ def test_lower_rejects_conflicting_function_level_pass_configs_for_multifunc_irm
         }
     )
 
-    with pytest.raises(
-        ValueError,
-        match="Conflicting function-level tilelang_pass_configs found in IRModule",
+    with (
+        pytest.raises(
+            ValueError,
+            match="Conflicting function-level tilelang_pass_configs found in IRModule",
+        ),
+        tvm.target.Target("c"),
     ):
-        with tvm.target.Target("c"):
-            tilelang.lower(mod, target="c", target_host="c")
+        tilelang.lower(mod, target="c", target_host="c")
 
 
 def test_lower_rejects_unregistered_pass_config_key():
-    with pytest.raises(Exception):
-        with tvm.target.Target("c"):
-            tilelang.lower(
-                tiny_cpu_kernel,
-                target="c",
-                target_host="c",
-                pass_configs={"tl.not_registered": "value"},
-            )
+    with pytest.raises(AttributeError, match="Invalid config option 'tl.not_registered'"), tvm.target.Target("c"):
+        tilelang.lower(
+            tiny_cpu_kernel,
+            target="c",
+            target_host="c",
+            pass_configs={"tl.not_registered": "value"},
+        )
 
 
 def test_cpu_arch_plumbing_is_declared_and_registered():
