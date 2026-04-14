@@ -371,6 +371,7 @@ def _load_cuda_source(source_code_or_path: str | os.PathLike[str]) -> str:
 def CUDASourceCodeKernel(
     source_code_or_path: str | os.PathLike[str],
     *blocks: int | tir.PrimExpr,
+    entry_name: str | None = None,
     threads: int | list[int] | tuple | None = None,
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
     prelude: str | None = None,
@@ -389,6 +390,10 @@ def CUDASourceCodeKernel(
         loaded. Otherwise it is treated as inline CUDA source code.
     blocks : int
         A list of extent, can be 1-3 dimension, representing gridDim.(x|y|z)
+    entry_name : str | None
+        Optional name of the `__global__` CUDA entry function inside the
+        provided source. When specified, TileLang launches that external CUDA
+        entry directly.
     threads : int
         A integer representing blockDim.x
         Or a list of integers representing blockDim.(x|y|z)
@@ -398,10 +403,6 @@ def CUDASourceCodeKernel(
         For example, use 2 or (2, 1, 1) to create 2-CTA clusters.
         When specified, the kernel will be launched using cudaLaunchKernelEx
         with cudaLaunchAttributeClusterDimension.
-    is_cpu : bool
-        Whether the kernel is running on CPU.
-        Thus we will not bind threadIdx.x, threadIdx.y, threadIdx.z.
-        and blockIdx.x, blockIdx.y, blockIdx.z.
     prelude : str
         The import c code of the kernel,
         will be injected before the generated kernel code.
@@ -418,6 +419,10 @@ def CUDASourceCodeKernel(
         source = prelude + "\n" + source
 
     attrs: dict = {"code_block_source": source}
+    if entry_name is not None:
+        if not isinstance(entry_name, str) or not entry_name.strip():
+            raise ValueError("entry_name must be a non-empty string when provided")
+        attrs["code_block_entry_name"] = entry_name
     threads = _normalize_threads(threads, is_cpu=False)
 
     cluster_dims = _normalize_cluster_dims(cluster_dims)

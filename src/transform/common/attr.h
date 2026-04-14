@@ -28,6 +28,7 @@ namespace attr {
 constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";
 constexpr const char *kHasGridSync = "has_cuda_pdl_sync";
 constexpr const char *kCodeBlockSource = "code_block_source";
+constexpr const char *kCodeBlockEntryName = "code_block_entry_name";
 } // namespace attr
 
 } // namespace tl

@@ -4628,39 +4628,41 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   }
 }
 
-std::string RewriteExternalKernelName(const std::string &source,
-                                      const std::string &target_name) {
+void ValidateExternalKernelEntryName(const std::string &source,
+                                     const std::string &expected_name) {
   static const std::regex kKernelPattern(
       R"((?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+))");
 
-  std::vector<std::smatch> matches;
+  std::vector<std::string> kernel_names;
   for (auto it =
            std::sregex_iterator(source.begin(), source.end(), kKernelPattern);
        it != std::sregex_iterator(); ++it) {
-    matches.push_back(*it);
+    kernel_names.push_back((*it)[1].str());
   }
 
-  ICHECK(!matches.empty()) << "T.CUDASourceCodeKernel expects external CUDA "
-                              "source to declare at least one "
-                              "__global__ kernel";
+  ICHECK(!kernel_names.empty()) << "T.CUDASourceCodeKernel expects external "
+                                   "CUDA source to declare at least one "
+                                   "__global__ kernel";
 
-  for (const auto &match : matches) {
-    if (match[1].str() == target_name) {
-      return source;
+  for (const std::string &kernel_name : kernel_names) {
+    if (kernel_name == expected_name) {
+      return;
     }
   }
 
-  ICHECK_EQ(matches.size(), 1U)
-      << "T.CUDASourceCodeKernel expects external CUDA source to either "
-         "already use "
-         "the generated kernel symbol `"
-      << target_name
-      << "` or contain exactly one __global__ kernel declaration";
+  std::string available_entries;
+  for (size_t i = 0; i < kernel_names.size(); ++i) {
+    if (i != 0) {
+      available_entries += ", ";
+    }
+    available_entries += kernel_names[i];
+  }
 
-  std::string rewritten = source;
-  rewritten.replace(static_cast<size_t>(matches[0].position(1)),
-                    static_cast<size_t>(matches[0].length(1)), target_name);
-  return rewritten;
+  ICHECK(false) << "T.CUDASourceCodeKernel expected device global_symbol `"
+                << expected_name
+                << "` to match a __global__ kernel in the provided CUDA "
+                   "source. Available entries: "
+                << available_entries;
 }
 
 void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
@@ -4670,10 +4672,17 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
     auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
     ICHECK(global_symbol) << "CodeGenTileLangCUDA: Expect PrimFunc to have the "
                              "global_symbol attribute";
-    stream << RewriteExternalKernelName(
-                  static_cast<std::string>(code_block_source.value()),
-                  static_cast<std::string>(global_symbol.value()))
-           << "\n\n";
+    if (auto code_block_entry_name =
+            f->GetAttr<String>(tl::attr::kCodeBlockEntryName)) {
+      ICHECK_EQ(static_cast<std::string>(global_symbol.value()),
+                static_cast<std::string>(code_block_entry_name.value()))
+          << "T.CUDASourceCodeKernel expects the lowered device global_symbol "
+             "to match entry_name";
+    }
+    ValidateExternalKernelEntryName(
+        static_cast<std::string>(code_block_source.value()),
+        static_cast<std::string>(global_symbol.value()));
+    stream << static_cast<std::string>(code_block_source.value()) << "\n\n";
     return;
   }
 
