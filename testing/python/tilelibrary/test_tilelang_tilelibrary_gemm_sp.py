@@ -304,7 +304,7 @@ def run_gemm_sp_sm80(
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 @pytest.mark.parametrize(
     "M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K, num_stages, num_threads, trans_A, trans_B",
     [

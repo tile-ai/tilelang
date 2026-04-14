@@ -21,41 +21,32 @@ namespace tl {
 using namespace tir;
 
 /**
- * @brief Construct a Gemm operator from serialized TL arguments and a buffer
- * map.
+ * @brief Construct a Gemm operator from serialized TL arguments.
  *
- * This constructor deserializes operator parameters from `args` and resolves
- * buffer references via `vmap`, populating an internal GemmNode with:
- * - device pointers for A, B, C and their corresponding Buffer objects,
- * - transpose flags for A and B,
- * - matrix dimensions M, N, K,
- * - warp allocation policy and clear_accum flag,
- * - strides and memory offsets for A and B,
- * - optional kPack (must be 1 or 2) and optional internal wg_wait.
- *
- * The populated GemmNode is stored into the wrapper's internal `data_`.
+ * Deserializes operator parameters from `args` and resolves buffer references,
+ * populating an internal GemmNode with buffers, transpose flags, M/N/K,
+ * warp policy, clear_accum, strides, offsets, optional kPack/wg_wait, and
+ * optional mbarrier.
  *
  * @param args Positional serialized arguments produced by the TL frontend:
  *   expected layout is:
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
- *      (optional) kPack (Int), (optional) internal wg_wait (Int)]
- *
- * @note If `kPack` is provided it must be 1; otherwise the constructor
- *       fails with an ICHECK (runtime assertion). No other validation is
- *       performed here.
+ *      (optional) kPack (Int), (optional) internal wg_wait (Int),
+ *      (optional) mbar (BufferLoad), cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
  */
-// NormalizeToBufferRegion moved to src/op/utils.{h,cc}
-
-// MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
-
 Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
-  node->aRegion_ = NormalizeToBufferRegion(args[0]);
-  node->bRegion_ = NormalizeToBufferRegion(args[1]);
-  node->cRegion_ = NormalizeToBufferRegion(args[2]);
+  auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto b_access = NormalizeToAccessRegion(args[1], kAccessRead);
+  auto c_access = NormalizeToAccessRegion(args[2], kAccessReadWrite);
+
+  node->aRegion_ = a_access.region;
+  node->bRegion_ = b_access.region;
+  node->cRegion_ = c_access.region;
+  node->SetAccessRegions({a_access, b_access, c_access});
 
   node->a_ = node->aRegion_->buffer;
   node->b_ = node->bRegion_->buffer;
@@ -95,17 +86,21 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  node->annotations_ = annotations;
   data_ = std::move(node);
 }
 
-/**
- * @brief Create a copy of this GemmNode as a TileOperator.
- *
- * Constructs a new GemmNode by copying the current node state and returns it
- * wrapped in a Gemm TileOperator.
- *
- * @return TileOperator A Gemm operator that owns a copy of this node.
- */
+AccessRegions GemmNode::GetAccessRegions() const {
+  AccessRegions result;
+  result.reads.push_back(aRegion_);
+  result.reads.push_back(bRegion_);
+  if (!is_one(clearAccum_)) {
+    result.reads.push_back(cRegion_);
+  }
+  result.writes.push_back(cRegion_);
+  return result;
+}
+
 TileOperator GemmNode::Clone() const {
   auto op = tvm::ffi::make_object<GemmNode>(*this);
   return Gemm(op);
@@ -116,6 +111,7 @@ bool GemmNode::allowTcgen5Mma(Target target) const {
                   IsSharedBuffer(b_) && c_.scope() == "shared.tmem";
   if (!TargetIsSm100(target) || !scope_ok)
     return false;
+  // For TS variant (A from TMEM), use B's dtype as the input dtype
   DataType ab_dtype = (a_.scope() == "shared.tmem") ? b_->dtype : a_->dtype;
   return GetTCGEN5MMAMeta(m_, n_, k_, ab_dtype, c_->dtype).first;
 }
@@ -155,9 +151,11 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
     }
     return GemmInst::kTCGEN5MMA;
   }
-  if (allowTcgen5Mma(target)) {
+  bool allow_tcgen5mma = allowTcgen5Mma(target);
+  bool allow_wgmma = allowWgmma(block_size, target);
+  if (allow_tcgen5mma) {
     return GemmInst::kTCGEN5MMA;
-  } else if (allowWgmma(block_size, target)) {
+  } else if (allow_wgmma) {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
@@ -165,8 +163,10 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kWMMA;
   } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
+  } else if (TargetIsCPU(target)) {
+    return GemmInst::kScalar;
   } else {
-    ICHECK(0) << "Unsupported target for gemm: " << target;
+    ICHECK(0) << "Unsupported target for gemm: " << target->str();
     return GemmInst::kMMA;
   }
 }
@@ -362,32 +362,8 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
 /**
  * @brief Checks whether WGMMA (warp-group MMA) can be used for this GEMM.
  *
- * Evaluates device-memory placement, data-type combinations, transpose flags,
- * and K divisibility constraints required for the Hopper WGMMA code path.
- *
- * The check returns true only when:
- * - B resides in shared memory ("shared" or "shared.dyn"); and
- * - (C, A, B) dtypes match one of the supported combinations below and K
- *   satisfies the required alignment; and
- * - for combinations that require specific orientations, A is not transposed
- *   and B is transposed.
- *
- * Supported combinations and constraints:
- * - C=float16:
- *   - A=float16, B=float16: K % 16 == 0
- *   - Various float8 mixes (e4m3/e5m2): require (!trans_A && trans_B) and K %
- * 32 == 0
- * - C=float32:
- *   - A=float16, B=float16: K % 16 == 0
- *   - A=bfloat16, B=bfloat16: K % 16 == 0
- *   - A=float32, B=float32: require (!trans_A && trans_B) and K % 8 == 0
- *   - Various float8 mixes: require (!trans_A && trans_B) and K % 32 == 0
- * - C=int32:
- *   - 8-bit integer combinations (Int8/UInt8): require (!trans_A && trans_B)
- * and K % 32 == 0
- *
- * @return true if WGMMA is supported for the current buffers, dtypes, and
- *         transpose/shape constraints; false otherwise.
+ * Returns true only when B resides in shared memory and the (C, A, B) dtype
+ * combination plus K alignment matches one of the supported WGMMA variants.
  */
 bool GemmNode::checkWgmma() const {
   if (b_.scope() != "shared.dyn" && b_.scope() != "shared") {
@@ -430,432 +406,71 @@ bool GemmNode::checkWgmma() const {
   }
 }
 
-/**
- * @brief Parse and return the numeric GPU architecture from a Target's "arch"
- * attribute.
- *
- * Examines the target's "arch" string and, if it matches the pattern
- * "sm_<num>", returns <num> as an int. If the attribute is present but does not
- * match that pattern, returns 0.
- *
- * Preconditions: the target must have an "arch" attribute (this is checked via
- * ICHECK).
- *
- * @return int The parsed architecture number (e.g., 80 for "sm_80"), or 0 if
- * the arch string does not match "sm_<num>".
- */
-static int GetArchInt(Target target) {
-  int arch_int = 0;
-  auto s = target->GetAttr<tvm::ffi::String>("arch");
-  ICHECK(s.has_value());
-  std::string arch = s.value();
-  if (arch.rfind("sm_", 0) == 0) {
-    arch_int = std::stoi(arch.substr(3));
-  } else {
-    arch_int = 0;
-  }
-  return arch_int;
-}
-
-/**
- * @brief Lower the GEMM operator to a TL TIR call expression.
- *
- * Constructs a tl::gemm call string parameterized by M, N, K, warp partition,
- * transpose flags, accumulation clearing, target-specific stride/offset/kPack
- * and optional workgroup wait value, then returns an Evaluate(call) node
- * invoking tl::tl_gemm with the composed string and the A/B/C buffer handles.
- *
- * @param T Contains lowering context including thread bounds and target.
- * @param analyzer Optional arithmetic analyzer used by lowering (may be
- * nullptr).
- * @return Stmt A TIR statement representing the evaluated TL GEMM call.
- */
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  auto block_size = *as_const_int(T.thread_bounds->extent);
-  GemmInst gemm_inst = getGemmInst(block_size, T.target);
-  auto [warp_m, warp_n] =
-      policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
-
-  // Build access pointers from regions locally
-  PrimExpr Aptr =
-      MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
-  PrimExpr Bptr =
-      MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
-  PrimExpr Cptr =
-      MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
-
-  std::stringstream ss;
-  std::string op_name;
-
-  if (gemm_inst == GemmInst::kTCGEN5MMA) {
-    DataType ab_dtype = (a_.scope() == "shared.tmem") ? b_->dtype : a_->dtype;
-    auto [can_use_tcgen5mma, meta] =
-        GetTCGEN5MMAMeta(m_, n_, k_, ab_dtype, c_->dtype);
-    ICHECK(can_use_tcgen5mma);
-    ICHECK(IsSharedBuffer(b_));
-    ICHECK(c_.scope() == "shared.tmem");
-    ICHECK(mbar_.defined()) << "mbar must be provided for TCGEN5MMA";
-    if (a_.scope() == "shared.tmem") {
-      op_name = "tl::tcgen5mma_gemm_ts";
-    } else if (IsSharedBuffer(a_)) {
-      op_name = "tl::tcgen5mma_gemm_ss";
-    } else {
-      ICHECK(0)
-          << "Unsupported A scope for TCGEN5MMA: "
-          << a_.scope(); // If this is triggered, it means Tilelang has bugs.
+  if (const auto f = ffi::Function::GetGlobal("tl.gemm.lower")) {
+    PrimExpr mbar_phase = T.mbar_phase_expr;
+    if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
+      mbar_phase = explicit_phase.value();
     }
-    ICHECK(wgWait_ == 0 || wgWait_ == -1)
-        << "TCGEN5MMA only accepts internal wg_wait values 0 or -1. "
-           "Public T.gemm() uses 0 and synchronization is still managed "
-           "manually via mbarrier.";
-
-    std::string accum_dtype = "";
-    if (c_->dtype.is_float()) {
-      if (c_->dtype.bits() == 32) {
-        accum_dtype = "float";
+    // NOTE(wt): Decide GemmInst and compute warp partition on Python side
+    auto prim_func = Downcast<PrimFunc>(
+        (*f)(tvm::ffi::GetRef<Gemm>(this), T.layout_map, T.target,
+             T.thread_bounds, T.thread_var, mbar_phase));
+    ICHECK(prim_func->attrs.defined());
+    auto global_symbol =
+        prim_func->attrs.GetAttr<tvm::ffi::String>("global_symbol");
+    ICHECK(global_symbol.has_value());
+    if (prim_func->body.as<BlockRealizeNode>()) {
+      BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
+      auto block = block_realize->block;
+      {
+        BlockNode *n = block.CopyOnWrite();
+        n->name_hint = global_symbol.value();
+        n->annotations.Set(tl::attr::kLexicalAllocScope,
+                           IntImm(DataType::Int(32), 1));
       }
+      return BlockRealize(block_realize->iter_values, block_realize->predicate,
+                          block);
     }
-    ICHECK(!accum_dtype.empty())
-        << "Unsupported C dtype for TCGEN5MMA: " << c_->dtype;
-    ss << op_name << "<" << m_ << ", " << n_ << ", " << k_ << ", ";
-    ss << meta.atom_m << ", " << meta.atom_n << ", " << meta.atom_k << ", ";
-    ss << transA_ << ", " << transB_ << ", ";
-    ss << accum_dtype;
-    ss << ">";
-
-    auto C_buffer = T.buffer_remap.count(c_) ? T.buffer_remap[c_] : c_;
-    Array<PrimExpr> new_args;
-    auto mbarPtr = MakeAccessPtrFromBufferLoad(mbar_, /*rw*/ 3);
-    new_args.push_back(StringImm(ss.str()));
-    new_args.push_back(Aptr);
-    new_args.push_back(Bptr);
-    new_args.push_back(BufferLoad(C_buffer, cCoords_));
-    new_args.push_back(mbarPtr);
-    new_args.push_back(clearAccum_);
-    auto new_call = Call(DataType::Handle(), builtin::call_extern(), new_args);
-
-    // Since TCGEN5MMA atoms provided by CUTLASS always have an internal
-    // `elect_one_sync()`, we check if we are calling it using full warps
-    constexpr int warp_size = 32;
-    ICHECK(
-        analyzer->CanProveEqual(FloorMod(T.thread_bounds->min, warp_size), 0) &&
-        analyzer->CanProveEqual(FloorMod(T.thread_bounds->extent, warp_size),
-                                0))
-        << "TCGEN5MMA requires thread bounds to be multiples of warp size (32) "
-           "and aligned to warps.";
-    Stmt tcgen5mma_call;
-    if (analyzer->CanProveEqual(T.thread_bounds->extent, warp_size)) {
-      // If the thread bounds is exactly one warp, we can use the original call
-      tcgen5mma_call = Evaluate(new_call);
-    } else {
-      // Add an if-else clause
-      tcgen5mma_call = IfThenElse(EQ(FloorDiv(T.thread_var, warp_size),
-                                     FloorDiv(T.thread_bounds->min, warp_size)),
-                                  Evaluate(new_call));
-    }
-    if (isTcgen05_) {
-      return tcgen5mma_call;
-    }
-    Stmt wait_stmt = Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
-                                   {mbar_, T.mbar_phase_expr}));
-    return SeqStmt({tcgen5mma_call, wait_stmt});
-  }
-
-  if (IsFragmentBuffer(a_)) {
-    ICHECK(!IsFragmentBuffer(b_));
-    ICHECK(!transA_)
-        << "gemm_rs requires the A operand to be in non-transposed layout.";
-    op_name = "tl::gemm_rs";
-  } else if (IsFragmentBuffer(b_)) {
-    op_name = "tl::gemm_sr";
+    // wrap with block realize node
+    Map<String, ObjectRef> block_annotations;
+    block_annotations.Set(tl::attr::kLexicalAllocScope,
+                          IntImm(DataType::Int(32), 1));
+    return BlockRealize(
+        /*iter_values=*/Array<PrimExpr>(),
+        /*predicate=*/const_true(),
+        /*block=*/
+        Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+              /*name_hint=*/global_symbol.value(), prim_func->body,
+              /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
+              /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
-    op_name = "tl::gemm_ss";
+    LOG(FATAL) << "No lower function found for gemm";
+    return Stmt();
   }
-  ICHECK(IsFragmentBuffer(c_));
-
-  ss << op_name << "<" << m_ << ", " << n_ << ", " << k_ << ", ";
-  ss << warp_m << ", " << warp_n << ", ";
-  ss << transA_ << ", " << transB_;
-  auto clear_accum_bool = clearAccum_.as<Bool>();
-  ICHECK(clear_accum_bool.has_value())
-      << "clear_accum must be a constant Bool type, got " << clearAccum_;
-  ss << ", " << bool(clear_accum_bool.value());
-  if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) {
-    ss << ", " << strideA_ << ", " << strideB_;
-    ss << ", " << offsetA_ << ", " << offsetB_;
-  }
-  if (TargetIsCDNA(T.target)) {
-    // for cdna gemm, we need to specify kPack
-    ss << ", " << kPack_;
-  } else if (TargetIsHopper(T.target)) {
-    ss << ", " << (gemm_inst == GemmInst::kWGMMA ? "true" : "false");
-  }
-
-  // Emit internal wg_wait only for Hopper WGMMA lowering.
-  if (TargetIsHopper(T.target)) {
-    if (wgWait_ != 0) {
-      ss << ", " << wgWait_;
-    }
-  } else if (TargetIsSm100(T.target)) {
-    // NOTE On sm100, only the leading thread issues the TCGEN5MMA instruction
-    // but all threads need to wait, so we emit another statement for cases
-    // where wg_wait == 0.
-    ICHECK(wgWait_ == 0 || wgWait_ == -1)
-        << "wg_wait must be 0 or -1 for Sm100";
-  } else {
-    ICHECK(wgWait_ == 0)
-        << "wg_wait must be 0 for non-Hopper and non-Sm100 targets";
-  }
-  ss << ">";
-
-  auto new_call = Call(DataType::Handle(), tl::tl_gemm(),
-                       Array<PrimExpr>{StringImm(ss.str()), Aptr, Bptr, Cptr});
-  return Evaluate(new_call);
 }
 
-/**
- * @brief Infer and bind target-specific memory/layout mappings for A, B, and C.
- *
- * Infers per-buffer layouts (fragment or shared-memory layouts) for this GEMM
- * operator according to the target architecture, thread bounds, warp
- * partitioning, data types, and transpose flags, then binds fragment layouts
- * to the thread range when required.
- *
- * Preconditions:
- * - C.scope() == "local.fragment"
- *
- * Side effects:
- * - Marks layout inference as completed (sets completed_ = true).
- * - May abort via ICHECK on unsupported targets, invalid buffer scopes, or
- *   incompatible shape constraints.
- *
- * @param T Input layout-inference context (provides thread bounds and target).
- * @return LayoutMap mapping A, B, and C to their inferred layouts.
- */
 LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                 InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;
-  auto thread_range = T.thread_bounds;
-  auto block_size = *as_const_int(thread_range->extent);
-  GemmInst gemm_inst = getGemmInst(block_size, T.target);
-  auto [warp_m, warp_n] =
-      policy_->computeWarpPartition(m_, n_, block_size, T.target, gemm_inst);
-  if (TargetIsVolta(T.target)) {
-    ICHECK(IsFragmentBuffer(c_))
-        << "Volta gemm only supports C in local.fragment scope, got "
-        << c_.scope();
-    auto fragment = makeGemmVoltaFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
-                                           c_->dtype.bits());
-    results.Set(c_, fragment->BindThreadRange(thread_range));
-    if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      auto layout = makeGemmVoltaABLayout(*as_const_int(a_->shape[dim_A - 2]),
-                                          *as_const_int(a_->shape[dim_A - 1]),
-                                          true, !transA_);
-      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
-    } else if (IsFragmentBuffer(a_)) {
-      ICHECK(transA_ == false);
-      auto fragment =
-          makeGemmVoltaFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n);
-      results.Set(a_, fragment->BindThreadRange(thread_range));
-    } else {
-      ICHECK(0);
-    }
 
-    ICHECK(IsSharedBuffer(b_));
-    int dim_B = b_->shape.size();
-    auto layout = makeGemmVoltaABLayout(*as_const_int(b_->shape[dim_B - 2]),
-                                        *as_const_int(b_->shape[dim_B - 1]),
-                                        false, transB_);
-    results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
-  } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
-             TargetIsSM120(T.target) ||
-             (TargetIsSm100(T.target) && gemm_inst == GemmInst::kMMA)) {
-    ICHECK(IsFragmentBuffer(c_))
-        << "MMA only supports C in local.fragment scope, got " << c_.scope();
-
-    auto fragment =
-        makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n, c_->dtype.bits());
-    results.Set(c_, fragment->BindThreadRange(thread_range));
-
-    if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      auto layout = makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                     a_->dtype.bits(), !transA_);
-      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
-    } else if (IsFragmentBuffer(a_)) {
-      auto fragment = makeGemmFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
-                                        a_->dtype.bits(), transA_);
-      results.Set(a_, fragment->BindThreadRange(thread_range));
-    } else {
-      ICHECK(0);
-    }
-    if (IsSharedBuffer(b_)) {
-      int dim_B = b_->shape.size();
-      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      auto layout = makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                     b_->dtype.bits(), transB_);
-      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
-    } else if (IsFragmentBuffer(b_)) {
-      auto fragment =
-          makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
-      results.Set(b_, fragment->BindThreadRange(thread_range));
-    } else {
-      ICHECK(0);
-    }
-  } else if (TargetIsHopper(T.target)) {
-    ICHECK(IsFragmentBuffer(c_))
-        << (gemm_inst == GemmInst::kWGMMA ? "WGMMA " : "MMA ")
-        << "only supports C in local.fragment scope, got " << c_.scope();
-    auto fragment = gemm_inst == GemmInst::kWGMMA
-                        ? makeGemmFragmentCHopper(m_, n_, m_ / warp_m,
-                                                  n_ / warp_n, c_->dtype.bits())
-                        : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
-                                            c_->dtype.bits());
-    results.Set(c_, fragment->BindThreadRange(thread_range));
-    if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      const int64_t continuity =
-          transA_ ? 4 * mat_continuous / warp_m : mat_continuous;
-      auto ABLayout =
-          gemm_inst == GemmInst::kWGMMA
-              ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       a_->dtype.bits(), !transA_)
-              : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 a_->dtype.bits(), !transA_);
-      results.Set(a_, ExpandLayoutToMatchBuffer(ABLayout, a_));
-    } else {
-      auto fragment = makeGemmFragmentA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
-                                        a_->dtype.bits(), transA_);
-      results.Set(a_, fragment->BindThreadRange(thread_range));
-    }
-    if (IsSharedBuffer(b_)) {
-      int dim_B = b_->shape.size();
-      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      const int64_t continuity =
-          transB_ ? mat_continuous : mat_continuous / warp_n;
-
-      auto ABLayout =
-          gemm_inst == GemmInst::kWGMMA
-              ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       b_->dtype.bits(), transB_)
-              : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 b_->dtype.bits(), transB_);
-      results.Set(b_, ExpandLayoutToMatchBuffer(ABLayout, b_));
-    } else {
-      auto fragment =
-          makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
-      results.Set(b_, fragment->BindThreadRange(thread_range));
-    }
-  } else if (gemm_inst == GemmInst::kTCGEN5MMA) {
-    ICHECK(c_.scope() == "shared.tmem")
-        << "TCGEN5MMA only supports C in shared.tmem scope, got " << c_.scope();
-    ICHECK(IsSharedBuffer(a_))
-        << "Current TCGEN5MMA only supports A in shared.dyn scope";
-    DataType ab_dtype = (a_.scope() == "shared.tmem") ? b_->dtype : a_->dtype;
-    auto [can_use_tcgen5mma, meta] =
-        GetTCGEN5MMAMeta(m_, n_, k_, ab_dtype, c_->dtype);
-    ICHECK(can_use_tcgen5mma);
-    {
-      int dim_A = a_->shape.size();
-      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      auto layout =
-          makeGemmABLayoutSm100(mat_stride, mat_continuous, mat_continuous,
-                                a_->dtype.bits(), transA_ ? 1 : 2);
-      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
-    }
-    {
-      int dim_B = b_->shape.size();
-      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      const int64_t continuity = mat_continuous;
-      auto layout =
-          makeGemmABLayoutSm100(mat_stride, mat_continuous, continuity,
-                                b_->dtype.bits(), transB_ ? 2 : 1);
-      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
-    }
-    {
-      Layout res;
-      IterVar i = make_itervar("i", m_);
-      IterVar j = make_itervar("j", n_);
-      ICHECK(m_ % meta.atom_m == 0);
-      PrimExpr atom_idx = FloorDiv(i, meta.atom_m) +
-                          FloorDiv(j, meta.atom_n) * (m_ / meta.atom_m);
-      PrimExpr ai = FloorMod(i, meta.atom_m); // "ai" means "atom_i"
-      PrimExpr aj = FloorMod(j, meta.atom_n);
-      if (meta.atom_m == 128) {
-        // Layout D
-        // (https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-path-layout-d)
-        res = Layout(Array{i, j}, {ai, aj + atom_idx * meta.atom_n});
-      } else if (meta.atom_m == 64) {
-        // Layout E
-        // (https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-path-layout-e)
-        // since .ws variant is used About why we use .ws variant here, please
-        // refer to gemm_sm100.h
-        res = Layout(Array{i, j}, {FloorDiv(ai, 32) * 32 + FloorMod(ai, 32) +
-                                       FloorDiv(aj, meta.atom_n / 2) * 64,
-                                   FloorMod(aj, meta.atom_n / 2) +
-                                       atom_idx * (meta.atom_n / 2)});
-      } else if (meta.atom_m == 32) {
-        // Layout G
-        // (https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-path-layout-g)
-        res = Layout(
-            Array{i, j},
-            {FloorMod(ai, 32) + FloorDiv(aj, meta.atom_n / 4) * 32,
-             FloorMod(aj, meta.atom_n / 4) + atom_idx * (meta.atom_n / 4)});
-      } else {
-        ICHECK(0);
+  if (const auto f = ffi::Function::GetGlobal("tl.gemm.infer_layout")) {
+    results = Downcast<LayoutMap>(
+        (*f)(tvm::ffi::GetRef<Gemm>(this), T.target, T.thread_bounds));
+    // Bind all fragment layouts with the provided thread range
+    for (auto kv : results) {
+      const Buffer &buf = kv.first;
+      const Layout &layout = kv.second;
+      if (auto frag = layout.as<Fragment>()) {
+        results.Set(buf, frag.value()->BindThreadRange(T.thread_bounds));
       }
-      results.Set(c_, res);
-    }
-  } else if (TargetIsCDNA(T.target)) {
-    ICHECK(IsFragmentBuffer(c_))
-        << "CDNA gemm (FMMA) only supports C in local.fragment scope, got "
-        << c_.scope();
-    auto fragment = makeGemmFragmentCCDNA(m_, n_, m_ / warp_m, n_ / warp_n,
-                                          c_->dtype.bits());
-    results.Set(c_, fragment->BindThreadRange(thread_range));
-
-    if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      auto shared_layout = makeGemmABLayoutCDNA(
-          *as_const_int(a_->shape[dim_A - 2]),
-          *as_const_int(a_->shape[dim_A - 1]), a_->dtype.bits(), kPack_);
-      results.Set(a_, ExpandLayoutToMatchBuffer(shared_layout, a_));
-    } else if (IsFragmentBuffer(a_)) {
-      auto fragment =
-          makeGemmFragmentACDNA(m_, n_, k_, m_ / warp_m, n_ / warp_n,
-                                a_->dtype.bits(), kPack_, transA_);
-      results.Set(a_, fragment->BindThreadRange(thread_range));
-    } else {
-      ICHECK(0);
-    }
-    if (IsSharedBuffer(b_)) {
-      int dim_B = b_->shape.size();
-      auto shared_layout = makeGemmABLayoutCDNA(
-          *as_const_int(b_->shape[dim_B - 2]),
-          *as_const_int(b_->shape[dim_B - 1]), b_->dtype.bits(), kPack_);
-
-      results.Set(b_, ExpandLayoutToMatchBuffer(shared_layout, b_));
-    } else if (IsFragmentBuffer(b_)) {
-      auto fragment =
-          makeGemmFragmentB(m_, n_, k_, m_ / warp_m, n_ / warp_n, transB_);
-      results.Set(b_, fragment->BindThreadRange(thread_range));
-    } else {
-      ICHECK(0);
     }
   } else {
-    ICHECK(0) << "Not supported " << T.target->str();
+    LOG(FATAL) << "No infer layout function found for gemm";
   }
+
   completed_ = true;
   return results;
 }
@@ -899,6 +514,9 @@ TVM_REGISTER_OP("tl.GemmWarpPolicy")
 TVM_FFI_STATIC_INIT_BLOCK() {
   GemmNode::RegisterReflection();
   GemmWarpPolicyNode::RegisterReflection();
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",
                         [](GemmWarpPolicy policy, int M, int N, int block_size,
@@ -906,6 +524,39 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                           policy->computeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
                         });
+  refl::GlobalDef().def("tl.GemmGetGemmInst",
+                        [](Gemm gemm, int block_size, Target target) {
+                          return gemm->getGemmInst(block_size, target);
+                        });
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def(
+      "tl.get_tcgen5_mma_meta", [](int M, int N, int K, DataType ab_dtype,
+                                   DataType c_dtype, bool disable_2cta) {
+        auto [success, meta] =
+            GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype, disable_2cta);
+        Array<Integer> result;
+        if (success) {
+          result.push_back(Integer(meta.atom_m));
+          result.push_back(Integer(meta.atom_n));
+          result.push_back(Integer(meta.atom_k));
+          result.push_back(Integer(meta.enable_ws));
+          result.push_back(Integer(meta.enable_2cta));
+        }
+        return result;
+      });
+  refl::GlobalDef().def(
+      "tl.get_tcgen5_instr_desc",
+      [](int atom_m, int atom_n, int atom_k, DataType ab_dtype,
+         DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int scale_in_a,
+         int scale_in_b) {
+        uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, ab_dtype,
+                                           c_dtype, a_is_k_major, b_is_k_major,
+                                           scale_in_a, scale_in_b);
+        return Integer(static_cast<int64_t>(desc));
+      });
 }
 
 } // namespace tl

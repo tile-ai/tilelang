@@ -17,15 +17,15 @@ from tilelang import _ffi_api
 from tilelang.utils.target import target_is_volta
 
 
-@tvm_ffi.register_global_func("tl.gemm_py.infer_layout")
-def gemm_py_infer_layout(gemm_py: GemmMMA, target: Target, thread_bounds: Range):
+@tvm_ffi.register_global_func("tl.gemm.infer_layout")
+def gemm_infer_layout(gemm: GemmMMA, target: Target, thread_bounds: Range):
     thread_nums = thread_bounds.extent
-    return gemm_py.infer_layout(target, thread_nums)
+    return gemm.infer_layout(target, thread_nums)
 
 
-@tvm_ffi.register_global_func("tl.gemm_py.lower")
-def gemm_py_lower(
-    gemm_py: GemmMMA,
+@tvm_ffi.register_global_func("tl.gemm.lower")
+def gemm_lower(
+    gemm: GemmMMA,
     layout_map,
     target: Target,
     thread_bounds: Range,
@@ -33,12 +33,12 @@ def gemm_py_lower(
     mbar_phase_expr: tir.PrimExpr,
 ):
     # We pass thread_bounds rather than thread_extents because tcgen5mma need to check this
-    stmt = gemm_py.lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
+    stmt = gemm.lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
     return stmt
 
 
-@tvm_ffi.register_object("tl.GemmPy")
-class GemmPy(Node, Scriptable):
+@tvm_ffi.register_object("tl.Gemm")
+class Gemm(Node, Scriptable):
     # FFI fields (LLVM/MLIR-style lowerCamel via reflection):
     # a, b, c, aPtr, bPtr, cPtr, m, n, k, transA, transB,
     # strideA, strideB, offsetA, offsetB, clearAccum, kPack, wgWait, policy
@@ -159,7 +159,7 @@ class GemmPy(Node, Scriptable):
         Returns:
             GemmInst: The selected GEMM instruction type
         """
-        return GemmInst(_ffi_api.GemmPyGemmInst(self, int(thread_nums), target))
+        return GemmInst(_ffi_api.GemmGetGemmInst(self, int(thread_nums), target))
 
     def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
         """Get the appropriate implementation class for the given GEMM instruction.

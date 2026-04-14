@@ -232,6 +232,14 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         ICHECK_EQ(lanes % 2, 0)
             << "only support even lane for float type with lanes > 4";
         os << "ulonglong" << lanes / 2;
+      } else if (lanes == 16) {
+        // float32x16: GCC vector extension type used by MFMA accumulators.
+        os << "float32x16";
+        return;
+      } else if (lanes == 32) {
+        // float32x32: GCC vector extension type used by MFMA accumulators.
+        os << "float32x32";
+        return;
       } else {
         fail = true;
       }
@@ -257,6 +265,10 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     } else if (lanes <= 8) {
       ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
       os << "uint" << lanes / 2;
+    } else if (lanes == 16) {
+      // bfloat16x16: struct { bfloat16_t data[16]; } used by MFMA accumulators.
+      os << "bfloat16x16";
+      return;
     } else {
       fail = true;
     }
@@ -470,6 +482,8 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
 
   static const char access[] = {'x', 'y', 'z', 'w'};
   ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
+                        : (t.lanes() == 16)                  ? 16
+                        : (t.lanes() == 32)                  ? 32
                         : (t.bits() == 16 || t.bits() == 32) ? 8
                                                              : 4));
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
@@ -480,6 +494,14 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       os << "((" << type_name << ")(" << ac << " >> " << i % 4 * 8 << "))";
     }
+  } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 &&
+             t.is_float()) {
+    // float32x16/float32x32: __attribute__((__vector_size__(...))) supports
+    // subscript.
+    os << vec << "[" << i << "]";
+  } else if (t.lanes() == 16 && t.is_bfloat16()) {
+    // bfloat16x16: struct { bfloat16_t data[16]; }
+    os << vec << ".data[" << i << "]";
   } else if (t.is_float16()) {
     os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
@@ -515,7 +537,10 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
                                            int i, const std::string &value) {
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
+
   ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
+                        : (t.lanes() == 16)                  ? 16
+                        : (t.lanes() == 32)                  ? 32
                         : (t.bits() == 16 || t.bits() == 32) ? 8
                                                              : 4));
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
@@ -531,6 +556,14 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
       }
       stream << "(" << value << " << " << i % 4 * 8 << ");\n";
     }
+  } else if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 &&
+             t.is_float()) {
+    // float32x16/float32x32: __attribute__((__vector_size__(...))) supports
+    // subscript.
+    stream << vec << "[" << i << "] = " << value << ";\n";
+  } else if (t.lanes() == 16 && t.is_bfloat16()) {
+    // bfloat16x16: struct { bfloat16_t data[16]; }
+    stream << vec << ".data[" << i << "] = " << value << ";\n";
   } else if (t.is_float16()) {
     stream << "*((half_t*)(&(((half2*)(&(" << vec << "." << access[i / 2]
            << ")))->" << access[i % 2] << "))) = " << value << ";\n";
@@ -825,6 +858,61 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::any_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
+    // HIP __any takes only the predicate; the mask is ignored because
+    // wavefront execution is always convergent across the full wave.
+    os << "__any(" << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::all_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.all_sync expects <mask, predicate>.";
+    os << "__all(" << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ballot_sync())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.ballot_sync expects <mask, predicate>.";
+    // HIP __ballot returns uint64 natively, covering every lane of the
+    // wavefront; the CUDA-style mask argument is ignored.
+    os << "((unsigned long long)__ballot(" << PrintExpr(op->args[1]) << "))";
+  } else if (op->op.same_as(tl::ballot())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.ballot expects <predicate>.";
+    os << "((unsigned long long)__ballot(" << PrintExpr(op->args[0]) << "))";
+  } else if (op->op.same_as(tl::activemask())) {
+    ICHECK(op->args.empty()) << "tl.activemask takes no arguments.";
+    os << "((unsigned long long)__ballot(1))";
+  } else if (op->op.same_as(tl::syncthreads_count())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.syncthreads_count expects <predicate>.";
+    os << "__syncthreads_count(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::syncthreads_and())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.syncthreads_and expects <predicate>.";
+    os << "__syncthreads_and(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::syncthreads_or())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.syncthreads_or expects <predicate>.";
+    os << "__syncthreads_or(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::shfl_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_sync expects <mask, value, src_lane, width>.";
+    // HIP __shfl takes only (value, src_lane, width); the mask is ignored.
+    os << "__shfl(" << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2])
+       << ", " << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_xor_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_xor_sync expects <mask, value, lane_mask, width>.";
+    os << "__shfl_xor(" << PrintExpr(op->args[1]) << ", "
+       << PrintExpr(op->args[2]) << ", " << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_down_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_down_sync expects <mask, value, delta, width>.";
+    os << "__shfl_down(" << PrintExpr(op->args[1]) << ", "
+       << PrintExpr(op->args[2]) << ", " << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_up_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_up_sync expects <mask, value, delta, width>.";
+    os << "__shfl_up(" << PrintExpr(op->args[1]) << ", "
+       << PrintExpr(op->args[2]) << ", " << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::match_any_sync()) ||
+             op->op.same_as(tl::match_all_sync())) {
+    LOG(FATAL) << "tl." << op->op << " is not supported on HIP: the "
+               << "__match_{any,all}_sync primitives have no HIP equivalent.";
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
@@ -975,7 +1063,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float8_e5m2fnuzx8", "long"},
         {"float8_e5m2x4", "fp8_e5_4_t"},
         {"float8_e5m2x8", "long"},
-        {"float32x16", "float32x16"}};
+        {"float32x16", "float32x16"},
+        {"float32x32", "float32x32"}};
     std::string call_mfma_code = R"({
       *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
                     *((({B_dtype}*){b_ref}) + {b_bias}),
@@ -1199,26 +1288,14 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tir::attr::async_commit_queue_scope) {
-    const IntImmNode *queue_id = op->value.as<IntImmNode>();
-    ICHECK(queue_id && queue_id->value == 0)
-        << "For CUDA, the index of an async queue must be 0.";
-    this->VisitStmt(op->body);
-    auto commit_group = Call(DataType::Void(), builtin::ptx_commit_group(), {});
-    this->VisitExpr(commit_group, this->stream);
-    return;
-  } else if (op->attr_key == tir::attr::async_wait_queue_scope) {
-    auto wait_attrs = GetAsyncWaitAttributes(op);
-    auto queue_id = wait_attrs.first.as<IntImmNode>();
-    ICHECK(queue_id && queue_id->value == 0)
-        << "For CUDA, the index of an async queue must be 0.";
-    auto wait_cnt = wait_attrs.second;
-    auto wait_group =
-        Call(DataType::Void(), builtin::ptx_wait_group(), {wait_cnt});
-    this->VisitExpr(wait_group, this->stream);
-    auto inner = op->body.as<AttrStmtNode>();
-    ICHECK(inner);
-    this->VisitStmt(inner->body);
+  if (op->attr_key == tl::attr::kLexicalAllocScope) {
+    PrintIndent();
+    stream << "{\n";
+    int scope = BeginScope();
+    PrintStmt(op->body);
+    EndScope(scope);
+    PrintIndent();
+    stream << "}\n";
     return;
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
@@ -1229,25 +1306,17 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
           call->args.size() >= 2) {
         const auto *name_node = call->args[0].as<StringImmNode>();
         const auto *size_node = call->args[1].as<IntImmNode>();
-        ICHECK(name_node && size_node)
-            << "threadblock_swizzle_pattern expects "
-               "tvm_tuple(device_func, panel_size)";
+        ICHECK(name_node && size_node) << "threadblock_swizzle_pattern expects "
+                                          "tvm_tuple(device_func, panel_size)";
         func_name = name_node->value;
         panel_size = static_cast<int>(size_node->value);
       }
-    } else if (const auto *pattern = op->value.as<StringImmNode>()) {
-      // Backward-compatible path for older IR that stored the full callee name.
-      func_name = pattern->value;
     }
-    ICHECK(!func_name.empty())
-        << "threadblock_swizzle_pattern expects either tvm_tuple(device_func, "
-           "panel_size) or a StringImm callee name";
-    if (panel_size > 0) {
-      this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
-                   << panel_size << ">();\n";
-    } else {
-      this->stream << "const dim3 blockIdx = " << func_name << "();\n";
-    }
+    ICHECK(!func_name.empty() && panel_size > 0)
+        << "threadblock_swizzle_pattern: failed to extract func_name and "
+           "panel_size";
+    this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
+                 << panel_size << ">();\n";
     this->VisitStmt(op->body);
     return;
   }
@@ -1346,13 +1415,45 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
+    // HIP does not allow taking the address of a temporary, so use a union
+    // to reinterpret float2 as unsigned long long without UB or temp-address.
     os << "make_ulonglong4(";
     for (int i = 0; i < 4; ++i) {
       if (i != 0)
         os << ", ";
-      os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+      os << "([&]{ union { float2 f; unsigned long long u; } _tmp;"
+         << " _tmp.f = make_float2(" << v << ", " << v
+         << "); return _tmp.u; }())";
     }
     os << ')';
+    return;
+  }
+
+  if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+      (op->dtype.lanes() == 16 || op->dtype.lanes() == 32)) {
+    // float32x16/float32x32: GCC vector extension — initialize with compound
+    // literal.
+    std::string v = PrintExpr(op->value);
+    os << "(float32x" << op->dtype.lanes() << "){";
+    for (int i = 0; i < op->dtype.lanes(); ++i) {
+      if (i != 0)
+        os << ", ";
+      os << v;
+    }
+    os << "}";
+    return;
+  }
+
+  if (op->dtype.is_bfloat16() && op->dtype.lanes() == 16) {
+    // bfloat16x16: struct aggregate initializer.
+    std::string v = PrintExpr(op->value);
+    os << "bfloat16x16{";
+    for (int i = 0; i < 16; ++i) {
+      if (i != 0)
+        os << ", ";
+      os << v;
+    }
+    os << "}";
     return;
   }
 
@@ -1515,7 +1616,7 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
     return;
   }
 
-  if (t.is_bfloat16()) {
+  if (t.is_bfloat16() && t.lanes() != 16) {
     if (i == 0) {
       os << "make_";
       PrintType(t, os);
@@ -1531,6 +1632,30 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
         os << ")";
       }
     }
+    return;
+  }
+
+  if ((t.lanes() == 16 || t.lanes() == 32) && t.bits() == 32 && t.is_float()) {
+    // float32x16/float32x32: compound literal.
+    if (i == 0)
+      os << "(float32x" << t.lanes() << "){";
+    os << value;
+    if (i != t.lanes() - 1)
+      os << ",";
+    else
+      os << "}";
+    return;
+  }
+
+  if (t.lanes() == 16 && t.is_bfloat16()) {
+    // bfloat16x16: struct aggregate initializer.
+    if (i == 0)
+      os << "bfloat16x16{";
+    os << value;
+    if (i != t.lanes() - 1)
+      os << ",";
+    else
+      os << "}";
     return;
   }
 

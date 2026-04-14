@@ -77,7 +77,6 @@ def get_configs():
 @autotune(configs=get_configs(), warmup=5, rep=5)
 @tilelang.jit(
     out_idx=[-4, -3, -2, -1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
 )
 def tilelang_chunk_bwd_intra(
     # task config

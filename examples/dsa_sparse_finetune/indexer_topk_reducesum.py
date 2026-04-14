@@ -14,11 +14,7 @@ BF16 = T.bfloat16
 FP32 = T.float32
 INT32 = T.int32
 
-pass_configs = {
-    tl.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
-    tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-}
+pass_configs = {tl.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True, tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
 
 
 @tl.jit(pass_configs=pass_configs)

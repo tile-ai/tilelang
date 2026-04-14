@@ -31,10 +31,7 @@ def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype=T.float16,
     kernel = tilelang.compile(
         program,
         out_idx=[1],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)

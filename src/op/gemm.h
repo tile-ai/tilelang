@@ -129,6 +129,8 @@ public:
 class GemmNode : public TileOperatorNode {
 public:
   bool checkWgmma() const;
+  bool allowTcgen5Mma(Target target) const;
+  bool allowWgmma(int block_size, Target target) const;
   tir::Buffer a_, b_, c_;
   // BufferRegion for A, B and C
   BufferRegion aRegion_, bRegion_, cRegion_;
@@ -137,15 +139,17 @@ public:
   int strideA_, strideB_;
   int offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
+  tir::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
+  Array<PrimExpr> cCoords_;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
   int kPack_ = 1;
   int wgWait_ = 0;
   bool isWgmma_ = false;
   bool isTcgen05_ = false;
-  tir::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
-  Array<PrimExpr> cCoords_;
   mutable GemmWarpPolicy policy_;
+  Map<String, ObjectRef> annotations_;
+
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
   static void RegisterReflection() {
@@ -167,26 +171,27 @@ public:
         .def_ro("offsetA", &GemmNode::offsetA_)
         .def_ro("offsetB", &GemmNode::offsetB_)
         .def_ro("clearAccum", &GemmNode::clearAccum_)
+        .def_ro("mbar", &GemmNode::mbar_)
+        .def_ro("cCoords", &GemmNode::cCoords_)
         .def_ro("kPack", &GemmNode::kPack_)
         .def_ro("wgWait", &GemmNode::wgWait_)
         .def_ro("isWgmma", &GemmNode::isWgmma_)
         .def_ro("isTcgen05", &GemmNode::isTcgen05_)
-        .def_ro("mbar", &GemmNode::mbar_)
-        .def_ro("cCoords", &GemmNode::cCoords_)
-        .def_ro("policy", &GemmNode::policy_);
+        .def_ro("policy", &GemmNode::policy_)
+        .def_ro("annotations", &GemmNode::annotations_);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
+  AccessRegions GetAccessRegions() const override;
 
   TileOperator Clone() const;
 
-private:
+  // Target GEMM instruction
   GemmInst getGemmInst(int block_size, Target target) const;
-  bool allowTcgen5Mma(Target target) const;
-  bool allowWgmma(int block_size, Target target) const;
 
+private:
   mutable bool completed_ = false;
 };
 

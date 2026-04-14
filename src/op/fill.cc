@@ -60,9 +60,10 @@ using namespace tir;
 Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
-  BufferRegion region = NormalizeToBufferRegion(args[0]);
-  node->dst = region->buffer;
-  node->region = region->region;
+  AccessRegion dst_access = NormalizeToAccessRegion(args[0], kAccessWrite);
+  node->dst = dst_access.region->buffer;
+  node->region = dst_access.region->region;
+  node->SetAccessRegions({dst_access});
 
   if (args[1]->dtype != node->dst->dtype) {
     node->value = Cast(node->dst->dtype, args[1]);
