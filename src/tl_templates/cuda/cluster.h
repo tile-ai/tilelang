@@ -137,10 +137,21 @@ TL_DEVICE void clc_try_cancel_multicast(void *result_ptr, void *mbar_ptr) {
 #endif
 }
 
+// CLC query responses are produced through the async shared-memory proxy and
+// must be fenced before normal shared-memory loads decode the 16-byte result.
+TL_DEVICE void clc_fence_proxy_async_shared_cta() {
+#if defined(CUTLASS_ARCH_CLC_ENABLED)
+  asm volatile("fence.proxy.async.shared::cta;" : : : "memory");
+#else
+  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+#endif
+}
+
 TL_DEVICE int clc_is_canceled(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
   uint32_t is_canceled = 0;
+  clc_fence_proxy_async_shared_cta();
   asm volatile("{\n\t"
                ".reg .pred p1;\n\t"
                ".reg .b128 clc_result;\n\t"
@@ -162,6 +173,7 @@ TL_DEVICE uint32_t clc_get_first_ctaid_x(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
   uint32_t x = 0, y = 0, z = 0;
+  clc_fence_proxy_async_shared_cta();
   asm volatile(
       "{\n\t"
       ".reg .pred p1;\n\t"
@@ -185,6 +197,7 @@ TL_DEVICE uint32_t clc_get_first_ctaid_y(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
   uint32_t x = 0, y = 0, z = 0;
+  clc_fence_proxy_async_shared_cta();
   asm volatile(
       "{\n\t"
       ".reg .pred p1;\n\t"
@@ -208,6 +221,7 @@ TL_DEVICE uint32_t clc_get_first_ctaid_z(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
   uint32_t x = 0, y = 0, z = 0;
+  clc_fence_proxy_async_shared_cta();
   asm volatile(
       "{\n\t"
       ".reg .pred p1;\n\t"

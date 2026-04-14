@@ -71,19 +71,35 @@ def clc_try_cancel_multicast(result, mbarrier) -> tir.PrimExpr:
 
 def clc_is_canceled(result) -> tir.PrimExpr:
     """Return 1 when the CLC query successfully canceled a future launch."""
-    return tir.call_extern("int32", "tl::clc_is_canceled", _to_ptr(result, "r"))
+    return tir.call_intrin(
+        "int32",
+        tir.op.Op.get("tl.clc_is_canceled"),
+        _to_ptr(result, "r"),
+    )
 
 
 def clc_get_first_ctaid_x(result) -> tir.PrimExpr:
     """Return the x coordinate of the first CTA in a successful CLC response."""
-    return tir.call_extern("uint32", "tl::clc_get_first_ctaid_x", _to_ptr(result, "r"))
+    return tir.call_intrin(
+        "uint32",
+        tir.op.Op.get("tl.clc_get_first_ctaid_x"),
+        _to_ptr(result, "r"),
+    )
 
 
 def clc_get_first_ctaid_y(result) -> tir.PrimExpr:
     """Return the y coordinate of the first CTA in a successful CLC response."""
-    return tir.call_extern("uint32", "tl::clc_get_first_ctaid_y", _to_ptr(result, "r"))
+    return tir.call_intrin(
+        "uint32",
+        tir.op.Op.get("tl.clc_get_first_ctaid_y"),
+        _to_ptr(result, "r"),
+    )
 
 
 def clc_get_first_ctaid_z(result) -> tir.PrimExpr:
     """Return the z coordinate of the first CTA in a successful CLC response."""
-    return tir.call_extern("uint32", "tl::clc_get_first_ctaid_z", _to_ptr(result, "r"))
+    return tir.call_intrin(
+        "uint32",
+        tir.op.Op.get("tl.clc_get_first_ctaid_z"),
+        _to_ptr(result, "r"),
+    )

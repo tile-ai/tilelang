@@ -2273,6 +2273,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::clc_try_cancel_multicast())) {
     need_cluster_h_ = true;
     print_extern_call_stmt("tl::clc_try_cancel_multicast");
+  } else if (op->op.same_as(tl::clc_is_canceled())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_is_canceled(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_x())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_x(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_y())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_y(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_z())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_z(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
