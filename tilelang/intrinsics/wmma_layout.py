@@ -150,7 +150,7 @@ def wmma_store_index_map_gfx12(thread_id, local_id):
 def shared_16x16_to_local_32x16_layout_A_gfx11(i, j):
     """ 
         Forward: A[i=M, j=K] -> (thread=i, local=j%16).
-        TODO: Currently we only reflect (i, j) to the lower-half-lane of threads in
+        ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
         a warp.
     """
     thread_id = i
@@ -172,7 +172,7 @@ def thread_id_shared_access_32x16_to_16x16_layout_A_gfx11(thread_id, local_id):
 def shared_16x16_to_local_32x16_layout_B_gfx11(i, j):
     """ 
         Forward: B[i=K, j=N] -> (thread=N, local=K%16).
-        TODO: Currently we only reflect (i, j) to the lower-half-lane of threads in
+        ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
         a warp.
     """
     thread_id = j
@@ -194,7 +194,7 @@ def thread_id_shared_access_32x16_to_16x16_layout_B_gfx11(thread_id, local_id):
 def shared_16x16_to_local_32x16_layout_B_colmajor_gfx11(i, j):
     """ 
         Forward: B_T[i=N, j=K] -> (thread=i, local=j%16).
-        TODO: Currently we only reflect (i, j) to the lower-half-lane of threads in
+        ATTN: Here we only reflect (i, j) to the lower-half-lane of threads in
         a warp.
     """
     thread_id = i
