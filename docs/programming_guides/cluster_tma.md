@@ -122,14 +122,23 @@ trip through global memory. This is useful for patterns such as:
 - Producer–consumer pipelines where the producer fills a neighbor's buffer
 - All-to-all collective communication within a cluster
 
-Two sub-variants are provided depending on whether an mbarrier is supplied:
+### Lowering paths
 
-| Variant | Parameter | Hardware instruction | Threads used |
-|---------|-----------|---------------------|--------------|
-| **Fast path** | `dst_block` + `remote_barrier` | `cp.async.bulk.shared::cluster` | 1 (async DMA) |
-| **Slow path** | `dst_block` only | `map_shared_rank` + scalar stores | all (SIMT loop) |
+The compiler selects one of three paths depending on whether `remote_barrier`
+is provided and whether the copy region is contiguous:
 
-### Fast path — bulk async copy with mbarrier
+| Path | Condition | Hardware instruction | Arrive count |
+|------|-----------|---------------------|--------------|
+| **TMA fast path** | `remote_barrier` set + region is contiguous | one `tl::tma_store_cluster` | 1 |
+| **Multi-TMA path** | `remote_barrier` set + ND region is non-contiguous | one `tl::tma_store_cluster` per contiguous row | number of rows |
+| **SIMT fallback** | no `remote_barrier`, or non-decomposable region | `map_shared_rank` scalar stores by all threads | auto-injected arrive if `remote_barrier` is set |
+
+A copy region is *contiguous* when its innermost dimension spans the full
+buffer width (i.e. the copy region `[..., 0:N_tile]` satisfies
+`N_tile == buffer_shape[-1]`). If the innermost extent is shorter, the region
+is non-contiguous and the TMA fast path is unavailable.
+
+### TMA fast path — bulk async copy with mbarrier
 
 ```python
 T.copy_cluster(src_shared, dst_shared, dst_block=<rank>, remote_barrier=<mbarrier>)
@@ -143,7 +152,7 @@ the destination CTA's mbarrier on completion. The destination CTA waits with
 Steps:
 1. Both CTAs allocate the **same** shared memory layout so their mbarriers live
    at the same offset.
-2. Every CTA initialises its own barrier for 1 arrival.
+2. Every CTA initialises its own barrier for 1 arrival via `T.alloc_cluster_barrier([1])`.
 3. The source CTA (`pid == 0` below) calls `T.copy_cluster(... dst_block=1, remote_barrier=...)`.
 4. The destination CTA (`pid == 1`) waits on its local barrier copy.
 
@@ -196,9 +205,40 @@ if (((int)threadIdx.x) == 0) {
 }
 ```
 
-### Slow path — element-by-element SIMT fallback
+### Multi-TMA path — non-contiguous ND regions
 
-Omit `remote_barrier` to use the slow path:
+When `remote_barrier` is provided but the copy region is not fully contiguous
+(e.g. copying a 2-D slice `[0:M, 0:N_tile]` from a buffer of shape
+`[M, N_full]` where `N_tile < N_full`), the compiler automatically
+**decomposes the ND region into individual contiguous rows**, emitting one
+`tl::tma_store_cluster` call per row. The mbarrier `arrive_count` is updated
+to the total number of rows so the destination CTA's `mbarrier_wait_parity`
+completes only after all rows are transferred.
+
+```python
+# 2-D non-contiguous copy: N_tile < N_full → compiler emits M TMA calls
+s_src = T.alloc_shared((M, N_full), "float32")
+s_dst = T.alloc_shared((M, N_full), "float32")
+s_barrier = T.alloc_cluster_barrier([1])   # arrive_count updated to M at compile time
+
+T.copy_cluster(
+    s_src[0:M, 0:N_tile],
+    s_dst[0:M, 0:N_tile],
+    dst_block=1,
+    remote_barrier=s_barrier[0],
+)
+```
+
+The decomposition is recursive: a 3-D region `[0:D, 0:M, 0:N_tile]` (with
+`N_tile < N_full`) produces `D × M` TMA calls and sets `arrive_count = D * M`.
+Static extents are unrolled at compile time; symbolic extents emit TIR `For`
+loops.
+
+The API is identical to the fast path — no change is required in user code.
+
+### SIMT fallback — element-by-element stores
+
+Omit `remote_barrier` to always use the SIMT fallback:
 
 ```python
 T.copy_cluster(s_src, s_dst, dst_block=1)
@@ -211,20 +251,29 @@ scalar pointer, vectorised writes are not possible. Use this path only when an
 mbarrier is unavailable or when the tile is too small to justify barrier
 overhead.
 
+When `remote_barrier` is provided but the region is neither contiguous nor
+decomposable into TMA rows, the compiler falls back to SIMT stores and
+**auto-injects a barrier arrive** (`__syncthreads()` + single-thread
+`s_barrier.arrive(1u)`) so the destination CTA can still wait on the same
+mbarrier without any API change.
+
 ### Synchronisation contract
 
-| | Fast path | Slow path |
-|-|-----------|-----------|
-| Source CTA | no wait needed; copy is async | effectively sync after the loop |
-| Destination CTA | `T.mbarrier_wait_parity(barrier, parity)` | external `T.cluster_sync()` or equivalent |
+| | TMA fast path | Multi-TMA path | SIMT fallback |
+|-|---------------|----------------|---------------|
+| Source CTA | no wait needed; copy is async | no wait needed | effectively sync after the loop |
+| Destination CTA | `T.mbarrier_wait_parity(barrier, parity)` | `T.mbarrier_wait_parity(barrier, parity)` | `T.cluster_sync()` (no barrier), or `T.mbarrier_wait_parity` if auto-arrived |
 
 ### Notes
 
-- Both paths require `src` and `dst` to be in `shared` or `shared.dyn` scope.
+- All paths require `src` and `dst` to be in `shared` or `shared.dyn` scope.
 - The mbarrier must be allocated with `T.alloc_cluster_barrier([arrive_count])`.
+  The compiler updates `arrive_count` automatically for the multi-TMA path.
 - `T.cluster_sync()` after allocation but before the copy is required to ensure
-  all CTAs have reached the barrier-init barrier before any data is pushed.
+  all CTAs have reached the barrier-init point before any data is pushed.
 - `dst_block` may be a compile-time integer or a runtime `tir.PrimExpr`.
+- `cluster_mask` and `dst_block` are mutually exclusive in a single
+  `T.copy_cluster` call.
 
 ---
 
@@ -234,7 +283,10 @@ overhead.
 |---------|--------|-------------|
 | `T.block_rank_in_cluster()` | `int32` | Block rank (0-indexed) within the cluster |
 | `T.get_cluster_block_nums()` | `int32` | Total number of CTAs in the cluster |
-| `T.cluster_sync()` | — | Barrier synchronisation across all cluster CTAs |
+| `T.cluster_sync()` | — | Barrier synchronisation across all cluster CTAs (arrive + wait) |
+| `T.cluster_arrive()` | — | Signal cluster barrier arrival (aligned) |
+| `T.cluster_arrive_relaxed()` | — | Signal cluster barrier arrival (relaxed) |
+| `T.cluster_wait()` | — | Wait for all cluster CTAs to arrive |
 | `T.alloc_cluster_barrier([count])` | `Buffer` | Allocate and initialise an mbarrier for `count` arrivals |
 | `T.mbarrier_arrive(bar)` | — | Signal one arrival on an mbarrier |
 | `T.mbarrier_wait_parity(bar, parity)` | — | Wait until `bar` flips to `parity` |
@@ -298,6 +350,6 @@ def split_k_gemm(A, B, C):
 ## See Also
 
 - `testing/python/cuda/test_tma_multicast_demo.py` — multicast validation
-- `testing/python/cuda/test_tma_dsmem.py` — SM-to-SM copy validation
+- `testing/python/cuda/test_tma_dsmem.py` — SM-to-SM copy validation (fast path, multi-TMA, and SIMT fallback)
 - Programming Guides → Instructions — complete `T.copy` parameter reference
 - Programming Guides → Control Flow — `T.Pipelined` and warp-specialized pipelines
