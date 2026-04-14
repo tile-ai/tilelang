@@ -4,7 +4,7 @@
  *
  */
 
-// TODO: @botbw: remove redundant code with gemm_py.h
+// TODO: @botbw: remove redundant code with gemm.h
 
 #ifndef TVM_TL_OP_GEMM_SP_PY_H_
 #define TVM_TL_OP_GEMM_SP_PY_H_

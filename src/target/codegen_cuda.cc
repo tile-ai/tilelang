@@ -1952,6 +1952,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+  if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
+    ICHECK_EQ(op->args.size(), 2);
+    const bool is_max = op->op.same_as(tl::max_nan());
+    const DataType t = op->dtype;
+    const char *f16_intrin = is_max ? "__hmax_nan" : "__hmin_nan";
+    const char *fallback = is_max ? "cutlass::fast_max" : "cutlass::fast_min";
+
+    if (t.is_bfloat16() && t.is_scalar()) {
+      os << "cutlass::bfloat16_t(" << f16_intrin << "("
+         << "(" << PrintExpr(op->args[0]) << ").to_nv_bfloat16(), "
+         << "(" << PrintExpr(op->args[1]) << ").to_nv_bfloat16()))";
+      return;
+    }
+    if (t.is_float16() && t.is_scalar()) {
+      os << "cutlass::half_t(" << f16_intrin << "("
+         << "(" << PrintExpr(op->args[0]) << ").to_half(), "
+         << "(" << PrintExpr(op->args[1]) << ").to_half()))";
+      return;
+    }
+    os << fallback << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+    return;
+  }
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
@@ -3247,6 +3270,76 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     enable_sparse_gemm_ = true;
     this->PrintCallExtern(GetType(tvm::ffi::GetRef<PrimExpr>(op)),
                           op_instance->value, op->args, true, os);
+  } else if (op->op.same_as(tl::any_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
+    os << "__any_sync(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::all_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.all_sync expects <mask, predicate>.";
+    os << "__all_sync(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ballot_sync())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.ballot_sync expects <mask, predicate>.";
+    // __ballot_sync returns unsigned int (32 bits); zero-extend to uint64.
+    os << "((unsigned long long)__ballot_sync(" << PrintExpr(op->args[0])
+       << ", " << PrintExpr(op->args[1]) << "))";
+  } else if (op->op.same_as(tl::ballot())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.ballot expects <predicate>.";
+    os << "((unsigned long long)__ballot_sync(0xFFFFFFFFu, "
+       << PrintExpr(op->args[0]) << "))";
+  } else if (op->op.same_as(tl::activemask())) {
+    ICHECK(op->args.empty()) << "tl.activemask takes no arguments.";
+    os << "((unsigned long long)__activemask())";
+  } else if (op->op.same_as(tl::syncthreads_count())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.syncthreads_count expects <predicate>.";
+    os << "__syncthreads_count(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::syncthreads_and())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.syncthreads_and expects <predicate>.";
+    os << "__syncthreads_and(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::syncthreads_or())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.syncthreads_or expects <predicate>.";
+    os << "__syncthreads_or(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::shfl_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_sync expects <mask, value, src_lane, width>.";
+    os << "__shfl_sync(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", "
+       << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_xor_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_xor_sync expects <mask, value, lane_mask, width>.";
+    os << "__shfl_xor_sync(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", "
+       << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_down_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_down_sync expects <mask, value, delta, width>.";
+    os << "__shfl_down_sync(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", "
+       << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::shfl_up_sync())) {
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.shfl_up_sync expects <mask, value, delta, width>.";
+    os << "__shfl_up_sync(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ", "
+       << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(tl::match_any_sync())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.match_any_sync expects <mask, value>.";
+    os << "__match_any_sync(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::match_all_sync())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.match_all_sync expects <mask, value>.";
+    // __match_all_sync writes a `pred` flag through its third argument. We
+    // hide the out-parameter behind an immediately-invoked lambda and
+    // discard pred (the returned mask already encodes whether all lanes
+    // agreed: a non-zero result implies pred == 1).
+    os << "([&]() -> unsigned { int _tl_pred = 0; return __match_all_sync("
+       << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1])
+       << ", &_tl_pred); }())";
   } else if (op->op.same_as(tl::get_lane_idx())) {
     ICHECK_LE(op->args.size(), 1)
         << "tl.get_lane_idx expects at most one argument <warp_size>.";
@@ -3608,7 +3701,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tir::attr::fragment_shape) {
+  if (op->attr_key == tl::attr::kLexicalAllocScope) {
+    PrintIndent();
+    stream << "{\n";
+    int scope = BeginScope();
+    PrintStmt(op->body);
+    EndScope(scope);
+    PrintIndent();
+    stream << "}\n";
+    return;
+  } else if (op->attr_key == tir::attr::fragment_shape) {
     const VarNode *buffer = op->node.as<VarNode>();
     const StringImmNode *shape_str = op->value.as<StringImmNode>();
     fragment_shapes[buffer] = shape_str->value;

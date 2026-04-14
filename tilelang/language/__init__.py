@@ -56,7 +56,7 @@ from .allocate import (
 from tvm.script.parser.tir import allocate as allocate  # noqa: F401
 from .copy_op import copy, async_copy, tma_copy, transpose, c2d_im2col  # noqa: F401
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
-from .gemm_op import gemm, gemm_v1, gemm_v2, wgmma_gemm, tcgen05_gemm  # noqa: F401
+from .gemm_op import gemm, wgmma_gemm, tcgen05_gemm  # noqa: F401
 from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401
 from .fill_op import fill, clear  # noqa: F401
 from .reduce_op import (
@@ -103,6 +103,14 @@ from .builtin import stg32 as stg32  # noqa: F401
 from .builtin import stg64 as stg64  # noqa: F401
 from .builtin import stg128 as stg128  # noqa: F401
 from .builtin import stg256 as stg256  # noqa: F401
+from .builtin import any_sync as any_sync  # noqa: F401
+from .builtin import all_sync as all_sync  # noqa: F401
+from .builtin import ballot_sync as ballot_sync  # noqa: F401
+from .builtin import ballot as ballot  # noqa: F401
+from .builtin import activemask as activemask  # noqa: F401
+from .builtin import syncthreads_count as syncthreads_count  # noqa: F401
+from .builtin import syncthreads_and as syncthreads_and  # noqa: F401
+from .builtin import syncthreads_or as syncthreads_or  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 
