@@ -1597,6 +1597,55 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
 }
 
 // ---------------------------------------------------------------------------
+// Shared contiguity predicate
+// ---------------------------------------------------------------------------
+// Returns true when `ranges` selects a contiguous row-major sub-region of
+// `buf`.  The region is contiguous iff:
+//   1. All dimensions before the pivot (first non-unit-extent dim) have
+//      extent == 1 (outer dims are fully squeezed).
+//   2. All dimensions after the pivot are full-span: min == 0 and
+//      extent == buf->shape[i] (no stride gaps on inner dims).
+//
+// Both LowerClusterCopy and MakeTMARows rely on this definition; keeping it
+// in one place makes the shared invariant explicit and avoids drift.
+static bool IsContiguousRegion(const Buffer &buf, const Array<Range> &ranges,
+                               arith::Analyzer *analyzer) {
+  ICHECK_EQ(buf->shape.size(), ranges.size())
+      << "IsContiguousRegion: buffer/range rank mismatch for " << buf->name;
+
+  int n = static_cast<int>(ranges.size());
+  // Find the first dim with non-unit extent (the pivot).
+  int pivot = -1;
+  for (int i = 0; i < n; ++i) {
+    if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
+      pivot = i;
+      break;
+    }
+  }
+  if (pivot == -1)
+    return true; // All-unit-extent: scalar region, trivially contiguous.
+
+  // Dims before pivot must all have extent 1 (invariant: outer dims are fixed).
+  // By the pivot scan above this holds by construction unless the analyzer
+  // cannot prove equality — the ICHECK surfaces such cases early.
+  for (int i = 0; i < pivot; ++i) {
+    ICHECK(analyzer->CanProveEqual(ranges[i]->extent, 1))
+        << "IsContiguousRegion: dim " << i << " precedes pivot " << pivot
+        << " but has non-unit extent " << ranges[i]->extent << " for buffer "
+        << buf->name
+        << ". Outer dimensions must be squeezed to extent-1 before this call.";
+  }
+
+  // Dims after pivot must be full-span.
+  for (int i = pivot + 1; i < n; ++i) {
+    if (!analyzer->CanProveEqual(ranges[i]->min, 0) ||
+        !analyzer->CanProveEqual(ranges[i]->extent, buf->shape[i]))
+      return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Multi-TMA decomposition helper
 // ---------------------------------------------------------------------------
 // Recursively splits an N-D copy region into individual contiguous "rows" and
@@ -1619,31 +1668,16 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
 // Preconditions:
 //   • src_ranges and dst_ranges have the same rank and matching per-dim
 //     extents (checked by the caller).
+//   • All dimensions that precede the first non-trivial (extent != 1) dim
+//     must have extent == 1.  The recursion maintains this invariant by
+//     reducing exactly one dim to extent-1 before each recursive call.
+//     IsContiguousRegion() enforces this via ICHECK.
 static std::pair<Array<Stmt>, PrimExpr>
 MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
             const Buffer &dst, const Array<Range> &dst_ranges,
             PrimExpr dst_block, PrimExpr barrier_load,
             arith::Analyzer *analyzer) {
   int n = static_cast<int>(src_ranges.size());
-
-  // Check whether a buffer/range pair is contiguous in row-major storage.
-  auto is_contig = [&](const Buffer &buf, const Array<Range> &ranges) -> bool {
-    int pivot = -1;
-    for (int i = 0; i < n; ++i) {
-      if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
-        pivot = i;
-        break;
-      }
-    }
-    if (pivot == -1)
-      return true;
-    for (int i = pivot + 1; i < n; ++i) {
-      if (!analyzer->CanProveEqual(ranges[i]->min, 0) ||
-          !analyzer->CanProveEqual(ranges[i]->extent, buf->shape[i]))
-        return false;
-    }
-    return true;
-  };
 
   // Linear element offset for the starting element of a region.
   auto linear_off = [](const Buffer &buf,
@@ -1659,7 +1693,8 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
   };
 
   // Base case: both regions are contiguous → one tma_store_cluster.
-  if (is_contig(src, src_ranges) && is_contig(dst, dst_ranges)) {
+  if (IsContiguousRegion(src, src_ranges, analyzer) &&
+      IsContiguousRegion(dst, dst_ranges, analyzer)) {
     PrimExpr total_elems = 1;
     for (const auto &r : src_ranges)
       total_elems = total_elems * r->extent;
@@ -1747,42 +1782,8 @@ Stmt CopyNode::LowerClusterCopy(const LowerArgs &T,
   if (auto barrier_opt = GetBarrier()) {
     // Bulk cluster copy issues a single flat byte-span transfer. This is only
     // correct when both src/dst regions are contiguous in row-major storage.
-    auto is_contiguous_region = [&](const Buffer &buf,
-                                    const Array<Range> &ranges) -> bool {
-      ICHECK_EQ(buf->shape.size(), ranges.size())
-          << "Buffer/range rank mismatch for " << buf->name;
-
-      int pivot = -1;
-      for (int i = 0; i < static_cast<int>(ranges.size()); ++i) {
-        if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
-          pivot = i;
-          break;
-        }
-      }
-      // Scalar region is contiguous.
-      if (pivot == -1) {
-        return true;
-      }
-
-      // Outer dimensions must be fixed (extent == 1).
-      for (int i = 0; i < pivot; ++i) {
-        if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
-          return false;
-        }
-      }
-
-      // Inner dimensions must be full-span [0, shape[i]) to avoid strides.
-      for (int i = pivot + 1; i < static_cast<int>(ranges.size()); ++i) {
-        if (!analyzer->CanProveEqual(ranges[i]->min, 0) ||
-            !analyzer->CanProveEqual(ranges[i]->extent, buf->shape[i])) {
-          return false;
-        }
-      }
-      return true;
-    };
-
-    bool src_contiguous = is_contiguous_region(src, src_range);
-    bool dst_contiguous = is_contiguous_region(dst, dst_range);
+    bool src_contiguous = IsContiguousRegion(src, src_range, analyzer);
+    bool dst_contiguous = IsContiguousRegion(dst, dst_range, analyzer);
 
     PrimExpr src_elements = 1;
     for (auto r : src_range)

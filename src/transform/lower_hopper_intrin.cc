@@ -19,10 +19,6 @@ namespace tl {
 using namespace tir;
 
 #if (CUDA_MAJOR_VERSION >= 12)
-// Barrier IDs 0–2 are reserved: 0 by InjectTmaBarrier (descriptor-based TMA
-// loads) and 1–2 by the backend for internal synchronization (e.g. AllReduce).
-// User-managed barriers must start after this reserved range.
-static constexpr int kReservedBarriers = 3;
 
 class LowerHopperIntrin : public StmtExprMutator {
 public:

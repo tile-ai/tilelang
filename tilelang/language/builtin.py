@@ -646,7 +646,8 @@ def cluster_block_nums() -> PrimExpr:
     """Return the number of blocks in the cluster.
 
     Lowers to `tl.get_cluster_block_nums` and emits
-    `cooperative_groups::this_cluster().num_blocks()` in CUDA codegen.
+    ``tl::cluster_shape().x * tl::cluster_shape().y * tl::cluster_shape().z``
+    in CUDA codegen.
     """
     return tir.call_intrin("int32", tir.op.Op.get("tl.get_cluster_block_nums"))
 
