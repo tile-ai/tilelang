@@ -26,6 +26,7 @@ from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.transform import PassConfigKey
+from tilelang.transform.pass_config import normalize_pass_configs
 import logging
 import os
 
@@ -99,9 +100,7 @@ class JITKernel(Generic[_P, _T]):
         self.target_host = target_host
         self.verbose = verbose
 
-        if pass_configs is None:
-            pass_configs = {}
-        self.pass_configs = pass_configs
+        self.pass_configs = normalize_pass_configs(pass_configs)
 
         self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 

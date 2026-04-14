@@ -971,8 +971,7 @@ def annotate_pass_configs(configs: dict[str, Any]) -> None:
         @tilelang.jit
         def kernel(A, B):
             T.annotate_pass_configs({
-                PassConfigKey.TL_ENABLE_FAST_MATH: True,
-            })
+                PassConfigKey.TL_ENABLE_FAST_MATH: True})
             ...
     """
     builder = Builder.current()

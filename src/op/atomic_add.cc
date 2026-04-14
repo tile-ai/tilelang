@@ -45,18 +45,23 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
       << "AtomicAdd expects at least 2 arguments (src, dst), got "
       << args.size();
   ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
+  std::vector<AccessRegion> access_regions;
 
   if (IsBufferLikeExpr(args[0])) {
-    auto region = NormalizeToBufferRegion(args[0]);
-    node->src = region->buffer;
-    node->src_range = region->region;
+    auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
+    node->src = src_access.region->buffer;
+    node->src_range = src_access.region->region;
+    access_regions.push_back(std::move(src_access));
   } else {
     node->src_value = args[0];
   }
 
-  auto region = NormalizeToBufferRegion(args[1]);
-  node->dst = region->buffer;
-  node->dst_range = region->region;
+  auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
+  dst_access.access_mask = kAccessReadWrite;
+  node->dst = dst_access.region->buffer;
+  node->dst_range = dst_access.region->region;
+  access_regions.push_back(std::move(dst_access));
+  node->SetAccessRegions(std::move(access_regions));
 
   // Copy annotations from the Call node
   node->annotations = annotations;

@@ -24,6 +24,7 @@
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/mbarrier.h"
+#include "common/pipeline_utils.h"
 #include "layout_reducer.h"
 #include "loop_partition.h"
 
@@ -230,17 +231,17 @@ public:
 
     // If any TMA copies allocated mbarriers, inject the barrier buffer
     // into the tilelang_root block with a barrier_init annotation.
-    // MultiVersionBuffer will expand it for pipelining, and
+    // Pipeline buffer versioning expands it for pipelining, and
     // LowerSharedBarrier will process it into ptx_init_barrier_thread_count.
     if (substituter.mbarrier_count_ > 0) {
       ICHECK(substituter.mbarrier_buffer_.defined())
           << "mbarrier_buffer_ must have been created by AllocMBarrier "
              "callback";
       Buffer mbar_buf = substituter.mbarrier_buffer_.value();
-      // Update buffer shape in-place to final count.  We use const_cast
+      // Update buffer shape in-place to final count. We use const_cast
       // because CopyOnWrite would create a new BufferNode, breaking identity
-      // with BufferLoad references already in the body.  MultiVersionBuffer
-      // relies on buffer identity to remap accesses correctly.
+      // with BufferLoad references already in the body. Pipeline buffer
+      // versioning relies on buffer identity to remap accesses correctly.
       const_cast<BufferNode *>(mbar_buf.get())->shape = {
           IntImm(DataType::Int(32), substituter.mbarrier_count_)};
 
@@ -1050,19 +1051,7 @@ private:
       return workspace.access_ptr(2); // write
     };
 
-    Range thread_bounds;
-
-    if (analyzer_->const_int_bound.IsBound(thread_var_->var)) {
-      auto const_int_bound = analyzer_->const_int_bound(thread_var_);
-      auto min_value = const_int_bound->min_value;
-      auto max_value = const_int_bound->max_value;
-      auto extent = max_value + 1 - min_value;
-      thread_bounds =
-          Range::FromMinExtent(IntImm(thread_var_->var.dtype(), min_value),
-                               IntImm(thread_var_->var.dtype(), extent));
-    } else {
-      thread_bounds = Range::FromMinExtent(0, 1);
-    }
+    Range thread_bounds = CurrentThreadBounds();
 
     // Convert let_bindings_ to Map<Var, PrimExpr> for LowerArgs
     Map<Var, PrimExpr> let_var_to_expr;
@@ -1079,38 +1068,23 @@ private:
       return id;
     };
 
-    // Compute mbarrier expressions from the enclosing loop and pipeline info.
-    // pipeline_num_stages: number of pipeline stages (from T.Pipelined
-    // annotation) mbar_stage_expr: ko % num_stages (cycles through multiple
-    // mbarriers) mbar_phase_expr: (ko / num_stages) % 2 (mbarrier parity for
-    // wait)
-    int pipeline_num_stages = 1;
-    PrimExpr mbar_phase_expr;
-    PrimExpr mbar_stage_expr = IntImm(DataType::Int(32), 0);
-    if (!loop_var_stack_.empty()) {
-      pipeline_num_stages = pipeline_num_stages_stack_.back();
-      Var loop_var = loop_var_stack_.back();
-      PrimExpr ns = IntImm(DataType::Int(32), pipeline_num_stages);
-      mbar_stage_expr = FloorMod(loop_var, ns);
-      mbar_phase_expr =
-          FloorMod(FloorDiv(loop_var, ns), IntImm(DataType::Int(32), 2));
-    } else {
-      mbar_phase_expr = IntImm(DataType::Int(32), 0);
-    }
-
-    auto lowered = tile_op->Lower(
-        LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  mbarrier_callback, layout_map_, buffer_remap_,
-                  let_var_to_expr,
-                  /*in_pipeline=*/pipelined_depth_ > 0, mbar_phase_expr,
-                  pipeline_num_stages, mbar_stage_expr, &mbarrier_buffer_,
-                  cluster_size_},
-        analyzer_);
+    auto lowered =
+        tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_->var,
+                                 callback, mbarrier_callback, layout_map_,
+                                 buffer_remap_, let_var_to_expr,
+                                 loop_mbar_phase_stack_.empty()
+                                     ? PrimExpr(IntImm(DataType::Int(32), 0))
+                                     : loop_mbar_phase_stack_.back(),
+                                 &mbarrier_buffer_, cluster_size_},
+                       analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == kPipelineContextNumStages) {
+      return VisitStmt(op->body);
+    }
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
@@ -1145,16 +1119,28 @@ private:
    * @return Stmt The lowered statement.
    */
   Stmt VisitStmt_(const ForNode *op) final {
-    // Track enclosing loop variables for mbarrier parity computation.
-    loop_var_stack_.push_back(op->loop_var);
-    // Track pipeline num_stages from the loop's annotation.
-    int num_stages = 1;
-    if (auto ns_anno = op->annotations.Get("num_stages")) {
-      if (auto *ns_int = ns_anno.value().as<IntImmNode>()) {
-        num_stages = static_cast<int>(ns_int->value);
+    bool pushed_loop_mbar_phase = false;
+    if (op->kind == ForKind::kSerial) {
+      int num_stages = 1;
+      if (auto ns_anno = op->annotations.Get("num_stages")) {
+        if (const auto *ns_int = ns_anno.value().as<IntImmNode>()) {
+          if (ns_int->value > 1) {
+            num_stages = static_cast<int>(ns_int->value);
+          }
+        }
       }
+      PrimExpr phase_expr;
+      DataType loop_dtype = op->loop_var.dtype();
+      PrimExpr two = make_const(loop_dtype, 2);
+      if (num_stages > 1) {
+        PrimExpr num_stages_expr = make_const(loop_dtype, num_stages);
+        phase_expr = FloorMod(FloorDiv(op->loop_var, num_stages_expr), two);
+      } else {
+        phase_expr = FloorMod(op->loop_var, two);
+      }
+      loop_mbar_phase_stack_.push_back(analyzer_->Simplify(phase_expr));
+      pushed_loop_mbar_phase = true;
     }
-    pipeline_num_stages_stack_.push_back(num_stages);
 
     // Extract reducer info from annotations
     Map<Var, ReducerInfo> reducer_info;
@@ -1164,25 +1150,11 @@ private:
                          .value();
     }
 
-    bool enter_pipelined = false;
-    if (auto num_stages_anno = op->annotations.Get("num_stages")) {
-      const auto *imm = num_stages_anno->as<IntImmNode>();
-      ICHECK(imm) << "For annotation num_stages must be IntImm, but got "
-                  << num_stages_anno.value();
-      enter_pipelined = imm->value > 0;
-    }
-    if (enter_pipelined) {
-      ++pipelined_depth_;
-    }
-
     // First visit the body.
     For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
-    if (enter_pipelined) {
-      ICHECK_GT(pipelined_depth_, 0);
-      --pipelined_depth_;
+    if (pushed_loop_mbar_phase) {
+      loop_mbar_phase_stack_.pop_back();
     }
-    loop_var_stack_.pop_back();
-    pipeline_num_stages_stack_.pop_back();
 
     // Only process parallel loops
     if (op->kind != ForKind::kParallel) {
@@ -1357,12 +1329,18 @@ private:
       bool enable_auto_async_copy =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
       bool should_enable_async_copy =
-          (enable_auto_async_copy && (pipelined_depth_ > 0)) ||
-          parallel_prefer_async;
-      lowered = InjectPTXAsyncCopy(lowered, should_enable_async_copy,
-                                   parallel_async_without_async_commit_wait);
+          parallel_prefer_async ||
+          (enable_auto_async_copy && parallel_async_without_async_commit_wait);
+      auto inject_result =
+          InjectPTXAsyncCopy(lowered, should_enable_async_copy,
+                             parallel_async_without_async_commit_wait);
+      lowered = inject_result.stmt;
     }
     return lowered;
+  }
+
+  Range CurrentThreadBounds() const {
+    return ComputeThreadBounds(thread_var_, *analyzer_);
   }
 
   Target target_;
@@ -1386,10 +1364,8 @@ private:
   std::vector<int> mbarrier_arrive_counts_;
   // The shared.barrier scope buffer created lazily by AllocMBarrier callback.
   Optional<Buffer> mbarrier_buffer_;
-  // Stack of enclosing loop variables for mbarrier parity computation.
-  std::vector<Var> loop_var_stack_;
-  // Stack of pipeline num_stages values from enclosing loop annotations.
-  std::vector<int> pipeline_num_stages_stack_;
+  // Fallback mbarrier parity derived from the nearest enclosing serial loop.
+  std::vector<PrimExpr> loop_mbar_phase_stack_;
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.
   bool is_ptx_{false};
@@ -1404,7 +1380,6 @@ private:
   // without recomputing indices, since swizzle is encoded in TMA descriptor
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
-  int pipelined_depth_{0};
 };
 
 namespace transform {

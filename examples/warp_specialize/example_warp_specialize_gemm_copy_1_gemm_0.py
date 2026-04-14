@@ -80,7 +80,6 @@ def run_regression_perf(M=16384, N=16384, K=16384):
     block_K = 64
 
     jit_kernel = matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K)
-    print(jit_kernel.get_kernel_source())
 
     import torch
 
@@ -99,4 +98,4 @@ def run_regression_perf(M=16384, N=16384, K=16384):
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    main()

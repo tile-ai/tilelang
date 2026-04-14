@@ -1689,25 +1689,6 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AttrStmtNode *op) {
       }
     }
     VisitStmt(op->body);
-  } else if (op->attr_key == tir::attr::async_commit_queue_scope) {
-    const IntImmNode *queue_id = op->value.as<IntImmNode>();
-    ICHECK(queue_id && queue_id->value == 0)
-        << "For CUDA, the index of an async queue must be 0.";
-    VisitStmt(op->body);
-    auto commit_group = Call(DataType::Void(), builtin::ptx_commit_group(), {});
-    VisitExpr(commit_group, stream);
-  } else if (op->attr_key == tir::attr::async_wait_queue_scope) {
-    auto wait_attrs = GetAsyncWaitAttributes(op);
-    auto queue_id = wait_attrs.first.as<IntImmNode>();
-    ICHECK(queue_id && queue_id->value == 0)
-        << "For CUDA, the index of an async queue must be 0.";
-    auto wait_cnt = wait_attrs.second;
-    auto wait_group =
-        Call(DataType::Void(), builtin::ptx_wait_group(), {wait_cnt});
-    VisitExpr(wait_group, stream);
-    auto inner = op->body.as<AttrStmtNode>();
-    ICHECK(inner);
-    VisitStmt(inner->body);
   } else if (op->attr_key == "threadblock_swizzle_pattern") {
     this->PrintIndent();
     std::string func_name;
