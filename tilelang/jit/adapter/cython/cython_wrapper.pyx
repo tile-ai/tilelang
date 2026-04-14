@@ -199,7 +199,7 @@ cdef class CythonKernelWrapper:
                     if isinstance(s, tir.Var):
                         for key in self.dynamic_symbolic_map:
                             if(str(s) == str(key)):
-                                ref_id, ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[key]
+                                ref_id, ref_tensor_idx, ref_shape_idx, _stride_scale = self.dynamic_symbolic_map[key]
                                 shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
