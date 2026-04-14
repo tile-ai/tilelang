@@ -3,14 +3,63 @@
  * \brief helper functions for target attributes.
  */
 
+#include <dmlc/thread_local.h>
+
 #include "utils.h"
 
+#include "../op/builtin.h"
 #include "../support/ffi_aliases.h"
 #include "dlpack/dlpack.h"
 #include <tvm/node/node.h>
 
 namespace tvm {
 namespace tl {
+
+namespace {
+
+struct PassContextConfigOverrideScope {
+  transform::PassContext pass_ctx;
+  ffi::Map<ffi::String, ffi::Any> previous_config;
+};
+
+struct PassContextConfigOverrideThreadLocalEntry {
+  std::vector<PassContextConfigOverrideScope> stack;
+};
+
+using PassContextConfigOverrideStore =
+    dmlc::ThreadLocalStore<PassContextConfigOverrideThreadLocalEntry>;
+
+void PushPassContextConfigs(ffi::Map<ffi::String, ffi::Any> overrides) {
+  transform::PassContext pass_ctx = transform::PassContext::Current();
+  auto *entry = PassContextConfigOverrideStore::Get();
+  entry->stack.push_back({pass_ctx, pass_ctx->config});
+
+  ffi::Map<ffi::String, ffi::Any> merged_config;
+  if (pass_ctx->config.defined()) {
+    merged_config = pass_ctx->config;
+  }
+  for (const auto &[key, value] : overrides) {
+    merged_config.Set(key, value);
+  }
+  pass_ctx->config = merged_config;
+}
+
+void PopPassContextConfigs() {
+  auto *entry = PassContextConfigOverrideStore::Get();
+  ICHECK(!entry->stack.empty())
+      << "Pass-context config override stack underflow";
+
+  PassContextConfigOverrideScope scope = entry->stack.back();
+  entry->stack.pop_back();
+
+  transform::PassContext current_pass_ctx = transform::PassContext::Current();
+  ICHECK(current_pass_ctx.same_as(scope.pass_ctx))
+      << "Pass-context config override restored under a different active "
+         "PassContext";
+  current_pass_ctx->config = scope.previous_config;
+}
+
+} // namespace
 
 bool TargetIsCuda(Target target) {
   return target->GetTargetDeviceType() == kDLCUDA;
@@ -23,6 +72,15 @@ bool TargetIsMetal(Target target) {
 }
 bool TargetIsCPU(Target target) {
   return target->GetTargetDeviceType() == kDLCPU;
+}
+
+ffi::Optional<ffi::String> TargetGetCPUArch(Target target) {
+  if (!TargetIsCPU(target)) {
+    return ffi::Optional<ffi::String>(std::nullopt);
+  }
+
+  return tvm::transform::PassContext::Current()->GetConfig(
+      kCPUArch, ffi::Optional<ffi::String>());
 }
 
 int GetArchInt(Target target) {
@@ -291,12 +349,18 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
+      .def("tl.PushPassContextConfigs", PushPassContextConfigs)
+      .def("tl.PopPassContextConfigs", PopPassContextConfigs)
       .def("tl.TargetIsCuda",
            [](Target target) { return TargetIsCuda(target); })
       .def("tl.TargetIsRocm",
            [](Target target) { return TargetIsRocm(target); })
       .def("tl.TargetIsMetal",
            [](Target target) { return TargetIsMetal(target); })
+      .def("tl.TargetIsCPU",
+           [](Target target) { return TargetIsCPU(target); })
+      .def("tl.TargetGetCPUArch",
+           [](Target target) { return TargetGetCPUArch(target); })
       .def("tl.TargetIsVolta",
            [](Target target) { return TargetIsVolta(target); })
       .def("tl.TargetIsTuring",

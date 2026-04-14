@@ -7,6 +7,7 @@
 #ifndef TVM_TL_TARGET_UTILS_H_
 #define TVM_TL_TARGET_UTILS_H_
 
+#include <tvm/ir/transform.h>
 #include <tvm/target/target.h>
 
 namespace tvm {
@@ -16,6 +17,7 @@ bool TargetIsCuda(Target target);
 bool TargetIsRocm(Target target);
 bool TargetIsMetal(Target target);
 bool TargetIsCPU(Target target);
+ffi::Optional<ffi::String> TargetGetCPUArch(Target target);
 
 bool TargetIsVolta(Target target);
 bool TargetIsTuring(Target target);

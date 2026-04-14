@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from contextlib import contextmanager
+from typing import Any, Callable
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -12,6 +13,7 @@ from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.transform import PassConfigKey
+from tilelang.transform.pass_config import normalize_pass_configs
 from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target
@@ -221,7 +223,103 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     return device_mod
 
 
-def lower(
+def _merged_pass_context(pass_configs: dict[str, Any] | None):
+    normalized_pass_configs = normalize_pass_configs(pass_configs)
+    if not normalized_pass_configs:
+        return _noop_context()
+
+    push_pass_context_configs = tvm.ffi.get_global_func("tl.PushPassContextConfigs")
+    pop_pass_context_configs = tvm.ffi.get_global_func("tl.PopPassContextConfigs")
+    merged_config = {}
+    for key, value in normalized_pass_configs.items():
+        merged_config[key.value if isinstance(key, PassConfigKey) else key] = value
+    # Reuse PassContext construction for config-key/type validation without
+    # entering a nested pass-context scope.
+    tvm.transform.PassContext(config=merged_config)
+
+    @contextmanager
+    def merged_pass_context_scope():
+        push_pass_context_configs(merged_config)
+        try:
+            yield
+        finally:
+            pop_pass_context_configs()
+
+    return merged_pass_context_scope()
+
+
+@contextmanager
+def _noop_context():
+    yield
+
+
+def _resolve_lower_pass_configs(
+    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    pass_configs: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    def _canonicalize_pass_configs(raw_pass_configs: dict[str, Any] | None) -> dict[str, Any]:
+        canonicalized = {}
+        for key, value in normalize_pass_configs(raw_pass_configs).items():
+            canonicalized[key.value if isinstance(key, PassConfigKey) else key] = value
+        return canonicalized
+
+    def _get_func_pass_configs(func: tir.PrimFunc) -> dict[str, Any]:
+        func_attrs = func.attrs
+        if func_attrs and "tilelang_pass_configs" in func_attrs:
+            return _canonicalize_pass_configs(dict(func_attrs["tilelang_pass_configs"]))
+        return {}
+
+    explicit_pass_configs = _canonicalize_pass_configs(pass_configs)
+    merged_pass_configs = {}
+    if isinstance(func_or_mod, tir.PrimFunc):
+        merged_pass_configs.update(_get_func_pass_configs(func_or_mod))
+    elif isinstance(func_or_mod, tvm.IRModule):
+        prim_func_configs = []
+        for global_var, func in func_or_mod.functions.items():
+            if isinstance(func, tir.PrimFunc):
+                func_pass_configs = _get_func_pass_configs(func)
+                if func_pass_configs:
+                    prim_func_configs.append((global_var.name_hint, func_pass_configs))
+
+        if len(prim_func_configs) == 1:
+            merged_pass_configs.update(prim_func_configs[0][1])
+        elif len(prim_func_configs) > 1:
+            conflict_details = []
+            all_keys = sorted({key for _, configs in prim_func_configs for key in configs})
+            for key in all_keys:
+                key_values = [(name, configs[key]) for name, configs in prim_func_configs if key in configs]
+                if key in explicit_pass_configs:
+                    continue
+                if len(key_values) != len(prim_func_configs):
+                    owners = ", ".join(name for name, _ in key_values)
+                    missing = ", ".join(
+                        name for name, configs in prim_func_configs if key not in configs
+                    )
+                    conflict_details.append(
+                        f"{key} set on [{owners}] but missing on [{missing}]"
+                    )
+                    continue
+
+                first_value = key_values[0][1]
+                if all(value == first_value for _, value in key_values[1:]):
+                    merged_pass_configs[key] = first_value
+                else:
+                    value_details = ", ".join(f"{name}={value!r}" for name, value in key_values)
+                    conflict_details.append(f"{key} differs across [{value_details}]")
+
+            if conflict_details:
+                raise ValueError(
+                    "Conflicting function-level tilelang_pass_configs found in IRModule "
+                    f"({'; '.join(conflict_details)}). Lower functions separately, "
+                    "align their annotations, or pass an explicit module-wide "
+                    "`pass_configs=` override."
+                )
+    if explicit_pass_configs:
+        merged_pass_configs.update(explicit_pass_configs)
+    return merged_pass_configs or None
+
+
+def _lower_impl(
     func_or_mod: tir.PrimFunc | tvm.IRModule,
     target: str | Target = "auto",
     target_host: str | Target | None = None,
@@ -274,3 +372,26 @@ def lower(
         return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source(), rt_mod=host_mod)
 
     return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source())
+
+
+def lower(
+    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
+    runtime_only=False,
+    pass_configs: dict[str, Any] | None = None,
+    enable_host_codegen=False,
+    enable_device_compile=False,
+) -> CompiledArtifact:
+
+    pass_configs = _resolve_lower_pass_configs(func_or_mod, pass_configs)
+
+    with _merged_pass_context(pass_configs):
+        return _lower_impl(
+            func_or_mod,
+            target=target,
+            target_host=target_host,
+            runtime_only=runtime_only,
+            enable_host_codegen=enable_host_codegen,
+            enable_device_compile=enable_device_compile,
+        )
