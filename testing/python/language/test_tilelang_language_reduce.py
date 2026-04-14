@@ -330,8 +330,8 @@ BATCHED_REDUCE_CASES = [
     ids=[f"{op}-{dtype}-{M}x{N}-t{threads}" for op, dtype, M, N, threads in BATCHED_REDUCE_CASES],
 )
 def test_batched_allreduce_codegen(op, dtype, M, N, threads):
-    """Verify that the batched AllReduce path is emitted when each thread
-    holds multiple values to reduce across warps."""
+    """Verify that the batched AllReduce path (run_batch) is emitted when
+    the user explicitly passes batch > 1 to the reduce call."""
     import re
 
     reduce_fn = {
@@ -340,13 +340,17 @@ def test_batched_allreduce_codegen(op, dtype, M, N, threads):
         "min": T.reduce_min,
     }[op]
 
+    # Use batch=2 — the test cases are chosen so that N_per_thread is even
+    # and >= 2, so batch=2 is always valid.
+    batch_val = 2
+
     @T.prim_func
     def kernel(A: T.Tensor((M, N), dtype), B: T.Tensor((N,), dtype)):
         with T.Kernel(1, threads=threads):
             A_shared = T.alloc_shared((M, N), dtype)
             frag = T.alloc_fragment((N,), dtype)
             T.copy(A, A_shared)
-            reduce_fn(A_shared, frag, dim=0)
+            reduce_fn(A_shared, frag, dim=0, batch=batch_val)
             T.copy(frag, B)
 
     mod = tl.compile(
@@ -359,16 +363,11 @@ def test_batched_allreduce_codegen(op, dtype, M, N, threads):
     )
     src = mod.get_kernel_source()
 
-    # The batched path emits AllReduce with extra batch_size and
-    # workspace_stride template arguments (last two integers before
-    # >::run) and passes an array pointer instead of a scalar.
-    # Match ", <batch_size>, <workspace_stride>>::run(" at the end of
-    # the template instantiation.
-    pattern = r",\s*(\d+)\s*,\s*(\d+)\s*>::run\("
+    # The batched path emits run_batch with batch_size and workspace_stride
+    # as the last two template arguments before >::run_batch.
+    pattern = r",\s*(\d+)\s*,\s*(\d+)\s*>::run_batch\("
     match = re.search(pattern, src)
-    assert match is not None, (
-        f"Expected batched AllReduce (with batch_size, workspace_stride) in generated source, but not found.\nGenerated source:\n{src}"
-    )
+    assert match is not None, f"Expected batched AllReduce (run_batch) in generated source, but not found.\nGenerated source:\n{src}"
     batch_size = int(match.group(1))
     assert batch_size > 1, f"Expected batch_size > 1, got {batch_size}.\nGenerated source:\n{src}"
 

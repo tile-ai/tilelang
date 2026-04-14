@@ -135,9 +135,10 @@ struct AllReduce {
     }
   }
 
-  // Batch interface: reduces batch_size values in parallel, sharing
-  // synchronization barriers to minimise sync overhead.
-  template <typename T> static TL_DEVICE void run(T *x, T *red_buf = nullptr) {
+  // Batch interface (named run_batch to avoid overload-resolution ambiguity
+  // with the scalar run(T x, T*) when a pointer is passed as the first arg).
+  template <typename T>
+  static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
     if constexpr (threads == scale) {
       return;
     } else {
@@ -192,7 +193,7 @@ private:
     if constexpr (offset == scale) {
       return;
     } else {
-      Next::run(x, red_buf);
+      Next::run_batch(x, red_buf);
     }
   }
 };

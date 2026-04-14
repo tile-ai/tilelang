@@ -22,7 +22,7 @@ ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor",
 
 
 # NOTE(chaofan): T.reduce is implemented as a macro, so no return
-def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: int, clear: bool) -> None:
+def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: int, clear: bool, batch: int = 1) -> None:
     """Perform a reduction operation on a buffer along a specified dimension.
 
     Args:
@@ -31,7 +31,14 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
         reduce_type (str): Type of reduction ('max', 'min', 'sum', 'abssum')
         dim (int): Dimension along which to perform reduction
         clear (bool): Whether to initialize the output buffer before reduction
+        batch (int): Number of output elements per batched AllReduce call
+            (default 1 = scalar, current behaviour). When batch > 1 the
+            compiler emits ceil(N/batch) batched AllReduce calls each sharing
+            a single pair of barriers, reducing total barrier count by batch×.
+            batch must evenly divide the per-thread output element count N.
     """
+    if batch < 1:
+        raise ValueError(f"batch must be >= 1, got {batch}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
     if list(out.shape) not in expected_shapes:
@@ -40,6 +47,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
             f"output shape is {out.shape}, expected shapes are {expected_shapes_str}"
         )
+
+    annotations = {"batch": batch} if batch > 1 else None
 
     @macro
     def reduce_macro(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
@@ -63,6 +72,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
                 reduce_type,
                 dim,
                 clear,
+                annotations=annotations,
             )
             copy(red_frag_out, out)
         elif is_shared(buffer) and is_fragment(out):
@@ -78,6 +88,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
                 reduce_type,
                 dim,
                 clear,
+                annotations=annotations,
             )
         elif is_fragment(buffer) and is_shared(out):
             red_frag_out = alloc_fragment(out.shape, out.dtype)
@@ -94,6 +105,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
                 reduce_type,
                 dim,
                 clear,
+                annotations=annotations,
             )
             copy(red_frag_out, out)
         elif is_fragment(buffer) and is_fragment(out):
@@ -105,6 +117,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
                 reduce_type,
                 dim,
                 clear,
+                annotations=annotations,
             )
         else:
             raise ValueError(f"Invalid buffer scopes: {buffer.scope()} and {out.scope()}")
@@ -112,7 +125,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
     reduce_macro(buffer, out, reduce_type, dim, clear)
 
 
-def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
     """Perform reduce max on input buffer, store the result to output buffer
 
     Parameters
@@ -125,15 +138,17 @@ def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         The dimension to perform reduce on
     clear : bool
         If set to True, the output buffer will first be initialized to -inf.
+    batch : int
+        Number of output elements per batched AllReduce call (default 1).
     Returns
     -------
     handle : PrimExpr
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "max", dim, clear)
+    reduce(buffer, out, "max", dim, clear, batch=batch)
 
 
-def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
     """Perform reduce min on input buffer, store the result to output buffer.
 
     Args:
@@ -141,15 +156,16 @@ def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
         clear (bool, optional): If True, output buffer will be initialized to inf. Defaults to True.
+        batch (int): Number of output elements per batched AllReduce call (default 1).
 
     Returns:
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "min", dim, clear)
+    reduce(buffer, out, "min", dim, clear, batch=batch)
 
 
-def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
     """Perform reduce sum on input buffer, store the result to output buffer.
 
     Args:
@@ -159,6 +175,7 @@ def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         clear (bool, optional): If True, output buffer will be cleared before reduction.
                               If False, results will be accumulated on existing values.
                               Defaults to True.
+        batch (int): Number of output elements per batched AllReduce call (default 1).
     Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because
           during warp reduction, the same value would be accumulated multiple times (number of threads
           in the warp). Therefore, the implementation with clear=True follows these steps:
@@ -171,70 +188,74 @@ def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "sum", dim, clear)
+    reduce(buffer, out, "sum", dim, clear, batch=batch)
 
 
-def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1) -> None:
+def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, batch: int = 1) -> None:
     """Perform reduce absolute sum on input buffer, store the result to output buffer.
 
     Args:
         buffer (tir.Buffer): The input buffer
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
+        batch (int): Number of output elements per batched AllReduce call (default 1).
 
     Returns:
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "abssum", dim, True)
+    reduce(buffer, out, "abssum", dim, True, batch=batch)
 
 
-def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
     """Perform reduce absolute max on input buffer, store the result to output buffer.
 
     Args:
         buffer (tir.Buffer): The input buffer
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
+        batch (int): Number of output elements per batched AllReduce call (default 1).
 
     Returns:
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "absmax", dim, clear)
+    reduce(buffer, out, "absmax", dim, clear, batch=batch)
 
 
-def reduce_bitand(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_bitand(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
     """Perform reduce bitwise-and on input buffer, store the result to output buffer.
 
     Args:
         buffer (tir.Buffer): The input buffer
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
+        batch (int): Number of output elements per batched AllReduce call (default 1).
 
     Returns:
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "bitand", dim, clear)
+    reduce(buffer, out, "bitand", dim, clear, batch=batch)
 
 
-def reduce_bitor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_bitor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
     """Perform reduce bitwise-or on input buffer, store the result to output buffer.
 
     Args:
         buffer (tir.Buffer): The input buffer
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
+        batch (int): Number of output elements per batched AllReduce call (default 1).
 
     Returns:
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "bitor", dim, clear)
+    reduce(buffer, out, "bitor", dim, clear, batch=batch)
 
 
-def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, batch: int = 1) -> None:
     """Perform reduce bitwise-xor on input buffer, store the result to output buffer.
 
     Args:
@@ -246,7 +267,7 @@ def reduce_bitxor(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: boo
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "bitxor", dim, clear)
+    reduce(buffer, out, "bitxor", dim, clear, batch=batch)
 
 
 @macro

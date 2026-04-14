@@ -116,8 +116,9 @@ struct AllReduce {
     }
   }
 
-  // Batch interface: reduces batch_size values in parallel.
-  template <typename T> static __device__ void run(T *x, T *red_buf = nullptr) {
+  // Batch interface (named run_batch to avoid overload-resolution ambiguity).
+  template <typename T>
+  static __device__ void run_batch(T *x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
     constexpr int warpSize = 64;
 
@@ -141,7 +142,7 @@ struct AllReduce {
       return;
     } else {
       AllReduce<Reducer, offset, scale, thread_offset, batch_size,
-                workspace_stride>::run(x, red_buf);
+                workspace_stride>::run_batch(x, red_buf);
     }
   }
 };

@@ -41,6 +41,14 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->dim = args[3].as<IntImm>().value()->value;
   node->type = ReduceType(reduce_type);
   node->clear = args[4].as<Bool>().value();
+  // Optional "batch" annotation: number of output elements per batched
+  // AllReduce call (default 1 = scalar).
+  if (auto opt = annotations.Get("batch")) {
+    if (auto i = opt.value().as<IntImm>()) {
+      node->batch = static_cast<int>(i.value()->value);
+      CHECK_GE(node->batch, 1) << "ReduceOp: batch must be >= 1";
+    }
+  }
   data_ = std::move(node);
 }
 
@@ -359,38 +367,30 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto iter_sum =
         arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
 
-    // Determine whether batched AllReduce is beneficial.
-    // Batching reduces all per-thread values in a single butterfly pass,
-    // sharing synchronization barriers across values.
-    // ROCm wavefronts are 64-wide; cross-warp reduction only kicks in above
-    // the native warp/wavefront size.
-    const int warp_size = TargetIsRocm(T.target) ? 64 : 32;
-    int64_t batch_size = 1;
-    for (const auto &s : clear_buffer->shape) {
-      const int64_t *p = as_const_int(s);
-      if (p == nullptr) {
-        batch_size = -1;
-        break;
+    // batch is set by the user via the "batch" annotation (default 1 = scalar).
+    // When batch > 1 the compiler phases the reduction:
+    //   1. init + local reduce loop
+    //   2. ceil(N/batch) batched AllReduce calls, each sharing one barrier pair
+    //   3. copy-back loop (only when need_duplicate)
+    const int batch = this->batch;
+
+    // Validate batch against the actual per-thread element count N.
+    if (batch > 1) {
+      int64_t N_total = 1;
+      for (const auto &s : clear_buffer->shape) {
+        const int64_t *p = as_const_int(s);
+        ICHECK(p != nullptr) << "ReduceOp: batch > 1 requires compile-time "
+                                "constant output shape";
+        N_total *= *p;
       }
-      batch_size *= *p;
+      CHECK_LE(batch, N_total)
+          << "ReduceOp: batch=" << batch
+          << " exceeds per-thread output element count N=" << N_total;
+      CHECK_EQ(N_total % batch, 0)
+          << "ReduceOp: batch=" << batch << " must evenly divide N=" << N_total;
     }
 
-    bool has_cross_warp_reduce = false;
-    if (batch_size > 1 && dst_layout->InputDim() > 0) {
-      for (const auto &iter_split : iter_sum->args) {
-        auto mark = iter_split->source->source.as<Var>();
-        if (mark && mark.value().same_as(src_vars[this->dim]->var)) {
-          auto ext = as_const_int(iter_split->extent);
-          auto sc = as_const_int(iter_split->scale);
-          if (ext && sc && *ext > 1 && (*ext) * (*sc) > warp_size) {
-            has_cross_warp_reduce = true;
-            break;
-          }
-        }
-      }
-    }
-
-    bool use_batch = batch_size > 1 && has_cross_warp_reduce;
+    bool use_batch = batch > 1;
 
     // Helper: wrap a body in the dst_vars loops with partitioning & unrolling.
     auto make_dst_loop = [&](Stmt body, const Array<IterVar> &vars) -> Stmt {
@@ -436,10 +436,9 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       Array<Stmt> phases;
       phases.push_back(pre_body);
 
-      // Phase 2: batched AllReduce call(s)
-      int workspace_stride =
-          static_cast<int>(*as_const_int(T.thread_bounds->extent));
-
+      // Phase 2: batched AllReduce call(s).
+      // workspace_stride = reducing_threads (SoA layout in smem:
+      //   slot for batch item b, thread t = red_buf[b * reducing_threads + t])
       for (const auto &iter_split : iter_sum->args) {
         auto mark = iter_split->source->source.as<Var>();
         ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
@@ -455,59 +454,66 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         auto thread_offset = T.thread_bounds->min;
         std::stringstream ss;
 
-        if (reducing_threads > warp_size) {
-          // Cross-warp: emit batched AllReduce sharing barriers.
-          if (TargetHasSMVersionGE(T.target, 90)) {
-            auto all_threads = T.thread_bounds->extent;
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ", tl::NamedBarrier<" << all_threads << ">, " << batch_size
-               << ", " << workspace_stride << ">::run";
-          } else if (TargetIsRocm(T.target)) {
-            // HIP AllReduce has no Barrier type parameter.
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ", " << batch_size << ", " << workspace_stride << ">::run";
-          } else {
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ", tl::SyncThreadsBarrier, " << batch_size << ", "
-               << workspace_stride << ">::run";
+        // Use run_batch (not run) to avoid overload-resolution ambiguity when
+        // a pointer is passed as first argument.
+        if (TargetHasSMVersionGE(T.target, 90)) {
+          auto all_threads = T.thread_bounds->extent;
+          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+             << reducing_threads << ", " << (*scale) << ", " << thread_offset
+             << ", tl::NamedBarrier<" << all_threads << ">, " << batch << ", "
+             << reducing_threads << ">::run_batch";
+        } else if (TargetIsRocm(T.target)) {
+          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+             << reducing_threads << ", " << (*scale) << ", " << thread_offset
+             << ", " << batch << ", " << reducing_threads << ">::run_batch";
+        } else {
+          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+             << reducing_threads << ", " << (*scale) << ", " << thread_offset
+             << ", tl::SyncThreadsBarrier, " << batch << ", "
+             << reducing_threads << ">::run_batch";
+        }
+
+        // Workspace is only needed for cross-warp reduce (> 32 threads).
+        // Allocate once; all chunks share the same workspace buffer.
+        PrimExpr workspace;
+        bool need_workspace = reducing_threads > 32;
+        if (need_workspace) {
+          int ws_size = reducing_threads * batch;
+          workspace = T.AddWorkspace(ws_size, clear_buffer->dtype);
+        }
+
+        // Compute N_total and num_chunks for this buffer.
+        int64_t N_total = 1;
+        for (const auto &s : clear_buffer->shape)
+          N_total *= *as_const_int(s);
+        int num_chunks = static_cast<int>(N_total / batch);
+
+        // Compute strides for reverse-linearisation of clear_buffer->shape.
+        int buf_ndim = static_cast<int>(clear_buffer->shape.size());
+        std::vector<int64_t> buf_shape_vals;
+        for (const auto &s : clear_buffer->shape)
+          buf_shape_vals.push_back(*as_const_int(s));
+        std::vector<int64_t> buf_strides(buf_ndim, 1);
+        for (int d = buf_ndim - 2; d >= 0; d--)
+          buf_strides[d] = buf_strides[d + 1] * buf_shape_vals[d + 1];
+
+        for (int chunk = 0; chunk < num_chunks; chunk++) {
+          int64_t flat_offset = (int64_t)chunk * batch;
+          // Map flat_offset to multi-dim indices in clear_buffer.
+          Array<PrimExpr> chunk_indices;
+          for (int d = 0; d < buf_ndim; d++) {
+            int64_t idx = (flat_offset / buf_strides[d]) % buf_shape_vals[d];
+            chunk_indices.push_back(Integer(idx));
           }
-          int ws_size = workspace_stride * static_cast<int>(batch_size);
-          PrimExpr workspace = T.AddWorkspace(ws_size, clear_buffer->dtype);
-          Array<PrimExpr> args = {StringImm(ss.str()), clear_buffer->data,
-                                  workspace};
+          // Pointer to the start of this chunk's elements in clear_buffer.
+          PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
+                              {BufferLoad(clear_buffer, chunk_indices)});
+
+          Array<PrimExpr> args = {StringImm(ss.str()), ptr};
+          if (need_workspace)
+            args.push_back(workspace);
           phases.push_back(
               Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
-        } else {
-          // Warp-only: no sync savings from batching; use scalar AllReduce
-          // inside a loop.
-          if (TargetHasSMVersionGE(T.target, 90)) {
-            auto all_threads = T.thread_bounds->extent;
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ", tl::NamedBarrier<" << all_threads << ">>::run";
-          } else {
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ">::run";
-          }
-          Array<PrimExpr> ar_args = {StringImm(ss.str()),
-                                     BufferLoad(clear_buffer, red_indices)};
-          auto call =
-              Call(clear_buffer->dtype, builtin::call_extern(), ar_args);
-          Stmt ar_body = BufferStore(clear_buffer, call, red_indices);
-          // Create fresh vars for this warp-only loop to avoid collisions
-          // with the pre-reduce loop.
-          auto [warp_vars, warp_dst_idx, warp_red_idx] =
-              make_fresh_dst_vars("_w");
-          // Substitute dst_vars → warp_vars in ar_body.
-          Map<Var, PrimExpr> vmap;
-          for (size_t i = 0; i < dst_dim; ++i)
-            vmap.Set(dst_vars[i]->var, warp_vars[i]->var);
-          ar_body = Substitute(ar_body, vmap);
-          phases.push_back(make_dst_loop(ar_body, warp_vars));
         }
       }
 
@@ -597,7 +603,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           }
           Array<PrimExpr> thread_reduce_args = {
               StringImm(ss.str()), BufferLoad(clear_buffer, red_indices)};
-          if (reducing_threads > warp_size) {
+          if (reducing_threads > 32) {
             int workspace_size =
                 static_cast<int>(*as_const_int(T.thread_bounds->extent));
             PrimExpr workspace =

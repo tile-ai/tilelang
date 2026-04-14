@@ -87,6 +87,12 @@ public:
   int dim;         ///< Dimension to reduce along
   ReduceType type; ///< Type of reduction operation
   bool clear;      ///< Whether to clear destination before reduction
+  int batch{1};    ///< Number of output elements per batched AllReduce call.
+                   ///< Default 1 = scalar (current behaviour). When batch > 1,
+                   ///< the compiler emits ceil(N/batch) batched AllReduce calls
+                   ///< each sharing a single pair of barriers across batch
+                   ///< elements. batch must evenly divide the per-thread output
+                   ///< element count N derived from the fragment layout.
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode,
                                     TileOperatorNode);
@@ -100,7 +106,8 @@ public:
         .def_ro("dstRegion", &ReduceOpNode::dstRegion_)
         .def_ro("dim", &ReduceOpNode::dim)
         .def_ro("type", &ReduceOpNode::type)
-        .def_ro("clear", &ReduceOpNode::clear);
+        .def_ro("clear", &ReduceOpNode::clear)
+        .def_ro("batch", &ReduceOpNode::batch);
   }
 
   /// Lower the operator to TIR statements
