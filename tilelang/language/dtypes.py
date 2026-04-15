@@ -600,13 +600,13 @@ else:
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
     bfloat16 = dtype("bfloat16")
     bfloat16x2 = dtype("bfloat16x2")
-    tfloat32 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 1))
-    tfloat32x2 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 2))
-    tfloat32x4 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 4))
-    tfloat32x8 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 8))
-    tfloat32x16 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 16))
-    tfloat32x32 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 32))
-    tfloat32x64 = dtype.from_dlpack_data_type((_TFLOAT32_TYPE_CODE, 32, 64))
+    tfloat32 = dtype("custom[tfloat32]")
+    tfloat32x2 = dtype("custom[tfloat32]x2")
+    tfloat32x4 = dtype("custom[tfloat32]x4")
+    tfloat32x8 = dtype("custom[tfloat32]x8")
+    tfloat32x16 = dtype("custom[tfloat32]x16")
+    tfloat32x32 = dtype("custom[tfloat32]x32")
+    tfloat32x64 = dtype("custom[tfloat32]x64")
 
 _all_dtypes = [
     "bool",
