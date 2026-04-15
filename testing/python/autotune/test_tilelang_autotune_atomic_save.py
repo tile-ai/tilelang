@@ -17,7 +17,6 @@ from tilelang.env import env
 
 
 class _FakeAdapter:
-
     def __init__(self, libpath: str):
         self.libpath = libpath
 

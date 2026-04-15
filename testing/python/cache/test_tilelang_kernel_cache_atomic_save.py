@@ -6,7 +6,6 @@ from tilelang.env import env
 
 
 class _FakeAdapter:
-
     def __init__(self, libpath: str):
         self.libpath = libpath
 
@@ -15,7 +14,6 @@ class _FakeAdapter:
 
 
 class _FakeKernel:
-
     def __init__(self, libpath: str):
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
