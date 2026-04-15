@@ -147,23 +147,44 @@ TL_DEVICE void clc_fence_proxy_async_shared_cta() {
 #endif
 }
 
-TL_DEVICE int clc_is_canceled(void const *result_ptr) {
+struct CLCResponseDecode {
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint32_t z = 0;
+  uint32_t is_canceled = 0;
+};
+
+TL_DEVICE CLCResponseDecode clc_decode_response(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
   uint32_t result_addr = smem_ptr_to_uint(result_ptr);
-  uint32_t is_canceled = 0;
+  CLCResponseDecode decoded;
+  asm volatile(
+      "{\n\t"
+      ".reg .pred p1;\n\t"
+      ".reg .b128 clc_result;\n\t"
+      "ld.shared.b128 clc_result, [%4];\n\t"
+      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
+      "clc_result;\n\t"
+      "selp.u32 %3, 1, 0, p1;\n\t"
+      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, "
+      "%1, %2, _}, clc_result;\n\t"
+      "}\n"
+      : "=r"(decoded.x), "=r"(decoded.y), "=r"(decoded.z),
+        "=r"(decoded.is_canceled)
+      : "r"(result_addr)
+      : "memory");
+  // Match CUTLASS's CLC decode path ordering: decode from shared first, then
+  // issue the async proxy fence before subsequent shared-memory consumers.
   clc_fence_proxy_async_shared_cta();
-  asm volatile("{\n\t"
-               ".reg .pred p1;\n\t"
-               ".reg .b128 clc_result;\n\t"
-               "ld.shared.b128 clc_result, [%1];\n\t"
-               "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
-               "clc_result;\n\t"
-               "selp.u32 %0, 1, 0, p1;\n\t"
-               "}\n"
-               : "=r"(is_canceled)
-               : "r"(result_addr)
-               : "memory");
-  return static_cast<int>(is_canceled);
+  return decoded;
+#else
+  TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
+#endif
+}
+
+TL_DEVICE int clc_is_canceled(void const *result_ptr) {
+#if defined(CUTLASS_ARCH_CLC_ENABLED)
+  return static_cast<int>(clc_decode_response(result_ptr).is_canceled);
 #else
   TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
 #endif
@@ -171,23 +192,7 @@ TL_DEVICE int clc_is_canceled(void const *result_ptr) {
 
 TL_DEVICE uint32_t clc_get_first_ctaid_x(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
-  uint32_t result_addr = smem_ptr_to_uint(result_ptr);
-  uint32_t x = 0, y = 0, z = 0;
-  clc_fence_proxy_async_shared_cta();
-  asm volatile(
-      "{\n\t"
-      ".reg .pred p1;\n\t"
-      ".reg .b128 clc_result;\n\t"
-      "ld.shared.b128 clc_result, [%3];\n\t"
-      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
-      "clc_result;\n\t"
-      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, "
-      "%1, %2, _}, clc_result;\n\t"
-      "}\n"
-      : "=r"(x), "=r"(y), "=r"(z)
-      : "r"(result_addr)
-      : "memory");
-  return x;
+  return clc_decode_response(result_ptr).x;
 #else
   TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
 #endif
@@ -195,23 +200,7 @@ TL_DEVICE uint32_t clc_get_first_ctaid_x(void const *result_ptr) {
 
 TL_DEVICE uint32_t clc_get_first_ctaid_y(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
-  uint32_t result_addr = smem_ptr_to_uint(result_ptr);
-  uint32_t x = 0, y = 0, z = 0;
-  clc_fence_proxy_async_shared_cta();
-  asm volatile(
-      "{\n\t"
-      ".reg .pred p1;\n\t"
-      ".reg .b128 clc_result;\n\t"
-      "ld.shared.b128 clc_result, [%3];\n\t"
-      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
-      "clc_result;\n\t"
-      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, "
-      "%1, %2, _}, clc_result;\n\t"
-      "}\n"
-      : "=r"(x), "=r"(y), "=r"(z)
-      : "r"(result_addr)
-      : "memory");
-  return y;
+  return clc_decode_response(result_ptr).y;
 #else
   TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
 #endif
@@ -219,23 +208,7 @@ TL_DEVICE uint32_t clc_get_first_ctaid_y(void const *result_ptr) {
 
 TL_DEVICE uint32_t clc_get_first_ctaid_z(void const *result_ptr) {
 #if defined(CUTLASS_ARCH_CLC_ENABLED)
-  uint32_t result_addr = smem_ptr_to_uint(result_ptr);
-  uint32_t x = 0, y = 0, z = 0;
-  clc_fence_proxy_async_shared_cta();
-  asm volatile(
-      "{\n\t"
-      ".reg .pred p1;\n\t"
-      ".reg .b128 clc_result;\n\t"
-      "ld.shared.b128 clc_result, [%3];\n\t"
-      "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, "
-      "clc_result;\n\t"
-      "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, "
-      "%1, %2, _}, clc_result;\n\t"
-      "}\n"
-      : "=r"(x), "=r"(y), "=r"(z)
-      : "r"(result_addr)
-      : "memory");
-  return z;
+  return clc_decode_response(result_ptr).z;
 #else
   TILELANG_UNREACHABLE("CUTLASS_ARCH_CLC_ENABLED is not defined");
 #endif
