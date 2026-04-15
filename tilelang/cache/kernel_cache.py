@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import errno
 import os
 import shutil
 import threading
@@ -370,8 +371,8 @@ class KernelCache:
         """
         cache_path = self._get_cache_path(key)
 
-        # Another process already wrote this entry — nothing to do.
-        if os.path.isdir(cache_path):
+        # Another process already wrote a complete entry — nothing to do.
+        if self._is_complete_cache_dir(cache_path):
             return
 
         # Staging dir lives under CACHE_DIR (same filesystem) so os.rename works.
@@ -403,11 +404,17 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
+            # Repair stale/incomplete entries before making the new directory visible.
+            self._remove_incomplete_cache_dir(cache_path)
+
             # Atomic rename — makes the complete directory visible in one step.
-            os.rename(staging_path, cache_path)
-        except OSError:
-            # Race: another process already created cache_path; clean up staging.
-            shutil.rmtree(staging_path, ignore_errors=True)
+            try:
+                os.rename(staging_path, cache_path)
+            except OSError as exc:
+                if not self._is_rename_collision(exc):
+                    raise
+                # Another process won the race with a complete cache entry.
+                shutil.rmtree(staging_path, ignore_errors=True)
         except Exception:
             shutil.rmtree(staging_path, ignore_errors=True)
             self.logger.exception("Error during atomic cache save")
@@ -519,6 +526,26 @@ class KernelCache:
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
         params_path = os.path.join(cache_path, self.params_path)
         return [kernel_lib_path, params_path]
+
+    def _get_complete_cache_files(self, cache_path: str) -> list[str]:
+        return [
+            os.path.join(cache_path, self.device_kernel_path),
+            os.path.join(cache_path, self.host_kernel_path),
+            *self._get_required_files(cache_path),
+        ]
+
+    def _is_complete_cache_dir(self, cache_path: str) -> bool:
+        return os.path.isdir(cache_path) and all(os.path.exists(file) for file in self._get_complete_cache_files(cache_path))
+
+    def _remove_incomplete_cache_dir(self, cache_path: str) -> bool:
+        if not os.path.isdir(cache_path) or self._is_complete_cache_dir(cache_path):
+            return False
+        shutil.rmtree(cache_path)
+        return True
+
+    @staticmethod
+    def _is_rename_collision(exc: OSError) -> bool:
+        return exc.errno in {errno.EEXIST, errno.ENOTEMPTY}
 
     def _load_kernel_source(self, device_kernel_path: str, host_kernel_path: str, verbose: bool = False) -> tuple[str | None, str | None]:
         try:

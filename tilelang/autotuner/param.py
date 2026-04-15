@@ -9,6 +9,7 @@ from tvm.target import Target
 from typing import Callable, Literal, Any
 from dataclasses import dataclass
 from pathlib import Path
+import errno
 
 from tilelang.jit import JITKernel
 import cloudpickle
@@ -194,7 +195,7 @@ class AutotuneResult:
             - kernel_lib.so: The compiled kernel library
             - params.pkl: The serialized kernel parameters
         """
-        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists (no-op when called from save_to_disk)
+        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists.
 
         # Save device kernel source code
         try:
@@ -220,14 +221,7 @@ class AutotuneResult:
             logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 
         # Save kernel library (backend-specific)
-        if kernel.execution_backend == "nvrtc":
-            kernel_lib_file = KERNEL_CUBIN_PATH
-        elif kernel.execution_backend == "tvm_ffi":
-            kernel_lib_file = EXECUTABLE_PATH
-        elif kernel.execution_backend == "cutedsl":
-            kernel_lib_file = KERNEL_PY_PATH
-        else:
-            kernel_lib_file = KERNEL_LIB_PATH
+        kernel_lib_file = self._get_kernel_lib_file(kernel.execution_backend)
 
         kernel_lib_path = os.path.join(cache_path, kernel_lib_file)
 
@@ -323,14 +317,7 @@ class AutotuneResult:
             return None
 
         # Resolve backend to pick correct file names
-        if execution_backend == "nvrtc":
-            kernel_lib_file = KERNEL_CUBIN_PATH
-        elif execution_backend == "tvm_ffi":
-            kernel_lib_file = EXECUTABLE_PATH
-        elif execution_backend == "cutedsl":
-            kernel_lib_file = KERNEL_PY_PATH
-        else:
-            kernel_lib_file = KERNEL_LIB_PATH
+        kernel_lib_file = self._get_kernel_lib_file(execution_backend)
 
         device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
         host_kernel_path = os.path.join(cache_path, HOST_KERNEL_PATH)
@@ -396,8 +383,8 @@ class AutotuneResult:
         renamed to *path* so that concurrent readers never see a half-written
         result.
         """
-        # Already saved (e.g. another process won the race).
-        if os.path.isdir(path):
+        # Already saved (e.g. another process won the race with a complete entry).
+        if self._is_complete_result_dir(path, self.kernel.execution_backend):
             return
 
         # Staging dir lives under TILELANG_CACHE_DIR (not the autotuner subdir) so that
@@ -452,11 +439,17 @@ class AutotuneResult:
             # save kernel
             self._save_kernel_to_disk(staging_path, self.kernel, verbose)
 
+            # Repair stale/incomplete entries before making the new directory visible.
+            self._remove_incomplete_result_dir(path, self.kernel.execution_backend)
+
             # Atomic rename — directory becomes visible in one step.
-            os.rename(str(staging_path), str(path))
-        except OSError:
-            # Race: another process already created the final path.
-            shutil.rmtree(str(staging_path), ignore_errors=True)
+            try:
+                os.rename(str(staging_path), str(path))
+            except OSError as exc:
+                if not self._is_rename_collision(exc):
+                    raise
+                # Another process won the race with a complete cache entry.
+                shutil.rmtree(str(staging_path), ignore_errors=True)
         except Exception:
             shutil.rmtree(str(staging_path), ignore_errors=True)
             logger.exception("Error during atomic autotune result save")
@@ -529,3 +522,40 @@ class AutotuneResult:
             ref_latency=ref_latency,
         )
         return result
+
+    @staticmethod
+    def _get_kernel_lib_file(execution_backend: str) -> str:
+        if execution_backend == "nvrtc":
+            return KERNEL_CUBIN_PATH
+        if execution_backend == "tvm_ffi":
+            return EXECUTABLE_PATH
+        if execution_backend == "cutedsl":
+            return KERNEL_PY_PATH
+        return KERNEL_LIB_PATH
+
+    @classmethod
+    def _get_complete_result_files(cls, path: Path, execution_backend: str) -> list[Path]:
+        return [
+            path / BEST_CONFIG_PATH,
+            path / FUNCTION_PATH,
+            path / LATENCY_PATH,
+            path / DEVICE_KERNEL_PATH,
+            path / HOST_KERNEL_PATH,
+            path / cls._get_kernel_lib_file(execution_backend),
+            path / PARAMS_PATH,
+        ]
+
+    @classmethod
+    def _is_complete_result_dir(cls, path: Path, execution_backend: str) -> bool:
+        return path.is_dir() and all(file.exists() for file in cls._get_complete_result_files(path, execution_backend))
+
+    @classmethod
+    def _remove_incomplete_result_dir(cls, path: Path, execution_backend: str) -> bool:
+        if not path.is_dir() or cls._is_complete_result_dir(path, execution_backend):
+            return False
+        shutil.rmtree(path)
+        return True
+
+    @staticmethod
+    def _is_rename_collision(exc: OSError) -> bool:
+        return exc.errno in {errno.EEXIST, errno.ENOTEMPTY}
