@@ -91,7 +91,8 @@ const CallNode *GetEvaluateCall(const Stmt &stmt) {
 }
 
 bool IsExternNameWithPrefix(const CallNode *call, const std::string &prefix) {
-  if (!call || !call->op.same_as(builtin::call_extern()) || call->args.empty()) {
+  if (!call || !call->op.same_as(builtin::call_extern()) ||
+      call->args.empty()) {
     return false;
   }
   const auto *name = call->args[0].as<StringImmNode>();
@@ -105,8 +106,7 @@ bool IsTcgen05OrTmemCall(const CallNode *call) {
 
   if (call->op.same_as(ptx_tcgen05_mma_ss()) ||
       call->op.same_as(ptx_tcgen05_mma_ts()) ||
-      call->op.same_as(tcgen05_ld()) ||
-      call->op.same_as(tcgen05_st()) ||
+      call->op.same_as(tcgen05_ld()) || call->op.same_as(tcgen05_st()) ||
       call->op.same_as(tcgen05_mma_arrive()) ||
       call->op.same_as(ptx_init_tensor_memory()) ||
       call->op.same_as(ptx_deallocate_tensor_memory())) {
@@ -259,9 +259,8 @@ public:
 
       if (IsMbarrierWaitParity(call)) {
         rewritten.push_back(stmt);
-        bool has_manual_after =
-            i + 1 < static_cast<int>(flat_seq.size()) &&
-            IsAfterFenceStmt(flat_seq[i + 1]);
+        bool has_manual_after = i + 1 < static_cast<int>(flat_seq.size()) &&
+                                IsAfterFenceStmt(flat_seq[i + 1]);
         if (!has_manual_after && HasUpcomingTcgen05Use(flat_seq, i)) {
           rewritten.push_back(MakeAfterFenceStmt());
         }

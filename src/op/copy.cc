@@ -1525,8 +1525,7 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
         args.push_back(col_offset);
         int reg_access_mode = 1;
         args.push_back(reg_buf.access_ptr(reg_access_mode, DataType::Handle(),
-                                          1, 0,
-                                          PrimExpr(tmem_phy_col_extent)));
+                                          1, 0, PrimExpr(tmem_phy_col_extent)));
         call = Evaluate(Call(DataType::Handle(), tcgen05_st(), args));
       }
       if (num_useful_threads != num_threads) {
