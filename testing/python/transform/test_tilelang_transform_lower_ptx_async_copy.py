@@ -56,6 +56,32 @@ def test_lower_ptx_async_copy_rewrites_plain_parallel_copy():
     assert calls.get("tir.ptx_wait_group", 0) > 0
 
 
+def test_lower_ptx_async_copy_respects_explicit_async_scope():
+    """`async_scope` marks explicit async semantics, so implicit sync should not be added."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((16,), T.float32),
+        B: T.Tensor((16,), T.float32),
+    ):
+        S = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        with T.attr(0, "async_scope", 1):
+            for i in T.Parallel(16):
+                S[i] = A[i]
+        B[0] = S[0]
+
+    target = tvm.target.Target("cuda -arch=sm_80")
+    func = before.with_attr("global_symbol", "main").with_attr("target", target)
+    mod = tvm.IRModule.from_expr(func)
+
+    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    calls = _count_calls(mod["main"])
+
+    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tir.ptx_commit_group", 0) == 0
+    assert calls.get("tir.ptx_wait_group", 0) == 0
+
+
 def test_lower_ptx_async_copy_supports_multi_dim_indices():
     """LowerPTXAsyncCopy should handle N-D buffer indices (pre-FlattenBuffer)."""
 

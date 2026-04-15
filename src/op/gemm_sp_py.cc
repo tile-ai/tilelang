@@ -52,10 +52,16 @@ using namespace tir;
 GemmSPPy::GemmSPPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPPyNode> node = tvm::ffi::make_object<GemmSPPyNode>();
 
-  node->aRegion_ = NormalizeToBufferRegion(args[0]);
-  node->eRegion_ = NormalizeToBufferRegion(args[1]);
-  node->bRegion_ = NormalizeToBufferRegion(args[2]);
-  node->cRegion_ = NormalizeToBufferRegion(args[3]);
+  auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
+  auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
+  auto c_access = NormalizeToAccessRegion(args[3], kAccessReadWrite);
+
+  node->aRegion_ = a_access.region;
+  node->eRegion_ = e_access.region;
+  node->bRegion_ = b_access.region;
+  node->cRegion_ = c_access.region;
+  node->SetAccessRegions({a_access, e_access, b_access, c_access});
 
   node->A = node->aRegion_->buffer;
   node->E = node->eRegion_->buffer;
@@ -84,6 +90,18 @@ GemmSPPy::GemmSPPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->wg_wait = args[17].as<IntImm>().value()->value;
   }
   data_ = std::move(node);
+}
+
+AccessRegions GemmSPPyNode::GetAccessRegions() const {
+  AccessRegions result;
+  result.reads.push_back(aRegion_);
+  result.reads.push_back(eRegion_);
+  result.reads.push_back(bRegion_);
+  if (!is_one(clear_accum)) {
+    result.reads.push_back(cRegion_);
+  }
+  result.writes.push_back(cRegion_);
+  return result;
 }
 
 /**
@@ -242,17 +260,24 @@ Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       {
         BlockNode *n = block.CopyOnWrite();
         n->name_hint = global_symbol.value();
+        n->annotations.Set(tl::attr::kLexicalAllocScope,
+                           IntImm(DataType::Int(32), 1));
       }
       return BlockRealize(block_realize->iter_values, block_realize->predicate,
                           block);
     }
     // warp with block realize node
+    Map<String, ObjectRef> block_annotations;
+    block_annotations.Set(tl::attr::kLexicalAllocScope,
+                          IntImm(DataType::Int(32), 1));
     return BlockRealize(
         /*iter_values=*/Array<PrimExpr>(),
         /*predicate=*/const_true(),
         /*block=*/
         Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-              /*name_hint=*/global_symbol.value(), prim_func->body));
+              /*name_hint=*/global_symbol.value(), prim_func->body,
+              /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
+              /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
     LOG(FATAL) << "No lower function found for gemm_sp_py";
   }

@@ -4,7 +4,7 @@ For TMA loads (global -> shared):
   T.tma_copy() emits only expect_tx + tma_load (no arrive, no wait).
   The user must explicitly call T.barrier_arrive() and T.mbarrier_wait_parity().
   This allows multiple tma_copy operations to share a single barrier arrive.
-  MultiVersionBuffer expands the barrier to num_stages versions automatically.
+  Pipeline buffer versioning expands the barrier to num_stages versions automatically.
 
 For TMA stores (shared -> global):
   T.tma_copy() emits tma_store + tma_store_arrive (no wait).
@@ -84,9 +84,7 @@ def run_gemm_tma_copy(num_stages):
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
@@ -183,9 +181,7 @@ def run_gemm_tma_copy_store(num_stages):
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
@@ -213,3 +209,4 @@ def test_tma_copy_store_pipeline_3_stages():
 
 if __name__ == "__main__":
     tilelang.testing.main()
+    # test_tma_copy_pipeline_2_stages()

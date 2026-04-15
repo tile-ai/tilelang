@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 # TODO: Add more documentation for each pass config
 
+import warnings
 from enum import Enum
+from typing import Any
 
 
 class PassConfigKey(str, Enum):
@@ -82,7 +86,11 @@ class PassConfigKey(str, Enum):
     """Bitwidth for configuration indices. Default: 32"""
 
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
-    """Disable TMA (Tensor Memory Access) lowering. Default: False"""
+    """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
+
+    Temporarily re-enabled for backward compatibility. Will be removed in
+    v0.1.10.
+    """
 
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
     """Disable safe memory access optimization. Default: False"""
@@ -260,3 +268,36 @@ class PassConfigKey(str, Enum):
 
     TL_DUMP_IR_DIR = "tl.dump_ir_path"
     """Path to the directory where IR will be dumped. Default: ./dump_ir/"""
+
+
+_DEPRECATED_PASS_CONFIG_MESSAGES = {
+    PassConfigKey.TL_DISABLE_TMA_LOWER.value: (
+        "`tl.disable_tma_lower` is deprecated and will be removed in v0.1.10. Use `T.copy(..., disable_tma=True)` per-copy instead."
+    ),
+}
+
+
+def normalize_pass_configs(pass_configs: dict[str, Any] | None) -> dict[str, Any]:
+    """Canonicalize known pass-config keys and emit compatibility warnings."""
+    if pass_configs is None:
+        return {}
+
+    normalized: dict[str, Any] = {}
+    warned_keys: set[str] = set()
+
+    for key, value in pass_configs.items():
+        normalized_key = key
+        if isinstance(key, str):
+            try:
+                normalized_key = PassConfigKey(key)
+            except ValueError:
+                normalized_key = key
+
+        normalized[normalized_key] = value
+
+        warning_key = normalized_key.value if isinstance(normalized_key, PassConfigKey) else normalized_key
+        if warning_key in _DEPRECATED_PASS_CONFIG_MESSAGES and warning_key not in warned_keys:
+            warnings.warn(_DEPRECATED_PASS_CONFIG_MESSAGES[warning_key], DeprecationWarning, stacklevel=3)
+            warned_keys.add(warning_key)
+
+    return normalized

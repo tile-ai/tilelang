@@ -175,9 +175,26 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
+    # Tile-level warp specialization: runs before layout inference so that
+    # producer/consumer split happens at the high-level tile-op IR.
+    # The pass classifies copy ops as TMA/cp.async/sync inline (no prior
+    # InstructionAnnotation pass needed). Shared buffers are multi-versioned
+    # internally only for functions where the WS transformation actually
+    # applies.
+    if allow_warp_specialized(target=target):
+        mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
     # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
     # LayoutInference so that the use_2cta annotation is visible to infer_layout)
     mod = tilelang.transform.LowerBlackwell2SM()(mod)
+    # Run pipeline planning and software-pipeline rewriting before layout
+    # inference so inferred layouts see the final pipelined structure directly.
+    mod = tilelang.transform.PipelinePlanning()(mod)
+    # print("After pipeline planing")
+    # print(mod)
+    mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    # print("After InjectSoftwarePipeline")
+    # print(mod)
+    mod = tilelang.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout
@@ -212,33 +229,17 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # which may be introduced by the LegalizeSafeMemoryAccess
     mod = tilelang.transform.IfStmtBinding()(mod)
     has_tma = module_has_tma(mod)
-    use_ws = has_tma and allow_warp_specialized(pass_ctx=pass_ctx, target=target)
-    if has_tma:
-        # In WS mode, version all buffers (barriers + data) because
-        # ProducerConsumerWarpSpecialized handles pipeline overlap and
-        # InjectSoftwarePipeline won't re-version data buffers.
-        # Without WS, only version barrier buffers for mbarrier parity
-        # rewriting; data buffer versioning is left to InjectSoftwarePipeline.
-        mod = tilelang.transform.MultiVersionBuffer(barrier_only=not use_ws)(mod)
-        if use_ws:
-            mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
-    else:
-        # Non-TMA: MultiVersionBuffer is not used, so buffer allocation
-        # locations must be planned explicitly.  In TMA paths this is
-        # handled implicitly by MultiVersionBuffer (which runs LCA
-        # analysis to place versioned buffers).
-        mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+    # Pipeline barriers are now created at final expanded size by
+    # InjectSoftwarePipeline, so no late MVB barrier fixup is needed.
+    # Buffer allocation placement is handled uniformly for both paths.
+    mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
     mod = tilelang.transform.LowerSharedBarrier()(mod)
-    mod = tilelang.transform.PipelinePlanning()(mod)
-    mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     if has_tma:
         mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     if is_hopper(target):
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
-    mod = tilelang.transform.Simplify()(mod)
-    mod = tilelang.transform.OptimizeCPAsyncSync()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
