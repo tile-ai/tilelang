@@ -86,10 +86,7 @@ def run_gemm(
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = kernel.get_profiler()
 
@@ -121,10 +118,7 @@ def test_pipeline_order_stage():
 
 @tilelang.jit(
     out_idx=[-1],
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def blocksparse_matmul(M, N, K, block_M, block_N, block_K, num_stages, dtype=T.float16, accum_dtype=T.float32):
     block_mask_shape = (M // block_M, N // block_N, K // block_K)

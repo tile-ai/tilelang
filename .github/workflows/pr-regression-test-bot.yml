@@ -41,7 +41,7 @@ jobs:
     steps:
       - name: Get commenter permission
         id: perm
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const username = context.payload.comment.user.login
@@ -127,7 +127,6 @@ jobs:
             export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
           fi
           export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
-          export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_CUDA=ON"
 
           echo "USE_CUDA=ON" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
@@ -135,7 +134,6 @@ jobs:
           echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-          echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
 
           if [[ ! -x "$(command -v nvcc)" ]]; then
             export PATH="/usr/local/cuda/bin:${PATH}"
@@ -243,7 +241,7 @@ jobs:
           path: regression_result.png
 
       - name: Post test results as PR comment
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

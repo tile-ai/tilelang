@@ -11,10 +11,7 @@ from typing import Optional, Tuple
 
 @tilelang.jit(
     out_idx=[4],
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def tl_fused_chunk_fwd_kernel(
     B,

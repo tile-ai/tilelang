@@ -1136,32 +1136,20 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.Fragment_condense_rep_var",
            [](Fragment fragment) { return fragment->CondenseReplicateVar(); })
       .def("tl.make_swizzled_layout",
-           [](int stride, int continuous, int element_size, bool k_inner,
-              bool allow_pad = true) {
-             if (allow_pad) {
-               return makeGemmABLayout(stride, continuous, continuous,
-                                       element_size, k_inner);
-             } else {
-               return makeGemmABLayoutHopper(stride, continuous, continuous,
-                                             element_size, k_inner);
-             }
+           [](const Buffer &buffer, bool k_inner, bool allow_pad) {
+             return makeSwizzledLayout(buffer, k_inner, allow_pad);
            })
       .def("tl.make_volta_swizzled_layout",
-           [](int stride, int mat_continuous, bool is_a, bool k_inner) {
-             return makeGemmVoltaABLayout(stride, mat_continuous, is_a,
-                                          k_inner);
+           [](const Buffer &buffer, bool is_a, bool k_inner) {
+             return makeVoltaSwizzledLayout(buffer, is_a, k_inner);
            })
       .def("tl.make_wgmma_swizzled_layout",
-           [](int stride, int mat_continuous, int continuity, int element_size,
-              bool k_inner) {
-             return makeGemmABLayoutHopper(stride, mat_continuous, continuity,
-                                           element_size, k_inner);
+           [](const Buffer &buffer, int continuity, bool k_inner) {
+             return makeWgmmaSwizzledLayout(buffer, continuity, k_inner);
            })
       .def("tl.make_tcgen05mma_swizzled_layout",
-           [](int stride, int mat_continuous, int continuity, int element_size,
-              bool k_inner) {
-             return makeGemmABLayoutSm100(stride, mat_continuous, continuity,
-                                          element_size, k_inner);
+           [](const Buffer &buffer, int continuity, bool k_inner) {
+             return makeTcgen05mmaSwizzledLayout(buffer, continuity, k_inner);
            })
       .def("tl.make_full_bank_swizzled_layout",
            [](const Buffer &buffer) {

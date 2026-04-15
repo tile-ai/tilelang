@@ -689,7 +689,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     #     a = 123
     #     def foo():
     #       x = foo.__globals__ # OK, globals are maintained by python
-    #       x = {**foo.__globals__, } # Not OK: globals are copied, and the original globals cannot be freed
+    #       x = {**foo.__globals__} # Not OK: globals are copied, and the original globals cannot be freed
     #       def bar(): x
     #       return bar
     #     ```

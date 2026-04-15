@@ -1,6 +1,6 @@
 # Runtime requirements
 
-apache-tvm-ffi~=0.1.0,>=0.1.2
+apache-tvm-ffi~=0.1.0,>=0.1.2,<0.1.10
 torch-c-dlpack-ext; python_version < '3.14'
 cloudpickle
 ml-dtypes

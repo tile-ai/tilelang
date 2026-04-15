@@ -117,6 +117,72 @@ private:
   ffi::Array<Buffer> buffer_alloc_recorder_;
 };
 
+/*! \brief Collect scope parent links and buffer vars referenced in for headers.
+ *
+ *  Allocations attached to a ForNode are injected into the loop body.  If a
+ *  buffer var is referenced by the loop header itself (e.g. in the extent),
+ *  the allocation must therefore be placed at an outer scope instead.
+ */
+class ScopePlacementInfoCollector : public StmtExprVisitor {
+public:
+  static ScopePlacementInfoCollector Collect(const PrimFunc &func) {
+    ScopePlacementInfoCollector collector;
+    collector.scope_stack_.push_back(nullptr);
+    collector(func->body);
+    return collector;
+  }
+
+  std::unordered_map<const StmtNode *, const StmtNode *> parent_scope_;
+  std::unordered_map<const ForNode *, std::unordered_set<const VarNode *>>
+      for_header_vars_;
+
+private:
+  void VisitStmt_(const BlockRealizeNode *op) final {
+    parent_scope_[op->block.get()] = scope_stack_.back();
+    scope_stack_.push_back(op->block.get());
+    if (!is_one(op->predicate)) {
+      this->VisitExpr(op->predicate);
+    }
+    this->VisitStmt(op->block->body);
+    scope_stack_.pop_back();
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    parent_scope_[op] = scope_stack_.back();
+    const ForNode *prev_for_header = current_for_header_;
+    current_for_header_ = op;
+    this->VisitExpr(op->min);
+    this->VisitExpr(op->extent);
+    for (const auto &kv : op->annotations) {
+      if (auto expr = kv.second.try_cast<PrimExpr>()) {
+        this->VisitExpr(expr.value());
+      }
+    }
+    current_for_header_ = prev_for_header;
+
+    scope_stack_.push_back(op);
+    this->VisitStmt(op->body);
+    scope_stack_.pop_back();
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (current_for_header_ != nullptr) {
+      for_header_vars_[current_for_header_].insert(op->buffer->data.get());
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const VarNode *op) final {
+    if (current_for_header_ != nullptr) {
+      for_header_vars_[current_for_header_].insert(op);
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  std::vector<const StmtNode *> scope_stack_;
+  const ForNode *current_for_header_{nullptr};
+};
+
 class BufferAllocationLocator : public StmtExprMutator {
 public:
   explicit BufferAllocationLocator(const PrimFunc &func) {
@@ -132,8 +198,12 @@ public:
         BufferAllocateOrderCollector::Collect(func);
     std::unordered_set<const VarNode *> arg_buffer_vars;
     CollectManagedAllocations collector;
+    ScopePlacementInfoCollector scope_info =
+        ScopePlacementInfoCollector::Collect(func);
     collector(func->body);
     managed_allocations_ = collector.managed_allocations;
+    parent_scope_ = std::move(scope_info.parent_scope_);
+    for_header_vars_ = std::move(scope_info.for_header_vars_);
 
     for (const auto &kv : func->buffer_map) {
       const Buffer &buffer = kv.second;
@@ -142,6 +212,13 @@ public:
     }
     // create buffers to be allocated at each stmts
     for (const auto &buffer : buffer_alloc_recorder) {
+      // Shared barriers must stay in their original block so the accompanying
+      // barrier_init annotation remains attached to the block that owns the
+      // initialization. Moving them into injected opaque blocks causes
+      // LowerSharedBarrier to see barrier buffers without local annotations.
+      if (IsBarrierBuffer(buffer)) {
+        continue;
+      }
       // Prefer the LCA derived from the underlying data var. If missing, fall
       // back to Buffer LCA.
       const StmtNode *stmt = nullptr;
@@ -154,6 +231,7 @@ public:
           stmt = (*bit).second.get();
         }
       }
+      stmt = ResolveAllocationSite(buffer->data.get(), stmt);
       if (stmt != nullptr || vit != var_lca.end()) {
         // Skip moving allocations that are already bound to func arguments.
         if (arg_buffer_vars.count(buffer->data.get())) {
@@ -222,6 +300,24 @@ private:
     return out;
   }
 
+  const StmtNode *ResolveAllocationSite(const VarNode *buffer_var,
+                                        const StmtNode *stmt) const {
+    while (stmt != nullptr && stmt->IsInstance<ForNode>()) {
+      const auto *for_node = static_cast<const ForNode *>(stmt);
+      auto header_it = for_header_vars_.find(for_node);
+      if (header_it == for_header_vars_.end() ||
+          !header_it->second.count(buffer_var)) {
+        break;
+      }
+      auto parent_it = parent_scope_.find(stmt);
+      if (parent_it == parent_scope_.end() || parent_it->second == nullptr) {
+        break;
+      }
+      stmt = parent_it->second;
+    }
+    return stmt;
+  }
+
   Stmt VisitStmt_(const ForNode *op) final {
     auto it = alloc_buffers_.find(op);
     if (it == alloc_buffers_.end()) {
@@ -250,10 +346,18 @@ private:
   Stmt VisitStmt_(const BlockNode *op) final {
     ICHECK(!op->init.defined());
     ffi::Array<Buffer> alloc_buffers;
+    ffi::Array<Buffer> preserved_barrier_buffers;
+    for (const Buffer &buf : op->alloc_buffers) {
+      if (IsBarrierBuffer(buf)) {
+        alloc_buffers.push_back(buf);
+        preserved_barrier_buffers.push_back(buf);
+        PushBinding(buf->data, buf);
+      }
+    }
     auto it = alloc_buffers_.find(op);
     if (it != alloc_buffers_.end()) {
-      alloc_buffers = it->second;
       for (const Buffer &buf : it->second) {
+        alloc_buffers.push_back(buf);
         PushBinding(buf->data, buf);
       }
     }
@@ -279,6 +383,9 @@ private:
       for (const Buffer &buf : it->second) {
         PopBinding(buf->data);
       }
+    }
+    for (const Buffer &buf : preserved_barrier_buffers) {
+      PopBinding(buf->data);
     }
 
     ObjectPtr<BlockNode> n = CopyOnWrite(op);
@@ -328,10 +435,20 @@ private:
 
   /*! \brief The map from stmt to the buffers to be allocated under it. */
   std::unordered_map<const StmtNode *, ffi::Array<Buffer>> alloc_buffers_;
+  /*! \brief Parent scope for each For/Block stmt. */
+  std::unordered_map<const StmtNode *, const StmtNode *> parent_scope_;
+  /*! \brief Buffer vars referenced in the header of each For stmt. */
+  std::unordered_map<const ForNode *, std::unordered_set<const VarNode *>>
+      for_header_vars_;
   /*! \brief Stack of buffers per data var for scoping correctness. */
   ffi::Map<Var, ffi::Array<Buffer>> buffer_data_to_buffers_;
   /*! \brief Buffers that are allocated within a BlockNode, and may be moved. */
   std::unordered_set<const VarNode *> managed_allocations_;
+
+  static bool IsBarrierBuffer(const Buffer &buffer) {
+    String scope = buffer.scope();
+    return scope == "shared.barrier" || scope == "shared.cluster_barrier";
+  }
 };
 
 PrimFunc PlanAndUpdateBufferAllocationLocation(PrimFunc func) {

@@ -4,6 +4,7 @@ import tilelang as tl
 from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
+from tilelang.engine.phase import LowerAndLegalize
 from tvm import tir
 
 auto_target = tvm.target.Target(determine_target("auto"))
@@ -41,6 +42,19 @@ def _collect_fence_barrier_init(stmt):
 
 def _collect_shuffle_elect(stmt):
     return _collect_calls(stmt, "tl.tl_shuffle_elect")
+
+
+def _collect_barrier_blocks(stmt):
+    blocks = []
+
+    def visitor(node):
+        if isinstance(node, tvm.tir.Block):
+            barrier_bufs = [buf for buf in node.alloc_buffers if buf.scope() in ("shared.barrier", "shared.cluster_barrier")]
+            if barrier_bufs:
+                blocks.append(node)
+
+    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
+    return blocks
 
 
 def test_single_barrier():
@@ -103,6 +117,60 @@ def test_no_barrier_is_noop():
 
     assert len(_collect_init_barrier_calls(body)) == 0
     assert len(_collect_fence_barrier_init(body)) == 0
+
+
+def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
+    """Regression for tcgen05 no-TMA kernels after pass reordering."""
+
+    pass_configs = {tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+
+    @T.prim_func
+    def func(
+        X: T.Tensor((256, 256), T.float16),
+        Y: T.Tensor((256, 256), T.float16),
+    ):
+        with T.Kernel(2, 2, threads=256) as (bx, by):
+            A_shared = T.alloc_shared((128, 128), T.float16)
+            B_shared = T.alloc_shared((128, 128), T.float16)
+            C_tmem = T.alloc_tmem([128, 128], T.float32)
+            mbar = T.alloc_barrier(1)
+            C_local = T.alloc_fragment((128, 128), T.float32)
+            Y_shared = T.alloc_shared((128, 128), T.float16)
+
+            for ko in T.Pipelined(2, num_stages=2):
+                T.copy(X[by * 128, ko * 128], A_shared)
+                T.copy(X[bx * 128, ko * 128], B_shared)
+                T.tcgen05_gemm(
+                    A_shared,
+                    B_shared,
+                    C_tmem,
+                    transpose_B=True,
+                    mbar=mbar,
+                    clear_accum=ko == 0,
+                )
+                T.mbarrier_wait_parity(mbar, ko % 2)
+
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, Y_shared)
+            T.copy(Y_shared, Y[by * 128, bx * 128])
+
+    target = tvm.target.Target("cuda -arch=sm_100")
+    with tvm.transform.PassContext(config=pass_configs), target:
+        mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+        mod = LowerAndLegalize(mod, target)
+        mod = tl.transform.LowerSharedTmem()(mod)
+        mod = tl.transform.IfStmtBinding()(mod)
+        mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+
+        barrier_blocks = _collect_barrier_blocks(mod["main"].body)
+        assert len(barrier_blocks) == 1
+        assert "barrier_init" in barrier_blocks[0].annotations
+
+        mod = tl.transform.LowerSharedBarrier()(mod)
+
+    body = mod["main"].body
+    assert len(_collect_init_barrier_calls(body)) == 1
+    assert len(_collect_fence_barrier_init(body)) == 1
 
 
 if __name__ == "__main__":
