@@ -220,83 +220,75 @@ class AutotuneResult:
             logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 
         # Save kernel library (backend-specific)
-        try:
-            if kernel.execution_backend == "nvrtc":
-                kernel_lib_file = KERNEL_CUBIN_PATH
-            elif kernel.execution_backend == "tvm_ffi":
-                kernel_lib_file = EXECUTABLE_PATH
-            elif kernel.execution_backend == "cutedsl":
-                # cutedsl only generates a Python source file as the "library", so save that instead of a .so
-                kernel_lib_file = KERNEL_PY_PATH
+        if kernel.execution_backend == "nvrtc":
+            kernel_lib_file = KERNEL_CUBIN_PATH
+        elif kernel.execution_backend == "tvm_ffi":
+            kernel_lib_file = EXECUTABLE_PATH
+        elif kernel.execution_backend == "cutedsl":
+            kernel_lib_file = KERNEL_PY_PATH
+        else:
+            kernel_lib_file = KERNEL_LIB_PATH
+
+        kernel_lib_path = os.path.join(cache_path, kernel_lib_file)
+
+        if kernel.execution_backend == "nvrtc":
+            # Save cubin and python helper file
+            src_lib_path = kernel.adapter.libpath
+            kernel_py_path = os.path.join(cache_path, KERNEL_PY_PATH)
+            py_src_path = src_lib_path.replace(".cubin", ".py")
+            if verbose:
+                logger.debug(f"Saving kernel nvrtc python code to file: {kernel_py_path}")
+            self._safe_write_file(kernel_py_path, "wb", lambda f: f.write(self._load_binary(py_src_path)))
+            if verbose:
+                logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
+            self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
+        elif kernel.execution_backend == "tvm_ffi":
+            if hasattr(kernel.adapter, "libpath") and kernel.adapter.libpath:
+                src_lib_path = kernel.adapter.libpath
+                if verbose:
+                    logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
+                self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             else:
-                kernel_lib_file = KERNEL_LIB_PATH
-
-            kernel_lib_path = os.path.join(cache_path, kernel_lib_file)
-
-            if kernel.execution_backend == "nvrtc":
-                # Save cubin and python helper file
-                src_lib_path = kernel.adapter.libpath
-                kernel_py_path = os.path.join(cache_path, KERNEL_PY_PATH)
-                py_src_path = src_lib_path.replace(".cubin", ".py")
+                executable = kernel.adapter.executable
                 if verbose:
-                    logger.debug(f"Saving kernel nvrtc python code to file: {kernel_py_path}")
-                self._safe_write_file(kernel_py_path, "wb", lambda f: f.write(self._load_binary(py_src_path)))
-                if verbose:
-                    logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
-                self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
-            elif kernel.execution_backend == "tvm_ffi":
-                if hasattr(kernel.adapter, "libpath") and kernel.adapter.libpath:
-                    src_lib_path = kernel.adapter.libpath
-                    if verbose:
-                        logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
-                    self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
-                else:
-                    executable = kernel.adapter.executable
-                    if verbose:
-                        logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
-                    self._safe_write_executable(executable, kernel_lib_path)
-            elif kernel.execution_backend == "cutedsl":
-                # Save the Python source file (CuTeDSL "library" is a .py, not a .so)
-                src_lib_path = kernel.adapter.libpath
-                if verbose:
-                    logger.debug(f"Saving CuTeDSL kernel Python source to file: {kernel_lib_path}")
-                self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
+                    logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
+                self._safe_write_executable(executable, kernel_lib_path)
+        elif kernel.execution_backend == "cutedsl":
+            # Save the Python source file (CuTeDSL "library" is a .py, not a .so)
+            src_lib_path = kernel.adapter.libpath
+            if verbose:
+                logger.debug(f"Saving CuTeDSL kernel Python source to file: {kernel_lib_path}")
+            self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
 
-                # Save launcher .so if present (compiled C++ launcher for TMA etc.)
-                lib_gen = kernel.adapter.lib_generator
-                launcher_src = getattr(lib_gen, "launcher_libpath", None)
-                if launcher_src and os.path.exists(launcher_src):
-                    launcher_name = getattr(lib_gen, "launcher_libname", os.path.basename(launcher_src))
-                    dst_launcher = os.path.join(cache_path, launcher_name)
-                    if verbose:
-                        logger.debug(f"Saving CuTeDSL launcher library to file: {dst_launcher}")
-                    self._safe_write_file(dst_launcher, "wb", lambda f: f.write(self._load_binary(launcher_src)))
-
-                # Save cubin if already generated (generated during autotuning benchmark)
-                src_dir = os.path.dirname(src_lib_path)
-                src_cubin = os.path.join(src_dir, "kernel.cubin")
-                if os.path.exists(src_cubin):
-                    dst_cubin = os.path.join(cache_path, KERNEL_CUBIN_PATH)
-                    if verbose:
-                        logger.debug(f"Saving CuTeDSL cubin to file: {dst_cubin}")
-                    self._safe_write_file(dst_cubin, "wb", lambda f: f.write(self._load_binary(src_cubin)))
-            else:
-                src_lib_path = kernel.adapter.libpath
+            # Save launcher .so if present (compiled C++ launcher for TMA etc.)
+            lib_gen = kernel.adapter.lib_generator
+            launcher_src = getattr(lib_gen, "launcher_libpath", None)
+            if launcher_src and os.path.exists(launcher_src):
+                launcher_name = getattr(lib_gen, "launcher_libname", os.path.basename(launcher_src))
+                dst_launcher = os.path.join(cache_path, launcher_name)
                 if verbose:
-                    logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
-                self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
+                    logger.debug(f"Saving CuTeDSL launcher library to file: {dst_launcher}")
+                self._safe_write_file(dst_launcher, "wb", lambda f: f.write(self._load_binary(launcher_src)))
 
-        except Exception as e:
-            logger.error(f"Error saving kernel library to disk: {e}")
+            # Save cubin if already generated (generated during autotuning benchmark)
+            src_dir = os.path.dirname(src_lib_path)
+            src_cubin = os.path.join(src_dir, "kernel.cubin")
+            if os.path.exists(src_cubin):
+                dst_cubin = os.path.join(cache_path, KERNEL_CUBIN_PATH)
+                if verbose:
+                    logger.debug(f"Saving CuTeDSL cubin to file: {dst_cubin}")
+                self._safe_write_file(dst_cubin, "wb", lambda f: f.write(self._load_binary(src_cubin)))
+        else:
+            src_lib_path = kernel.adapter.libpath
+            if verbose:
+                logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
+            self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
 
         # Save kernel parameters
-        try:
-            params_path = os.path.join(cache_path, PARAMS_PATH)
-            if verbose:
-                logger.debug(f"Saving kernel parameters to disk: {params_path}")
-            self._safe_write_file(params_path, "wb", lambda f: cloudpickle.dump(kernel.params, f))
-        except Exception as e:
-            logger.error(f"Error saving kernel parameters to disk: {e}")
+        params_path = os.path.join(cache_path, PARAMS_PATH)
+        if verbose:
+            logger.debug(f"Saving kernel parameters to disk: {params_path}")
+        self._safe_write_file(params_path, "wb", lambda f: cloudpickle.dump(kernel.params, f))
 
     def _load_kernel_from_disk(
         self,
@@ -408,9 +400,12 @@ class AutotuneResult:
         if os.path.isdir(path):
             return
 
-        parent = path.parent if isinstance(path, Path) else Path(path).parent
-        staging_path = parent / f".staging_{Path(path).name}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        # Staging dir lives under TILELANG_CACHE_DIR (not the autotuner subdir) so that
+        # KernelCache._cleanup_stale_staging_dirs() can find and clean up stale entries.
+        staging_path = Path(env.TILELANG_CACHE_DIR) / f".staging_{Path(path).name}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         os.makedirs(staging_path)
+        # Ensure the parent of the final path exists (e.g. ~/.tilelang/cache/autotuner/)
+        os.makedirs(Path(path).parent, exist_ok=True)
 
         try:
             # save best config

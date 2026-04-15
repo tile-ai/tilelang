@@ -395,19 +395,13 @@ class KernelCache:
                 self.logger.exception("Error saving host kernel source code to disk")
 
             # Save the kernel library
-            try:
-                self._save_so_cubin_to_disk(kernel, staging_path, verbose)
-            except Exception:
-                self.logger.exception("Error saving kernel library to disk")
+            self._save_so_cubin_to_disk(kernel, staging_path, verbose)
 
             # Save kernel parameters
-            try:
-                params_path = os.path.join(staging_path, self.params_path)
-                if verbose:
-                    self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
-                KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
-            except Exception:
-                self.logger.exception("Error saving kernel parameters to disk")
+            params_path = os.path.join(staging_path, self.params_path)
+            if verbose:
+                self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
+            KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
             # Atomic rename — makes the complete directory visible in one step.
             os.rename(staging_path, cache_path)
