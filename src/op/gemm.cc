@@ -456,7 +456,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     return {};
   LayoutMap results;
   if (const auto f = ffi::Function::GetGlobal("tl.gemm.infer_layout")) {
-    auto raw_results = Downcast<LayoutMap>(
+    auto inferred_layouts = Downcast<LayoutMap>(
         (*f)(tvm::ffi::GetRef<Gemm>(this), T.target, T.thread_bounds));
     // For MMA instructions, skip shared buffer layouts that are already
     // inferred by a prior operator to avoid layout conflicts when the same
@@ -466,7 +466,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     auto block_size = *as_const_int(T.thread_bounds->extent);
     GemmInst gemm_inst = getGemmInst(block_size, T.target);
     bool is_mma = (gemm_inst == GemmInst::kMMA);
-    for (auto kv : raw_results) {
+    for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
       if (is_mma && IsSharedBuffer(buf) && T.layout_map.count(buf)) {
