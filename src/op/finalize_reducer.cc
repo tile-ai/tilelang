@@ -34,11 +34,12 @@ using namespace tir;
 FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
                                      Map<String, ObjectRef> annotations) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
-  // Normalize any supported region expression
-  // (BufferRegion/BufferLoad/tl.region) to a BufferRegion, then take the
-  // underlying Buffer as reducer.
-  auto region = NormalizeToBufferRegion(args[0]);
-  node->reducer = region->buffer;
+  auto reducer_access = NormalizeToAccessRegion(args[0], kAccessReadWrite);
+  reducer_access.region =
+      BufferRegion::FullRegion(reducer_access.region->buffer);
+  reducer_access.access_mask = kAccessReadWrite;
+  node->reducer = reducer_access.region->buffer;
+  node->SetAccessRegions({reducer_access});
   node->op = (ReducerOpType)*as_const_int(args[1]);
   data_ = std::move(node);
 }

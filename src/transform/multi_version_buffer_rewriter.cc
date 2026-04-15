@@ -4,24 +4,114 @@
  */
 
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
 
 #include <functional>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
+#include "../layout/layout.h"
 #include "../op/builtin.h"
+#include "../op/operator.h"
+#include "../op/region.h"
 #include "../op/utils.h"
+#include "common/pipeline_utils.h"
+#include "multi_version_buffer_rewriter.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
+                 arith::Analyzer *analyzer) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Layout ExpandAnnotatedLayoutForMultiVersionedBuffer(const Layout &layout,
+                                                    const Buffer &old_buffer,
+                                                    const Buffer &new_buffer) {
+  if (!layout.defined() ||
+      new_buffer->shape.size() <= old_buffer->shape.size()) {
+    return Layout();
+  }
+
+  arith::Analyzer analyzer;
+  if (!ShapesEqual(layout->InputShape(), old_buffer->shape, &analyzer)) {
+    return Layout();
+  }
+
+  size_t leading_ndim = new_buffer->shape.size() - old_buffer->shape.size();
+  Array<PrimExpr> trailing_shape;
+  Array<PrimExpr> leading_shape;
+  for (size_t i = 0; i < leading_ndim; ++i) {
+    leading_shape.push_back(new_buffer->shape[i]);
+  }
+  for (size_t i = 0; i < old_buffer->shape.size(); ++i) {
+    trailing_shape.push_back(new_buffer->shape[leading_ndim + i]);
+  }
+  if (!ShapesEqual(trailing_shape, old_buffer->shape, &analyzer)) {
+    return Layout();
+  }
+
+  return layout->Expand(leading_shape);
+}
+
+bool UpdateExpandedLayoutMapForRemappedAllocs(
+    const std::vector<std::pair<Buffer, Buffer>> &remapped_allocs,
+    Map<String, Any> *annotations) {
+  if (remapped_allocs.empty() || !annotations->count(attr::kLayoutMap)) {
+    return false;
+  }
+
+  auto layout_map_ref = annotations->Get(attr::kLayoutMap);
+  if (!layout_map_ref.has_value()) {
+    return false;
+  }
+  auto layout_map = layout_map_ref.value().as<Map<Var, Layout>>();
+  if (!layout_map.has_value()) {
+    return false;
+  }
+
+  Map<Var, Layout> updated_layout_map = layout_map.value();
+  std::unordered_set<const VarNode *> visited;
+  bool changed = false;
+  for (const auto &[old_buffer, new_buffer] : remapped_allocs) {
+    if (!visited.insert(old_buffer->data.get()).second ||
+        !updated_layout_map.count(old_buffer->data)) {
+      continue;
+    }
+    Layout layout = updated_layout_map[old_buffer->data];
+    Layout expanded = ExpandAnnotatedLayoutForMultiVersionedBuffer(
+        layout, old_buffer, new_buffer);
+    if (!expanded.defined()) {
+      continue;
+    }
+    updated_layout_map.Set(old_buffer->data, expanded);
+    changed = true;
+  }
+
+  if (changed) {
+    annotations->Set(attr::kLayoutMap, updated_layout_map);
+  }
+  return changed;
+}
+
+} // namespace
 
 enum class Role : uint8_t { kConsumer, kProducer, kBoth };
 
@@ -128,8 +218,8 @@ private:
 
 class MultiVersionBufferRewriter : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f, bool barrier_only = false) {
-    auto rewriter = MultiVersionBufferRewriter(barrier_only);
+  static PrimFunc Substitute(PrimFunc f) {
+    auto rewriter = MultiVersionBufferRewriter();
     rewriter.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : rewriter.buffer_lca_) {
       Var buffer_var = buffer->data;
@@ -140,8 +230,7 @@ public:
   }
 
 private:
-  explicit MultiVersionBufferRewriter(bool barrier_only = false)
-      : barrier_only_(barrier_only) {}
+  explicit MultiVersionBufferRewriter() = default;
 
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
@@ -159,6 +248,13 @@ private:
       }
       if (const auto *attr = stmt.as<AttrStmtNode>()) {
         collect_stmts(attr->body);
+        return;
+      }
+      if (const auto *if_then_else = stmt.as<IfThenElseNode>()) {
+        collect_stmts(if_then_else->then_case);
+        if (if_then_else->else_case.defined()) {
+          collect_stmts(if_then_else->else_case.value());
+        }
         return;
       }
       if (const auto *block_realize = stmt.as<BlockRealizeNode>()) {
@@ -183,8 +279,52 @@ private:
       Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
                   /*name_hint=*/"", /*body*/ stmt);
       auto access = GetBlockAccessRegion(block, buffer_data_to_buffer_);
-      reads.push_back(access[0]);
-      writes.push_back(access[1]);
+      Array<BufferRegion> stmt_reads = access[0];
+      Array<BufferRegion> stmt_writes = access[1];
+
+      // Supplement with tile-op analysis.
+      // GetBlockAccessRegion misses buffer references that are encoded as
+      // tl.tileop.region Call args or as plain BufferLoad args whose
+      // semantic role (read vs write) is only known to the tile-op.
+      // Let the tile-op report its own access regions, and fall back to
+      // RegionOp scanning for any ops that still do not expose them.
+      if (auto *eval = stmt.as<EvaluateNode>()) {
+        if (auto *call = eval->value.as<CallNode>()) {
+          auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+          if (tile_op.defined()) {
+            AccessRegions access = tile_op->GetAccessRegions();
+            if (!access.reads.empty() || !access.writes.empty()) {
+              stmt_reads.insert(stmt_reads.end(), access.reads.begin(),
+                                access.reads.end());
+              stmt_writes.insert(stmt_writes.end(), access.writes.begin(),
+                                 access.writes.end());
+            } else {
+              // Fallback: scan RegionOp-encoded args.
+              for (const auto &arg : call->args) {
+                if (auto *region_call = arg.as<CallNode>()) {
+                  if (region_call->op.same_as(RegionOp::Get())) {
+                    auto region_op =
+                        ParseOperator(ffi::GetRef<Call>(region_call));
+                    if (auto *rn = region_op.as<RegionOpNode>()) {
+                      int mask = rn->GetAccessMask();
+                      auto br = BufferRegion(rn->GetBuffer(), rn->GetRanges());
+                      if (mask & 1) { // read
+                        stmt_reads.push_back(br);
+                      }
+                      if (mask & 2) { // write
+                        stmt_writes.push_back(br);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      reads.push_back(stmt_reads);
+      writes.push_back(stmt_writes);
       roles.push_back(marker.GetRole(stmt));
     }
 
@@ -274,20 +414,151 @@ private:
     return Buffer(new_buffer);
   }
 
+  Array<Stmt> GetPipelineTopLevelStmts(const Stmt &pipeline_body) const {
+    Stmt current = pipeline_body;
+    while (true) {
+      if (const auto *realize = current.as<BlockRealizeNode>()) {
+        current = realize->block->body;
+        continue;
+      }
+      if (const auto *block = current.as<BlockNode>()) {
+        current = block->body;
+        continue;
+      }
+      break;
+    }
+    if (const auto *seq = current.as<SeqStmtNode>()) {
+      return seq->seq;
+    }
+    return {current};
+  }
+
+  Array<Buffer> CollectScopedBuffers() const {
+    Array<Buffer> scoped_buffers;
+    std::unordered_set<const BufferNode *> seen;
+    for (auto [buffer, stmt] : buffer_lca_) {
+      if (!stmt.defined()) {
+        continue;
+      }
+      const StmtNode *lca = stmt.value().get();
+      bool in_scope = false;
+      for (const StmtNode *ancestor : stmt_stack_) {
+        if (ancestor == lca) {
+          in_scope = true;
+          break;
+        }
+      }
+      if (!in_scope) {
+        continue;
+      }
+      if (!IsSharedBuffer(buffer) && buffer.scope() != "shared.barrier") {
+        continue;
+      }
+      if (seen.insert(buffer.get()).second) {
+        scoped_buffers.push_back(buffer);
+      }
+    }
+    for (auto it = stmt_stack_.rbegin(); it != stmt_stack_.rend(); ++it) {
+      if (!(*it)->IsInstance<BlockNode>()) {
+        continue;
+      }
+      const auto *block = static_cast<const BlockNode *>(*it);
+      auto map_it = block_alloc_buffers_.find(block);
+      const Array<Buffer> &buffers = map_it != block_alloc_buffers_.end()
+                                         ? map_it->second
+                                         : block->alloc_buffers;
+      for (const Buffer &buffer : buffers) {
+        if (!IsSharedBuffer(buffer) && buffer.scope() != "shared.barrier") {
+          continue;
+        }
+        if (seen.insert(buffer.get()).second) {
+          scoped_buffers.push_back(buffer);
+        }
+      }
+    }
+    return scoped_buffers;
+  }
+
+  Array<Buffer> SelectVersionedBuffers(const Stmt &pipeline_body,
+                                       int num_stages) {
+    Array<Buffer> scoped_buffers = CollectScopedBuffers();
+    Array<Buffer> versioned_buffers = GetVersionedBuffers(
+        GetPipelineTopLevelStmts(pipeline_body), scoped_buffers);
+
+    std::unordered_set<const BufferNode *> already;
+    for (const Buffer &buffer : versioned_buffers) {
+      already.insert(buffer.get());
+    }
+    for (const Buffer &buffer : scoped_buffers) {
+      if (buffer.scope() == "shared.barrier" && !already.count(buffer.get())) {
+        versioned_buffers.push_back(buffer);
+      }
+    }
+
+    if (num_stages <= 1) {
+      Array<Buffer> filtered;
+      for (const Buffer &buffer : versioned_buffers) {
+        if (buffer.scope() == "shared.barrier") {
+          filtered.push_back(buffer);
+        }
+      }
+      versioned_buffers = filtered;
+    }
+    return versioned_buffers;
+  }
+
+  void EnsureVersionedBuffers(const Array<Buffer> &versioned_buffers,
+                              int num_stages) {
+    for (const Buffer &buffer : versioned_buffers) {
+      if (buffer_remap_.count(buffer)) {
+        continue;
+      }
+      Var buffer_var = buffer->data;
+      Buffer new_buffer = RewriteAllocBuffer(buffer, num_stages);
+      buffer_remap_.Set(buffer, new_buffer);
+      if (!buffer_data_to_buffer_.count(buffer_var)) {
+        buffer_data_to_buffer_.Set(buffer_var, buffer);
+      }
+    }
+  }
+
+  PrimExpr CurrentVersionIndex() const {
+    if (!explicit_version_index_stack_.empty()) {
+      return explicit_version_index_stack_.back();
+    }
+    return version_index_;
+  }
+
+  PrimExpr CurrentParityCycle() const {
+    if (!explicit_parity_cycle_stack_.empty()) {
+      return explicit_parity_cycle_stack_.back();
+    }
+    return parity_cycle_;
+  }
+
   Stmt VisitStmt_(const BlockRealizeNode *op) final {
     BlockRealize block_realize =
         Downcast<BlockRealize>(StmtExprMutator::VisitStmt_(op));
     Block block = block_realize->block;
     Array<Buffer> alloc_buffers;
+    std::vector<std::pair<Buffer, Buffer>> remapped_allocs;
     for (auto buffer : block->alloc_buffers) {
       if (buffer_remap_.count(buffer)) {
         Buffer new_buffer = buffer_remap_[buffer];
         alloc_buffers.push_back(new_buffer);
+        remapped_allocs.emplace_back(buffer, new_buffer);
       } else {
         alloc_buffers.push_back(buffer);
       }
     }
     block.CopyOnWrite()->alloc_buffers = std::move(alloc_buffers);
+
+    if (!remapped_allocs.empty()) {
+      auto ann = block->annotations;
+      if (UpdateExpandedLayoutMapForRemappedAllocs(remapped_allocs, &ann)) {
+        block.CopyOnWrite()->annotations = std::move(ann);
+      }
+    }
 
     // Update barrier_init annotation: replicate arrive counts for versioned
     // barrier buffers so lower_shared_barrier sees the correct count.
@@ -339,10 +610,47 @@ private:
     return stmt;
   }
 
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    stmt_stack_.push_back(op);
+
+    bool pushed_explicit_version = false;
+    bool pushed_explicit_parity = false;
+    if (op->attr_key == kPipelineMVBContextNumStages) {
+      if (const int64_t *imm = as_const_int(op->value)) {
+        int num_stages = static_cast<int>(*imm);
+        EnsureVersionedBuffers(SelectVersionedBuffers(op->body, num_stages),
+                               num_stages);
+      }
+    } else if (op->attr_key == kPipelineMVBStageExpr) {
+      explicit_version_index_stack_.push_back(op->value);
+      pushed_explicit_version = true;
+    } else if (op->attr_key == kPipelineMVBParityExpr) {
+      explicit_parity_cycle_stack_.push_back(op->value);
+      pushed_explicit_parity = true;
+    }
+
+    Stmt body = this->VisitStmt(op->body);
+
+    if (pushed_explicit_version) {
+      explicit_version_index_stack_.pop_back();
+    }
+    if (pushed_explicit_parity) {
+      explicit_parity_cycle_stack_.pop_back();
+    }
+    stmt_stack_.pop_back();
+
+    if (op->attr_key == kPipelineMVBStageExpr ||
+        op->attr_key == kPipelineMVBParityExpr ||
+        op->attr_key == kPipelineMVBContextNumStages) {
+      return body;
+    }
+    return AttrStmt(op->node, op->attr_key, op->value, body, op->span);
+  }
+
   Stmt VisitStmt_(const ForNode *op) final {
     stmt_stack_.push_back(op);
     loop_stack_.emplace_back(op->loop_var, op->extent);
-    auto num_stages_anno = op->annotations.Get("num_stages");
+    Optional<Integer> num_stages_anno = GetPipelineNumStages(op);
     if (!num_stages_anno) {
       auto for_node = StmtExprMutator::VisitStmt_(op);
       loop_stack_.pop_back();
@@ -350,135 +658,19 @@ private:
       return for_node;
     }
 
-    ICHECK(num_stages_anno->as<IntImmNode>());
-    int num_stages = static_cast<int>(num_stages_anno->as<IntImmNode>()->value);
+    int num_stages = num_stages_anno.value()->value;
+    EnsureVersionedBuffers(SelectVersionedBuffers(op->body, num_stages),
+                           num_stages);
 
-    Stmt pipeline_body_root{nullptr};
-    if (const auto *realize = op->body.as<BlockRealizeNode>()) {
-      const auto &block = realize->block;
-      for (const auto &buffer : block->alloc_buffers) {
-        ICHECK(buffer->IsInstance<BufferNode>());
-        buffer_data_to_buffer_.Set(buffer->data, buffer);
-      }
-      pipeline_body_root = block->body;
-    } else {
-      pipeline_body_root = op->body;
-    }
-
-    const SeqStmtNode *pipeline_body_seq = nullptr;
-    {
-      // Traverse trivial wrappers (let/if) to find the actual SeqStmt body.
-      Stmt current = pipeline_body_root;
-      while (true) {
-        if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-          pipeline_body_seq = seq_stmt;
-          break;
-        }
-        if (const auto *if_then_else = current.as<IfThenElseNode>()) {
-          ICHECK(!if_then_else->else_case.defined())
-              << "MultiVersionBuffer: Can't handle the body of the loop "
-                 "because the IfThenElse node has an else branch";
-          current = if_then_else->then_case;
-          continue;
-        }
-        if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          current = let_stmt->body;
-          continue;
-        }
-        LOG(FATAL)
-            << "MultiVersionBuffer: Can't handle the body of the loop because "
-            << "it is not a SeqStmt, IfThenElse without else, "
-            << "or LetStmt wrapping them, but got " << current->GetTypeKey();
-      }
-    }
-    ICHECK(pipeline_body_seq != nullptr);
-
-    Array<Buffer> scoped_buffers;
-    std::unordered_set<const BufferNode *> seen;
-    for (auto [buffer, stmt] : buffer_lca_) {
-      if (!stmt.defined())
-        continue;
-      const StmtNode *lca = stmt.value().get();
-      bool in_scope = false;
-      for (const StmtNode *ancestor : stmt_stack_) {
-        if (ancestor == lca) {
-          in_scope = true;
-          break;
-        }
-      }
-      if (!in_scope)
-        continue;
-      // Only double-buffer shared/barrier allocations; locals do not need
-      // versioning.
-      if (!IsSharedBuffer(buffer) && buffer.scope() != "shared.barrier")
-        continue;
-      if (seen.insert(buffer.get()).second) {
-        scoped_buffers.push_back(buffer);
-      }
-    }
-    for (auto it = stmt_stack_.rbegin(); it != stmt_stack_.rend(); ++it) {
-      if (!(*it)->IsInstance<BlockNode>())
-        continue;
-      const auto *block = static_cast<const BlockNode *>(*it);
-      // Try cached alloc list first; fall back to the original IR node
-      // (the cache may not be populated yet during the recursive visit).
-      auto map_it = block_alloc_buffers_.find(block);
-      const Array<Buffer> &buffers = map_it != block_alloc_buffers_.end()
-                                         ? map_it->second
-                                         : block->alloc_buffers;
-      for (const Buffer &buffer : buffers) {
-        if (!IsSharedBuffer(buffer) && buffer.scope() != "shared.barrier")
-          continue;
-        if (seen.insert(buffer.get()).second) {
-          scoped_buffers.push_back(buffer);
-        }
-      }
-    }
-
-    Array<Buffer> versioned_buffers =
-        GetVersionedBuffers(pipeline_body_seq->seq, scoped_buffers);
-
-    // Barrier buffers always get versioned in pipelined loops —
-    // they don't fit the producer/consumer analysis above.
-    {
-      std::unordered_set<const BufferNode *> already;
-      for (auto b : versioned_buffers)
-        already.insert(b.get());
-      for (auto buffer : scoped_buffers) {
-        if (buffer.scope() == "shared.barrier" &&
-            !already.count(buffer.get())) {
-          versioned_buffers.push_back(buffer);
-        }
-      }
-    }
-
-    // In barrier_only mode, only version barrier buffers.
-    // Data buffer versioning is left to InjectSoftwarePipeline.
-    if (barrier_only_) {
-      Array<Buffer> filtered;
-      for (auto buffer : versioned_buffers) {
-        if (buffer.scope() == "shared.barrier") {
-          filtered.push_back(buffer);
-        }
-      }
-      versioned_buffers = filtered;
-    }
-
-    for (auto buffer : versioned_buffers) {
-      Var buffer_var = buffer->data;
-      Buffer new_buffer = RewriteAllocBuffer(buffer, num_stages);
-      buffer_remap_.Set(buffer, new_buffer);
-      // Ensure the data var is discoverable so the barrier_init annotation
-      // update in VisitStmt_(BlockRealizeNode*) can find the remapped buffer.
-      if (!buffer_data_to_buffer_.count(buffer_var)) {
-        buffer_data_to_buffer_.Set(buffer_var, buffer);
-      }
-    }
     PrimExpr linear_index = loop_stack_[0].first;
     for (size_t i = 1; i < loop_stack_.size(); ++i) {
       linear_index =
           linear_index * loop_stack_[i].second + loop_stack_[i].first;
     }
+    PrimExpr old_version_index = version_index_;
+    PrimExpr old_parity_cycle = parity_cycle_;
+    Var old_pipeline_loop_var = pipeline_loop_var_;
+    PrimExpr old_pipeline_loop_min = pipeline_loop_min_;
     version_index_ = FloorMod(linear_index, num_stages);
     // Parity cycles every num_stages iterations for mbarrier phase tracking.
     parity_cycle_ = FloorMod(FloorDiv(linear_index, num_stages), 2);
@@ -487,9 +679,10 @@ private:
     pipeline_loop_var_ = op->loop_var;
     pipeline_loop_min_ = op->min;
     auto for_node = StmtExprMutator::VisitStmt_(op);
-    parity_cycle_ = PrimExpr(); // reset
-    pipeline_loop_var_ = Var();
-    pipeline_loop_min_ = PrimExpr();
+    version_index_ = old_version_index;
+    parity_cycle_ = old_parity_cycle;
+    pipeline_loop_var_ = old_pipeline_loop_var;
+    pipeline_loop_min_ = old_pipeline_loop_min;
     loop_stack_.pop_back();
     stmt_stack_.pop_back();
 
@@ -504,13 +697,16 @@ private:
     }
     Buffer old_buffer = load->buffer;
     const Buffer &new_buffer = (*it).second;
+    PrimExpr version_index = CurrentVersionIndex();
+    ICHECK(version_index.defined())
+        << "Versioned buffer load escaped pipeline stage context";
     auto *n = load.CopyOnWrite();
     n->buffer = new_buffer;
     if (old_buffer.scope() == "shared.barrier") {
       // Barrier: offset into expanded 1D array
-      n->indices.Set(0, version_index_ * old_buffer->shape[0] + n->indices[0]);
+      n->indices.Set(0, version_index * old_buffer->shape[0] + n->indices[0]);
     } else {
-      n->indices.insert(n->indices.begin(), version_index_);
+      n->indices.insert(n->indices.begin(), version_index);
     }
     return std::move(load);
   }
@@ -523,12 +719,15 @@ private:
     }
     Buffer old_buffer = store->buffer;
     const Buffer &new_buffer = (*it).second;
+    PrimExpr version_index = CurrentVersionIndex();
+    ICHECK(version_index.defined())
+        << "Versioned buffer store escaped pipeline stage context";
     auto *n = store.CopyOnWrite();
     n->buffer = new_buffer;
     if (old_buffer.scope() == "shared.barrier") {
-      n->indices.Set(0, version_index_ * old_buffer->shape[0] + n->indices[0]);
+      n->indices.Set(0, version_index * old_buffer->shape[0] + n->indices[0]);
     } else {
-      n->indices.insert(n->indices.begin(), version_index_);
+      n->indices.insert(n->indices.begin(), version_index);
     }
     return std::move(store);
   }
@@ -538,6 +737,35 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
+    // Rewrite tl.tileop.region Calls for versioned buffers.
+    // The region encoding is:
+    //   region(BufferLoad(buf, [min_0, ..., min_N]), access_mask, ext_0, ...,
+    //   ext_N)
+    // After the recursive visit, VisitExpr_(BufferLoadNode*) prepends a
+    // version_index to the BufferLoad indices, yielding [version_index,
+    // min_0, ..., min_N].  We must also insert a matching extent (1) for the
+    // new leading dimension so that RegionOp's ndim == indices.size()
+    // invariant is preserved.
+    //
+    // Detection: if the BufferLoad has more indices than the number of extent
+    // args (args.size() - 2), a version index was prepended.
+    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+      if (auto load = call->args[0].as<BufferLoadNode>()) {
+        size_t num_extents =
+            call->args.size() - 2; // args = [load, mask, ext...]
+        if (load->indices.size() == num_extents + 1) {
+          // Version index was prepended.  Insert a unit extent to match.
+          Array<PrimExpr> new_args;
+          new_args.push_back(call->args[0]); // rewritten BufferLoad
+          new_args.push_back(call->args[1]); // access_mask
+          new_args.push_back(IntImm(DataType::Int(32), 1)); // stage extent
+          for (size_t i = 2; i < call->args.size(); ++i) {
+            new_args.push_back(call->args[i]);
+          }
+          return Call(call->dtype, call->op, new_args, call->annotations);
+        }
+      }
+    }
     // Rewrite parity for mbarrier_wait_parity on versioned barrier buffers.
     // The user writes single-barrier parity (e.g. k % 2 or (k+1) % 2).
     // After multi-versioning, each barrier is reused every num_stages
@@ -546,27 +774,34 @@ private:
     // (e.g. back-pressure barriers use (k+1)%2 so the first iteration
     // passes immediately). We detect this offset by evaluating the original
     // parity at the loop's initial value and preserving it.
-    if (call->op.same_as(mbarrier_wait_parity()) && parity_cycle_.defined()) {
+    PrimExpr parity_cycle = CurrentParityCycle();
+    if (call->op.same_as(mbarrier_wait_parity()) && parity_cycle.defined()) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         if (load->buffer.scope() == "shared.barrier") {
-          PrimExpr new_parity = parity_cycle_;
+          PrimExpr new_parity = parity_cycle;
+          arith::Analyzer analyzer;
+          PrimExpr init_orig = call->args[1];
+          PrimExpr init_cycle = parity_cycle;
+          if (!explicit_parity_cycle_stack_.empty()) {
+            PrimExpr version_index = CurrentVersionIndex();
+            ICHECK(version_index.defined())
+                << "Explicit parity rewrite requires a version index";
+            init_cycle = version_index;
+          }
           if (pipeline_loop_var_.defined()) {
-            arith::Analyzer analyzer;
             auto subst = [&](const Var &v) -> Optional<PrimExpr> {
               if (v.same_as(pipeline_loop_var_))
                 return pipeline_loop_min_;
               return Optional<PrimExpr>();
             };
-            PrimExpr init_orig =
-                analyzer.Simplify(tir::Substitute(call->args[1], subst));
-            PrimExpr init_cycle =
-                analyzer.Simplify(tir::Substitute(parity_cycle_, subst));
-            PrimExpr offset =
-                analyzer.Simplify(FloorMod(init_orig - init_cycle, 2));
-            if (auto *imm = offset.as<IntImmNode>()) {
-              if (imm->value % 2 != 0) {
-                new_parity = FloorMod(parity_cycle_ + 1, 2);
-              }
+            init_orig = analyzer.Simplify(tir::Substitute(init_orig, subst));
+            init_cycle = analyzer.Simplify(tir::Substitute(init_cycle, subst));
+          }
+          PrimExpr offset =
+              analyzer.Simplify(FloorMod(init_orig - init_cycle, 2));
+          if (const int64_t *imm = as_const_int(offset)) {
+            if (*imm % 2 != 0) {
+              new_parity = FloorMod(parity_cycle + 1, 2);
             }
           }
           Array<PrimExpr> new_args = call->args;
@@ -595,6 +830,9 @@ private:
       const Buffer &buffer = buffer_data_to_buffer_[buffer_var];
       auto it = buffer_remap_.find(buffer);
       if (it != buffer_remap_.end()) {
+        PrimExpr version_index = CurrentVersionIndex();
+        ICHECK(version_index.defined())
+            << "Versioned access_ptr escaped pipeline stage context";
         const Buffer &new_buffer = (*it).second;
         const PrimExpr &old_index = call->args[i + 1];
         PrimExpr offset;
@@ -603,14 +841,13 @@ private:
         } else {
           offset = new_buffer->strides[0];
         }
-        PrimExpr new_index = old_index + version_index_ * offset;
+        PrimExpr new_index = old_index + version_index * offset;
         new_args.Set(i + 1, new_index);
       }
     }
     return Call(call->dtype, call->op, new_args, call->annotations, call->span);
   }
 
-  bool barrier_only_;
   PrimExpr version_index_;
   PrimExpr parity_cycle_; // (k / num_stages) % 2 for mbarrier parity rewriting
   Var pipeline_loop_var_; // loop variable of the pipelined loop
@@ -619,6 +856,8 @@ private:
   // Track ancestor statements to query whether an LCA is inside the current
   // loop.
   std::vector<const StmtNode *> stmt_stack_;
+  std::vector<PrimExpr> explicit_version_index_stack_;
+  std::vector<PrimExpr> explicit_parity_cycle_stack_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Optional<Stmt>> buffer_lca_;
   Map<Buffer, Buffer> buffer_remap_;
@@ -627,18 +866,8 @@ private:
   std::unordered_map<const BlockNode *, Array<Buffer>> block_alloc_buffers_;
 };
 
-using namespace tir::transform;
-
-tvm::transform::Pass MultiVersionBuffer(bool barrier_only) {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return MultiVersionBufferRewriter::Substitute(f, barrier_only);
-  };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MultiVersionBuffer", {});
-}
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.MultiVersionBuffer", MultiVersionBuffer);
+PrimFunc ApplyMultiVersionBufferRewriter(PrimFunc f) {
+  return MultiVersionBufferRewriter::Substitute(std::move(f));
 }
 
 } // namespace tl

@@ -55,10 +55,7 @@ def sinkhorn_bwd_configs(n_stream, seqlen):
 )
 @tilelang.jit(
     out_idx=[2],
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def sinkhorn_bwd_implicit_cg(n_stream: int, tilesize: int = 32, threads: int = 128):
     seqlen = T.dynamic("seqlen")

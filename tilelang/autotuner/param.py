@@ -224,6 +224,9 @@ class AutotuneResult:
                 kernel_lib_file = KERNEL_CUBIN_PATH
             elif kernel.execution_backend == "tvm_ffi":
                 kernel_lib_file = EXECUTABLE_PATH
+            elif kernel.execution_backend == "cutedsl":
+                # cutedsl only generates a Python source file as the "library", so save that instead of a .so
+                kernel_lib_file = KERNEL_PY_PATH
             else:
                 kernel_lib_file = KERNEL_LIB_PATH
 
@@ -251,6 +254,31 @@ class AutotuneResult:
                     if verbose:
                         logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
                     self._safe_write_executable(executable, kernel_lib_path)
+            elif kernel.execution_backend == "cutedsl":
+                # Save the Python source file (CuTeDSL "library" is a .py, not a .so)
+                src_lib_path = kernel.adapter.libpath
+                if verbose:
+                    logger.debug(f"Saving CuTeDSL kernel Python source to file: {kernel_lib_path}")
+                self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
+
+                # Save launcher .so if present (compiled C++ launcher for TMA etc.)
+                lib_gen = kernel.adapter.lib_generator
+                launcher_src = getattr(lib_gen, "launcher_libpath", None)
+                if launcher_src and os.path.exists(launcher_src):
+                    launcher_name = getattr(lib_gen, "launcher_libname", os.path.basename(launcher_src))
+                    dst_launcher = os.path.join(cache_path, launcher_name)
+                    if verbose:
+                        logger.debug(f"Saving CuTeDSL launcher library to file: {dst_launcher}")
+                    self._safe_write_file(dst_launcher, "wb", lambda f: f.write(self._load_binary(launcher_src)))
+
+                # Save cubin if already generated (generated during autotuning benchmark)
+                src_dir = os.path.dirname(src_lib_path)
+                src_cubin = os.path.join(src_dir, "kernel.cubin")
+                if os.path.exists(src_cubin):
+                    dst_cubin = os.path.join(cache_path, KERNEL_CUBIN_PATH)
+                    if verbose:
+                        logger.debug(f"Saving CuTeDSL cubin to file: {dst_cubin}")
+                    self._safe_write_file(dst_cubin, "wb", lambda f: f.write(self._load_binary(src_cubin)))
             else:
                 src_lib_path = kernel.adapter.libpath
                 if verbose:
@@ -275,7 +303,7 @@ class AutotuneResult:
         target: str | Target = "auto",
         target_host: str | Target = None,
         out_idx: list[int] | int | None = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
         func: Callable = None,
@@ -306,6 +334,8 @@ class AutotuneResult:
             kernel_lib_file = KERNEL_CUBIN_PATH
         elif execution_backend == "tvm_ffi":
             kernel_lib_file = EXECUTABLE_PATH
+        elif execution_backend == "cutedsl":
+            kernel_lib_file = KERNEL_PY_PATH
         else:
             kernel_lib_file = KERNEL_LIB_PATH
 
@@ -387,7 +417,9 @@ class AutotuneResult:
             "w",
             lambda f: json.dump(
                 {
-                    "out_idx": getattr(self.func, "out_idx_override", None),
+                    "out_idx": list(self.func.attrs["tilelang_out_idx"])
+                    if (self.func.attrs and "tilelang_out_idx" in self.func.attrs)
+                    else None
                 },
                 f,
             ),
@@ -436,11 +468,14 @@ class AutotuneResult:
         with open(path / FUNCTION_PATH, "rb") as f:
             func = cloudpickle.load(f)
 
-        # load out idx
-        if verbose:
-            logger.debug(f"Loading out idx from file: {path / OUT_IDX_PATH}")
-        with open(path / OUT_IDX_PATH) as f:
-            out_idx_override = json.load(f)["out_idx"]
+        # load out idx (optional — older caches may not have this file)
+        out_idx_override = None
+        out_idx_file = path / OUT_IDX_PATH
+        if out_idx_file.exists():
+            if verbose:
+                logger.debug(f"Loading out idx from file: {out_idx_file}")
+            with open(out_idx_file) as f:
+                out_idx_override = json.load(f)["out_idx"]
 
         # load latency
         if verbose:

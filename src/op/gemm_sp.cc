@@ -86,10 +86,15 @@ GemmSPWarpPolicyNode::computeWarpPartition(int M, int N, int block_size,
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
-  node->aRegion_ = NormalizeToBufferRegion(args[0]);
-  node->eRegion_ = NormalizeToBufferRegion(args[1]);
-  node->bRegion_ = NormalizeToBufferRegion(args[2]);
-  node->cRegion_ = NormalizeToBufferRegion(args[3]);
+  auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
+  auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
+  auto c_access = NormalizeToAccessRegion(args[3], kAccessReadWrite);
+  node->aRegion_ = a_access.region;
+  node->eRegion_ = e_access.region;
+  node->bRegion_ = b_access.region;
+  node->cRegion_ = c_access.region;
+  node->SetAccessRegions({a_access, e_access, b_access, c_access});
   node->a_ = node->aRegion_->buffer;
   node->e_ = node->eRegion_->buffer;
   node->b_ = node->bRegion_->buffer;
@@ -111,6 +116,18 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->wgWait_ = args[12].as<IntImm>().value()->value;
   }
   data_ = std::move(node);
+}
+
+AccessRegions GemmSPNode::GetAccessRegions() const {
+  AccessRegions result;
+  result.reads.push_back(aRegion_);
+  result.reads.push_back(eRegion_);
+  result.reads.push_back(bRegion_);
+  if (!clearAccum_) {
+    result.reads.push_back(cRegion_);
+  }
+  result.writes.push_back(cRegion_);
+  return result;
 }
 
 /**
@@ -175,16 +192,20 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ss << ", " << wgWait_;
   }
   ss << ">";
-  auto A_buffer = T.buffer_remap.count(a_) ? T.buffer_remap[a_] : a_;
-  auto B_buffer = T.buffer_remap.count(b_) ? T.buffer_remap[b_] : b_;
-  auto C_buffer = T.buffer_remap[c_];
-  auto E_buffer = T.buffer_remap.count(e_) ? T.buffer_remap[e_] : e_;
+  // Build access pointers from regions to preserve stage-specific offsets
+  // from pipeline multi-versioning (matching dense GemmNode::Lower pattern).
+  PrimExpr Aptr =
+      MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Bptr =
+      MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
+  PrimExpr Cptr =
+      MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
+  PrimExpr Eptr =
+      MakeAccessPtrFromRegion(eRegion_, /*r*/ 1, /*require_2d*/ false);
 
   auto new_call =
       Call(DataType::Handle(), tl::tl_gemm_sp(),
-           Array<PrimExpr>{StringImm(ss.str()), A_buffer.access_ptr(1),
-                           B_buffer.access_ptr(1), C_buffer.access_ptr(3),
-                           E_buffer.access_ptr(1)});
+           Array<PrimExpr>{StringImm(ss.str()), Aptr, Bptr, Cptr, Eptr});
   return Evaluate(new_call);
 }
 

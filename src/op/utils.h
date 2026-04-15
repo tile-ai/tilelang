@@ -35,6 +35,12 @@ TVM_DLL bool IsBufferLikeExpr(const PrimExpr &expr);
 // Note: tvm_access_ptr is no longer supported here.
 TVM_DLL BufferRegion NormalizeToBufferRegion(const PrimExpr &arg);
 
+// Normalize an argument to BufferRegion together with an access mask.
+// If the argument is a tl.region(...) bridge, preserve its encoded mask;
+// otherwise fall back to the provided default mask.
+TVM_DLL AccessRegion NormalizeToAccessRegion(
+    const PrimExpr &arg, int default_access_mask = kAccessReadWrite);
+
 // Build a tvm_access_ptr(handle) from a BufferRegion.
 // - If `require_2d` is true, checks buffer ndim >= 2.
 // - For 1D regions (when allowed), offset=min, extent=extent.

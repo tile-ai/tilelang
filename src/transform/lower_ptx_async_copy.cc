@@ -36,8 +36,10 @@ public:
       : enable_auto_async_copy_(enable_auto_async_copy),
         async_without_async_commit_wait_(async_without_async_commit_wait) {}
 
+  bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
+
   Stmt Finalize(Stmt body) {
-    if (!pending_sync_copies_ || async_without_async_commit_wait_) {
+    if (!pending_sync_copies_ || UseExplicitAsyncSemantics()) {
       pending_sync_copies_ = false;
       uncommitted_sync_copies_ = false;
       return body;
@@ -50,6 +52,17 @@ public:
     pending_sync_copies_ = false;
     uncommitted_sync_copies_ = false;
     return SeqStmt(seq);
+  }
+
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::async_scope) {
+      ++explicit_async_scope_depth_;
+      Stmt body = this->VisitStmt(op->body);
+      --explicit_async_scope_depth_;
+      // `async_scope` is a lowering-only marker for cp.async semantics.
+      return body;
+    }
+    return StmtMutator::VisitStmt_(op);
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
@@ -138,7 +151,7 @@ public:
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
-    if (async_without_async_commit_wait_) {
+    if (UseExplicitAsyncSemantics()) {
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -212,7 +225,7 @@ public:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    if (async_without_async_commit_wait_) {
+    if (UseExplicitAsyncSemantics()) {
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -266,7 +279,8 @@ public:
           TryInjectPTX(load, store, predicate.defined(),
                        predicate.defined() ? predicate.value() : PrimExpr());
       if (injected.defined()) {
-        if (!async_without_async_commit_wait_) {
+        injected_ptx_async_copy_ = true;
+        if (!UseExplicitAsyncSemantics()) {
           pending_sync_copies_ = true;
           uncommitted_sync_copies_ = true;
         }
@@ -278,6 +292,10 @@ public:
   }
 
 private:
+  bool UseExplicitAsyncSemantics() const {
+    return async_without_async_commit_wait_ || explicit_async_scope_depth_ > 0;
+  }
+
   // A copy candidate represented after flattening source/destination indexing.
   struct CopyIndexInfo {
     PrimExpr src_index;
@@ -688,20 +706,24 @@ private:
 
   bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
+  int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;
+  bool injected_ptx_async_copy_{false};
   bool pending_sync_copies_{false};
   bool uncommitted_sync_copies_{false};
 };
 
 using namespace tir::transform;
 
-Stmt InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                        bool async_without_async_commit_wait) {
+PTXAsyncCopyInjectResult
+InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
+                   bool async_without_async_commit_wait) {
   PTXAsyncCopyInjector injector(enable_auto_async_copy,
                                 async_without_async_commit_wait);
-  return injector.Finalize(injector(body));
+  Stmt injected = injector(body);
+  return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }
 
 tvm::transform::Pass LowerPTXAsyncCopy() {
@@ -724,9 +746,10 @@ tvm::transform::Pass LowerPTXAsyncCopy() {
         ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
 
     auto *n = f.CopyOnWrite();
-    PTXAsyncCopyInjector injector(enable_auto_async_copy,
-                                  /*async_without_async_commit_wait=*/false);
-    n->body = injector.Finalize(injector(n->body));
+    auto inject_result =
+        InjectPTXAsyncCopy(n->body, enable_auto_async_copy,
+                           /*async_without_async_commit_wait=*/false);
+    n->body = inject_result.stmt;
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerPTXAsyncCopy", {});

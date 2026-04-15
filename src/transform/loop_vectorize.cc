@@ -84,6 +84,7 @@ struct BufferVectorInfo {
   int vector_size;
   bool is_store;
   Array<PrimExpr> indices;
+  bool is_cast = false; // true for CastNode constraints (vs CallNode)
 };
 
 Array<PrimExpr> GetBufferStrides(const Buffer &buffer) {
@@ -215,6 +216,7 @@ public:
     int local_fragment_min = initial_vector_size_;
     int memory_min = initial_vector_size_;
     int call_node_min = initial_vector_size_;
+    int non_cast_call_node_min = initial_vector_size_;
     bool has_global_or_shared_buffer = false;
 
     auto is_local_or_fragment = [](const Buffer &buf) {
@@ -232,21 +234,45 @@ public:
                     << " -> vector_size=" << info.vector_size
                     << (info.is_store ? " [store]" : " [load]") << "\n";
         } else {
-          std::cerr << "  [cast/call] -> vector_size=" << info.vector_size
-                    << "\n";
+          std::cerr << "  [" << (info.is_cast ? "cast" : "call")
+                    << "] -> vector_size=" << info.vector_size << "\n";
         }
       }
       if (!buffer.defined()) {
-        // CastNode, CallNode do not have buffer defined.
         call_node_min = arith::ZeroAwareGCD(call_node_min, info.vector_size);
+        if (!info.is_cast) {
+          non_cast_call_node_min =
+              arith::ZeroAwareGCD(non_cast_call_node_min, info.vector_size);
+        }
       } else if (is_local_or_fragment(buffer)) {
         local_fragment_min =
             arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
         local_fragment_buffers.push_back(info);
       } else {
         // global, shared, shared.dyn
-        memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
-        has_global_or_shared_buffer = true;
+        // If a *load*'s indices don't depend on loop var (e.g. b[0]), treat
+        // as local — it will become a scalar broadcast, not a vector memory
+        // access, and DecoupleTypeCast won't create a cast buffer for it.
+        // Stores must stay in the memory bucket: a loop-invariant store is a
+        // reduction-like pattern where ComputeBufferVectorSize has already
+        // returned 1 to disable vectorization, and that constraint must not
+        // be dropped (memory strategy ignores local_fragment_min).
+        bool depends_on_loop_var =
+            !info.indices.empty() && inner_for_ &&
+            std::any_of(info.indices.begin(), info.indices.end(),
+                        [&](const PrimExpr &idx) {
+                          return UsesVar(idx, [&](const VarNode *v) {
+                            return v == inner_for_->loop_var.get();
+                          });
+                        });
+        if (depends_on_loop_var || info.is_store) {
+          memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
+          has_global_or_shared_buffer = true;
+        } else {
+          local_fragment_min =
+              arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
+          local_fragment_buffers.push_back(info);
+        }
       }
     }
 
@@ -269,12 +295,15 @@ public:
       }
     } else if (has_global_or_shared_buffer) {
       // Has memory buffers and simple case (no SeqStmt):
-      // ignore local/fragment constraints
-      vector_size_ = arith::ZeroAwareGCD(memory_min, call_node_min);
+      // ignore local/fragment constraints AND cast constraints.
+      // Cast constraints are ignored because DecoupleTypeCast will later
+      // split mixed-type operations into separate loops, allowing memory
+      // copies to use wider vectors independently of cast width limits.
+      vector_size_ = arith::ZeroAwareGCD(memory_min, non_cast_call_node_min);
       if (verbose) {
         std::cerr << "  [Strategy] Has memory buffers (simple case), using "
-                     "memory_min="
-                  << memory_min
+                  << "memory_min=" << memory_min
+                  << ", non_cast_call_node_min=" << non_cast_call_node_min
                   << " (ignoring local/fragment_min=" << local_fragment_min
                   << ")" << "\n";
       }
@@ -655,7 +684,9 @@ private:
     }
     int cast_vector_size = arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
     // Record cast constraint (use empty buffer to indicate cast)
-    buffer_vector_infos_.push_back({Buffer(), cast_vector_size, false, {}});
+    // Mark is_cast=true so Plan() can distinguish cast from other call nodes
+    buffer_vector_infos_.push_back(
+        {Buffer(), cast_vector_size, false, {}, /*is_cast=*/true});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
