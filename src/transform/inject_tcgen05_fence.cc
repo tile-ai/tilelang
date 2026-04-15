@@ -36,7 +36,6 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <string>
 #include <utility>
 
 #include "../op/builtin.h"
@@ -90,32 +89,17 @@ const CallNode *GetEvaluateCall(const Stmt &stmt) {
   return nullptr;
 }
 
-bool IsExternNameWithPrefix(const CallNode *call, const std::string &prefix) {
-  if (!call || !call->op.same_as(builtin::call_extern()) ||
-      call->args.empty()) {
-    return false;
-  }
-  const auto *name = call->args[0].as<StringImmNode>();
-  return name && std::string(name->value).rfind(prefix, 0) == 0;
-}
-
 bool IsTcgen05OrTmemCall(const CallNode *call) {
   if (!call || IsBeforeFenceCall(call) || IsAfterFenceCall(call)) {
     return false;
   }
 
-  if (call->op.same_as(ptx_tcgen05_mma_ss()) ||
-      call->op.same_as(ptx_tcgen05_mma_ts()) ||
-      call->op.same_as(tcgen05_ld()) || call->op.same_as(tcgen05_st()) ||
-      call->op.same_as(tcgen05_mma_arrive()) ||
-      call->op.same_as(ptx_init_tensor_memory()) ||
-      call->op.same_as(ptx_deallocate_tensor_memory())) {
-    return true;
-  }
-
-  return IsExternNameWithPrefix(call, "tl::tcgen05_ld_") ||
-         IsExternNameWithPrefix(call, "tl::tcgen05_st_") ||
-         IsExternNameWithPrefix(call, "tl::tcgen05_cp");
+  return call->op.same_as(ptx_tcgen05_mma_ss()) ||
+         call->op.same_as(ptx_tcgen05_mma_ts()) ||
+         call->op.same_as(tcgen05_ld()) || call->op.same_as(tcgen05_st()) ||
+         call->op.same_as(tcgen05_mma_arrive()) ||
+         call->op.same_as(ptx_init_tensor_memory()) ||
+         call->op.same_as(ptx_deallocate_tensor_memory());
 }
 
 bool StmtUsesTcgen05OrTmem(const Stmt &stmt) {

@@ -58,6 +58,19 @@ def _count_extern_calls_with_prefix(stmt, prefix: str):
     return count
 
 
+def _tcgen05_ld_call(tmem_ref, local_buf):
+    return T.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tcgen05_ld"),
+        32,
+        128,
+        False,
+        tmem_ref,
+        0,
+        T.tvm_access_ptr(T.type_annotation(T.float32), local_buf.data, 0, 128, 2),
+    )
+
+
 def test_storage_sync_is_wrapped_with_tcgen05_fences():
     @T.prim_func
     def before():
@@ -65,13 +78,7 @@ def test_storage_sync_is_wrapped_with_tcgen05_fences():
             C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
             C_local = T.decl_buffer((128,), T.float32, scope="local")
             T.tvm_storage_sync("shared")
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
     @T.prim_func
     def after():
@@ -81,13 +88,7 @@ def test_storage_sync_is_wrapped_with_tcgen05_fences():
             T.tcgen05_before_thread_sync()
             T.tvm_storage_sync("shared")
             T.tcgen05_after_thread_sync()
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
     _check(before, after)
 
@@ -181,13 +182,7 @@ def test_wait_and_arrive_are_rewritten_only_at_tmem_handoffs():
             C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
             C_local = T.decl_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
             T.ptx_arrive_barrier(mbarrier[0])
 
     @T.prim_func
@@ -198,13 +193,7 @@ def test_wait_and_arrive_are_rewritten_only_at_tmem_handoffs():
             C_local = T.decl_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.tcgen05_after_thread_sync()
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
             T.tcgen05_before_thread_sync()
             T.ptx_arrive_barrier(mbarrier[0])
 
@@ -220,13 +209,7 @@ def test_wait_and_arrive_scan_across_neutral_statements():
             C_local = T.decl_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.call_extern("handle", "generic_op")
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
             T.call_extern("handle", "generic_op")
             T.ptx_arrive_barrier(mbarrier[0])
 
@@ -239,13 +222,7 @@ def test_wait_and_arrive_scan_across_neutral_statements():
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.tcgen05_after_thread_sync()
             T.call_extern("handle", "generic_op")
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
             T.call_extern("handle", "generic_op")
             T.tcgen05_before_thread_sync()
             T.ptx_arrive_barrier(mbarrier[0])
@@ -263,13 +240,7 @@ def test_sync_boundary_stops_wait_lookahead():
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.call_extern("handle", "generic_op")
             T.ptx_arrive_barrier(mbarrier[0])
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
     mod = _apply(func)
     assert _count_calls(mod["main"].body, "tl.tcgen05_after_thread_sync") == 0
@@ -284,13 +255,7 @@ def test_existing_manual_fences_are_not_duplicated():
             C_local = T.decl_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.tcgen05_after_thread_sync()
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
             T.tcgen05_before_thread_sync()
             T.ptx_arrive_barrier(mbarrier[0])
 
@@ -307,13 +272,7 @@ def test_non_sm100_targets_are_left_untouched():
             C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
             C_local = T.decl_buffer((128,), T.float32, scope="local")
             T.tvm_storage_sync("shared")
-            T.call_extern(
-                "handle",
-                "tl::tcgen05_ld_32dp32bNx<128, false>",
-                C_tmem[0],
-                0,
-                T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 128, 2),
-            )
+            T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
     mod = _apply(func, sm90_target)
     assert _count_calls(mod["main"].body, "tl.tcgen05_before_thread_sync") == 0
