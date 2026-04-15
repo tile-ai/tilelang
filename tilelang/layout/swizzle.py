@@ -64,71 +64,30 @@ def _get_element_size(buffer_or_load_or_region: BufferLikeType) -> int:
 # Use a stable swizzled layout to ensure consistent memory access patterns.
 # Swizzling should be enabled or disabled based on whether TMA (Tensor Memory Access) is applied.
 def make_swizzled_layout(buffer: BufferLikeType, k_major: bool = True, allow_pad: bool = True):
-    _, shape, _ = _get_buffer_info(buffer)
-    stride, continuous = _get_stride_continuous(buffer)
-    element_size = _get_element_size(buffer)
-    base = _ffi_api.make_swizzled_layout(
-        stride,
-        continuous,
-        element_size,
-        k_major,
-        allow_pad,
-    )
-    return base.reshape(shape)
+    buf, _, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_swizzled_layout(buf, k_major, allow_pad)
 
 
 # for Volta Intrinsics
 def make_volta_swizzled_layout(buffer: BufferLikeType, is_a: bool = True, k_inner: bool = True):
-    _, shape, _ = _get_buffer_info(buffer)
-    stride, continuous = _get_stride_continuous(buffer)
-    base = _ffi_api.make_volta_swizzled_layout(
-        stride,
-        continuous,
-        is_a,
-        k_inner,
-    )
-    return base.reshape(shape)
+    buf, _, _ = _get_buffer_info(buffer)
+    return _ffi_api.make_volta_swizzled_layout(buf, is_a, k_inner)
 
 
 # for WGMMA Intrinsics
 def make_wgmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
-    _, shape, _ = _get_buffer_info(buffer)
-    stride, continuous = _get_stride_continuous(buffer)
-    element_size = _get_element_size(buffer)
+    buf, _, _ = _get_buffer_info(buffer)
     if continuity is None:
-        continuity = continuous
-    base = _ffi_api.make_wgmma_swizzled_layout(
-        stride,
-        continuous,
-        continuity,
-        element_size,
-        k_major,
-    )
-    return base.reshape(shape)
+        continuity = -1
+    return _ffi_api.make_wgmma_swizzled_layout(buf, continuity, k_major)
 
 
 # for TCGEN05MMA Intrinsics
 def make_tcgen05mma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
-    buf, shape, _ = _get_buffer_info(buffer)
-    stride, continuous = _get_stride_continuous(buffer)
-    element_size = _get_element_size(buffer)
+    buf, _, _ = _get_buffer_info(buffer)
     if continuity is None:
-        continuity = continuous
-    try:
-        base = _ffi_api.make_tcgen05mma_swizzled_layout(
-            stride,
-            continuous,
-            continuity,
-            element_size,
-            k_major,
-        )
-        return base.reshape(shape)
-    except TypeError as err:
-        # Keep Python sources compatible with older built libs that still expose
-        # the legacy FFI signature: (buffer, continuity, k_major).
-        if "Mismatched number of arguments" not in str(err):
-            raise
-        return _ffi_api.make_tcgen05mma_swizzled_layout(buf, continuity, k_major)
+        continuity = -1
+    return _ffi_api.make_tcgen05mma_swizzled_layout(buf, continuity, k_major)
 
 
 # swizzle 128B

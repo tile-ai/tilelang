@@ -104,10 +104,7 @@ def run_gemm_ss(
     kernel = tilelang.compile(
         program,
         out_idx=[3],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
 
@@ -273,10 +270,7 @@ def run_gemm_rs(
     kernel = tilelang.compile(
         program,
         out_idx=[3],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
@@ -424,10 +418,7 @@ def run_gemm_sr(
     kernel = tilelang.compile(
         program,
         out_idx=[3],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
@@ -579,10 +570,7 @@ def run_gemm_rr(
     kernel = tilelang.compile(
         program,
         out_idx=[3],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")

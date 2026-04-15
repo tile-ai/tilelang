@@ -866,47 +866,57 @@ def barrier_arrive(mbarrier: BarrierType):
     return mbarrier_arrive(mbarrier)
 
 
-def shfl_xor(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
-    """Perform a shuffle operation with XOR offset.
+# Full-warp mask as a proper uint32 TIR constant so the emitted C/C++ source
+# prints as `0xFFFFFFFFu` instead of `(int64_t)4294967295` after TIR widening.
+_FULL_WARP_MASK = tir.const(0xFFFFFFFF, "uint32")
+_DEFAULT_SHFL_WIDTH = 32
 
-    Args:
-        value: Optional[int, PrimExpr]
-            The value to shuffle
-        offset: Optional[int, PrimExpr]
-            The offset for the shuffle operation
-    Returns:
-        tir.Call: A handle to the shuffle operation
+
+def _as_uint32_mask(mask: int | PrimExpr) -> PrimExpr:
+    """Normalize a warp lane mask to a uint32 TIR expression.
+
+    Python literals (e.g. ``0xFFFFFFFF``) would otherwise be widened to int64
+    by TIR and printed as ``(int64_t)4294967295`` in the generated source.
     """
-    if _IS_HIP_AVAILABLE:
-        return tir.call_extern(value.dtype, "__shfl_xor", value, offset)
-    else:
-        return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xFFFFFFFF, value, offset)
+    if isinstance(mask, int):
+        return tir.const(mask, "uint32")
+    return mask
 
 
-def shfl_down(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
-    """Perform a shuffle operation with down offset.
-
-    Args:
-        value: Optional[int, PrimExpr]
-            The value to shuffle
+def shfl_xor(
+    value: int | PrimExpr | tir.Call,
+    delta: int | PrimExpr | tir.Call,
+    width: int | PrimExpr = _DEFAULT_SHFL_WIDTH,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+):
+    """XOR-swap ``value`` across lanes (``__shfl_xor_sync`` on CUDA,
+    ``__shfl_xor`` on HIP — mask ignored on HIP).
     """
-    if _IS_HIP_AVAILABLE:
-        return tir.call_extern(value.dtype, "__shfl_down", value, offset)
-    else:
-        return tir.call_extern(value.dtype, "__shfl_down_sync", 0xFFFFFFFF, value, offset)
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.shfl_xor_sync"), _as_uint32_mask(mask), value, delta, width)
 
 
-def shfl_up(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
-    """Perform a shuffle operation with up offset.
-
-    Args:
-        value: Optional[int, PrimExpr]
-            The value to shuffle
+def shfl_down(
+    value: int | PrimExpr | tir.Call,
+    delta: int | PrimExpr | tir.Call,
+    width: int | PrimExpr = _DEFAULT_SHFL_WIDTH,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+):
+    """Shift ``value`` down by ``delta`` lanes (``__shfl_down_sync`` on CUDA,
+    ``__shfl_down`` on HIP).
     """
-    if _IS_HIP_AVAILABLE:
-        return tir.call_extern(value.dtype, "__shfl_up", value, offset)
-    else:
-        return tir.call_extern(value.dtype, "__shfl_up_sync", 0xFFFFFFFF, value, offset)
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.shfl_down_sync"), _as_uint32_mask(mask), value, delta, width)
+
+
+def shfl_up(
+    value: int | PrimExpr | tir.Call,
+    delta: int | PrimExpr | tir.Call,
+    width: int | PrimExpr = _DEFAULT_SHFL_WIDTH,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+):
+    """Shift ``value`` up by ``delta`` lanes (``__shfl_up_sync`` on CUDA,
+    ``__shfl_up`` on HIP).
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.shfl_up_sync"), _as_uint32_mask(mask), value, delta, width)
 
 
 def sync_threads(barrier_id: int = None, arrive_count: int = None):
@@ -926,11 +936,157 @@ def sync_warp(mask: int = None):
     return tir.call_intrin("void", tir.op.Op.get("tl.sync_warp"))
 
 
-def shfl_sync(mask: int, value: int | PrimExpr, srcLane: int, width: int = None):
-    """Receives data from a thread in the same warp."""
-    if width is None:
-        return tir.call_extern(value.dtype, "__shfl_sync", mask, value, srcLane)
-    return tir.call_extern(value.dtype, "__shfl_sync", mask, value, srcLane, width)
+def shfl_sync(
+    value: int | PrimExpr,
+    srcLane: int | PrimExpr,
+    width: int | PrimExpr = _DEFAULT_SHFL_WIDTH,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+):
+    """Broadcast ``value`` from ``srcLane`` to all lanes in the subgroup of
+    ``width`` lanes (``__shfl_sync`` on CUDA, ``__shfl`` on HIP — mask ignored
+    on HIP).
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.shfl_sync"), _as_uint32_mask(mask), value, srcLane, width)
+
+
+# ---------------------------------------------------------------------------
+# Warp-vote / warp-ballot intrinsics
+#
+# The CUDA/HIP split and the uint32->uint64 zero-extension for ballot_sync and
+# activemask are handled in codegen (src/target/codegen_{cuda,hip}.cc). These
+# Python wrappers simply emit the backend-agnostic tl.* ops.
+# ---------------------------------------------------------------------------
+
+
+def any_sync(
+    predicate: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Non-zero if ANY active lane in ``mask`` has a non-zero ``predicate``.
+
+    Lowers to ``__any_sync(mask, predicate)`` on CUDA and ``__any(predicate)``
+    on HIP (the mask is ignored on HIP because the full wavefront is always
+    convergent).
+
+    Args:
+        predicate: Integer condition to test.
+        mask: Warp lane mask (defaults to ``0xFFFFFFFF``, i.e. all 32 lanes).
+
+    Returns:
+        int32: Non-zero if any thread in the mask has a non-zero predicate.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.any_sync"), _as_uint32_mask(mask), predicate)
+
+
+def all_sync(
+    predicate: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Non-zero only if ALL active lanes in ``mask`` have a non-zero predicate.
+
+    Lowers to ``__all_sync(mask, predicate)`` on CUDA and ``__all(predicate)``
+    on HIP.
+
+    Args:
+        predicate: Integer condition to test.
+        mask: Warp lane mask (defaults to ``0xFFFFFFFF``, i.e. all 32 lanes).
+
+    Returns:
+        int32: Non-zero if all threads in the mask have a non-zero predicate.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.all_sync"), _as_uint32_mask(mask), predicate)
+
+
+def ballot_sync(
+    predicate: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Return a ``uint64`` bitmask of lanes in ``mask`` whose predicate is set.
+
+    CUDA: ``__ballot_sync(mask, predicate)`` returns ``unsigned int``; codegen
+    zero-extends it to ``uint64`` (upper 32 bits always zero for 32-wide warps).
+    HIP: ``__ballot(predicate)`` returns ``uint64`` natively, covering all
+    64 wavefront lanes. The mask argument is ignored on HIP.
+
+    Returns:
+        uint64: Bitmask with bit N set if lane N's predicate is non-zero.
+    """
+    return tir.call_intrin("uint64", tir.op.Op.get("tl.ballot_sync"), _as_uint32_mask(mask), predicate)
+
+
+def ballot(predicate: int | PrimExpr) -> PrimExpr:
+    """Full-warp / full-wavefront ballot. Equivalent to
+    ``ballot_sync(predicate)`` (i.e. with the default full warp mask).
+
+    Returns:
+        uint64: Bitmask with bit N set if lane N's predicate is non-zero.
+    """
+    return tir.call_intrin("uint64", tir.op.Op.get("tl.ballot"), predicate)
+
+
+def activemask() -> PrimExpr:
+    """Return a ``uint64`` bitmask of currently active (non-exited) lanes.
+
+    Lowers to ``__activemask()`` (zero-extended to ``uint64``) on CUDA and
+    ``__ballot(1)`` on HIP.
+    """
+    return tir.call_intrin("uint64", tir.op.Op.get("tl.activemask"))
+
+
+# ---------------------------------------------------------------------------
+# Thread-block synchronization with predicate (shared across CUDA & HIP)
+# ---------------------------------------------------------------------------
+
+
+def syncthreads_count(predicate: int | PrimExpr) -> PrimExpr:
+    """Block barrier that returns the number of threads whose ``predicate``
+    evaluates to non-zero (``__syncthreads_count`` on CUDA and HIP).
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.syncthreads_count"), predicate)
+
+
+def syncthreads_and(predicate: int | PrimExpr) -> PrimExpr:
+    """Block barrier that returns non-zero only if ALL threads have a non-zero
+    ``predicate`` (``__syncthreads_and`` on CUDA and HIP).
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.syncthreads_and"), predicate)
+
+
+def syncthreads_or(predicate: int | PrimExpr) -> PrimExpr:
+    """Block barrier that returns non-zero if ANY thread has a non-zero
+    ``predicate`` (``__syncthreads_or`` on CUDA and HIP).
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.syncthreads_or"), predicate)
+
+
+# ---------------------------------------------------------------------------
+# Warp match intrinsics (CUDA sm_70+; unsupported on HIP)
+# ---------------------------------------------------------------------------
+
+
+def match_any_sync(
+    value: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Return a ``uint32`` bitmask of lanes in ``mask`` whose ``value`` equals
+    the calling lane's value. Lowers to ``__match_any_sync`` on CUDA
+    (compute capability >= 7.0). Not supported on HIP.
+    """
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.match_any_sync"), _as_uint32_mask(mask), value)
+
+
+def match_all_sync(
+    value: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Return ``mask`` if all lanes in ``mask`` agree on ``value``, else 0.
+
+    Lowers to ``__match_all_sync`` on CUDA (compute capability >= 7.0); the
+    trailing ``int*`` predicate output is hidden in codegen and discarded.
+    Callers can reconstruct the predicate as ``result != 0``. Not supported
+    on HIP.
+    """
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.match_all_sync"), _as_uint32_mask(mask), value)
 
 
 def sync_global():

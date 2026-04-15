@@ -122,10 +122,7 @@ def test_no_barrier_is_noop():
 def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
     """Regression for tcgen05 no-TMA kernels after pass reordering."""
 
-    pass_configs = {
-        tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    }
+    pass_configs = {tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
 
     @T.prim_func
     def func(

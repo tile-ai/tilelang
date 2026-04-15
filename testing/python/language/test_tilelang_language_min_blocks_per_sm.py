@@ -21,6 +21,7 @@ def _kernel_min_blocks_per_sm():
     return main
 
 
+@tilelang.testing.requires_cuda
 def test_annotate_min_blocks_per_sm_launch_bounds():
     """Codegen should emit the second __launch_bounds__ argument from the annotation."""
     src = _kernel_min_blocks_per_sm.get_kernel_source()
