@@ -1233,21 +1233,11 @@ def tcgen05_after_thread_sync():
     return tir.call_intrin("handle", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
     
 
-def tcgen05_cp(smem_src, tmem_dst, tmem_col_offset=0):
+def tcgen05_cp(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool = False):
     """Copy 128 scale factor elements from shared memory to tensor memory via UTCCP.
 
     Internally builds the SMEM descriptor and extracts the TMEM column address.
-
-    Parameters
-    ----------
-    smem_src : BufferLikeType
-        Source buffer (region/slice) in shared memory containing 128 uint32 elements.
-    tmem_dst : BufferLikeType
-        Destination in tensor memory (buffer load or buffer).
-    tmem_col_offset : int
-        Offset in TMEM columns from the base address (default 0).
-        Each UTCCP call copies 128 uint32 = 4 TMEM columns.
-        Use offset=4 for the second chunk, 8 for the third, etc.
+    With ``use_2cta=True``, lowers to the true ``tcgen05.cp.cta_group::2`` path.
     """
     smem_ptr = retrieve_ptr(smem_src, access_type="r")
     if isinstance(tmem_dst, (tir.Buffer,)):
@@ -1258,7 +1248,15 @@ def tcgen05_cp(smem_src, tmem_dst, tmem_col_offset=0):
         tmem_ptr = tmem_dst.buffer.data
     else:
         tmem_ptr = tmem_dst
-    return tir.call_intrin("void", tir.op.Op.get("tl.ptx_tcgen05_cp"), smem_ptr, tmem_ptr, tmem_col_offset)
+    ann = {"use_2cta": 1} if use_2cta else None
+    return tir.call_intrin(
+        "void",
+        tir.op.Op.get("tl.ptx_tcgen05_cp"),
+        smem_ptr,
+        tmem_ptr,
+        tmem_col_offset,
+        annotations=ann,
+    )
 
 
 def sf_warp_transpose(smem_src):

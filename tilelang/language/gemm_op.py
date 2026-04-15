@@ -258,7 +258,9 @@ def tcgen05_gemm(
     compilation fails instead of silently falling back to another GEMM path.
     """
 
-    ann = {"use_2cta": int(use_2cta)} if use_2cta else None
+    ann = {"is_tcgen05": 1}
+    if use_2cta:
+        ann["use_2cta"] = 1
     return _gemm_impl(
         "tl.tileop.tcgen05_gemm",
         A,
@@ -288,12 +290,19 @@ def tcgen05_gemm_blockscaled(
     mbar: BarrierType | None = None,
     sf_a_id: int = 0,
     sf_b_id: int = 0,
+    *,
+    use_2cta: bool = False,
 ) -> tir.PrimExpr:
     """Explicit Blackwell TCGEN05 block-scaled GEMM without an implicit wait.
 
     This is the explicit asynchronous Blackwell TCGEN5MMA block-scaled
-    counterpart to `T.tcgen05_gemm(...)`, lowering to
-    `tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale`.
+    counterpart to `T.tcgen05_gemm(...)`. It never auto-emits an inlined
+    `mbarrier_wait_parity`, and compilation fails instead of silently falling
+    back if the requested ISA path is unavailable.
+
+    With ``use_2cta=True``, this lowers to the true 2CTA block-scaled TCGEN05
+    path only; there is no fallback or emulation. That mode requires
+    ``cluster_dims`` to be ``(2,1,1)`` or ``(1,2,1)``.
 
     A and B are FP8 (E4M3/E5M2) in shared memory, C is the accumulator in
     tensor memory, and SFA/SFB are E8M0 scale factors already resident in
@@ -313,7 +322,12 @@ def tcgen05_gemm_blockscaled(
         mbar: Mbarrier for MMA completion signaling.
         sf_a_id: Scale factor ID for A (0-3).
         sf_b_id: Scale factor ID for B (0-3).
+        use_2cta: Whether to request true ``cta_group::2`` lowering.
     """
+
+    ann = {"use_2cta": int(use_2cta)} if use_2cta else None
+
+    # Re-read normalized regions below after let legalization.
 
     def legalize(arg):
         if isinstance(arg, tir.Var) and T.has_let_value(arg):
@@ -342,9 +356,20 @@ def tcgen05_gemm_blockscaled(
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
 
     M, N = C_shape
+    M_A = A_shape[-1] if transpose_A else A_shape[-2]
+    N_B = B_shape[-2] if transpose_B else B_shape[-1]
     K = A_shape[-2] if transpose_A else A_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert prim_expr_equal(K, K_B), f"T.tcgen05_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
+    if use_2cta:
+        assert prim_expr_equal(M_A, M) and prim_expr_equal(N_B * 2, N), (
+            f"T.tcgen05_gemm_blockscaled 2CTA shape check failed: "
+            f"M_A = {M_A}, expected M_C = {M}; N_B = {N_B}, expected N_C / 2 = {N} / 2"
+        )
+    else:
+        assert prim_expr_equal(N_B, N), (
+            f"T.tcgen05_gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
+        )
 
     A_stride = retrieve_stride(A_region)
     B_stride = retrieve_stride(B_region)
@@ -408,7 +433,7 @@ def tcgen05_gemm_blockscaled(
         SFB_arg,  # arg 20
         sf_a_id,  # arg 21
         sf_b_id,  # arg 22
-        annotations={"is_tcgen05": 1},
+        annotations=ann,
     )
 
 

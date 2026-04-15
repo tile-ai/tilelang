@@ -60,7 +60,7 @@ class GemmTCGEN5(GemmBase):
         For TS: A and C get TMEM store layouts, B gets a swizzled shared-memory layout.
         For block-scaled: same as SS (A and B get swizzle, C gets TMEM store layout).
         """
-        # Block-scaled GEMM always uses 1x1 warp partition (cta_group::1)
+        # Block-scaled GEMM keeps a 1x1 warp partition even when using cta_group::2.
         if self.is_blockscaled:
             m_warp, n_warp = 1, 1
         else:
@@ -115,7 +115,7 @@ class GemmTCGEN5(GemmBase):
     ):
         """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent
-        # Block-scaled GEMM always uses 1x1 warp partition
+        # Block-scaled GEMM keeps a 1x1 warp partition even when using cta_group::2.
         if self.is_blockscaled:
             m_warp, n_warp = 1, 1
         else:
@@ -242,15 +242,21 @@ class GemmTCGEN5(GemmBase):
         # `lower()` does not need a special case.
         del mbar_phase_expr
 
+        annotations = getattr(self.gemm_node, "annotations", {})
+        use_2cta = bool(annotations.get("use_2cta", 0))
+        mma_emitter.get_tcgen5_mma_meta(self.M, self.N, self.K, disable_2cta=not use_2cta)
+        _atom_m, _atom_n, _atom_k, _enable_ws, enable_2cta = (int(x) for x in mma_emitter.meta)
+
         analyzer = Analyzer()
         warp_size = 32
         assert analyzer.can_prove(thread_bounds.min % warp_size == 0 and thread_bounds.extent % warp_size == 0), (
             "Block-scaled GEMM requires thread bounds aligned to warps."
         )
+        cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0
 
         @T.prim_func
         def _gemm_blockscaled_cond() -> None:
-            if thread_var // 32 == thread_bounds.min // warp_size:
+            if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma_blockscaled(
                     A_shared, B_shared, C_local, SFA_tmem, SFB_tmem,
                     mbarptr, clear_accum, sf_a_id, sf_b_id,
@@ -258,10 +264,11 @@ class GemmTCGEN5(GemmBase):
 
         @T.prim_func
         def _gemm_blockscaled() -> None:
-            mma_emitter.tcgen05mma_blockscaled(
-                A_shared, B_shared, C_local, SFA_tmem, SFB_tmem,
-                mbarptr, clear_accum, sf_a_id, sf_b_id,
-            )
+            if cluster_cond:
+                mma_emitter.tcgen05mma_blockscaled(
+                    A_shared, B_shared, C_local, SFA_tmem, SFB_tmem,
+                    mbarptr, clear_accum, sf_a_id, sf_b_id,
+                )
 
         return (
             _Simplify(_gemm_blockscaled, inline_let=True)

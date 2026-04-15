@@ -86,15 +86,21 @@ TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr,
   }
 }
 
-// UTCCP: Copy scale factors from shared memory to tensor memory
-// Uses tcgen05.cp.cta_group::1.32x128b.warpx4 instruction
+// UTCCP: Copy scale factors from shared memory to tensor memory.
 // Must be called by one warp; only one elected thread issues the instruction.
+template <bool use_2cta = false>
 TL_DEVICE void tcgen05_cp(uint64_t const &smem_desc,
-                                  uint32_t const &tmem_col) {
+                          uint32_t const &tmem_col) {
   if (cute::elect_one_sync()) {
-    asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;"
-                 :
-                 : "r"(tmem_col), "l"(smem_desc));
+    if constexpr (use_2cta) {
+      asm volatile("tcgen05.cp.cta_group::2.32x128b.warpx4 [%0], %1;"
+                   :
+                   : "r"(tmem_col), "l"(smem_desc));
+    } else {
+      asm volatile("tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;"
+                   :
+                   : "r"(tmem_col), "l"(smem_desc));
+    }
   }
 }
 

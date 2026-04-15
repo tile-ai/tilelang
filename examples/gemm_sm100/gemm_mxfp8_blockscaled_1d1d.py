@@ -23,7 +23,7 @@ def mxfp8_blockscaled_gemm(
     num_stages,
     sf_granularity_k=128,
 ):
-    """Block-scaled MXFP8 GEMM.
+    """1D-1D Block-scaled MXFP8 GEMM.
 
     A:   [M, K] in FP8 (E4M3 or E5M2)
     B:   [K, N] in FP8 (E4M3 or E5M2)
@@ -42,7 +42,7 @@ def mxfp8_blockscaled_gemm(
     SFB: T.Tensor[[N, T.ceildiv(K, sf_granularity_k)], "uint8"]
     C = T.empty((M, N), out_dtype)
 
-    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+    with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128) as (bx, by):
         # Data shared memory (pipelined)
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, block_N), in_dtype)
@@ -76,12 +76,12 @@ def mxfp8_blockscaled_gemm(
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
                 T.tma_copy(
-                    A[by * block_M:(by + 1) * block_M, k * block_K:(k + 1) * block_K],
+                    A[bx * block_M:(bx + 1) * block_M, k * block_K:(k + 1) * block_K],
                     A_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
                 T.tma_copy(
-                    B[k * block_K:(k + 1) * block_K, bx * block_N:(bx + 1) * block_N],
+                    B[k * block_K:(k + 1) * block_K, by * block_N:(by + 1) * block_N],
                     B_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
@@ -89,11 +89,11 @@ def mxfp8_blockscaled_gemm(
                 if k % sf_load_period == 0:
                     sf_k_idx = k // sf_load_period
                     T.copy(
-                        SFA[by * block_M:(by + 1) * block_M, sf_k_idx * 4:(sf_k_idx + 1) * 4],
+                        SFA[bx * block_M:(bx + 1) * block_M, sf_k_idx * 4:(sf_k_idx + 1) * 4],
                         SFA_shared[k % num_stages, :, :],
                     )
                     T.copy(
-                        SFB[bx * block_N:(bx + 1) * block_N, sf_k_idx * 4:(sf_k_idx + 1) * 4],
+                        SFB[by * block_N:(by + 1) * block_N, sf_k_idx * 4:(sf_k_idx + 1) * 4],
                         SFB_shared[k % num_stages, :, :],
                     )
                 T.mbarrier_arrive(loaded[k % num_stages])
@@ -131,7 +131,7 @@ def mxfp8_blockscaled_gemm(
 
         T.copy(C_tmem, C_local)
         T.copy(C_local, C_shared)
-        T.copy(C_shared, C[by * block_M, bx * block_N])
+        T.copy(C_shared, C[bx * block_M, by * block_N])
 
     return C
 
@@ -185,6 +185,7 @@ def main():
     in_dtype, out_dtype, accum_dtype = T.float8_e4m3fn, T.bfloat16, T.float
     num_stages = 4
     sf_granularity_k = 128
+    assert sf_granularity_k == 128
 
     a = torch.randn(M, K, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
     b = torch.randn(K, N, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
@@ -194,8 +195,8 @@ def main():
 
     # Pad to multiple of 4 (UTCCP loads 4 K-blocks at a time)
     sf_k_padded = ((sf_k_blocks + 3) // 4) * 4
-    sfa = torch.randint(127 - 10, 127 + 10, (M, sf_k_padded), device="cuda", dtype=torch.uint8)
-    sfb = torch.randint(127 - 10, 127 + 10, (N, sf_k_padded), device="cuda", dtype=torch.uint8)
+    sfa = torch.randint(127 - 5, 127 + 5, (M, sf_k_padded), device="cuda", dtype=torch.uint8)
+    sfb = torch.randint(127 - 5, 127 + 5, (N, sf_k_padded), device="cuda", dtype=torch.uint8)
 
     c = mxfp8_blockscaled_gemm(
         a, b, sfa, sfb,
@@ -231,7 +232,7 @@ def main():
         backend="cupti",
     )
     print(f"Tilelang MXFP8 latency: {tl_latency} ms")
-    print(f"TFLOPS: {2 * M * N * K / (tl_latency / 1e3) / 1e12:.2f}")
+    print(f"TFLOPs: {2 * M * N * K / (tl_latency / 1e3) / 1e12:.2f}")
 
 
 if __name__ == "__main__":

@@ -1444,9 +1444,13 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
       // 2. tcgen05.cp: copy transposed data from SMEM to TMEM
       PrimExpr cp_ptr = make_smem_ptr(chunk_offset, elements_per_cp);
       PrimExpr col_offset = IntImm(DataType::Int(32), i * COLS_PER_CP);
+      Map<String, ObjectRef> cp_ann;
+      if (annotations.find("use_2cta") != annotations.end()) {
+        cp_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+      }
       stmts.push_back(Evaluate(
           Call(DataType::Void(), ptx_tcgen05_cp(),
-               {cp_ptr, tmem_ptr, col_offset})));
+               {cp_ptr, tmem_ptr, col_offset}, cp_ann)));
     }
 
     Stmt body = stmts[0];

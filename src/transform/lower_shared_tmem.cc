@@ -95,6 +95,29 @@ static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
   return {{}, true};
 }
 
+namespace {
+
+class Use2CTACallDetector : public tir::StmtExprVisitor {
+public:
+  bool found{false};
+
+  void VisitExpr_(const CallNode* op) final {
+    auto it = op->annotations.find("use_2cta");
+    if (it != op->annotations.end()) {
+      PrimExpr val = Downcast<PrimExpr>((*it).second);
+      if (const auto* i = val.as<IntImmNode>()) {
+        if (i->value != 0) {
+          found = true;
+          return;
+        }
+      }
+    }
+    tir::StmtExprVisitor::VisitExpr_(op);
+  }
+};
+
+}  // namespace
+
 class SharedTmemRewriter : public StmtExprMutator {
 public:
   static Stmt Rewrite(Stmt body, Target target) {
@@ -220,17 +243,25 @@ private:
       return StmtExprMutator::VisitStmt_(op);
     }
 
-    // If block has use_2cta attr, add use_2cta: 1 to tmem alloc/dealloc call
-    // annotations.
+    // If block has use_2cta attr, or contains any use_2cta call, add use_2cta: 1
+    // to tmem alloc/dealloc call annotations.
     Map<String, ObjectRef> tmem_call_ann;
+    bool enable_2cta_tmem = false;
     if (op->annotations.count("use_2cta")) {
       PrimExpr val = Downcast<PrimExpr>(op->annotations["use_2cta"]);
-      // Bool in TVM is a subclass of IntImm, so only check IntImm.
-      if (const auto *i = val.as<IntImmNode>()) {
+      if (const auto* i = val.as<IntImmNode>()) {
         if (i->value != 0) {
-          tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+          enable_2cta_tmem = true;
         }
       }
+    }
+    if (!enable_2cta_tmem) {
+      Use2CTACallDetector detector;
+      detector(op->body);
+      enable_2cta_tmem = detector.found;
+    }
+    if (enable_2cta_tmem) {
+      tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
     }
 
     // 3. create init & dealloc calls for new buffers
