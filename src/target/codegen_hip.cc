@@ -1497,13 +1497,17 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangHIP *p) { // NOLINT(*)
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
-    os << "bfloat16_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << "bfloat16_t(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
     return;
   } else if (op->dtype.is_float8_e4m3fnuz() || op->dtype.is_float8_e4m3() ||
              op->dtype.is_float8_e4m3fn()) {
-    os << "fp8_e4_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << "fp8_e4_t(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
     return;
   }
   // Type code is kFloat
