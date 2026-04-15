@@ -429,22 +429,6 @@ TVM_DLL const Op &pack_b16();
 TVM_DLL const Op &fence_proxy_async();
 
 /*!
- * \brief Emit tcgen05.fence::before_thread_sync on Blackwell (SM100+)
- *
- * tcgen05_before_thread_sync()
- *
- */
-TVM_DLL const Op &tcgen05_before_thread_sync();
-
-/*!
- * \brief Emit tcgen05.fence::after_thread_sync on Blackwell (SM100+)
- *
- * tcgen05_after_thread_sync()
- *
- */
-TVM_DLL const Op &tcgen05_after_thread_sync();
-
-/*!
  * \brief Indicate arrival of warp issuing TMA_STORE
  *
  * tma_store_arrive()
@@ -720,6 +704,22 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
  *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
  */
 TVM_DLL const Op &tcgen05_mma_arrive();
+
+/*!
+ * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory load.
+ *
+ *  Internal lowering op used by LowerTmemCopy to represent
+ *  `tl::tcgen05_ld_*` calls without routing through `call_extern`.
+ */
+TVM_DLL const Op &tcgen05_ld();
+
+/*!
+ * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory store.
+ *
+ *  Internal lowering op used by LowerTmemCopy to represent
+ *  `tl::tcgen05_st_*` calls without routing through `call_extern`.
+ */
+TVM_DLL const Op &tcgen05_st();
 
 /*!
  * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /

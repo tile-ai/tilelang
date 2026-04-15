@@ -2031,12 +2031,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(func_name, 2);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
-  } else if (op->op.same_as(tl::tcgen05_before_thread_sync())) {
-    need_tcgen05_common_h_ = true;
-    print_extern_call_stmt("tl::tcgen05_before_thread_sync");
-  } else if (op->op.same_as(tl::tcgen05_after_thread_sync())) {
-    need_tcgen05_common_h_ = true;
-    print_extern_call_stmt("tl::tcgen05_after_thread_sync");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl::tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
@@ -2618,6 +2612,33 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(mask3)", mask3);
     tcgen05_call = replacer.rewrite(tcgen05_call);
     this->stream << tcgen05_call;
+  } else if (op->op.same_as(tl::tcgen05_ld())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
+    need_tcgen05_common_h_ = true;
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool pack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = this->PrintExpr(op->args[3]);
+    std::string col_offset = this->PrintExpr(op->args[4]);
+    std::string dst_ptr = this->PrintExpr(op->args[5]);
+    this->PrintIndent();
+    this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
+                 << ", " << (pack16 ? "true" : "false") << ">("
+                 << tmem_start_col << ", " << col_offset << ", " << dst_ptr
+                 << ");\n";
+  } else if (op->op.same_as(tl::tcgen05_st())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool unpack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = this->PrintExpr(op->args[3]);
+    std::string col_offset = this->PrintExpr(op->args[4]);
+    std::string src_ptr = this->PrintExpr(op->args[5]);
+    this->PrintIndent();
+    this->stream << "tl::tcgen05_st_32dp" << inst_bits << "bNx<" << chunks
+                 << ", " << (unpack16 ? "true" : "false") << ">("
+                 << tmem_start_col << ", " << col_offset << ", " << src_ptr
+                 << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;

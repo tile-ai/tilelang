@@ -488,6 +488,16 @@ TIR_DEFINE_TL_BUILTIN(tcgen05_mma_arrive)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tcgen05_ld)
+    .set_num_inputs(6)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_st)
+    .set_num_inputs(6)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(warp_reduce_sum)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",

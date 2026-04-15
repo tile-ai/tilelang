@@ -288,8 +288,14 @@ def InjectFenceProxy():
 
 
 def InjectTcgen05Fence():
-    """Inject tcgen05.fence::before_thread_sync / after_thread_sync around
-    __syncthreads() calls on Blackwell (SM100+) targets that use tensor memory.
+    """Inject tcgen05.fence::before_thread_sync / after_thread_sync at
+    conservative TCGEN05/TMEM synchronization boundaries on Blackwell
+    (SM100+) targets.
+
+    The current pass wraps CTA-wide shared-memory syncs and also inserts
+    fences around linear mbarrier wait/use and use/arrive handoff patterns.
+    It is intentionally conservative and does not try to infer arbitrary
+    barrier protocols.
 
     Returns
     -------

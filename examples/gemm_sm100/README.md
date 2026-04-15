@@ -21,6 +21,16 @@ T.tcgen05_gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, mbar=mbar, clear_ac
 T.mbarrier_wait_parity(mbar, k%2)  # Manual phase calculation required
 ```
 
+TileLang now has a conservative `InjectTcgen05Fence` pass on SM100+ that can
+insert `tcgen05_before_thread_sync()` / `tcgen05_after_thread_sync()` around:
+- `tvm_storage_sync("shared"|"shared.dyn")`
+- linear `mbarrier_wait_parity(...) -> tcgen05/TMEM use` regions
+- linear `tcgen05/TMEM use -> mbarrier_arrive(...)` regions
+
+This does **not** eliminate the need to structure the mbarrier protocol
+explicitly in user code, and the examples in this directory still keep manual
+fences where they make the handoff points obvious.
+
 ## Examples
 
 ### TCGEN5MMA Example (`gemm_tcgen5mma.py`)
