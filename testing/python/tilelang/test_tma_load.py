@@ -45,8 +45,8 @@ def _build_1d_tma_copy():
     def main(A: T.Buffer((N,), "float16"), B: T.Buffer((N,), "float16")):
         with T.Kernel(T.ceildiv(N, BLOCK), threads=128) as bx:
             A_shared = T.alloc_shared((BLOCK,), "float16")
-            T.copy(A[bx * BLOCK:(bx + 1) * BLOCK], A_shared)
-            T.copy(A_shared, B[bx * BLOCK:(bx + 1) * BLOCK])
+            T.copy(A[bx * BLOCK : (bx + 1) * BLOCK], A_shared)
+            T.copy(A_shared, B[bx * BLOCK : (bx + 1) * BLOCK])
 
     return main
 
