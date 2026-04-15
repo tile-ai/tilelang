@@ -56,6 +56,8 @@ def gemm_clc_persistent_2cta(
         schedule_arrived = T.alloc_cluster_barrier([1])
         schedule_finished = T.alloc_cluster_barrier([7])
         clc_result = T.alloc_shared((4,), "uint32", scope="shared")
+        schedule_valid = T.alloc_shared((1,), "int32")
+        schedule_tile_id = T.alloc_shared((1,), "int32")
 
         tx = T.get_thread_binding()
         cta_id = T.block_rank_in_cluster()
@@ -67,13 +69,13 @@ def gemm_clc_persistent_2cta(
                     T.mbarrier_wait_parity(schedule_arrived, (work_iter - 1) & 1)
                     if tx == 0:
                         T.mbarrier_arrive(schedule_finished, 0)
-                    if T.clc_is_canceled(clc_result) == 0:
+                    if schedule_valid[0] == 0:
                         break
 
                 tile_id = T.if_then_else(
                     work_iter == 0,
                     block_id // 2,
-                    T.cast(T.clc_get_first_ctaid_x(clc_result), "int32") // 2,
+                    schedule_tile_id[0],
                 )
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
@@ -98,7 +100,7 @@ def gemm_clc_persistent_2cta(
                     T.mbarrier_wait_parity(schedule_arrived, (work_iter - 1) & 1)
                     if tx == 32:
                         T.mbarrier_arrive(schedule_finished, 0)
-                    if T.clc_is_canceled(clc_result) == 0:
+                    if schedule_valid[0] == 0:
                         break
 
                 T.mbarrier_wait_parity(tmem_empty[work_iter & 1], ((work_iter // 2) & 1) ^ 1)
@@ -136,8 +138,10 @@ def gemm_clc_persistent_2cta(
                     if cta_id == 0:
                         T.clc_try_cancel_multicast(clc_result, schedule_arrived)
                     T.mbarrier_wait_parity(schedule_arrived, work_iter & 1)
+                    schedule_valid[0] = T.clc_is_canceled(clc_result)
+                    schedule_tile_id[0] = T.cast(T.clc_get_first_ctaid_x(clc_result), "int32") // 2
                     T.mbarrier_arrive(schedule_finished, 0)
-                    if T.clc_is_canceled(clc_result) == 0:
+                    if schedule_valid[0] == 0:
                         break
 
         elif 128 <= tx < 256:  # Epilogue
@@ -146,13 +150,13 @@ def gemm_clc_persistent_2cta(
                     T.mbarrier_wait_parity(schedule_arrived, (work_iter - 1) & 1)
                     if tx == 128:
                         T.mbarrier_arrive(schedule_finished, 0)
-                    if T.clc_is_canceled(clc_result) == 0:
+                    if schedule_valid[0] == 0:
                         break
 
                 tile_id = T.if_then_else(
                     work_iter == 0,
                     block_id // 2,
-                    T.cast(T.clc_get_first_ctaid_x(clc_result), "int32") // 2,
+                    schedule_tile_id[0],
                 )
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
