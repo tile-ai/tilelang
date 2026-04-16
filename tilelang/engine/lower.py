@@ -70,7 +70,8 @@ def _collect_external_cuda_kernel_names(source: str) -> list[str]:
     return kernel_names
 
 
-def _validate_external_cuda_kernel_entry_names(device_mod: tvm.IRModule) -> None:
+@tvm_ffi.register_global_func("tilelang_callback_cuda_validate", override=True)
+def tilelang_callback_cuda_validate(device_mod):
     for _, base_func in device_mod.functions.items():
         if not isinstance(base_func, tir.PrimFunc) or not base_func.attrs:
             continue
@@ -97,12 +98,6 @@ def _validate_external_cuda_kernel_entry_names(device_mod: tvm.IRModule) -> None
                 f"`{expected_name}` to match a __global__ kernel in the provided CUDA source. "
                 f"Available entries: {', '.join(kernel_names)}"
             )
-
-
-@tvm_ffi.register_global_func("tilelang_callback_cuda_validate", override=True)
-def tilelang_callback_cuda_validate(device_mod, target=None):
-    del target
-    _validate_external_cuda_kernel_entry_names(device_mod)
 
 
 @tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
