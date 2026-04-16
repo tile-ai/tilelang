@@ -2087,7 +2087,8 @@ private:
         for (int i = loop_idx - 1; i >= 0; --i) {
           LocalAccessSummary summary = LocalAccessCollector::Collect(
               seq->seq[i], buffer_data_to_buffer_);
-          if (!summary.HasTrackedDefs()) continue;
+          if (!summary.HasTrackedDefs())
+            continue;
           if (producer_live.NeedsAnyDef(summary)) {
             producer_live.AddUses(summary);
           }
@@ -2103,10 +2104,9 @@ private:
       // move next to the branch that consumes them, or are duplicated when
       // both producer and consumer need the same definition.
       for (int i = 0; i < loop_idx; ++i) {
-        switch (ClassifyPreludeStmt(seq->seq[i], buffer_data_to_buffer_,
-                                    shared_prelude_live_seed_,
-                                    producer_prelude_live_seed_,
-                                    consumer_prelude_live_seed_)) {
+        switch (ClassifyPreludeStmt(
+            seq->seq[i], buffer_data_to_buffer_, shared_prelude_live_seed_,
+            producer_prelude_live_seed_, consumer_prelude_live_seed_)) {
         case PreludeStmtPlacement::kProducerOnly:
           extracted_producer_init_.push_back(seq->seq[i]);
           break;

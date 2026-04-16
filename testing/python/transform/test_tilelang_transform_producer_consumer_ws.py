@@ -194,9 +194,7 @@ def grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype="float16"):
     batch_padded_offsets = [0]
     for i in range(len(batch_sizes) - 1):
         batch_offsets.append(batch_offsets[-1] + batch_sizes[i])
-        batch_padded_offsets.append(
-            batch_padded_offsets[-1] + math.ceil(batch_sizes[i] / block_M) * block_M
-        )
+        batch_padded_offsets.append(batch_padded_offsets[-1] + math.ceil(batch_sizes[i] / block_M) * block_M)
 
     A = torch.randn(sum(batch_sizes), K, dtype=getattr(torch, dtype), device="cuda")
     B = torch.randn(len(batch_sizes), K, N, dtype=getattr(torch, dtype), device="cuda")
@@ -222,13 +220,12 @@ def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, blo
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
     import torch
 
-    A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t = grouped_gemm_inputs(
-        batch_sizes, K, N, block_M, dtype
-    )
+    A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t = grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype)
     out = kernel(A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t)
     ref = grouped_gemm_reference(A.float(), B.float(), batch_sizes)
     torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
     return out
+
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
