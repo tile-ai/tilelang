@@ -33,14 +33,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <algorithm>
-#include <cctype>
-#include <cstring>
-#include <regex>
-#include <sstream>
-#include <string>
 #include <unordered_set>
-#include <vector>
 
 #include "../op/builtin.h"
 #include "common/assume.h"
@@ -125,7 +118,6 @@ private:
   Optional<Array<Integer>> cluster_dims_{std::nullopt};
   Optional<String> code_block_source_{std::nullopt};
   Optional<String> code_block_entry_name_{std::nullopt};
-  mutable Optional<String> resolved_code_block_entry_name_{std::nullopt};
 
   static void SortDeviceParams(std::vector<tir::Var> *params) {
     std::sort(params->begin(), params->end(),
@@ -140,419 +132,43 @@ private:
               });
   }
 
-  struct ExternalKernelParam {
-    std::string name;
-    bool is_pointer{false};
-  };
-
-  struct ExternalKernelSignature {
-    std::string name;
-    std::vector<ExternalKernelParam> params;
-  };
-
-  struct SourceKernelCandidate {
-    tir::Var var;
-    std::vector<std::string> names;
-  };
-
-  mutable std::vector<ExternalKernelSignature>
-      parsed_external_kernel_signatures_;
-
-  static std::string Trim(std::string value) {
-    auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-    auto begin = std::find_if(value.begin(), value.end(), not_space);
-    auto end = std::find_if(value.rbegin(), value.rend(), not_space).base();
-    if (begin >= end) {
-      return "";
-    }
-    return std::string(begin, end);
-  }
-
-  static std::string ToLower(std::string value) {
-    std::transform(
-        value.begin(), value.end(), value.begin(),
-        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return value;
-  }
-
-  static bool IsIdentifierChar(char ch) {
-    return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
-  }
-
-  static std::vector<std::string>
-  SplitTopLevelCommaList(const std::string &params) {
-    std::vector<std::string> fields;
-    size_t field_start = 0;
-    int paren_depth = 0;
-    int angle_depth = 0;
-    int bracket_depth = 0;
-
-    for (size_t i = 0; i < params.size(); ++i) {
-      char ch = params[i];
-      switch (ch) {
-      case '(':
-        ++paren_depth;
-        break;
-      case ')':
-        --paren_depth;
-        break;
-      case '<':
-        ++angle_depth;
-        break;
-      case '>':
-        if (angle_depth > 0)
-          --angle_depth;
-        break;
-      case '[':
-        ++bracket_depth;
-        break;
-      case ']':
-        if (bracket_depth > 0)
-          --bracket_depth;
-        break;
-      case ',':
-        if (paren_depth == 0 && angle_depth == 0 && bracket_depth == 0) {
-          fields.push_back(params.substr(field_start, i - field_start));
-          field_start = i + 1;
-        }
-        break;
-      default:
-        break;
-      }
-    }
-
-    fields.push_back(params.substr(field_start));
-    return fields;
-  }
-
-  static ExternalKernelParam
-  ParseExternalKernelParam(const std::string &param_decl) {
-    std::string trimmed = Trim(param_decl);
-    if (trimmed.empty() || trimmed == "void") {
-      return {};
-    }
-
-    bool is_pointer = trimmed.find('*') != std::string::npos ||
-                      trimmed.find('[') != std::string::npos;
-
-    size_t cursor = trimmed.size();
-    while (cursor > 0 &&
-           std::isspace(static_cast<unsigned char>(trimmed[cursor - 1]))) {
-      --cursor;
-    }
-
-    while (cursor > 0 && trimmed[cursor - 1] == ']') {
-      int bracket_depth = 1;
-      --cursor;
-      while (cursor > 0 && bracket_depth > 0) {
-        --cursor;
-        if (trimmed[cursor] == ']') {
-          ++bracket_depth;
-        } else if (trimmed[cursor] == '[') {
-          --bracket_depth;
-        }
-      }
-      while (cursor > 0 &&
-             std::isspace(static_cast<unsigned char>(trimmed[cursor - 1]))) {
-        --cursor;
-      }
-    }
-
-    size_t ident_end = cursor;
-    while (ident_end > 0 && !IsIdentifierChar(trimmed[ident_end - 1])) {
-      --ident_end;
-    }
-    size_t ident_begin = ident_end;
-    while (ident_begin > 0 && IsIdentifierChar(trimmed[ident_begin - 1])) {
-      --ident_begin;
-    }
-
-    ICHECK_LT(ident_begin, ident_end)
-        << "Failed to parse external CUDA kernel parameter name from `"
-        << param_decl << "`";
-
-    return {
-        trimmed.substr(ident_begin, ident_end - ident_begin),
-        is_pointer,
-    };
-  }
-
-  static std::vector<ExternalKernelSignature>
-  ParseExternalKernelSignatures(const std::string &source) {
-    static const std::regex kKernelPattern(
-        R"((?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+))");
-
-    std::vector<ExternalKernelSignature> signatures;
-    std::unordered_set<std::string> seen_names;
-
-    for (auto it =
-             std::sregex_iterator(source.begin(), source.end(), kKernelPattern);
-         it != std::sregex_iterator(); ++it) {
-      const std::smatch &match = *it;
-      std::string kernel_name = match[1].str();
-      if (!seen_names.insert(kernel_name).second) {
-        continue;
-      }
-
-      size_t cursor = static_cast<size_t>(match.position(0) + match.length(0));
-      while (cursor < source.size() &&
-             std::isspace(static_cast<unsigned char>(source[cursor]))) {
-        ++cursor;
-      }
-      ICHECK_LT(cursor, source.size())
-          << "Malformed external CUDA kernel declaration for `" << kernel_name
-          << "`";
-      ICHECK_EQ(source[cursor], '(')
-          << "Expected parameter list for external CUDA kernel `" << kernel_name
-          << "`";
-
-      size_t params_begin = cursor + 1;
-      int paren_depth = 1;
-      ++cursor;
-      while (cursor < source.size() && paren_depth > 0) {
-        if (source[cursor] == '(') {
-          ++paren_depth;
-        } else if (source[cursor] == ')') {
-          --paren_depth;
-        }
-        ++cursor;
-      }
-      ICHECK_EQ(paren_depth, 0)
-          << "Unterminated parameter list for external CUDA kernel `"
-          << kernel_name << "`";
-
-      std::string params_text =
-          source.substr(params_begin, cursor - params_begin - 1);
-      ExternalKernelSignature signature;
-      signature.name = kernel_name;
-      for (const std::string &field : SplitTopLevelCommaList(params_text)) {
-        ExternalKernelParam param = ParseExternalKernelParam(field);
-        if (!param.name.empty()) {
-          signature.params.push_back(std::move(param));
-        }
-      }
-      signatures.push_back(std::move(signature));
-    }
-
-    ICHECK(!signatures.empty()) << "T.CUDASourceCodeKernel expects external "
-                                   "CUDA source to declare at least one "
-                                   "__global__ kernel";
-    return signatures;
-  }
-
-  const ExternalKernelSignature &
-  ResolveExternalKernelSignature(const std::string &source) const {
-    parsed_external_kernel_signatures_ = ParseExternalKernelSignatures(source);
-
-    auto choose_by_name =
-        [&](const std::string &kernel_name) -> const ExternalKernelSignature * {
-      for (const auto &signature : parsed_external_kernel_signatures_) {
-        if (signature.name == kernel_name) {
-          return &signature;
-        }
-      }
-      return nullptr;
-    };
-
-    if (code_block_entry_name_) {
-      const std::string requested_name = code_block_entry_name_.value();
-      const auto *signature = choose_by_name(requested_name);
-      ICHECK(signature)
-          << "T.CUDASourceCodeKernel expected entry_name=`" << requested_name
-          << "` to match a __global__ kernel in the provided CUDA source";
-      resolved_code_block_entry_name_ = String(signature->name);
-      return *signature;
-    }
-
-    if (parsed_external_kernel_signatures_.size() == 1U) {
-      resolved_code_block_entry_name_ =
-          String(parsed_external_kernel_signatures_.front().name);
-      return parsed_external_kernel_signatures_.front();
-    }
-
-    if (const auto *signature = choose_by_name("main_kernel")) {
-      resolved_code_block_entry_name_ = String(signature->name);
-      return *signature;
-    }
-
-    LOG(FATAL) << "T.CUDASourceCodeKernel expects external CUDA source to "
-                  "either contain exactly one __global__ kernel, define a "
-                  "`main_kernel` entry, or specify entry_name explicitly";
-  }
-
-  static std::string
-  DescribeCandidates(const std::vector<SourceKernelCandidate> &candidates,
-                     const std::vector<bool> &used) {
-    std::ostringstream os;
-    bool first = true;
-    for (size_t i = 0; i < candidates.size(); ++i) {
-      if (used[i])
-        continue;
-      if (!first) {
-        os << ", ";
-      }
-      first = false;
-      os << candidates[i].var->name_hint;
-    }
-    return first ? std::string("<none>") : os.str();
-  }
-
-  static int
-  MatchExternalKernelParam(const ExternalKernelParam &param,
-                           const std::vector<SourceKernelCandidate> &candidates,
-                           const std::vector<bool> &used) {
-    auto try_match = [&](bool case_sensitive) -> int {
-      int matched_index = -1;
-      std::string needle = case_sensitive ? param.name : ToLower(param.name);
-      for (size_t i = 0; i < candidates.size(); ++i) {
-        if (used[i])
-          continue;
-        for (const std::string &candidate_name : candidates[i].names) {
-          std::string haystack =
-              case_sensitive ? candidate_name : ToLower(candidate_name);
-          if (haystack == needle) {
-            if (matched_index != -1) {
-              return -2;
-            }
-            matched_index = static_cast<int>(i);
-            break;
-          }
-        }
-      }
-      return matched_index;
-    };
-
-    int exact_match = try_match(true);
-    if (exact_match >= 0) {
-      return exact_match;
-    }
-    if (exact_match == -2) {
-      return exact_match;
-    }
-
-    int insensitive_match = try_match(false);
-    if (insensitive_match >= 0) {
-      return insensitive_match;
-    }
-    if (insensitive_match == -2) {
-      return insensitive_match;
-    }
-
-    int unresolved_count = 0;
-    int last_unresolved = -1;
-    for (size_t i = 0; i < candidates.size(); ++i) {
-      if (!used[i]) {
-        ++unresolved_count;
-        last_unresolved = static_cast<int>(i);
-      }
-    }
-
-    if (unresolved_count == 1) {
-      return last_unresolved;
-    }
-    return -1;
-  }
-
   std::tuple<Array<tir::Var>, Array<tir::Buffer>>
   CollectSourceKernelSignature() const {
-    ICHECK(code_block_source_)
-        << "CollectSourceKernelSignature requires code_block_source";
+    std::vector<tir::Var> params;
+    std::unordered_set<std::string> seen_vars;
 
-    const ExternalKernelSignature &signature =
-        ResolveExternalKernelSignature(code_block_source_.value());
-
-    std::vector<SourceKernelCandidate> pointer_candidates;
-    std::vector<SourceKernelCandidate> scalar_candidates;
-    std::unordered_set<std::string> seen_pointer_vars;
-    std::unordered_set<std::string> seen_scalar_vars;
-
-    auto add_pointer_candidate = [&](const tir::Buffer &buf,
-                                     const tir::Var &host_param) {
-      const std::string &var_name = buf->data->name_hint;
-      if (!seen_pointer_vars.insert(var_name).second) {
-        return;
+    auto push = [&](const tir::Var &var) {
+      if (var.defined() && seen_vars.insert(var->name_hint).second) {
+        params.push_back(var);
       }
-      std::vector<std::string> names = {var_name, buf->name};
-      if (host_param.defined()) {
-        std::string host_name = host_param->name_hint;
-        constexpr const char *kHandleSuffix = "_handle";
-        size_t suffix_len = std::strlen(kHandleSuffix);
-        if (host_name.size() > suffix_len &&
-            host_name.compare(host_name.size() - suffix_len, suffix_len,
-                              kHandleSuffix) == 0) {
-          host_name.erase(host_name.size() - suffix_len);
-        }
-        names.push_back(host_name);
-      }
-      pointer_candidates.push_back({buf->data, names});
     };
 
-    auto add_scalar_candidate = [&](const tir::Var &var) {
-      const std::string &var_name = var->name_hint;
-      if (!seen_scalar_vars.insert(var_name).second) {
-        return;
-      }
-      scalar_candidates.push_back({var, {var_name}});
-    };
+    // for (const auto &param : host_params_) {
+    //   push(param);
+    // }
 
-    for (const auto &param : host_params_) {
-      if (auto opt = host_buffer_map_.Get(param)) {
-        add_pointer_candidate(opt.value(), param);
-      } else {
-        add_scalar_candidate(param);
-      }
-    }
-
-    for (const auto &param : host_params_) {
-      auto opt = host_buffer_map_.Get(param);
-      if (!opt) {
-        continue;
-      }
-      const tir::Buffer &buf = opt.value();
-      auto record_symbol = [&](const PrimExpr &expr) {
-        if (const auto *var = expr.as<tir::VarNode>()) {
-          add_scalar_candidate(GetRef<tir::Var>(var));
-        }
-      };
+    Array<tir::Buffer> buffers_to_declare;
+    for (const auto &kv : host_buffer_map_) {
+      const tir::Buffer &buf = kv.second;
+      push(buf->data);
+      buffers_to_declare.push_back(buf);
       for (const PrimExpr &dim : buf->shape) {
-        record_symbol(dim);
+        if (const auto *var = dim.as<tir::VarNode>()) {
+          push(GetRef<tir::Var>(var));
+        }
       }
       for (const PrimExpr &stride : buf->strides) {
-        record_symbol(stride);
+        if (const auto *var = stride.as<tir::VarNode>()) {
+          push(GetRef<tir::Var>(var));
+        }
       }
-      record_symbol(buf->elem_offset);
+      if (const auto *var = buf->elem_offset.as<tir::VarNode>()) {
+        push(GetRef<tir::Var>(var));
+      }
     }
 
-    std::vector<bool> used_pointer(pointer_candidates.size(), false);
-    std::vector<bool> used_scalar(scalar_candidates.size(), false);
-    std::vector<tir::Var> params;
-
-    for (const ExternalKernelParam &param : signature.params) {
-      const auto &candidates =
-          param.is_pointer ? pointer_candidates : scalar_candidates;
-      const auto &used = param.is_pointer ? used_pointer : used_scalar;
-      int matched_index = MatchExternalKernelParam(param, candidates, used);
-
-      ICHECK_GE(matched_index, 0)
-          << "Unable to infer binding for external CUDA kernel parameter `"
-          << param.name << "` while building source-kernel ABI. Available "
-          << (param.is_pointer ? "pointer" : "scalar")
-          << " symbols: " << DescribeCandidates(candidates, used);
-
-      if (param.is_pointer) {
-        used_pointer[matched_index] = true;
-      } else {
-        used_scalar[matched_index] = true;
-      }
-      params.push_back(candidates[matched_index].var);
-    }
-
-    // Source kernels use the external CUDA entry as the source of truth for
-    // the device ABI, so we intentionally avoid introducing extra DeclBuffer
-    // carriers that would force additional shape/stride parameters into the
-    // device signature.
-    return {Array<tir::Var>(params.begin(), params.end()),
-            Array<tir::Buffer>()};
+    SortDeviceParams(&params);
+    return {Array<tir::Var>(params.begin(), params.end()), buffers_to_declare};
   }
 
   class SourceKernelAttrExtractor : public tir::StmtMutator {
@@ -570,70 +186,29 @@ private:
         : code_block_source_(code_block_source),
           code_block_entry_name_(code_block_entry_name) {}
 
-    void ExtractStringAnnotation(const String &attr_key,
-                                 const ffi::Any &value) {
-      Optional<String> *target = nullptr;
-      if (attr_key == tl::attr::kCodeBlockSource) {
-        target = code_block_source_;
-      } else if (attr_key == tl::attr::kCodeBlockEntryName) {
-        target = code_block_entry_name_;
-      } else {
-        LOG(FATAL) << "Unexpected source-kernel annotation key: " << attr_key;
-      }
-
-      if (auto str = value.try_cast<String>()) {
-        *target = str.value();
-      } else if (auto expr = value.try_cast<PrimExpr>()) {
-        if (auto str = expr.value().as<StringImmNode>()) {
-          *target = str->value;
-        } else {
-          LOG(FATAL) << "Expected annotation `" << attr_key
-                     << "` to carry a StringImm value, but got "
-                     << expr.value()->GetTypeKey();
-        }
-      } else {
-        LOG(FATAL) << "Expected annotation `" << attr_key
-                   << "` to carry a StringImm value, but got "
-                   << value.GetTypeKey();
-      }
-    }
-
-    Stmt VisitStmt_(const tir::BlockNode *op) final {
-      tir::Block block = Downcast<tir::Block>(tir::StmtMutator::VisitStmt_(op));
-      bool has_source = block->annotations.count(tl::attr::kCodeBlockSource);
-      bool has_entry_name =
-          block->annotations.count(tl::attr::kCodeBlockEntryName);
-      if (!has_source && !has_entry_name) {
-        return std::move(block);
-      }
-
-      if (has_source) {
-        ExtractStringAnnotation(
-            tl::attr::kCodeBlockSource,
-            block->annotations.Get(tl::attr::kCodeBlockSource).value());
-      }
-      if (has_entry_name) {
-        ExtractStringAnnotation(
-            tl::attr::kCodeBlockEntryName,
-            block->annotations.Get(tl::attr::kCodeBlockEntryName).value());
-      }
-
-      tir::BlockNode *block_ptr = block.CopyOnWrite();
-      if (has_source) {
-        block_ptr->annotations.erase(tl::attr::kCodeBlockSource);
-      }
-      if (has_entry_name) {
-        block_ptr->annotations.erase(tl::attr::kCodeBlockEntryName);
-      }
-      return std::move(block);
-    }
-
     Stmt VisitStmt_(const tir::AttrStmtNode *op) final {
-      if (op->attr_key == tl::attr::kCodeBlockSource ||
-          op->attr_key == tl::attr::kCodeBlockEntryName) {
-        ExtractStringAnnotation(op->attr_key, op->value);
+      if (op->attr_key == tl::attr::kCodeBlockSource) {
+        if (auto str = op->value.as<StringImmNode>()) {
+          *code_block_source_ = str->value;
+        } else {
+          LOG(FATAL) << "Expected `" << tl::attr::kCodeBlockSource
+                     << "` AttrStmt to carry a StringImm value, but got "
+                     << op->value->GetTypeKey();
+        }
         return VisitStmt(op->body);
       }
+
+      if (op->attr_key == tl::attr::kCodeBlockEntryName) {
+        if (auto str = op->value.as<StringImmNode>()) {
+          *code_block_entry_name_ = str->value;
+        } else {
+          LOG(FATAL) << "Expected `" << tl::attr::kCodeBlockEntryName
+                     << "` AttrStmt to carry a StringImm value, but got "
+                     << op->value->GetTypeKey();
+        }
+        return VisitStmt(op->body);
+      }
+
       return tir::StmtMutator::VisitStmt_(op);
     }
 
@@ -676,7 +251,6 @@ private:
   tir::Stmt SplitDeviceFunc(tir::Stmt body, tvm::Target device_target) {
     code_block_source_ = std::nullopt;
     code_block_entry_name_ = std::nullopt;
-    resolved_code_block_entry_name_ = std::nullopt;
     body = SourceKernelAttrExtractor::Extract(
         std::move(body), &code_block_source_, &code_block_entry_name_);
 
@@ -786,19 +360,14 @@ private:
     }
     if (code_block_source_) {
       device_attrs.Set(tl::attr::kCodeBlockSource, code_block_source_.value());
-      ICHECK(resolved_code_block_entry_name_)
-          << "T.CUDASourceCodeKernel expects SplitHostDevice to resolve an "
-             "external CUDA entry name before building the device PrimFunc";
-      device_attrs.Set(tvm::attr::kGlobalSymbol,
-                       resolved_code_block_entry_name_.value());
-    }
-    if (code_block_entry_name_) {
-      device_attrs.Set(tl::attr::kCodeBlockEntryName,
-                       code_block_entry_name_.value());
     }
     device_func = WithAttrs(std::move(device_func), device_attrs);
 
     GlobalVar kernel_symbol_global = var_supply_();
+    if (code_block_entry_name_) {
+      kernel_symbol_global = GlobalVar(code_block_entry_name_.value());
+    }
+
     (*device_mod_)->Add(kernel_symbol_global, device_func);
     // Use old_params as call arguments (host-side variables)
     Array<PrimExpr> args =

@@ -369,10 +369,10 @@ def _load_cuda_source(source_code_or_path: str | os.PathLike[str]) -> str:
 
 
 def CUDASourceCodeKernel(
-    source_code_or_path: str | os.PathLike[str],
     *blocks: int | tir.PrimExpr,
-    entry_name: str | None = None,
     threads: int | list[int] | tuple | None = None,
+    source_code_or_path: str | os.PathLike[str],
+    entry_name: str = "main_kernel",
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
     prelude: str | None = None,
 ) -> None:
@@ -419,10 +419,10 @@ def CUDASourceCodeKernel(
         source = prelude + "\n" + source
 
     attrs: dict = {"code_block_source": source}
-    if entry_name is not None:
-        if not isinstance(entry_name, str) or not entry_name.strip():
-            raise ValueError("entry_name must be a non-empty string when provided")
-        attrs["code_block_entry_name"] = entry_name
+    if not isinstance(entry_name, str) or not entry_name.strip():
+        raise ValueError("entry_name must be a non-empty string when provided")
+    attrs["code_block_entry_name"] = entry_name
+
     threads = _normalize_threads(threads, is_cpu=False)
 
     cluster_dims = _normalize_cluster_dims(cluster_dims)
@@ -432,7 +432,7 @@ def CUDASourceCodeKernel(
     with _ffi_api.KernelLaunch(blocks, threads, attrs):
         # Keep the launch frame alive until SplitHostDevice can lift the
         # external CUDA source pragma onto the device PrimFunc.
-        T_evaluate(tir.call_extern("int32", "__tl_source_kernel_marker"))
+        T_evaluate(tir.call_extern("int32", entry_name))
 
 
 def get_thread_binding(dim: int = 0) -> Var:
