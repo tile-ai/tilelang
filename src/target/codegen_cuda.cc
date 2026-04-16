@@ -9,7 +9,6 @@
 #include <tvm/tir/op.h>
 
 #include <cmath>
-#include <regex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -4628,43 +4627,6 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   }
 }
 
-void ValidateExternalKernelEntryName(const std::string &source,
-                                     const std::string &expected_name) {
-  static const std::regex kKernelPattern(
-      R"((?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+))");
-
-  std::vector<std::string> kernel_names;
-  for (auto it =
-           std::sregex_iterator(source.begin(), source.end(), kKernelPattern);
-       it != std::sregex_iterator(); ++it) {
-    kernel_names.push_back((*it)[1].str());
-  }
-
-  ICHECK(!kernel_names.empty()) << "T.CUDASourceCodeKernel expects external "
-                                   "CUDA source to declare at least one "
-                                   "__global__ kernel";
-
-  for (const std::string &kernel_name : kernel_names) {
-    if (kernel_name == expected_name) {
-      return;
-    }
-  }
-
-  std::string available_entries;
-  for (size_t i = 0; i < kernel_names.size(); ++i) {
-    if (i != 0) {
-      available_entries += ", ";
-    }
-    available_entries += kernel_names[i];
-  }
-
-  ICHECK(false) << "T.CUDASourceCodeKernel expected device global_symbol `"
-                << expected_name
-                << "` to match a __global__ kernel in the provided CUDA "
-                   "source. Available entries: "
-                << available_entries;
-}
-
 void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
                                       const PrimFunc &f) {
   auto code_block_source = f->GetAttr<String>(tl::attr::kCodeBlockSource);
@@ -4679,9 +4641,6 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           << "T.CUDASourceCodeKernel expects the lowered device global_symbol "
              "to match entry_name";
     }
-    ValidateExternalKernelEntryName(
-        static_cast<std::string>(code_block_source.value()),
-        static_cast<std::string>(global_symbol.value()));
     stream << static_cast<std::string>(code_block_source.value()) << "\n\n";
     return;
   }

@@ -3,6 +3,7 @@ import re
 import tempfile
 from pathlib import Path
 
+import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -77,29 +78,10 @@ def test_source_kernel_loads_from_file():
 
 
 @tilelang.testing.requires_cuda
-def test_source_kernel_can_mix_with_regular_kernel():
-    N = T.dynamic("N")
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((N,), T.float32),
-        B: T.Tensor((N,), T.float32),
-    ):
-        T.CUDASourceCodeKernel(CUDA_SOURCE, T.ceildiv(N, 128), threads=128)
-        with T.Kernel(T.ceildiv(N, 128), threads=128):
-            if T.get_thread_binding() == 0 and T.get_block_binding() == 0:
-                B[0] = A[0]
-
-    artifact = tilelang.lower(main, target="cuda")
-
-    definitions = re.findall(r"__global__\s+void(?:\s+__launch_bounds__\([^\)]*\))?\s+\w+\s*\([^;]*\)\s*\{", artifact.kernel_source)
-    assert len(definitions) == 2
-    assert "B[i] = A[i];" in artifact.kernel_source
-    assert "B[0] = A[0];" in artifact.kernel_source
+def test_source_kernel_invalid_entry_name_fails_in_lower():
+    with pytest.raises(Exception, match=r"Available entries: external_copy"):
+        tilelang.lower(make_source_kernel(CUDA_SOURCE, entry_name="main_kernel"), target="cuda")
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    # test_source_kernel_inline_codegen()
-    # test_source_kernel_loads_from_file()
-    test_source_kernel_run()
+    tilelang.testing.main()

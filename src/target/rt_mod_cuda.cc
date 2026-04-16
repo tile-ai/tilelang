@@ -96,6 +96,10 @@ ffi::Module BuildTileLangCUDA(IRModule mod, Target target) {
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
   ValidateUniqueDeviceGlobalSymbols(mod);
+  if (const auto f =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_validate")) {
+    (*f)(mod, target);
+  }
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
@@ -133,6 +137,10 @@ ffi::Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
   ValidateUniqueDeviceGlobalSymbols(mod);
+  if (const auto f =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_validate")) {
+    (*f)(mod, target);
+  }
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
