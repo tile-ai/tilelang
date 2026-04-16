@@ -404,6 +404,11 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
+            missing_files = self._get_missing_complete_cache_files(staging_path)
+            if missing_files:
+                missing_names = ", ".join(os.path.basename(path) for path in missing_files)
+                raise RuntimeError(f"Incomplete cache staging directory is missing required file(s): {missing_names}")
+
             # Repair stale/incomplete entries before making the new directory visible.
             self._remove_incomplete_cache_dir(cache_path)
 
@@ -528,14 +533,21 @@ class KernelCache:
         return [kernel_lib_path, params_path]
 
     def _get_complete_cache_files(self, cache_path: str) -> list[str]:
-        return [
-            os.path.join(cache_path, self.device_kernel_path),
-            os.path.join(cache_path, self.host_kernel_path),
-            *self._get_required_files(cache_path),
-        ]
+        return list(
+            dict.fromkeys(
+                [
+                    os.path.join(cache_path, self.device_kernel_path),
+                    os.path.join(cache_path, self.host_kernel_path),
+                    *self._get_required_files(cache_path),
+                ]
+            )
+        )
+
+    def _get_missing_complete_cache_files(self, cache_path: str) -> list[str]:
+        return [file for file in self._get_complete_cache_files(cache_path) if not os.path.exists(file)]
 
     def _is_complete_cache_dir(self, cache_path: str) -> bool:
-        return os.path.isdir(cache_path) and all(os.path.exists(file) for file in self._get_complete_cache_files(cache_path))
+        return os.path.isdir(cache_path) and not self._get_missing_complete_cache_files(cache_path)
 
     def _remove_incomplete_cache_dir(self, cache_path: str) -> bool:
         if not os.path.isdir(cache_path) or self._is_complete_cache_dir(cache_path):

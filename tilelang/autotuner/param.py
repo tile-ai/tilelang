@@ -324,7 +324,8 @@ class AutotuneResult:
         kernel_lib_path = os.path.join(cache_path, kernel_lib_file)
         params_path = os.path.join(cache_path, PARAMS_PATH)
 
-        if not all([os.path.exists(file) for file in (kernel_lib_path, params_path)]):
+        required_files = [*self._get_required_kernel_files(Path(cache_path), execution_backend), Path(params_path)]
+        if not all(file.exists() for file in required_files):
             return None
 
         device_kernel_source: str | None = None
@@ -439,6 +440,11 @@ class AutotuneResult:
             # save kernel
             self._save_kernel_to_disk(staging_path, self.kernel, verbose)
 
+            missing_files = self._get_missing_complete_result_files(staging_path, self.kernel.execution_backend)
+            if missing_files:
+                missing_names = ", ".join(path.name for path in missing_files)
+                raise RuntimeError(f"Incomplete autotune staging directory is missing required file(s): {missing_names}")
+
             # Repair stale/incomplete entries before making the new directory visible.
             self._remove_incomplete_result_dir(path, self.kernel.execution_backend)
 
@@ -534,20 +540,35 @@ class AutotuneResult:
         return KERNEL_LIB_PATH
 
     @classmethod
+    def _get_required_kernel_files(cls, path: Path, execution_backend: str) -> list[Path]:
+        files = [path / cls._get_kernel_lib_file(execution_backend)]
+        if execution_backend == "nvrtc":
+            files.append(path / KERNEL_PY_PATH)
+        return files
+
+    @classmethod
     def _get_complete_result_files(cls, path: Path, execution_backend: str) -> list[Path]:
-        return [
-            path / BEST_CONFIG_PATH,
-            path / FUNCTION_PATH,
-            path / LATENCY_PATH,
-            path / DEVICE_KERNEL_PATH,
-            path / HOST_KERNEL_PATH,
-            path / cls._get_kernel_lib_file(execution_backend),
-            path / PARAMS_PATH,
-        ]
+        return list(
+            dict.fromkeys(
+                [
+                    path / BEST_CONFIG_PATH,
+                    path / FUNCTION_PATH,
+                    path / LATENCY_PATH,
+                    path / DEVICE_KERNEL_PATH,
+                    path / HOST_KERNEL_PATH,
+                    *cls._get_required_kernel_files(path, execution_backend),
+                    path / PARAMS_PATH,
+                ]
+            )
+        )
+
+    @classmethod
+    def _get_missing_complete_result_files(cls, path: Path, execution_backend: str) -> list[Path]:
+        return [file for file in cls._get_complete_result_files(path, execution_backend) if not file.exists()]
 
     @classmethod
     def _is_complete_result_dir(cls, path: Path, execution_backend: str) -> bool:
-        return path.is_dir() and all(file.exists() for file in cls._get_complete_result_files(path, execution_backend))
+        return path.is_dir() and not cls._get_missing_complete_result_files(path, execution_backend)
 
     @classmethod
     def _remove_incomplete_result_dir(cls, path: Path, execution_backend: str) -> bool:
