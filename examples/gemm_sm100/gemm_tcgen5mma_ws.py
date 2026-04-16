@@ -48,7 +48,6 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
         elif tx < 64:  # warp 1: issue tcgen5
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(loaded[k % num_stages], (k // num_stages) & 1)
-                T.tcgen05_after_thread_sync()
                 T.tcgen05_gemm(
                     A_shared[k % num_stages, :, :],
                     B_shared[k % num_stages, :, :],
@@ -60,7 +59,6 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
 
         # Wait for all tcgen5 to finish
         T.mbarrier_wait_parity(tmem_full, 0)
-        T.tcgen05_after_thread_sync()
         T.copy(C_tmem, C_local)
         if use_tma_store:
             T.copy(C_local, C_shared)
@@ -115,7 +113,6 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
         elif cta_id == 0 and tx < 64:  # Only warp 1 on leader cta issues tcgen5
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(loaded[k % num_stages], (k // num_stages) & 1)
-                T.tcgen05_after_thread_sync()
                 T.tcgen05_gemm(
                     A_shared[k % num_stages, :, :],
                     B_shared[k % num_stages, :, :],
@@ -128,7 +125,6 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
 
         # Wait for all tcgen5 to finish
         T.mbarrier_wait_parity(tmem_full, 0)
-        T.tcgen05_after_thread_sync()
         T.copy(C_tmem, C_local)
         if use_tma_store:
             T.copy(C_local, C_shared)
