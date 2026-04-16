@@ -198,27 +198,21 @@ class AutotuneResult:
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists.
 
         # Save device kernel source code
-        try:
-            device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
-            if verbose:
-                logger.debug(f"Saving kernel source code to file: {device_kernel_path}")
-            if kernel.kernel_source is not None:
-                self._safe_write_file(device_kernel_path, "w", lambda f: f.write(kernel.kernel_source))
-        except Exception as e:
-            logger.error(f"Error saving kernel source code to disk: {e}")
+        device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
+        if verbose:
+            logger.debug(f"Saving kernel source code to file: {device_kernel_path}")
+        if kernel.kernel_source is not None:
+            self._safe_write_file(device_kernel_path, "w", lambda f: f.write(kernel.kernel_source))
 
         # Save host kernel source code (wrapped)
-        try:
-            host_kernel_path = os.path.join(cache_path, HOST_KERNEL_PATH)
-            if verbose:
-                logger.debug(f"Saving wrapped kernel source code to file: {host_kernel_path}")
-            # Match kernel_cache behavior: use host source for tvm_ffi, otherwise wrapped kernel
-            if kernel.execution_backend == "tvm_ffi":
-                self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_host_source()))
-            else:
-                self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_kernel_source()))
-        except Exception as e:
-            logger.error(f"Error saving wrapped kernel source code to disk: {e}")
+        host_kernel_path = os.path.join(cache_path, HOST_KERNEL_PATH)
+        if verbose:
+            logger.debug(f"Saving wrapped kernel source code to file: {host_kernel_path}")
+        # Match kernel_cache behavior: use host source for tvm_ffi, otherwise wrapped kernel
+        if kernel.execution_backend == "tvm_ffi":
+            self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_host_source()))
+        else:
+            self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_kernel_source()))
 
         # Save kernel library (backend-specific)
         kernel_lib_file = self._get_kernel_lib_file(kernel.execution_backend)

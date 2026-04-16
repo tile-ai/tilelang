@@ -384,16 +384,10 @@ class KernelCache:
 
         try:
             # Save kernel source code
-            try:
-                self._save_kernel_source_code_to_disk(kernel, staging_path, verbose)
-            except Exception:
-                self.logger.exception("Error saving kernel source code to disk")
+            self._save_kernel_source_code_to_disk(kernel, staging_path, verbose)
 
             # Save wrapped kernel source code
-            try:
-                self._save_wrapper_kernel_code_to_disk(kernel, staging_path, verbose)
-            except Exception:
-                self.logger.exception("Error saving host kernel source code to disk")
+            self._save_wrapper_kernel_code_to_disk(kernel, staging_path, verbose)
 
             # Save the kernel library
             self._save_so_cubin_to_disk(kernel, staging_path, verbose)
