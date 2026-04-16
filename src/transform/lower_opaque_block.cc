@@ -106,7 +106,7 @@ private:
     }
     // Step 5. Materialize a lexical scope boundary only for blocks that were
     // explicitly marked by an earlier semantic lowering pass (for example
-    // gemm_py/gemm_sp_py). We intentionally avoid re-inferring this from the
+    // gemm/gemm_sp_py). We intentionally avoid re-inferring this from the
     // lowered alloc_buffers here because provenance has already been blurred by
     // earlier allocation planning/hoisting passes.
     if (HasLexicalAllocScopeAnnotation(new_block->annotations)) {

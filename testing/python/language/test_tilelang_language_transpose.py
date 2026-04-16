@@ -94,12 +94,14 @@ def run_tilelang_transpose_square(M=256, block_M=128, dtype=T.float16):
     print(f"PASS: square transpose M={M}, block_M={block_M}")
 
 
+@tilelang.testing.requires_cuda
 def test_tilelang_transpose():
     run_tilelang_transpose(M=128, N=128, block_M=128, block_N=128)
     run_tilelang_transpose(M=256, N=256, block_M=128, block_N=128)
     run_tilelang_transpose(M=128, N=256, block_M=128, block_N=256)
 
 
+@tilelang.testing.requires_cuda
 def test_tilelang_transpose_square():
     run_tilelang_transpose_square(M=128, block_M=128)
     run_tilelang_transpose_square(M=256, block_M=128)
@@ -107,5 +109,4 @@ def test_tilelang_transpose_square():
 
 
 if __name__ == "__main__":
-    test_tilelang_transpose()
-    test_tilelang_transpose_square()
+    tilelang.testing.main()
