@@ -266,8 +266,8 @@ def thread_id_shared_access_32x8_to_16x16_layout_C_gfx11(thread_id, local_id):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# gfx12 store index map: (thread, local) -> (M, N) in D (hardware D layout)
-# D[M=(t//16)*8+local][N=t%16] -- affine, invertible
+# gfx11 store index map: (thread, local) -> (M, N) in D (hardware D layout)
+# D[M=(t//16)+local*2][N=t%16] -- affine, invertible
 # ──────────────────────────────────────────────────────────────────────────────
 
 
