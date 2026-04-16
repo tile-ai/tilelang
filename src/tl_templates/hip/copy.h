@@ -80,12 +80,13 @@ CK_TILE_DEVICE void async_buffer_load_dwordx4_v(void *smem, int32x4_t rsrc,
                                                 index_t voffset) {
   auto const lds_ptr_sgpr =
       __builtin_amdgcn_readfirstlane((reinterpret_cast<uintptr_t>(smem)));
-  asm volatile("s_mov_b32 m0, %0; \n\t"
-               "buffer_load_dwordx4 %1, %2, 0 offen lds;\n\t" ::"s"(lds_ptr_sgpr),
-               "v"(voffset), "s"(rsrc)
-               : "memory");
+  asm volatile(
+      "s_mov_b32 m0, %0; \n\t"
+      "buffer_load_dwordx4 %1, %2, 0 offen lds;\n\t" ::"s"(lds_ptr_sgpr),
+      "v"(voffset), "s"(rsrc)
+      : "memory");
 }
-#endif  // __gfx950__
+#endif // __gfx950__
 
 template <int N>
 TL_DEVICE void cp_async_gs(void *lds_base_ptr, void const *global_base_ptr) {
