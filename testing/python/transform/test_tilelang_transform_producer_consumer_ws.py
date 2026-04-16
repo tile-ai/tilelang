@@ -114,6 +114,122 @@ def prelude_tma_wait_sink(block=64, iters=2, dtype="float16", threads=128):
     return main
 
 
+def grouped_gemm_padded_pipelined(
+    batch_sizes,
+    K,
+    N,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    num_stages=2,
+    threads=256,
+    dtype="float16",
+):
+    """Grouped GEMM with padded M tiles to exercise WS shared-prelude local vars."""
+
+    batch_sizes = tuple(batch_sizes)
+    batch_count = len(batch_sizes)
+    batch_sum = sum(batch_sizes)
+    total_m_blocks = sum((size + block_M - 1) // block_M for size in batch_sizes)
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((batch_sum, K), dtype),
+        B: T.Buffer((batch_count, K, N), dtype),
+        C: T.Buffer((batch_sum, N), dtype),
+        batch_sizes_buf: T.Buffer((batch_count,), "int32"),
+        batch_offsets: T.Buffer((batch_count,), "int32"),
+        batch_padded_offsets: T.Buffer((batch_count,), "int32"),
+    ):
+        with T.Kernel(total_m_blocks, T.ceildiv(N, block_N), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
+            cur_batch_idx = T.alloc_var("int32")
+            cur_batch_size = T.alloc_var("int32")
+
+            m_start_padded = bx * block_M
+            for i in range(batch_count):
+                in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
+                cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)
+
+            cur_batch_size = batch_sizes_buf[cur_batch_idx]
+            m_start = m_start_padded - batch_padded_offsets[cur_batch_idx] + batch_offsets[cur_batch_idx]
+            actual_rows = T.max(
+                0,
+                T.min(block_M, cur_batch_size + batch_padded_offsets[cur_batch_idx] - m_start_padded),
+            )
+
+            T.clear(C_local)
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                T.copy(A[m_start, ko * block_K], A_shared)
+                T.copy(B[cur_batch_idx, ko * block_K, by * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+
+            for i, j in T.Parallel(block_M, block_N):
+                if i < actual_rows:
+                    C[m_start + i, by * block_N + j] = C_local[i, j]
+
+    return main
+
+
+def grouped_gemm_reference(A, B, batch_sizes):
+    import torch
+
+    outputs = []
+    start = 0
+    for idx, size in enumerate(batch_sizes):
+        end = start + size
+        outputs.append(torch.mm(A[start:end], B[idx]))
+        start = end
+    return torch.cat(outputs, dim=0)
+
+
+def grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype="float16"):
+    import math
+    import torch
+
+    batch_sizes = list(batch_sizes)
+    batch_offsets = [0]
+    batch_padded_offsets = [0]
+    for i in range(len(batch_sizes) - 1):
+        batch_offsets.append(batch_offsets[-1] + batch_sizes[i])
+        batch_padded_offsets.append(
+            batch_padded_offsets[-1] + math.ceil(batch_sizes[i] / block_M) * block_M
+        )
+
+    A = torch.randn(sum(batch_sizes), K, dtype=getattr(torch, dtype), device="cuda")
+    B = torch.randn(len(batch_sizes), K, N, dtype=getattr(torch, dtype), device="cuda")
+    batch_sizes_t = torch.tensor(batch_sizes, dtype=torch.int32, device="cuda")
+    batch_offsets_t = torch.tensor(batch_offsets, dtype=torch.int32, device="cuda")
+    batch_padded_offsets_t = torch.tensor(batch_padded_offsets, dtype=torch.int32, device="cuda")
+    return A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t
+
+
+def _find_after(src, needle, start=0):
+    pos = src.find(needle, start)
+    assert pos >= 0, f"missing substring: {needle}"
+    return pos
+
+
+def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, block_N=64, block_K=32):
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    func = grouped_gemm_padded_pipelined(batch_sizes, K, N, block_M, block_N, block_K)
+    kernel = _compile_tvm_ffi(func, pass_configs, out_idx=[2])
+    return kernel, batch_sizes
+
+
+def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
+    import torch
+
+    A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t = grouped_gemm_inputs(
+        batch_sizes, K, N, block_M, dtype
+    )
+    out = kernel(A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t)
+    ref = grouped_gemm_reference(A.float(), B.float(), batch_sizes)
+    torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
+    return out
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_stage1_dynamic_loop_start():
@@ -318,6 +434,36 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
     assert k_load < v_load < branch < first_wait
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
+    """Shared-prelude grouped-gemm indices must stay outside WS branches."""
+    kernel, batch_sizes = _compile_grouped_gemm_ws()
+    src = kernel.get_kernel_source()
+
+    branch = _find_after(src, "if (256 <= ((int)threadIdx.x))")
+    cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
+    m_start = _find_after(src, "int m_start =")
+    actual_rows = _find_after(src, "int actual_rows =")
+
+    assert cur_batch_idx_loop < m_start < actual_rows < branch
+    _run_grouped_gemm_ws(kernel, batch_sizes)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
+    """Producer branch should reuse shared local.var state instead of cloning it."""
+    kernel, batch_sizes = _compile_grouped_gemm_ws()
+    src = kernel.get_kernel_source()
+
+    assert "cur_batch_idx_producer_ws" not in src
+    assert "cur_batch_size_producer_ws" not in src
+    assert "tl::tma_load(B_desc" in src
+    assert "cur_batch_idx);" in src
+    _run_grouped_gemm_ws(kernel, batch_sizes)
+
+
 if __name__ == "__main__":
     test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()
@@ -325,3 +471,5 @@ if __name__ == "__main__":
     test_tiled_ws_swizzled_layout_allows_ws()
     test_tiled_ws_incompatible_layout_blocks_ws()
     test_tiled_ws_sinks_preloop_tma_waits_into_consumer()
+    test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm()
+    test_tiled_ws_does_not_clone_local_var_into_producer_branch()
