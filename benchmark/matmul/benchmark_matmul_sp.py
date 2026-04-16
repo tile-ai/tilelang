@@ -219,7 +219,7 @@ def matmul_sp(M, N, K, in_dtype, accum_dtype):
                     T.copy(B[k * block_K, bx * block_N], B_shared)
                     # Perform a partial matrix multiplication:
                     #   C_local += A_shared @ B_shared
-                    T.gemm_sp_v2(
+                    T.gemm_sp(
                         A_shared,
                         E_shared,
                         B_shared,
