@@ -264,7 +264,8 @@ public:
           for (size_t i = 0; i < info.indices.size(); ++i) {
             elem_offset += info.indices[i] * strides[i];
           }
-          depends_on_loop_var = !IsExprInvariantInVectorBoundary(elem_offset, inner_for_->loop_var, vector_size_, analyzer_);
+          depends_on_loop_var = !IsExprInvariantInVectorBoundary(
+              elem_offset, inner_for_->loop_var, vector_size_, analyzer_);
         }
         if (depends_on_loop_var) {
           memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
