@@ -1486,7 +1486,6 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
       // unpack::16b) so MMA TS reads correctly packed bf16 from TMEM columns.
       // For tcgen05_ld, pack::16b is still needed when reading unpacked data.
       bool use_pack_unpack_modifier = is_ld ? needs_pack_unpack : false;
-      const char *bool_str = use_pack_unpack_modifier ? "true" : "false";
       int effective_chunks =
           needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
       PrimExpr relative_wg_idx =
@@ -1497,22 +1496,38 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
               : relative_wg_idx * (effective_chunks * meta.width);
       have_succeeded = true;
       Array<PrimExpr> args;
-      args.push_back(StringImm(meta.intrinsics_name + "<" +
-                               std::to_string(effective_chunks) + ", " +
-                               bool_str + ">"));
-      args.push_back(
-          BufferLoad(tmem_buf, {(int)logical_row_min,
-                                (int)logical_col_min})); // Will be translated
-                                                         // later in
-                                                         // lower_shared_tmem
-                                                         // pass
-      args.push_back(col_offset);
-      int reg_access_mode = is_ld ? 2 : 1;
-      args.push_back(reg_buf.access_ptr(reg_access_mode, DataType::Handle(), 1,
-                                        0, PrimExpr(tmem_phy_col_extent)));
-
-      Stmt call =
-          Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
+      Stmt call;
+      if (is_ld) {
+        args.push_back(IntImm(DataType::Int(32), meta.width * 32));
+        args.push_back(IntImm(DataType::Int(32), effective_chunks));
+        args.push_back(Bool(use_pack_unpack_modifier));
+        args.push_back(
+            BufferLoad(tmem_buf, {(int)logical_row_min,
+                                  (int)logical_col_min})); // Will be translated
+                                                           // later in
+                                                           // lower_shared_tmem
+                                                           // pass
+        args.push_back(col_offset);
+        args.push_back(reg_buf.access_ptr(/*access_mask=*/2, DataType::Handle(),
+                                          /*content_lanes=*/1, /*offset=*/0,
+                                          PrimExpr(tmem_phy_col_extent)));
+        call = Evaluate(Call(DataType::Handle(), tcgen05_ld(), args));
+      } else {
+        args.push_back(IntImm(DataType::Int(32), meta.width * 32));
+        args.push_back(IntImm(DataType::Int(32), effective_chunks));
+        args.push_back(Bool(use_pack_unpack_modifier));
+        args.push_back(
+            BufferLoad(tmem_buf, {(int)logical_row_min,
+                                  (int)logical_col_min})); // Will be translated
+                                                           // later in
+                                                           // lower_shared_tmem
+                                                           // pass
+        args.push_back(col_offset);
+        int reg_access_mode = 1;
+        args.push_back(reg_buf.access_ptr(reg_access_mode, DataType::Handle(),
+                                          1, 0, PrimExpr(tmem_phy_col_extent)));
+        call = Evaluate(Call(DataType::Handle(), tcgen05_st(), args));
+      }
       if (num_useful_threads != num_threads) {
         body =
             IfThenElse(T.thread_var < T.thread_bounds->min + num_useful_threads,
