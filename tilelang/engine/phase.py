@@ -285,6 +285,11 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    # Inject conservative tcgen05 fences on Blackwell (SM100+).
+    # Must run after ThreadSync so that tvm_storage_sync calls are present.
+    # The pass handles shared syncs and simple linear wait/use, use/arrive
+    # handoffs, and is a no-op on non-SM100 targets or functions without TMEM.
+    mod = tilelang.transform.InjectTcgen05Fence()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     # NOTE: LowerPTXAsyncCopy is applied earlier (before PipelinePlanning).
     if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
