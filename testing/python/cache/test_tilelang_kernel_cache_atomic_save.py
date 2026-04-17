@@ -1,4 +1,5 @@
 import errno
+from pathlib import Path
 import pytest
 
 from tilelang.cache.kernel_cache import KernelCache
@@ -48,8 +49,8 @@ def _make_fake_nvrtc_kernel(tmp_path):
 def test_kernel_cache_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
     cache = KernelCache()
     key = "atomic-repair"
-    cache_path = cache_dirs / key
-    cache_path.mkdir()
+    cache_path = Path(cache._get_cache_path(key))
+    cache_path.mkdir(parents=True)
     (cache_path / "stale.txt").write_text("partial")
 
     cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
@@ -65,6 +66,8 @@ def test_kernel_cache_logs_write_oserror_instead_of_treating_it_as_race(cache_di
     cache = KernelCache()
     key = "atomic-write-error"
     logged = []
+    cache_path = Path(cache._get_cache_path(key))
+    staging_root = Path(cache._get_staging_root())
 
     def raise_write_error(*args, **kwargs):
         raise OSError(errno.ENOSPC, "No space left on device")
@@ -77,9 +80,9 @@ def test_kernel_cache_logs_write_oserror_instead_of_treating_it_as_race(cache_di
 
     cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
 
-    assert f"{key}" not in {path.name for path in cache_dirs.iterdir()}
+    assert not cache_path.exists()
     assert "Error during atomic cache save" in logged
-    assert not any(path.name.startswith(".staging_") for path in cache_dirs.iterdir())
+    assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
 def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_missing(cache_dirs, tmp_path, monkeypatch):
@@ -88,6 +91,8 @@ def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_miss
     kernel = _make_fake_kernel(tmp_path)
     kernel.kernel_source = None
     logged = []
+    cache_path = Path(cache._get_cache_path(key))
+    staging_root = Path(cache._get_staging_root())
 
     def record_exception(message, *args, **kwargs):
         logged.append(message)
@@ -96,16 +101,16 @@ def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_miss
 
     cache._save_kernel_to_disk(key, kernel)
 
-    assert f"{key}" not in {path.name for path in cache_dirs.iterdir()}
+    assert not cache_path.exists()
     assert "Error during atomic cache save" in logged
-    assert not any(path.name.startswith(".staging_") for path in cache_dirs.iterdir())
+    assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
 def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
     cache = NVRTCKernelCache()
     key = "nvrtc-atomic-repair"
-    cache_path = cache_dirs / key
-    cache_path.mkdir()
+    cache_path = Path(cache._get_cache_path(key))
+    cache_path.mkdir(parents=True)
     (cache_path / cache.device_kernel_path).write_text("// device kernel")
     (cache_path / cache.host_kernel_path).write_text("// host kernel")
     (cache_path / cache.kernel_lib_path).write_bytes(b"old-cubin")
