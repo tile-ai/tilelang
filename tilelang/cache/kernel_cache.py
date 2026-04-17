@@ -420,6 +420,10 @@ class KernelCache:
             func (Callable, optional): The original function.
             verbose (bool): Enable verbose log messages.
         """
+        # Env-backed cache roots may change across tests or at runtime; recreate the
+        # namespace-specific directories lazily here so direct save helpers keep working
+        # even when the singleton instance is reused.
+        KernelCache._create_dirs()
         cache_path = self._get_cache_path(key)
 
         # Another process already wrote a complete entry — nothing to do.
