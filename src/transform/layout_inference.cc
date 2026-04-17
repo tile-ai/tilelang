@@ -62,8 +62,8 @@ bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
 }
 
 Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
-                                       const Layout &layout,
-                                       arith::Analyzer *analyzer) {
+                                        const Layout &layout,
+                                        arith::Analyzer *analyzer) {
   for (const auto &buffer : buffers) {
     if (ShapesEqual(layout->InputShape(), buffer->shape, analyzer)) {
       return buffer;
@@ -764,9 +764,10 @@ private:
         ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
         Optional<Buffer> anchor_buffer =
             FindLayoutAnchorBuffer(buffers, layout, &analyzer_);
-        int64_t anchor_bits = anchor_buffer.defined()
-                                  ? GetElementStorageBits(anchor_buffer.value()->dtype)
-                                  : GetElementStorageBits(buffers[0]->dtype);
+        int64_t anchor_bits =
+            anchor_buffer.defined()
+                ? GetElementStorageBits(anchor_buffer.value()->dtype)
+                : GetElementStorageBits(buffers[0]->dtype);
         // Apply layout to all buffers associated with this var
         for (const auto &buffer : buffers) {
 
@@ -779,8 +780,7 @@ private:
             annotated_layout_map_.Set(buffer, layout);
           } else {
             auto reshaped_layout =
-                layout->Reshape(buffer->shape, &analyzer_,
-                                Integer(anchor_bits),
+                layout->Reshape(buffer->shape, &analyzer_, Integer(anchor_bits),
                                 Integer(GetElementStorageBits(buffer->dtype)));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }
