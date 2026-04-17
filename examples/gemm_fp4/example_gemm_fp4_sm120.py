@@ -9,7 +9,6 @@ The << 2 bit-shift before MMA places FP4 data at bits 2-5 as required.
 Addresses https://github.com/tile-ai/tilelang/issues/1592
 """
 
-import os
 import time
 import torch
 import tilelang
@@ -122,8 +121,6 @@ jit_kernel = tilelang.compile(
 )
 
 print("Compilation succeeded!")
-with open(os.path.join(os.path.dirname(__file__), "gemm_fp4_sm120.cu"), "w") as f:
-    f.write(jit_kernel.get_kernel_source())
 
 torch.manual_seed(42)
 

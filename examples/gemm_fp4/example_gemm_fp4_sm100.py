@@ -12,7 +12,6 @@ Requires: SM100 GPU (B200 / Thor), CUDA 12.8+, PyTorch >= 2.4
 import torch
 import tilelang
 import tilelang.language as T
-import os
 
 
 def matmul_fp4_sm100(
@@ -145,8 +144,6 @@ if __name__ == "__main__":
     )
 
     print("Compilation succeeded!")
-    with open(os.path.join(os.path.dirname(__file__), "gemm_fp4_sm100.cu"), "w") as f:
-        f.write(jit_kernel.get_kernel_source())
 
     torch.manual_seed(42)
 
