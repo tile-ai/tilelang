@@ -34,7 +34,7 @@ def test_example_grouped_gemm_fwd_ptr_small():
         block_K=32,
         num_stages=1,
         threads=256,
-        backend="tvm_ffi",
+        backend="auto",
         profile=False,
     )
 

@@ -125,7 +125,7 @@ def run_tilelang_grouped_gemm_ptr(
     block_K,
     num_stages=2,
     threads=128,
-    backend="tvm_ffi",
+    backend="auto",
     profile=False,
 ):
     device = torch.device("cuda")
@@ -159,7 +159,13 @@ if __name__ == "__main__":
     parser.add_argument("--batch_sizes", type=str, default="64,128,256", help="comma-separated per-group M sizes")
     parser.add_argument("--K", type=int, default=4096, help="reduce dim")
     parser.add_argument("--N", type=int, default=4096, help="output dim")
-    parser.add_argument("--backend", type=str, default="tvm_ffi", choices=["tvm_ffi", "cython"], help="execution backend")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="auto",
+        choices=["auto", "tvm_ffi", "cython", "nvrtc", "cutedsl"],
+        help="execution backend",
+    )
     parser.add_argument("--profile", action="store_true", help="benchmark the kernel")
     args = parser.parse_args()
 
