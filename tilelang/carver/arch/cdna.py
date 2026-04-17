@@ -23,7 +23,7 @@ class CDNA(TileDevice):
         self.device: tvm.runtime.Device = device
         self.platform: str = "CDNA"
 
-        # TVM runtime should orrectly report 160 KB (163840 B) for gfx950; the
+        # TVM runtime should correctly report 160 KB (163840 B) for gfx950; the
         # override is kept as a safety net in case an older driver reports the
         # conservative 64 KB default.
         mcpu = str(target.attrs.get("mcpu", ""))
