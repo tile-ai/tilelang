@@ -250,8 +250,31 @@ public:
         local_fragment_buffers.push_back(info);
       } else {
         // global, shared, shared.dyn
-        memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
-        has_global_or_shared_buffer = true;
+        // If a *load*'s indices don't depend on loop var (e.g. b[0]), treat
+        // as local — it will become a scalar broadcast, not a vector memory
+        // access, and DecoupleTypeCast won't create a cast buffer for it.
+        // Stores must stay in the memory bucket: a loop-invariant store is a
+        // reduction-like pattern where ComputeBufferVectorSize has already
+        // returned 1 to disable vectorization, and that constraint must not
+        // be dropped (memory strategy ignores local_fragment_min).
+        bool depends_on_loop_var = true;
+        if (!info.indices.empty() && inner_for_) {
+          Array<PrimExpr> strides = GetBufferStrides(info.buffer);
+          PrimExpr elem_offset = 0;
+          for (size_t i = 0; i < info.indices.size(); ++i) {
+            elem_offset += info.indices[i] * strides[i];
+          }
+          depends_on_loop_var = !IsExprInvariantInVectorBoundary(
+              elem_offset, inner_for_->loop_var, vector_size_, analyzer_);
+        }
+        if (depends_on_loop_var) {
+          memory_min = arith::ZeroAwareGCD(memory_min, info.vector_size);
+          has_global_or_shared_buffer = true;
+        } else {
+          local_fragment_min =
+              arith::ZeroAwareGCD(local_fragment_min, info.vector_size);
+          local_fragment_buffers.push_back(info);
+        }
       }
     }
 

@@ -213,12 +213,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int, int]]:
+    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
 
-        Maps symbolic variables to their corresponding (id, buffer_index, dimension)
+        Maps symbolic variables to their corresponding (id, buffer_index, dimension, stride_scale)
         for runtime shape resolution.
-        id represents shape or stride, 0 represents shape, 1 represents stride
+        id represents shape or stride, 0 represents shape, 1 represents stride.
+        stride_scale compensates for sub-byte dtypes (e.g. float4_e2m1fn) where torch strides
+        are in storage units but the kernel expects logical element strides.
         """
         func = self.prim_func
         params = func.params
@@ -229,13 +231,15 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
                     if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
-                        dynamic_symbolic_map[shape] = (0, i, j)
+                        dynamic_symbolic_map[shape] = (0, i, j, 1)
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
+                element_bits = buffer.dtype.bits * buffer.dtype.lanes
+                stride_scale = 8 // element_bits if element_bits < 8 else 1
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
-                        dynamic_symbolic_map[stride] = (1, i, j)
+                        dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
     def _process_buffer_dtype(self) -> dict[tir.Var, tuple[int, torch.dtype]]:

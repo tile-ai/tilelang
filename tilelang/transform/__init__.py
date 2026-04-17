@@ -154,17 +154,6 @@ def WarpSpecializedPipeline():
     return _ffi_api.WarpSpecializedPipeline()  # type: ignore
 
 
-def RewriteWgmmaSync():
-    """RewriteWgmmaSync
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.RewriteWgmmaSync()  # type: ignore
-
-
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 
@@ -288,6 +277,24 @@ def InjectFenceProxy():
         The result pass
     """
     return _ffi_api.InjectFenceProxy()  # type: ignore
+
+
+def InjectTcgen05Fence():
+    """Inject tcgen05.fence::before_thread_sync / after_thread_sync at
+    conservative TCGEN05/TMEM synchronization boundaries on Blackwell
+    (SM100+) targets.
+
+    The current pass wraps CTA-wide shared-memory syncs and also inserts
+    fences around linear mbarrier wait/use and use/arrive handoff patterns.
+    It is intentionally conservative and does not try to infer arbitrary
+    barrier protocols.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InjectTcgen05Fence()  # type: ignore
 
 
 def LegalizeVectorizedLoop():

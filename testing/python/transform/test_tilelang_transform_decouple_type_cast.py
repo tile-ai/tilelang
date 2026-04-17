@@ -120,6 +120,58 @@ def test_no_transform_if_then_else_condition():
     _check(before, after)
 
 
+def test_rmw_same_buffer_different_indices():
+    """RMW with different indices into the same buffer: a[i] = a[i] + a[i+32].
+
+    Both loads and the store target the same buffer but at different index
+    expressions. Each unique (buffer, indices) pair should get its own cast
+    buffer, and the RMW load `a[i]` should read from the same cast buffer the
+    store writes to (so the read-side copy-from and the write-side copy-to
+    share that buffer).
+    """
+
+    @T.prim_func
+    def before(a: T.Tensor[(64,), T.float8_e4m3fn]):
+        for i in T.vectorized(32):
+            a[i] = T.cast(
+                T.cast(a[i], T.float32) + T.cast(a[i + 32], T.float32),
+                T.float8_e4m3fn,
+            )
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = DecoupleTypeCast()(mod)
+
+    # Sanity checks: pass ran, two distinct cast buffers were created, and the
+    # RMW load site no longer references `a` directly in the compute body.
+    text = mod["main"].script()
+    assert "a_local_cast" in text, "Expected cast buffer for store-side of a[i]"
+    assert "a_local_cast_1" in text, "Expected second cast buffer for a[i+32]"
+
+
+def test_local_to_memory_with_let_stmt():
+    """Test local → memory transform still triggers through LetStmt-bound loads."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        scale = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            factor = scale[i]
+            b[i] = a_frag[i] * factor
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        scale = T.alloc_local((16,), T.float32)
+        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+        for i in T.vectorized(16):
+            b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
+        for i_copy in T.vectorized(16):
+            b[i_copy] = b_local_cast[i_copy]
+
+    _check(before, after)
+
+
 # =============================================================================
 # CUDA Codegen Tests
 # =============================================================================
@@ -375,8 +427,48 @@ def test_e2e_fp8_manual_decouple():
     )
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9)
+def test_e2e_scalar_load_no_cast_buffer():
+    """Test that scalar memory load (b[0]) is not decoupled into a cast buffer.
+
+    When a vectorized loop stores to global with a scalar memory load in the
+    expression (e.g. c[i] = a_local[i] * b[0]), the scalar load's index does
+    not depend on the loop variable. It should remain in the compute loop as
+    a broadcast, not be extracted into a local cast buffer.
+
+    Previously this caused float32x32 codegen errors because both
+    VectorizePlanner and DecoupleTypeCast treated b[0] as a vector memory
+    access.
+    """
+
+    @tilelang.jit
+    def kernel_fn():
+        @T.prim_func
+        def main(
+            a: T.Tensor[(32,), T.float8_e4m3fn],
+            b: T.Tensor[(1,), T.float32],
+            c: T.Tensor[(32,), T.float8_e4m3fn],
+        ):
+            with T.Kernel(1, threads=32):
+                a_local = T.alloc_local((32,), T.float8_e4m3fn)
+                T.copy(a, a_local)
+
+                for i in T.vectorized(32):
+                    c[i] = a_local[i] * b[0]
+
+        return main
+
+    kernel = kernel_fn()
+    source = kernel.get_kernel_source()
+
+    assert "c_local_cast" in source, "Expected c_local_cast for store-side decoupling"
+    assert "b_local_cast" not in source, "Scalar load b[0] should not get a cast buffer"
+
+
 if __name__ == "__main__":
     test_no_transform_if_then_else_condition()
+    test_e2e_scalar_load_no_cast_buffer()
     test_e2e_bf16_global_to_frag()
     test_e2e_bf16_global_shared_frag()
     test_e2e_fp8_global_to_frag()

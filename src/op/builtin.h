@@ -924,6 +924,22 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
 TVM_DLL const Op &tcgen05_mma_arrive();
 
 /*!
+ * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory load.
+ *
+ *  Internal lowering op used by LowerTmemCopy to represent
+ *  `tl::tcgen05_ld_*` calls without routing through `call_extern`.
+ */
+TVM_DLL const Op &tcgen05_ld();
+
+/*!
+ * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory store.
+ *
+ *  Internal lowering op used by LowerTmemCopy to represent
+ *  `tl::tcgen05_st_*` calls without routing through `call_extern`.
+ */
+TVM_DLL const Op &tcgen05_st();
+
+/*!
  * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
  * bar.sync). Matches PTX \c tcgen05.fence::before_thread_sync (DeepGEMM /
  * Blackwell UMMA sequencing).

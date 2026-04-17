@@ -899,6 +899,30 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << "[0] + " << c_offset << ", " << desc_val << ", " << scale_out
            << ", " << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
            << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_ld())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool pack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = PrintExpr_(op->args[3]);
+    std::string col_offset = PrintExpr_(op->args[4]);
+    std::string dst_ptr = PrintExpr_(op->args[5]);
+    PrintIndent();
+    stream << "tl.tcgen05_ld_32dp" << inst_bits << "bNx(" << chunks << ", "
+           << (pack16 ? "True" : "False") << ", " << tmem_start_col << ", "
+           << col_offset << ", " << dst_ptr << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_st())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool unpack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = PrintExpr_(op->args[3]);
+    std::string col_offset = PrintExpr_(op->args[4]);
+    std::string src_ptr = PrintExpr_(op->args[5]);
+    PrintIndent();
+    stream << "tl.tcgen05_st_32dp" << inst_bits << "bNx(" << chunks << ", "
+           << (unpack16 ? "True" : "False") << ", " << tmem_start_col << ", "
+           << col_offset << ", " << src_ptr << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     PrintIndent();
