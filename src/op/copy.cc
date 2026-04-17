@@ -366,8 +366,7 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   bool is_scalar = loop_vars.empty();
 
   int src_bits = src->dtype.bits();
-  bool is_sub_byte = (!is_scalar && src_bits < 8 &&
-                      src->dtype == dst->dtype &&
+  bool is_sub_byte = (!is_scalar && src_bits < 8 && src->dtype == dst->dtype &&
                       src->dtype.lanes() == 1);
 
   if (is_sub_byte) {
@@ -379,9 +378,9 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
       for (size_t i = 0; i + 1 < buf->shape.size(); i++)
         new_shape.push_back(buf->shape[i]);
       new_shape.push_back(FloorDiv(buf->shape.back(), pack_ratio));
-      return Buffer(buf->data, byte_dtype, new_shape, {},
-                    buf->elem_offset, buf->name, buf->data_alignment,
-                    buf->offset_factor, buf->buffer_type);
+      return Buffer(buf->data, byte_dtype, new_shape, {}, buf->elem_offset,
+                    buf->name, buf->data_alignment, buf->offset_factor,
+                    buf->buffer_type);
     };
     Buffer byte_src = make_byte_buf(src);
     Buffer byte_dst = make_byte_buf(dst);
@@ -391,9 +390,8 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
       for (size_t i = 0; i + 1 < ranges.size(); i++)
         result.push_back(ranges[i]);
       Range last = ranges.back();
-      result.push_back(
-          Range(FloorDiv(last->min, pack_ratio),
-                FloorDiv(last->extent, pack_ratio)));
+      result.push_back(Range(FloorDiv(last->min, pack_ratio),
+                             FloorDiv(last->extent, pack_ratio)));
       return result;
     };
     Array<Range> byte_src_range = adjust_ranges(src_range);
@@ -401,8 +399,10 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
     auto scope_level = [](const Buffer &b) -> int {
       String s = b.scope();
-      if (s == "local.fragment" || s == "local") return 2;
-      if (s == "shared" || s == "shared.dyn" || s == "shared.tmem") return 1;
+      if (s == "local.fragment" || s == "local")
+        return 2;
+      if (s == "shared" || s == "shared.dyn" || s == "shared.tmem")
+        return 1;
       return 0;
     };
     bool base_is_src = (scope_level(src) >= scope_level(dst));
@@ -412,9 +412,10 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     Array<IterVar> byte_loop_vars;
     size_t idx = 0;
     for (size_t i = 0; i < base_ranges.size(); i++) {
-      if (is_one(base_ranges[i]->extent)) continue;
-      Var var = Var(std::string{char('i' + idx)},
-                    base_ranges[i]->extent->dtype);
+      if (is_one(base_ranges[i]->extent))
+        continue;
+      Var var =
+          Var(std::string{char('i' + idx)}, base_ranges[i]->extent->dtype);
       idx++;
       byte_loop_vars.push_back(
           {Range(0, base_ranges[i]->extent), var, IterVarType::kDataPar});
@@ -449,17 +450,15 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
       Map<String, ObjectRef> loop_annotations;
       if (i == 0) {
         if (annotations.count(attr::kCoalescedWidth))
-          loop_annotations.Set(
-              attr::kCoalescedWidth,
-              annotations.Get(attr::kCoalescedWidth).value());
+          loop_annotations.Set(attr::kCoalescedWidth,
+                               annotations.Get(attr::kCoalescedWidth).value());
         if (annotations.count(attr::kParallelLoopLayout))
           loop_annotations.Set(
               attr::kParallelLoopLayout,
               annotations.Get(attr::kParallelLoopLayout).value());
       }
-      body = For(byte_loop_vars[i]->var, 0,
-                 byte_loop_vars[i]->dom->extent, ForKind::kParallel,
-                 body, std::nullopt, loop_annotations);
+      body = For(byte_loop_vars[i]->var, 0, byte_loop_vars[i]->dom->extent,
+                 ForKind::kParallel, body, std::nullopt, loop_annotations);
     }
     return Downcast<For>(body);
   }
@@ -804,8 +803,8 @@ bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
     LOG(WARNING)
         << "src range must have last dim multiple of 16 bytes for tma bulk "
            "load "
-        << src->name << " range " << last_extent << " * "
-        << src_elem_byte_num << " bytes % 16 != 0";
+        << src->name << " range " << last_extent << " * " << src_elem_byte_num
+        << " bytes % 16 != 0";
     return false;
   }
 
@@ -1113,7 +1112,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
   }
-  return Stmt();  // unreachable
+  return Stmt(); // unreachable
 }
 
 // Lowers copy to cp.async global->shared transfers.
@@ -1769,7 +1768,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   if (sub_byte_pack_ratio > 1) {
     for (size_t i = 1; i < desc.global_stride.size(); i++) {
       desc.global_stride.Set(
-          i, floordiv(cast(DataType::Int(64), desc.global_stride[i]), sub_byte_pack_ratio));
+          i, floordiv(cast(DataType::Int(64), desc.global_stride[i]),
+                      sub_byte_pack_ratio));
     }
   }
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
@@ -1886,7 +1886,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     return LowerNormalCopy(T, analyzer);
   }
   int instruction_dim = *inner_box_dim;
-  int elem_bytes_for_swizzle = src->dtype.bytes();  // >= 1
+  int elem_bytes_for_swizzle = src->dtype.bytes(); // >= 1
   if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
     instruction_dim = 64 / elem_bytes_for_swizzle;
   } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {

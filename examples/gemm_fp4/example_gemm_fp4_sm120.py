@@ -17,9 +17,16 @@ import tilelang.language as T
 
 
 def matmul_fp4(
-    M, N, K, block_M, block_N, block_K,
-    out_dtype, accum_dtype,
-    num_stages=2, threads=128,
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    out_dtype,
+    accum_dtype,
+    num_stages=2,
+    threads=128,
 ):
     A_shape = (M, K)
     B_shape = (N, K)
@@ -49,8 +56,22 @@ def matmul_fp4(
 
 
 FP4_E2M1_TO_FLOAT = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
 ]
 
 
@@ -78,9 +99,16 @@ print(f"Running FP4 GEMM: M={M}, N={N}, K={K}")
 print(f"  block_M={block_M}, block_N={block_N}, block_K={block_K}")
 
 func = matmul_fp4(
-    M, N, K, block_M, block_N, block_K,
-    out_dtype, accum_dtype,
-    num_stages=2, threads=128,
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    out_dtype,
+    accum_dtype,
+    num_stages=2,
+    threads=128,
 )
 
 jit_kernel = tilelang.compile(
@@ -126,7 +154,7 @@ print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
 if max_diff < 1.0:
     print("[PASS] numerical verification (max_abs_diff < 1.0)")
 else:
-    print(f"[WARN] large diff -- may indicate layout or data flow issue")
+    print("[WARN] large diff -- may indicate layout or data flow issue")
 
 # --- Benchmark ---
 torch.cuda.synchronize()

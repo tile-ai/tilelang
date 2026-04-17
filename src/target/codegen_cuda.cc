@@ -1839,14 +1839,13 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     if (!is_packed_scope && scope == "shared" &&
         buffer_element_dtype.is_float4()) {
       Target cur_target = Target::Current(/*allow_not_defined=*/true);
-      if (cur_target.defined() &&
-          tl::TargetHasSMVersionGE(cur_target, 100) &&
+      if (cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100) &&
           !tl::TargetHasSMVersionGE(cur_target, 120)) {
         is_packed_scope = true;
       }
     }
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
-        && is_packed_scope) {
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1 &&
+        is_packed_scope) {
       div_factor = 2;
     }
     index_str =
@@ -1859,14 +1858,13 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     if (!is_packed_scope && scope == "shared" &&
         buffer_element_dtype.is_float4()) {
       Target cur_target = Target::Current(/*allow_not_defined=*/true);
-      if (cur_target.defined() &&
-          tl::TargetHasSMVersionGE(cur_target, 100) &&
+      if (cur_target.defined() && tl::TargetHasSMVersionGE(cur_target, 100) &&
           !tl::TargetHasSMVersionGE(cur_target, 120)) {
         is_packed_scope = true;
       }
     }
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
-        && is_packed_scope) {
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1 &&
+        is_packed_scope) {
       div_factor = 2;
     }
     index_str =

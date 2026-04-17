@@ -14,6 +14,7 @@ import tilelang
 import tilelang.language as T
 import os
 
+
 def matmul_fp4_sm100(
     M,
     N,
@@ -37,9 +38,7 @@ def matmul_fp4_sm100(
         B: T.Tensor(B_shape, "float4_e2m1fn"),
         C: T.Tensor((M, N), out_dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads
-        ) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, "float4_e2m1fn")
             B_shared = T.alloc_shared(B_shared_shape, "float4_e2m1fn")
             C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
@@ -47,9 +46,7 @@ def matmul_fp4_sm100(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            for k in T.Pipelined(
-                T.ceildiv(K, block_K), num_stages=num_stages
-            ):
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B[bx * block_N, k * block_K], B_shared)
                 T.gemm(
@@ -75,8 +72,22 @@ def matmul_fp4_sm100(
 # Host-side FP4 helpers
 # ---------------------------------------------------------------------------
 FP4_E2M1_LUT = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,   # positive (sign=0)
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,  # negative (sign=1)
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,  # positive (sign=0)
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,  # negative (sign=1)
 ]
 
 
@@ -112,8 +123,16 @@ if __name__ == "__main__":
     print(f"  block=({block_M},{block_N},{block_K}), stages={num_stages}")
 
     func = matmul_fp4_sm100(
-        M, N, K, block_M, block_N, block_K,
-        out_dtype, accum_dtype, num_stages, threads,
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        out_dtype,
+        accum_dtype,
+        num_stages,
+        threads,
     )
 
     jit_kernel = tilelang.compile(
@@ -139,9 +158,7 @@ if __name__ == "__main__":
     a_zero = torch.zeros(M, K // 2, device="cuda", dtype=torch.int8)
     b_zero = torch.zeros(N, K // 2, device="cuda", dtype=torch.int8)
     c_zero = jit_kernel(a_zero, b_zero)
-    assert c_zero.abs().max().item() == 0.0, (
-        f"Zero test failed: max={c_zero.abs().max().item()}"
-    )
+    assert c_zero.abs().max().item() == 0.0, f"Zero test failed: max={c_zero.abs().max().item()}"
     print("[PASS] zeros in -> zeros out")
 
     # --- Test 2: numerical verification ---

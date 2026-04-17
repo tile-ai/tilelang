@@ -8,7 +8,6 @@ Uses SM120 native mma.sync.kind::f8f6f4 with mixed-type operands:
 No block scaling. Direct FP8 x FP4 tensor core multiply-accumulate.
 """
 
-import os
 import time
 import torch
 import tilelang
@@ -16,9 +15,16 @@ import tilelang.language as T
 
 
 def gemm_a8w4(
-    M, N, K, block_M, block_N, block_K,
-    out_dtype, accum_dtype,
-    num_stages=2, threads=128,
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    out_dtype,
+    accum_dtype,
+    num_stages=2,
+    threads=128,
 ):
     A_shape = (M, K)
     B_shape = (N, K)
@@ -46,8 +52,22 @@ def gemm_a8w4(
 
 
 FP4_E2M1_TO_FLOAT = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
 ]
 
 
@@ -63,12 +83,19 @@ out_dtype = T.float32
 accum_dtype = T.float32
 
 print(f"Running A8W4 GEMM: M={M}, N={N}, K={K}")
-print(f"  A: float8_e4m3fn, B: FP4 (unpacked uint8)")
+print("  A: float8_e4m3fn, B: FP4 (unpacked uint8)")
 
 func = gemm_a8w4(
-    M, N, K, block_M, block_N, block_K,
-    out_dtype, accum_dtype,
-    num_stages=2, threads=128,
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    out_dtype,
+    accum_dtype,
+    num_stages=2,
+    threads=128,
 )
 
 jit_kernel = tilelang.compile(
@@ -113,7 +140,7 @@ print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
 if rel_err < 0.01:
     print("[PASS] numerical verification (rel_err < 0.01)")
 else:
-    print(f"[WARN] large diff -- may indicate layout or data flow issue")
+    print("[WARN] large diff -- may indicate layout or data flow issue")
 
 # --- Benchmark ---
 torch.cuda.synchronize()

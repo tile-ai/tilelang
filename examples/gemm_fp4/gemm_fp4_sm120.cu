@@ -71,4 +71,3 @@ extern "C" __global__ void __launch_bounds__(128, 1) main_kernel(const fp4_e2_t*
     *(float2*)(C + (((((((((((int)blockIdx.y) * 32768) + (((((int)threadIdx.x) & 63) >> 5) * 16384)) + ((i_11 >> 4) * 4096)) + ((i_11 & 1) * 2048)) + (((((int)threadIdx.x) & 31) >> 2) * 256)) + (((int)blockIdx.x) * 128)) + ((((int)threadIdx.x) >> 6) * 64)) + (((i_11 & 15) >> 1) * 8)) + ((((int)threadIdx.x) & 3) * 2))) = *(float2*)(C_local + (i_11 * 2));
   }
 }
-

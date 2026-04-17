@@ -36,10 +36,10 @@ namespace codegen {
 namespace ptx {
 
 static const char *enum_to_str[] = {
-    "kInt4",        "kUInt4",         "kInt8",    "kUInt8",    "kInt16",
-    "kUInt16",      "kInt32",         "kUInt32",  "kInt64",    "kUInt64",
-    "kFloat8_e4m3", "kFloat8_e5m2",   "kFloat16", "kBFloat16", "kFloat16x2",
-    "kFloat32",     "kTensorFloat32", "kFloat64", "kBit1",     "kBit8",
+    "kInt4",        "kUInt4",         "kInt8",    "kUInt8",        "kInt16",
+    "kUInt16",      "kInt32",         "kUInt32",  "kInt64",        "kUInt64",
+    "kFloat8_e4m3", "kFloat8_e5m2",   "kFloat16", "kBFloat16",     "kFloat16x2",
+    "kFloat32",     "kTensorFloat32", "kFloat64", "kBit1",         "kBit8",
     "kBit16",       "kBit32",         "kBit64",   "kFloat4_e2m1fn"};
 
 static const char *dtype_str[] = {

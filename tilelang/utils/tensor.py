@@ -111,9 +111,7 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
                 else:
                     packed_shape = list(shape)
                     packed_shape[-1] = packed_shape[-1] // 2
-                    return torch.randint(
-                        low=0, high=256, size=packed_shape, device=device,
-                        dtype=torch.uint8).view(dtype)
+                    return torch.randint(low=0, high=256, size=packed_shape, device=device, dtype=torch.uint8).view(dtype)
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             elif dtype in {torch.float16, torch.float32, torch.bfloat16}:
@@ -142,9 +140,7 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
                 else:
                     packed_shape = list(shape)
                     packed_shape[-1] = packed_shape[-1] // 2
-                    return torch.randint(
-                        low=0, high=256, size=packed_shape, device=device,
-                        dtype=torch.uint8).view(dtype)
+                    return torch.randint(low=0, high=256, size=packed_shape, device=device, dtype=torch.uint8).view(dtype)
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             else:

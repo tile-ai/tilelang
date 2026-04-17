@@ -27,7 +27,9 @@ public:
   }
 
   // Set low 4 bits (first fp4)
-  TL_DEVICE void set_x(fp4_e2_t val) { __x = (__x & 0xF0) | (val.raw() & 0x0F); }
+  TL_DEVICE void set_x(fp4_e2_t val) {
+    __x = (__x & 0xF0) | (val.raw() & 0x0F);
+  }
 
   // Set high 4 bits (second fp4)
   TL_DEVICE void set_y(fp4_e2_t val) {

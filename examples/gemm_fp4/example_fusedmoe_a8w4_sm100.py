@@ -21,8 +21,22 @@ import tilelang.language as T
 
 
 FP4_E2M1_LUT = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
 ]
 
 
@@ -66,45 +80,25 @@ def moe_shared_expert_a8w4_sm100(
             T.ceildiv(num_tokens, block_token),
             threads=threads,
         ) as (bx, by):
-            input_shared = T.alloc_shared(
-                (block_token, block_hidden), "float8_e4m3fn"
-            )
-            W_gate_shared = T.alloc_shared(
-                (block_expert, block_hidden), "float4_e2m1fn"
-            )
-            W_up_shared = T.alloc_shared(
-                (block_expert, block_hidden), "float4_e2m1fn"
-            )
+            input_shared = T.alloc_shared((block_token, block_hidden), "float8_e4m3fn")
+            W_gate_shared = T.alloc_shared((block_expert, block_hidden), "float4_e2m1fn")
+            W_up_shared = T.alloc_shared((block_expert, block_hidden), "float4_e2m1fn")
 
-            gate_tmem = T.alloc_tmem(
-                [block_token, block_expert], "float32"
-            )
-            up_tmem = T.alloc_tmem(
-                [block_token, block_expert], "float32"
-            )
+            gate_tmem = T.alloc_tmem([block_token, block_expert], "float32")
+            up_tmem = T.alloc_tmem([block_token, block_expert], "float32")
             mbar_gate = T.alloc_barrier(1)
             mbar_up = T.alloc_barrier(1)
 
-            gate_local = T.alloc_fragment(
-                (block_token, block_expert), "float32"
-            )
-            up_local = T.alloc_fragment(
-                (block_token, block_expert), "float32"
-            )
-            out_shared = T.alloc_shared(
-                (block_token, block_expert), "float32"
-            )
+            gate_local = T.alloc_fragment((block_token, block_expert), "float32")
+            up_local = T.alloc_fragment((block_token, block_expert), "float32")
+            out_shared = T.alloc_shared((block_token, block_expert), "float32")
 
             k_iters = T.ceildiv(d_hidden, block_hidden)
 
             # Gate GEMM: input x W_gate^T
             for k in T.Pipelined(k_iters, num_stages=num_stages):
-                T.copy(
-                    input[by * block_token, k * block_hidden], input_shared
-                )
-                T.copy(
-                    W_gate[bx * block_expert, k * block_hidden], W_gate_shared
-                )
+                T.copy(input[by * block_token, k * block_hidden], input_shared)
+                T.copy(W_gate[bx * block_expert, k * block_hidden], W_gate_shared)
                 T.gemm(
                     input_shared,
                     W_gate_shared,
@@ -121,12 +115,8 @@ def moe_shared_expert_a8w4_sm100(
 
             # Up GEMM: input x W_up^T
             for k in T.Pipelined(k_iters, num_stages=num_stages):
-                T.copy(
-                    input[by * block_token, k * block_hidden], input_shared
-                )
-                T.copy(
-                    W_up[bx * block_expert, k * block_hidden], W_up_shared
-                )
+                T.copy(input[by * block_token, k * block_hidden], input_shared)
+                T.copy(W_up[bx * block_expert, k * block_hidden], W_up_shared)
                 T.gemm(
                     input_shared,
                     W_up_shared,
@@ -143,15 +133,11 @@ def moe_shared_expert_a8w4_sm100(
 
             # Fused SiLU activation: output = up * (gate * sigmoid(gate))
             for i, j in T.Parallel(block_token, block_expert):
-                gate_local[i, j] = gate_local[i, j] * (
-                    1.0 / (1.0 + T.exp2(-gate_local[i, j] * scale))
-                )
+                gate_local[i, j] = gate_local[i, j] * (1.0 / (1.0 + T.exp2(-gate_local[i, j] * scale)))
                 up_local[i, j] = up_local[i, j] * gate_local[i, j]
 
             T.copy(up_local, out_shared)
-            T.copy(
-                out_shared, output[by * block_token, bx * block_expert]
-            )
+            T.copy(out_shared, output[by * block_token, bx * block_expert])
 
     return main
 
@@ -168,10 +154,7 @@ if __name__ == "__main__":
     block_hidden = 128
     block_expert = 128
 
-    print(
-        f"SM100 FusedMoE A8W4: tokens={num_tokens}, "
-        f"hidden={d_hidden}, expert={d_expert}"
-    )
+    print(f"SM100 FusedMoE A8W4: tokens={num_tokens}, hidden={d_hidden}, expert={d_expert}")
 
     func = moe_shared_expert_a8w4_sm100(
         num_tokens,
@@ -199,24 +182,16 @@ if __name__ == "__main__":
     torch.manual_seed(42)
 
     # Input: FP8 activation
-    input_fp8 = torch.randn(
-        num_tokens, d_hidden, device="cuda", dtype=torch.float16
-    ).to(torch.float8_e4m3fn)
+    input_fp8 = torch.randn(num_tokens, d_hidden, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
 
     # Weights: packed FP4 (2 per byte)
     W_gate_packed = pack_fp4_random(d_expert, d_hidden)
     W_up_packed = pack_fp4_random(d_expert, d_hidden)
 
     # --- Test 1: zeros ---
-    z_input = torch.zeros(
-        num_tokens, d_hidden, device="cuda", dtype=torch.float8_e4m3fn
-    )
-    z_gate = torch.zeros(
-        d_expert, d_hidden // 2, device="cuda", dtype=torch.int8
-    )
-    z_up = torch.zeros(
-        d_expert, d_hidden // 2, device="cuda", dtype=torch.int8
-    )
+    z_input = torch.zeros(num_tokens, d_hidden, device="cuda", dtype=torch.float8_e4m3fn)
+    z_gate = torch.zeros(d_expert, d_hidden // 2, device="cuda", dtype=torch.int8)
+    z_up = torch.zeros(d_expert, d_hidden // 2, device="cuda", dtype=torch.int8)
     c_zero = jit_kernel(z_input, z_gate, z_up)
     status = "PASS" if c_zero.abs().max().item() == 0.0 else "FAIL"
     print(f"[{status}] zeros in -> zeros out")

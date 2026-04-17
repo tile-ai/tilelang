@@ -205,13 +205,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
 
         a_swizzle_atom_elems = (
-            (k_dim if a_is_k_major else m_dim)
-            if a_swizzle_mode.is_none()
-            else a_swizzle_mode.swizzle_byte_size() // a_elem_bytes
+            (k_dim if a_is_k_major else m_dim) if a_swizzle_mode.is_none() else a_swizzle_mode.swizzle_byte_size() // a_elem_bytes
         )
-        b_swizzle_atom_elems = (
-            n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // b_elem_bytes
-        )
+        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // b_elem_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
         # When the warp-specialization pass is disabled (e.g. T.Pipelined
@@ -253,9 +249,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             b_lbo_absolute = True
             b_leading_byte_offset = (k_dim * b_elem_bytes) if b_is_k_major else (n_dim_per_cta * b_elem_bytes)
             b_stride_byte_offset = (
-                (8 * k_dim * b_elem_bytes)
-                if b_is_k_major
-                else (0 if n_dim_per_cta == 8 else (8 * n_dim_per_cta * b_elem_bytes))
+                (8 * k_dim * b_elem_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * n_dim_per_cta * b_elem_bytes))
             )
         else:
             b_lbo_absolute = False
@@ -448,9 +442,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_elem_bytes = max(1, b_elem_bits // 8)
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-        b_swizzle_atom_elems = (
-            n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // b_elem_bytes
-        )
+        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // b_elem_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
         # B descriptor parameters (same as SS)
@@ -458,9 +450,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             b_lbo_absolute = True
             b_leading_byte_offset = (k_dim * b_elem_bytes) if b_is_k_major else (n_dim_per_cta * b_elem_bytes)
             b_stride_byte_offset = (
-                (8 * k_dim * b_elem_bytes)
-                if b_is_k_major
-                else (0 if n_dim_per_cta == 8 else (8 * n_dim_per_cta * b_elem_bytes))
+                (8 * k_dim * b_elem_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * n_dim_per_cta * b_elem_bytes))
             )
         else:
             b_lbo_absolute = False

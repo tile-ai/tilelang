@@ -11,12 +11,12 @@ python examples/flash_attention_sm100/gqa_fwd_bshd.py --variant ts --groups 4 --
 python examples/flash_attention_sm100/gqa_fwd_bshd.py --variant wasp --groups 4 --seq_len 8192
 
 
-python examples/flash_attention/example_mha_fwd_bshd.py  --batch 2 --heads 4 --seq_len 8192 
+python examples/flash_attention/example_mha_fwd_bshd.py  --batch 2 --heads 4 --seq_len 8192
 python examples/flash_attention/example_gqa_fwd_bshd.py  --batch 2 --heads 4 --seq_len 8192 --groups 4
 
 
 
-nvidia@tegra-ubuntu:~/wahao/tilelang$ bash examples/flash_attention_sm100/perf.sh 
+nvidia@tegra-ubuntu:~/wahao/tilelang$ bash examples/flash_attention_sm100/perf.sh
 Loading tilelang libs from dev root: /home/nvidia/wahao/tilelang/build
 Namespace(batch=2, heads=4, seq_len=8192, dim=128, is_causal=False, variant='ss')
 === Blackwell Flash Attention (SS) ===
@@ -76,5 +76,3 @@ Ref: 45.17 ms
 Ref: 6.09 TFlops
 Tile-lang: 10.63 ms
 Tile-lang: 25.86 TFlops
-
-
