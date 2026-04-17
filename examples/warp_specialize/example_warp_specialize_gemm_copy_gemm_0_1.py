@@ -6,9 +6,7 @@ import tilelang.language as T
 # @tilelang.jit
 @tilelang.jit(
     out_idx=[2],
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    },
+    pass_configs={},
 )
 def matmul_warp_specialize_copy_1_gemm_0(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     warp_group_num = 2

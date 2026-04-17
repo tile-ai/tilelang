@@ -22,7 +22,7 @@ ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor",
 
 
 # NOTE(chaofan): T.reduce is implemented as a macro, so no return
-def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: int, clear: bool) -> None:
+def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: int, clear: bool, nan_propagate: bool = False) -> None:
     """Perform a reduction operation on a buffer along a specified dimension.
 
     Args:
@@ -31,6 +31,10 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
         reduce_type (str): Type of reduction ('max', 'min', 'sum', 'abssum')
         dim (int): Dimension along which to perform reduction
         clear (bool): Whether to initialize the output buffer before reduction
+        nan_propagate (bool): Only meaningful for max/min/absmax on
+            float16/bfloat16. When True, lower to CUDA __hmax_nan/__hmin_nan so
+            NaNs propagate through the reduction. When False (default), use
+            __hmax/__hmin which return the non-NaN operand. CUDA-only.
     """
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
@@ -40,6 +44,8 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
             f"output shape is {out.shape}, expected shapes are {expected_shapes_str}"
         )
+
+    annotations = {"nan_propagate": True} if nan_propagate else None
 
     @macro
     def reduce_macro(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
@@ -63,6 +69,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
                 reduce_type,
                 dim,
                 clear,
+                annotations=annotations,
             )
             copy(red_frag_out, out)
         elif is_shared(buffer) and is_fragment(out):
@@ -78,6 +85,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
                 reduce_type,
                 dim,
                 clear,
+                annotations=annotations,
             )
         elif is_fragment(buffer) and is_shared(out):
             red_frag_out = alloc_fragment(out.shape, out.dtype)
@@ -94,6 +102,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
                 reduce_type,
                 dim,
                 clear,
+                annotations=annotations,
             )
             copy(red_frag_out, out)
         elif is_fragment(buffer) and is_fragment(out):
@@ -105,6 +114,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
                 reduce_type,
                 dim,
                 clear,
+                annotations=annotations,
             )
         else:
             raise ValueError(f"Invalid buffer scopes: {buffer.scope()} and {out.scope()}")
@@ -112,7 +122,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: ReduceKind, dim: in
     reduce_macro(buffer, out, reduce_type, dim, clear)
 
 
-def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, nan_propagate: bool = False) -> None:
     """Perform reduce max on input buffer, store the result to output buffer
 
     Parameters
@@ -125,15 +135,19 @@ def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         The dimension to perform reduce on
     clear : bool
         If set to True, the output buffer will first be initialized to -inf.
+    nan_propagate : bool
+        For float16/bfloat16 only. When True, NaN inputs propagate through the
+        reduction (CUDA __hmax_nan). When False (default), NaN inputs are
+        ignored in favor of the other operand (CUDA __hmax). CUDA-only.
     Returns
     -------
     handle : PrimExpr
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "max", dim, clear)
+    reduce(buffer, out, "max", dim, clear, nan_propagate)
 
 
-def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, nan_propagate: bool = False) -> None:
     """Perform reduce min on input buffer, store the result to output buffer.
 
     Args:
@@ -141,12 +155,15 @@ def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
         clear (bool, optional): If True, output buffer will be initialized to inf. Defaults to True.
+        nan_propagate (bool, optional): For float16/bfloat16 only. When True,
+            NaN inputs propagate (CUDA __hmin_nan). When False (default), NaNs
+            are ignored (CUDA __hmin). CUDA-only.
 
     Returns:
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "min", dim, clear)
+    reduce(buffer, out, "min", dim, clear, nan_propagate)
 
 
 def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
@@ -189,19 +206,22 @@ def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1) -> None:
     reduce(buffer, out, "abssum", dim, True)
 
 
-def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:
+def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True, nan_propagate: bool = False) -> None:
     """Perform reduce absolute max on input buffer, store the result to output buffer.
 
     Args:
         buffer (tir.Buffer): The input buffer
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
+        nan_propagate (bool, optional): For float16/bfloat16 only. When True,
+            NaN inputs propagate (CUDA __hmax_nan). When False (default), NaNs
+            are ignored. CUDA-only.
 
     Returns:
         tir.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "absmax", dim, clear)
+    reduce(buffer, out, "absmax", dim, clear, nan_propagate)
 
 
 def reduce_bitand(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True) -> None:

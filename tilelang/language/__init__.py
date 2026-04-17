@@ -30,6 +30,7 @@ from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
+    CUDASourceCodeKernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
     get_thread_binding,  # noqa: F401
     get_thread_bindings,  # noqa: F401
@@ -51,11 +52,12 @@ from .allocate import (
     alloc_tcgen05_smem_desc,  # noqa: F401
     alloc_tcgen05_instr_desc,  # noqa: F401
     empty,  # noqa: F401
+    alloc_global,  # noqa: F401
 )
 from tvm.script.parser.tir import allocate as allocate  # noqa: F401
-from .copy_op import copy, async_copy, tma_copy, c2d_im2col  # noqa: F401
+from .copy_op import copy, async_copy, tma_copy, transpose, c2d_im2col  # noqa: F401
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
-from .gemm_op import gemm, gemm_v1, gemm_v2  # noqa: F401
+from .gemm_op import gemm, wgmma_gemm, tcgen05_gemm  # noqa: F401
 from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401
 from .fill_op import fill, clear  # noqa: F401
 from .reduce_op import (
@@ -102,6 +104,14 @@ from .builtin import stg32 as stg32  # noqa: F401
 from .builtin import stg64 as stg64  # noqa: F401
 from .builtin import stg128 as stg128  # noqa: F401
 from .builtin import stg256 as stg256  # noqa: F401
+from .builtin import any_sync as any_sync  # noqa: F401
+from .builtin import all_sync as all_sync  # noqa: F401
+from .builtin import ballot_sync as ballot_sync  # noqa: F401
+from .builtin import ballot as ballot  # noqa: F401
+from .builtin import activemask as activemask  # noqa: F401
+from .builtin import syncthreads_count as syncthreads_count  # noqa: F401
+from .builtin import syncthreads_and as syncthreads_and  # noqa: F401
+from .builtin import syncthreads_or as syncthreads_or  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 
@@ -112,6 +122,7 @@ from .annotations import (  # noqa: F401
     annotate_safe_value,
     annotate_l2_hit_ratio,
     annotate_restrict_buffers,
+    annotate_min_blocks_per_sm,
 )
 
 from .random import (
@@ -131,6 +142,12 @@ from .cluster import (
     cluster_wait,  # noqa: F401
     cluster_sync,  # noqa: F401
     block_rank_in_cluster,  # noqa: F401
+    clc_try_cancel,  # noqa: F401
+    clc_try_cancel_multicast,  # noqa: F401
+    clc_is_canceled,  # noqa: F401
+    clc_get_first_ctaid_x,  # noqa: F401
+    clc_get_first_ctaid_y,  # noqa: F401
+    clc_get_first_ctaid_z,  # noqa: F401
 )
 
 

@@ -6,13 +6,20 @@ from tvm import tir
 import numpy as np
 
 
+def _get_float8_dtypes():
+    """Collect available float8 dtypes - some may not exist in older torch versions."""
+    dtypes = set()
+    for name in ("float8_e5m2", "float8_e5m2fnuz", "float8_e4m3fn", "float8_e4m3fnuz"):
+        if hasattr(torch, name):
+            dtypes.add(getattr(torch, name))
+    return dtypes
+
+
+_FLOAT8_DTYPES = _get_float8_dtypes()
+
+
 def is_float8_dtype(dtype: torch.dtype) -> bool:
-    return dtype in {
-        torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-    }
+    return dtype in _FLOAT8_DTYPES
 
 
 def fp8_remove_negative_zeros_(tensor: torch.Tensor):

@@ -92,6 +92,7 @@ typedef
 using int32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using float32x4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 using float32x16 = __attribute__((__vector_size__(16 * sizeof(float)))) float;
+using float32x32 = __attribute__((__vector_size__(32 * sizeof(float)))) float;
 
 using int8x4 = __attribute__((__vector_size__(4 * sizeof(int8_t)))) int8_t;
 
@@ -111,20 +112,26 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
 
 namespace tl {
 
-// Packed FP32x2 math helpers (HIP fallback)
+// Packed x2 element-wise math helpers (HIP scalar fallbacks)
 //
-// CUDA has PTX `.f32x2` instructions that may lower to SASS FADD2/FMUL2/FFMA2
-// on supported architectures. HIP does not expose an equivalent packed-FP32x2
-// instruction, so we provide per-lane scalar fallbacks to keep the TileLang
-// language surface portable.
-TL_DEVICE float2 fadd2(float2 a, float2 b) {
+// HIP does not expose packed-FP32x2 instructions, so we provide per-lane
+// scalar fallbacks to keep the TileLang language surface portable.
+
+TL_DEVICE float2 add2(float2 a, float2 b) {
   float2 out;
   out.x = a.x + b.x;
   out.y = a.y + b.y;
   return out;
 }
 
-TL_DEVICE float2 fmul2(float2 a, float2 b) {
+TL_DEVICE float2 sub2(float2 a, float2 b) {
+  float2 out;
+  out.x = a.x - b.x;
+  out.y = a.y - b.y;
+  return out;
+}
+
+TL_DEVICE float2 mul2(float2 a, float2 b) {
   float2 out;
   out.x = a.x * b.x;
   out.y = a.y * b.y;
@@ -135,6 +142,27 @@ TL_DEVICE float2 fma2(float2 a, float2 b, float2 c) {
   float2 out;
   out.x = a.x * b.x + c.x;
   out.y = a.y * b.y + c.y;
+  return out;
+}
+
+TL_DEVICE float2 max2(float2 a, float2 b) {
+  float2 out;
+  out.x = (a.x > b.x) ? a.x : b.x;
+  out.y = (a.y > b.y) ? a.y : b.y;
+  return out;
+}
+
+TL_DEVICE float2 min2(float2 a, float2 b) {
+  float2 out;
+  out.x = (a.x < b.x) ? a.x : b.x;
+  out.y = (a.y < b.y) ? a.y : b.y;
+  return out;
+}
+
+TL_DEVICE float2 abs2(float2 a) {
+  float2 out;
+  out.x = (a.x >= 0.0f) ? a.x : -a.x;
+  out.y = (a.y >= 0.0f) ? a.y : -a.y;
   return out;
 }
 

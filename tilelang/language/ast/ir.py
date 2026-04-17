@@ -451,6 +451,7 @@ def alloc_buffer(
     offset_factor: int = 0,
     buffer_type: str = "default",
     axis_separators: Optional[List[int]] = None,
+    annotations: Optional[Dict[str, Any]] = None,
 ) -> Buffer:
     """The buffer allocation function.
 
@@ -486,6 +487,10 @@ def alloc_buffer(
     axis_separators : List[int], optional
         The separators between input axes when generating flattened output axes.
 
+    annotations : Dict[str, Any], optional
+        Additional annotation hints for the buffer, e.g. to guide code generation
+        for specific backends.
+
     Returns
     -------
     res : Buffer
@@ -496,18 +501,10 @@ def alloc_buffer(
         strides = [Var(s, T.int32) if isinstance(s, str) else s for s in strides]
     else:
         strides = []
-    return _ffi_api.AllocBuffer(  # type: ignore[attr-defined] # pylint: disable=no-member
-        shape,
-        dtype,
-        data,
-        strides,
-        elem_offset,
-        scope,
-        align,
-        offset_factor,
-        buffer_type,
-        axis_separators,
-    )
+    args = [shape, dtype, data, strides, elem_offset, scope, align, offset_factor, buffer_type, axis_separators]
+    if annotations is not None:
+        args.append(annotations)
+    return _ffi_api.AllocBuffer(*args)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def _as_range(dom: Union[ir.Range, List[PrimExpr]]) -> ir.Range:

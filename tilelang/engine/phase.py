@@ -3,7 +3,7 @@ from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
-from tilelang.contrib.nvcc import have_tma, is_hopper, have_pdl
+from tilelang.contrib.nvcc import have_tma, have_pdl
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -18,32 +18,14 @@ def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target |
     return not disable_warp_specialized
 
 
-def allow_tma_and_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
-    if pass_ctx is None:
-        pass_ctx = tilelang.transform.get_pass_context()
-    if not have_tma(target):
-        return False
-    disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
-    return not disable_tma_lower and allow_warp_specialized(pass_ctx=pass_ctx, target=target)
+def module_has_tma(mod: IRModule) -> bool:
+    """Check if any function in the module was lowered with TMA operations.
 
-
-def allow_tma_lower(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
-    """Return True when TMA lowering is enabled for the given target.
-
-    This is intentionally decoupled from warp specialization so Hopper TMA can
-    be used in a non-warp-specialized pipeline (e.g., no-WS kernels still need
-    mbarrier allocation/init and expect_tx injection).
+    This reads the ``tl.has_tma`` attribute set by ``LowerTileOp`` during
+    ``LowerAndLegalize``, which is the source of truth for whether TMA
+    copies were actually generated.
     """
-    if pass_ctx is None:
-        pass_ctx = tilelang.transform.get_pass_context()
-    if not have_tma(target):
-        return False
-    disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
-    return not disable_tma_lower
-
-
-def allow_fence_proxy(target: Target | None = None) -> bool:
-    return have_tma(target)
+    return any(func.attrs and func.attrs.get("tl.has_tma", False) for _, func in mod.functions.items())
 
 
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
@@ -189,6 +171,26 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
+    # Tile-level warp specialization: runs before layout inference so that
+    # producer/consumer split happens at the high-level tile-op IR.
+    # The pass classifies copy ops as TMA/cp.async/sync inline (no prior
+    # InstructionAnnotation pass needed). Shared buffers are multi-versioned
+    # internally only for functions where the WS transformation actually
+    # applies.
+    if allow_warp_specialized(target=target):
+        mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
+    # LayoutInference so that the use_2cta annotation is visible to infer_layout)
+    mod = tilelang.transform.LowerBlackwell2SM()(mod)
+    # Run pipeline planning and software-pipeline rewriting before layout
+    # inference so inferred layouts see the final pipelined structure directly.
+    mod = tilelang.transform.PipelinePlanning()(mod)
+    # print("After pipeline planing")
+    # print(mod)
+    mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    # print("After InjectSoftwarePipeline")
+    # print(mod)
+    mod = tilelang.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout
@@ -221,40 +223,17 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
     # which may be introduced by the LegalizeSafeMemoryAccess
-    if allow_tma_lower(pass_ctx=pass_ctx, target=target):
-        mod = tilelang.transform.IfStmtBinding()(mod)
-        # MultiVersionBuffer before LowerSharedBarrier so barrier buffers
-        # (shared.barrier scope) can be expanded for pipelining.
-        mod = tilelang.transform.MultiVersionBuffer()(mod)
-        if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-            # Producer-Consumer Warp Specialization:
-            # Splits TMA pipeline loops into producer (TMA loads) and consumer
-            # (compute) warps with mbarrier-based synchronization.
-            # When WS succeeds, it handles the pipeline overlap directly,
-            # so PipelinePlanning + InjectSoftwarePipeline are skipped.
-            # NOTE: LowerSharedBarrier runs ONLY after WS, not before.
-            # Running it before would generate barrier init calls that
-            # WS cannot clean up when it replaces the barriers.
-            mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
-            mod = tilelang.transform.LowerSharedBarrier()(mod)
-        else:
-            mod = tilelang.transform.LowerSharedBarrier()(mod)
-            mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-            mod = tilelang.transform.PipelinePlanning()(mod)
-            mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    mod = tilelang.transform.IfStmtBinding()(mod)
+    has_tma = module_has_tma(mod)
+    # Pipeline barriers are now created at final expanded size by
+    # InjectSoftwarePipeline, so no late MVB barrier fixup is needed.
+    # Buffer allocation placement is handled uniformly for both paths.
+    mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
+    mod = tilelang.transform.LowerSharedBarrier()(mod)
+    if has_tma:
         mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
-        mod = tilelang.transform.LowerOpaqueBlock()(mod)
-        if is_hopper(target):
-            mod = tilelang.transform.RewriteWgmmaSync()(mod)
-    else:
-        mod = tilelang.transform.LowerSharedBarrier()(mod)
-        mod = tilelang.transform.IfStmtBinding()(mod)
-        mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        mod = tilelang.transform.PipelinePlanning()(mod)
-        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+    mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
-    mod = tilelang.transform.Simplify()(mod)
-    mod = tilelang.transform.OptimizeCPAsyncSync()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
@@ -301,18 +280,19 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
-    if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
-        mod = tilelang.transform.InjectFenceProxy()(mod)
-    else:
-        if allow_fence_proxy(target=target):
-            # in hopper device, wgmma is an async proxy
-            # so we need to inject a fence proxy before it
-            mod = tilelang.transform.InjectFenceProxy()(mod)
+    # InjectFenceProxy is a no-op on targets that lack the TMA / async-proxy
+    # programming model; the pass itself checks the PrimFunc's target.
+    mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    # Inject conservative tcgen05 fences on Blackwell (SM100+).
+    # Must run after ThreadSync so that tvm_storage_sync calls are present.
+    # The pass handles shared syncs and simple linear wait/use, use/arrive
+    # handoffs, and is a no-op on non-SM100 targets or functions without TMEM.
+    mod = tilelang.transform.InjectTcgen05Fence()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     # NOTE: LowerPTXAsyncCopy is applied earlier (before PipelinePlanning).
-    if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
+    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)

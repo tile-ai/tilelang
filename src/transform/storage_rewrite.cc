@@ -285,6 +285,8 @@ public:
       VisitNewScope(op);
     } else if (op->attr_key == tir::attr::virtual_thread) {
       VisitNewScope(op);
+    } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
+      VisitNewScope(op);
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }
@@ -575,6 +577,7 @@ public:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent ||
         op->attr_key == tir::attr::virtual_thread ||
+        op->attr_key == tl::attr::kLexicalAllocScope ||
         tir::attr::IsPragmaKey(op->attr_key)) {
       // remake all the allocation at the attach scope.
       if (attach_map_.count(op)) {
@@ -954,6 +957,21 @@ private:
     }
   }
 
+  /*! \brief Return the effective attach scope for the given storage scope.
+   *
+   * lexical_alloc_scope is intended to bound register/local-like allocations.
+   * Shared/global allocations should continue to follow thread_scope_ so we do
+   * not accidentally re-scope shared buffers nested inside a lexical block.
+   */
+  const Object *effective_scope(const StorageScope &storage_scope) const {
+    if (lexical_scope_ != nullptr &&
+        storage_scope.rank != StorageRank::kGlobal &&
+        storage_scope.rank != StorageRank::kShared) {
+      return lexical_scope_;
+    }
+    return thread_scope_;
+  }
+
   // Memory plan algorithm
   void
   PlanMemory(const std::vector<StmtEntry> &seq,
@@ -990,7 +1008,8 @@ private:
                 InplaceOpVerifier visitor;
                 StorageEntry *src_entry = alloc_map_.at(src);
                 if (src_entry->scope == storage_scope &&
-                    src_entry->attach_scope_ == thread_scope_ &&
+                    src_entry->attach_scope_ ==
+                        effective_scope(storage_scope) &&
                     src_entry->elem_type == alloc->dtype.element_of() &&
                     visitor.Check(s.stmt, var, src)) {
                   uint64_t const_nbits =
@@ -1007,9 +1026,10 @@ private:
             }
           }
           if (dst_entry == nullptr) {
-            dst_entry = FindAlloc(alloc, thread_scope_, storage_scope,
-                                  entry.num_physical_dimensions, enable_reuse,
-                                  reuse_require_exact_matched_dtype);
+            dst_entry =
+                FindAlloc(alloc, effective_scope(storage_scope), storage_scope,
+                          entry.num_physical_dimensions, enable_reuse,
+                          reuse_require_exact_matched_dtype);
           }
           dst_entry->allocs.emplace_back(alloc);
           alloc_map_[var] = dst_entry;
@@ -1022,6 +1042,33 @@ private:
             op->attr_key == tir::attr::virtual_thread ||
             tir::attr::IsPragmaKey(op->attr_key)) {
           PlanNewScope(op);
+        } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
+          if (s.scope_pair_offset > 0) {
+            // Entering: redirect allocation attachment to this scope.
+            // thread_scope_ is NOT touched so PlanNewScope keeps working.
+            lexical_scope_stack_.push_back(lexical_scope_);
+            lexical_scope_ = op;
+          } else {
+            // Exiting: clear free lists for this scope and restore.
+            for (auto it = const_free_map_.begin();
+                 it != const_free_map_.end();) {
+              if (it->second->attach_scope_ == op) {
+                it = const_free_map_.erase(it);
+              } else {
+                ++it;
+              }
+            }
+            for (auto it = sym_free_list_.begin();
+                 it != sym_free_list_.end();) {
+              if ((*it)->attach_scope_ == op) {
+                it = sym_free_list_.erase(it);
+              } else {
+                ++it;
+              }
+            }
+            lexical_scope_ = lexical_scope_stack_.back();
+            lexical_scope_stack_.pop_back();
+          }
         } else {
           ICHECK(op->attr_key == tir::attr::extern_scope);
         }
@@ -1179,6 +1226,11 @@ private:
   }
   // thread scope.
   const Object *thread_scope_{nullptr};
+  // Current lexical scope (set by lexical_alloc_scope, independent of
+  // thread_scope_ so that PlanNewScope's toggle protocol is preserved).
+  const Object *lexical_scope_{nullptr};
+  // Stack for nested lexical scopes.
+  std::vector<const Object *> lexical_scope_stack_;
   // whether enable inplace detection.
   bool detect_inplace_{false};
   // Locations of free ops.
@@ -1515,6 +1567,17 @@ public:
     // vectorized pointer types (e.g. float16x4*).  Once they do, this if
     // statement should instead be replaced by the below ICHECK_EQ.
     if (index_lanes * var_info.element_dtype.lanes() != value_dtype.lanes()) {
+      // If the total element sizes differ (e.g. a bfloat16 view of a
+      // bfloat16x2 buffer where each bfloat16x2 = 4 bytes but bfloat16 = 2
+      // bytes), this is a reinterpret-cast view access with a finer-grained
+      // element type.  The buffer's declared element dtype must not be
+      // downgraded in this case; just skip lane tracking for this access.
+      int declared_bytes =
+          var_info.element_dtype.bits() * var_info.element_dtype.lanes() / 8;
+      int access_bytes = value_dtype.bits() * value_dtype.lanes() / 8;
+      if (access_bytes != declared_bytes) {
+        return;
+      }
       ICHECK_EQ(index_lanes, value_dtype.lanes());
       lanes_used = 1;
       var_info.element_dtype = var_info.element_dtype.with_lanes(1);

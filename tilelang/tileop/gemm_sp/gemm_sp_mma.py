@@ -85,9 +85,9 @@ class GemmSPMMA(GemmSPBase):
         local_size_e = mma_emitter.local_size_e
         local_size_b = mma_emitter.local_size_b
         micro_size_k = mma_emitter.micro_size_k
-        A_shared = self.A
-        E_shared = self.E
-        B_shared = self.B
+        A_shared = self.ARegion
+        E_shared = self.ERegion
+        B_shared = self.BRegion
         C_local = self.C
         clear_accum = self.clear_accum
         assert micro_size_k <= self.K, f"K dimension {self.K} should be >= micro size k {micro_size_k}"

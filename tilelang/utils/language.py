@@ -384,13 +384,19 @@ def retrieve_dtype(obj: BufferLikeType) -> str:
 
 def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     """
-    Compute the number of bits in a Buffer (shape with dtype)."""
+    Compute the number of bits in a Buffer (shape with dtype).
+
+    For vector types (e.g. ``bfloat16x2``) ``DataType.bits`` returns the
+    per-lane width, not the full element width.  Multiply by ``lanes`` so
+    that the total bit count is correct.
+    """
     if len(shape) == 0:
         return tir.IntImm("int32", 1)
     result = shape[0]
     for i in range(1, len(shape)):
         result = result * shape[i]
-    return result * DataType(dtype).bits
+    dt = DataType(dtype)
+    return result * dt.bits * dt.lanes
 
 
 def prim_expr_equal(lhs, rhs) -> bool:

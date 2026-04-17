@@ -63,6 +63,18 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
   throw; // Unreachable
 }
 
+AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
+                                     int default_access_mask) {
+  if (const auto *call = arg.as<CallNode>()) {
+    if (call->op.same_as(RegionOp::Get())) {
+      RegionOp region(call->args);
+      return {BufferRegion(region->GetBuffer(), region->GetRanges()),
+              region->GetAccessMask()};
+    }
+  }
+  return {NormalizeToBufferRegion(arg), default_access_mask};
+}
+
 PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
                                  bool require_2d) {
   Buffer buf = region->buffer;

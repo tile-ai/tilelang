@@ -17,11 +17,11 @@ namespace tvm {
 namespace tl {
 
 TVM_REGISTER_PASS_CONFIG_OPTION(kDebugMergeSharedMemoryAllocations, Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableSafeMemoryLegalize, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWarpSpecialized, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableThreadStorageSync, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kConfigIndexBitwidth, Integer);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAggressiveSharedMemoryMerge, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kForceLetInline, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableFastMath, Bool);
@@ -88,6 +88,12 @@ TIR_DEFINE_TL_BUILTIN(__cos).set_num_inputs(1).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(__sin).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(max_nan).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(min_nan).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 // high precision with IEEE-compliant
 TIR_DEFINE_TL_BUILTIN(ieee_add).set_num_inputs(3).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
@@ -117,14 +123,26 @@ TIR_DEFINE_TL_BUILTIN(ieee_frsqrt)
 TIR_DEFINE_TL_BUILTIN(ieee_fdiv).set_num_inputs(3).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
-// Packed FP32x2 math intrinsics (PTX `.f32x2`)
-TIR_DEFINE_TL_BUILTIN(fadd2).set_num_inputs(2).set_attr<TCallEffectKind>(
+// Packed x2 element-wise math intrinsics (float32x2, bfloat16x2, float16x2)
+TIR_DEFINE_TL_BUILTIN(add2).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
-TIR_DEFINE_TL_BUILTIN(fmul2).set_num_inputs(2).set_attr<TCallEffectKind>(
+TIR_DEFINE_TL_BUILTIN(sub2).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(mul2).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(fma2).set_num_inputs(3).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(max2).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(min2).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(abs2).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(rng_init).set_num_inputs(4).set_attr<TCallEffectKind>(
@@ -199,6 +217,11 @@ TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ts)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(deallocate_tmem)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(ptx_init_tensor_memory)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -239,13 +262,23 @@ TIR_DEFINE_TL_BUILTIN(fence_proxy_async)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(tcgen05_before_thread_sync)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_after_thread_sync)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(tma_store_arrive)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(tma_store_wait)
-    .set_num_inputs(0)
+    .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 TIR_DEFINE_TL_BUILTIN(set_max_nreg)
@@ -331,6 +364,36 @@ TIR_DEFINE_TL_BUILTIN(block_rank_in_cluster)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(clc_try_cancel)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(clc_try_cancel_multicast)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(clc_is_canceled)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(clc_get_first_ctaid_x)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(clc_get_first_ctaid_y)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(clc_get_first_ctaid_z)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(sync_grid).set_num_inputs(0).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
@@ -344,6 +407,74 @@ TIR_DEFINE_TL_BUILTIN(pdl_trigger)
 
 TIR_DEFINE_TL_BUILTIN(pdl_sync).set_num_inputs(0).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+// Warp-vote / warp-ballot intrinsics. These synchronize the warp, so they are
+// marked opaque to prevent reordering across divergent control flow.
+TIR_DEFINE_TL_BUILTIN(any_sync).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(all_sync).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ballot_sync)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ballot).set_num_inputs(1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(activemask)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+// Block-wide predicated barriers.
+TIR_DEFINE_TL_BUILTIN(syncthreads_count)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(syncthreads_and)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(syncthreads_or)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+// Warp-shuffle intrinsics. All four accept (mask, value, lane_or_offset,
+// width) and are opaque because they involve inter-lane communication.
+TIR_DEFINE_TL_BUILTIN(shfl_sync).set_num_inputs(4).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(shfl_xor_sync)
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(shfl_down_sync)
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(shfl_up_sync)
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+// Warp match-any/match-all intrinsics (CUDA sm_70+). HIP lowering errors.
+TIR_DEFINE_TL_BUILTIN(match_any_sync)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(match_all_sync)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(loop_break)
     .set_num_inputs(0)
@@ -458,6 +589,16 @@ TIR_DEFINE_TL_BUILTIN(device_assert_with_msg)
 
 TIR_DEFINE_TL_BUILTIN(tcgen05_mma_arrive)
     .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_ld)
+    .set_num_inputs(6)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tcgen05_st)
+    .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

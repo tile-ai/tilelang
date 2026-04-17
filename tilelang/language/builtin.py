@@ -252,11 +252,43 @@ def access_ptr(
     )
 
 
+def deallocate_tmem(tmem: tir.Buffer) -> None:
+    """Explicitly deallocate a TMEM buffer allocated by ``T.alloc_tmem``.
+
+    By default, TileLang inserts a TMEM deallocation automatically at the end
+    of the allocation block. Calling ``T.deallocate_tmem(buf)`` suppresses that
+    automatic tail deallocation for ``buf`` and lowers an explicit deallocation
+    at the call site instead.
+
+    Notes:
+    - The deallocation must obey the hardware TMEM rules: it should be issued by
+      the same warp that performed the allocation.
+    - Once this API is used, the buffer lifetime is user-managed for the current
+      block; deallocating too early or conditionally is the user's responsibility.
+
+    Args:
+        tmem: A TMEM buffer previously returned by ``T.alloc_tmem``.
+    """
+
+    if not isinstance(tmem, tir.Buffer):
+        raise TypeError(f"T.deallocate_tmem expects a tvm.tir.Buffer, but got {type(tmem)}.")
+    if tmem.scope() != "shared.tmem":
+        raise ValueError(f"T.deallocate_tmem expects a shared.tmem buffer, but got scope={tmem.scope()}.")
+
+    return evaluate(tir.call_intrin("handle", tir.op.Op.get("tl.deallocate_tmem"), tmem.data))
+
+
 def create_tma_descriptor(*args):
     """Create a Tensor Memory Access (TMA) descriptor.
 
-    Args:
-        *args: Variable arguments defining the TMA descriptor configuration
+    This is an internal API used by copy lowering. The argument list depends on
+    the tensor rank and encodes the full TMA descriptor configuration:
+
+        create_tma_descriptor(data_type, rank, global_addr,
+            global_shape..., global_stride..., smem_box..., smem_stride...,
+            interleave, swizzle, l2_promotion, oob_fill)
+
+    Total arguments: 7 + 4 * rank.
 
     Returns:
         tir.Call: A handle to the created TMA descriptor
@@ -267,8 +299,9 @@ def create_tma_descriptor(*args):
 def tma_load(*args):
     """Perform a Tensor Memory Access (TMA) load operation.
 
-    Args:
-        *args: Variable arguments specifying the TMA load parameters
+    This is an internal API used by copy lowering. Arguments:
+
+        tma_load(descriptor, mbarrier, smem_addr, coord_0, ..., coord_n, eviction_policy)
 
     Returns:
         tir.Call: A handle to the TMA load operation
@@ -276,40 +309,56 @@ def tma_load(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args)
 
 
-def fence_proxy_async(*args):
-    """Create a fence for asynchronous proxy operations.
+def tma_load_2sm(*args):
+    """Perform a TMA load with 2SM (two Streaming Multiprocessors) on Blackwell.
 
-    Args:
-        *args: Variable arguments for fence configuration
+    This is an internal API. Same arguments as :func:`tma_load`, but with
+    the ``use_2cta`` annotation enabled for 2-CTA cooperative loading.
+
+    Returns:
+        tir.Call: A handle to the TMA load operation
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args, annotations={"use_2cta": 1})
+
+
+def fence_proxy_async():
+    """Issue a shared memory fence for asynchronous proxy operations.
+
+    Ensures that prior asynchronous operations (e.g. TMA stores) are visible
+    to subsequent memory accesses. Maps to ``fence.proxy.async.shared::cta``.
 
     Returns:
         tir.Call: A handle to the fence operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_proxy_async"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_proxy_async"))
 
 
-def tma_store_arrive(*args):
+def tma_store_arrive():
     """Signal the arrival of a TMA store operation.
 
-    Args:
-        *args: Variable arguments for the store arrival operation
+    Commits the current group of outstanding TMA store operations.
+    Maps to ``cp.async.bulk.commit_group``.
 
     Returns:
         tir.Call: A handle to the store arrive operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_arrive"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_arrive"))
 
 
-def tma_store_wait(*args):
+def tma_store_wait(count: int = 0):
     """Wait for completion of TMA store operations.
 
+    Waits until the number of outstanding TMA store groups is at most ``count``.
+    Maps to the PTX instruction ``cp.async.bulk.wait_group.read <count>``.
+
     Args:
-        *args: Variable arguments specifying which store operations to wait for
+        count (int): The maximum number of outstanding store groups allowed
+            to remain in flight. Defaults to 0 (wait for all stores to complete).
 
     Returns:
         tir.Call: A handle to the store wait operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_wait"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_wait"), count)
 
 
 def set_max_nreg(reg_count: int, is_inc: int):
@@ -445,6 +494,14 @@ def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):
     """
     mbarrier = _mbar_to_buffer_load(mbarrier)
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), mbarrier, tx)
+
+
+def mbarrier_arrive_expect_tx(mbarrier: BarrierType, tx: int):
+    """Arrive at a memory barrier and expect completion of async transactions."""
+    from tilelang.language.tir.op import ptx_arrive_barrier_expect_tx
+
+    mbarrier = _mbar_to_buffer_load(mbarrier)
+    return ptx_arrive_barrier_expect_tx(mbarrier, tx)
 
 
 def warpgroup_arrive():
@@ -817,47 +874,57 @@ def barrier_arrive(mbarrier: BarrierType):
     return mbarrier_arrive(mbarrier)
 
 
-def shfl_xor(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
-    """Perform a shuffle operation with XOR offset.
+# Full-warp mask as a proper uint32 TIR constant so the emitted C/C++ source
+# prints as `0xFFFFFFFFu` instead of `(int64_t)4294967295` after TIR widening.
+_FULL_WARP_MASK = tir.const(0xFFFFFFFF, "uint32")
+_DEFAULT_SHFL_WIDTH = 32
 
-    Args:
-        value: Optional[int, PrimExpr]
-            The value to shuffle
-        offset: Optional[int, PrimExpr]
-            The offset for the shuffle operation
-    Returns:
-        tir.Call: A handle to the shuffle operation
+
+def _as_uint32_mask(mask: int | PrimExpr) -> PrimExpr:
+    """Normalize a warp lane mask to a uint32 TIR expression.
+
+    Python literals (e.g. ``0xFFFFFFFF``) would otherwise be widened to int64
+    by TIR and printed as ``(int64_t)4294967295`` in the generated source.
     """
-    if _IS_HIP_AVAILABLE:
-        return tir.call_extern(value.dtype, "__shfl_xor", value, offset)
-    else:
-        return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xFFFFFFFF, value, offset)
+    if isinstance(mask, int):
+        return tir.const(mask, "uint32")
+    return mask
 
 
-def shfl_down(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
-    """Perform a shuffle operation with down offset.
-
-    Args:
-        value: Optional[int, PrimExpr]
-            The value to shuffle
+def shfl_xor(
+    value: int | PrimExpr | tir.Call,
+    delta: int | PrimExpr | tir.Call,
+    width: int | PrimExpr = _DEFAULT_SHFL_WIDTH,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+):
+    """XOR-swap ``value`` across lanes (``__shfl_xor_sync`` on CUDA,
+    ``__shfl_xor`` on HIP — mask ignored on HIP).
     """
-    if _IS_HIP_AVAILABLE:
-        return tir.call_extern(value.dtype, "__shfl_down", value, offset)
-    else:
-        return tir.call_extern(value.dtype, "__shfl_down_sync", 0xFFFFFFFF, value, offset)
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.shfl_xor_sync"), _as_uint32_mask(mask), value, delta, width)
 
 
-def shfl_up(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
-    """Perform a shuffle operation with up offset.
-
-    Args:
-        value: Optional[int, PrimExpr]
-            The value to shuffle
+def shfl_down(
+    value: int | PrimExpr | tir.Call,
+    delta: int | PrimExpr | tir.Call,
+    width: int | PrimExpr = _DEFAULT_SHFL_WIDTH,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+):
+    """Shift ``value`` down by ``delta`` lanes (``__shfl_down_sync`` on CUDA,
+    ``__shfl_down`` on HIP).
     """
-    if _IS_HIP_AVAILABLE:
-        return tir.call_extern(value.dtype, "__shfl_up", value, offset)
-    else:
-        return tir.call_extern(value.dtype, "__shfl_up_sync", 0xFFFFFFFF, value, offset)
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.shfl_down_sync"), _as_uint32_mask(mask), value, delta, width)
+
+
+def shfl_up(
+    value: int | PrimExpr | tir.Call,
+    delta: int | PrimExpr | tir.Call,
+    width: int | PrimExpr = _DEFAULT_SHFL_WIDTH,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+):
+    """Shift ``value`` up by ``delta`` lanes (``__shfl_up_sync`` on CUDA,
+    ``__shfl_up`` on HIP).
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.shfl_up_sync"), _as_uint32_mask(mask), value, delta, width)
 
 
 def sync_threads(barrier_id: int = None, arrive_count: int = None):
@@ -877,11 +944,157 @@ def sync_warp(mask: int = None):
     return tir.call_intrin("void", tir.op.Op.get("tl.sync_warp"))
 
 
-def shfl_sync(mask: int, value: int | PrimExpr, srcLane: int, width: int = None):
-    """Receives data from a thread in the same warp."""
-    if width is None:
-        return tir.call_extern(value.dtype, "__shfl_sync", mask, value, srcLane)
-    return tir.call_extern(value.dtype, "__shfl_sync", mask, value, srcLane, width)
+def shfl_sync(
+    value: int | PrimExpr,
+    srcLane: int | PrimExpr,
+    width: int | PrimExpr = _DEFAULT_SHFL_WIDTH,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+):
+    """Broadcast ``value`` from ``srcLane`` to all lanes in the subgroup of
+    ``width`` lanes (``__shfl_sync`` on CUDA, ``__shfl`` on HIP — mask ignored
+    on HIP).
+    """
+    return tir.call_intrin(value.dtype, tir.op.Op.get("tl.shfl_sync"), _as_uint32_mask(mask), value, srcLane, width)
+
+
+# ---------------------------------------------------------------------------
+# Warp-vote / warp-ballot intrinsics
+#
+# The CUDA/HIP split and the uint32->uint64 zero-extension for ballot_sync and
+# activemask are handled in codegen (src/target/codegen_{cuda,hip}.cc). These
+# Python wrappers simply emit the backend-agnostic tl.* ops.
+# ---------------------------------------------------------------------------
+
+
+def any_sync(
+    predicate: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Non-zero if ANY active lane in ``mask`` has a non-zero ``predicate``.
+
+    Lowers to ``__any_sync(mask, predicate)`` on CUDA and ``__any(predicate)``
+    on HIP (the mask is ignored on HIP because the full wavefront is always
+    convergent).
+
+    Args:
+        predicate: Integer condition to test.
+        mask: Warp lane mask (defaults to ``0xFFFFFFFF``, i.e. all 32 lanes).
+
+    Returns:
+        int32: Non-zero if any thread in the mask has a non-zero predicate.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.any_sync"), _as_uint32_mask(mask), predicate)
+
+
+def all_sync(
+    predicate: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Non-zero only if ALL active lanes in ``mask`` have a non-zero predicate.
+
+    Lowers to ``__all_sync(mask, predicate)`` on CUDA and ``__all(predicate)``
+    on HIP.
+
+    Args:
+        predicate: Integer condition to test.
+        mask: Warp lane mask (defaults to ``0xFFFFFFFF``, i.e. all 32 lanes).
+
+    Returns:
+        int32: Non-zero if all threads in the mask have a non-zero predicate.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.all_sync"), _as_uint32_mask(mask), predicate)
+
+
+def ballot_sync(
+    predicate: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Return a ``uint64`` bitmask of lanes in ``mask`` whose predicate is set.
+
+    CUDA: ``__ballot_sync(mask, predicate)`` returns ``unsigned int``; codegen
+    zero-extends it to ``uint64`` (upper 32 bits always zero for 32-wide warps).
+    HIP: ``__ballot(predicate)`` returns ``uint64`` natively, covering all
+    64 wavefront lanes. The mask argument is ignored on HIP.
+
+    Returns:
+        uint64: Bitmask with bit N set if lane N's predicate is non-zero.
+    """
+    return tir.call_intrin("uint64", tir.op.Op.get("tl.ballot_sync"), _as_uint32_mask(mask), predicate)
+
+
+def ballot(predicate: int | PrimExpr) -> PrimExpr:
+    """Full-warp / full-wavefront ballot. Equivalent to
+    ``ballot_sync(predicate)`` (i.e. with the default full warp mask).
+
+    Returns:
+        uint64: Bitmask with bit N set if lane N's predicate is non-zero.
+    """
+    return tir.call_intrin("uint64", tir.op.Op.get("tl.ballot"), predicate)
+
+
+def activemask() -> PrimExpr:
+    """Return a ``uint64`` bitmask of currently active (non-exited) lanes.
+
+    Lowers to ``__activemask()`` (zero-extended to ``uint64``) on CUDA and
+    ``__ballot(1)`` on HIP.
+    """
+    return tir.call_intrin("uint64", tir.op.Op.get("tl.activemask"))
+
+
+# ---------------------------------------------------------------------------
+# Thread-block synchronization with predicate (shared across CUDA & HIP)
+# ---------------------------------------------------------------------------
+
+
+def syncthreads_count(predicate: int | PrimExpr) -> PrimExpr:
+    """Block barrier that returns the number of threads whose ``predicate``
+    evaluates to non-zero (``__syncthreads_count`` on CUDA and HIP).
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.syncthreads_count"), predicate)
+
+
+def syncthreads_and(predicate: int | PrimExpr) -> PrimExpr:
+    """Block barrier that returns non-zero only if ALL threads have a non-zero
+    ``predicate`` (``__syncthreads_and`` on CUDA and HIP).
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.syncthreads_and"), predicate)
+
+
+def syncthreads_or(predicate: int | PrimExpr) -> PrimExpr:
+    """Block barrier that returns non-zero if ANY thread has a non-zero
+    ``predicate`` (``__syncthreads_or`` on CUDA and HIP).
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.syncthreads_or"), predicate)
+
+
+# ---------------------------------------------------------------------------
+# Warp match intrinsics (CUDA sm_70+; unsupported on HIP)
+# ---------------------------------------------------------------------------
+
+
+def match_any_sync(
+    value: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Return a ``uint32`` bitmask of lanes in ``mask`` whose ``value`` equals
+    the calling lane's value. Lowers to ``__match_any_sync`` on CUDA
+    (compute capability >= 7.0). Not supported on HIP.
+    """
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.match_any_sync"), _as_uint32_mask(mask), value)
+
+
+def match_all_sync(
+    value: int | PrimExpr,
+    mask: int | PrimExpr = _FULL_WARP_MASK,
+) -> PrimExpr:
+    """Return ``mask`` if all lanes in ``mask`` agree on ``value``, else 0.
+
+    Lowers to ``__match_all_sync`` on CUDA (compute capability >= 7.0); the
+    trailing ``int*`` predicate output is hidden in codegen and discarded.
+    Callers can reconstruct the predicate as ``result != 0``. Not supported
+    on HIP.
+    """
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.match_all_sync"), _as_uint32_mask(mask), value)
 
 
 def sync_global():
@@ -995,17 +1208,29 @@ def cp_async_barrier_noinc(barrier: BarrierType):
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier)
 
 
-def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr):
+def tcgen05_mma_arrive(mbar: tir.Buffer | BufferLoad | PrimExpr, arrive_2cta: bool = False):
     """Signal UMMA (TCGEN05) barrier arrival for a shared-memory mbarrier pointer.
 
     Parameters
     ----------
     mbar: tir.Buffer | BufferLoad | PrimExpr
         The mbarrier object in shared memory (e.g., Barrier*) or its address.
+    arrive_2cta: bool
+        Whether to also arrive at the peer CTA's barrier.
+        If set, will be lowered to umma_arrive_multicast_2x1SM.
     """
     if isinstance(mbar, (tir.Buffer, BufferLoad)):
         mbar = retrieve_ptr(mbar, access_type="rw")
-    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar)
+    ann = {"use_2cta": 1} if arrive_2cta else {}
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_mma_arrive"), mbar, annotations=ann)
+
+
+def tcgen05_before_thread_sync():
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_before_thread_sync"))
+
+
+def tcgen05_after_thread_sync():
+    return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
 
 
 def ptx_mma_sm70(

@@ -12,11 +12,7 @@ tilelang.testing.set_random_seed(42)
 # auto warp specialization may have some bugs.
 @tilelang.jit(
     out_idx=[-1],
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def native_sparse_attention(
     batch,

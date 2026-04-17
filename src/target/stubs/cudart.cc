@@ -54,6 +54,14 @@ static_assert(CUDART_VERSION >= 11000,
 
 namespace {
 
+constexpr const char *kLibCudartPaths[] = {
+    "libcudart.so",
+    // Some distros ship a versioned SONAME as well; try a few common ones.
+    "libcudart.so.13",
+    "libcudart.so.12",
+    "libcudart.so.11",
+};
+
 using CudaGraphInstantiateLegacy = cudaError_t (*)(cudaGraphExec_t *pGraphExec,
                                                    cudaGraph_t graph,
                                                    cudaGraphNode_t *pErrorNode,
@@ -77,8 +85,17 @@ void *TryLoadLibCudart() {
     return RTLD_NEXT;
   }
 
+  // Otherwise, attempt to dlopen the library directly.
+  void *handle = nullptr;
+  for (const char *path : kLibCudartPaths) {
+    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
+    if (handle != nullptr) {
+      return handle;
+    }
+  }
+
   fprintf(stderr,
-          "TileLang Error: libcudart symbols not found globally. "
+          "TileLang Error: libcudart symbols not found. "
           "Make sure PyTorch with CUDA is installed before using TileLang.\n");
   abort();
 }

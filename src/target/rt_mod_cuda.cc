@@ -9,6 +9,36 @@
 namespace tvm {
 namespace codegen {
 
+static std::string GetDeviceGlobalSymbol(const GlobalVar &gvar,
+                                         const tir::PrimFunc &f) {
+  if (auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol)) {
+    return static_cast<std::string>(global_symbol.value());
+  }
+  return gvar->name_hint;
+}
+
+static void ValidateUniqueDeviceGlobalSymbols(const IRModule &mod) {
+  std::unordered_map<std::string, std::string> symbol_to_gvar;
+
+  for (auto kv : mod->functions) {
+    ICHECK(kv.second->IsInstance<tir::PrimFuncNode>())
+        << "Can only lower IR Module with PrimFuncs";
+    auto gvar = Downcast<GlobalVar>(kv.first);
+    auto f = Downcast<tir::PrimFunc>(kv.second);
+    std::string global_symbol = GetDeviceGlobalSymbol(gvar, f);
+
+    auto [it, inserted] =
+        symbol_to_gvar.emplace(global_symbol, gvar->name_hint);
+    ICHECK(inserted)
+        << "Duplicate CUDA kernel global_symbol `" << global_symbol
+        << "` found on PrimFuncs `" << it->second << "` and `"
+        << gvar->name_hint
+        << "`. T.CUDASourceCodeKernel emits raw CUDA source without "
+           "renaming, so CUDA entry names must be unique within the compiled "
+           "module.";
+  }
+}
+
 static std::unordered_map<std::string, runtime::FunctionInfo>
 ExtractFuncInfo(const IRModule &mod) {
   std::unordered_map<std::string, runtime::FunctionInfo> fmap;
@@ -56,8 +86,7 @@ ExtractFuncInfo(const IRModule &mod) {
         }
       }
     }
-    auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
-    fmap[static_cast<std::string>(global_symbol.value())] = info;
+    fmap[GetDeviceGlobalSymbol(Downcast<GlobalVar>(kv.first), f)] = info;
   }
   return fmap;
 }
@@ -66,6 +95,12 @@ ffi::Module BuildTileLangCUDA(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
+
+  ValidateUniqueDeviceGlobalSymbols(mod);
+  if (const auto f =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_validate")) {
+    (*f)(mod);
+  }
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
@@ -102,6 +137,12 @@ ffi::Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
+
+  ValidateUniqueDeviceGlobalSymbols(mod);
+  if (const auto f =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_validate")) {
+    (*f)(mod);
+  }
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
