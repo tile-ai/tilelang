@@ -187,8 +187,12 @@ private:
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
 // annotations: Map containing coalesced_width, disable_tma, eviction_policy,
-// etc.
+// dst_block, etc.
 Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ICHECK_EQ(args.size(), 2U)
+      << "Copy expects exactly 2 arguments (src, dst); optional attributes "
+         "must be passed via annotations, but got "
+      << args.size();
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
@@ -197,9 +201,7 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
   node->SetAccessRegions({src_access, dst_access});
-  // Copy annotations from the Call node
-  // then override with positional
-  // args when provided for backward compatibility.
+  // Copy lowering hints directly from the Call node annotations.
   node->annotations = annotations;
   if (auto dst_block = node->annotations.Get("dst_block")) {
     if (auto int_imm = dst_block->as<IntImmNode>()) {
@@ -208,28 +210,6 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
       }
     } else {
       node->dst_block = Downcast<PrimExpr>(dst_block.value());
-    }
-  }
-  if (args.size() >= 3) {
-    auto coalesced_width = Downcast<IntImm>(args[2]);
-    if (coalesced_width->value > 0) {
-      node->annotations.Set(attr::kCoalescedWidth, coalesced_width);
-    }
-  }
-  if (args.size() >= 4) {
-    node->annotations.Set("disable_tma", Downcast<Bool>(args[3]));
-  }
-  if (args.size() >= 5) {
-    node->annotations.Set("eviction_policy", args[4]);
-  }
-  if (args.size() >= 6) {
-    auto dst_block = args[5];
-    if (auto int_imm = dst_block.as<IntImmNode>()) {
-      if (int_imm->value != -1) {
-        node->dst_block = dst_block;
-      }
-    } else {
-      node->dst_block = dst_block;
     }
   }
   data_ = std::move(node);
@@ -3006,11 +2986,11 @@ void CopyNode::CollectFragmentLayouts(const PrimExpr &expr,
 
 // Register the Copy operation with TVM's TIR system
 // This makes the copy operation available for use in TVM programs
-// - Takes 5 inputs: src_buffer, dst_buffer, coalesced_width, disable_tma,
-// eviction_policy
+// - Takes 2 inputs: src region and dst region
+// - Optional lowering hints are carried in Call annotations
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
-    .set_num_inputs(6)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -3024,7 +3004,7 @@ TVM_REGISTER_OP("tl.tileop.async_copy")
                                        IntImm(DataType::Int(32), 1));
                                return Copy(args, ann);
                              })
-    .set_num_inputs(5)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -3040,7 +3020,7 @@ TVM_REGISTER_OP("tl.tileop.tma_copy")
                                        IntImm(DataType::Int(32), 1));
                                return Copy(args, ann);
                              })
-    .set_num_inputs(5)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
