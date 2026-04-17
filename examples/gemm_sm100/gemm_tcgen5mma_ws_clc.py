@@ -104,11 +104,9 @@ def gemm_clc_persistent_2cta(
                         break
 
                 T.mbarrier_wait_parity(tmem_empty[work_iter & 1], ((work_iter // 2) & 1) ^ 1)
-                T.tcgen05_after_thread_sync()
                 for k in T.serial(k_blocks):
                     phase = work_iter * k_blocks + k
                     T.mbarrier_wait_parity(loaded[phase % num_stages], (phase // num_stages) & 1)
-                    T.tcgen05_after_thread_sync()
                     if work_iter & 1 == 0:
                         T.tcgen05_gemm(
                             A_shared[phase % num_stages, :, :],
@@ -161,13 +159,11 @@ def gemm_clc_persistent_2cta(
                 bx, by = get_swizzled_block_idx(tile_id, group_size, m_clusters, cta_id)
 
                 T.mbarrier_wait_parity(tmem_full[work_iter & 1], (work_iter // 2) & 1)
-                T.tcgen05_after_thread_sync()
                 T.sync_threads(1, 128)
                 if work_iter & 1 == 0:
                     T.copy(C_tmem_0, C_local)
                 else:
                     T.copy(C_tmem_1, C_local)
-                T.tcgen05_before_thread_sync()
                 T.mbarrier_arrive(tmem_empty[work_iter & 1], 0)
 
                 if use_tma_store:
