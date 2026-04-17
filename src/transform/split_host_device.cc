@@ -143,10 +143,6 @@ private:
       }
     };
 
-    // for (const auto &param : host_params_) {
-    //   push(param);
-    // }
-
     Array<tir::Buffer> buffers_to_declare;
     for (const auto &kv : host_buffer_map_) {
       const tir::Buffer &buf = kv.second;
