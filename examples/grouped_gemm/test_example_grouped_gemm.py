@@ -1,13 +1,8 @@
-import os
-import pytest
 import tilelang.testing
 
 import example_grouped_gemm_bwd
 import example_grouped_gemm_fwd
 import example_grouped_gemm_fwd_ptr
-
-_is_cutedsl = os.environ.get("TILELANG_TARGET", "").lower() == "cutedsl"
-pytestmark = pytest.mark.skipif(_is_cutedsl, reason="Grouped GEMM examples are not part of CuTeDSL coverage")
 
 
 @tilelang.testing.requires_cuda
