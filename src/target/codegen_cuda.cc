@@ -2281,6 +2281,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::block_rank_in_cluster())) {
     need_cluster_h_ = true;
     os << "tl::block_rank_in_cluster()";
+  } else if (op->op.same_as(tl::clc_try_cancel())) {
+    need_cluster_h_ = true;
+    print_extern_call_stmt("tl::clc_try_cancel");
+  } else if (op->op.same_as(tl::clc_try_cancel_multicast())) {
+    need_cluster_h_ = true;
+    print_extern_call_stmt("tl::clc_try_cancel_multicast");
+  } else if (op->op.same_as(tl::clc_is_canceled())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_is_canceled(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_x())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_x(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_y())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_y(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_z())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_z(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
@@ -4645,6 +4663,22 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
 
 void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
                                       const PrimFunc &f) {
+  auto code_block_source = f->GetAttr<String>(tl::attr::kCodeBlockSource);
+  if (code_block_source) {
+    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+    ICHECK(global_symbol) << "CodeGenTileLangCUDA: Expect PrimFunc to have the "
+                             "global_symbol attribute";
+    if (auto code_block_entry_name =
+            f->GetAttr<String>(tl::attr::kCodeBlockEntryName)) {
+      ICHECK_EQ(static_cast<std::string>(global_symbol.value()),
+                static_cast<std::string>(code_block_entry_name.value()))
+          << "T.CUDASourceCodeKernel expects the lowered device global_symbol "
+             "to match entry_name";
+    }
+    stream << static_cast<std::string>(code_block_source.value()) << "\n\n";
+    return;
+  }
+
   // If the function has already been forward-declared, this is a
   // no-op.
   CodeGenC::DeclareFunction(gvar, f);

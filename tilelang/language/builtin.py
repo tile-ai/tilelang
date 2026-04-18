@@ -496,6 +496,14 @@ def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), mbarrier, tx)
 
 
+def mbarrier_arrive_expect_tx(mbarrier: BarrierType, tx: int):
+    """Arrive at a memory barrier and expect completion of async transactions."""
+    from tilelang.language.tir.op import ptx_arrive_barrier_expect_tx
+
+    mbarrier = _mbar_to_buffer_load(mbarrier)
+    return ptx_arrive_barrier_expect_tx(mbarrier, tx)
+
+
 def warpgroup_arrive():
     """Signal warpgroup readiness for subsequent WGMMA operations.
 
