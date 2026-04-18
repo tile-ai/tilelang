@@ -125,7 +125,6 @@ def run_tilelang_grouped_gemm_ptr(
     block_K,
     num_stages=2,
     threads=128,
-    backend="auto",
     profile=False,
 ):
     device = torch.device("cuda")
@@ -136,7 +135,7 @@ def run_tilelang_grouped_gemm_ptr(
     kernel = tl.compile(
         program,
         target="cuda",
-        execution_backend=backend,
+        execution_backend="auto",
         pass_configs={"tl.disable_warp_specialized": True},
     )
     a_list, b_list, c_list, a_ptrs, b_ptrs, c_ptrs, batch_tile_offsets = construct_inputs(batch_sizes_list, K, N, block_M, device, dtype)
@@ -162,13 +161,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch_sizes", type=str, default="64,128,256", help="comma-separated per-group M sizes")
     parser.add_argument("--K", type=int, default=4096, help="reduce dim")
     parser.add_argument("--N", type=int, default=4096, help="output dim")
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="auto",
-        choices=["auto", "tvm_ffi", "cython", "nvrtc"],
-        help="execution backend",
-    )
     parser.add_argument("--profile", action="store_true", help="benchmark the kernel")
     args = parser.parse_args()
 
@@ -189,7 +181,6 @@ if __name__ == "__main__":
         block_K,
         num_stages=num_stages,
         threads=threads,
-        backend=args.backend,
         profile=args.profile,
     )
     print(f"End-to-end: {time.time() - t0:.3f} s")
