@@ -226,44 +226,12 @@ public:
       Var buffer_var = buffer->data;
       rewriter.buffer_data_to_buffer_.Set(buffer_var, buffer);
     }
-    Stmt rewritten = rewriter(f->body);
-    rewritten = rewriter.FinalizeRaggedPrefixAllocation(std::move(rewritten));
-    f.CopyOnWrite()->body = std::move(rewritten);
+    f.CopyOnWrite()->body = rewriter(f->body);
     return f;
   }
 
 private:
   explicit MultiVersionBufferRewriter() = default;
-
-  void EnsureRaggedPrefixBuffer() {
-    if (ragged_prefix_buf_.defined()) {
-      return;
-    }
-    Array<PrimExpr> shape = {IntImm(DataType::Int(32), 1)};
-    ragged_prefix_buf_ =
-        decl_buffer(shape, DataType::Int(32), "tl_mvb_ragged_prefix", "local");
-  }
-
-  PrimExpr LoadRaggedPrefix() {
-    EnsureRaggedPrefixBuffer();
-    Array<PrimExpr> zero_indices = {0};
-    return BufferLoad(ragged_prefix_buf_, zero_indices);
-  }
-
-  Stmt FinalizeRaggedPrefixAllocation(Stmt body) {
-    if (!needs_ragged_prefix_ || inserted_ragged_prefix_) {
-      return body;
-    }
-    EnsureRaggedPrefixBuffer();
-    Array<PrimExpr> zero_indices = {0};
-    Stmt init = BufferStore(ragged_prefix_buf_, IntImm(DataType::Int(32), 0),
-                            zero_indices);
-    Stmt seq = SeqStmt({init, body});
-    seq = DeclBuffer(ragged_prefix_buf_, seq);
-    inserted_ragged_prefix_ = true;
-    return Allocate(ragged_prefix_buf_->data, ragged_prefix_buf_->dtype,
-                    ragged_prefix_buf_->shape, const_true(), seq);
-  }
 
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
@@ -672,28 +640,6 @@ private:
     }
     stmt_stack_.pop_back();
 
-    // Make sure any ragged prefix allocation lives inside the device thread
-    // scope (threadIdx.x). Allocating at PrimFunc scope can be lifted into an
-    // extra kernel parameter by downstream lowering.
-    bool is_thread_extent = (op->attr_key == tir::attr::thread_extent);
-    bool is_threadidx_x = false;
-    if (is_thread_extent) {
-      if (const auto *iv = op->node.as<IterVarNode>()) {
-        is_threadidx_x = (iv->thread_tag == "threadIdx.x");
-      }
-    }
-    if (needs_ragged_prefix_ && is_threadidx_x && !inserted_ragged_prefix_) {
-      inserted_ragged_prefix_ = true;
-      EnsureRaggedPrefixBuffer();
-      Array<PrimExpr> zero_indices = {0};
-      Stmt init = BufferStore(ragged_prefix_buf_, IntImm(DataType::Int(32), 0),
-                              zero_indices);
-      Stmt seq = SeqStmt({init, body});
-      seq = DeclBuffer(ragged_prefix_buf_, seq);
-      body = Allocate(ragged_prefix_buf_->data, ragged_prefix_buf_->dtype,
-                      ragged_prefix_buf_->shape, const_true(), seq);
-    }
-
     if (op->attr_key == kPipelineMVBStageExpr ||
         op->attr_key == kPipelineMVBParityExpr ||
         op->attr_key == kPipelineMVBContextNumStages) {
@@ -716,47 +662,6 @@ private:
     int num_stages = num_stages_anno.value()->value;
     EnsureVersionedBuffers(SelectVersionedBuffers(op->body, num_stages),
                            num_stages);
-
-    // A single-stage software pipeline does not require multi-versioned
-    // buffers or ragged-prefix bookkeeping; keep the loop unchanged.
-    if (num_stages <= 1) {
-      auto for_node = StmtExprMutator::VisitStmt_(op);
-      loop_stack_.pop_back();
-      stmt_stack_.pop_back();
-      return for_node;
-    }
-
-    // For ragged (dynamic extent) pipelined loops, rectangular linearization
-    // using loop extents is invalid. Use a runtime prefix counter so
-    // ping-pong buffer selection stays consistent across outer iterations.
-    bool is_dynamic_extent = !op->extent.as<IntImmNode>();
-    if (is_dynamic_extent) {
-      needs_ragged_prefix_ = true;
-      PrimExpr old_version_index = version_index_;
-      PrimExpr old_parity_cycle = parity_cycle_;
-      Var old_pipeline_loop_var = pipeline_loop_var_;
-      PrimExpr old_pipeline_loop_min = pipeline_loop_min_;
-      version_index_ =
-          FloorMod(LoadRaggedPrefix() + (op->loop_var - op->min), num_stages);
-      parity_cycle_ = FloorMod(
-          FloorDiv(LoadRaggedPrefix() + (op->loop_var - op->min), num_stages),
-          2);
-      pipeline_loop_var_ = op->loop_var;
-      pipeline_loop_min_ = op->min;
-      Stmt for_node = StmtExprMutator::VisitStmt_(op);
-      version_index_ = old_version_index;
-      parity_cycle_ = old_parity_cycle;
-      pipeline_loop_var_ = old_pipeline_loop_var;
-      pipeline_loop_min_ = old_pipeline_loop_min;
-
-      Array<PrimExpr> zero_indices = {0};
-      Stmt update = BufferStore(ragged_prefix_buf_,
-                                LoadRaggedPrefix() + op->extent, zero_indices);
-
-      loop_stack_.pop_back();
-      stmt_stack_.pop_back();
-      return SeqStmt({for_node, update});
-    }
 
     PrimExpr linear_index = loop_stack_[0].first;
     for (size_t i = 1; i < loop_stack_.size(); ++i) {
@@ -945,9 +850,6 @@ private:
   }
 
   PrimExpr version_index_;
-  Buffer ragged_prefix_buf_;
-  bool needs_ragged_prefix_ = false;
-  bool inserted_ragged_prefix_ = false;
   PrimExpr parity_cycle_; // (k / num_stages) % 2 for mbarrier parity rewriting
   Var pipeline_loop_var_; // loop variable of the pipelined loop
   PrimExpr pipeline_loop_min_; // min value of the pipelined loop
