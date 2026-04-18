@@ -830,6 +830,8 @@ TL_DEVICE __half2 abs2(__half2 a) {
 
 } // namespace tl
 
+using tl::tfloat32_t;
+
 namespace cutlass {
 TL_DEVICE
 bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
