@@ -314,6 +314,16 @@ CodeGenTileLangCUDA::TryMatchDynSharedAliasAccess(const BufferNode *buffer,
   if (!emit_named_smem_pointers_) {
     return std::nullopt;
   }
+  std::string scope;
+  if (alloc_storage_scope_.count(buffer->data.get())) {
+    scope = alloc_storage_scope_.at(buffer->data.get());
+  }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+  if (scope != "shared.dyn") {
+    return std::nullopt;
+  }
   int elem_bytes = buffer->dtype.bytes() * buffer->dtype.lanes();
   if (elem_bytes <= 0) {
     return std::nullopt;
