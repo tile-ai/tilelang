@@ -123,6 +123,10 @@ class PassConfigKey(str, Enum):
     Default: True
     """
 
+    TL_EMIT_NAMED_SMEM_POINTERS = "tl.emit_named_smem_pointers"
+    """Emit named typed pointer aliases for merged `shared.dyn` buffers in CUDA codegen.
+    Default: False"""
+
     TL_ENABLE_LOWER_LDGSTG = "tl.enable_lower_ldgstg"
     """Enable non-predicated LDG/STG lowering for global memory access.
     When enabled, converts Ramp-based global buffer load/store to ldg/stg intrinsics.

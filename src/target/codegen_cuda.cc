@@ -8,6 +8,7 @@
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -90,6 +91,9 @@ int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
       << total_bytes;
   return static_cast<int>(total_bytes);
 }
+
+static constexpr const char *kDynSharedMemoryAliasMetadata =
+    "tl.dyn_shared_memory_alias_metadata";
 
 bool CanEmitPackedX2Math(DataType t) {
   int lanes = t.lanes();
@@ -301,6 +305,20 @@ CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
   vid_global_barrier_expect_ = name_supply_->FreshName("__barrier_expect");
   ICHECK_EQ(vid_global_barrier_state_,
             runtime::symbol::tvm_global_barrier_state);
+}
+
+PrimExpr CodeGenTileLangCUDA::GetAliasedBufferIndex(const BufferNode *buffer,
+                                                    PrimExpr index) const {
+  if (!emit_named_smem_pointers_) {
+    return index;
+  }
+  auto it = dyn_shared_aliases_.find(buffer->name);
+  if (it == dyn_shared_aliases_.end()) {
+    return index;
+  }
+  PrimExpr elem_offset = indexdiv(
+      it->second.byte_offset, buffer->dtype.bytes() * buffer->dtype.lanes());
+  return arith::Analyzer().Simplify(index - elem_offset);
 }
 
 void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
@@ -1878,9 +1896,17 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   };
 
   DataType buffer_element_dtype = buffer->dtype;
+  bool use_named_alias =
+      emit_named_smem_pointers_ && dyn_shared_aliases_.count(buffer->name) &&
+      buffer_element_dtype == dyn_shared_aliases_.at(buffer->name).dtype;
+  if (use_named_alias) {
+    vid = dyn_shared_aliases_.at(buffer->name).alias_name;
+    index = GetAliasedBufferIndex(buffer, index);
+  }
 
   std::string buffer_str = vid;
-  if (!HandleTypeMatch(buffer_var, buffer_element_dtype) || is_vol) {
+  if (!use_named_alias &&
+      (!HandleTypeMatch(buffer_var, buffer_element_dtype) || is_vol)) {
     std::stringstream temp;
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();
@@ -3029,8 +3055,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "}\n";
     } else {
       os << "for (int local_id = 0; local_id < 8; ++local_id) {\n";
-      os << dst << "[" + this->PrintExpr(dst_ind) + "]" << " = " << src << "["
-         << src_offset << " + local_id];\n";
+      os << dst << "[" + this->PrintExpr(dst_ind) + "]"
+         << " = " << src << "[" << src_offset << " + local_id];\n";
       os << "}\n";
     }
 
@@ -3943,6 +3969,17 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
 
   if (scope == "shared.dyn") {
     stream << ' ' << vid << "[];\n";
+    if (emit_named_smem_pointers_) {
+      for (const auto &buffer_name : dyn_shared_alias_order_) {
+        const auto &alias = dyn_shared_aliases_.at(buffer_name);
+        PrintIndent();
+        PrintType(alias.dtype, stream);
+        stream << "* " << alias.alias_name << " = reinterpret_cast<";
+        PrintType(alias.dtype, stream);
+        stream << "*>(" << vid << " + " << PrintExpr(alias.byte_offset)
+               << ");\n";
+      }
+    }
   } else {
     size_t constant_size = op->ConstantAllocationSize();
     ICHECK_GT(constant_size, 0)
@@ -4126,12 +4163,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
       HandleVolatileLoads(ref, op, os);
     } else {
       std::ostringstream svalue_expr;
+      index = GetAliasedBufferIndex(op->buffer.get(), index);
       std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
       std::string vid = GetVarID(buffer_var.get());
       DataType elem_type = op->dtype.element_of();
+      auto alias_it = dyn_shared_aliases_.find(op->buffer->name);
+      bool use_named_alias = emit_named_smem_pointers_ &&
+                             alias_it != dyn_shared_aliases_.end() &&
+                             alias_it->second.dtype == op->buffer->dtype;
       for (int i = 0; i < lanes; ++i) {
         std::ostringstream value_temp;
-        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+        if (use_named_alias) {
+          value_temp << alias_it->second.alias_name;
+        } else if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
           value_temp << "((";
           if (buffer_var.get()->dtype.is_handle()) {
             auto it = alloc_storage_scope_.find(buffer_var.get());
@@ -4222,13 +4266,20 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       int vec_scope = BeginScope();
 
       // store elements separately
+      index_expr = GetAliasedBufferIndex(op->buffer.get(), index_expr);
       std::string index = SSAGetID(PrintExpr(index_expr), index_expr.dtype());
       std::string value = SSAGetID(PrintExpr(op->value), op->value.dtype());
       std::string vid = GetVarID(buffer_var.get());
+      auto alias_it = dyn_shared_aliases_.find(op->buffer->name);
+      bool use_named_alias = emit_named_smem_pointers_ &&
+                             alias_it != dyn_shared_aliases_.end() &&
+                             alias_it->second.dtype == op->buffer->dtype;
       for (int i = 0; i < value_dtype.lanes(); ++i) {
         this->PrintIndent();
         DataType elem_type = value_dtype.element_of();
-        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+        if (use_named_alias) {
+          stream << alias_it->second.alias_name;
+        } else if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
           stream << "((";
           if (buffer_var.get()->dtype.is_handle()) {
             auto it = alloc_storage_scope_.find(buffer_var.get());
@@ -4826,6 +4877,53 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
     for (const auto &idx : opt.value()) {
       ro_param_indices.insert(static_cast<int>(Downcast<Integer>(idx)->value));
     }
+  }
+
+  emit_named_smem_pointers_ =
+      tvm::transform::PassContext::Current()
+          ->GetConfig<Bool>(tl::kEmitNamedSmemPointers, Bool(false))
+          .value_or(Bool(false));
+  dyn_shared_aliases_.clear();
+  dyn_shared_alias_order_.clear();
+  if (emit_named_smem_pointers_) {
+    if (auto opt = f->GetAttr<Map<String, Array<PrimExpr>>>(
+            kDynSharedMemoryAliasMetadata)) {
+      std::vector<std::pair<std::string, DynSharedAliasInfo>> aliases;
+      for (const auto &kv : opt.value()) {
+        const Array<PrimExpr> &metadata = kv.second;
+        if (metadata.size() != 4) {
+          continue;
+        }
+        auto code = metadata[1].as<IntImmNode>();
+        auto bits = metadata[2].as<IntImmNode>();
+        auto lanes = metadata[3].as<IntImmNode>();
+        if (code == nullptr || bits == nullptr || lanes == nullptr) {
+          continue;
+        }
+        DynSharedAliasInfo info;
+        info.byte_offset = metadata[0];
+        info.dtype = DataType(static_cast<uint8_t>(code->value), bits->value,
+                              lanes->value);
+        aliases.emplace_back(std::string(kv.first), std::move(info));
+      }
+      std::sort(
+          aliases.begin(), aliases.end(), [](const auto &lhs, const auto &rhs) {
+            auto lhs_offset = lhs.second.byte_offset.template as<IntImmNode>();
+            auto rhs_offset = rhs.second.byte_offset.template as<IntImmNode>();
+            if (lhs_offset != nullptr && rhs_offset != nullptr &&
+                lhs_offset->dtype == rhs_offset->dtype &&
+                lhs_offset->value != rhs_offset->value) {
+              return lhs_offset->value < rhs_offset->value;
+            }
+            return lhs.first < rhs.first;
+          });
+      for (auto &entry : aliases) {
+        entry.second.alias_name = name_supply_->FreshName(entry.first);
+        dyn_shared_alias_order_.push_back(entry.first);
+        dyn_shared_aliases_.emplace(entry.first, std::move(entry.second));
+      }
+    }
+    emit_named_smem_pointers_ = !dyn_shared_aliases_.empty();
   }
 
   this->PrintFuncPrefix(stream);

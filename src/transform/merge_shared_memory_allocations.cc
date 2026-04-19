@@ -52,6 +52,9 @@ namespace tl {
 
 using namespace tir;
 
+static constexpr const char *kDynSharedMemoryAliasMetadata =
+    "tl.dyn_shared_memory_alias_metadata";
+
 using runtime::StorageRank;
 using runtime::StorageScope;
 
@@ -464,6 +467,37 @@ public:
     this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
   }
 
+  Map<String, Array<PrimExpr>> ExportBufferAliasMetadata() const {
+    Map<String, Array<PrimExpr>> metadata;
+    if (!is_dynamic_) {
+      return metadata;
+    }
+    for (const auto &pair : buffer_byte_offsets_) {
+      const VarNode *buffer_var = pair.first;
+      auto alloc_it = shmem_allocs_.find(buffer_var);
+      if (alloc_it == shmem_allocs_.end()) {
+        continue;
+      }
+      const AllocateNode *alloc = alloc_it->second;
+      if (GetPtrStorageScope(alloc->buffer_var) != "shared.dyn") {
+        continue;
+      }
+      String buffer_name(buffer_var->name_hint);
+      auto name_it = buffer_names_.find(buffer_var);
+      if (name_it != buffer_names_.end() && name_it->second.size() != 0) {
+        buffer_name = name_it->second;
+      }
+      Array<PrimExpr> buffer_metadata;
+      buffer_metadata.push_back(pair.second);
+      buffer_metadata.push_back(IntImm(DataType::Int(32), alloc->dtype.code()));
+      buffer_metadata.push_back(IntImm(DataType::Int(32), alloc->dtype.bits()));
+      buffer_metadata.push_back(
+          IntImm(DataType::Int(32), alloc->dtype.lanes()));
+      metadata.Set(buffer_name, buffer_metadata);
+    }
+    return metadata;
+  }
+
 private:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent && !allocated_) {
@@ -541,6 +575,9 @@ private:
           << "MergeSharedMemoryAllocations expects flat memory buffers, "
           << "and is to be run after "
           << "StorageFlatten (TE schedules) or FlattenBuffer (TIR schedules)";
+      if (node->buffer->name.size() != 0) {
+        buffer_names_.try_emplace(node->buffer->data.get(), node->buffer->name);
+      }
       Array<PrimExpr> indices = {
           node->indices[0] +
           this->GetBufferOffset(node->buffer->data, node->buffer->dtype)};
@@ -1387,6 +1424,8 @@ private:
   PrimExpr merged_alloc_size_{0};
   // The mapping from the original buffer var to its offset in the merged buffer
   std::unordered_map<const VarNode *, PrimExpr> buffer_byte_offsets_;
+  // The first observed high-level Buffer name for each original buffer var.
+  std::unordered_map<const VarNode *, String> buffer_names_;
   // The mapping from the original buffer objects to their location in the
   // merged buffer.
   std::unordered_map<const BufferNode *, Buffer> buffer_remap_;
@@ -1398,15 +1437,18 @@ private:
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
 };
 
-Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
-                                  bool enable_aggressive_merge,
-                                  int align_bytes = 16, bool verbose = false) {
+std::pair<Stmt, Map<String, Array<PrimExpr>>>
+MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
+                             bool enable_aggressive_merge, int align_bytes = 16,
+                             bool verbose = false) {
   AllocateCollector collector;
   collector(stmt);
+  Map<String, Array<PrimExpr>> dyn_alias_metadata;
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
                                   align_bytes);
     rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
+    dyn_alias_metadata = rewriter.ExportBufferAliasMetadata();
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
@@ -1415,7 +1457,7 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
     rewriter.PlanReuse(stmt, false, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
-  return stmt;
+  return {stmt, dyn_alias_metadata};
 }
 
 using namespace tir::transform;
@@ -1432,9 +1474,20 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
     auto *n = f.CopyOnWrite();
-    n->body = tl::MergeSharedMemoryAllocations(
+    auto merge_result = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
         align_bytes, debug_merge_shared_memory_allocations);
+    n->body = std::move(merge_result.first);
+    if (!merge_result.second.empty()) {
+      Map<String, Any> attrs;
+      if (n->attrs.defined()) {
+        for (const auto &kv : n->attrs->dict) {
+          attrs.Set(kv.first, kv.second);
+        }
+      }
+      attrs.Set(String(kDynSharedMemoryAliasMetadata), merge_result.second);
+      f = WithAttrs(std::move(f), attrs);
+    }
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",
