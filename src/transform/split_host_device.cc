@@ -48,6 +48,13 @@ namespace tl {
 using namespace ffi;
 namespace tir = tvm::tir;
 
+namespace {
+
+static constexpr const char *kDynSharedMemoryMultiVersionMetadata =
+    "tl.dyn_shared_memory_multiversion_metadata";
+
+} // namespace
+
 // This pass traverses the AST, split the target function into host part and
 // device part and copies all assume attribute statements to the device side.
 
@@ -69,6 +76,11 @@ public:
 
   void SetClusterDims(Array<Integer> cluster_dims) {
     cluster_dims_ = std::move(cluster_dims);
+  }
+
+  void SetDynSharedMemoryMultiVersionMetadata(
+      Map<String, Array<PrimExpr>> metadata) {
+    dyn_shared_multi_version_metadata_ = std::move(metadata);
   }
 
   void SetHostFuncSignature(const tir::PrimFunc &func) {
@@ -116,6 +128,8 @@ private:
   Map<tir::Var, tir::Buffer> host_buffer_map_;
   Array<tir::Var> non_restrict_params_;
   Optional<Array<Integer>> cluster_dims_{std::nullopt};
+  Optional<Map<String, Array<PrimExpr>>> dyn_shared_multi_version_metadata_{
+      std::nullopt};
   Optional<String> code_block_source_{std::nullopt};
   Optional<String> code_block_entry_name_{std::nullopt};
 
@@ -354,6 +368,10 @@ private:
     if (cluster_dims_.defined()) {
       device_attrs.Set("cluster_dims", cluster_dims_.value());
     }
+    if (dyn_shared_multi_version_metadata_.defined()) {
+      device_attrs.Set(kDynSharedMemoryMultiVersionMetadata,
+                       dyn_shared_multi_version_metadata_.value());
+    }
     if (code_block_source_) {
       device_attrs.Set(tl::attr::kCodeBlockSource, code_block_source_.value());
     }
@@ -410,6 +428,12 @@ tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,
   if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
     splitter.SetClusterDims(opt.value());
     func = tvm::WithoutAttr(std::move(func), "cluster_dims");
+  }
+  if (auto opt = func->GetAttr<Map<String, Array<PrimExpr>>>(
+          kDynSharedMemoryMultiVersionMetadata)) {
+    splitter.SetDynSharedMemoryMultiVersionMetadata(opt.value());
+    func =
+        tvm::WithoutAttr(std::move(func), kDynSharedMemoryMultiVersionMetadata);
   }
 
   if (auto body = splitter(func->body); !body.same_as(func->body)) {

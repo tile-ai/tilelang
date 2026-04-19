@@ -39,6 +39,22 @@ using int4_t = int4;
 #define TL_DEVICE_NOINLINE __noinline__ __device__
 #define TL_PATCH
 
+namespace tl {
+
+template <typename Fn> struct PatternVisitor {
+  Fn fn;
+
+  TL_DEVICE explicit PatternVisitor(Fn fn) : fn(fn) {}
+
+  template <typename Index> TL_DEVICE auto operator[](Index const &i) const {
+    return fn(i);
+  }
+};
+
+template <typename Fn> PatternVisitor(Fn) -> PatternVisitor<Fn>;
+
+} // namespace tl
+
 #define TILELANG_CHECK(stmt)                                                   \
   do {                                                                         \
     cudaError_t __err = (stmt);                                                \

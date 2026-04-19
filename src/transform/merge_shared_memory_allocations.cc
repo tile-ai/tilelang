@@ -43,6 +43,7 @@
 
 #include "../op/builtin.h"
 #include "../target/utils.h"
+#include "common/pipeline_utils.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/tir/function.h"
@@ -54,6 +55,8 @@ using namespace tir;
 
 static constexpr const char *kDynSharedMemoryAliasMetadata =
     "tl.dyn_shared_memory_alias_metadata";
+static constexpr const char *kDynSharedMemoryMultiVersionMetadata =
+    "tl.dyn_shared_memory_multiversion_metadata";
 
 using runtime::StorageRank;
 using runtime::StorageScope;
@@ -90,6 +93,69 @@ public:
   // The static mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocateNode *>
       static_shmem_allocs_;
+};
+
+class MultiVersionStageCollector : public StmtExprVisitor {
+public:
+  void VisitStmt_(const AttrStmtNode *op) final {
+    bool pushed_num_stages = false;
+    bool pushed_stage_expr = false;
+    if (op->attr_key == kPipelineMVBContextNumStages) {
+      if (const int64_t *num_stages = as_const_int(op->value);
+          num_stages != nullptr && *num_stages > 1) {
+        num_stages_stack_.push_back(static_cast<int>(*num_stages));
+        pushed_num_stages = true;
+      }
+    } else if (op->attr_key == kPipelineMVBStageExpr) {
+      ++stage_expr_depth_;
+      pushed_stage_expr = true;
+    }
+
+    StmtExprVisitor::VisitStmt_(op);
+
+    if (pushed_stage_expr) {
+      --stage_expr_depth_;
+    }
+    if (pushed_num_stages) {
+      num_stages_stack_.pop_back();
+    }
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    RecordBuffer(op->buffer->data.get());
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    RecordBuffer(op->buffer->data.get());
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() >= 2) {
+      if (const auto *buffer_var = op->args[1].as<VarNode>()) {
+        RecordBuffer(buffer_var);
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  const std::unordered_map<const VarNode *, int> &buffer_num_stages() const {
+    return buffer_num_stages_;
+  }
+
+private:
+  void RecordBuffer(const VarNode *buffer_var) {
+    if (stage_expr_depth_ <= 0 || num_stages_stack_.empty()) {
+      return;
+    }
+    auto &num_stages = buffer_num_stages_[buffer_var];
+    num_stages = std::max(num_stages, num_stages_stack_.back());
+  }
+
+  int stage_expr_depth_{0};
+  std::vector<int> num_stages_stack_;
+  std::unordered_map<const VarNode *, int> buffer_num_stages_;
 };
 
 // Find a linear pattern of storage access
@@ -442,9 +508,11 @@ public:
   explicit SharedMemoryRewriter(
       const std::unordered_map<const VarNode *, const AllocateNode *>
           &shmem_allocs,
-      bool is_dynamic = true, bool verbose = false, int align_bytes = 0)
+      bool is_dynamic = true, bool verbose = false, int align_bytes = 0,
+      Map<String, Array<PrimExpr>> multi_version_metadata = {})
       : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
-        align_bytes_{align_bytes} {
+        align_bytes_{align_bytes}, multi_version_metadata_{
+                                       std::move(multi_version_metadata)} {
     if (!is_dynamic) {
       merged_buf_var_ =
           Var("buf_shmem", PointerType(PrimType(DataType::UInt(8)), "shared"));
@@ -460,6 +528,9 @@ public:
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
+    MultiVersionStageCollector stage_collector;
+    stage_collector(stmt);
+    buffer_num_stages_ = stage_collector.buffer_num_stages();
     shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
     // First compute liveness over the flattened schedule, then feed it into the
     // arena packer.
@@ -487,8 +558,36 @@ public:
       if (name_it != buffer_names_.end() && name_it->second.size() != 0) {
         buffer_name = name_it->second;
       }
+      DataType offset_dtype = pair.second.dtype();
+      PrimExpr total_bytes =
+          make_const(offset_dtype, alloc->dtype.bytes() * alloc->dtype.lanes());
+      for (const PrimExpr &extent : alloc->extents) {
+        PrimExpr e = extent;
+        if (e.dtype() != offset_dtype) {
+          e = cast(offset_dtype, e);
+        }
+        total_bytes = total_bytes * e;
+      }
+      PrimExpr stage_stride_bytes = make_const(offset_dtype, 0);
+      auto mv_it = multi_version_metadata_.find(buffer_name);
+      if (mv_it != multi_version_metadata_.end() && !(*mv_it).second.empty()) {
+        PrimExpr stage_stride = (*mv_it).second[0];
+        if (stage_stride.dtype() != offset_dtype) {
+          stage_stride = cast(offset_dtype, stage_stride);
+        }
+        stage_stride_bytes =
+            stage_stride * make_const(offset_dtype, alloc->dtype.bytes() *
+                                                        alloc->dtype.lanes());
+      } else if (auto num_stages_it = buffer_num_stages_.find(buffer_var);
+                 num_stages_it != buffer_num_stages_.end() &&
+                 num_stages_it->second > 1) {
+        stage_stride_bytes = indexdiv(
+            total_bytes, make_const(offset_dtype, num_stages_it->second));
+      }
       Array<PrimExpr> buffer_metadata;
       buffer_metadata.push_back(pair.second);
+      buffer_metadata.push_back(total_bytes);
+      buffer_metadata.push_back(stage_stride_bytes);
       buffer_metadata.push_back(IntImm(DataType::Int(32), alloc->dtype.code()));
       buffer_metadata.push_back(IntImm(DataType::Int(32), alloc->dtype.bits()));
       buffer_metadata.push_back(
@@ -1420,6 +1519,8 @@ private:
                       PointerType(PrimType(DataType::UInt(8)), "shared.dyn")};
   // The mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocateNode *> shmem_allocs_;
+  // Per-buffer multi-versioning metadata propagated from pipeline rewriting.
+  Map<String, Array<PrimExpr>> multi_version_metadata_;
   // The size of the merged buffer
   PrimExpr merged_alloc_size_{0};
   // The mapping from the original buffer var to its offset in the merged buffer
@@ -1435,18 +1536,20 @@ private:
   std::unordered_map<const Object *, EventEntry> event_map_;
   // The mapping of buffer bytes alignment
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
+  // Number of pipeline versions inferred for each buffer from MVB attrs.
+  std::unordered_map<const VarNode *, int> buffer_num_stages_;
 };
 
-std::pair<Stmt, Map<String, Array<PrimExpr>>>
-MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
-                             bool enable_aggressive_merge, int align_bytes = 16,
-                             bool verbose = false) {
+std::pair<Stmt, Map<String, Array<PrimExpr>>> MergeSharedMemoryAllocations(
+    Stmt stmt, bool merge_static_smem, bool enable_aggressive_merge,
+    int align_bytes = 16, bool verbose = false,
+    Map<String, Array<PrimExpr>> multi_version_metadata = {}) {
   AllocateCollector collector;
   collector(stmt);
   Map<String, Array<PrimExpr>> dyn_alias_metadata;
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
-                                  align_bytes);
+                                  align_bytes, multi_version_metadata);
     rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
     dyn_alias_metadata = rewriter.ExportBufferAliasMetadata();
     stmt = rewriter(std::move(stmt));
@@ -1473,10 +1576,16 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     bool debug_merge_shared_memory_allocations =
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
+    Map<String, Array<PrimExpr>> multi_version_metadata;
+    if (auto opt = f->GetAttr<Map<String, Array<PrimExpr>>>(
+            kDynSharedMemoryMultiVersionMetadata)) {
+      multi_version_metadata = opt.value();
+    }
     auto *n = f.CopyOnWrite();
     auto merge_result = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
-        align_bytes, debug_merge_shared_memory_allocations);
+        align_bytes, debug_merge_shared_memory_allocations,
+        multi_version_metadata);
     n->body = std::move(merge_result.first);
     if (!merge_result.second.empty()) {
       Map<String, Any> attrs;
