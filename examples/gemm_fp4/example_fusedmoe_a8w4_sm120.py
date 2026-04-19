@@ -98,81 +98,86 @@ def moe_shared_expert_a8w4(
     return main
 
 
-# Problem sizes (small for testing)
-num_tokens = 128
-d_hidden = 256
-d_expert = 256
+def main():
+    # Problem sizes (small for testing)
+    num_tokens = 128
+    d_hidden = 256
+    d_expert = 256
 
-print(f"Running FP4 MoE (A8W4): tokens={num_tokens}, hidden={d_hidden}, expert={d_expert}")
+    print(f"Running FP4 MoE (A8W4): tokens={num_tokens}, hidden={d_hidden}, expert={d_expert}")
 
-func = moe_shared_expert_a8w4(
-    num_tokens,
-    d_hidden,
-    d_expert,
-    block_token=128,
-    block_hidden=128,
-    block_expert=128,
-    threads=128,
-    num_stages=1,
-)
+    func = moe_shared_expert_a8w4(
+        num_tokens,
+        d_hidden,
+        d_expert,
+        block_token=128,
+        block_hidden=128,
+        block_expert=128,
+        threads=128,
+        num_stages=1,
+    )
 
-jit_kernel = tilelang.compile(
-    func,
-    out_idx=[4],
-    target="cuda",
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
-)
+    jit_kernel = tilelang.compile(
+        func,
+        out_idx=[4],
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        },
+    )
 
-print("Compilation succeeded!")
+    print("Compilation succeeded!")
 
-torch.manual_seed(42)
+    torch.manual_seed(42)
 
-# Create test data
-input_fp8 = torch.randn(num_tokens, d_hidden, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
-W_gate_uint8 = torch.randint(0, 16, (d_expert, d_hidden), device="cuda", dtype=torch.uint8)
-W_up_uint8 = torch.randint(0, 16, (d_expert, d_hidden), device="cuda", dtype=torch.uint8)
-W_down_uint8 = torch.randint(0, 16, (d_hidden, d_expert), device="cuda", dtype=torch.uint8)
+    # Create test data
+    input_fp8 = torch.randn(num_tokens, d_hidden, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
+    W_gate_uint8 = torch.randint(0, 16, (d_expert, d_hidden), device="cuda", dtype=torch.uint8)
+    W_up_uint8 = torch.randint(0, 16, (d_expert, d_hidden), device="cuda", dtype=torch.uint8)
+    W_down_uint8 = torch.randint(0, 16, (d_hidden, d_expert), device="cuda", dtype=torch.uint8)
 
-# --- Test 1: zeros ---
-z_input = torch.zeros(num_tokens, d_hidden, device="cuda", dtype=torch.float8_e4m3fn)
-z_gate = torch.zeros(d_expert, d_hidden, device="cuda", dtype=torch.uint8)
-z_up = torch.zeros(d_expert, d_hidden, device="cuda", dtype=torch.uint8)
-z_down = torch.zeros(d_hidden, d_expert, device="cuda", dtype=torch.uint8)
-c_zero = jit_kernel(z_input, z_gate, z_up, z_down)
-print(f"[{'PASS' if c_zero.abs().max().item() == 0.0 else 'FAIL'}] zeros in -> zeros out")
+    # --- Test 1: zeros ---
+    z_input = torch.zeros(num_tokens, d_hidden, device="cuda", dtype=torch.float8_e4m3fn)
+    z_gate = torch.zeros(d_expert, d_hidden, device="cuda", dtype=torch.uint8)
+    z_up = torch.zeros(d_expert, d_hidden, device="cuda", dtype=torch.uint8)
+    z_down = torch.zeros(d_hidden, d_expert, device="cuda", dtype=torch.uint8)
+    c_zero = jit_kernel(z_input, z_gate, z_up, z_down)
+    print(f"[{'PASS' if c_zero.abs().max().item() == 0.0 else 'FAIL'}] zeros in -> zeros out")
 
-# --- Test 2: numerical verification (gate+up only, no down GEMM in this kernel) ---
-out = jit_kernel(input_fp8, W_gate_uint8, W_up_uint8, W_down_uint8)
+    # --- Test 2: numerical verification (gate+up only, no down GEMM in this kernel) ---
+    out = jit_kernel(input_fp8, W_gate_uint8, W_up_uint8, W_down_uint8)
 
-# Reference
-input_f32 = input_fp8.to(torch.float32)
-gate_f32 = fp4_uint8_to_float(W_gate_uint8)
-up_f32 = fp4_uint8_to_float(W_up_uint8)
+    # Reference
+    input_f32 = input_fp8.to(torch.float32)
+    gate_f32 = fp4_uint8_to_float(W_gate_uint8)
+    up_f32 = fp4_uint8_to_float(W_up_uint8)
 
-gate_logits = input_f32 @ gate_f32.T
-up_logits = input_f32 @ up_f32.T
-gate_activated = gate_logits * torch.sigmoid(gate_logits)
-ref_out = up_logits * gate_activated
+    gate_logits = input_f32 @ gate_f32.T
+    up_logits = input_f32 @ up_f32.T
+    gate_activated = gate_logits * torch.sigmoid(gate_logits)
+    ref_out = up_logits * gate_activated
 
-diff = (out.float() - ref_out).abs()
-max_diff = diff.max().item()
-rel_err = diff.sum().item() / (ref_out.abs().sum().item() + 1e-10)
-print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
-if rel_err < 0.05:
-    print("[PASS] MoE gate+up fusion numerical verification")
-else:
-    print("[WARN] large diff")
+    diff = (out.float() - ref_out).abs()
+    max_diff = diff.max().item()
+    rel_err = diff.sum().item() / (ref_out.abs().sum().item() + 1e-10)
+    print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
+    if rel_err < 0.05:
+        print("[PASS] MoE gate+up fusion numerical verification")
+    else:
+        print("[WARN] large diff")
 
-# --- Benchmark ---
-torch.cuda.synchronize()
-start = time.perf_counter()
-for _ in range(100):
-    jit_kernel(input_fp8, W_gate_uint8, W_up_uint8, W_down_uint8)
-torch.cuda.synchronize()
-elapsed = (time.perf_counter() - start) / 100 * 1000
-total_flops = 2 * num_tokens * d_hidden * d_expert * 2  # 2 GEMMs
-print(f"Latency: {elapsed:.4f} ms")
-print(f"TFLOPS:  {total_flops / (elapsed / 1e3) / 1e12:.2f}")
+    # --- Benchmark ---
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(100):
+        jit_kernel(input_fp8, W_gate_uint8, W_up_uint8, W_down_uint8)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / 100 * 1000
+    total_flops = 2 * num_tokens * d_hidden * d_expert * 2  # 2 GEMMs
+    print(f"Latency: {elapsed:.4f} ms")
+    print(f"TFLOPS:  {total_flops / (elapsed / 1e3) / 1e12:.2f}")
+
+
+if __name__ == "__main__":
+    main()

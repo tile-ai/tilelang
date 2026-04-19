@@ -88,77 +88,84 @@ def unpack_fp4_to_float(packed_int8: torch.Tensor, M: int, K: int) -> torch.Tens
     unpacked = unpack_fp4_to_uint8(packed_int8, M, K).to(torch.int64)
     return lut[unpacked]
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    M, N, K = 256, 256, 256
+    block_M, block_N, block_K = 128, 128, 128
+    out_dtype = T.float32
+    accum_dtype = T.float32
 
-M, N, K = 256, 256, 256
-block_M, block_N, block_K = 128, 128, 128
-out_dtype = T.float32
-accum_dtype = T.float32
+    print(f"Running FP4 GEMM: M={M}, N={N}, K={K}")
+    print(f"  block_M={block_M}, block_N={block_N}, block_K={block_K}")
 
-print(f"Running FP4 GEMM: M={M}, N={N}, K={K}")
-print(f"  block_M={block_M}, block_N={block_N}, block_K={block_K}")
+    func = matmul_fp4(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        out_dtype,
+        accum_dtype,
+        num_stages=2,
+        threads=128,
+    )
 
-func = matmul_fp4(
-    M,
-    N,
-    K,
-    block_M,
-    block_N,
-    block_K,
-    out_dtype,
-    accum_dtype,
-    num_stages=2,
-    threads=128,
-)
+    jit_kernel = tilelang.compile(
+        func,
+        out_idx=[2],
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        },
+    )
 
-jit_kernel = tilelang.compile(
-    func,
-    out_idx=[2],
-    target="cuda",
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
-)
+    print("Compilation succeeded!")
 
-print("Compilation succeeded!")
+    torch.manual_seed(42)
 
-torch.manual_seed(42)
+    # Create packed FP4 data (2 per byte), then pre-unpack to uint8
+    a_packed = torch.randint(0, 256, (M, K // 2), device="cuda", dtype=torch.uint8).to(torch.int8)
+    b_packed = torch.randint(0, 256, (N, K // 2), device="cuda", dtype=torch.uint8).to(torch.int8)
+    a_unpacked = unpack_fp4_to_uint8(a_packed, M, K)
+    b_unpacked = unpack_fp4_to_uint8(b_packed, N, K)
 
-# Create packed FP4 data (2 per byte), then pre-unpack to uint8
-a_packed = torch.randint(0, 256, (M, K // 2), device="cuda", dtype=torch.uint8).to(torch.int8)
-b_packed = torch.randint(0, 256, (N, K // 2), device="cuda", dtype=torch.uint8).to(torch.int8)
-a_unpacked = unpack_fp4_to_uint8(a_packed, M, K)
-b_unpacked = unpack_fp4_to_uint8(b_packed, N, K)
+    # --- Test 1: zeros ---
+    a_zero = torch.zeros(M, K, device="cuda", dtype=torch.uint8)
+    b_zero = torch.zeros(N, K, device="cuda", dtype=torch.uint8)
+    c_zero = jit_kernel(a_zero, b_zero)
+    assert c_zero.abs().max().item() == 0.0, f"Zero test failed: max={c_zero.abs().max().item()}"
+    print("[PASS] zeros in -> zeros out")
 
-# --- Test 1: zeros ---
-a_zero = torch.zeros(M, K, device="cuda", dtype=torch.uint8)
-b_zero = torch.zeros(N, K, device="cuda", dtype=torch.uint8)
-c_zero = jit_kernel(a_zero, b_zero)
-assert c_zero.abs().max().item() == 0.0, f"Zero test failed: max={c_zero.abs().max().item()}"
-print("[PASS] zeros in -> zeros out")
+    # --- Test 2: numerical verification ---
+    c = jit_kernel(a_unpacked, b_unpacked)
 
-# --- Test 2: numerical verification ---
-c = jit_kernel(a_unpacked, b_unpacked)
+    a_float = unpack_fp4_to_float(a_packed, M, K)
+    b_float = unpack_fp4_to_float(b_packed, N, K)
+    ref_c = a_float @ b_float.T
 
-a_float = unpack_fp4_to_float(a_packed, M, K)
-b_float = unpack_fp4_to_float(b_packed, N, K)
-ref_c = a_float @ b_float.T
+    diff = (c.float() - ref_c).abs()
+    max_diff = diff.max().item()
+    rel_err = diff.sum().item() / (ref_c.abs().sum().item() + 1e-10)
+    print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
+    if max_diff < 1.0:
+        print("[PASS] numerical verification (max_abs_diff < 1.0)")
+    else:
+        print("[WARN] large diff -- may indicate layout or data flow issue")
 
-diff = (c.float() - ref_c).abs()
-max_diff = diff.max().item()
-rel_err = diff.sum().item() / (ref_c.abs().sum().item() + 1e-10)
-print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
-if max_diff < 1.0:
-    print("[PASS] numerical verification (max_abs_diff < 1.0)")
-else:
-    print("[WARN] large diff -- may indicate layout or data flow issue")
+    # --- Benchmark ---
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(100):
+        jit_kernel(a_unpacked, b_unpacked)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / 100 * 1000
+    print(f"Latency: {elapsed:.4f} ms")
+    print(f"TFLOPS:  {2 * M * N * K / (elapsed / 1e3) / 1e12:.2f}")
 
-# --- Benchmark ---
-torch.cuda.synchronize()
-start = time.perf_counter()
-for _ in range(100):
-    jit_kernel(a_unpacked, b_unpacked)
-torch.cuda.synchronize()
-elapsed = (time.perf_counter() - start) / 100 * 1000
-print(f"Latency: {elapsed:.4f} ms")
-print(f"TFLOPS:  {2 * M * N * K / (elapsed / 1e3) / 1e12:.2f}")
+
+if __name__ == "__main__":
+    main()

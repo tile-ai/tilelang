@@ -70,28 +70,28 @@ def moe_shared_expert_a8w4_sm100(
 
     @T.prim_func
     def main(
-        input: T.Tensor((num_tokens, d_hidden), "float8_e4m3fn"),
-        W_gate: T.Tensor((d_expert, d_hidden), "float4_e2m1fn"),
-        W_up: T.Tensor((d_expert, d_hidden), "float4_e2m1fn"),
-        output: T.Tensor((num_tokens, d_expert), "float32"),
+        input: T.Tensor((num_tokens, d_hidden), T.float8_e4m3fn),
+        W_gate: T.Tensor((d_expert, d_hidden), T.float4_e2m1fn),
+        W_up: T.Tensor((d_expert, d_hidden), T.float4_e2m1fn),
+        output: T.Tensor((num_tokens, d_expert), T.float32),
     ):
         with T.Kernel(
             T.ceildiv(d_expert, block_expert),
             T.ceildiv(num_tokens, block_token),
             threads=threads,
         ) as (bx, by):
-            input_shared = T.alloc_shared((block_token, block_hidden), "float8_e4m3fn")
-            W_gate_shared = T.alloc_shared((block_expert, block_hidden), "float4_e2m1fn")
-            W_up_shared = T.alloc_shared((block_expert, block_hidden), "float4_e2m1fn")
+            input_shared = T.alloc_shared((block_token, block_hidden), T.float8_e4m3fn)
+            W_gate_shared = T.alloc_shared((block_expert, block_hidden), T.float4_e2m1fn)
+            W_up_shared = T.alloc_shared((block_expert, block_hidden), T.float4_e2m1fn)
 
-            gate_tmem = T.alloc_tmem([block_token, block_expert], "float32")
-            up_tmem = T.alloc_tmem([block_token, block_expert], "float32")
+            gate_tmem = T.alloc_tmem([block_token, block_expert], T.float32)
+            up_tmem = T.alloc_tmem([block_token, block_expert], T.float32)
             mbar_gate = T.alloc_barrier(1)
             mbar_up = T.alloc_barrier(1)
 
-            gate_local = T.alloc_fragment((block_token, block_expert), "float32")
-            up_local = T.alloc_fragment((block_token, block_expert), "float32")
-            out_shared = T.alloc_shared((block_token, block_expert), "float32")
+            gate_local = T.alloc_fragment((block_token, block_expert), T.float32)
+            up_local = T.alloc_fragment((block_token, block_expert), T.float32)
+            out_shared = T.alloc_shared((block_token, block_expert), T.float32)
 
             k_iters = T.ceildiv(d_hidden, block_hidden)
 
@@ -145,7 +145,7 @@ def moe_shared_expert_a8w4_sm100(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
+def main():
     num_tokens = 128
     d_hidden = 256
     d_expert = 256
@@ -228,3 +228,7 @@ if __name__ == "__main__":
     total_flops = 2 * num_tokens * d_hidden * d_expert * 2
     print(f"Latency: {elapsed:.4f} ms")
     print(f"TFLOPS:  {total_flops / (elapsed / 1e3) / 1e12:.2f}")
+
+
+if __name__ == "__main__":
+    main()

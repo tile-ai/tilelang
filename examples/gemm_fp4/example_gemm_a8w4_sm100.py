@@ -112,7 +112,7 @@ def unpack_fp4_to_float(packed: torch.Tensor, M: int, K: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
+def main():
     M, N, K = 256, 256, 256
     block_M, block_N, block_K = 128, 128, 128
     out_dtype = T.float32
@@ -185,3 +185,7 @@ if __name__ == "__main__":
     latency = profiler.do_bench()
     print(f"Latency: {latency:.4f} ms")
     print(f"TFLOPS:  {2 * M * N * K / (latency / 1e3) / 1e12:.2f}")
+
+
+if __name__ == "__main__":
+    main()
