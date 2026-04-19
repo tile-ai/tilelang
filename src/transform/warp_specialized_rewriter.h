@@ -31,7 +31,7 @@ using arith::IRVisitorWithAnalyzer;
 
 class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
 public:
-  // return true means auto warp specialization will be disabled
+  // return true means this aws will be disabled
   static bool Detect(const Stmt &stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
@@ -40,11 +40,6 @@ public:
                       "specialization is manually enabled";
       return true;
     }
-    // TMA loads with mbarrier ops indicate a user-managed pipeline that is
-    // incompatible with auto warp specialisation.  The cluster-copy exemption
-    // only applies when mbarrier ops exist *without* any regular TMA-load
-    // path (i.e. barriers are solely for SM-to-SM cluster copy sync), which
-    // naturally falls through here because has_tma_op_ is false in that case.
     if (detector.has_tma_op_ && detector.has_mbarrier_op_) {
       LOG(WARNING) << "Auto warp specialization will be disabled because TMA "
                       "and mbarrier are both present";
