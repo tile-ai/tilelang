@@ -66,14 +66,16 @@ public:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
-    // Track nested vectorized loop extents so we can rewrite element-wise
-    // copies (e.g. float16 stores) into `tir.ptx_cp_async` with element bytes,
-    // relying on the later `tl.VectorizeLoop` pass to widen:
-    //   for v in T.vectorized(k): ptx_cp_async(dst, src, elem_bytes)
-    // => ptx_cp_async(dst_base, src_base, elem_bytes * k)
+    // Track nested vectorized loop extents so cp.async injection can emit the
+    // final packed transfer width directly:
+    //   for v in T.vectorized(k): store(load(...))
+    // => ptx_cp_async(dst_base, src_base, total_transfer_bytes)
     //
-    // This mirrors the logic in `CPAsyncStoreRewriter` used by `T.copy`
-    // lowering, and avoids duplicating vectorize-loop collapse here.
+    // cp.async only supports byte widths {4, 8, 16}. Instead of emitting
+    // element-sized transfers here and relying on a later vectorization pass
+    // to widen them, TryInjectPTX packs the active vectorized loop directly
+    // whenever the overall transfer width is legal, then collapses the now
+    // redundant vectorized loop.
     int previous_vectorized_lanes = current_vectorized_lanes_;
     bool pushed_vectorized_loop = false;
     if (op->kind == ForKind::kVectorized) {
@@ -90,6 +92,13 @@ public:
       }
     }
     Stmt stmt = StmtMutator::VisitStmt_(op);
+    if (pushed_vectorized_loop) {
+      if (const auto *loop = stmt.as<ForNode>()) {
+        if (CanCollapseVectorizedCPAsyncLoop(loop->body, loop->loop_var)) {
+          stmt = loop->body;
+        }
+      }
+    }
     if (pushed_vectorized_loop) {
       active_vectorized_loops_.pop_back();
     }
@@ -123,11 +132,29 @@ public:
                                           index_info->dst_index)) {
         return Optional<Stmt>();
       }
+      if (index_info->collapse_vectorized_loop) {
+        Optional<Array<PrimExpr>> src_base_indices =
+            ExtractActiveVectorizedLoopBaseIndices(load->indices);
+        Optional<Array<PrimExpr>> dst_base_indices =
+            ExtractActiveVectorizedLoopBaseIndices(store->indices);
+        if (!src_base_indices.defined() || !dst_base_indices.defined()) {
+          return Optional<Stmt>();
+        }
+        return MakeCPAsyncStmtFromLoads(
+            store, ptr_info.value(),
+            /*dst_base_load=*/
+            BufferLoad(store->buffer, dst_base_indices.value()),
+            /*src_base_load=*/
+            BufferLoad(load->buffer, src_base_indices.value()),
+            /*bytes=*/index_info->total_transfer_bytes, predicated,
+            predicate_value);
+      }
       return MakeCPAsyncStmtFromLoads(
           store, ptr_info.value(),
           /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
           /*src_base_load=*/BufferLoad(load->buffer, load->indices),
-          /*bytes=*/index_info->transfer_bytes, predicated, predicate_value);
+          /*bytes=*/index_info->per_access_transfer_bytes, predicated,
+          predicate_value);
     }
 
     Optional<Array<PrimExpr>> src_base_indices =
@@ -147,7 +174,8 @@ public:
         store, ptr_info.value(),
         /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
         /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
-        /*bytes=*/index_info->transfer_bytes, predicated, predicate_value);
+        /*bytes=*/index_info->per_access_transfer_bytes, predicated,
+        predicate_value);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -301,7 +329,9 @@ private:
     PrimExpr src_index;
     PrimExpr dst_index;
     int index_lanes{1};
-    int transfer_bytes{0};
+    int per_access_transfer_bytes{0};
+    int total_transfer_bytes{0};
+    bool collapse_vectorized_loop{false};
   };
 
   // Pointer element type metadata extracted from buffer handle annotations.
@@ -409,9 +439,17 @@ private:
     }
 
     const int effective_lanes = std::max(value_lanes, index_lanes);
-    const int elem_bytes = effective_lanes * load->dtype.bytes();
-    const int total_bytes = static_cast<int>(elem_bytes) *
-                            static_cast<int>(current_vectorized_lanes_);
+    const int elem_bits = effective_lanes * load->dtype.bits();
+    const int total_bits = static_cast<int>(elem_bits) *
+                           static_cast<int>(current_vectorized_lanes_);
+    // cp.async is byte-granular. We only fold an active vectorized copy into a
+    // single packed async transfer when the logical payload is exactly
+    // byte-aligned; otherwise rounding up here would over-copy packed subbyte
+    // data and change the copy semantics.
+    if (total_bits % 8 != 0) {
+      return std::nullopt;
+    }
+    const int total_bytes = total_bits / 8;
     if (!IsValidCPAsyncTransferBytes(total_bytes)) {
       return std::nullopt;
     }
@@ -420,8 +458,25 @@ private:
     info.src_index = src_index;
     info.dst_index = dst_index;
     info.index_lanes = index_lanes;
-    info.transfer_bytes = elem_bytes;
+    info.per_access_transfer_bytes = (elem_bits + 7) / 8;
+    info.total_transfer_bytes = total_bytes;
+    info.collapse_vectorized_loop =
+        current_vectorized_lanes_ > 1 && index_lanes == 1;
     return info;
+  }
+
+  Optional<Array<PrimExpr>>
+  ExtractActiveVectorizedLoopBaseIndices(const Array<PrimExpr> &indices) {
+    Array<PrimExpr> base_indices;
+    base_indices.reserve(indices.size());
+    for (PrimExpr index : indices) {
+      for (const auto &loop : active_vectorized_loops_) {
+        index = analyzer_.Simplify(Substitute(
+            index, {{loop.loop_var, IntImm(loop.loop_var->dtype, 0)}}));
+      }
+      base_indices.push_back(index);
+    }
+    return Optional<Array<PrimExpr>>(base_indices);
   }
 
   static std::optional<PointerTypeInfo>
@@ -533,6 +588,28 @@ private:
   static Stmt MakeWaitGroupStmt(int n) {
     return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
                          {IntImm(DataType::Int(32), n)}));
+  }
+
+  static bool IsCPAsyncStmt(const Stmt &stmt) {
+    const auto *eval = stmt.as<EvaluateNode>();
+    if (eval == nullptr) {
+      return false;
+    }
+    const auto *call = eval->value.as<CallNode>();
+    if (call == nullptr) {
+      return false;
+    }
+    return call->op.same_as(builtin::ptx_cp_async()) ||
+           call->op.same_as(tl::ptx_cp_async());
+  }
+
+  static bool CanCollapseVectorizedCPAsyncLoop(const Stmt &stmt,
+                                               const Var &loop_var) {
+    if (!IsCPAsyncStmt(stmt)) {
+      return false;
+    }
+    return !tir::UsesVar(
+        stmt, [loop_var](const VarNode *v) { return v == loop_var.get(); });
   }
 
   // ---- Vectorized-offset contiguity helpers ----

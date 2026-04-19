@@ -651,10 +651,10 @@ public:
     return Call(op->dtype, GetVectorizedAtomicOp(vector_size), {dst, src});
   }
 
-  // cp.async call vectorization.
-  // Pattern:
-  //   for i in vectorized(k): ptx_cp_async(dst, src, elem_bytes)
-  // => ptx_cp_async(dst_base, src_base, elem_bytes * k)
+  // cp.async is expected to be emitted at its final packed transfer width by
+  // InjectPTXAsyncCopy during LowerTileOp. If a vectorized loop still contains
+  // cp.async here, keep it scalar and let the enclosing loop scalarize rather
+  // than trying to widen the transfer again in this late vectorization pass.
   PrimExpr MutatePTXCPAsyncExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::ptx_cp_async()) ||
            op->op.same_as(tl::ptx_cp_async()));
@@ -676,33 +676,17 @@ public:
     }
 
     auto lanes_ptr = as_const_int(var_lanes_);
-    if (!lanes_ptr || *lanes_ptr <= 1) {
-      Array<PrimExpr> new_args{dst, src, bytes};
-      if (predicate.defined()) {
-        new_args.push_back(predicate.value());
-      }
-      if (new_args.same_as(op->args)) {
-        return tvm::ffi::GetRef<PrimExpr>(op);
-      }
-      return Call(op->dtype, op->op, new_args);
-    }
-
-    const auto *bytes_imm = bytes.as<IntImmNode>();
-    if (bytes_imm == nullptr) {
+    if (lanes_ptr && *lanes_ptr > 1) {
       need_scalarize_ = true;
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
-    int vector_size = static_cast<int>(*lanes_ptr);
-    int total_bytes = static_cast<int>(bytes_imm->value) * vector_size;
-    if (!IsValidCPAsyncTransferBytes(total_bytes)) {
-      need_scalarize_ = true;
-      return tvm::ffi::GetRef<PrimExpr>(op);
-    }
-
-    Array<PrimExpr> new_args{dst, src, IntImm(bytes_imm->dtype, total_bytes)};
+    Array<PrimExpr> new_args{dst, src, bytes};
     if (predicate.defined()) {
       new_args.push_back(predicate.value());
+    }
+    if (new_args.same_as(op->args)) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
     return Call(op->dtype, op->op, new_args);
   }
