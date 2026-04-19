@@ -99,6 +99,8 @@ private:
   std::string GetDynSharedAliasBufferExpr(const DynSharedAliasAccess &access);
   std::string GetDynSharedAliasAddressExpr(const DynSharedAliasAccess &access,
                                            PrimExpr element_index);
+  void BindDynSharedAliasVarRange(const Var &var, Range range);
+  void UnbindDynSharedAliasVarRange(const Var &var);
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
@@ -179,6 +181,7 @@ private:
   std::unordered_map<std::string, DynSharedAliasInfo> dyn_shared_aliases_;
   std::vector<std::string> dyn_shared_alias_order_;
   std::vector<PrimExpr> dyn_shared_stage_expr_stack_;
+  std::unordered_map<const VarNode *, Range> dyn_shared_alias_var_ranges_;
   // Map from VarNode to packed buffer variable name for fp4 packed storage
   std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,

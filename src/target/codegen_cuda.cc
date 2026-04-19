@@ -319,6 +319,9 @@ CodeGenTileLangCUDA::TryMatchDynSharedAliasAccess(const BufferNode *buffer,
     return std::nullopt;
   }
   arith::Analyzer analyzer;
+  for (const auto &kv : dyn_shared_alias_var_ranges_) {
+    analyzer.Bind(GetRef<Var>(kv.first), kv.second);
+  }
   auto try_match = [&](const DynSharedAliasInfo &info,
                        bool require_range_check) {
     if (info.dtype != buffer->dtype) {
@@ -391,6 +394,15 @@ std::string CodeGenTileLangCUDA::GetDynSharedAliasAddressExpr(
     return buffer_expr;
   }
   return "(&(" + buffer_expr + "[" + PrintExpr(simplified) + "]))";
+}
+
+void CodeGenTileLangCUDA::BindDynSharedAliasVarRange(const Var &var,
+                                                     Range range) {
+  dyn_shared_alias_var_ranges_[var.get()] = std::move(range);
+}
+
+void CodeGenTileLangCUDA::UnbindDynSharedAliasVarRange(const Var &var) {
+  dyn_shared_alias_var_ranges_.erase(var.get());
 }
 
 void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
@@ -725,6 +737,8 @@ std::string CodeGenTileLangCUDA::Finish() {
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
+  BindDynSharedAliasVarRange(op->loop_var,
+                             Range::FromMinExtent(op->min, op->extent));
   if (op->kind == tir::ForKind::kUnrolled) {
     PrintIndent();
     if (unroll_factor.count(op->loop_var.get())) {
@@ -748,6 +762,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
   this->EndScope(for_scope);
   PrintIndent();
   stream << "}\n";
+  UnbindDynSharedAliasVarRange(op->loop_var);
 }
 
 void CodeGenTileLangCUDA::BindThreadIndex(const IterVar &iv) {
@@ -1359,8 +1374,8 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
   ICHECK(i >= 0 && i < 256 / t.bits());
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
-      stream << vec << '.' << access[i % t.lanes()] << "=" << "(" << value
-             << ");\n";
+      stream << vec << '.' << access[i % t.lanes()] << "="
+             << "(" << value << ");\n";
     } else if (t.lanes() <= 16) {
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       stream << ac << "=";
@@ -1819,15 +1834,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
-    os << "cutlass::bfloat16_t(__hmin(" << "(" << PrintExpr(op->a)
-       << ").to_nv_bfloat16(), " << "(" << PrintExpr(op->b)
-       << ").to_nv_bfloat16()))";
+    os << "cutlass::bfloat16_t(__hmin("
+       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
+       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
     return;
   }
 
   if (t.is_float16() && t.is_scalar()) {
-    os << "cutlass::half_t(__hmin(" << "(" << PrintExpr(op->a)
-       << ").to_half(), " << "(" << PrintExpr(op->b) << ").to_half()))";
+    os << "cutlass::half_t(__hmin("
+       << "(" << PrintExpr(op->a) << ").to_half(), "
+       << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -1849,15 +1865,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.is_bfloat16() && t.is_scalar()) {
-    os << "cutlass::bfloat16_t(__hmax(" << "(" << PrintExpr(op->a)
-       << ").to_nv_bfloat16(), " << "(" << PrintExpr(op->b)
-       << ").to_nv_bfloat16()))";
+    os << "cutlass::bfloat16_t(__hmax("
+       << "(" << PrintExpr(op->a) << ").to_nv_bfloat16(), "
+       << "(" << PrintExpr(op->b) << ").to_nv_bfloat16()))";
     return;
   }
 
   if (t.is_float16() && t.is_scalar()) {
-    os << "cutlass::half_t(__hmax(" << "(" << PrintExpr(op->a)
-       << ").to_half(), " << "(" << PrintExpr(op->b) << ").to_half()))";
+    os << "cutlass::half_t(__hmax("
+       << "(" << PrintExpr(op->a) << ").to_half(), "
+       << "(" << PrintExpr(op->b) << ").to_half()))";
     return;
   }
 
@@ -2005,7 +2022,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
          << GetDynSharedAliasAddressExpr(*dyn_shared_access, scaled_index)
          << ")";
     } else {
-      os << "*((" << ptr_cast(t) << vid << ")" << " + " << index_str << ")";
+      os << "*((" << ptr_cast(t) << vid << ")"
+         << " + " << index_str << ")";
     }
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
@@ -2163,8 +2181,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(op->args.size() == 1 && load);
     ICHECK_EQ(load->indices.size(), 1)
         << "CodeGenCUDA only supports flat memory allocations.";
-    if (auto dyn_shared_access =
-            TryMatchDynSharedAliasAccess(load->buffer.get(), load->indices[0])) {
+    if (auto dyn_shared_access = TryMatchDynSharedAliasAccess(
+            load->buffer.get(), load->indices[0])) {
       os << GetDynSharedAliasAddressExpr(*dyn_shared_access,
                                          dyn_shared_access->element_index);
       return;
@@ -3145,13 +3163,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (op->dtype.bits() == 16) {
       os << "for (int local_id = 0; local_id < 8; local_id+=2) {\n";
       os << "*((uint *)&" << dst << "[" + this->PrintExpr(dst_ind) + "])"
-         << " = " << "*((uint *)&" << src << "[" << src_offset
-         << " + local_id]);\n";
+         << " = "
+         << "*((uint *)&" << src << "[" << src_offset << " + local_id]);\n";
       os << "}\n";
     } else {
       os << "for (int local_id = 0; local_id < 8; ++local_id) {\n";
-      os << dst << "[" + this->PrintExpr(dst_ind) + "]" << " = " << src << "["
-         << src_offset << " + local_id];\n";
+      os << dst << "[" + this->PrintExpr(dst_ind) + "]"
+         << " = " << src << "[" << src_offset << " + local_id];\n";
       os << "}\n";
     }
 
@@ -3238,7 +3256,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "\" @!p mov.b32 %0, 0;\\n\"\n";
     this->stream << "\" @p ld.global.nc.f32 %0, [%1];}\\n\"\n";
     // stream << "\" @p ld.global.nc.L2::128B.f32 %0, [%1];}\\n\"\n" ;
-    stream << ": \"=f\"(" << reg << "[" << local_addr << "]" << ")\n";
+    stream << ": \"=f\"(" << reg << "[" << local_addr << "]"
+           << ")\n";
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
@@ -3961,7 +3980,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tl::attr::kLexicalAllocScope) {
+  if (op->attr_key == tir::attr::thread_extent) {
+    IterVar iv = Downcast<IterVar>(op->node);
+    BindDynSharedAliasVarRange(
+        iv->var, Range::FromMinExtent(make_zero(iv->var.dtype()), op->value));
+    CodeGenC::VisitStmt_(op);
+    UnbindDynSharedAliasVarRange(iv->var);
+    return;
+  } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
     PrintIndent();
     stream << "{\n";
     int scope = BeginScope();
@@ -4197,8 +4223,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   PrintType(op->dtype, os);
   os << "(";
   for (int i = 0; i < lanes; i++) {
-    os << "(" << PrintExpr(op->base) << ")" << "+(" << PrintExpr(op->stride)
-       << "*" << i << ")";
+    os << "(" << PrintExpr(op->base) << ")"
+       << "+(" << PrintExpr(op->stride) << "*" << i << ")";
     if (i != lanes - 1)
       os << ", ";
   }
@@ -4998,6 +5024,8 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           .value_or(Bool(false));
   dyn_shared_aliases_.clear();
   dyn_shared_alias_order_.clear();
+  dyn_shared_stage_expr_stack_.clear();
+  dyn_shared_alias_var_ranges_.clear();
   if (emit_named_smem_pointers_) {
     if (auto opt = f->GetAttr<Map<String, Array<PrimExpr>>>(
             kDynSharedMemoryAliasMetadata)) {
