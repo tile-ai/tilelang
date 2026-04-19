@@ -1952,15 +1952,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
-  auto print_mbarrier_obj = [&](PrimExpr barrier_id) {
-    std::ostringstream ss;
-    if (barrier_id.as<IntImmNode>()) {
-      ss << mbarrier_name_ << "[" << barrier_id << "]";
-    } else {
-      ss << this->PrintExpr(barrier_id);
-    }
-    return ss.str();
-  };
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
     const bool is_max = op->op.same_as(tl::max_nan());
