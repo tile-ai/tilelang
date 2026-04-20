@@ -27,10 +27,14 @@ def matmul_nt_int4(M, N, K, block_M, block_N, block_K):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(7, 5)
+@tilelang.testing.requires_cuda_compute_version_eq(8, 0)
 def test_compile_int4_gemm_tgemm():
     func = matmul_nt_int4(1024, 1024, 1024, 128, 128, 64)
     kernel = tilelang.compile(func, out_idx=-1)
     src = kernel.get_kernel_source()
     assert src is not None
     assert "s4.s4.s32" in src or "int4" in src
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()
