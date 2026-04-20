@@ -484,4 +484,3 @@ class WMMAIntrinEmitter:
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type: {type(obj)}")
-
