@@ -187,12 +187,8 @@ private:
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
 // annotations: Map containing coalesced_width, disable_tma, eviction_policy,
-// dst_block, etc.
+// etc.
 Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ICHECK_EQ(args.size(), 2U)
-      << "Copy expects exactly 2 arguments (src, dst); optional attributes "
-         "must be passed via annotations, but got "
-      << args.size();
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
@@ -201,7 +197,7 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
   node->SetAccessRegions({src_access, dst_access});
-  // Copy lowering hints directly from the Call node annotations.
+  // Copy annotations from the Call node
   node->annotations = annotations;
   if (auto dst_block = node->annotations.Get("dst_block")) {
     if (auto int_imm = dst_block->as<IntImmNode>()) {
