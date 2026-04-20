@@ -48,6 +48,30 @@ int64_t GetElementStorageBits(DataType dtype) {
   return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
 }
 
+bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
+                 arith::Analyzer *analyzer) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
+                                        const Layout &layout,
+                                        arith::Analyzer *analyzer) {
+  for (const auto &buffer : buffers) {
+    if (ShapesEqual(layout->InputShape(), buffer->shape, analyzer)) {
+      return buffer;
+    }
+  }
+  return Optional<Buffer>();
+}
+
 } // namespace
 
 /*!
@@ -738,31 +762,25 @@ private:
             << "buffer " << var << " is not found in the block";
         const auto &buffers = buffer_data_to_buffers_[var];
         ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
+        Optional<Buffer> anchor_buffer =
+            FindLayoutAnchorBuffer(buffers, layout, &analyzer_);
+        int64_t anchor_bits =
+            anchor_buffer.defined()
+                ? GetElementStorageBits(anchor_buffer.value()->dtype)
+                : GetElementStorageBits(buffers[0]->dtype);
         // Apply layout to all buffers associated with this var
         for (const auto &buffer : buffers) {
 
           // Reshape the layout to match the buffer's shape
           // Check if shapes are structurally equal
           bool shapes_equal =
-              layout->InputShape().size() == buffer->shape.size();
-          if (shapes_equal) {
-            for (size_t i = 0; i < layout->InputShape().size(); ++i) {
-              if (!analyzer_.CanProveEqual(layout->InputShape()[i],
-                                           buffer->shape[i])) {
-                shapes_equal = false;
-                break;
-              }
-            }
-          }
+              ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_);
 
           if (shapes_equal) {
             annotated_layout_map_.Set(buffer, layout);
           } else {
-            // Use the first buffer sharing this var as the base for dtype ratio
-            int64_t base_bits = GetElementStorageBits(buffers[0]->dtype);
-
             auto reshaped_layout =
-                layout->Reshape(buffer->shape, &analyzer_, Integer(base_bits),
+                layout->Reshape(buffer->shape, &analyzer_, Integer(anchor_bits),
                                 Integer(GetElementStorageBits(buffer->dtype)));
             annotated_layout_map_.Set(buffer, reshaped_layout);
           }

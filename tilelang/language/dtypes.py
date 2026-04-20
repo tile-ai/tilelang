@@ -212,6 +212,9 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float4_e2m1fn":
         logger.info("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
         return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
+    elif dtype_str == "int4":
+        logger.info("torch doesn't support int4, using int8 as storage dtype.")
+        return torch.int8
     elif dtype_str == "handle":
         return None
     elif dtype_str in _STR_TO_TORCH_DTYPE:

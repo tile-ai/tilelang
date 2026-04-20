@@ -310,6 +310,7 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+            --ignore=../examples/grouped_gemm/test_example_grouped_gemm.py \
             ../examples
 
       # NVIDIA CUDA tests

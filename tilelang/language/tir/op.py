@@ -1350,7 +1350,7 @@ def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, sme
     return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset)
 
 
-def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
+def ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate=None):
     """TVM intrinsic for ptx async copy from global to shared memory using cp.async
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async
 
@@ -1364,8 +1364,12 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
         The source (global memory) access pointer created by tvm_access_ptr.
         Should include pointer, offset, extent, and read access flag (rw_mask=1).
 
-    bytes : int or PrimExpr
-        The number of bytes to copy (must be 4, 8, or 16).
+    num_elems : int or PrimExpr
+        The number of logical elements to copy.
+
+        For TileLang's ``tl.ptx_cp_async`` frontend op, the final PTX byte width
+        is derived later from ``num_elems * element_bits(access_ptr)`` and must
+        eventually land on a legal ``cp.async`` width of 4, 8, or 16 bytes.
 
     predicate : PrimExpr, optional
         Optional predicate condition for conditional cp.async. When provided, the copy
@@ -1379,11 +1383,11 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
 
     Examples
     --------
-    >>> # Copy 16 bytes from global to shared memory
+    >>> # Copy 16 uint8 elements (= 16 bytes) from global to shared memory
     >>> T.ptx_cp_async(
     ...     T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 16, 2),  # dst
     ...     T.tvm_access_ptr(T.type_annotation(T.uint8), B_global.data, 0, 16, 1),  # src
-    ...     16  # bytes
+    ...     16  # num_elems
     ... )
     >>>
     >>> # Predicated cp.async (only copy if condition is true)
@@ -1397,9 +1401,9 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
     from tvm import tir
 
     if predicate is None:
-        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, bytes)
+        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems)
     else:
-        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, bytes, predicate)
+        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems, predicate)
 
 
 def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id):

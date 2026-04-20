@@ -9,6 +9,8 @@
 #include <tvm/tir/op.h>
 
 #include <cmath>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,6 +27,69 @@ using namespace tvm::tl::codegen;
 using namespace ffi;
 
 namespace {
+
+bool IsValidCPAsyncTransferBytes(int64_t bytes) {
+  return bytes == 4 || bytes == 8 || bytes == 16;
+}
+
+std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
+  const auto *ptr_call = expr.as<CallNode>();
+  if (ptr_call == nullptr) {
+    return std::nullopt;
+  }
+  if (ptr_call->op.same_as(builtin::address_of())) {
+    const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+    ICHECK(buffer_load) << "address_of arg must be BufferLoad";
+    return buffer_load->buffer->dtype;
+  }
+  if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+    ICHECK(!ptr_call->args.empty());
+    return ptr_call->args[0].dtype();
+  }
+  if (ptr_call->op.same_as(tl::access_ptr())) {
+    ICHECK_EQ(ptr_call->args.size(), 3U)
+        << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+    const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+    ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
+    return buffer_load->buffer->dtype;
+  }
+  return std::nullopt;
+}
+
+int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
+  ICHECK(op->args.size() == 3 || op->args.size() == 4)
+      << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+         "src_access_ptr, num_elems, [predicate])";
+  const auto *num_elems_imm = op->args[2].as<IntImmNode>();
+  ICHECK(num_elems_imm) << "tl::ptx_cp_async num_elems must be IntImm, but got "
+                        << op->args[2];
+  int64_t num_elems = num_elems_imm->value;
+  ICHECK_GT(num_elems, 0);
+
+  auto dst_elem_type = GetAccessPtrElementType(op->args[0]);
+  auto src_elem_type = GetAccessPtrElementType(op->args[1]);
+  ICHECK(dst_elem_type.has_value() && src_elem_type.has_value())
+      << "tl::ptx_cp_async expects address_of, tl.access_ptr, or "
+         "tvm_access_ptr operands";
+
+  int64_t dst_total_bits =
+      num_elems * dst_elem_type.value().bits() * dst_elem_type.value().lanes();
+  int64_t src_total_bits =
+      num_elems * src_elem_type.value().bits() * src_elem_type.value().lanes();
+  ICHECK_EQ(dst_total_bits, src_total_bits)
+      << "tl::ptx_cp_async requires src/dst transfer widths to match, but got "
+      << dst_total_bits << " vs " << src_total_bits << " bits";
+  ICHECK_EQ(dst_total_bits % 8, 0)
+      << "tl::ptx_cp_async requires byte-aligned transfers, but got "
+      << dst_total_bits << " bits";
+
+  int64_t total_bytes = dst_total_bits / 8;
+  ICHECK(IsValidCPAsyncTransferBytes(total_bytes))
+      << "tl::ptx_cp_async requires a final PTX byte width in {4, 8, 16}, but "
+         "got "
+      << total_bytes;
+  return static_cast<int>(total_bytes);
+}
 
 bool CanEmitPackedX2Math(DataType t) {
   int lanes = t.lanes();
@@ -1999,14 +2064,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
   } else if (op->op.same_as(tl::ptx_cp_async())) {
     // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
-    // args[2] = bytes, args[3] = predicate (optional)
-    ICHECK(op->args.size() == 3 || op->args.size() == 4)
-        << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-           "src_access_ptr, bytes, [predicate])";
+    // args[2] = num_elems, args[3] = predicate (optional)
+    int total_bytes = GetTileLangCPAsyncTransferBytes(op);
 
     std::string dst = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
-    std::string size = this->PrintExpr(op->args[2]);
+    std::string size = std::to_string(total_bytes);
 
     this->PrintIndent();
     if (op->args.size() == 3) {
@@ -2267,6 +2330,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::block_rank_in_cluster())) {
     need_cluster_h_ = true;
     os << "tl::block_rank_in_cluster()";
+  } else if (op->op.same_as(tl::clc_try_cancel())) {
+    need_cluster_h_ = true;
+    print_extern_call_stmt("tl::clc_try_cancel");
+  } else if (op->op.same_as(tl::clc_try_cancel_multicast())) {
+    need_cluster_h_ = true;
+    print_extern_call_stmt("tl::clc_try_cancel_multicast");
+  } else if (op->op.same_as(tl::clc_is_canceled())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_is_canceled(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_x())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_x(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_y())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_y(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_z())) {
+    need_cluster_h_ = true;
+    os << "tl::clc_get_first_ctaid_z(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
@@ -4629,6 +4710,22 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
 
 void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
                                       const PrimFunc &f) {
+  auto code_block_source = f->GetAttr<String>(tl::attr::kCodeBlockSource);
+  if (code_block_source) {
+    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+    ICHECK(global_symbol) << "CodeGenTileLangCUDA: Expect PrimFunc to have the "
+                             "global_symbol attribute";
+    if (auto code_block_entry_name =
+            f->GetAttr<String>(tl::attr::kCodeBlockEntryName)) {
+      ICHECK_EQ(static_cast<std::string>(global_symbol.value()),
+                static_cast<std::string>(code_block_entry_name.value()))
+          << "T.CUDASourceCodeKernel expects the lowered device global_symbol "
+             "to match entry_name";
+    }
+    stream << static_cast<std::string>(code_block_source.value()) << "\n\n";
+    return;
+  }
+
   // If the function has already been forward-declared, this is a
   // no-op.
   CodeGenC::DeclareFunction(gvar, f);
