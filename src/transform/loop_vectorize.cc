@@ -33,6 +33,7 @@
 #include "tvm/tir/analysis.h"
 #include "tvm/tir/var.h"
 #include <iostream>
+#include <optional>
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
@@ -410,6 +411,69 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
+  static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
+    const auto *ptr_call = expr.as<CallNode>();
+    if (ptr_call == nullptr) {
+      return std::nullopt;
+    }
+    if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK(!ptr_call->args.empty());
+      DataType dtype = ptr_call->args[0].dtype();
+      return dtype.bits() * dtype.lanes();
+    }
+    if (ptr_call->op.same_as(tl::access_ptr())) {
+      ICHECK_EQ(ptr_call->args.size(), 3U)
+          << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+      const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+      ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
+      DataType dtype = buffer_load->buffer->dtype;
+      return dtype.bits() * dtype.lanes();
+    }
+    return std::nullopt;
+  }
+
+  static std::optional<int> GetCPAsyncBitsPerCall(const CallNode *node) {
+    ICHECK_GE(node->args.size(), 3U)
+        << "cp.async expects at least 3 arguments, but got " << node->args;
+    const auto *count_imm = node->args[2].as<IntImmNode>();
+    ICHECK(count_imm) << "cp.async transfer count must be IntImm, but got "
+                      << node->args[2];
+    int count = static_cast<int>(count_imm->value);
+    if (count <= 0) {
+      return std::nullopt;
+    }
+    if (node->op.same_as(builtin::ptx_cp_async())) {
+      return count * 8;
+    }
+    ICHECK(node->op.same_as(tl::ptx_cp_async()));
+    auto dst_elem_bits = GetAccessPtrElementBits(node->args[0]);
+    auto src_elem_bits = GetAccessPtrElementBits(node->args[1]);
+    if (!dst_elem_bits.has_value() || !src_elem_bits.has_value()) {
+      return std::nullopt;
+    }
+    int dst_total_bits = count * dst_elem_bits.value();
+    int src_total_bits = count * src_elem_bits.value();
+    ICHECK_EQ(dst_total_bits, src_total_bits)
+        << "tl.ptx_cp_async requires src/dst transfer widths to match, but got "
+        << dst_total_bits << " vs " << src_total_bits << " bits";
+    return dst_total_bits;
+  }
+
+  static int GetMaxCPAsyncVectorizeLength(int per_call_bits) {
+    if (per_call_bits <= 0) {
+      return 1;
+    }
+    int vectorize_length = 1;
+    for (int target_bytes : {16, 8, 4}) {
+      int target_bits = target_bytes * 8;
+      if (target_bits % per_call_bits == 0) {
+        vectorize_length =
+            std::max(vectorize_length, target_bits / per_call_bits);
+      }
+    }
+    return vectorize_length;
+  }
+
   PrimExpr VisitExpr_(const CallNode *node) final {
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
@@ -457,22 +521,11 @@ private:
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::ptx_cp_async()) ||
                node->op.same_as(tl::ptx_cp_async())) {
-      // Prefer emitting cp.async at the final packed width during
-      // InjectPTXAsyncCopy, but keep late vectorization enabled as a fallback
-      // for cp.async calls that still reach this planner.
-      int vectorize_length = 1;
-      ICHECK_GE(node->args.size(), 3U)
-          << "cp.async expects at least 3 arguments, but got " << node->args;
-      const auto *bytes_imm = node->args[2].as<IntImmNode>();
-      ICHECK(bytes_imm) << "cp.async byte count must be IntImm, but got "
-                        << node->args[2];
-      int bytes = static_cast<int>(bytes_imm->value);
-      for (int lanes : {16, 8, 4, 2, 1}) {
-        if (IsValidCPAsyncTransferBytes(bytes * lanes)) {
-          vectorize_length = lanes;
-          break;
-        }
-      }
+      // builtin::ptx_cp_async stores bytes, while tl::ptx_cp_async stores
+      // logical element counts. In both cases we pick the largest vector width
+      // whose eventual PTX payload is one of {4, 8, 16} bytes.
+      int vectorize_length =
+          GetMaxCPAsyncVectorizeLength(GetCPAsyncBitsPerCall(node).value_or(0));
       buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == builtin::address_of() ||

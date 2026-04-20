@@ -66,16 +66,15 @@ public:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
-    // Track nested vectorized loop extents so cp.async injection can emit the
-    // final packed transfer width directly:
-    //   for v in T.vectorized(k): store(load(...))
-    // => ptx_cp_async(dst_base, src_base, total_transfer_bytes)
+    // Track nested vectorized loop extents so we can decide whether an
+    // element-wise copy has a legal final cp.async width after later loop
+    // vectorization:
+    //   for v in T.vectorized(k): tl.ptx_cp_async(dst, src, elem_count)
+    // => tl.ptx_cp_async(dst_base, src_base, elem_count * k)
     //
-    // cp.async only supports byte widths {4, 8, 16}. Instead of emitting
-    // element-sized transfers here and relying on a later vectorization pass
-    // to widen them, TryInjectPTX packs the active vectorized loop directly
-    // whenever the overall transfer width is legal, then collapses the now
-    // redundant vectorized loop.
+    // TileLang records logical element counts in tl.ptx_cp_async. The final
+    // PTX byte width is derived later from the access_ptr dtype, so subbyte
+    // dtypes such as int4/fp4/int2/int1 remain representable here.
     int previous_vectorized_lanes = current_vectorized_lanes_;
     bool pushed_vectorized_loop = false;
     if (op->kind == ForKind::kVectorized) {
@@ -93,13 +92,6 @@ public:
     }
     Stmt stmt = StmtMutator::VisitStmt_(op);
     if (pushed_vectorized_loop) {
-      if (const auto *loop = stmt.as<ForNode>()) {
-        if (CanCollapseVectorizedCPAsyncLoop(loop->body, loop->loop_var)) {
-          stmt = loop->body;
-        }
-      }
-    }
-    if (pushed_vectorized_loop) {
       active_vectorized_loops_.pop_back();
     }
     current_vectorized_lanes_ = previous_vectorized_lanes;
@@ -112,17 +104,10 @@ public:
                               const PrimExpr &predicate_value = PrimExpr()) {
     // Pipeline:
     // 1) Analyze source/destination indices and transfer width eligibility.
-    // 2) Validate pointer type metadata for access_ptr construction.
-    // 3) Build cp.async with scalar/vectorized offsets if representable.
+    // 2) Build tl.ptx_cp_async with scalar/vectorized base offsets when the
+    //    eventual PTX byte width is representable.
     std::optional<CopyIndexInfo> index_info = PrepareCopyIndexInfo(load, store);
     if (!index_info.has_value()) {
-      return Optional<Stmt>();
-    }
-
-    std::optional<PointerTypeInfo> ptr_info =
-        PreparePointerTypeInfo(load, store);
-    if (!ptr_info.has_value()) {
-      // Be conservative: if pointer metadata is missing, skip injection.
       return Optional<Stmt>();
     }
 
@@ -132,28 +117,11 @@ public:
                                           index_info->dst_index)) {
         return Optional<Stmt>();
       }
-      if (index_info->collapse_vectorized_loop) {
-        Optional<Array<PrimExpr>> src_base_indices =
-            ExtractActiveVectorizedLoopBaseIndices(load->indices);
-        Optional<Array<PrimExpr>> dst_base_indices =
-            ExtractActiveVectorizedLoopBaseIndices(store->indices);
-        if (!src_base_indices.defined() || !dst_base_indices.defined()) {
-          return Optional<Stmt>();
-        }
-        return MakeCPAsyncStmtFromLoads(
-            store, ptr_info.value(),
-            /*dst_base_load=*/
-            BufferLoad(store->buffer, dst_base_indices.value()),
-            /*src_base_load=*/
-            BufferLoad(load->buffer, src_base_indices.value()),
-            /*bytes=*/index_info->total_transfer_bytes, predicated,
-            predicate_value);
-      }
       return MakeCPAsyncStmtFromLoads(
-          store, ptr_info.value(),
+          store,
           /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
           /*src_base_load=*/BufferLoad(load->buffer, load->indices),
-          /*bytes=*/index_info->per_access_transfer_bytes, predicated,
+          /*num_elems=*/index_info->per_access_num_elems, predicated,
           predicate_value);
     }
 
@@ -171,10 +139,10 @@ public:
       return Optional<Stmt>();
     }
     return MakeCPAsyncStmtFromLoads(
-        store, ptr_info.value(),
+        store,
         /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
         /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
-        /*bytes=*/index_info->per_access_transfer_bytes, predicated,
+        /*num_elems=*/index_info->per_access_num_elems, predicated,
         predicate_value);
   }
 
@@ -329,15 +297,7 @@ private:
     PrimExpr src_index;
     PrimExpr dst_index;
     int index_lanes{1};
-    int per_access_transfer_bytes{0};
-    int total_transfer_bytes{0};
-    bool collapse_vectorized_loop{false};
-  };
-
-  // Pointer element type metadata extracted from buffer handle annotations.
-  struct PointerTypeInfo {
-    DataType dst_elem_type;
-    DataType src_elem_type;
+    int per_access_num_elems{0};
   };
 
   // Synchronization state for injected cp.async runs carried across statements.
@@ -439,13 +399,12 @@ private:
     }
 
     const int effective_lanes = std::max(value_lanes, index_lanes);
-    const int elem_bits = effective_lanes * load->dtype.bits();
-    const int total_bits = static_cast<int>(elem_bits) *
+    const int per_access_bits = effective_lanes * load->dtype.bits();
+    const int total_bits = static_cast<int>(per_access_bits) *
                            static_cast<int>(current_vectorized_lanes_);
-    // cp.async is byte-granular. We only fold an active vectorized copy into a
-    // single packed async transfer when the logical payload is exactly
-    // byte-aligned; otherwise rounding up here would over-copy packed subbyte
-    // data and change the copy semantics.
+    // PTX cp.async is byte-granular. `tl.ptx_cp_async` stores logical element
+    // counts, but we still need to know that the eventual vectorized transfer
+    // can map to a legal byte width without over-copying packed subbyte data.
     if (total_bits % 8 != 0) {
       return std::nullopt;
     }
@@ -458,36 +417,8 @@ private:
     info.src_index = src_index;
     info.dst_index = dst_index;
     info.index_lanes = index_lanes;
-    info.per_access_transfer_bytes = (elem_bits + 7) / 8;
-    info.total_transfer_bytes = total_bytes;
-    info.collapse_vectorized_loop =
-        current_vectorized_lanes_ > 1 && index_lanes == 1;
+    info.per_access_num_elems = effective_lanes;
     return info;
-  }
-
-  Optional<Array<PrimExpr>>
-  ExtractActiveVectorizedLoopBaseIndices(const Array<PrimExpr> &indices) {
-    Array<PrimExpr> base_indices;
-    base_indices.reserve(indices.size());
-    for (PrimExpr index : indices) {
-      for (const auto &loop : active_vectorized_loops_) {
-        index = analyzer_.Simplify(Substitute(
-            index, {{loop.loop_var, IntImm(loop.loop_var->dtype, 0)}}));
-      }
-      base_indices.push_back(index);
-    }
-    return Optional<Array<PrimExpr>>(base_indices);
-  }
-
-  static std::optional<PointerTypeInfo>
-  PreparePointerTypeInfo(const BufferLoadNode *load,
-                         const BufferStoreNode *store) {
-    auto dst_elem_type = GetPointerType(store->buffer->data->type_annotation);
-    auto src_elem_type = GetPointerType(load->buffer->data->type_annotation);
-    if (!dst_elem_type.has_value() || !src_elem_type.has_value()) {
-      return std::nullopt;
-    }
-    return PointerTypeInfo{dst_elem_type.value(), src_elem_type.value()};
   }
 
   static PrimExpr ExtractVectorBase(const PrimExpr &index) {
@@ -555,30 +486,25 @@ private:
                  IntImm(DataType::Int(32), rw_mask)});
   }
 
-  static Optional<Stmt> MakeCPAsyncStmtFromLoads(
-      const BufferStoreNode *store, const PointerTypeInfo &ptr_info,
-      const BufferLoad &dst_base_load, const BufferLoad &src_base_load,
-      int bytes, bool predicated, const PrimExpr &predicate_value) {
-    int dst_elem_count = bytes / ptr_info.dst_elem_type.bytes();
-    int src_elem_count = bytes / ptr_info.src_elem_type.bytes();
-    if (dst_elem_count <= 0 || src_elem_count <= 0) {
-      return Optional<Stmt>();
-    }
-
+  static Optional<Stmt>
+  MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
+                           const BufferLoad &dst_base_load,
+                           const BufferLoad &src_base_load, int num_elems,
+                           bool predicated, const PrimExpr &predicate_value) {
     PrimExpr dst_access_ptr =
-        MakeAccessPtrFromLoad(dst_base_load, dst_elem_count, /*rw_mask=*/2);
+        MakeAccessPtrFromLoad(dst_base_load, num_elems, /*rw_mask=*/2);
     PrimExpr src_access_ptr =
-        MakeAccessPtrFromLoad(src_base_load, src_elem_count, /*rw_mask=*/1);
+        MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
 
     ffi::Array<PrimExpr> cp_async_args;
     if (predicated) {
-      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes),
+      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems),
                        predicate_value};
     } else {
-      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes)};
+      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems)};
     }
-    return Evaluate(Call(store->buffer->dtype,
-                         tvm::tir::builtin::ptx_cp_async(), cp_async_args));
+    return Evaluate(
+        Call(store->buffer->dtype, tvm::tl::ptx_cp_async(), cp_async_args));
   }
 
   static Stmt MakeCommitGroupStmt() {
@@ -588,28 +514,6 @@ private:
   static Stmt MakeWaitGroupStmt(int n) {
     return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
                          {IntImm(DataType::Int(32), n)}));
-  }
-
-  static bool IsCPAsyncStmt(const Stmt &stmt) {
-    const auto *eval = stmt.as<EvaluateNode>();
-    if (eval == nullptr) {
-      return false;
-    }
-    const auto *call = eval->value.as<CallNode>();
-    if (call == nullptr) {
-      return false;
-    }
-    return call->op.same_as(builtin::ptx_cp_async()) ||
-           call->op.same_as(tl::ptx_cp_async());
-  }
-
-  static bool CanCollapseVectorizedCPAsyncLoop(const Stmt &stmt,
-                                               const Var &loop_var) {
-    if (!IsCPAsyncStmt(stmt)) {
-      return false;
-    }
-    return !tir::UsesVar(
-        stmt, [loop_var](const VarNode *v) { return v == loop_var.get(); });
   }
 
   // ---- Vectorized-offset contiguity helpers ----
