@@ -457,9 +457,23 @@ private:
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::ptx_cp_async()) ||
                node->op.same_as(tl::ptx_cp_async())) {
-      // Existing cp.async is already a final-width async transfer. Do not use
-      // it to encourage additional loop vectorization.
-      buffer_vector_infos_.push_back({Buffer(), 1, false, {}});
+      // Prefer emitting cp.async at the final packed width during
+      // InjectPTXAsyncCopy, but keep late vectorization enabled as a fallback
+      // for cp.async calls that still reach this planner.
+      int vectorize_length = 1;
+      ICHECK_GE(node->args.size(), 3U)
+          << "cp.async expects at least 3 arguments, but got " << node->args;
+      const auto *bytes_imm = node->args[2].as<IntImmNode>();
+      ICHECK(bytes_imm) << "cp.async byte count must be IntImm, but got "
+                        << node->args[2];
+      int bytes = static_cast<int>(bytes_imm->value);
+      for (int lanes : {16, 8, 4, 2, 1}) {
+        if (IsValidCPAsyncTransferBytes(bytes * lanes)) {
+          vectorize_length = lanes;
+          break;
+        }
+      }
+      buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == builtin::address_of() ||
                node->op == tl::access_ptr()) {
