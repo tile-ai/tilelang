@@ -67,7 +67,6 @@ def unwrap_cond(expr):
     else:
         logger.warning(
             f"Python expression `{expr}` is used as condition in TileLang, \nthis is treated as a constant expression. ",
-            stack_info=True,
             stacklevel=3,
         )
         return bool(expr)
@@ -252,7 +251,7 @@ class Builder(BaseBuilder):
     def check_continue_break(self):
         idx = self.find_frame_idx(ContinueOrBreak)
         if idx is not None:
-            logger.warning("Writing code after continue/break may cause undefined behavior in tilelang.", stack_info=True, stacklevel=3)
+            logger.warning("Writing code after continue/break may cause undefined behavior in tilelang.", stacklevel=3)
 
     @contextmanager
     def with_frame(self, frame: AbstractContextManager[Any] | None):
@@ -294,11 +293,7 @@ class Builder(BaseBuilder):
             pass
         elif isinstance(val, tir.frame.IRBuilderFrame):
             if isinstance(val, tir.frame.ForFrame):
-                logger.warning(
-                    "Evaluating a for frame may cause undefined behavior in tilelang.",
-                    stack_info=True,
-                    stacklevel=1,
-                )
+                logger.warning("Evaluating a for frame may cause undefined behavior in tilelang.", stacklevel=1)
             self.enter_frame(val)
         elif isinstance(val, PrimExpr):
             tir.evaluate(val)
@@ -311,7 +306,7 @@ class Builder(BaseBuilder):
         elif isinstance(val, (Buffer, Var)):
             pass
         else:
-            logger.warning(f"Unused return value: {val}({type(val)})", stack_info=True, stacklevel=2)
+            logger.warning(f"Unused return value: {val}({type(val)})", stacklevel=2)
 
     def ctx_for(self, it):
         self.check_continue_break()
@@ -374,9 +369,8 @@ class Builder(BaseBuilder):
                 )
             else:
                 logger.warning(
-                    "While loop with constant false condition detected in Tilelang, the loop body will never be executed.\n",
+                    "While loop with constant false condition detected in Tilelang, the loop body will never be executed.\n"
                     f"Condition: {cond_v}({type(cond_v)}) => {cond_v_unwrap}({type(cond_v_unwrap)})\n",
-                    stack_info=True,
                     stacklevel=2,
                 )
         with self.with_frame(tir.While(cond_v_unwrap)):
@@ -472,7 +466,6 @@ class Builder(BaseBuilder):
             if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
                     f"Immutable value `{name}` is re-bound. If you want to modify its value, please use T.alloc_var to make it a variable!",
-                    stack_info=True,
                     stacklevel=2,
                 )
             self.name_inside_frame[name] = self.frames[frame]
@@ -527,7 +520,7 @@ class Builder(BaseBuilder):
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
         self.check_continue_break()
         if annot is not self.empty:
-            logger.warning("Type annotation in slice assignment has no effect", stack_info=True, stacklevel=2)
+            logger.warning("Type annotation in slice assignment has no effect", stacklevel=2)
         if isinstance(lval, Buffer):
             tir.buffer_store(lval, value, sl)
         else:
@@ -572,7 +565,6 @@ class Builder(BaseBuilder):
                 if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                     logger.warning(
                         f"Immutable value `{name}` is re-bound. If you want to modify its value, please use T.alloc_var to make it a variable!",
-                        stack_info=True,
                         stacklevel=2,
                     )
                 self.name_inside_frame[name] = self.frames[frame]
