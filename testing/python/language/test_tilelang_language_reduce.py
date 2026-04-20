@@ -34,56 +34,64 @@ def _ref(A, op):
     raise ValueError(op)
 
 
-def _reduce_op(T, op, src, dst, dim):
+def _reduce_op(T, op, src, dst, dim, batch=1):
+    kwargs = {} if batch == 1 else {"batch": batch}
     if op == "sum":
-        T.reduce_sum(src, dst, dim=dim)
+        T.reduce_sum(src, dst, dim=dim, **kwargs)
     elif op == "max":
-        T.reduce_max(src, dst, dim=dim)
+        T.reduce_max(src, dst, dim=dim, **kwargs)
     elif op == "min":
-        T.reduce_min(src, dst, dim=dim)
+        T.reduce_min(src, dst, dim=dim, **kwargs)
     elif op == "abssum":
-        T.reduce_abssum(src, dst, dim=dim)
+        T.reduce_abssum(src, dst, dim=dim, **kwargs)
     elif op == "absmax":
-        T.reduce_absmax(src, dst, dim=dim)
+        T.reduce_absmax(src, dst, dim=dim, **kwargs)
 
 
 # ---------------------------------------------------------------------------
-# test_reduce  (op × dtype × src_scope × dst_scope × threads)
+# test_reduce  (op × dtype × src_scope × dst_scope × threads × batch)
 # ---------------------------------------------------------------------------
 
 # int types only support sum (no abssum/absmax for int in tilelang)
 REDUCE_CASES = [
-    # (op,      dtype,       M,   N,   src_scope,  dst_scope,  threads)
-    ("sum", T.float32, 128, 128, "fragment", "fragment", 32),
-    ("sum", T.int32, 128, 128, "fragment", "fragment", 32),
-    ("sum", T.int64, 192, 64, "fragment", "fragment", 32),
-    ("sum", T.float32, 192, 64, "fragment", "fragment", 32),
-    ("sum", T.float32, 32, 32, "fragment", "fragment", 16),
-    ("sum", T.float32, 16, 16, "fragment", "fragment", 8),
-    ("sum", T.float32, 32, 32, "shared", "shared", 32),
-    ("sum", T.float32, 32, 32, "fragment", "shared", 32),
-    ("max", T.float32, 128, 128, "fragment", "fragment", 32),
-    ("max", T.int64, 128, 128, "fragment", "fragment", 32),
-    ("max", T.float32, 32, 32, "shared", "shared", 32),
-    ("min", T.float32, 128, 128, "fragment", "fragment", 32),
-    ("min", T.int64, 128, 128, "fragment", "fragment", 32),
-    ("abssum", T.float32, 128, 128, "fragment", "fragment", 32),
-    ("abssum", T.int64, 128, 128, "fragment", "fragment", 32),
-    ("absmax", T.float32, 128, 128, "fragment", "fragment", 32),
-    ("absmax", T.int64, 128, 128, "fragment", "fragment", 32),
+    # (op,      dtype,       M,   N,   src_scope,    dst_scope,  threads, batch)
+    ("sum", T.float32, 128, 128, "fragment", "fragment", 32, 1),
+    ("sum", T.int32, 128, 128, "fragment", "fragment", 32, 1),
+    ("sum", T.int64, 192, 64, "fragment", "fragment", 32, 1),
+    ("sum", T.float32, 192, 64, "fragment", "fragment", 32, 1),
+    ("sum", T.float32, 32, 32, "fragment", "fragment", 16, 1),
+    ("sum", T.float32, 16, 16, "fragment", "fragment", 8, 1),
+    ("sum", T.float32, 32, 32, "shared", "shared", 32, 1),
+    ("sum", T.float32, 32, 32, "fragment", "shared", 32, 1),
+    ("max", T.float32, 128, 128, "fragment", "fragment", 32, 1),
+    ("max", T.int64, 128, 128, "fragment", "fragment", 32, 1),
+    ("max", T.float32, 32, 32, "shared", "shared", 32, 1),
+    ("min", T.float32, 128, 128, "fragment", "fragment", 32, 1),
+    ("min", T.int64, 128, 128, "fragment", "fragment", 32, 1),
+    ("abssum", T.float32, 128, 128, "fragment", "fragment", 32, 1),
+    ("abssum", T.int64, 128, 128, "fragment", "fragment", 32, 1),
+    ("absmax", T.float32, 128, 128, "fragment", "fragment", 32, 1),
+    ("absmax", T.int64, 128, 128, "fragment", "fragment", 32, 1),
+    # batch > 1: verify run_batch codegen and correctness together
+    ("max", T.bfloat16, 128, 64, "shared", "fragment", 256, 2),
+    ("sum", T.float32, 128, 64, "shared", "fragment", 256, 2),
+    ("min", T.float32, 64, 128, "shared", "fragment", 128, 2),
 ]
 
 
 @pytest.mark.parametrize(
-    ("op", "dtype", "M", "N", "src_scope", "dst_scope", "threads"),
+    ("op", "dtype", "M", "N", "src_scope", "dst_scope", "threads", "batch"),
     REDUCE_CASES,
     ids=[
-        f"{op}-{dtype}-{M}x{N}-{src_scope[0]}2{dst_scope[0]}-t{threads}" for op, dtype, M, N, src_scope, dst_scope, threads in REDUCE_CASES
+        f"{op}-{dtype}-{M}x{N}-{src_scope[0]}2{dst_scope[0]}-t{threads}-b{batch}"
+        for op, dtype, M, N, src_scope, dst_scope, threads, batch in REDUCE_CASES
     ],
 )
-def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads):
+def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
+    import re
+
     @tilelang.jit(out_idx=-1)
-    def kernel(M, N, dtype, op, src_scope, dst_scope, threads):
+    def kernel(M, N, dtype, op, src_scope, dst_scope, threads, batch):
         @T.prim_func
         def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M,), dtype)):
             with T.Kernel(1, threads=threads):
@@ -96,13 +104,21 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads):
                 else:
                     dst = T.alloc_shared((M,), dtype)
                 T.copy(A, src, disable_tma=src_scope == "shared")
-                _reduce_op(T, op, src, dst, dim=1)
+                _reduce_op(T, op, src, dst, dim=1, batch=batch)
                 T.copy(dst, B)
 
         return main
 
+    jit_kernel = kernel(M, N, dtype, op, src_scope, dst_scope, threads, batch)
+
+    if batch > 1:
+        src = jit_kernel.get_kernel_source()
+        m = re.search(r",\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
+        assert m is not None, f"Expected run_batch in generated source.\n{src}"
+        assert int(m.group(1)) > 1, f"Expected batch_size > 1, got {m.group(1)}.\n{src}"
+
     A = _make_input(M, N, dtype)
-    B = kernel(M, N, dtype, op, src_scope, dst_scope, threads)(A)
+    B = jit_kernel(A)
     torch.testing.assert_close(B, _ref(A, op), atol=1e-2, rtol=1e-2)
 
 
@@ -159,50 +175,6 @@ def test_reduce_clear(op, dtype, M, N, src_scope, dst_scope):
     elif op == "max":
         ref = A.max(dim=1).values
     torch.testing.assert_close(B, ref, atol=1e-2, rtol=1e-2)
-
-
-# ---------------------------------------------------------------------------
-# test_reduce_batch_codegen  (batch>1 must emit run_batch)
-# ---------------------------------------------------------------------------
-
-REDUCE_BATCH_CASES = [
-    ("max", T.bfloat16, 128, 64, 256),
-    ("sum", T.float32, 128, 64, 256),
-    ("min", T.float32, 64, 128, 128),
-]
-
-
-@pytest.mark.parametrize(
-    ("op", "dtype", "M", "N", "threads"),
-    REDUCE_BATCH_CASES,
-    ids=[f"{op}-{dtype}-{M}x{N}-t{threads}" for op, dtype, M, N, threads in REDUCE_BATCH_CASES],
-)
-def test_reduce_batch_codegen(op, dtype, M, N, threads):
-    import re
-
-    reduce_fn = {"sum": T.reduce_sum, "max": T.reduce_max, "min": T.reduce_min}[op]
-
-    @T.prim_func
-    def kernel(A: T.Tensor((M, N), dtype), B: T.Tensor((N,), dtype)):
-        with T.Kernel(1, threads=threads):
-            A_shared = T.alloc_shared((M, N), dtype)
-            frag = T.alloc_fragment((N,), dtype)
-            T.copy(A, A_shared)
-            reduce_fn(A_shared, frag, dim=0, batch=2)
-            T.copy(frag, B)
-
-    src = tl.compile(
-        kernel,
-        out_idx=-1,
-        pass_configs={
-            tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
-    ).get_kernel_source()
-
-    m = re.search(r",\s*(\d+)\s*,\s*\d+\s*>::run_batch\(", src)
-    assert m is not None, f"Expected run_batch in generated source.\n{src}"
-    assert int(m.group(1)) > 1, f"Expected batch_size > 1, got {m.group(1)}.\n{src}"
 
 
 # ---------------------------------------------------------------------------
