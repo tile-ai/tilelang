@@ -73,9 +73,15 @@ REDUCE_CASES = [
     ("absmax", T.float32, 128, 128, "fragment", "fragment", 32, 1),
     ("absmax", T.int64, 128, 128, "fragment", "fragment", 32, 1),
     # batch > 1: verify run_batch codegen and correctness together
-    ("max", T.bfloat16, 128, 64, "shared", "fragment", 256, 2),
     ("sum", T.float32, 128, 64, "shared", "fragment", 256, 2),
+    ("sum", T.float32, 128, 64, "shared", "fragment", 256, 4),
+    ("sum", T.float16, 64, 128, "fragment", "fragment", 256, 4),
+    ("max", T.bfloat16, 128, 64, "shared", "fragment", 256, 2),
+    ("max", T.float32, 128, 128, "fragment", "fragment", 256, 4),
     ("min", T.float32, 64, 128, "shared", "fragment", 128, 2),
+    ("min", T.float16, 128, 128, "fragment", "fragment", 256, 8),
+    ("abssum", T.float32, 128, 128, "fragment", "fragment", 256, 4),
+    ("absmax", T.float32, 128, 128, "fragment", "fragment", 256, 4),
 ]
 
 
@@ -119,7 +125,9 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
 
     A = _make_input(M, N, dtype)
     B = jit_kernel(A)
-    torch.testing.assert_close(B, _ref(A, op), atol=1e-2, rtol=1e-2)
+    # float16/bfloat16 accumulate more rounding error over large reductions
+    tol = 1e-1 if dtype in (T.float16, T.bfloat16) else 1e-2
+    torch.testing.assert_close(B, _ref(A, op), atol=tol, rtol=tol)
 
 
 # ---------------------------------------------------------------------------
