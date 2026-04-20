@@ -372,5 +372,61 @@ def test_batched_allreduce_codegen(op, dtype, M, N, threads):
     assert batch_size > 1, f"Expected batch_size > 1, got {batch_size}.\nGenerated source:\n{src}"
 
 
+BATCHED_FINALIZE_REDUCER_CASES = [
+    # (op,   dtype,        block_M, block_N, threads, batch)
+    ("sum", T.float32, 128, 64, 256, 4),
+    ("max", T.bfloat16, 64, 128, 256, 8),
+    ("min", T.float32, 128, 128, 256, 16),
+]
+
+
+@pytest.mark.parametrize(
+    ("op", "dtype", "block_M", "block_N", "threads", "batch"),
+    BATCHED_FINALIZE_REDUCER_CASES,
+    ids=[f"{op}-{dtype}-{bM}x{bN}-t{threads}-b{batch}" for op, dtype, bM, bN, threads, batch in BATCHED_FINALIZE_REDUCER_CASES],
+)
+def test_batched_finalize_reducer_codegen(op, dtype, block_M, block_N, threads, batch):
+    """Verify that the batched AllReduce path (run_batch) is emitted when
+    an explicit batch argument is passed to T.finalize_reducer."""
+    import re
+
+    @T.prim_func
+    def kernel(A: T.Tensor((block_M, block_N), dtype), B: T.Tensor((block_M,), dtype)):
+        with T.Kernel(1, threads=threads) as _:
+            o_reducer = T.alloc_reducer(block_M, dtype, op=op, replication="all")
+            T.clear(o_reducer)
+            A_smem = T.alloc_shared((block_M, block_N), dtype)
+            T.copy(A, A_smem)
+            A_frag = T.alloc_fragment((block_M, block_N), dtype)
+            T.copy(A_smem, A_frag)
+            for i, j in T.Parallel(block_M, block_N):
+                if op == "sum":
+                    o_reducer[i] += A_frag[i, j]
+                elif op == "max":
+                    o_reducer[i] = T.max(o_reducer[i], A_frag[i, j])
+                else:
+                    o_reducer[i] = T.min(o_reducer[i], A_frag[i, j])
+            T.finalize_reducer(o_reducer, batch=batch)
+            T.copy(o_reducer, B)
+
+    mod = tl.compile(
+        kernel,
+        out_idx=-1,
+        pass_configs={
+            tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+            tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        },
+    )
+    src = mod.get_kernel_source()
+
+    # The batched path emits run_batch with batch_size and workspace_stride
+    # as the last two template arguments before >::run_batch.
+    pattern = r",\s*(\d+)\s*,\s*(\d+)\s*>::run_batch\("
+    match = re.search(pattern, src)
+    assert match is not None, f"Expected batched AllReduce (run_batch) in generated source, but not found.\nGenerated source:\n{src}"
+    emitted_batch = int(match.group(1))
+    assert emitted_batch == batch, f"Expected batch_size={batch}, got {emitted_batch}.\nGenerated source:\n{src}"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

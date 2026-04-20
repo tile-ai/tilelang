@@ -26,6 +26,9 @@ class FinalizeReducerOpNode : public TileOperatorNode {
 public:
   tir::Buffer reducer;
   ReducerOpType op;
+  // Batch size for batched AllReduce (1 = scalar path, same as T.reduce
+  // default).
+  int batch{1};
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerOp",
                                     FinalizeReducerOpNode, TileOperatorNode);
@@ -34,7 +37,8 @@ public:
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<FinalizeReducerOpNode>()
         .def_ro("reducer", &FinalizeReducerOpNode::reducer)
-        .def_ro("op", &FinalizeReducerOpNode::op);
+        .def_ro("op", &FinalizeReducerOpNode::op)
+        .def_ro("batch", &FinalizeReducerOpNode::batch);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;

@@ -417,7 +417,7 @@ def cumsum(
     )
 
 
-def finalize_reducer(reducer: tir.Buffer) -> tir.PrimExpr:
+def finalize_reducer(reducer: tir.Buffer, batch: int = 1) -> tir.PrimExpr:
     """
     Finalize a reducer buffer by emitting the `tl.tileop.finalize_reducer` intrinsic.
 
@@ -426,14 +426,25 @@ def finalize_reducer(reducer: tir.Buffer) -> tir.PrimExpr:
 
     Parameters:
         reducer (tir.Buffer): Reducer buffer whose writable pointer will be finalized.
+        batch (int): Batch size for the AllReduce call (default 1 = scalar path,
+            matching the T.reduce default).  When batch > 1, the compiler emits a
+            single batched AllReduce call covering `batch` output elements at a
+            time, reducing barrier count by batch×.  batch must evenly divide the
+            total number of per-thread output elements.
 
     Returns:
         tir.Call: Handle to the finalize reducer intrinsic call.
     """
+    if batch < 1:
+        raise ValueError(f"finalize_reducer: batch must be >= 1, got {batch}")
+    annotations = {}
+    if batch > 1:
+        annotations["batch"] = batch
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.tileop.finalize_reducer"),
         to_buffer_region(reducer, access_type="w"),
+        annotations=annotations if annotations else None,
     )
 
 
