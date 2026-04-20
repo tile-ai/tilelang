@@ -372,6 +372,46 @@ def test_batched_allreduce_codegen(op, dtype, M, N, threads):
     assert batch_size > 1, f"Expected batch_size > 1, got {batch_size}.\nGenerated source:\n{src}"
 
 
+# ---------------------------------------------------------------------------
+# Helpers shared by all finalize_reducer tests
+# ---------------------------------------------------------------------------
+
+_COMPILE_FLAGS = {
+    tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+}
+
+
+def _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch):
+    """Return a prim_func that reduces A[block_M, block_N] -> B[block_M]
+    using alloc_reducer + finalize_reducer(batch=batch)."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((block_M, block_N), dtype), B: T.Tensor((block_M,), dtype)):
+        with T.Kernel(1, threads=256) as _:
+            o_reducer = T.alloc_reducer(block_M, dtype, op=op, replication="all")
+            T.clear(o_reducer)
+            A_smem = T.alloc_shared((block_M, block_N), dtype)
+            T.copy(A, A_smem)
+            A_frag = T.alloc_fragment((block_M, block_N), dtype)
+            T.copy(A_smem, A_frag)
+            for i, j in T.Parallel(block_M, block_N):
+                if op == "sum":
+                    o_reducer[i] += A_frag[i, j]
+                elif op == "max":
+                    o_reducer[i] = T.max(o_reducer[i], A_frag[i, j])
+                else:
+                    o_reducer[i] = T.min(o_reducer[i], A_frag[i, j])
+            T.finalize_reducer(o_reducer, batch=batch)
+            T.copy(o_reducer, B)
+
+    return kernel
+
+
+# ---------------------------------------------------------------------------
+# Codegen tests – verify run_batch / run is emitted as expected
+# ---------------------------------------------------------------------------
+
 BATCHED_FINALIZE_REDUCER_CASES = [
     # (op,   dtype,        block_M, block_N, threads, batch)
     ("sum", T.float32, 128, 64, 256, 4),
@@ -390,33 +430,8 @@ def test_batched_finalize_reducer_codegen(op, dtype, block_M, block_N, threads, 
     an explicit batch argument is passed to T.finalize_reducer."""
     import re
 
-    @T.prim_func
-    def kernel(A: T.Tensor((block_M, block_N), dtype), B: T.Tensor((block_M,), dtype)):
-        with T.Kernel(1, threads=threads) as _:
-            o_reducer = T.alloc_reducer(block_M, dtype, op=op, replication="all")
-            T.clear(o_reducer)
-            A_smem = T.alloc_shared((block_M, block_N), dtype)
-            T.copy(A, A_smem)
-            A_frag = T.alloc_fragment((block_M, block_N), dtype)
-            T.copy(A_smem, A_frag)
-            for i, j in T.Parallel(block_M, block_N):
-                if op == "sum":
-                    o_reducer[i] += A_frag[i, j]
-                elif op == "max":
-                    o_reducer[i] = T.max(o_reducer[i], A_frag[i, j])
-                else:
-                    o_reducer[i] = T.min(o_reducer[i], A_frag[i, j])
-            T.finalize_reducer(o_reducer, batch=batch)
-            T.copy(o_reducer, B)
-
-    mod = tl.compile(
-        kernel,
-        out_idx=-1,
-        pass_configs={
-            tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
-    )
+    kernel = _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch)
+    mod = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)
     src = mod.get_kernel_source()
 
     # The batched path emits run_batch with batch_size and workspace_stride
@@ -426,6 +441,180 @@ def test_batched_finalize_reducer_codegen(op, dtype, block_M, block_N, threads, 
     assert match is not None, f"Expected batched AllReduce (run_batch) in generated source, but not found.\nGenerated source:\n{src}"
     emitted_batch = int(match.group(1))
     assert emitted_batch == batch, f"Expected batch_size={batch}, got {emitted_batch}.\nGenerated source:\n{src}"
+
+
+SCALAR_FINALIZE_REDUCER_CASES = [
+    # batch=1 (default) must NOT emit run_batch
+    ("sum", T.float32, 64, 64, 256, 1),
+    ("max", T.float32, 128, 32, 256, 1),
+]
+
+
+@pytest.mark.parametrize(
+    ("op", "dtype", "block_M", "block_N", "threads", "batch"),
+    SCALAR_FINALIZE_REDUCER_CASES,
+    ids=[f"{op}-{dtype}-{bM}x{bN}-t{threads}-b{batch}" for op, dtype, bM, bN, threads, batch in SCALAR_FINALIZE_REDUCER_CASES],
+)
+def test_scalar_finalize_reducer_codegen(op, dtype, block_M, block_N, threads, batch):
+    """Verify that batch=1 (default) does NOT emit run_batch."""
+
+    kernel = _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch)
+    mod = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+    src = mod.get_kernel_source()
+
+    assert "run_batch" not in src, f"batch=1 must not emit run_batch.\nGenerated source:\n{src}"
+
+
+# ---------------------------------------------------------------------------
+# Correctness tests – compare against numpy/torch reference
+# ---------------------------------------------------------------------------
+
+# batch=1 cases: scalar path, expected to be correct.
+# Also includes batch==block_M: when batch equals the full output size, the
+# batched AllReduce happens to be equivalent to the full scalar path because
+# every element in the fragment buffer participates, so the result is correct.
+FINALIZE_REDUCER_CORRECTNESS_SCALAR_CASES = [
+    # (op,    dtype,       block_M, block_N, batch)
+    ("sum", T.float32, 128, 64, 1),
+    ("sum", T.float32, 128, 64, 128),  # batch == block_M: correct by coincidence
+    ("max", T.float32, 64, 128, 1),
+    ("min", T.float32, 128, 128, 1),
+    ("sum", T.float16, 64, 64, 1),
+]
+
+# batch>1 but batch<block_M cases: known-buggy batched path – run_batch is
+# called with the raw fragment buffer pointer, but the fragment layout is
+# non-contiguous per thread, so run_batch reads wrong/zero elements.
+# Tracked in work/bug-finalize-reducer-batch.md.
+FINALIZE_REDUCER_CORRECTNESS_BATCHED_CASES = [
+    # (op,    dtype,       block_M, block_N, batch)
+    ("sum", T.float32, 128, 64, 4),
+    ("max", T.float32, 64, 128, 8),
+    ("min", T.float32, 128, 128, 16),
+    ("sum", T.float16, 64, 64, 4),
+]
+
+
+def _run_finalize_reducer_correctness(op, dtype, block_M, block_N, batch):
+
+    kernel = _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch)
+    jit_kernel = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+    def ref_fn(A):
+        if op == "sum":
+            return A.sum(dim=1)
+        elif op == "max":
+            return A.max(dim=1).values
+        else:
+            return A.min(dim=1).values
+
+    profiler = jit_kernel.get_profiler()
+    profiler.assert_allclose(ref_fn, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    ("op", "dtype", "block_M", "block_N", "batch"),
+    FINALIZE_REDUCER_CORRECTNESS_SCALAR_CASES,
+    ids=[f"{op}-{dtype}-{bM}x{bN}-b{batch}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CORRECTNESS_SCALAR_CASES],
+)
+def test_finalize_reducer_correctness_scalar(op, dtype, block_M, block_N, batch):
+    """Correctness of finalize_reducer with batch=1 (scalar AllReduce::run path)."""
+    _run_finalize_reducer_correctness(op, dtype, block_M, block_N, batch)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "finalize_reducer batched path passes buffer->data directly to run_batch, "
+        "but fragment layout is non-contiguous per thread. "
+        "See work/bug-finalize-reducer-batch.md for root-cause analysis."
+    ),
+    strict=True,
+)
+@pytest.mark.parametrize(
+    ("op", "dtype", "block_M", "block_N", "batch"),
+    FINALIZE_REDUCER_CORRECTNESS_BATCHED_CASES,
+    ids=[f"{op}-{dtype}-{bM}x{bN}-b{batch}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CORRECTNESS_BATCHED_CASES],
+)
+def test_finalize_reducer_correctness_batched(op, dtype, block_M, block_N, batch):
+    """Correctness of finalize_reducer with batch>1 – currently xfail due to
+    non-contiguous fragment layout bug in the batched AllReduce path."""
+    _run_finalize_reducer_correctness(op, dtype, block_M, block_N, batch)
+
+
+# ---------------------------------------------------------------------------
+# Error-input tests
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_reducer_batch_zero_raises():
+    """batch=0 must raise ValueError at the Python layer."""
+    with pytest.raises(ValueError, match="batch must be >= 1"):
+
+        @T.prim_func
+        def kernel(A: T.Tensor((64, 64), T.float32), B: T.Tensor((64,), T.float32)):
+            with T.Kernel(1, threads=256) as _:
+                o_reducer = T.alloc_reducer(64, T.float32, op="sum", replication="all")
+                T.clear(o_reducer)
+                T.finalize_reducer(o_reducer, batch=0)
+                T.copy(o_reducer, B)
+
+
+def test_finalize_reducer_batch_negative_raises():
+    """Negative batch must raise ValueError at the Python layer."""
+    with pytest.raises(ValueError, match="batch must be >= 1"):
+
+        @T.prim_func
+        def kernel(A: T.Tensor((64, 64), T.float32), B: T.Tensor((64,), T.float32)):
+            with T.Kernel(1, threads=256) as _:
+                o_reducer = T.alloc_reducer(64, T.float32, op="sum", replication="all")
+                T.clear(o_reducer)
+                T.finalize_reducer(o_reducer, batch=-1)
+                T.copy(o_reducer, B)
+
+
+def test_finalize_reducer_batch_exceeds_layout_raises():
+    """batch > total output elements must raise at compile/lower time."""
+    block_M = 64
+
+    @T.prim_func
+    def kernel(A: T.Tensor((block_M, 64), T.float32), B: T.Tensor((block_M,), T.float32)):
+        with T.Kernel(1, threads=256) as _:
+            o_reducer = T.alloc_reducer(block_M, T.float32, op="sum", replication="all")
+            T.clear(o_reducer)
+            A_smem = T.alloc_shared((block_M, 64), T.float32)
+            T.copy(A, A_smem)
+            A_frag = T.alloc_fragment((block_M, 64), T.float32)
+            T.copy(A_smem, A_frag)
+            for i, j in T.Parallel(block_M, 64):
+                o_reducer[i] += A_frag[i, j]
+            # batch=block_M*2 exceeds total output elements block_M
+            T.finalize_reducer(o_reducer, batch=block_M * 2)
+            T.copy(o_reducer, B)
+
+    with pytest.raises(Exception, match="exceeds total output elements"):
+        tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)
+
+
+def test_finalize_reducer_batch_not_divisible_raises():
+    """batch that does not evenly divide total output elements must raise."""
+    block_M = 64  # batch=3 does not divide 64
+
+    @T.prim_func
+    def kernel(A: T.Tensor((block_M, 64), T.float32), B: T.Tensor((block_M,), T.float32)):
+        with T.Kernel(1, threads=256) as _:
+            o_reducer = T.alloc_reducer(block_M, T.float32, op="sum", replication="all")
+            T.clear(o_reducer)
+            A_smem = T.alloc_shared((block_M, 64), T.float32)
+            T.copy(A, A_smem)
+            A_frag = T.alloc_fragment((block_M, 64), T.float32)
+            T.copy(A_smem, A_frag)
+            for i, j in T.Parallel(block_M, 64):
+                o_reducer[i] += A_frag[i, j]
+            T.finalize_reducer(o_reducer, batch=3)
+            T.copy(o_reducer, B)
+
+    with pytest.raises(Exception, match="must evenly divide"):
+        tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)
 
 
 if __name__ == "__main__":
