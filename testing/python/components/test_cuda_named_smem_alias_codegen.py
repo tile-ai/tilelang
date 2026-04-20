@@ -58,6 +58,7 @@ def _compile_kernel(pass_configs=None, program_fn=_two_dyn_shared_buffers):
             tilelang.enable_cache()
 
 
+@tilelang.testing.requires_cuda
 def test_codegen_keeps_raw_dyn_smem_access_by_default():
     kernel = _compile_kernel()
     src = kernel.get_kernel_source()
