@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Literal
 
 import tilelang.language as T
+from tilelang import _ffi_api
 from tilelang import tvm as tvm
 from tvm import tir
 from tvm.ir import Range
@@ -69,6 +70,7 @@ class WMMAIntrinEmitter:
     ):
         assert a_dtype in ("float16", "bfloat16"), f"Unsupported a_dtype: {a_dtype}"
         assert accum_dtype == "float32", f"Unsupported accum_dtype: {accum_dtype}"
+        assert target is not None, "WMMAIntrinEmitter requires a HIP target to select WMMA layouts."
 
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -83,7 +85,9 @@ class WMMAIntrinEmitter:
         self.k_pack = k_pack
         self.thread_var = thread_var
         self.target = target
-        self.rdna_gen = self._detect_rdna_generation(target)
+        self.rdna_gen = _ffi_api.TargetGetRDNAGeneration(target)
+        if self.rdna_gen == 0:
+            raise ValueError(f"Invalid RDNA target for WMMA: {target}")
 
         self.micro_size_x = self.M_DIM
         self.micro_size_y = self.N_DIM
@@ -481,15 +485,3 @@ class WMMAIntrinEmitter:
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type: {type(obj)}")
 
-    @staticmethod
-    def _detect_rdna_generation(target: Target | None) -> int:
-        if target is None:
-            raise ValueError("WMMAIntrinEmitter requires a HIP target to select WMMA layouts.")
-        if "mcpu" not in target.attrs:
-            raise ValueError("WMMAIntrinEmitter requires target.attrs['mcpu'] for WMMA layouts.")
-        mcpu = str(target.attrs["mcpu"])
-        if mcpu.startswith("gfx11"):
-            return 11
-        if mcpu.startswith("gfx12"):
-            return 12
-        raise ValueError(f"Unsupported RDNA target for WMMA layouts: {mcpu}")

@@ -334,6 +334,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetHasStmatrix(target); })
       .def("tl.TargetHasBulkCopy",
            [](Target target) { return TargetHasBulkCopy(target); })
+      .def("tl.TargetGetRDNAGeneration",
+           [](Target target) { return TargetGetRDNAGeneration(target); })
       .def("tl.TargetGetWarpSize",
            [](Target target) { return TargetGetWarpSize(target); });
 }
