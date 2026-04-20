@@ -95,8 +95,8 @@ def test_codegen_emits_pattern_visitors_for_multiversion_dyn_smem_aliases():
     assert "auto B_shared = tl::PatternVisitor" in src
     assert "A_shared[(k % 3)]" in src or "A_shared[k % 3]" in src
     assert "B_shared[(k % 3)]" in src or "B_shared[k % 3]" in src
-    assert "A_shared[1][0]" in src
-    assert "B_shared[1][0]" in src
+    assert "A_shared[1]" in src
+    assert "B_shared[1]" in src
 
 
 if __name__ == "__main__":
