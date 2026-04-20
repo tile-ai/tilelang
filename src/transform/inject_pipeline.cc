@@ -526,7 +526,9 @@ private:
         }
         PrimExpr new_index =
             old_index +
-            floormod(pipeline_loop_->loop_var, new_buffer->shape[0]) * offset;
+            floormod((pipeline_loop_->loop_var - pipeline_loop_->min),
+                     new_buffer->shape[0]) *
+                offset;
         new_args.Set(i + 1, new_index);
       }
     }
