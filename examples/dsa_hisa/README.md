@@ -111,9 +111,9 @@ clean_and_maintain_logits_interface(
 ```
 
 **What it does**: for each row `m`,
-* positions outside `[cu_seqlen_ks[m], cu_seqlen_ke[m])` → set to `-inf`
+- positions outside `[cu_seqlen_ks[m], cu_seqlen_ke[m])` → set to `-inf`
   (so `torch.topk` ignores them),
-* positions `cu_seqlen_ks[m]` and `cu_seqlen_ke[m] - 1`      → set to `+inf`
+- positions `cu_seqlen_ks[m]` and `cu_seqlen_ke[m] - 1`      → set to `+inf`
   (force-maintain the boundary blocks: they are always picked by the
   subsequent top-block selection — a standard hisa trick to preserve
   sink and local blocks).
@@ -125,8 +125,8 @@ clean_and_maintain_logits_interface(
 **Meaning**: fine-grained fp8 MQA over only the **raw K tokens** inside the
 top-`block_topk` pool blocks selected per query. Two kernel variants are
 auto-dispatched by the factory:
-* general (`kv_block_size > block_N`): pipelined sub-block inner loop
-* small-pooling-size (`kv_block_size == block_N`): single pass, no pipeline
+- general (`kv_block_size > block_N`): pipelined sub-block inner loop
+- small-pooling-size (`kv_block_size == block_N`): single pass, no pipeline
 
 **Interface**:
 ```python

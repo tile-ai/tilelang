@@ -3,6 +3,8 @@ from tilelang import language as T
 from tilelang.profiler import do_bench
 import torch
 
+from tilelang_utils import prepare_ks_ke_from_cu_seqlens
+
 
 @tilelang.jit
 def clean_and_maintain_logits_(
@@ -17,9 +19,9 @@ def clean_and_maintain_logits_(
 
     @T.prim_func
     def clean_and_maintain_logits_kernel(
-        Logits: T.Tensor([seq_len, seq_len_kv], dtype),           # type: ignore
-        CuSeqLenKS: T.Tensor([seq_len], indices_dtype),           # type: ignore
-        CuSeqLenKE: T.Tensor([seq_len], indices_dtype),           # type: ignore
+        Logits: T.Tensor([seq_len, seq_len_kv], dtype),  # type: ignore
+        CuSeqLenKS: T.Tensor([seq_len], indices_dtype),  # type: ignore
+        CuSeqLenKE: T.Tensor([seq_len], indices_dtype),  # type: ignore
     ):
         with T.Kernel(seq_len, threads=threads) as bx:
             tx = T.thread_binding(0, threads, thread="threadIdx.x")
@@ -65,12 +67,22 @@ def ref_clean_and_maintain_logits(
     return out
 
 
-def test_clean_and_maintain_logits(M: int = 4096, N: int = 4096):
+def test_clean_and_maintain_logits(M: int = 4096, N: int = 4096, num_seqs: int = 1):
+    """Correctness + speed test where `M` query rows are packed from
+    `num_seqs` equal-length causal sequences. Per-row ``cu_ks / cu_ke``
+    is derived from ``prepare_ks_ke_from_cu_seqlens`` so each row sees
+    only the prefix of its own sequence (causal self-attention)."""
     torch.manual_seed(0)
-    # Build causal prefill ranges: cu_ks[m] = 0, cu_ke[m] = m + 1.
+    assert M % num_seqs == 0, f"M ({M}) must be divisible by num_seqs ({num_seqs})"
+    assert (M // num_seqs) <= N, "N must accommodate the longest sequence"
+
+    per_seq = M // num_seqs
+    cu_seqlens = torch.arange(num_seqs + 1, device="cuda", dtype=torch.long) * per_seq
+    ks_long, ke_long = prepare_ks_ke_from_cu_seqlens(cu_seqlens)
+    cu_ks = ks_long.to(torch.int32).contiguous()
+    cu_ke = ke_long.to(torch.int32).clamp(max=N).contiguous()
+
     logits_init = torch.randn(M, N, device="cuda", dtype=torch.float32)
-    cu_ks = torch.zeros(M, device="cuda", dtype=torch.int32)
-    cu_ke = (torch.arange(M, device="cuda") + 1).to(torch.int32).clamp(max=N)
 
     # Run kernel in place on a copy.
     got = logits_init.clone()
@@ -85,13 +97,14 @@ def test_clean_and_maintain_logits(M: int = 4096, N: int = 4096):
     assert torch.equal(torch.isneginf(got), torch.isneginf(ref)), "neg-inf mask differs"
     finite = torch.isfinite(got) & torch.isfinite(ref)
     torch.testing.assert_close(got[finite], ref[finite], rtol=0.0, atol=0.0)
-    print(f"  correctness: PASS  (M={M}, N={N})")
+    print(f"  correctness: PASS  (M={M}, N={N}, num_seqs={num_seqs}, per_seq={per_seq})")
 
     # Speed.
     def fn():
         logits = torch.randn(M, N, device="cuda", dtype=torch.float32)  # fresh copy each iter
         clean_and_maintain_logits_interface(logits, cu_ks, cu_ke)
         return logits
+
     ms = do_bench(fn, warmup=50, rep=200)
     # ~2 reads + 1 write of [M, N] f32, but mostly no-op except at mask boundaries.
     bytes_moved = 2 * M * N * 4
@@ -100,5 +113,12 @@ def test_clean_and_maintain_logits(M: int = 4096, N: int = 4096):
 
 
 if __name__ == "__main__":
-    for cfg in [(4096, 4096), (16384, 16384), (65536, 65536)]:
+    # (M, N, num_seqs)
+    for cfg in [
+        (4096, 4096, 1),
+        (4096, 4096, 4),
+        (16384, 16384, 1),
+        (16384, 16384, 8),
+        (65536, 65536, 16),
+    ]:
         test_clean_and_maintain_logits(*cfg)

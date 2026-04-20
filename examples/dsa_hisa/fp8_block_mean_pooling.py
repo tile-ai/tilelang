@@ -29,9 +29,9 @@ def fp8_native_block_mean_pooling(
 
     @T.prim_func
     def fp8_native_block_mean_pooling_kernel(
-        K: T.Tensor(k_size, dtype=dtype),                        # type: ignore
-        KScale: T.Tensor(scale_size, dtype=accum_dtype),         # type: ignore
-        BlockedK: T.Tensor(blocked_k_size, dtype=dtype),         # type: ignore
+        K: T.Tensor(k_size, dtype=dtype),  # type: ignore
+        KScale: T.Tensor(scale_size, dtype=accum_dtype),  # type: ignore
+        BlockedK: T.Tensor(blocked_k_size, dtype=dtype),  # type: ignore
         BlockedKScale: T.Tensor(blocked_k_scale_size, dtype=accum_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len_k, pooling_block_size), threads=threads) as bx:
@@ -50,7 +50,7 @@ def fp8_native_block_mean_pooling(
 
                 tl_block_s = k_start + b_i * block_N
                 tl_block_e = T.min(k_start + (b_i + 1) * block_N, k_end)
-                T.copy(K[tl_block_s:tl_block_s + block_N, :], index_k)
+                T.copy(K[tl_block_s : tl_block_s + block_N, :], index_k)
                 for bn_i in T.Parallel(block_N):
                     scale[bn_i] = KScale[tl_block_s + bn_i]
 
@@ -110,8 +110,20 @@ def ref_fp8_block_mean_pooling(k_fp8: torch.Tensor, k_scale: torch.Tensor, k_blo
     return out
 
 
-def test_fp8_block_mean_pooling(N: int = 16384, D: int = 128, k_block_size: int = 128):
+def test_fp8_block_mean_pooling(N: int = 16384, D: int = 128, k_block_size: int = 128, num_seqs: int = 1):
+    """Correctness + speed test with `num_seqs` sequences of equal length
+    packed into the flat K buffer.
+
+    NOTE: the flat mean-pool kernel is sequence-agnostic — it pools every
+    `k_block_size` consecutive tokens regardless of sequence boundaries.
+    `num_seqs` is accepted here for API consistency with the other kernels'
+    tests; it affects how `cu_seqlens` is laid out (shown for illustration)
+    but not the kernel's inputs / outputs.
+    """
     torch.manual_seed(0)
+    assert N % num_seqs == 0, f"N ({N}) must be divisible by num_seqs ({num_seqs})"
+    per_seq = N // num_seqs
+
     k_bf16 = torch.randn(N, D, device="cuda", dtype=torch.bfloat16)
     k = k_bf16.to(torch.float8_e4m3fn)
     k_scale = (0.1 + 0.01 * torch.rand(N, device="cuda", dtype=torch.float32)).contiguous()
@@ -122,11 +134,12 @@ def test_fp8_block_mean_pooling(N: int = 16384, D: int = 128, k_block_size: int 
     ref = ref_fp8_block_mean_pooling(k, k_scale, k_block_size)
     # fp8 re-quant: ~1/256 rel error on top of bf16-level precision.
     torch.testing.assert_close(got, ref, rtol=5e-2, atol=5e-3)
-    print(f"  correctness: PASS  (N={N}, D={D}, k_block_size={k_block_size})")
+    print(f"  correctness: PASS  (N={N}, D={D}, k_block_size={k_block_size}, num_seqs={num_seqs}, per_seq={per_seq})")
 
     # Speed.
     def fn():
         return fp8_native_block_mean_pooling_interface(k, k_scale, k_block_size)
+
     ms = do_bench(fn, warmup=50, rep=200)
     num_blocks = (N + k_block_size - 1) // k_block_size
     # Bytes moved: read N * D fp8 (K) + N * 4 f32 (scale) + write num_blocks * D fp8 + num_blocks * 4 f32.
@@ -136,5 +149,12 @@ def test_fp8_block_mean_pooling(N: int = 16384, D: int = 128, k_block_size: int 
 
 
 if __name__ == "__main__":
-    for cfg in [(4096, 128, 128), (16384, 128, 128), (65536, 128, 128), (131072, 128, 128)]:
+    # (N, D, k_block_size, num_seqs)
+    for cfg in [
+        (16384, 128, 128, 1),
+        (16384, 128, 128, 4),
+        (65536, 128, 128, 1),
+        (65536, 128, 128, 8),
+        (131072, 128, 128, 16),
+    ]:
         test_fp8_block_mean_pooling(*cfg)
