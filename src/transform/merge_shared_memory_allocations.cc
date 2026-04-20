@@ -511,8 +511,8 @@ public:
       bool is_dynamic = true, bool verbose = false, int align_bytes = 0,
       Map<String, Array<PrimExpr>> multi_version_metadata = {})
       : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
-        align_bytes_{align_bytes}, multi_version_metadata_{
-                                       std::move(multi_version_metadata)} {
+        align_bytes_{align_bytes},
+        multi_version_metadata_{std::move(multi_version_metadata)} {
     if (!is_dynamic) {
       merged_buf_var_ =
           Var("buf_shmem", PointerType(PrimType(DataType::UInt(8)), "shared"));
