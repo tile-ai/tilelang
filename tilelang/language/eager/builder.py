@@ -295,7 +295,7 @@ class Builder(BaseBuilder):
             if isinstance(val, tir.frame.ForFrame):
                 logger.warning(
                     "A for-loop frame is being evaluated as a standalone expression. Did you mean to use it in a `for` statement?",
-                    stacklevel=1,
+                    stacklevel=2,
                 )
             self.enter_frame(val)
         elif isinstance(val, PrimExpr):
@@ -326,7 +326,8 @@ class Builder(BaseBuilder):
                     real_stop = tir.ceildiv(it.start - it.stop, -step_value)
             else:
                 logger.warning(
-                    f"Non-constant step `{it.step}` in serial range may produce unexpected results. Consider using a constant step if possible."
+                    f"Non-constant step `{it.step}` in serial range may produce unexpected results. Consider using a constant step if possible.",
+                    stacklevel=2,
                 )
                 real_stop = tir.ceildiv(it.stop - it.start, it.step)
             if isinstance(it, UnrollForWithStep):
@@ -470,7 +471,7 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
-                    f"`{name}` is an immutable binding and is being re-assigned. Use T.alloc_var to create a mutable variable.",
+                    f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
                     stacklevel=2,
                 )
             self.name_inside_frame[name] = self.frames[frame]
@@ -569,7 +570,7 @@ class Builder(BaseBuilder):
                 assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
                 if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                     logger.warning(
-                        f"`{name}` is an immutable binding and is being re-assigned. Use T.alloc_var to create a mutable variable.",
+                        f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
                         stacklevel=2,
                     )
                 self.name_inside_frame[name] = self.frames[frame]
