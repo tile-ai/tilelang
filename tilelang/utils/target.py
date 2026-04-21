@@ -82,7 +82,7 @@ def determine_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> str:
     if fp8_format == "e4m3":
         if gcn_arch.startswith("gfx950"):
             return T.float8_e4m3fn
-        return torch.float8_e4m3fnuz
+        return T.float8_e4m3fnuz
     if gcn_arch.startswith("gfx950") and hasattr(T, "float8_e5m2"):
         return T.float8_e5m2
     return T.float8_e5m2fnuz
