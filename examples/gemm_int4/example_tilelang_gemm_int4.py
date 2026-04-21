@@ -22,8 +22,8 @@ def matmul_nt_int4(M, N, K, block_M, block_N, block_K, threads=128):
         C: T.Tensor((M, N), T.int32),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), T.int4, scope="shared")
-            B_shared = T.alloc_shared((block_N, block_K), T.int4, scope="shared")
+            A_shared = T.alloc_shared((block_M, block_K), T.int4)
+            B_shared = T.alloc_shared((block_N, block_K), T.int4)
             C_local = T.alloc_fragment((block_M, block_N), T.int32)
 
             T.clear(C_local)
@@ -91,8 +91,6 @@ def check_int4_gemm_correctness(
 
     A_logical = torch.randint(-8, 8, (M, K), device="cuda", dtype=torch.int8)
     B_logical = torch.randint(-8, 8, (N, K), device="cuda", dtype=torch.int8)
-    # A_logical = torch.ones_like(A_logical)
-    # B_logical = torch.ones_like(B_logical)
 
     A_packed = pack_int4(A_logical)
     B_packed = pack_int4(B_logical)
