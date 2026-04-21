@@ -589,10 +589,11 @@ private:
       return Call(op->dtype, op->op,
                   {op->args[0], merged_buf_var_, extra_offset + offset, extent,
                    op->args[4]});
-    } else if (op->op.same_as(builtin::ptx_cp_async())) {
+    } else if (op->op.same_as(builtin::ptx_cp_async()) ||
+               op->op.same_as(tl::ptx_cp_async())) {
       ICHECK(op->args.size() == 3U || op->args.size() == 4U)
           << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-             "src_access_ptr, bytes[, predicate])";
+             "src_access_ptr, count[, predicate])";
 
       // Extract dst_access_ptr and check if it needs merging
       Call dst_access_ptr = Downcast<Call>(op->args[0]);

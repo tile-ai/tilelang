@@ -45,10 +45,6 @@ class GemmSPWarpPolicy(Node, Scriptable):
         return self.m_warp, self.n_warp
 
 
-@tvm_ffi.register_object("tl.Gemm")
-class Gemm(Node, Scriptable): ...
-
-
 @tvm_ffi.register_object("tl.GemmSP")
 class GemmSP(Node, Scriptable): ...
 

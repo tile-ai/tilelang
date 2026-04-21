@@ -16,11 +16,7 @@ from tilelang.profiler import do_bench
 import argparse
 
 
-PASS_CFG = {
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-}
+PASS_CFG = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
 
 
 @tilelang.jit(out_idx=[3], pass_configs=PASS_CFG)
@@ -94,13 +90,12 @@ def flashattn(
                 T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
 
                 # GEMM 1: S = Q @ K^T -> S_tmem (tcgen05mma_ss)
-                T.gemm(
+                T.tcgen05_gemm(
                     Q_shared,
                     K_shared,
                     S_tmem,
                     transpose_B=True,
                     mbar=mbar_s,
-                    wg_wait=-1,
                     clear_accum=True,
                 )
                 T.mbarrier_wait_parity(mbar_s, k % 2)
@@ -150,12 +145,11 @@ def flashattn(
                 T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
 
                 # GEMM 2: D = P @ V -> D_tmem (ss: mma_ss; ts: mma_ts)
-                T.gemm(
+                T.tcgen05_gemm(
                     P_operand,
                     V_shared,
                     D_tmem,
                     mbar=mbar_d,
-                    wg_wait=-1,
                     clear_accum=True,
                 )
                 T.mbarrier_wait_parity(mbar_d, k % 2)
@@ -286,23 +280,21 @@ def flashattn_wasp(
                     T.mbarrier_wait_parity(mbar_bmm1_empty[stage_id], parity_inv)
 
                     if stage_id == 0:
-                        T.gemm(
+                        T.tcgen05_gemm(
                             Q_shared,
                             K_shared_0,
                             S_tmem,
                             transpose_B=True,
                             mbar=mbar_bmm1_full[stage_id],
-                            wg_wait=-1,
                             clear_accum=True,
                         )
                     else:
-                        T.gemm(
+                        T.tcgen05_gemm(
                             Q_shared,
                             K_shared_1,
                             S_tmem,
                             transpose_B=True,
                             mbar=mbar_bmm1_full[stage_id],
-                            wg_wait=-1,
                             clear_accum=True,
                         )
                     T.mbarrier_arrive(mbar_dma1_empty[stage_id])
@@ -311,21 +303,19 @@ def flashattn_wasp(
                     T.mbarrier_wait_parity(mbar_dma2_full[stage_id], parity)
 
                     if stage_id == 0:
-                        T.gemm(
+                        T.tcgen05_gemm(
                             P_tmem,
                             V_shared_0,
                             O_tmem,
                             mbar=mbar_bmm2_full[stage_id],
-                            wg_wait=-1,
                             clear_accum=is_clear_accum,
                         )
                     else:
-                        T.gemm(
+                        T.tcgen05_gemm(
                             P_tmem,
                             V_shared_1,
                             O_tmem,
                             mbar=mbar_bmm2_full[stage_id],
-                            wg_wait=-1,
                             clear_accum=is_clear_accum,
                         )
 
@@ -478,15 +468,15 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch", type=int, default=2)
-    parser.add_argument("--heads", type=int, default=4)
-    parser.add_argument("--seq_len", type=int, default=256)
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--heads", type=int, default=16)
+    parser.add_argument("--seq_len", type=int, default=16384)
     parser.add_argument("--dim", type=int, default=128)
     parser.add_argument("--is_causal", action="store_true")
     parser.add_argument(
         "--variant",
         choices=["ss", "ts", "wasp"],
-        default="ss",
+        default="wasp",
         help="ss: pipeline 128t; ts: single-path 256t mma_ts; wasp: warp-specialized (fallback to ts if fail)",
     )
     args = parser.parse_args()

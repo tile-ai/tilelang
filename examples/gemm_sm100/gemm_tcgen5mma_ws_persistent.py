@@ -114,7 +114,6 @@ def gemm_persistent(
 
                 if bx * block_M < M and by * block_N < N:
                     T.mbarrier_wait_parity(tmem_full[w & 1], (w // 2) & 1)
-                    T.sync_threads(1, 128)
                     if (w & 1) == 0:
                         T.copy(C_tmem_0, C_local)
                     else:
@@ -250,7 +249,6 @@ def gemm_persistent_2cta(
 
                 if bx * block_M < M and by * block_N < N:
                     T.mbarrier_wait_parity(tmem_full[w & 1], (w // 2) & 1)
-                    T.sync_threads(1, 128)
                     if (w & 1) == 0:
                         T.copy(C_tmem_0, C_local)
                     else:

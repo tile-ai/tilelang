@@ -16,7 +16,6 @@ from tilelang.utils.language import (
 from tilelang.language.utils import (
     buffer_region_to_tile_region,
 )
-from tilelang.env import env as _env
 
 
 def _gemm_impl(
@@ -146,62 +145,6 @@ def _gemm_impl(
     )
 
 
-# Public wrappers
-def gemm_v1(
-    A: BufferLikeType,
-    B: BufferLikeType,
-    C: BufferLikeType,
-    transpose_A: bool = False,
-    transpose_B: bool = False,
-    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
-    clear_accum: bool = False,
-    k_pack: int = 1,
-    mbar: BarrierType | None = None,
-) -> tir.PrimExpr:
-    """Synchronous GEMM v1: use op tl.gemm."""
-    return _gemm_impl(
-        "tl.tileop.gemm",
-        A,
-        B,
-        C,
-        transpose_A,
-        transpose_B,
-        policy,
-        clear_accum,
-        k_pack,
-        0,
-        mbar,
-    )
-
-
-# experimental currently, for fast compilation
-def gemm_v2(
-    A: BufferLikeType,
-    B: BufferLikeType,
-    C: BufferLikeType,
-    transpose_A: bool = False,
-    transpose_B: bool = False,
-    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
-    clear_accum: bool = False,
-    k_pack: int = 1,
-    mbar: BarrierType | None = None,
-) -> tir.PrimExpr:
-    """Synchronous GEMM v2: use op tl.gemm_py."""
-    return _gemm_impl(
-        "tl.tileop.gemm_py",
-        A,
-        B,
-        C,
-        transpose_A,
-        transpose_B,
-        policy,
-        clear_accum,
-        k_pack,
-        0,
-        mbar,
-    )
-
-
 def gemm(
     A: BufferLikeType,
     B: BufferLikeType,
@@ -239,8 +182,19 @@ def gemm(
     Returns:
         tir.Call: A handle to the GEMM operation.
     """
-    impl = gemm_v1 if _env.use_gemm_v1() else gemm_v2
-    return impl(A, B, C, transpose_A, transpose_B, policy, clear_accum, k_pack, mbar)
+    return _gemm_impl(
+        "tl.tileop.gemm",
+        A,
+        B,
+        C,
+        transpose_A,
+        transpose_B,
+        policy,
+        clear_accum,
+        k_pack,
+        0,
+        mbar,
+    )
 
 
 def wgmma_gemm(
@@ -264,7 +218,7 @@ def wgmma_gemm(
     """
 
     return _gemm_impl(
-        "tl.tileop.wgmma_gemm_py",
+        "tl.tileop.wgmma_gemm",
         A,
         B,
         C,
@@ -306,7 +260,7 @@ def tcgen05_gemm(
 
     ann = {"use_2cta": int(use_2cta)} if use_2cta else None
     return _gemm_impl(
-        "tl.tileop.tcgen05_gemm_py",
+        "tl.tileop.tcgen05_gemm",
         A,
         B,
         C,

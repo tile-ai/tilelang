@@ -8,10 +8,8 @@ import argparse
 
 
 @tilelang.jit(
-    out_idx=[6],
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
+    out_idx=[4],
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, softmax_scale):
     scale = float(softmax_scale * 1.44269504)  # log2(e)
@@ -27,10 +25,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
         KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
         K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
         Output: T.Tensor([batch, heads, dim], dtype),
     ):
+        glse = T.alloc_global([batch, heads, num_split], dtype)
+        Output_partial = T.alloc_global([batch, heads, num_split, dim], dtype)
         # flash_attn_split
         with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bid, hid, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
@@ -125,8 +123,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
         KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
         K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
         Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=256) as (hid, bid):
@@ -185,15 +181,13 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         return main_no_split
 
 
-def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
+def ref_program(q, q_pe, kv, k_pe):
     #     """
     #     Inputs:
     #     - q (Tensor): [batch, heads, dim]
     #     - q_pe (Tensor): [batch, heads, pe_dim]
     #     - kv (Tensor): [batch, seqlen_kv, kv_head_num, dim]
     #     - k_pe (Tensor): [batch, seqlen_kv, kv_head_num, pe_dim]
-    #     - glse (Tensor): [batch, heads, num_split]
-    #     - Output_partial (Tensor): [batch, heads, num_split, dim]
     #     Outputs:
     #     - output (Tensor): [batch, heads, dim]
     #     """

@@ -1,492 +1,472 @@
-# ruff: noqa
-from tilelang import tvm as tvm
-import tilelang as tl
+"""Tests for the warp-specialized producer/consumer pass."""
+
+import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tilelang import tvm as tvm
+from tilelang.layout import make_swizzled_layout
 from tilelang.utils.target import determine_target
-from tvm import tir
 
 
-auto_target = tvm.target.Target(determine_target("auto"))
+def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16", threads=128):
+    """A simple pipelined GEMM using T.copy + T.gemm tile ops."""
 
-
-def _collect_calls(stmt, op_name: str):
-    calls = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tir.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
-            calls.append(node)
-
-    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
-    return calls
-
-
-def _collect_ifs(stmt):
-    ifs = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tir.IfThenElse):
-            ifs.append(node)
-
-    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
-    return ifs
-
-
-def _stmt_contains_call(stmt, op_name: str) -> bool:
-    found = False
-
-    def visitor(node):
-        nonlocal found
-        if isinstance(node, tvm.tir.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
-            found = True
-
-    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
-    return found
-
-
-def _count_calls_in_stmt(stmt, op_name: str) -> int:
-    count = 0
-
-    def visitor(node):
-        nonlocal count
-        if isinstance(node, tvm.tir.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
-            count += 1
-
-    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
-    return count
-
-
-def _collect_buffer_loads(stmt, scope: str):
-    """Collect BufferLoad nodes from buffers with the given scope."""
-    loads = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tir.BufferLoad) and node.buffer.scope() == scope:
-            loads.append(node)
-
-    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
-    return loads
-
-
-def test_producer_consumer_ws_pure_tma_does_not_reserve_unused_preloop_barrier():
     @T.prim_func
-    def before(A: T.Tensor((512, 512), T.float16), B: T.Tensor((512, 512), T.float16)):
-        bx = T.launch_thread("blockIdx.x", 8)
-        by = T.launch_thread("blockIdx.y", 8)
-        v = T.launch_thread("threadIdx.x", 128)
+    def main(
+        A: T.Buffer((M, K), dtype),
+        B: T.Buffer((K, N), dtype),
+        C: T.Buffer((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+            bx,
+            by,
+        ):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
 
-        with T.block(""):
-            T.reads(A[by * 64, 0:481], B[0:481, bx * 64])
-            T.writes()
+            T.clear(C_local)
 
-            A_shared = T.alloc_buffer((3, 1, 8, 256), T.float16, scope="shared.dyn")
-            B_shared = T.alloc_buffer((3, 1, 4, 512), T.float16, scope="shared.dyn")
-            C_local = T.alloc_buffer((32,), scope="local")
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[ko * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
 
-            mbarrier = T.alloc_barrier([128, 128, 128, 128, 128, 128])
+            T.copy(C_local, C[by * block_M, bx * block_N])
 
-            for k in T.serial(16, annotations={"num_stages": T.int32(3)}):
-                if v == 0:
-                    T.call_intrin(
-                        "handle",
-                        tir.op.Op.get("tl.mbarrier_expect_tx"),
-                        mbarrier[k % 3],
-                        4096,
-                    )
-                if v == 0:
-                    T.tma_load(
-                        T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                        mbarrier[k % 3],
-                        T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 2),
-                        k * 32,
-                        by * 64,
-                    )
-                T.call_intrin(
-                    "handle",
-                    tir.op.Op.get("tl.mbarrier_wait_parity"),
-                    mbarrier[k % 3],
-                    k // 3 % 2,
-                )
-
-                if v == 0:
-                    T.call_intrin(
-                        "handle",
-                        tir.op.Op.get("tl.mbarrier_expect_tx"),
-                        mbarrier[k % 3 + 3],
-                        4096,
-                    )
-                if v == 0:
-                    T.tma_load(
-                        T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3, 2, 0),
-                        mbarrier[k % 3 + 3],
-                        T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 2),
-                        k * 32,
-                        bx * 64,
-                    )
-                T.call_intrin(
-                    "handle",
-                    tir.op.Op.get("tl.mbarrier_wait_parity"),
-                    mbarrier[k % 3 + 3],
-                    k // 3 % 2,
-                )
-
-                T.call_extern(
-                    "handle",
-                    "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                    T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 1),
-                    T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 1),
-                    T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
-                )
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
-
-    main_func = mod["main"]
-    # After the WS pass, the barrier buffer should still be present as shared.barrier
-    # scope BufferLoads in the output (the pass creates its own barrier buffer).
-    barrier_loads = _collect_buffer_loads(main_func.body, "shared.barrier")
-    assert len(barrier_loads) > 0, "Expected shared.barrier BufferLoad nodes in WS output"
+    return main
 
 
-def test_producer_consumer_ws_preserves_guarded_forward_wait():
+def matmul_windowed_pipelined(
+    M,
+    N,
+    K,
+    block_M,
+    block_K,
+    block_N,
+    num_stages,
+    window_tiles=2,
+    dtype="float16",
+    threads=128,
+):
+    """A pipelined GEMM whose K-loop has a dynamic lower bound."""
+
     @T.prim_func
-    def before(A: T.Tensor((512, 512), T.float16)):
-        bx = T.launch_thread("blockIdx.x", 1)
-        by = T.launch_thread("blockIdx.y", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
+    def main(
+        A: T.Buffer((M, K), dtype),
+        B: T.Buffer((K, N), dtype),
+        C: T.Buffer((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+            bx,
+            by,
+        ):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
 
-        with T.block(""):
-            T.reads(A[0:128, 0:64])
-            T.writes()
+            T.clear(C_local)
 
-            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
-            C_local = T.alloc_buffer((1,), "float32", scope="local")
+            start = T.max(0, bx - (window_tiles - 1))
+            end = T.min(T.ceildiv(K, block_K), bx + 1)
+            for ko in T.Pipelined(start, end, num_stages=num_stages):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[ko * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
 
-            mbarrier = T.alloc_barrier([1, 1])
+            T.copy(C_local, C[by * block_M, bx * block_N])
 
-            for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
-                i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
-
-                if i_s >= 0:
-                    T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1)
-                    if tx == 0:
-                        T.call_intrin(
-                            "handle",
-                            tir.op.Op.get("tl.mbarrier_expect_tx"),
-                            mbarrier[k % 2],
-                            4096,
-                        )
-                    if tx == 0:
-                        T.tma_load(
-                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                            mbarrier[k % 2],
-                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
-                            k * 32,
-                            by * 64,
-                        )
-                if i_s >= 0:
-                    T.call_intrin(
-                        "handle",
-                        tir.op.Op.get("tl.mbarrier_wait_parity"),
-                        mbarrier[k % 2],
-                        k // 2 % 2,
-                    )
-                if i_s >= 0:
-                    C_local[0] = C_local[0] + T.float32(1)
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
-
-    main_func = mod["main"]
-    body_text = main_func.script()
-    assert 'threadIdx.x", 256' in body_text
-
-    guarded_waits = []
-    for if_stmt in _collect_ifs(main_func.body):
-        if _stmt_contains_call(if_stmt.then_case, "tl.mbarrier_wait_parity"):
-            guarded_waits.append(str(if_stmt.condition))
-
-    assert guarded_waits
-    assert any("i_s" in cond for cond in guarded_waits)
+    return main
 
 
-def test_producer_consumer_ws_preserves_guarded_producer_backpressure_wait():
+def prelude_tma_wait_sink(block=64, iters=2, dtype="float16", threads=128):
+    """A tiled-WS kernel with pre-loop TMA loads consumed at different points."""
+
     @T.prim_func
-    def before(A: T.Tensor((512, 512), T.float16)):
-        bx = T.launch_thread("blockIdx.x", 1)
-        by = T.launch_thread("blockIdx.y", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
+    def main(
+        Q: T.Buffer((iters * block, block), dtype),
+        K_in: T.Buffer((block, block), dtype),
+        V_in: T.Buffer((block, block), dtype),
+        O: T.Buffer((block, block), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            K_shared = T.alloc_shared((block, block), dtype)
+            V_shared = T.alloc_shared((block, block), dtype)
+            q = T.alloc_shared((block, block), dtype)
+            acc0 = T.alloc_fragment((block, block), "float32")
+            acc1 = T.alloc_fragment((block, block), "float32")
+            out = T.alloc_fragment((block, block), "float32")
 
-        with T.block(""):
-            T.reads(A[0:128, 0:64])
-            T.writes()
+            T.copy(K_in[0, 0], K_shared)
+            T.copy(V_in[0, 0], V_shared)
+            T.clear(out)
+            for ko in T.Pipelined(iters, num_stages=2):
+                T.copy(Q[ko * block, 0], q)
+                T.clear(acc0)
+                T.gemm(K_shared, q, acc0, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.clear(acc1)
+                T.gemm(V_shared, q, acc1, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                for i, j in T.Parallel(block, block):
+                    out[i, j] = acc0[i, j] + acc1[i, j]
 
-            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
-            C_local = T.alloc_buffer((1,), "float32", scope="local")
+            T.copy(out, O[0, 0])
 
-            mbarrier = T.alloc_barrier([1, 1])
-
-            for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
-                i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
-
-                if i_s >= 0:
-                    T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1)
-                    if tx == 0:
-                        T.call_intrin(
-                            "handle",
-                            tir.op.Op.get("tl.mbarrier_expect_tx"),
-                            mbarrier[k % 2],
-                            4096,
-                        )
-                    if tx == 0:
-                        T.tma_load(
-                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                            mbarrier[k % 2],
-                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
-                            k * 32,
-                            by * 64,
-                        )
-                if i_s >= 0:
-                    T.call_intrin(
-                        "handle",
-                        tir.op.Op.get("tl.mbarrier_wait_parity"),
-                        mbarrier[k % 2],
-                        k // 2 % 2,
-                    )
-                if i_s >= 0:
-                    C_local[0] = C_local[0] + T.float32(1)
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
-
-    main_func = mod["main"]
-    body_text = main_func.script()
-    assert 'threadIdx.x", 256' in body_text
-
-    guarded_wait_count = 0
-    guarded_arrive_count = 0
-    for if_stmt in _collect_ifs(main_func.body):
-        if "i_s" not in str(if_stmt.condition):
-            continue
-        guarded_wait_count += _count_calls_in_stmt(if_stmt.then_case, "tl.mbarrier_wait_parity")
-        guarded_arrive_count += _count_calls_in_stmt(if_stmt.then_case, "tir.ptx_arrive_barrier")
-
-    assert guarded_wait_count >= 2
-    assert guarded_arrive_count >= 2
+    return main
 
 
-def test_producer_consumer_ws_uses_consumer_guard_for_backpressure_protocol():
+def grouped_gemm_padded_pipelined(
+    batch_sizes,
+    K,
+    N,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    num_stages=2,
+    threads=256,
+    dtype="float16",
+):
+    """Grouped GEMM with padded M tiles to exercise WS shared-prelude local vars."""
+
+    batch_sizes = tuple(batch_sizes)
+    batch_count = len(batch_sizes)
+    batch_sum = sum(batch_sizes)
+    total_m_blocks = sum((size + block_M - 1) // block_M for size in batch_sizes)
+
     @T.prim_func
-    def before(A: T.Tensor((512, 512), T.float16)):
-        bx = T.launch_thread("blockIdx.x", 1)
-        by = T.launch_thread("blockIdx.y", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
+    def main(
+        A: T.Buffer((batch_sum, K), dtype),
+        B: T.Buffer((batch_count, K, N), dtype),
+        C: T.Buffer((batch_sum, N), dtype),
+        batch_sizes_buf: T.Buffer((batch_count,), "int32"),
+        batch_offsets: T.Buffer((batch_count,), "int32"),
+        batch_padded_offsets: T.Buffer((batch_count,), "int32"),
+    ):
+        with T.Kernel(total_m_blocks, T.ceildiv(N, block_N), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
+            cur_batch_idx = T.alloc_var("int32")
+            cur_batch_size = T.alloc_var("int32")
 
-        with T.block(""):
-            T.reads(A[0:128, 0:64])
-            T.writes()
+            m_start_padded = bx * block_M
+            for i in range(batch_count):
+                in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
+                cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)
 
-            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
-            C_local = T.alloc_buffer((1,), "float32", scope="local")
+            cur_batch_size = batch_sizes_buf[cur_batch_idx]
+            m_start = m_start_padded - batch_padded_offsets[cur_batch_idx] + batch_offsets[cur_batch_idx]
+            actual_rows = T.max(
+                0,
+                T.min(block_M, cur_batch_size + batch_padded_offsets[cur_batch_idx] - m_start_padded),
+            )
 
-            mbarrier = T.alloc_barrier([1, 1])
+            T.clear(C_local)
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                T.copy(A[m_start, ko * block_K], A_shared)
+                T.copy(B[cur_batch_idx, ko * block_K, by * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
 
-            for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
-                i_s: T.int32 = T.if_then_else(k < 2, 0, -1)
+            for i, j in T.Parallel(block_M, block_N):
+                if i < actual_rows:
+                    C[m_start + i, by * block_N + j] = C_local[i, j]
 
-                if i_s >= 0:
-                    T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1)
-                    if tx == 0:
-                        T.call_intrin(
-                            "handle",
-                            tir.op.Op.get("tl.mbarrier_expect_tx"),
-                            mbarrier[k % 2],
-                            4096,
-                        )
-                    if tx == 0:
-                        T.tma_load(
-                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                            mbarrier[k % 2],
-                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
-                            k * 32,
-                            by * 64,
-                        )
-                if i_s >= 0:
-                    T.call_intrin(
-                        "handle",
-                        tir.op.Op.get("tl.mbarrier_wait_parity"),
-                        mbarrier[k % 2],
-                        k // 2 % 2,
-                    )
-
-                use_block: T.int32 = T.if_then_else(i_s >= 0, 1, 0)
-                if use_block != 0:
-                    C_local[0] = C_local[0] + T.Cast("float32", A_shared[k % 2, 0, 0, 0])
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
-
-    main_func = mod["main"]
-    body_text = main_func.script()
-    assert 'threadIdx.x", 256' in body_text
-
-    guarded_wait_count = 0
-    guarded_arrive_count = 0
-    for if_stmt in _collect_ifs(main_func.body):
-        if "use_block" not in str(if_stmt.condition):
-            continue
-        guarded_wait_count += _count_calls_in_stmt(if_stmt.then_case, "tl.mbarrier_wait_parity")
-        guarded_arrive_count += _count_calls_in_stmt(if_stmt.then_case, "tir.ptx_arrive_barrier")
-
-    assert guarded_wait_count >= 1
-    assert guarded_arrive_count >= 1
+    return main
 
 
-def test_producer_consumer_ws_finds_pipeline_loop_under_if_wrapper():
+def grouped_gemm_reference(A, B, batch_sizes):
+    import torch
+
+    outputs = []
+    start = 0
+    for idx, size in enumerate(batch_sizes):
+        end = start + size
+        outputs.append(torch.mm(A[start:end], B[idx]))
+        start = end
+    return torch.cat(outputs, dim=0)
+
+
+def grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype="float16"):
+    import math
+    import torch
+
+    batch_sizes = list(batch_sizes)
+    batch_offsets = [0]
+    batch_padded_offsets = [0]
+    for i in range(len(batch_sizes) - 1):
+        batch_offsets.append(batch_offsets[-1] + batch_sizes[i])
+        batch_padded_offsets.append(batch_padded_offsets[-1] + math.ceil(batch_sizes[i] / block_M) * block_M)
+
+    A = torch.randn(sum(batch_sizes), K, dtype=getattr(torch, dtype), device="cuda")
+    B = torch.randn(len(batch_sizes), K, N, dtype=getattr(torch, dtype), device="cuda")
+    batch_sizes_t = torch.tensor(batch_sizes, dtype=torch.int32, device="cuda")
+    batch_offsets_t = torch.tensor(batch_offsets, dtype=torch.int32, device="cuda")
+    batch_padded_offsets_t = torch.tensor(batch_padded_offsets, dtype=torch.int32, device="cuda")
+    return A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t
+
+
+def _find_after(src, needle, start=0):
+    pos = src.find(needle, start)
+    assert pos >= 0, f"missing substring: {needle}"
+    return pos
+
+
+def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, block_N=64, block_K=32):
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    func = grouped_gemm_padded_pipelined(batch_sizes, K, N, block_M, block_N, block_K)
+    kernel = _compile_tvm_ffi(func, pass_configs, out_idx=[2])
+    return kernel, batch_sizes
+
+
+def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
+    import torch
+
+    A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t = grouped_gemm_inputs(batch_sizes, K, N, block_M, dtype)
+    out = kernel(A, B, batch_sizes_t, batch_offsets_t, batch_padded_offsets_t)
+    ref = grouped_gemm_reference(A.float(), B.float(), batch_sizes)
+    torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
+    return out
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_stage1_dynamic_loop_start():
+    """Stage-1 tiled WS should handle dynamic pipeline loop bounds."""
+    import torch
+
+    M, N, K = 64, 128, 64
+    block_M, block_K, block_N = 64, 32, 64
+    func = matmul_windowed_pipelined(
+        M,
+        N,
+        K,
+        block_M,
+        block_K,
+        block_N,
+        num_stages=1,
+        window_tiles=2,
+    )
+    target = determine_target()
+    kernel = tilelang.compile(func, target=target, out_idx=[2])
+    source = kernel.get_kernel_source()
+
+    assert "__launch_bounds__(256, 1)" in source
+
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    C = kernel(A, B)
+
+    ref = torch.zeros(M, N, dtype=torch.float32, device="cuda")
+    num_k_tiles = (K + block_K - 1) // block_K
+    num_n_tiles = (N + block_N - 1) // block_N
+    for bx in range(num_n_tiles):
+        start = max(0, bx - 1)
+        end = min(num_k_tiles, bx + 1)
+        n_slice = slice(bx * block_N, min((bx + 1) * block_N, N))
+        acc = torch.zeros(M, n_slice.stop - n_slice.start, dtype=torch.float32, device="cuda")
+        for ko in range(start, end):
+            k_slice = slice(ko * block_K, min((ko + 1) * block_K, K))
+            acc += A[:, k_slice].float() @ B[k_slice, n_slice].float()
+        ref[:, n_slice] = acc
+
+    torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_correctness():
+    """End-to-end correctness test: pipelined GEMM via tiled WS."""
+    import torch
+
+    M, N, K = 256, 256, 256
+    func = matmul_pipelined(M, N, K, 64, 32, 64, num_stages=2)
+    target = determine_target()
+    kernel = tilelang.compile(func, target=target, out_idx=[2])
+
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    C = kernel(A, B)
+
+    ref = A.float() @ B.float()
+    torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_stage3():
+    """Pipelined GEMM with 3 stages."""
+    import torch
+
+    M, N, K = 512, 512, 512
+    func = matmul_pipelined(M, N, K, 128, 64, 128, num_stages=3)
+    target = determine_target()
+    kernel = tilelang.compile(func, target=target, out_idx=[2])
+
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    C = kernel(A, B)
+
+    ref = A.float() @ B.float()
+    torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+def _compile_tvm_ffi(func, pass_configs=None, **kwargs):
+    tilelang.disable_cache()
+    try:
+        return tilelang.compile(
+            func,
+            target="cuda",
+            execution_backend="tvm_ffi",
+            pass_configs=pass_configs or {},
+            **kwargs,
+        )
+    finally:
+        tilelang.enable_cache()
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_swizzled_layout_allows_ws():
+    """Swizzled layout on a TMA copy target should NOT block warp specialization.
+
+    Swizzled layouts are valid TMA layouts (TMA supports 32B/64B/128B swizzle).
+    Layout::Expand correctly handles MVB expansion for swizzled layouts.
+    """
+    import torch
+
+    M, N, K = 256, 256, 256
+    block_M, block_K, block_N = 64, 64, 64
+
     @T.prim_func
-    def before(A: T.Tensor((512, 512), T.float16)):
-        bx = T.launch_thread("blockIdx.x", 1)
-        by = T.launch_thread("blockIdx.y", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
+    def gemm_swizzled(
+        A: T.Buffer((M, K), "float16"),
+        B: T.Buffer((K, N), "float16"),
+        C: T.Buffer((M, N), "float16"),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), "float16")
+            B_shared = T.alloc_shared((block_K, block_N), "float16")
+            C_local = T.alloc_fragment((block_M, block_N), "float32")
 
-        with T.block(""):
-            T.reads(A[0:128, 0:64])
-            T.writes()
+            T.annotate_layout({A_shared: make_swizzled_layout(A_shared), B_shared: make_swizzled_layout(B_shared)})
 
-            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
-            C_local = T.alloc_buffer((1,), "float32", scope="local")
+            T.clear(C_local)
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[ko * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+            T.copy(C_local, C[by * block_M, bx * block_N])
 
-            mbarrier = T.alloc_barrier([1, 1])
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(gemm_swizzled, pass_configs, out_idx=[2])
+    src = kernel.get_kernel_source()
 
-            if bx < 1:
-                for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
-                    with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
-                        if tx == 0:
-                            T.call_intrin(
-                                "handle",
-                                tir.op.Op.get("tl.mbarrier_expect_tx"),
-                                mbarrier[k % 2],
-                                4096,
-                            )
-                        if tx == 0:
-                            T.tma_load(
-                                T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                                mbarrier[k % 2],
-                                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
-                                k * 32,
-                                by * 64,
-                            )
-                    T.call_intrin(
-                        "handle",
-                        tir.op.Op.get("tl.mbarrier_wait_parity"),
-                        mbarrier[k % 2],
-                        k // 2 % 2,
-                    )
-                    C_local[0] = C_local[0] + T.float32(1)
+    # WS should be applied: launch bounds should include producer warp group
+    assert "__launch_bounds__(256, 1)" in src
+    # TMA loads should be present
+    assert "tl::tma_load" in src
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
-
-    main_func = mod["main"]
-    body_text = main_func.script()
-    assert 'threadIdx.x", 256' in body_text
-    assert "num_stages" not in body_text
-    assert "software_pipeline_stage" not in body_text
-    assert "software_pipeline_order" not in body_text
+    # Correctness check
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    C = kernel(A, B)
+    ref = A.float() @ B.float()
+    torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
 
 
-def test_producer_consumer_ws_moves_preloop_tma_prefix_inside_wrapped_ws_split():
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_incompatible_layout_blocks_ws():
+    """A non-swizzle, non-linear layout on ALL TMA copy targets should block WS.
+
+    If every copy that could be a TMA producer has an incompatible layout,
+    there are no real TMA candidates and WS should not apply.
+    """
+    from tilelang.layout import Layout
+
+    M, K = 16, 128
+    block_m, block_k = 16, 128
+
+    # A padded layout: (i, j) -> i * (block_k + 8) + j
+    # This is neither a swizzle layout nor a linear layout (output shape != input shape).
+    padded_continuous = block_k + 8
+    padded_layout = Layout([block_m, block_k], lambda i, j: i * padded_continuous + j)
+
     @T.prim_func
-    def before(A: T.Tensor((512, 512), T.float16)):
-        bx = T.launch_thread("blockIdx.x", 1)
-        by = T.launch_thread("blockIdx.y", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
+    def copy_with_padded_layout(
+        x: T.Tensor((M, K), "float16"),
+        y: T.Tensor((M, K), "float16"),
+    ):
+        with T.Kernel(T.ceildiv(M, block_m), threads=128) as pid_m:
+            x_shared = T.alloc_shared((block_m, block_k), "float16")
 
-        with T.block(""):
-            T.reads(A[0:128, 0:64])
-            T.writes()
+            T.annotate_layout({x_shared: padded_layout})
 
-            A_shared = T.alloc_buffer((2, 1, 8, 256), T.float16, scope="shared.dyn")
-            C_local = T.alloc_buffer((1,), "float32", scope="local")
+            for _ in T.Pipelined(1, num_stages=1):
+                T.copy(x[pid_m * block_m, 0], x_shared)
+                T.copy(x_shared, y[pid_m * block_m, 0])
 
-            mbarrier = T.alloc_barrier([1, 1, 1])
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(copy_with_padded_layout, pass_configs, out_idx=[1])
+    src = kernel.get_kernel_source()
 
-            if bx < 1:
-                with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
-                    if tx == 0:
-                        T.call_intrin(
-                            "handle",
-                            tir.op.Op.get("tl.mbarrier_expect_tx"),
-                            mbarrier[0],
-                            4096,
-                        )
-                    if tx == 0:
-                        T.tma_load(
-                            T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                            mbarrier[0],
-                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, 0, 2048, 2),
-                            0,
-                            by * 64,
-                        )
-                T.call_intrin(
-                    "handle",
-                    tir.op.Op.get("tl.mbarrier_wait_parity"),
-                    mbarrier[0],
-                    0,
-                )
+    # WS should NOT be applied: no producer/consumer split
+    assert "__launch_bounds__(256, 1)" not in src
 
-                for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
-                    with T.attr(A_shared.data, "tl.tma_copy_write_buffer", 1):
-                        if tx == 0:
-                            T.call_intrin(
-                                "handle",
-                                tir.op.Op.get("tl.mbarrier_expect_tx"),
-                                mbarrier[k % 2 + 1],
-                                4096,
-                            )
-                        if tx == 0:
-                            T.tma_load(
-                                T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
-                                mbarrier[k % 2 + 1],
-                                T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 2 * 2048, 2048, 2),
-                                k * 32,
-                                by * 64,
-                            )
-                    T.call_intrin(
-                        "handle",
-                        tir.op.Op.get("tl.mbarrier_wait_parity"),
-                        mbarrier[k % 2 + 1],
-                        k // 2 % 2,
-                    )
-                    C_local[0] = C_local[0] + T.Cast("float32", A_shared[k % 2, 0, 0, 0])
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.MultiVersionBuffer(barrier_only=False)(mod)
-    mod = tl.transform.ProducerConsumerWarpSpecialized()(mod)
-    mod = tir.transform.LowerOpaqueBlock()(mod)
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
+    """Pre-loop TMA loads should not emit immediate waits in the common prelude."""
 
-    main_func = mod["main"]
-    body_text = main_func.script()
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(prelude_tma_wait_sink(), pass_configs, out_idx=[3])
+    src = kernel.get_kernel_source()
 
-    scope_idx = body_text.find("kWarpSpecializationScope")
-    first_tma_idx = body_text.find("T.tma_load(")
-    first_producer_elect_idx = body_text.find("T.tl_shuffle_elect(128)")
+    k_load = src.find("tl::tma_load(K_in_desc")
+    v_load = src.find("tl::tma_load(V_in_desc")
+    branch = src.find("if (128 <= ((int)threadIdx.x))")
+    first_wait = src.find(".wait(0)")
 
-    assert scope_idx != -1
-    assert first_tma_idx > scope_idx
-    assert first_producer_elect_idx > scope_idx
+    assert min(k_load, v_load, branch, first_wait) >= 0
+    assert k_load < v_load < branch < first_wait
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
+    """Shared-prelude grouped-gemm indices must stay outside WS branches."""
+    kernel, batch_sizes = _compile_grouped_gemm_ws()
+    src = kernel.get_kernel_source()
+
+    branch = _find_after(src, "if (256 <= ((int)threadIdx.x))")
+    cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
+    m_start = _find_after(src, "int m_start =")
+    actual_rows = _find_after(src, "int actual_rows =")
+
+    assert cur_batch_idx_loop < m_start < actual_rows < branch
+    _run_grouped_gemm_ws(kernel, batch_sizes)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
+    """Producer branch should reuse shared local.var state instead of cloning it."""
+    kernel, batch_sizes = _compile_grouped_gemm_ws()
+    src = kernel.get_kernel_source()
+
+    assert "cur_batch_idx_producer_ws" not in src
+    assert "cur_batch_size_producer_ws" not in src
+    assert "tl::tma_load(B_desc" in src
+    assert "cur_batch_idx);" in src
+    _run_grouped_gemm_ws(kernel, batch_sizes)
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    test_tiled_ws_stage1_dynamic_loop_start()
+    test_tiled_ws_correctness()
+    test_tiled_ws_stage3()
+    test_tiled_ws_swizzled_layout_allows_ws()
+    test_tiled_ws_incompatible_layout_blocks_ws()
+    test_tiled_ws_sinks_preloop_tma_waits_into_consumer()
+    test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm()
+    test_tiled_ws_does_not_clone_local_var_into_producer_branch()

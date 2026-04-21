@@ -45,6 +45,7 @@ def run_tilelang_if_range(M=128, N=128, block_M=32, block_N=32, dtype=T.float16)
     torch.testing.assert_close(b, ref_b, rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_cuda
 def test_tilelang_if_range():
     run_tilelang_if_range(M=128, N=128, block_M=32, block_N=32)
 

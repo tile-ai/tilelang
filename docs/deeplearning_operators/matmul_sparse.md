@@ -258,4 +258,4 @@ However, fixing a specific layout introduces several potential issues:
 
 3. Alignment requirements: `CUTLASS` enforces strict alignment checks, and many hyperparameter configurations can lead to compilation errors. (For reference, sm8x was implemented in `CUTLASS 2`.)
 
-`T.gemm_sp_v2` was designed to address these limitations, following the approach of `T.gemm_v2`. It lowers directly to PTX, removing the need for a fixed metadata layout.
+`T.gemm_sp_v2` was designed to address these limitations, following the approach of `T.gemm`. It lowers directly to PTX, removing the need for a fixed metadata layout.

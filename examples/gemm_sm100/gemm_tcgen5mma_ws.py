@@ -16,7 +16,7 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
     B: T.Tensor[[K, N], in_dtype]
     C = T.empty((M, N), out_dtype)
 
-    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+    with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128) as (bx, by):
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, block_N), in_dtype)
         C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
@@ -35,12 +35,12 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
                 T.tma_copy(
-                    A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K],
+                    A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
                     A_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
                 T.tma_copy(
-                    B[k * block_K : (k + 1) * block_K, bx * block_N : (bx + 1) * block_N],
+                    B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N],
                     B_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
@@ -62,10 +62,10 @@ def gemm(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype, num_
         T.copy(C_tmem, C_local)
         if use_tma_store:
             T.copy(C_local, C_shared)
-            T.copy(C_shared, C[by * block_M, bx * block_N])
+            T.copy(C_shared, C[bx * block_M, by * block_N])
         else:
             T.copy(C_local, C_local_cast)
-            T.copy(C_local_cast, C[by * block_M, bx * block_N])  # STG256
+            T.copy(C_local_cast, C[bx * block_M, by * block_N])  # STG256
     return C
 
 
@@ -79,7 +79,7 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
     B: T.Tensor[[K, N], in_dtype]
     C = T.empty((M, N), out_dtype)
 
-    with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (by, bx):
+    with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (bx, by):
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)  # Each cta hold half of B
         C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
@@ -100,12 +100,12 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
                 T.tma_copy(
-                    A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K],
+                    A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
                     A_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
                 T.tma_copy(
-                    B[k * block_K : (k + 1) * block_K, (bx * 2 + cta_id) * (block_N // 2) : (bx * 2 + cta_id + 1) * (block_N // 2)],
+                    B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * (block_N // 2) : (by * 2 + cta_id + 1) * (block_N // 2)],
                     B_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
@@ -128,10 +128,10 @@ def gemm_2cta(A, B, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype,
         T.copy(C_tmem, C_local)
         if use_tma_store:
             T.copy(C_local, C_shared)
-            T.copy(C_shared, C[by * block_M, bx * block_N])
+            T.copy(C_shared, C[bx * block_M, by * block_N])
         else:
             T.copy(C_local, C_local_cast)
-            T.copy(C_local_cast, C[by * block_M, bx * block_N])
+            T.copy(C_local_cast, C[bx * block_M, by * block_N])
     return C
 
 

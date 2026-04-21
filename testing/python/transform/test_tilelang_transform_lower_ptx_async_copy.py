@@ -51,9 +51,35 @@ def test_lower_ptx_async_copy_rewrites_plain_parallel_copy():
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) > 0
     assert calls.get("tir.ptx_wait_group", 0) > 0
+
+
+def test_lower_ptx_async_copy_respects_explicit_async_scope():
+    """`async_scope` marks explicit async semantics, so implicit sync should not be added."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((16,), T.float32),
+        B: T.Tensor((16,), T.float32),
+    ):
+        S = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        with T.attr(0, "async_scope", 1):
+            for i in T.Parallel(16):
+                S[i] = A[i]
+        B[0] = S[0]
+
+    target = tvm.target.Target("cuda -arch=sm_80")
+    func = before.with_attr("global_symbol", "main").with_attr("target", target)
+    mod = tvm.IRModule.from_expr(func)
+
+    mod = tl.transform.LowerPTXAsyncCopy()(mod)
+    calls = _count_calls(mod["main"])
+
+    assert calls.get("tl.ptx_cp_async", 0) > 0
+    assert calls.get("tir.ptx_commit_group", 0) == 0
+    assert calls.get("tir.ptx_wait_group", 0) == 0
 
 
 def test_lower_ptx_async_copy_supports_multi_dim_indices():
@@ -76,7 +102,7 @@ def test_lower_ptx_async_copy_supports_multi_dim_indices():
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) > 0
     assert calls.get("tir.ptx_wait_group", 0) > 0
 
@@ -102,7 +128,7 @@ def test_lower_ptx_async_copy_rewrites_vectorized_float16_loop():
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) > 0
     assert calls.get("tir.ptx_wait_group", 0) > 0
 
@@ -129,7 +155,7 @@ def test_lower_ptx_async_copy_hoists_sync_out_of_predicated_block():
 
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) > 0
     assert calls.get("tir.ptx_wait_group", 0) > 0
 
@@ -169,7 +195,7 @@ def test_lower_ptx_async_copy_respects_enable_async_copy_config():
         mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) == 0
+    assert calls.get("tl.ptx_cp_async", 0) == 0
     assert calls.get("tir.ptx_commit_group", 0) == 0
     assert calls.get("tir.ptx_wait_group", 0) == 0
 
@@ -196,7 +222,7 @@ def test_lower_ptx_async_copy_does_not_duplicate_existing_sync():
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) == 1
     assert calls.get("tir.ptx_wait_group", 0) == 1
 
@@ -222,7 +248,7 @@ def test_lower_ptx_async_copy_inserts_commit_before_existing_wait():
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) == 1
     assert calls.get("tir.ptx_wait_group", 0) == 1
 
@@ -247,7 +273,7 @@ def test_lower_ptx_async_copy_keeps_sync_out_of_inner_unrolled_loops_in_pipeline
 
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) > 0
     assert calls.get("tir.ptx_wait_group", 0) > 0
 
@@ -295,7 +321,7 @@ def test_lower_ptx_async_copy_from_vectorized_loop():
 
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
 
 
 def test_lower_ptx_async_copy_skips_vectorized_broadcast_source():
@@ -318,7 +344,7 @@ def test_lower_ptx_async_copy_skips_vectorized_broadcast_source():
 
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
-    assert calls.get("tir.ptx_cp_async", 0) == 0
+    assert calls.get("tl.ptx_cp_async", 0) == 0
     assert calls.get("tir.ptx_commit_group", 0) == 0
     assert calls.get("tir.ptx_wait_group", 0) == 0
 
@@ -343,7 +369,7 @@ def test_lower_ptx_async_copy_from_ramp():
     print(mod)
     calls = _count_calls(mod["main"])
     print(calls)
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
 
 
 if __name__ == "__main__":

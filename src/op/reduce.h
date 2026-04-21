@@ -84,9 +84,13 @@ public:
   tir::Buffer src, dst; ///< Source and destination buffers
   // Optional: keep the original regions used to construct this op
   BufferRegion srcRegion_, dstRegion_;
-  int dim;         ///< Dimension to reduce along
-  ReduceType type; ///< Type of reduction operation
-  bool clear;      ///< Whether to clear destination before reduction
+  int dim;                   ///< Dimension to reduce along
+  ReduceType type;           ///< Type of reduction operation
+  bool clear;                ///< Whether to clear destination before reduction
+  bool nan_propagate{false}; ///< For fp16/bf16 max/min/absmax: propagate NaN
+                             ///< (use __hmax_nan/__hmin_nan) instead of the
+                             ///< default __hmax/__hmin which return the
+                             ///< non-NaN operand.
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode,
                                     TileOperatorNode);
@@ -100,7 +104,8 @@ public:
         .def_ro("dstRegion", &ReduceOpNode::dstRegion_)
         .def_ro("dim", &ReduceOpNode::dim)
         .def_ro("type", &ReduceOpNode::type)
-        .def_ro("clear", &ReduceOpNode::clear);
+        .def_ro("clear", &ReduceOpNode::clear)
+        .def_ro("nan_propagate", &ReduceOpNode::nan_propagate);
   }
 
   /// Lower the operator to TIR statements
@@ -108,6 +113,7 @@ public:
   /// Infer memory layout for buffers
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
+  AccessRegions GetAccessRegions() const override;
   static const Op &Get();
   TileOperator Clone() const;
 

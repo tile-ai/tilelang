@@ -65,6 +65,8 @@ def map_torch_type(intype) -> torch.dtype:
             "torch.float4_e2m1fnx2 is not supported in this version of torchPlease upgrade torch >= 2.8.0"
         )
         return torch.float4_e2m1fnx2
+    elif intype == "int4":
+        return torch.int8
     elif "float4" in intype:
         # PyTorch doesn't support float4, use int8 as storage type
         return torch.int8

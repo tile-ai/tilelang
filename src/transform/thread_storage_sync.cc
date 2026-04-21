@@ -665,9 +665,13 @@ private:
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     current_.depends_on_runtime = true;
-    if (IsThreadLocalScope(GetScope(op->buffer->data))) {
-      current_.is_block_uniform = false;
-    }
+    // Do not mark local-scope loads as non-block-uniform solely based on
+    // storage scope.  Thread-local buffers (fragments) commonly hold
+    // block-uniform data when populated from block-uniform global addresses
+    // (e.g., T.copy(BlockMask[blockIdx.y, :], fragment)).  If the load
+    // indices actually depend on threadIdx, the recursive visit of indices
+    // below (via IRMutatorWithAnalyzer::VisitExpr_) will correctly set
+    // is_block_uniform = false through VisitExpr_(VarNode*).
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 

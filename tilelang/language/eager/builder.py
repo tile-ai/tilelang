@@ -66,8 +66,7 @@ def unwrap_cond(expr):
         return bool(expr)
     else:
         logger.warning(
-            f"Python expression `{expr}` is used as condition in TileLang, \nthis is treated as a constant expression. ",
-            stack_info=True,
+            f"Python expression `{expr}` is used as condition in TileLang, this is treated as a constant expression.",
             stacklevel=3,
         )
         return bool(expr)
@@ -181,6 +180,8 @@ class Builder(BaseBuilder):
         self.constexpr_var = set()
         self.eager_jit: EagerJITStage = "none"
         self.eager_jit_subs: dict[str, PrimExpr] = {}
+        self.func_pass_configs: dict[str, Any] | None = None
+        self.func_compile_flags: list[str] | str | None = None
         self.current_file = "<unknown>"
         self.current_line = 0
         self.current_macro_name = "<unknown-macro>"
@@ -250,7 +251,7 @@ class Builder(BaseBuilder):
     def check_continue_break(self):
         idx = self.find_frame_idx(ContinueOrBreak)
         if idx is not None:
-            logger.warning("Writing code after continue/break may cause undefined behavior in tilelang.", stack_info=True, stacklevel=3)
+            logger.warning("Statements after continue/break have no effect and will be ignored.", stacklevel=3)
 
     @contextmanager
     def with_frame(self, frame: AbstractContextManager[Any] | None):
@@ -293,9 +294,8 @@ class Builder(BaseBuilder):
         elif isinstance(val, tir.frame.IRBuilderFrame):
             if isinstance(val, tir.frame.ForFrame):
                 logger.warning(
-                    "Evaluating a for frame may cause undefined behavior in tilelang.",
-                    stack_info=True,
-                    stacklevel=1,
+                    "A for-loop frame is being evaluated as a standalone expression. Did you mean to use it in a `for` statement?",
+                    stacklevel=2,
                 )
             self.enter_frame(val)
         elif isinstance(val, PrimExpr):
@@ -309,7 +309,7 @@ class Builder(BaseBuilder):
         elif isinstance(val, (Buffer, Var)):
             pass
         else:
-            logger.warning(f"Unused return value: {val}({type(val)})", stack_info=True, stacklevel=2)
+            logger.warning(f"Return value `{val}` ({type(val)}) is unused and will be discarded.", stacklevel=2)
 
     def ctx_for(self, it):
         self.check_continue_break()
@@ -325,7 +325,10 @@ class Builder(BaseBuilder):
                 else:
                     real_stop = tir.ceildiv(it.start - it.stop, -step_value)
             else:
-                logger.warning(f"Using a non-constant step `{it.step}` in stepped serial may lead to undefined behavior in tilelang")
+                logger.warning(
+                    f"Non-constant step `{it.step}` in serial range may produce unexpected results. Consider using a constant step if possible.",
+                    stacklevel=2,
+                )
                 real_stop = tir.ceildiv(it.stop - it.start, it.step)
             if isinstance(it, UnrollForWithStep):
                 real_frame = tir.unroll(real_stop, annotations=it.annotations)
@@ -372,9 +375,8 @@ class Builder(BaseBuilder):
                 )
             else:
                 logger.warning(
-                    "While loop with constant false condition detected in Tilelang, the loop body will never be executed.\n",
-                    f"Condition: {cond_v}({type(cond_v)}) => {cond_v_unwrap}({type(cond_v_unwrap)})\n",
-                    stack_info=True,
+                    "While loop condition is always false; the loop body will be skipped.\n"
+                    f"Condition: {cond_v} ({type(cond_v)}) => {cond_v_unwrap} ({type(cond_v_unwrap)})\n",
                     stacklevel=2,
                 )
         with self.with_frame(tir.While(cond_v_unwrap)):
@@ -469,8 +471,7 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
-                    f"Immutable value `{name}` is re-bound. If you want to modify its value, please use T.alloc_var to make it a variable!",
-                    stack_info=True,
+                    f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
                     stacklevel=2,
                 )
             self.name_inside_frame[name] = self.frames[frame]
@@ -525,7 +526,7 @@ class Builder(BaseBuilder):
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
         self.check_continue_break()
         if annot is not self.empty:
-            logger.warning("Type annotation in slice assignment has no effect", stack_info=True, stacklevel=2)
+            logger.warning("Type annotation on slice assignment is not supported and will be ignored.", stacklevel=2)
         if isinstance(lval, Buffer):
             tir.buffer_store(lval, value, sl)
         else:
@@ -569,8 +570,7 @@ class Builder(BaseBuilder):
                 assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
                 if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                     logger.warning(
-                        f"Immutable value `{name}` is re-bound. If you want to modify its value, please use T.alloc_var to make it a variable!",
-                        stack_info=True,
+                        f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
                         stacklevel=2,
                     )
                 self.name_inside_frame[name] = self.frames[frame]
@@ -754,7 +754,6 @@ if TYPE_CHECKING:
         span: Span | None
         ir_gen: IRGenerator[_P, _T] | None
         orig_func: Callable[_P, _T] | None
-        out_idx_override: list[int] | None
 
 else:
     PrimFunc = tvm.tir.PrimFunc
@@ -935,6 +934,66 @@ def const(name: str, dtype: str = "int32") -> Var | tuple[Var, ...]:
             return builder.eager_jit_subs[name]
 
 
+def annotate_compile_flags(flags: list[str] | str) -> None:
+    """
+    Annotate additional device compile flags inside a function body.
+
+    The flags will be merged with any externally provided compile_flags
+    at compilation time. Can be placed before or after tensor type annotations.
+
+    Example::
+
+        @tilelang.jit
+        def kernel(A, B):
+            T.annotate_compile_flags(["--use_fast_math"])
+            ...
+    """
+    builder = Builder.current()
+    if builder is None:
+        raise JITNoBuilderError("T.annotate_compile_flags() can only be used inside @tilelang.jit or @T.prim_func")
+    if builder.eager_jit == "phase1":
+        return
+    builder.func_compile_flags = flags
+
+
+def annotate_pass_configs(configs: dict[str, Any]) -> None:
+    """
+    Annotate pass configuration inside a function body.
+
+    The configs will be merged with any externally provided pass_configs
+    at compilation time (function-level configs take lower priority, i.e.
+    external configs override). Can be placed before or after tensor type annotations.
+
+    Example::
+
+        @tilelang.jit
+        def kernel(A, B):
+            T.annotate_pass_configs({
+                PassConfigKey.TL_ENABLE_FAST_MATH: True})
+            ...
+    """
+    builder = Builder.current()
+    if builder is None:
+        raise JITNoBuilderError("T.annotate_pass_configs() can only be used inside @tilelang.jit or @T.prim_func")
+    if builder.eager_jit == "phase1":
+        return
+    builder.func_pass_configs = configs
+
+
+def _patch_prim_func_attrs(pf: PrimFunc, builder: Builder) -> PrimFunc:
+    """Attach function-level out_idx, pass_configs and compile_flags as PrimFunc attrs."""
+    if builder.out_idx:
+        pf = pf.with_attr("tilelang_out_idx", builder.out_idx)
+    if builder.func_pass_configs is not None:
+        pf = pf.with_attr("tilelang_pass_configs", builder.func_pass_configs)
+    if builder.func_compile_flags is not None:
+        flags = builder.func_compile_flags
+        if isinstance(flags, str):
+            flags = [flags]
+        pf = pf.with_attr("tilelang_compile_flags", flags)
+    return pf
+
+
 @dataclass
 class TirTemplate(Generic[_P, _T]):
     """
@@ -1019,8 +1078,7 @@ class TirTemplate(Generic[_P, _T]):
         with builder.prim_func(self.name):
             self.ir_gen.gen(builder)(**tensor_args, **kwargs)
         pf = builder.get()
-        if builder.out_idx:
-            pf.out_idx_override = builder.out_idx
+        pf = _patch_prim_func_attrs(pf, builder)
         return pf
 
 
@@ -1117,8 +1175,6 @@ class JITFunc(Generic[_P, _T]):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
             pf.orig_func = self.orig_func
-            if builder.out_idx:
-                pf.out_idx_override = builder.out_idx
             return TirTemplate.create(self.orig_func.__name__, pf, builder.constexpr_var, self.ir_gen)
         else:
             raise ValueError(f"Invalid jit mode: {self.mode}, expected 'lazy' or 'eager'")
@@ -1218,9 +1274,8 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> Prim
                 with builder.prim_func(func.__name__):
                     ir_gen.gen(builder)(**annot)
                 prim_func = builder.get()
+                prim_func = _patch_prim_func_attrs(prim_func, builder)
                 prim_func.orig_func = func
-                if builder.out_idx:
-                    prim_func.out_idx_override = builder.out_idx
                 return prim_func
             except Exception as e:
                 logger.fatal(f"Failed to build prim_func from {func.__name__}\nargs={annot}\nsource={ir_gen.source}")

@@ -38,6 +38,22 @@ def PipelinePlanning():
     return _ffi_api.PipelinePlanning()  # type: ignore
 
 
+def InstructionAnnotation():
+    """Annotate tile operations with coarse-grained instruction kind.
+
+    This pass runs before LayoutInference and LowerTileOp.  It adds a
+    ``tl_instruction_kind`` annotation to each tile-op Call node indicating
+    the instruction category ("tma", "cp_async", "sync", "wgmma", etc.)
+    that will be selected during lowering.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InstructionAnnotation()  # type: ignore
+
+
 def LayoutInference():
     """LayoutInference
 
@@ -69,17 +85,6 @@ def InjectSoftwarePipeline():
         The result pass
     """
     return _ffi_api.InjectSoftwarePipeline()  # type: ignore
-
-
-def OptimizeCPAsyncSync():
-    """Optimize explicit cp.async commit/wait synchronization intrinsics.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.OptimizeCPAsyncSync()  # type: ignore
 
 
 def FrontendLegalize():
@@ -149,17 +154,6 @@ def WarpSpecializedPipeline():
     return _ffi_api.WarpSpecializedPipeline()  # type: ignore
 
 
-def RewriteWgmmaSync():
-    """RewriteWgmmaSync
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.RewriteWgmmaSync()  # type: ignore
-
-
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 
@@ -225,28 +219,12 @@ def LoopUnswitching():
     return _ffi_api.LoopUnswitching()  # type: ignore
 
 
-def MultiVersionBuffer(barrier_only: bool = False):
-    """MultiVersionBuffer
-
-    Parameters
-    ----------
-    barrier_only : bool
-        If True, only version barrier buffers (shared.barrier scope).
-        Data buffer versioning is left to InjectSoftwarePipeline.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.MultiVersionBuffer(barrier_only)  # type: ignore
-
-
 def ProducerConsumerWarpSpecialized():
-    """Producer-Consumer Warp Specialization for TMA pipelines.
+    """Producer-consumer warp specialization at the tile-op level.
 
-    Splits pipelined loops with TMA loads into producer (TMA copy) and
-    consumer (compute) warp groups with mbarrier-based synchronization.
+    This pass runs before LayoutInference and LowerTileOp. It rewrites
+    eligible pipelined tile-op loops into warp-specialized producer and
+    consumer branches with explicit barrier synchronization.
 
     Returns
     -------
@@ -254,6 +232,20 @@ def ProducerConsumerWarpSpecialized():
         The result pass
     """
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
+
+
+def ProducerConsumerWarpSpecializedTiled():
+    """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
+
+    The tiled tile-op implementation is now the canonical
+    ``ProducerConsumerWarpSpecialized`` pass.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return ProducerConsumerWarpSpecialized()
 
 
 def AnnotateWarpGroupRegAlloc():
@@ -285,6 +277,24 @@ def InjectFenceProxy():
         The result pass
     """
     return _ffi_api.InjectFenceProxy()  # type: ignore
+
+
+def InjectTcgen05Fence():
+    """Inject tcgen05.fence::before_thread_sync / after_thread_sync at
+    conservative TCGEN05/TMEM synchronization boundaries on Blackwell
+    (SM100+) targets.
+
+    The current pass wraps CTA-wide shared-memory syncs and also inserts
+    fences around linear mbarrier wait/use and use/arrive handoff patterns.
+    It is intentionally conservative and does not try to infer arbitrary
+    barrier protocols.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InjectTcgen05Fence()  # type: ignore
 
 
 def LegalizeVectorizedLoop():

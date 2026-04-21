@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import tilelang.language as T
 from typing import Literal, Callable
-from tvm import DataType
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var
+from tvm import DataType, tir
+from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
+from tvm.ir import Range
 from tvm.runtime import convert
 from .utils import (
     mma_store_index_map,
     get_ldmatrix_offset,
 )
-from tilelang.utils import is_fragment
+from tilelang.utils import is_fragment, get_buffer_region_from_load
 
 from tilelang.intrinsics.mma_sp_layout import (
     shared_16x16_to_mma_sp_layout_sr_a,
@@ -60,62 +61,14 @@ class SparseTensorCoreIntrinEmitter:
     }
 
     E_FACTOR_MAP = {  # e_kdim = mma_kdim // e_factor
-        "float": {
-            "int16": 8,
-            "uint16": 8,
-        },
-        "float32": {
-            "int16": 8,
-            "uint16": 8,
-        },
-        "float16": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "bfloat16": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "int8": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "uint8": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "float8_e4m3": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
-        "float8_e5m2": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
-        },
+        "float": {"int16": 8, "uint16": 8},
+        "float32": {"int16": 8, "uint16": 8},
+        "float16": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "bfloat16": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "int8": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "uint8": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "float8_e4m3": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
+        "float8_e5m2": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
     }
 
     E_REPLICATE_FACTOR = {  # metadata replicate every 4 consecutive threads
@@ -285,7 +238,7 @@ class SparseTensorCoreIntrinEmitter:
             )
             return lane_id, warp_n, warp_m
 
-    def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer, ki: PrimExpr, rk: PrimExpr = 0):
+    def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion | BufferLoad, ki: PrimExpr, rk: PrimExpr = 0):
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         warp_k = self.warp_k
@@ -312,6 +265,13 @@ class SparseTensorCoreIntrinEmitter:
 
         thread_binding = self.get_thread_binding()
 
+        A_region = self._legalize_to_buffer_region(A_shared_buf)
+        A_buf = A_region.buffer
+        A_base0 = A_region.region[-2].min
+        A_base1 = A_region.region[-1].min
+        A_other = [r.min for r in A_region.region[:-2]]
+        A_stride_last = A_buf.shape[-1]
+
         @T.macro
         def _warp_ldmatrix_a(
             A_local_buf,
@@ -320,36 +280,38 @@ class SparseTensorCoreIntrinEmitter:
             thread_binding,
             rk=0,
         ):
-            stride = A_shared_buf.shape[-1]
+            stride = A_stride_last
             tx, _, warp_m = self.extract_thread_binding(thread_binding)
             trans = self.a_transposed
 
             for i in T.serial(warp_rows):
-                # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, (rk * warp_k + ki * micro_size_k) // self.SPARSE_FACTOR
-                A_shared_buf_elem = A_shared_buf[wk, wi] if a_transposed else A_shared_buf[wi, wk]
 
                 if ldmatrix_available:
+                    row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
+                    src_indices = (
+                        tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
+                        if a_transposed
+                        else tuple(A_other) + (A_base0 + wi + row_off, A_base1 + wk + col_off)
+                    )
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(trans),
                         4,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.access_ptr(A_shared_buf_elem, "r"),
-                        get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
+                        T.access_ptr(A_buf[src_indices], "r", extent=8),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
                 else:
                     for j in T.serial(local_size_a):
                         mi, mk = mma_load_layout(tx, j)
                         A_local_buf[i * local_size_a + j] = (
-                            A_shared_buf[wk + mk, wi + mi] if a_transposed else A_shared_buf[wi + mi, wk + mk]
+                            A_buf[tuple(A_other) + (A_base0 + wk + mk, A_base1 + wi + mi)]
+                            if a_transposed
+                            else A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
                         )
 
-        return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
+        return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
-    def ldmatrix_e(self, E_local_buf: Buffer, E_shared_buf: Buffer, ki: PrimExpr, rk: PrimExpr = 0):
+    def ldmatrix_e(self, E_local_buf: Buffer, E_shared_buf: Buffer | BufferRegion | BufferLoad, ki: PrimExpr, rk: PrimExpr = 0):
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         warp_k = self.warp_k
@@ -395,6 +357,12 @@ class SparseTensorCoreIntrinEmitter:
 
         thread_binding = self.get_thread_binding()
 
+        E_region = self._legalize_to_buffer_region(E_shared_buf)
+        E_buf = E_region.buffer
+        E_base0 = E_region.region[-2].min
+        E_base1 = E_region.region[-1].min
+        E_other = [r.min for r in E_region.region[:-2]]
+
         @T.macro
         def _warp_ldmatrix_e(
             E_local_buf,
@@ -409,11 +377,15 @@ class SparseTensorCoreIntrinEmitter:
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, (rk * warp_k + ki * micro_size_k) // self.e_factor
                 for j in T.serial(local_size_e):
                     mi, mk = mma_load_layout(tx, j)
-                    E_local_buf[i * local_size_e + j] = E_shared_buf[wk + mk, wi + mi] if trans else E_shared_buf[wi + mi, wk + mk]
+                    E_local_buf[i * local_size_e + j] = (
+                        E_buf[tuple(E_other) + (E_base0 + wk + mk, E_base1 + wi + mi)]
+                        if trans
+                        else E_buf[tuple(E_other) + (E_base0 + wi + mi, E_base1 + wk + mk)]
+                    )
 
-        return _warp_ldmatrix_e(E_local_buf, E_shared_buf, ki, thread_binding, rk)
+        return _warp_ldmatrix_e(E_local_buf, E_region, ki, thread_binding, rk)
 
-    def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer, ki: PrimExpr, rk: PrimExpr = 0):
+    def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion | BufferLoad, ki: PrimExpr, rk: PrimExpr = 0):
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         warp_k = self.warp_k
@@ -440,6 +412,13 @@ class SparseTensorCoreIntrinEmitter:
             else:
                 raise ValueError(f"Unsupported dtype: {b_dtype}")
 
+        B_region = self._legalize_to_buffer_region(B_shared_buf)
+        B_buf = B_region.buffer
+        B_base0 = B_region.region[-2].min
+        B_base1 = B_region.region[-1].min
+        B_other = [r.min for r in B_region.region[:-2]]
+        B_stride_last = B_buf.shape[-1]
+
         @T.macro
         def _warp_ldmatrix_b(
             B_local_buf,
@@ -448,7 +427,7 @@ class SparseTensorCoreIntrinEmitter:
             thread_binding,
             rk=0,
         ):
-            stride = B_shared_buf.shape[-1]
+            stride = B_stride_last
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
             trans = not b_transposed
 
@@ -460,40 +439,44 @@ class SparseTensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = B_shared_buf[wi, wk] if b_transposed else B_shared_buf[wk, wi]
-
                     if replicate_b:
+                        row_off, col_off = get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed)
+                        src_indices = (
+                            tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
+                            if b_transposed
+                            else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                        )
                         T.ptx_ldmatrix(
-                            b_dtype,
                             T.bool(trans),
                             4,
-                            ".b16",
-                            B_local_buf.data,
-                            i * local_size_b,
-                            T.access_ptr(B_shared_buf_elem, "r"),
-                            get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
+                            T.access_ptr(B_buf[src_indices], "r", extent=8),
+                            T.access_ptr(B_local_buf[i * local_size_b], "w", extent=8),
                         )
 
+                        row_off, col_off = get_ldmatrix_offset_b("B", tx, lift(local_size_b) // 2, stride, b_dtype, b_transposed)
+                        src_indices = (
+                            tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
+                            if b_transposed
+                            else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                        )
                         T.ptx_ldmatrix(
-                            b_dtype,
                             T.bool(trans),
                             4,
-                            ".b16",
-                            B_local_buf.data,
-                            i * local_size_b + lift(local_size_b) // 2,
-                            T.access_ptr(B_shared_buf_elem, "r"),
-                            get_ldmatrix_offset_b("B", tx, lift(local_size_b) // 2, stride, b_dtype, b_transposed),
+                            T.access_ptr(B_buf[src_indices], "r", extent=8),
+                            T.access_ptr(B_local_buf[i * local_size_b + lift(local_size_b) // 2], "w", extent=8),
                         )
                     else:
+                        row_off, col_off = get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed)
+                        src_indices = (
+                            tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
+                            if b_transposed
+                            else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                        )
                         T.ptx_ldmatrix(
-                            b_dtype,
                             T.bool(trans),
                             4,
-                            ".b16",
-                            B_local_buf.data,
-                            i * local_size_b,
-                            T.access_ptr(B_shared_buf_elem, "r"),
-                            get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
+                            T.access_ptr(B_buf[src_indices], "r", extent=8),
+                            T.access_ptr(B_local_buf[i * local_size_b], "w", extent=8),
                         )
 
                 else:
@@ -502,10 +485,30 @@ class SparseTensorCoreIntrinEmitter:
                     for j in T.serial(local_size_b):
                         mi, mk = mma_load_layout(tx, j)
                         B_local_buf[i * local_size_b + j] = (
-                            B_shared_buf[wi + mi, wk + mk] if b_transposed else B_shared_buf[wk + mk, wi + mi]
+                            B_buf[tuple(B_other) + (B_base0 + wi + mi, B_base1 + wk + mk)]
+                            if b_transposed
+                            else B_buf[tuple(B_other) + (B_base0 + wk + mk, B_base1 + wi + mi)]
                         )
 
-        return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
+        return _warp_ldmatrix_b(B_local_buf, B_region, ki, thread_binding, rk)
+
+    @staticmethod
+    def _legalize_to_buffer_region(obj: Buffer | BufferLoad | BufferRegion) -> BufferRegion:
+        if isinstance(obj, BufferRegion):
+            return obj
+        if isinstance(obj, Buffer):
+            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
+            return BufferRegion(obj, ranges)
+        if isinstance(obj, BufferLoad):
+            region = get_buffer_region_from_load(obj)
+            if region is not None:
+                return region
+            mins = [idx for idx in obj.indices]
+            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
+            return BufferRegion(obj.buffer, ranges)
+        raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
     def mma_sp(self, A_local_buf: Buffer, E_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr = 0):
         warp_rows = self.warp_rows
