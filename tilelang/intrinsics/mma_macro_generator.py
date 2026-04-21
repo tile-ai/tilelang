@@ -500,13 +500,7 @@ class TensorCoreIntrinEmitter:
             trans = self.a_transposed
 
             for i in T.serial(warp_rows):
-                # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
-                A_shared_buf_elem = (
-                    A_buf[tuple(A_other) + (A_base0 + wk, A_base1 + wi)]
-                    if a_transposed
-                    else A_buf[tuple(A_other) + (A_base0 + wi, A_base1 + wk)]
-                )
 
                 if ldmatrix_available:
                     row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
@@ -624,12 +618,6 @@ class TensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = (
-                        B_buf[tuple(B_other) + (B_base0 + wi, B_base1 + wk)]
-                        if b_transposed
-                        else B_buf[tuple(B_other) + (B_base0 + wk, B_base1 + wi)]
-                    )
-
                     num = 4 if replicate_b else 2
                     row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
                     if b_transposed:
@@ -639,8 +627,8 @@ class TensorCoreIntrinEmitter:
                     T.ptx_ldmatrix(
                         T.bool(trans),
                         num,
-                        T.access_ptr(B_buf[src_indices], "r", extent=2*num),
-                        T.access_ptr(B_local_buf[i * local_size_b], "w", extent=2*num),
+                        T.access_ptr(B_buf[src_indices], "r", extent=2 * num),
+                        T.access_ptr(B_local_buf[i * local_size_b], "w", extent=2 * num),
                     )
 
                 else:

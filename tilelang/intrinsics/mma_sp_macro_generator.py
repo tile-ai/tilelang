@@ -285,13 +285,7 @@ class SparseTensorCoreIntrinEmitter:
             trans = self.a_transposed
 
             for i in T.serial(warp_rows):
-                # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, (rk * warp_k + ki * micro_size_k) // self.SPARSE_FACTOR
-                A_shared_buf_elem = (
-                    A_buf[tuple(A_other) + (A_base0 + wk, A_base1 + wi)]
-                    if a_transposed
-                    else A_buf[tuple(A_other) + (A_base0 + wi, A_base1 + wk)]
-                )
 
                 if ldmatrix_available:
                     row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
@@ -444,12 +438,6 @@ class SparseTensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = (
-                        B_buf[tuple(B_other) + (B_base0 + wi, B_base1 + wk)]
-                        if b_transposed
-                        else B_buf[tuple(B_other) + (B_base0 + wk, B_base1 + wi)]
-                    )
-
                     if replicate_b:
                         row_off, col_off = get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed)
                         if b_transposed:

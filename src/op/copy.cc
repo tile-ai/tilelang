@@ -1162,9 +1162,10 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     shared_coords = inv->Forward({local_index, thread_index});
   }
   shared_coords.pop_back(); // remove rep
-  PrimExpr shared_addr = Call(DataType::Handle(), tl::access_ptr(),
-      {BufferLoad(shared_tensor, shared_coords), PrimExpr(2 * num),
-       make_const(DataType::Int(32), is_ldmatrix ? 1 : 2)});
+  PrimExpr shared_addr =
+      Call(DataType::Handle(), tl::access_ptr(),
+           {BufferLoad(shared_tensor, shared_coords), PrimExpr(2 * num),
+            make_const(DataType::Int(32), is_ldmatrix ? 1 : 2)});
   args.push_back(shared_addr);
 
   if (is_ldmatrix) {
@@ -1174,9 +1175,10 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       // copy
       return LowerNormalCopy(T, analyzer);
     }
-    PrimExpr local_addr = Call(DataType::Handle(), tl::access_ptr(),
-        {BufferLoad(local_tensor, {local_iter * 2 * num}), PrimExpr(2 * num),
-         make_const(DataType::Int(32), 2)});
+    PrimExpr local_addr =
+        Call(DataType::Handle(), tl::access_ptr(),
+             {BufferLoad(local_tensor, {local_iter * 2 * num}),
+              PrimExpr(2 * num), make_const(DataType::Int(32), 2)});
     args.push_back(local_addr);
   } else {
     for (int i = 0; i < num; i++) {
