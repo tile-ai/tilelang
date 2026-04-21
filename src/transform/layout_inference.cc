@@ -257,8 +257,8 @@ public:
           const Layout &existing = layout_map[buffer];
           if (!layout.as<Fragment>() && !existing.as<Fragment>()) {
             if (auto merged = MergeSwizzleLayouts(existing, layout, buffer)) {
-              LOG(WARNING) << "Swizzle layout conflict for buffer " << buffer
-                           << ", merging to smaller granularity";
+              DLOG(WARNING) << "Swizzle layout conflict for buffer " << buffer
+                            << ", merging to smaller granularity";
               layout_map.Set(buffer, merged.value());
               propagate_alias(buffer, merged.value());
               continue;
