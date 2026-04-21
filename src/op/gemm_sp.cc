@@ -5,19 +5,21 @@
  */
 
 #include "gemm_sp.h"
+#include "utils.h"
 
+#include "builtin.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
-#include "builtin.h"
-#include "gemm.h"
-#include "utils.h"
+#include "tvm/ffi/string.h"
 
 namespace tvm {
 namespace tl {
+
+using namespace tir;
 
 std::pair<int, int>
 GemmSPWarpPolicyNode::computeWarpPartition(int M, int N, int block_size,
@@ -65,55 +67,59 @@ GemmSPWarpPolicyNode::computeWarpPartition(int M, int N, int block_size,
 }
 
 /**
- * @brief Construct a GemmSP operator node from TL call arguments and a buffer
- * map.
+ * @brief Construct a GemmSP operator from serialized TL arguments.
  *
- * Parses the expected call argument tuple and fills an internal GemmSPNode:
- * - Buffers: A (args[0]), E (args[1]), B (args[2]), C (args[3]) are looked up
- * in vmap.
- * - Booleans: trans_A (args[4]), trans_B (args[5]).
- * - Dimensions: M (args[6]), N (args[7]), K (args[8]) as integers.
- * - Warp policy: policy (args[9]) mapped to GemmWarpPolicy.
- * - clear_accum: boolean flag (args[10]).
- * - Optional kPack (args[11]): must be 1 or 2 (checked via ICHECK).
- * - Optional wg_wait (args[12]): integer workgroup wait parameter.
+ * Deserializes operator parameters from `args` and resolves buffer references,
+ * populating an internal GemmSPNode with buffers, transpose flags, M/N/K,
+ * warp policy, clear_accum, strides, offsets, and optional kPack/wg_wait.
  *
- * The populated GemmSPNode is stored in the instance's internal data_ pointer.
- *
- * @param args Positional TL call arguments in the above order.
- *
- * @note An ICHECK failure is raised if a provided kPack is not 1 or 2.
+ * @param args Positional serialized arguments produced by the TL frontend:
+ *   expected layout is:
+ *     [Aptr, Eptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
+ *      trans_E (Bool), M (Int), N (Int), K (Int), policy (Int),
+ *      clear_accum (Bool), stride_A (Int), stride_B (Int),
+ *      offset_A (Int), offset_B (Int),
+ *      (optional) kPack (Int), (optional) wg_wait (Int)]
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
+
   auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
   auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
   auto c_access = NormalizeToAccessRegion(args[3], kAccessReadWrite);
+
   node->aRegion_ = a_access.region;
   node->eRegion_ = e_access.region;
   node->bRegion_ = b_access.region;
   node->cRegion_ = c_access.region;
   node->SetAccessRegions({a_access, e_access, b_access, c_access});
-  node->a_ = node->aRegion_->buffer;
-  node->e_ = node->eRegion_->buffer;
-  node->b_ = node->bRegion_->buffer;
-  node->c_ = node->cRegion_->buffer;
-  node->transA_ = args[4].as<Bool>().value();
-  node->transB_ = args[5].as<Bool>().value();
-  node->m_ = args[6].as<IntImm>().value()->value;
-  node->n_ = args[7].as<IntImm>().value()->value;
-  node->k_ = args[8].as<IntImm>().value()->value;
-  node->policy_ = GemmSPWarpPolicy(args[9].as<IntImm>().value()->value);
-  node->clearAccum_ = args[10].as<Bool>().value();
-  if (args.size() > 11) {
-    node->kPack_ = args[11].as<IntImm>().value()->value;
-    if (node->kPack_ != 1 && node->kPack_ != 2) {
+
+  node->A = node->aRegion_->buffer;
+  node->E = node->eRegion_->buffer;
+  node->B = node->bRegion_->buffer;
+  node->C = node->cRegion_->buffer;
+
+  node->trans_A = args[4].as<Bool>().value();
+  node->trans_B = args[5].as<Bool>().value();
+  node->trans_E = args[6].as<Bool>().value();
+  node->M = args[7].as<IntImm>().value()->value;
+  node->N = args[8].as<IntImm>().value()->value;
+  node->K = args[9].as<IntImm>().value()->value;
+  node->policy = GemmWarpPolicy(args[10].as<IntImm>().value()->value);
+  node->clear_accum = args[11].as<PrimExpr>().value();
+  node->stride_A = args[12].as<IntImm>().value()->value;
+  node->stride_B = args[13].as<IntImm>().value()->value;
+  node->offset_A = args[14].as<IntImm>().value()->value;
+  node->offset_B = args[15].as<IntImm>().value()->value;
+  if (args.size() > 16) {
+    node->kPack = args[16].as<IntImm>().value()->value;
+    if (node->kPack != 1 && node->kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
-  if (args.size() > 12) {
-    node->wgWait_ = args[12].as<IntImm>().value()->value;
+  if (args.size() > 17) {
+    node->wg_wait = args[17].as<IntImm>().value()->value;
   }
   data_ = std::move(node);
 }
@@ -123,7 +129,7 @@ AccessRegions GemmSPNode::GetAccessRegions() const {
   result.reads.push_back(aRegion_);
   result.reads.push_back(eRegion_);
   result.reads.push_back(bRegion_);
-  if (!clearAccum_) {
+  if (!is_one(clear_accum)) {
     result.reads.push_back(cRegion_);
   }
   result.writes.push_back(cRegion_);
@@ -133,10 +139,6 @@ AccessRegions GemmSPNode::GetAccessRegions() const {
 /**
  * @brief Create a deep copy of this GemmSPNode wrapped as a TileOperator.
  *
- * Returns a new TileOperator that owns a copy of this node. The cloned node
- * duplicates all fields of the original; subsequent modifications to the
- * clone do not affect the original node.
- *
  * @return TileOperator A TileOperator holding a cloned GemmSPNode.
  */
 TileOperator GemmSPNode::Clone() const {
@@ -144,186 +146,78 @@ TileOperator GemmSPNode::Clone() const {
   return GemmSP(op);
 }
 
-/**
- * @brief Lower this GemmSP node to a TL (tensile-like) intrinsic call.
- *
- * Constructs and returns an Evaluate statement containing a call to the
- * TL gemm_sp intrinsic that encodes this GEMM's template parameters
- * (M, N, K, warp partition, transposition flags, clear_accum, and optional
- * Hopper/WGMMA and wg_wait modifiers) and the remapped buffer access pointers.
- *
- * The function validates that A, B, and E reside in shared (or shared.dyn)
- * memory (ICHECK failures otherwise), computes the warp partition based on
- * the launch configuration and target, and emits a single tl::tl_gemm_sp call
- * with a string template describing the configuration.
- *
- * @param T Lowering context containing thread bounds, target, and optional
- *          buffer remapping used to obtain the final buffer AccessPtr
- *          arguments for the TL call.
- * @return Stmt An Evaluate wrapping the constructed tl::tl_gemm_sp call.
- */
-Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  int warp_size = 32;
-
-  auto block_size = *as_const_int(T.thread_bounds->extent);
-  bool maybe_wgmma = TargetIsHopper(T.target) && (this->m_ >= 64) &&
-                     (block_size / warp_size % 4 == 0);
-  auto gemm_inst = maybe_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA;
-  auto [warp_m, warp_n] = policy_->computeWarpPartition(
-      m_, n_, block_size, T.target, gemm_inst, a_->dtype.bits());
-
-  std::stringstream ss;
-  std::string op_name = "tl::gemm_sp_ss";
-  ICHECK(IsSharedBuffer(a_) && IsSharedBuffer(b_))
-      << "Only support shared.dyn scope for A and B, but received "
-      << a_.scope() << " and " << b_.scope();
-  ICHECK(IsSharedBuffer(e_))
-      << "Only support shared.dyn scope for E as copy from smem to rmem are "
-         "delegated to cute implementation, found "
-      << e_.scope();
-  ss << op_name << "<" << m_ << ", " << n_ << ", " << k_ << ", ";
-  ss << warp_m << ", " << warp_n << ", ";
-  ss << transA_ << ", " << transB_;
-  ss << ", " << clearAccum_;
-  if (TargetIsHopper(T.target)) {
-    ss << ", " << (maybe_wgmma ? "true" : "false");
+GemmInst GemmSPNode::GetGemmInst(int block_size, Target target) const {
+  int warp_size = TargetGetWarpSize(target);
+  int num_warps = block_size / warp_size;
+  bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
+                     (num_warps % 4 == 0) && CheckWGMMA();
+  if (allow_wgmma) {
+    return GemmInst::kWGMMA;
+  } else if (TargetIsCDNA(target)) {
+    return GemmInst::kMFMA;
+  } else if (TargetIsRDNA(target)) {
+    return GemmInst::kWMMA;
+  } else if (TargetIsCuda(target)) {
+    return GemmInst::kMMA;
+  } else {
+    ICHECK(0) << "Unsupported target for gemm: " << target->str();
   }
-  if (wgWait_ != 0) {
-    ss << ", " << wgWait_;
-  }
-  ss << ">";
-  // Build access pointers from regions to preserve stage-specific offsets
-  // from pipeline multi-versioning (matching dense GemmNode::Lower pattern).
-  PrimExpr Aptr =
-      MakeAccessPtrFromRegion(aRegion_, /*r*/ 1, /*require_2d*/ true);
-  PrimExpr Bptr =
-      MakeAccessPtrFromRegion(bRegion_, /*r*/ 1, /*require_2d*/ true);
-  PrimExpr Cptr =
-      MakeAccessPtrFromRegion(cRegion_, /*rw*/ 3, /*require_2d*/ true);
-  PrimExpr Eptr =
-      MakeAccessPtrFromRegion(eRegion_, /*r*/ 1, /*require_2d*/ false);
-
-  auto new_call =
-      Call(DataType::Handle(), tl::tl_gemm_sp(),
-           Array<PrimExpr>{StringImm(ss.str()), Aptr, Bptr, Cptr, Eptr});
-  return Evaluate(new_call);
 }
 
-/**
- * @brief Infers and returns the memory/layout mapping for the GemmSP operator.
- *
- * Infers thread-local fragment layout for C and shared-memory layouts for A and
- * B based on the target (Hopper-only path), block/thread bounds in T,
- * transposition flags, and matrix dimensions stored in the node. The function
- * caches its work: if layout inference has already completed (completed_ ==
- * true) it returns an empty LayoutMap.
- *
- * Precondition:
- * - C.scope() must be "local.fragment".
- *
- * Behavior notes:
- * - Only the Hopper target is supported; non-Hopper targets trigger a fatal
- * check.
- * - For Hopper, the function computes a warp partition from block size and may
- *   enable WGMMA-specific fragment creation when conditions on M and block size
- *   are met.
- * - A and B must reside in "shared" or "shared.dyn"; otherwise the function
- *   aborts with a check failure.
- * - The method sets completed_ = true before returning to avoid re-entrance.
- *
- * @param T LayoutInferArgs containing thread bounds and the target (used to
- *          select Hopper-specific layouts).
- * @param level Currently unused inference detail level.
- * @return LayoutMap mapping A, B, and C to their inferred layouts (or empty if
- *         inference was already completed).
- */
+bool GemmSPNode::CheckWGMMA() const {
+  return false; // not supported yet
+}
+
+Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp.lower")) {
+    auto prim_func =
+        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmSP>(this), T.target,
+                                T.thread_bounds, T.thread_var));
+    ICHECK(prim_func->attrs.defined());
+    auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
+    ICHECK(global_symbol.has_value());
+    if (prim_func->body.as<BlockRealizeNode>()) {
+      BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
+      auto block = block_realize->block;
+      {
+        BlockNode *n = block.CopyOnWrite();
+        n->name_hint = global_symbol.value();
+        n->annotations.Set(tl::attr::kLexicalAllocScope,
+                           IntImm(DataType::Int(32), 1));
+      }
+      return BlockRealize(block_realize->iter_values, block_realize->predicate,
+                          block);
+    }
+    // wrap with block realize node
+    Map<String, ObjectRef> block_annotations;
+    block_annotations.Set(tl::attr::kLexicalAllocScope,
+                          IntImm(DataType::Int(32), 1));
+    return BlockRealize(
+        /*iter_values=*/Array<PrimExpr>(),
+        /*predicate=*/const_true(),
+        /*block=*/
+        Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+              /*name_hint=*/global_symbol.value(), prim_func->body,
+              /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
+              /*match_buffers=*/{}, /*annotations=*/block_annotations));
+  } else {
+    LOG(FATAL) << "No lower function found for gemm_sp";
+  }
+}
+
 LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
                                   InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;
-  ICHECK(IsFragmentBuffer(c_));
-  auto thread_range = T.thread_bounds;
-  auto block_size = *as_const_int(thread_range->extent);
-  if (TargetIsHopper(T.target)) {
-    const int warp_size = 32;
-    constexpr int wgmma_m = 16 * 4;
-    bool maybe_wgmma =
-        (this->m_ >= wgmma_m) && (block_size / warp_size % 4 == 0);
-    auto gemm_inst = maybe_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA;
-    auto [warp_m, warp_n] = policy_->computeWarpPartition(
-        m_, n_, block_size, T.target, gemm_inst, a_->dtype.bits());
-    auto fragment = maybe_wgmma
-                        ? makeGemmFragmentCHopper(m_, n_, m_ / warp_m,
-                                                  n_ / warp_n, c_->dtype.bits())
-                        : makeGemmFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
-                                            c_->dtype.bits());
-    results.Set(c_, fragment->BindThreadRange(thread_range));
-    if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      auto layout =
-          makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
-                                 a_->dtype.bits(), transA_ ? 1 : 2);
-      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
-    } else {
-      ICHECK(false) << "Not implemented";
-    }
 
-    if (IsSharedBuffer(b_)) {
-      int dim_B = b_->shape.size();
-      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      const int64_t continuity =
-          transB_ ? mat_continuous : mat_continuous / warp_n;
-      auto layout =
-          makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                 b_->dtype.bits(), transB_ ? 2 : 1);
-      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
-    } else {
-      ICHECK(false) << "WGMMA only support B in shared.";
-    }
-  } else if (TargetIsAmpere(T.target)) {
-    auto [warp_m, warp_n] = policy_->computeWarpPartition(
-        m_, n_, block_size, T.target, GemmInst::kMMA, a_->dtype.bits());
-    auto fragment = makeGemmSparseFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
-                                            c_->dtype.bits());
-    results.Set(c_, fragment->BindThreadRange(thread_range));
-
-    if (IsSharedBuffer(a_)) {
-      int dim_A = a_->shape.size();
-      const int64_t mat_stride = *as_const_int(a_->shape[dim_A - 2]);
-      const int64_t mat_continuous = *as_const_int(a_->shape[dim_A - 1]);
-      auto layout = makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                 a_->dtype.bits());
-      results.Set(a_, ExpandLayoutToMatchBuffer(layout, a_));
-    } else if (IsFragmentBuffer(a_)) {
-      // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
-      //                                   A->dtype.bits(), trans_A);
-      // results.Set(A, fragment->BindThreadRange(thread_range));
-      ICHECK(false) << "Not Implemented";
-    } else {
-      ICHECK(0);
-    }
-    if (IsSharedBuffer(b_)) {
-      int dim_B = b_->shape.size();
-      const int64_t mat_stride = *as_const_int(b_->shape[dim_B - 2]);
-      const int64_t mat_continuous = *as_const_int(b_->shape[dim_B - 1]);
-      auto layout = makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
-                                                 b_->dtype.bits());
-      results.Set(b_, ExpandLayoutToMatchBuffer(layout, b_));
-    } else if (IsFragmentBuffer(b_)) {
-      // auto fragment =
-      //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
-      // results.Set(B, fragment->BindThreadRange(thread_range));
-      ICHECK(false) << "Not Implemented";
-    } else {
-      ICHECK(0);
-    }
+  if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp.infer_layout")) {
+    results = Downcast<LayoutMap>(
+        (*f)(tvm::ffi::GetRef<GemmSP>(this), T.target, T.thread_bounds));
   } else {
-    ICHECK(0) << "Architecture is not supported: " << T.target->str();
+    LOG(FATAL) << "No infer layout function found for gemm_sp";
   }
+
   completed_ = true;
   return results;
 }

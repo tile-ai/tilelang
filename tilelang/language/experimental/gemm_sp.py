@@ -24,6 +24,7 @@ def gemm_sp(
     C: BufferLikeType | tir.Var,
     transpose_A: bool = False,
     transpose_B: bool = False,
+    transpose_E: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     k_pack: int = 1,
@@ -35,95 +36,13 @@ def gemm_sp(
     The operation supports various warp policies and accumulation modes.
 
     Args:
-        A_sparse (Union[BufferLikeType, tir.Var]): First input matrix dense values
-        E (Union[BufferLikeType, tir.Var]): First input matrix sparse metadata
-        B (Union[BufferLikeType, tir.Var]): Second input matrix
-        C (Union[BufferLikeType, tir.Var]): Output matrix for results
-        transpose_A (bool, optional): Whether to transpose matrix A. Defaults to False.
-        transpose_B (bool, optional): Whether to transpose matrix B. Defaults to False.
-        policy (GemmWarpPolicy, optional): Warp execution policy. Defaults to GemmWarpPolicy.Square.
-        clear_accum (bool, optional): Whether to clear accumulator before computation. Defaults to False.
-        k_pack (int, optional): Number of k dimensions packed into a single warp. Defaults to 1.
-        wg_wait (int, optional): Warp group wait count. Defaults to 0.
-
-    Returns:
-        tir.Call: A handle to the GEMM operation
-
-    Raises:
-        AssertionError: If the K dimensions of matrices A and B don't match
-    """
-
-    def legalize_arguments(arg: BufferLikeType | tir.Var):
-        """Convert let-bound variables to their corresponding buffers.
-
-        Args:
-            arg (Union[BufferLikeType, tir.Var]): Input argument to legalize
-
-        Returns:
-            Union[BufferLikeType, tir.Var]: The legalized argument
-        """
-        if isinstance(arg, tir.Var) and T.has_let_value(arg):
-            return T.get_let_value(arg).buffer
-        return arg
-
-    A_sparse = legalize_arguments(A_sparse)
-    B = legalize_arguments(B)
-    C = legalize_arguments(C)
-    M = C.shape[0]
-    N = C.shape[1]
-    K_A = A_sparse.shape[0] if transpose_A else A_sparse.shape[1]
-    K_B = B.shape[1] if transpose_B else B.shape[0]
-    assert K_A * 2 == K_B, f"T.gemm_sp K shape check failed: K_A = {K_A}, K_B = {K_B}"
-    # Build tl.region descriptors for operands
-    A_arg = to_buffer_region(A_sparse, access_type="r")
-    E_arg = to_buffer_region(E, access_type="r")
-    B_arg = to_buffer_region(B, access_type="r")
-    C_arg = to_buffer_region(C, access_type="rw")
-    return tir.call_intrin(
-        "handle",
-        tir.op.Op.get("tl.tileop.gemm_sp"),
-        A_arg,
-        E_arg,
-        B_arg,
-        C_arg,
-        transpose_A,
-        transpose_B,
-        M,
-        N,
-        K_B,
-        policy,
-        clear_accum,
-        k_pack,
-        wg_wait,
-    )
-
-
-# experimental currently, for fast compilation
-def gemm_sp_v2(
-    A_sparse: BufferLikeType | tir.Var,
-    E: BufferLikeType | tir.Var,
-    B: BufferLikeType | tir.Var,
-    C: BufferLikeType | tir.Var,
-    transpose_A: bool = False,
-    transpose_B: bool = False,
-    transpose_E: bool = False,
-    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
-    clear_accum: bool = False,
-    k_pack: int = 1,
-    wg_wait: int = 0,
-):
-    """Perform a General Matrix Multiplication (GEMM) operation.
-
-    This function computes C = A @ B where A and B can optionally be transposed.
-    The operation supports various warp policies and accumulation modes.
-
-    Args:
         A_sparse (Union[BufferLikeType, tir.Var]): First input matrix, contains only non-zero elements
         E (Union[BufferLikeType, tir.Var]): The metadata of A_sparse, noted as E
         B (Union[BufferLikeType, tir.Var]): Second input matrix
         C (Union[BufferLikeType, tir.Var]): Output matrix for results
         transpose_A (bool, optional): Whether to transpose matrix A. Defaults to False.
         transpose_B (bool, optional): Whether to transpose matrix B. Defaults to False.
+        transpose_E (bool, optional): Whether to transpose metadata E. Defaults to False.
         policy (GemmWarpPolicy, optional): Warp execution policy. Defaults to GemmWarpPolicy.Square.
         clear_accum (bool, optional): Whether to clear accumulator before computation. Defaults to False.
         k_pack (int, optional): Number of k dimensions packed into a single warp. Defaults to 1.
@@ -137,14 +56,7 @@ def gemm_sp_v2(
     """
 
     def legalize_arguments(arg: BufferLikeType | tir.Var) -> BufferLikeType:
-        """Convert let-bound variables to their corresponding buffers.
-
-        Args:
-            arg (Union[BufferLikeType, tir.Var]): Input argument to legalize
-
-        Returns:
-            Union[BufferLikeType, tir.Var]: The legalized argument
-        """
+        """Convert let-bound variables to their corresponding buffers."""
         if isinstance(arg, tir.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
         return arg
@@ -202,7 +114,7 @@ def gemm_sp_v2(
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
     return tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.gemm_sp_py"),
+        tir.op.Op.get("tl.tileop.gemm_sp"),
         A_arg,
         E_arg,
         B_arg,

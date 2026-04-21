@@ -586,6 +586,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_mma_sm70_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma_sm70.h>\n";
   }
+  if (need_mma_sp_instruction_h_) {
+    decl_stream << "#include <tl_templates/cuda/instruction/mma_sp.h>\n";
+  }
   if (need_tcgen05_common_h_) {
     decl_stream << "#include <tl_templates/cuda/tcgen_05.h>\n";
   }
@@ -2586,16 +2589,84 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string b_offset = this->PrintExpr(op->args[9]);
     std::string c_ref = this->PrintExpr(op->args[10]);
     std::string c_offset = this->PrintExpr(op->args[11]);
-    std::string metadata = this->PrintExpr(op->args[12]);
-    std::string metadata_offset = this->PrintExpr(op->args[13]);
-    std::string sparse_selector = this->PrintExpr(op->args[14]);
-    bool saturate = Downcast<Bool>(op->args[15])->value;
+    std::string e_ref = this->PrintExpr(op->args[12]);
+    std::string e_offset = this->PrintExpr(op->args[13]);
+    int64_t sparse_selector = Downcast<IntImm>(op->args[14])->value;
+
+    auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
+    auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
+    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+
+    // Derive MetaType from the buffer element dtype of the metadata arg.
+    auto meta_tvm_dtype = op->args[12]->dtype;
+    std::string MetaType;
+    if (meta_tvm_dtype == DataType::UInt(8)) {
+      MetaType = "uint8_t";
+    } else if (meta_tvm_dtype == DataType::UInt(16)) {
+      MetaType = "uint16_t";
+    } else if (meta_tvm_dtype == DataType::UInt(64)) {
+      MetaType = "uint64_t";
+    } else {
+      MetaType = "uint32_t";
+    }
+
+    need_mma_sp_instruction_h_ = true;
     this->PrintIndent();
-    std::string asm_code = PrintMMAAssembly(
-        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_offset,
-        b_ref, b_offset, c_ref, c_offset, metadata, metadata_offset,
-        sparse_selector, "", true, saturate);
-    this->stream << asm_code;
+
+    std::string mma_call =
+        "tl::mma_sp_sync<(AType), (BType), (CType), (M), (N), (K), (TransA), "
+        "(TransB), (SparseSel), (MetaType)>("
+        "reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
+        "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "
+        "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)), "
+        "reinterpret_cast<const (MetaType)*>((E_ptr) + (E_offset)));\n";
+    tl::codegen::Replacer replacer;
+
+    // TF32 workaround: float32 A/B in TF32 context maps to kTensorFloat32.
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(dtype_a_enum);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(dtype_b_enum);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+    std::string ARegType = tl::codegen::GetMMARegisterType(dtype_a_enum);
+    if (ARegType == "float") {
+      ARegType = "uint32_t";
+    }
+    std::string BRegType = tl::codegen::GetMMARegisterType(dtype_b_enum);
+    if (BRegType == "float") {
+      BRegType = "uint32_t";
+    }
+
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(TransA)", A_layout == "row" ? "false" : "true");
+    replacer.register_rule("(TransB)", B_layout == "row" ? "false" : "true");
+    replacer.register_rule("(SparseSel)", sparse_selector == 0
+                                              ? "SM80::MMA::SparseSel::Zero"
+                                              : "SM80::MMA::SparseSel::One");
+    replacer.register_rule("(MetaType)", MetaType);
+    replacer.register_rule("(ARegType)", ARegType);
+    replacer.register_rule("(BRegType)", BRegType);
+    replacer.register_rule("(CRegType)",
+                           tl::codegen::GetMMARegisterType(dtype_c_enum));
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", a_offset);
+    replacer.register_rule("(B_ptr)", b_ref);
+    replacer.register_rule("(B_offset)", b_offset);
+    replacer.register_rule("(C_ptr)", c_ref);
+    replacer.register_rule("(C_offset)", c_offset);
+    replacer.register_rule("(E_ptr)", e_ref);
+    replacer.register_rule("(E_offset)", e_offset);
+    this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
     // arg 0: dtype
     // arg 1: shape
