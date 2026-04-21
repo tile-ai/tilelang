@@ -504,10 +504,11 @@ class TensorCoreIntrinEmitter:
 
                 if ldmatrix_available:
                     row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
-                    if a_transposed:
-                        src_indices = tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
-                    else:
-                        src_indices = tuple(A_other) + (A_base0 + wi + row_off, A_base1 + wk + col_off)
+                    src_indices = (
+                        tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
+                        if a_transposed
+                        else tuple(A_other) + (A_base0 + wi + row_off, A_base1 + wk + col_off)
+                    )
                     T.ptx_ldmatrix(
                         T.bool(trans),
                         4,
@@ -620,10 +621,11 @@ class TensorCoreIntrinEmitter:
                 if ldmatrix_available:
                     num = 4 if replicate_b else 2
                     row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
-                    if b_transposed:
-                        src_indices = tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
-                    else:
-                        src_indices = tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                    src_indices = (
+                        tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
+                        if b_transposed
+                        else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                    )
                     T.ptx_ldmatrix(
                         T.bool(trans),
                         num,
