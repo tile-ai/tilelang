@@ -39,6 +39,8 @@ class GemmMMA(GemmBase):
         mma_emitter = self._make_mma_emitter(target, thread_nums)
         if self.is_gemm_ss():
             return {
+                self.A: make_swizzled_layout(self.A),
+                self.B: make_swizzled_layout(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_sr():
