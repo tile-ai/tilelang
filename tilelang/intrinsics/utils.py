@@ -24,7 +24,7 @@ def get_ldmatrix_offset(
     row_idx,
     col_idx,
     stride,
-    dtype: Literal["float16", "int8"] = "float16",
+    dtype: Literal["float16", "int8", "int4"] = "float16",
     transposed: bool = False,
 ):
     assert matrix in ["A", "B"], "matrix should be either A or B"
@@ -49,19 +49,32 @@ def get_ldmatrix_offset(
         else:
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
             return new_row_idx * stride + new_col_idx
-    elif dtype_bits == 8:
+    elif dtype_bits <= 8:
         if matrix == "B" and transposed:
             transform_func = ldmatrix_32x16_to_shared_16x32_layout_b
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
-            return new_row_idx * stride + new_col_idx
+            pack_factor = 8 // dtype_bits
+            return new_row_idx * stride + new_col_idx * pack_factor
         elif matrix == "A" and not transposed:
             transform_func = ldmatrix_32x16_to_shared_16x32_layout_a
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
-            return new_row_idx * stride + new_col_idx
+            pack_factor = 8 // dtype_bits
+            return new_row_idx * stride + new_col_idx * pack_factor
         else:
             raise ValueError("ldmatrix only supports B transposed and A non-transposed for int8")
     else:
         raise ValueError(f"Unsupported dtype {dtype}")
+
+
+def get_ldmatrix_num(local_size: int, dtype: Literal["float16", "int8", "int4"] = "float16") -> int:
+    dtype_bits = DataType(dtype).bits
+    total_bits = local_size * dtype_bits
+    if total_bits % 32 != 0:
+        raise ValueError(f"ldmatrix local fragment must be 32-bit aligned, got {local_size} * {dtype_bits} bits")
+    num = total_bits // 32
+    if num not in (1, 2, 4):
+        raise ValueError(f"Unsupported ldmatrix register count {num} for dtype {dtype} and local_size {local_size}")
+    return num
 
 
 def shared_16x16_to_mma_32x8_layout(i, j):
