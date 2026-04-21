@@ -1312,42 +1312,41 @@ def mma_fill(dtype, local_size, local_ptr, offset):
     return _tvm_op.mma_fill(dtype, local_size, local_ptr, offset)
 
 
-def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset):
-    """TVM intrinsic for ptx load matrix from shared memory
+def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
+    """TileLang intrinsic for ptx load matrix from shared memory
+
+    Uses `tl.ptx_ldmatrix` which expects access pointers created via
+    `T.access_ptr` (i.e. `tl.access_ptr` wrapping a `BufferLoad`).
+
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-ldmatrix
 
     Parameters
     ----------
-    dtype : str
-       The data type of the result.
-
     trans : bool
         The matrix is loaded in column-major format.
 
     num : IntImm
-        The number of matrices.
+        The number of matrices (2 or 4).
 
-    type : Literal[".b16"]
-        The data type of the matrices.
+    src_access_ptr : PrimExpr
+        A `tl.access_ptr` pointing to the source (shared memory) buffer.
 
-    local_ptr : Var
-        The local pointer variable.
-
-    local_offset : Expr
-        The offset of local pointer.
-
-    smem_ptr : Var
-        The shared memory pointer variable.
-
-    smem_offset : Expr
-        The offset of shared memort pointer.
+    dst_access_ptr : PrimExpr
+        A `tl.access_ptr` pointing to the destination (local/register) buffer.
 
     Returns
     -------
     call : PrimExpr
-        The call expression.
+        The call expression (handle-typed).
     """
-    return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset)
+    return tvm.tir.call_intrin(
+        "handle",
+        tvm.tir.op.Op.get("tl.ptx_ldmatrix"),
+        trans,
+        num,
+        src_access_ptr,
+        dst_access_ptr,
+    )
 
 
 def ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate=None):

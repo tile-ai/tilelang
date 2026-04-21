@@ -11,7 +11,6 @@ from tvm.runtime import convert
 from .utils import (
     mma_store_index_map,
     get_ldmatrix_offset,
-    get_ldmatrix_num,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
 from tilelang.intrinsics.mma_layout import (
@@ -332,24 +331,20 @@ class TensorCoreIntrinEmitter:
             trans = self.a_transposed
 
             for i in T.serial(warp_rows):
-                # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
-                A_shared_buf_elem = (
-                    A_buf[tuple(A_other) + (A_base0 + wk, A_base1 + wi)]
-                    if a_transposed
-                    else A_buf[tuple(A_other) + (A_base0 + wi, A_base1 + wk)]
-                )
 
                 if ldmatrix_available:
+                    row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
+                    src_indices = (
+                        tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
+                        if a_transposed
+                        else tuple(A_other) + (A_base0 + wi + row_off, A_base1 + wk + col_off)
+                    )
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(trans),
                         4,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.access_ptr(A_shared_buf_elem, "r"),
-                        get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
+                        T.access_ptr(A_buf[src_indices], "r", extent=8),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
                 else:
                     for j in T.serial(local_size_a):
@@ -455,21 +450,18 @@ class TensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = (
-                        B_buf[tuple(B_other) + (B_base0 + wi, B_base1 + wk)]
+                    num = 4 if replicate_b else 2
+                    row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
+                    src_indices = (
+                        tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
                         if b_transposed
-                        else B_buf[tuple(B_other) + (B_base0 + wk, B_base1 + wi)]
+                        else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
                     )
-
                     T.ptx_ldmatrix(
-                        b_dtype,
                         T.bool(trans),
-                        4 if replicate_b else 2,
-                        ".b16",
-                        B_local_buf.data,
-                        i * local_size_b,
-                        T.access_ptr(B_shared_buf_elem, "r"),
-                        get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
+                        num,
+                        T.access_ptr(B_buf[src_indices], "r", extent=2 * num),
+                        T.access_ptr(B_local_buf[i * local_size_b], "w", extent=2 * num),
                     )
 
                 else:
@@ -919,7 +911,6 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         a_dtype = self.a_dtype
         a_transposed = self.a_transposed
         transform_kind_a = self.transform_kind_a
-        ldmatrix_num_a = get_ldmatrix_num(local_size_a, a_dtype)
 
         thread_binding = self.get_thread_binding()
 
@@ -935,21 +926,19 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
             tx, _, warp_m = self.extract_thread_binding(thread_binding)
             if transform_kind_a == TransformKind.NonTransform:
                 for i in T.serial(warp_rows):
+                    row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(False),
-                        ldmatrix_num_a,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
+                        4,
                         T.access_ptr(
                             A_shared_buf[
-                                warp_m * warp_row_tiles + i * micro_size_x,
-                                rk * chunk + ki * micro_size_k,
+                                warp_m * warp_row_tiles + i * micro_size_x + row_off,
+                                rk * chunk + ki * micro_size_k + col_off,
                             ],
                             "r",
+                            extent=8,
                         ),
-                        get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
             elif transform_kind_a == TransformKind.InterWarpTransform:
                 for i in T.serial(warp_rows):
@@ -964,18 +953,12 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         (ri) % micro_size_x,
                         (rj) % micro_size_k,
                     )
-                    args = (ni, nj, nii, njj) if transform_kind_a > 0 else (ri, rj)
-                    A_shared_elem = A_shared_buf[args]
-
+                    row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(False),
-                        ldmatrix_num_a,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.access_ptr(A_shared_elem, "r"),
-                        get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
+                        4,
+                        T.access_ptr(A_shared_buf[ni, nj, nii + row_off, njj + col_off], "r", extent=8),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
             elif transform_kind_a == TransformKind.IntraWarpTransform:
                 for i in T.serial(warp_rows):
@@ -990,17 +973,13 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         (ri) % micro_size_x,
                         (rj) % micro_size_k,
                     )
-                    A_shared_elem = A_shared_buf[ni, nj, nii, njj]
-
+                    row_off = (tx * local_size_a) // stride
+                    col_off = (tx * local_size_a) % stride
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(False),
-                        ldmatrix_num_a,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.access_ptr(A_shared_elem, "r"),
-                        tx * local_size_a,
+                        4,
+                        T.access_ptr(A_shared_buf[ni, nj, nii + row_off, njj + col_off], "r", extent=8),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
             elif transform_kind_a == TransformKind.LDMatrixTransform:
                 for j in T.serial(warp_rows):
@@ -1028,7 +1007,6 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         transform_kind_b = self.transform_kind_b
         b_transposed = self.b_transposed
         num_elems_per_byte = self.num_elems_per_byte
-        ldmatrix_num_b = get_ldmatrix_num(local_size_b, b_dtype)
 
         thread_binding = self.get_thread_binding()
 
@@ -1050,17 +1028,12 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         warp_n * warp_col_tiles + j * micro_size_y,
                         rk * chunk + ki * micro_size_k,
                     )
-                    B_shared_elem = B_shared_buf[ri, rj]
-
+                    row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
                     T.ptx_ldmatrix(
-                        b_dtype,
                         T.bool(False),
-                        ldmatrix_num_b,
-                        ".b16",
-                        B_local_buf.data,
-                        j * local_size_b,
-                        T.access_ptr(B_shared_elem, "r"),
-                        get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
+                        4,
+                        T.access_ptr(B_shared_buf[ri + row_off, rj + col_off], "r", extent=8),
+                        T.access_ptr(B_local_buf[j * local_size_b], "w", extent=8),
                     )
             elif transform_kind_b == TransformKind.InterWarpTransform:
                 for j in T.serial(warp_cols):
@@ -1075,17 +1048,12 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         (ri) % micro_size_y,
                         (rj) % micro_size_k,
                     )
-                    B_shared_elem = B_shared_buf[ni, nj, nii, njj]
-
+                    row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
                     T.ptx_ldmatrix(
-                        b_dtype,
                         T.bool(False),  # TODO(lei): should be optimized
-                        ldmatrix_num_b,
-                        ".b16",
-                        B_local_buf.data,
-                        j * local_size_b,
-                        T.access_ptr(B_shared_elem, "r"),
-                        get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
+                        4,
+                        T.access_ptr(B_shared_buf[ni, nj, nii + row_off, njj + col_off], "r", extent=8),
+                        T.access_ptr(B_local_buf[j * local_size_b], "w", extent=8),
                     )
             elif transform_kind_b == TransformKind.IntraWarpTransform:
                 for j in T.serial(warp_cols):
@@ -1100,17 +1068,13 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                         (ri) % micro_size_y,
                         (rj) % micro_size_k,
                     )
-                    B_shared_elem = B_shared_buf[ni, nj, nii, njj]
-
+                    row_off = (tx * local_size_b) // stride
+                    col_off = (tx * local_size_b) % stride
                     T.ptx_ldmatrix(
-                        b_dtype,
                         T.bool(False),  # TODO(lei): should be optimized
-                        ldmatrix_num_b,
-                        ".b16",
-                        B_local_buf.data,
-                        j * local_size_b,
-                        T.access_ptr(B_shared_elem, "r"),
-                        tx * local_size_b,
+                        4,
+                        T.access_ptr(B_shared_buf[ni, nj, nii + row_off, njj + col_off], "r", extent=8),
+                        T.access_ptr(B_local_buf[j * local_size_b], "w", extent=8),
                     )
             elif transform_kind_b == TransformKind.LDMatrixTransform:
                 local_size_dequantize = local_size_b // num_elems_per_byte
