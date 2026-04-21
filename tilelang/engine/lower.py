@@ -112,6 +112,8 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
 
     ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+    if ptxas_usage_level is not None:
+        ptxas_usage_level = int(ptxas_usage_level)
     verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
 
     options = [

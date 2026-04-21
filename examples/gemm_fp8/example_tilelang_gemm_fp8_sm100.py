@@ -1,7 +1,6 @@
 import torch
 import tilelang
 import tilelang.language as T
-from tilelang.utils.tensor import map_torch_type
 
 
 def matmul(
@@ -74,8 +73,8 @@ num_stages = 2
 threads = 256
 for tvm_fp8_dtype in [T.float8_e4m3fn, T.float8_e5m2]:
     for tvm_acc_dtype in [T.float16, T.float32]:  # , torch.float16]:
-        torch_fp8_dtype = map_torch_type(tvm_fp8_dtype)
-        torch_acc_dtype = map_torch_type(tvm_acc_dtype)
+        torch_fp8_dtype = tvm_fp8_dtype.as_torch()
+        torch_acc_dtype = tvm_acc_dtype.as_torch()
         print(f"running {tvm_fp8_dtype} -> {tvm_acc_dtype}")
         in_dtype, out_dtype, accum_dtype = tvm_fp8_dtype, tvm_acc_dtype, tvm_acc_dtype
 

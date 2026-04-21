@@ -62,6 +62,8 @@ class LibraryGenerator:
             enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+            if ptxas_usage_level is not None:
+                ptxas_usage_level = int(ptxas_usage_level)
             verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
 
             command = [

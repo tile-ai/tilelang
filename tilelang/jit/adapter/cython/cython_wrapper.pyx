@@ -6,7 +6,6 @@ import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tir
-from tilelang.utils.tensor import map_torch_type
 
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference

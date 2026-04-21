@@ -403,7 +403,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
     for (const auto &iter_split : iter_sum->args) {
       auto mark = iter_split->source->source.as<Var>();
-      ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
+      if (!mark)
+        continue;
       if (mark.value().same_as(src_vars[this->dim]->var)) {
         // `scale` is the stride of participating threads in the thread index
         // space.  When the thread-to-data mapping for the reduce dimension is
