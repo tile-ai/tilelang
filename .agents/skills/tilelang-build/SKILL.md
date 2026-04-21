@@ -1,5 +1,5 @@
 ---
-name: build
+name: tilelang-build
 description: Repository-specific build, rebuild, install, and test instructions for tilelang. Use when working in the tilelang repository and the correct commands are needed for building from source, reinstalling after changes, or running project tests.
 ---
 
