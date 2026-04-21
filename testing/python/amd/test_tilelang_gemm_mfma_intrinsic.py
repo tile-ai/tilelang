@@ -221,11 +221,11 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
         (128, 256, 256, T.int8, T.int32, T.int32, False, True, 2),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 1),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 2),
-        (128, 128, 128, T.dtype(determine_fp8_type()), T.float16, T.float32, False, True, 1),
-        (128, 256, 256, T.dtype(determine_fp8_type()), T.float32, T.float32, False, True, 1),
-        (128, 256, 256, T.dtype(determine_fp8_type()), T.float32, T.float32, False, True, 2),
-        (128, 256, 256, T.dtype(determine_fp8_type()), T.float32, T.float32, False, False, 1),
-        (128, 256, 256, T.dtype(determine_fp8_type()), T.float32, T.float32, False, False, 2),
+        (128, 128, 128, determine_fp8_type(), T.float16, T.float32, False, True, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, True, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, True, 2),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, False, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, False, 2),
     ],
 )
 @tilelang.testing.requires_rocm
