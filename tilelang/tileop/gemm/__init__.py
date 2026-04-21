@@ -140,7 +140,7 @@ class Gemm(Node, Scriptable):
         thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
-        return impl_class(self).lower(layout_map, target, thread_bounds, thread_var)
+        return impl_class(self).lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
         """Select the appropriate GEMM instruction based on target and thread configuration.
