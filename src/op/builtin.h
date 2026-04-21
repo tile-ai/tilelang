@@ -443,8 +443,8 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 /*!
  * \brief TileLang intrinsic for PTX async copy from global to shared memory
  *
- * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes)
- * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate)
  *
  */
 TVM_DLL const Op &ptx_cp_async();

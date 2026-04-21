@@ -8,8 +8,8 @@ from tilelang.intrinsics import (
 )
 from tilelang.transform import simplify_prim_func
 from tilelang.intrinsics.mma_macro_generator import (
-    INT4TensorCoreIntrinEmitter,
-    INT4TensorCoreIntrinEmitterWithLadderTransform,
+    TensorCoreIntrinEmitter,
+    TensorCoreIntrinEmitterWithLadderTransform,
 )
 
 tilelang.testing.set_random_seed(42)
@@ -75,9 +75,9 @@ def tl_matmul(
     warp_cols = warp_col_tiles // micro_size_y
 
     # MMA Wrapper to Auto Generate Code for MMA
-    mma_emitter = INT4TensorCoreIntrinEmitter(
-        a_dtype=in_dtype,
-        b_dtype=in_dtype,
+    mma_emitter = TensorCoreIntrinEmitter(
+        a_dtype=T.int4,
+        b_dtype=T.int4,
         accum_dtype=accum_dtype,
         a_transposed=False,
         b_transposed=True,
@@ -266,9 +266,9 @@ def tl_matmul_weight_only_transform(
     warp_cols = warp_col_tiles // micro_size_y
 
     # MMA Wrapper to Auto Generate Code for MMA
-    mma_emitter = INT4TensorCoreIntrinEmitterWithLadderTransform(
-        a_dtype=in_dtype,
-        b_dtype=in_dtype,
+    mma_emitter = TensorCoreIntrinEmitterWithLadderTransform(
+        a_dtype=T.int4,
+        b_dtype=T.int4,
         accum_dtype=accum_dtype,
         a_transposed=False,
         b_transposed=True,
