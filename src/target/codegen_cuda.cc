@@ -44,9 +44,9 @@ PrimExpr GetStorageBitsExpr(DataType dtype, DataType out_dtype) {
 
 PrimExpr BytesToLogicalElementOffset(PrimExpr byte_offset, DataType dtype) {
   DataType out_dtype = byte_offset.dtype();
-  return arith::Analyzer().Simplify(indexdiv(
-      byte_offset * make_const(out_dtype, 8),
-      GetStorageBitsExpr(dtype, out_dtype)));
+  return arith::Analyzer().Simplify(
+      indexdiv(byte_offset * make_const(out_dtype, 8),
+               GetStorageBitsExpr(dtype, out_dtype)));
 }
 
 std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
@@ -352,16 +352,15 @@ CodeGenTileLangCUDA::TryMatchDynSharedAliasAccess(const BufferNode *buffer,
     if (info.dtype != buffer->dtype) {
       return std::optional<DynSharedAliasAccess>();
     }
-    PrimExpr base_offset =
-        analyzer.Simplify(BytesToLogicalElementOffset(info.byte_offset,
-                                                      buffer->dtype));
+    PrimExpr base_offset = analyzer.Simplify(
+        BytesToLogicalElementOffset(info.byte_offset, buffer->dtype));
     PrimExpr shifted = analyzer.Simplify(index - base_offset);
     PrimExpr zero = make_const(shifted.dtype(), 0);
     if (require_range_check && !is_zero(info.total_byte_size) &&
         (!analyzer.CanProve(shifted >= zero) ||
-         !analyzer.CanProve(
-             shifted < analyzer.Simplify(BytesToLogicalElementOffset(
-                           info.total_byte_size, buffer->dtype))))) {
+         !analyzer.CanProve(shifted <
+                            analyzer.Simplify(BytesToLogicalElementOffset(
+                                info.total_byte_size, buffer->dtype))))) {
       return std::optional<DynSharedAliasAccess>();
     }
     DynSharedAliasAccess access;
@@ -4300,7 +4299,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     // reading that byte only returns the low nibble — the odd-indexed element
     // is lost).
     if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
-      auto dyn_shared_access = TryMatchDynSharedAliasAccess(op->buffer.get(), index);
+      auto dyn_shared_access =
+          TryMatchDynSharedAliasAccess(op->buffer.get(), index);
       if (dyn_shared_access.has_value()) {
         index = dyn_shared_access->element_index;
       }
@@ -4309,8 +4309,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
           dyn_shared_access.has_value()
               ? GetDynSharedAliasBufferExpr(*dyn_shared_access)
               : GetVarID(buffer_var.get());
-      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << buffer_expr << ", "
-         << idx_str << ")";
+      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << buffer_expr << ", " << idx_str
+         << ")";
     } else {
       std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
       HandleVolatileLoads(ref, op, os);

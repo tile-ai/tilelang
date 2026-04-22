@@ -83,8 +83,7 @@ static PrimExpr GetStorageBitsExpr(DataType dtype, DataType out_dtype) {
   return make_const(out_dtype, GetStorageBits(dtype));
 }
 
-template <int Divisor>
-static PrimExpr CeilDivByConstant(PrimExpr value) {
+template <int Divisor> static PrimExpr CeilDivByConstant(PrimExpr value) {
   static_assert(Divisor > 0, "Divisor must be positive");
   DataType dtype = value.dtype();
   return indexdiv(value + make_const(dtype, Divisor - 1),
@@ -650,9 +649,8 @@ private:
           auto alloc_it = shmem_allocs_.find(buffer_var_node);
           if (alloc_it != shmem_allocs_.end()) {
             const AllocateNode *alloc = alloc_it->second;
-            PrimExpr buffer_size_bytes =
-                GetStorageSizeInBytes(byte_offset.dtype(), alloc->dtype,
-                                      alloc->extents);
+            PrimExpr buffer_size_bytes = GetStorageSizeInBytes(
+                byte_offset.dtype(), alloc->dtype, alloc->extents);
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
                        << " (Type: " << alloc->dtype << ")"
                        << ", Start Offset: " << byte_offset
@@ -1381,8 +1379,8 @@ private:
         size_dtype = DataType::Int(32);
       }
 
-      PrimExpr size_expr = GetStorageSizeInBytes(size_dtype, alloc->dtype,
-                                                 alloc->extents);
+      PrimExpr size_expr =
+          GetStorageSizeInBytes(size_dtype, alloc->dtype, alloc->extents);
       info.size_dtype = size_dtype;
       info.size_expr = size_expr;
 
