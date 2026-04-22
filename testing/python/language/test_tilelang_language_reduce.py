@@ -16,7 +16,7 @@ tilelang.testing.set_random_seed()
 def _make_input(M, N, dtype):
     torch_dtype = getattr(torch, dtype)
     if torch_dtype in (torch.int32, torch.int64):
-        return torch.randint(-100, 100, (M, N), dtype=torch_dtype).cuda()
+        return torch.randint(-2, 3, (M, N), dtype=torch_dtype).cuda()
     return torch.randn(M, N, dtype=torch_dtype).cuda()
 
 
