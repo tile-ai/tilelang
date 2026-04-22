@@ -2394,10 +2394,10 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     }
     // Only apply MVB + WS if the function is a tiled WS candidate.
     if (!TiledWSCandidate::Check(f->body, target.value())) {
-      LOG(WARNING) << "[WS] skipped: no TMA copies in pipeline loop";
+      DLOG(WARNING) << "[WS] skipped: no TMA copies in pipeline loop";
       return f;
     }
-    LOG(WARNING) << "[WS] candidate found, applying MVB + WS";
+    DLOG(WARNING) << "[WS] candidate found, applying MVB + WS";
     // Expand shared buffers for pipelining before the WS split.
     // Keep the original so we can fall back if the WS rewriter doesn't fire
     // (e.g. non-tile-op consumers in the loop body).
@@ -2405,7 +2405,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     f = ApplyMultiVersionBufferRewriter(std::move(f));
     PrimFunc result = ProducerConsumerWSRewriter::Substitute(std::move(f));
     if (!result->HasNonzeroAttr(kTiledWSApplied)) {
-      LOG(WARNING) << "[WS] rewriter did not fire, falling back";
+      DLOG(WARNING) << "[WS] rewriter did not fire, falling back";
       // The TMA kernel needs warp specialization for correct pipelined
       // execution.  Since the tiled rewriter could not apply WS (e.g.
       // conditional loop body), strip pipeline annotations so that
@@ -2432,7 +2432,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       fn->body = stripped;
       return original_f;
     }
-    LOG(WARNING) << "[WS] transformation applied successfully";
+    DLOG(WARNING) << "[WS] transformation applied successfully";
     return result;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ProducerConsumerWarpSpecialized",
