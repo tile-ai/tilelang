@@ -309,7 +309,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
             --ignore=../examples/grouped_gemm/test_example_grouped_gemm.py \
             ../examples
 
@@ -323,7 +323,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
             ./python
 
       # AMD ROCm tests
@@ -337,7 +337,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
             --ignore=./python/runtime --ignore=./python/transform \
             ./python
 
@@ -351,7 +351,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
             -k metal \
             ./python
 
@@ -485,7 +485,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
             ../examples
 
       - name: List generated files
