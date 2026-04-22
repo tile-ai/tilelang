@@ -456,12 +456,15 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                      shared_layout,
                      makeGemmABLayoutPadded(*stride, *continuous,
                                             shared_tensor->dtype.bits()))) {
-        DLOG(WARNING) << "AtomicAdd TMA cannot support a padded layout for src: "
-                     << src->name << ", dst: " << dst->name << " fallback to none swizzle";
+        DLOG(WARNING)
+            << "AtomicAdd TMA cannot support a padded layout for src: "
+            << src->name << ", dst: " << dst->name
+            << " fallback to none swizzle";
         desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
       } else {
         DLOG(WARNING) << "AtomicAdd TMA unsupported swizzle layout for src: "
-                     << src->name << ", dst: " << dst->name << " fallback to none swizzle";
+                      << src->name << ", dst: " << dst->name
+                      << " fallback to none swizzle";
         desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
       }
     }
@@ -500,8 +503,8 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     for (const auto &check : swizzle_checks) {
       if (desc.swizzle == check.swizzle && inner_box_dim_ > check.max_dim) {
         DLOG(WARNING) << "AtomicAdd TMA cannot support swizzled layout with "
-                        "inner_box_dim_ > "
-                     << check.max_dim;
+                         "inner_box_dim_ > "
+                      << check.max_dim;
       }
     }
 
