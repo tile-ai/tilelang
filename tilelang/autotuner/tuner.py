@@ -288,6 +288,28 @@ class AutoTuner:
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
+    def _validate_input_supply_requirements(self, prim_func: PrimFunc, out_idx: list[int] | int | None):
+        if self.profile_args.supply_prog is not None:
+            return
+
+        if out_idx is None:
+            result_idx = []
+        elif isinstance(out_idx, int):
+            result_idx = [len(prim_func.params) + out_idx if out_idx < 0 else out_idx]
+        else:
+            result_idx = [len(prim_func.params) + idx if idx < 0 else idx for idx in out_idx]
+
+        for i, param in enumerate(prim_func.params):
+            if i in result_idx:
+                continue
+            if param not in prim_func.buffer_map:
+                kernel_name = get_prim_func_name(prim_func, "<unknown>")
+                raise ValueError(
+                    f"Auto-tuning kernel '{kernel_name}' does not support auto-generated scalar inputs. "
+                    f"Found scalar input parameter '{param.name}'. "
+                    "Please provide concrete inputs with `with set_autotune_inputs(...)`."
+                )
+
     def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process."""
 
@@ -701,6 +723,8 @@ class AutoTuneImpl(Generic[_P, _T]):
         return_kernel = kwargs.pop("__return_kernel", False)
 
         mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
+        autotuner = self.get_tunner()
+        autotuner._validate_input_supply_requirements(self.jit_impl.get_tir(*args, **kwargs), self.jit_impl.out_idx)
 
         norm_args = _normalize_value(args, sort_dict_items=True)
         norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
@@ -711,7 +735,6 @@ class AutoTuneImpl(Generic[_P, _T]):
                 def jit_compile(**config_arg):
                     return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
 
-                autotuner = self.get_tunner()
                 autotuner.jit_compile = jit_compile
                 autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
             else:
@@ -721,7 +744,6 @@ class AutoTuneImpl(Generic[_P, _T]):
                     merged.update(config_arg)
                     return self.jit_impl.compile(*args, **merged)
 
-                autotuner = self.get_tunner()
                 autotuner.jit_compile = jit_compile
                 autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
 
