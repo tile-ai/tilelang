@@ -75,6 +75,48 @@ static bool IsStaticSharedMemory(Var buffer_var) {
          storage_scope.tag.empty();
 }
 
+static int64_t GetStorageBits(DataType dtype) {
+  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+}
+
+static PrimExpr GetStorageBitsExpr(DataType dtype, DataType out_dtype) {
+  return make_const(out_dtype, GetStorageBits(dtype));
+}
+
+template <int Divisor>
+static PrimExpr CeilDivByConstant(PrimExpr value) {
+  static_assert(Divisor > 0, "Divisor must be positive");
+  DataType dtype = value.dtype();
+  return indexdiv(value + make_const(dtype, Divisor - 1),
+                  make_const(dtype, Divisor));
+}
+
+static PrimExpr GetStorageSizeInBytes(DataType out_dtype, DataType elem_dtype,
+                                      const Array<PrimExpr> &extents) {
+  PrimExpr total_bits = GetStorageBitsExpr(elem_dtype, out_dtype);
+  for (const PrimExpr &extent : extents) {
+    PrimExpr e = extent;
+    if (e.dtype() != out_dtype) {
+      e = cast(out_dtype, e);
+    }
+    total_bits = total_bits * e;
+  }
+  return CeilDivByConstant<8>(total_bits);
+}
+
+static PrimExpr BytesToLogicalElementOffset(PrimExpr byte_offset,
+                                            DataType elem_dtype) {
+  DataType dtype = byte_offset.dtype();
+  return indexdiv(byte_offset * make_const(dtype, 8),
+                  GetStorageBitsExpr(elem_dtype, dtype));
+}
+
+static int64_t GetConstantStorageSizeInBytes(int64_t logical_elems,
+                                             DataType elem_dtype) {
+  int64_t total_bits = logical_elems * GetStorageBits(elem_dtype);
+  return (total_bits + 7) / 8;
+}
+
 /*!
  * \brief collect the mapping from the buffer var to its allocate
  */
@@ -560,14 +602,7 @@ public:
       }
       DataType offset_dtype = pair.second.dtype();
       PrimExpr total_bytes =
-          make_const(offset_dtype, alloc->dtype.bytes() * alloc->dtype.lanes());
-      for (const PrimExpr &extent : alloc->extents) {
-        PrimExpr e = extent;
-        if (e.dtype() != offset_dtype) {
-          e = cast(offset_dtype, e);
-        }
-        total_bytes = total_bytes * e;
-      }
+          GetStorageSizeInBytes(offset_dtype, alloc->dtype, alloc->extents);
       PrimExpr stage_stride_bytes = make_const(offset_dtype, 0);
       auto mv_it = multi_version_metadata_.find(buffer_name);
       if (mv_it != multi_version_metadata_.end() && !(*mv_it).second.empty()) {
@@ -575,9 +610,8 @@ public:
         if (stage_stride.dtype() != offset_dtype) {
           stage_stride = cast(offset_dtype, stage_stride);
         }
-        stage_stride_bytes =
-            stage_stride * make_const(offset_dtype, alloc->dtype.bytes() *
-                                                        alloc->dtype.lanes());
+        stage_stride_bytes = CeilDivByConstant<8>(
+            stage_stride * GetStorageBitsExpr(alloc->dtype, offset_dtype));
       } else if (auto num_stages_it = buffer_num_stages_.find(buffer_var);
                  num_stages_it != buffer_num_stages_.end() &&
                  num_stages_it->second > 1) {
@@ -617,7 +651,8 @@ private:
           if (alloc_it != shmem_allocs_.end()) {
             const AllocateNode *alloc = alloc_it->second;
             PrimExpr buffer_size_bytes =
-                alloc->extents[0] * alloc->dtype.bytes() * alloc->dtype.lanes();
+                GetStorageSizeInBytes(byte_offset.dtype(), alloc->dtype,
+                                      alloc->extents);
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
                        << " (Type: " << alloc->dtype << ")"
                        << ", Start Offset: " << byte_offset
@@ -773,7 +808,7 @@ private:
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
-    return indexdiv(it->second, dtype.bytes() * dtype.lanes());
+    return BytesToLogicalElementOffset(it->second, dtype);
   }
 
   // Wrapper function to determine if the shared memory allocation for a
@@ -1338,8 +1373,6 @@ private:
       }
 
       const AllocateNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem =
-          static_cast<int64_t>(alloc->dtype.bytes() * alloc->dtype.lanes());
       DataType size_dtype = DataType::Int(32);
       if (!alloc->extents.empty()) {
         size_dtype = alloc->extents[0].dtype();
@@ -1348,20 +1381,15 @@ private:
         size_dtype = DataType::Int(32);
       }
 
-      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->extents) {
-        PrimExpr e = extent;
-        if (e.dtype() != size_dtype) {
-          e = cast(size_dtype, e);
-        }
-        size_expr = size_expr * e;
-      }
+      PrimExpr size_expr = GetStorageSizeInBytes(size_dtype, alloc->dtype,
+                                                 alloc->extents);
       info.size_dtype = size_dtype;
       info.size_expr = size_expr;
 
       int64_t const_extent = alloc->ConstantAllocationSize();
       if (const_extent >= 0) {
-        info.const_size_bytes = const_extent * bytes_per_elem;
+        info.const_size_bytes =
+            GetConstantStorageSizeInBytes(const_extent, alloc->dtype);
       }
 
       buf_infos.push_back(std::move(info));

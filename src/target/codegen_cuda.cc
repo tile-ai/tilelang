@@ -34,6 +34,21 @@ bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
 
+int64_t GetStorageBits(DataType dtype) {
+  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+}
+
+PrimExpr GetStorageBitsExpr(DataType dtype, DataType out_dtype) {
+  return make_const(out_dtype, GetStorageBits(dtype));
+}
+
+PrimExpr BytesToLogicalElementOffset(PrimExpr byte_offset, DataType dtype) {
+  DataType out_dtype = byte_offset.dtype();
+  return arith::Analyzer().Simplify(indexdiv(
+      byte_offset * make_const(out_dtype, 8),
+      GetStorageBitsExpr(dtype, out_dtype)));
+}
+
 std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
   const auto *ptr_call = expr.as<CallNode>();
   if (ptr_call == nullptr) {
@@ -324,8 +339,8 @@ CodeGenTileLangCUDA::TryMatchDynSharedAliasAccess(const BufferNode *buffer,
   if (scope != "shared.dyn") {
     return std::nullopt;
   }
-  int elem_bytes = buffer->dtype.bytes() * buffer->dtype.lanes();
-  if (elem_bytes <= 0) {
+  int64_t elem_bits = GetStorageBits(buffer->dtype);
+  if (elem_bits <= 0) {
     return std::nullopt;
   }
   arith::Analyzer analyzer;
@@ -338,14 +353,15 @@ CodeGenTileLangCUDA::TryMatchDynSharedAliasAccess(const BufferNode *buffer,
       return std::optional<DynSharedAliasAccess>();
     }
     PrimExpr base_offset =
-        analyzer.Simplify(indexdiv(info.byte_offset, elem_bytes));
+        analyzer.Simplify(BytesToLogicalElementOffset(info.byte_offset,
+                                                      buffer->dtype));
     PrimExpr shifted = analyzer.Simplify(index - base_offset);
     PrimExpr zero = make_const(shifted.dtype(), 0);
     if (require_range_check && !is_zero(info.total_byte_size) &&
         (!analyzer.CanProve(shifted >= zero) ||
          !analyzer.CanProve(
-             shifted <
-             analyzer.Simplify(indexdiv(info.total_byte_size, elem_bytes))))) {
+             shifted < analyzer.Simplify(BytesToLogicalElementOffset(
+                           info.total_byte_size, buffer->dtype))))) {
       return std::optional<DynSharedAliasAccess>();
     }
     DynSharedAliasAccess access;
@@ -354,8 +370,8 @@ CodeGenTileLangCUDA::TryMatchDynSharedAliasAccess(const BufferNode *buffer,
       access.element_index = shifted;
       return std::optional<DynSharedAliasAccess>(std::move(access));
     }
-    PrimExpr stage_stride =
-        analyzer.Simplify(indexdiv(info.stage_stride_bytes, elem_bytes));
+    PrimExpr stage_stride = analyzer.Simplify(
+        BytesToLogicalElementOffset(info.stage_stride_bytes, buffer->dtype));
     if (!dyn_shared_stage_expr_stack_.empty()) {
       PrimExpr stage_index = dyn_shared_stage_expr_stack_.back();
       PrimExpr stage_shifted =
@@ -4284,9 +4300,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     // reading that byte only returns the low nibble — the odd-indexed element
     // is lost).
     if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+      auto dyn_shared_access = TryMatchDynSharedAliasAccess(op->buffer.get(), index);
+      if (dyn_shared_access.has_value()) {
+        index = dyn_shared_access->element_index;
+      }
       std::string idx_str = PrintExpr(index);
-      std::string vid = GetVarID(buffer_var.get());
-      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
+      std::string buffer_expr =
+          dyn_shared_access.has_value()
+              ? GetDynSharedAliasBufferExpr(*dyn_shared_access)
+              : GetVarID(buffer_var.get());
+      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << buffer_expr << ", "
+         << idx_str << ")";
     } else {
       std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
       HandleVolatileLoads(ref, op, os);
@@ -4390,12 +4414,20 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     // consecutive fp4 elements to the same byte, and a plain assignment
     // overwrites the entire byte — destroying the neighboring nibble.
     if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+      auto dyn_shared_access =
+          TryMatchDynSharedAliasAccess(op->buffer.get(), index_expr);
+      if (dyn_shared_access.has_value()) {
+        index_expr = dyn_shared_access->element_index;
+      }
       std::string idx_str = PrintExpr(index_expr);
       std::string value = this->PrintExpr(op->value);
-      std::string vid = GetVarID(buffer_var.get());
+      std::string buffer_expr =
+          dyn_shared_access.has_value()
+              ? GetDynSharedAliasBufferExpr(*dyn_shared_access)
+              : GetVarID(buffer_var.get());
       this->PrintIndent();
-      stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << vid << ", " << idx_str
-             << ", " << value << ");\n";
+      stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << buffer_expr << ", "
+             << idx_str << ", " << value << ");\n";
     } else {
       std::string value = this->PrintExpr(op->value);
       std::string ref =
