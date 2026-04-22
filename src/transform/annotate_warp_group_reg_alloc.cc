@@ -3,8 +3,8 @@
  * \brief Annotate warp group reg alloc for warp specialization
  */
 
-#include <tvm/ffi/reflection/registry.h>
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
