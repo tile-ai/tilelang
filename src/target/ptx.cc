@@ -1429,7 +1429,7 @@ std::string PrintCpAsyncBulkAsm(const std::string &shared_ptr,
     unsigned int smem_addr_int = cast_smem_ptr_to_int({smem_addr});
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
     __asm__ __volatile__(
-      "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+      "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
       :: "r"(smem_addr_int), "l"({global_ptr}), "r"({bytes}), "r"(barrier_addr_int)
       : "memory"
     );

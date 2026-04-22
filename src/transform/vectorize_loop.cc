@@ -32,6 +32,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -651,10 +652,58 @@ public:
     return Call(op->dtype, GetVectorizedAtomicOp(vector_size), {dst, src});
   }
 
-  // cp.async call vectorization.
-  // Pattern:
-  //   for i in vectorized(k): ptx_cp_async(dst, src, elem_bytes)
-  // => ptx_cp_async(dst_base, src_base, elem_bytes * k)
+  static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
+    const auto *ptr_call = expr.as<CallNode>();
+    if (ptr_call == nullptr) {
+      return std::nullopt;
+    }
+    if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+      ICHECK(!ptr_call->args.empty());
+      DataType dtype = ptr_call->args[0].dtype();
+      return dtype.bits() * dtype.lanes();
+    }
+    if (ptr_call->op.same_as(tl::access_ptr())) {
+      ICHECK_GE(ptr_call->args.size(), 3U);
+      const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+      ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
+      DataType dtype = buffer_load->buffer->dtype;
+      return dtype.bits() * dtype.lanes();
+    }
+    return std::nullopt;
+  }
+
+  static std::optional<int> GetCPAsyncBitsPerCall(const CallNode *op,
+                                                  const PrimExpr &count) {
+    const auto *count_imm = count.as<IntImmNode>();
+    if (count_imm == nullptr) {
+      return std::nullopt;
+    }
+    int scalar_count = static_cast<int>(count_imm->value);
+    if (scalar_count <= 0) {
+      return std::nullopt;
+    }
+    if (op->op.same_as(builtin::ptx_cp_async())) {
+      return scalar_count * 8;
+    }
+    ICHECK(op->op.same_as(tl::ptx_cp_async()));
+    auto dst_elem_bits = GetAccessPtrElementBits(op->args[0]);
+    auto src_elem_bits = GetAccessPtrElementBits(op->args[1]);
+    if (!dst_elem_bits.has_value() || !src_elem_bits.has_value()) {
+      return std::nullopt;
+    }
+    int dst_total_bits = scalar_count * dst_elem_bits.value();
+    int src_total_bits = scalar_count * src_elem_bits.value();
+    ICHECK_EQ(dst_total_bits, src_total_bits)
+        << "tl.ptx_cp_async requires src/dst transfer widths to match, but got "
+        << dst_total_bits << " vs " << src_total_bits << " bits";
+    return dst_total_bits;
+  }
+
+  // Vectorized cp.async widening.
+  // builtin::ptx_cp_async keeps the transfer width in bytes, while
+  // tl::ptx_cp_async keeps it in logical element counts. The generic
+  // vectorization pass widens either form by the vector lane count and lets
+  // the final codegen validate the derived PTX byte width.
   PrimExpr MutatePTXCPAsyncExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::ptx_cp_async()) ||
            op->op.same_as(tl::ptx_cp_async()));
@@ -664,7 +713,7 @@ public:
 
     PrimExpr dst = VisitExpr(op->args[0]);
     PrimExpr src = VisitExpr(op->args[1]);
-    PrimExpr bytes = VisitExpr(op->args[2]);
+    PrimExpr count = VisitExpr(op->args[2]);
     Optional<PrimExpr> predicate = std::nullopt;
     if (op->args.size() == 4) {
       auto pred = VisitExpr(op->args[3]);
@@ -677,7 +726,7 @@ public:
 
     auto lanes_ptr = as_const_int(var_lanes_);
     if (!lanes_ptr || *lanes_ptr <= 1) {
-      Array<PrimExpr> new_args{dst, src, bytes};
+      Array<PrimExpr> new_args{dst, src, count};
       if (predicate.defined()) {
         new_args.push_back(predicate.value());
       }
@@ -687,22 +736,32 @@ public:
       return Call(op->dtype, op->op, new_args);
     }
 
-    const auto *bytes_imm = bytes.as<IntImmNode>();
-    if (bytes_imm == nullptr) {
+    auto bits_per_call = GetCPAsyncBitsPerCall(op, count);
+    if (!bits_per_call.has_value()) {
       need_scalarize_ = true;
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
     int vector_size = static_cast<int>(*lanes_ptr);
-    int total_bytes = static_cast<int>(bytes_imm->value) * vector_size;
+    int total_bits = bits_per_call.value() * vector_size;
+    if (total_bits % 8 != 0) {
+      need_scalarize_ = true;
+      return tvm::ffi::GetRef<PrimExpr>(op);
+    }
+    int total_bytes = total_bits / 8;
     if (!IsValidCPAsyncTransferBytes(total_bytes)) {
       need_scalarize_ = true;
       return tvm::ffi::GetRef<PrimExpr>(op);
     }
 
-    Array<PrimExpr> new_args{dst, src, IntImm(bytes_imm->dtype, total_bytes)};
+    int total_count =
+        static_cast<int>(Downcast<IntImm>(count)->value) * vector_size;
+    Array<PrimExpr> new_args{dst, src, IntImm(count.dtype(), total_count)};
     if (predicate.defined()) {
       new_args.push_back(predicate.value());
+    }
+    if (new_args.same_as(op->args)) {
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
     return Call(op->dtype, op->op, new_args);
   }

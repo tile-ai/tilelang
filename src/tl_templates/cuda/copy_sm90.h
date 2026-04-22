@@ -20,7 +20,7 @@ TL_DEVICE void tma_load(void *smem_ptr, void const *gmem_ptr,
   uint32_t smem_int_mbar =
       smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::"
+  asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::"
                "bytes [%0], [%1], %2, [%3]; \n" ::"r"(smem_int_ptr),
                "l"((void const *)gmem_ptr), "r"(size), "r"(smem_int_mbar)
                :);
@@ -211,7 +211,7 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, BarrierType &smem_mbar,
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
   }
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::"
+  asm volatile("cp.async.bulk.tensor.1d.shared::cta.global.mbarrier::"
                "complete_tx::bytes.L2::cache_hint"
                " [%0], [%1, {%3}], [%2], %4;"
                :
@@ -233,7 +233,7 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, BarrierType &smem_mbar,
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
   }
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::"
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::"
                "complete_tx::bytes.L2::cache_hint"
                " [%0], [%1, {%3, %4}], [%2], %5;"
                :
@@ -255,7 +255,7 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, BarrierType &smem_mbar,
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
   }
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::"
+  asm volatile("cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::"
                "complete_tx::bytes.L2::cache_hint"
                " [%0], [%1, {%3, %4, %5}], [%2], %6;"
                :
@@ -277,7 +277,7 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, BarrierType &smem_mbar,
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
   }
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::"
+  asm volatile("cp.async.bulk.tensor.4d.shared::cta.global.mbarrier::"
                "complete_tx::bytes.L2::cache_hint"
                " [%0], [%1, {%3, %4, %5, %6}], [%2], %7;"
                :
@@ -300,7 +300,7 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, BarrierType &smem_mbar,
     smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
   }
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::"
+  asm volatile("cp.async.bulk.tensor.5d.shared::cta.global.mbarrier::"
                "complete_tx::bytes.L2::cache_hint"
                " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
                :
@@ -322,7 +322,7 @@ tma_load_im2col(const CUtensorMap &descriptor, BarrierType &smem_mbar,
   uint32_t smem_int_mbar =
       smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.im2col.mbarrier:"
+  asm volatile("cp.async.bulk.tensor.4d.shared::cta.global.im2col.mbarrier:"
                ":complete_tx::bytes.L2::cache_hint"
                " [%0], [%1, {%3, %4, %5, %6}], [%2], {%7, %8}, %9;"
                :

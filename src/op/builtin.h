@@ -455,8 +455,8 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 /*!
  * \brief TileLang intrinsic for PTX async copy from global to shared memory
  *
- * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes)
- * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate)
  *
  */
 TVM_DLL const Op &ptx_cp_async();
@@ -630,6 +630,55 @@ TVM_DLL const Op &cluster_sync();
 TVM_DLL const Op &block_rank_in_cluster();
 
 /*!
+ * \brief Issue a Blackwell cluster launch control query that writes a 16-byte
+ * response into shared memory and signals completion on the given mbarrier.
+ *
+ * clc_try_cancel(result_ptr, mbar_ptr)
+ *
+ */
+TVM_DLL const Op &clc_try_cancel();
+
+/*!
+ * \brief Cluster-wide multicast variant of cluster launch control query.
+ *
+ * clc_try_cancel_multicast(result_ptr, mbar_ptr)
+ *
+ */
+TVM_DLL const Op &clc_try_cancel_multicast();
+
+/*!
+ * \brief Return 1 when a CLC response represents a successful cancellation.
+ *
+ * int32 clc_is_canceled(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_is_canceled();
+
+/*!
+ * \brief Return the x coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_x(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_x();
+
+/*!
+ * \brief Return the y coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_y(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_y();
+
+/*!
+ * \brief Return the z coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_z(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_z();
+
+/*!
  * \brief Synchronize all threads in a grid
  *
  * sync_grid()
@@ -660,6 +709,132 @@ TVM_DLL const Op &pdl_trigger();
  *
  */
 TVM_DLL const Op &pdl_sync();
+
+/*!
+ * \brief Warp-vote: non-zero if ANY active lane in the mask has a non-zero
+ * predicate. Lowers to `__any_sync(mask, predicate)` on CUDA and
+ * `__any(predicate)` on HIP (mask is ignored on HIP).
+ *
+ * int32 any_sync(mask, predicate)
+ */
+TVM_DLL const Op &any_sync();
+
+/*!
+ * \brief Warp-vote: non-zero only if ALL active lanes in the mask have a
+ * non-zero predicate. Lowers to `__all_sync(mask, predicate)` on CUDA and
+ * `__all(predicate)` on HIP (mask is ignored on HIP).
+ *
+ * int32 all_sync(mask, predicate)
+ */
+TVM_DLL const Op &all_sync();
+
+/*!
+ * \brief Warp-ballot: bitmask of lanes in the mask with non-zero predicate.
+ *
+ * CUDA: `__ballot_sync(mask, predicate)` returns `uint32`; the codegen
+ * zero-extends the result to `uint64`.
+ * HIP: `__ballot(predicate)` returns `uint64` natively, covering all 64
+ * lanes of the wavefront. Mask is ignored on HIP.
+ *
+ * uint64 ballot_sync(mask, predicate)
+ */
+TVM_DLL const Op &ballot_sync();
+
+/*!
+ * \brief Full-warp / full-wavefront ballot. Equivalent to
+ * `ballot_sync(0xFFFFFFFF, predicate)`.
+ *
+ * uint64 ballot(predicate)
+ */
+TVM_DLL const Op &ballot();
+
+/*!
+ * \brief Bitmask of currently active (non-exited) lanes. Lowers to
+ * `__activemask()` (zero-extended to `uint64`) on CUDA and `__ballot(1)` on
+ * HIP.
+ *
+ * uint64 activemask()
+ */
+TVM_DLL const Op &activemask();
+
+/*!
+ * \brief Block barrier that returns the number of threads whose predicate
+ * evaluates to non-zero. Lowers to `__syncthreads_count(predicate)` on both
+ * CUDA and HIP.
+ *
+ * int32 syncthreads_count(predicate)
+ */
+TVM_DLL const Op &syncthreads_count();
+
+/*!
+ * \brief Block barrier that returns non-zero only if ALL threads have a
+ * non-zero predicate. Lowers to `__syncthreads_and(predicate)` on both
+ * CUDA and HIP.
+ *
+ * int32 syncthreads_and(predicate)
+ */
+TVM_DLL const Op &syncthreads_and();
+
+/*!
+ * \brief Block barrier that returns non-zero if ANY thread has a non-zero
+ * predicate. Lowers to `__syncthreads_or(predicate)` on both CUDA and HIP.
+ *
+ * int32 syncthreads_or(predicate)
+ */
+TVM_DLL const Op &syncthreads_or();
+
+/*!
+ * \brief Warp shuffle: broadcast `value` from `src_lane` within each subgroup
+ * of `width` lanes. Lowers to `__shfl_sync(mask, value, src_lane, width)` on
+ * CUDA and `__shfl(value, src_lane, width)` on HIP. The dtype of the result
+ * matches the dtype of `value`.
+ *
+ * T shfl_sync(mask, value, src_lane, width)
+ */
+TVM_DLL const Op &shfl_sync();
+
+/*!
+ * \brief Warp shuffle (XOR-swap variant). Lowers to `__shfl_xor_sync` on CUDA
+ * and `__shfl_xor` on HIP.
+ *
+ * T shfl_xor_sync(mask, value, lane_mask, width)
+ */
+TVM_DLL const Op &shfl_xor_sync();
+
+/*!
+ * \brief Warp shuffle (shift-down variant). Lowers to `__shfl_down_sync` on
+ * CUDA and `__shfl_down` on HIP.
+ *
+ * T shfl_down_sync(mask, value, delta, width)
+ */
+TVM_DLL const Op &shfl_down_sync();
+
+/*!
+ * \brief Warp shuffle (shift-up variant). Lowers to `__shfl_up_sync` on CUDA
+ * and `__shfl_up` on HIP.
+ *
+ * T shfl_up_sync(mask, value, delta, width)
+ */
+TVM_DLL const Op &shfl_up_sync();
+
+/*!
+ * \brief Warp match-any: returns a mask of lanes in `mask` whose `value`
+ * equals the calling lane's value. Lowers to `__match_any_sync` on CUDA
+ * (compute capability >= 7.0). Not supported on HIP.
+ *
+ * uint32 match_any_sync(mask, value)
+ */
+TVM_DLL const Op &match_any_sync();
+
+/*!
+ * \brief Warp match-all: returns `mask` if all lanes in `mask` agree on
+ * `value`, else 0. Lowers to `__match_all_sync` on CUDA (compute capability
+ * >= 7.0, the trailing `int*` predicate output is discarded via an
+ * immediately-invoked lambda). Not supported on HIP.
+ *
+ * uint32 match_all_sync(mask, value)
+ */
+TVM_DLL const Op &match_all_sync();
 
 /*!
  * \brief tvm intrinsic for loop continue
@@ -767,6 +942,22 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
  *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
  */
 TVM_DLL const Op &tcgen05_mma_arrive();
+
+/*!
+ * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory load.
+ *
+ *  Internal lowering op used by LowerTmemCopy to represent
+ *  `tl::tcgen05_ld_*` calls without routing through `call_extern`.
+ */
+TVM_DLL const Op &tcgen05_ld();
+
+/*!
+ * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory store.
+ *
+ *  Internal lowering op used by LowerTmemCopy to represent
+ *  `tl::tcgen05_st_*` calls without routing through `call_extern`.
+ */
+TVM_DLL const Op &tcgen05_st();
 
 /*!
  * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /

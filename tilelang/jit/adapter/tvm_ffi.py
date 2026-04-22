@@ -110,12 +110,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         self._post_init()
 
-    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int]]:
+    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
 
-        Maps symbolic variables to their corresponding (id, buffer_index, dimension)
+        Maps symbolic variables to their corresponding (id, buffer_index, dimension, stride_scale)
         for runtime shape resolution.
-        id represents shape or stride, 0 represents shape, 1 represents stride
+        id represents shape or stride, 0 represents shape, 1 represents stride, 2 represents scalar param.
+        stride_scale compensates for sub-byte dtypes (e.g. float4_e2m1fn) where torch strides
+        are in storage units but the kernel expects logical element strides.
         """
         func = self.prim_func
         params = func.params
@@ -123,19 +125,21 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         dynamic_symbolic_map = {}
         for i, param in enumerate(params):
             if isinstance(param, tir.Var) and (param not in dynamic_symbolic_map):
-                dynamic_symbolic_map[param] = (2, i, -1)
+                dynamic_symbolic_map[param] = (2, i, -1, 1)
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
                     if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
-                        dynamic_symbolic_map[shape] = (0, i, j)
+                        dynamic_symbolic_map[shape] = (0, i, j, 1)
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
+                element_bits = buffer.dtype.bits * buffer.dtype.lanes
+                stride_scale = 8 // element_bits if element_bits < 8 else 1
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
-                        dynamic_symbolic_map[stride] = (1, i, j)
+                        dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
     def _convert_torch_func(self) -> Callable[..., Any]:
@@ -216,13 +220,13 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         if isinstance(s, tir.Var):
                             for key in dynamic_symbolic_map:
                                 if str(s) == str(key):
-                                    ref_id, ref_tensor_idx, ref_shape_idx = dynamic_symbolic_map[key]
+                                    ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = dynamic_symbolic_map[key]
                                     if ref_id == 2:
                                         shape.append(inputs[ref_tensor_idx])
                                     elif ref_id == 0:
                                         shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
                                     elif ref_id == 1:
-                                        shape.append(tensor_list[ref_tensor_idx].stride()[ref_shape_idx])
+                                        shape.append(tensor_list[ref_tensor_idx].stride()[ref_shape_idx] * stride_scale)
                         else:  # Already converted to Python int during initialization
                             shape.append(s)
 

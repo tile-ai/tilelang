@@ -52,7 +52,7 @@ def test_no_sync_between_atomic_adds_to_shared():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync inserted for atomic ops:\n{s}"
 
 
@@ -90,7 +90,7 @@ def test_thread_sync_handles_int64_tvm_access_ptr_offset():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    s = str(mod)
+    s = str(mod.script())
     assert 'T.tvm_storage_sync("shared.dyn")' not in s, f"Unexpected sync inserted for single atomic op:\n{s}"
 
 
@@ -115,7 +115,7 @@ def test_sync_if_with_same_index():
         result_local[0] = result_local[0] + temp_shared[0]
 
     mod = run_passes(func)
-    assert "T.tvm_storage_sync" in str(mod)
+    assert "T.tvm_storage_sync" in str(mod.script())
 
 
 @tilelang.testing.requires_cuda
@@ -137,7 +137,7 @@ def test_sync_if_with_same_index_with_modulo_if():
         result_local[0] = temp_shared[threadIdx_x]
 
     mod = run_passes(func)
-    assert "T.tvm_storage_sync" in str(mod)
+    assert "T.tvm_storage_sync" in str(mod.script())
 
 
 @tilelang.testing.requires_cuda
@@ -162,7 +162,7 @@ def test_sync_read_thread_id_independent_location():
         result_local[0] = result_local[0] + temp_shared[0] * p1[1]
 
     mod = run_passes(func)
-    assert "T.tvm_storage_sync" in str(mod)
+    assert "T.tvm_storage_sync" in str(mod.script())
 
 
 @tilelang.testing.requires_cuda
@@ -326,7 +326,7 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    s = str(mod)
+    s = str(mod.script())
     assert 'T.tvm_storage_sync("shared.dyn")' in s
     # Ensure the sync appears before the unrolled loop
     assert s.index('T.tvm_storage_sync("shared.dyn")') < s.index("for i in T.unroll(8)")
@@ -359,7 +359,7 @@ def test_loop_carry_no_dependency_same_index():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     # Should NOT have sync inside the loop since A[tx] in iteration i
     # does not conflict with A[tx] in iteration i+1 (they're different threads' data)
     # The key insight: same thread writes and reads its own location
@@ -399,7 +399,7 @@ def test_loop_carry_with_cross_thread_dependency():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     # Should have sync because thread tx reads from thread (tx+127)%128's location
     # This is a WAR hazard across threads
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync for cross-thread dependency:\n{s}"
@@ -433,7 +433,7 @@ def test_loop_carry_modulo_buffering():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     # Should NOT have sync inside loop due to modulo buffering analysis
     # Note: This test verifies the modulo analysis capability
     print(f"Modulo buffering result:\n{s}")
@@ -467,7 +467,7 @@ def test_loop_carry_different_indices():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     print(f"Different indices result:\n{s}")
 
 
@@ -505,7 +505,7 @@ def test_sync_hoist_non_uniform_if_with_threadidx():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     # Sync should appear before the if statement
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
     # The sync should be before the if, not inside it
@@ -545,7 +545,7 @@ def test_sync_hoist_non_uniform_if_shared_memory_condition():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     # Sync should appear before the if statement
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
     # The sync should be before the if that checks token_ids
@@ -581,7 +581,7 @@ def test_sync_inside_uniform_if_blockidx():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     # Should have sync (either inside or outside the if is fine for uniform condition)
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
 
@@ -605,7 +605,7 @@ def test_sync_inside_uniform_if_runtime_block_uniform_condition():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     assert s.count('T.tvm_storage_sync("shared")') == 1, f"Expected exactly one sync:\n{s}"
     if_pos = s.index("if flags[bx] > 0")
     sync_pos = s.index('T.tvm_storage_sync("shared")')
@@ -636,7 +636,7 @@ def test_sync_hoist_nested_non_uniform_if():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
     # Sync should be before the outermost non-uniform if
     sync_pos = s.index('T.tvm_storage_sync("shared")')
@@ -667,7 +667,7 @@ def test_sync_hoist_non_uniform_if_in_loop():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
     # Sync should be before the if inside the loop, not inside the if
     # This ensures all threads can reach the sync point
@@ -697,7 +697,7 @@ def test_no_sync_needed_uniform_accesses():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     # No sync needed - only local memory is accessed
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
@@ -724,7 +724,7 @@ def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod)
+    s = str(mod.script())
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
     # Sync should be before the if inside the loop, not inside the if
     sync_pos = s.index('T.tvm_storage_sync("shared")')

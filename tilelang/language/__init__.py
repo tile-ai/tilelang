@@ -30,6 +30,7 @@ from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
+    CUDASourceCodeKernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
     get_thread_binding,  # noqa: F401
     get_thread_bindings,  # noqa: F401
@@ -103,6 +104,14 @@ from .builtin import stg32 as stg32  # noqa: F401
 from .builtin import stg64 as stg64  # noqa: F401
 from .builtin import stg128 as stg128  # noqa: F401
 from .builtin import stg256 as stg256  # noqa: F401
+from .builtin import any_sync as any_sync  # noqa: F401
+from .builtin import all_sync as all_sync  # noqa: F401
+from .builtin import ballot_sync as ballot_sync  # noqa: F401
+from .builtin import ballot as ballot  # noqa: F401
+from .builtin import activemask as activemask  # noqa: F401
+from .builtin import syncthreads_count as syncthreads_count  # noqa: F401
+from .builtin import syncthreads_and as syncthreads_and  # noqa: F401
+from .builtin import syncthreads_or as syncthreads_or  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 
@@ -133,6 +142,12 @@ from .cluster import (
     cluster_wait,  # noqa: F401
     cluster_sync,  # noqa: F401
     block_rank_in_cluster,  # noqa: F401
+    clc_try_cancel,  # noqa: F401
+    clc_try_cancel_multicast,  # noqa: F401
+    clc_is_canceled,  # noqa: F401
+    clc_get_first_ctaid_x,  # noqa: F401
+    clc_get_first_ctaid_y,  # noqa: F401
+    clc_get_first_ctaid_z,  # noqa: F401
 )
 
 

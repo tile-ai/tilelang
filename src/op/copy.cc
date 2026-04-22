@@ -18,6 +18,7 @@
 #include "utils.h"
 
 #include "builtin.h"
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -48,139 +49,6 @@ PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
   }
   return phase;
 }
-
-// Rewrite scalar global->shared stores into ptx_cp_async calls.
-// This rewriter is applied before the global vectorize pass, so each generated
-// cp.async call starts with element-wise bytes and can be widened later.
-class CPAsyncStoreRewriter : public StmtMutator {
-public:
-  Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
-
-  bool RewriteSuccess() const {
-    return rewritten_any_store_ && !failed_on_shared_store_;
-  }
-
-private:
-  static bool IsZeroValue(const PrimExpr &e) {
-    if (auto *b = e.as<BroadcastNode>()) {
-      return IsZeroValue(b->value);
-    }
-    if (auto *f = e.as<FloatImmNode>()) {
-      return f->value == 0.0f;
-    }
-    if (auto *i = e.as<IntImmNode>()) {
-      return i->value == 0;
-    }
-    return false;
-  }
-
-  static const BufferLoadNode *
-  MatchZeroFillBufferLoad(const PrimExpr &value,
-                          Optional<PrimExpr> *predicate) {
-    if (const auto *load = value.as<BufferLoadNode>()) {
-      return load;
-    }
-
-    const auto *call = value.as<CallNode>();
-    if (!call || !call->op.same_as(builtin::if_then_else()) ||
-        !IsZeroValue(call->args[2])) {
-      return nullptr;
-    }
-
-    const BufferLoadNode *load =
-        MatchZeroFillBufferLoad(call->args[1], predicate);
-    if (load == nullptr) {
-      return nullptr;
-    }
-
-    // Nested zero-fill guards only permit issuing cp.async when every guard
-    // on the path to the load is true.
-    *predicate =
-        predicate->defined()
-            ? Optional<PrimExpr>(And(call->args[0], predicate->value()))
-            : Optional<PrimExpr>(call->args[0]);
-    return load;
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    if (!IsSharedBuffer(op->buffer)) {
-      return StmtMutator::VisitStmt_(op);
-    }
-
-    Optional<PrimExpr> predicate = std::nullopt;
-    // Accept either a direct load or a nested zero-fill guard chain:
-    // if_then_else(p1, if_then_else(p2, load, 0), 0). Nested predicates are
-    // combined so the generated cp.async is only issued when all guards hold.
-    const BufferLoadNode *load = MatchZeroFillBufferLoad(op->value, &predicate);
-    if (load == nullptr) {
-      failed_on_shared_store_ = true;
-      return StmtMutator::VisitStmt_(op);
-    }
-
-    if (!IsGlobalBuffer(load->buffer)) {
-      failed_on_shared_store_ = true;
-      return StmtMutator::VisitStmt_(op);
-    }
-    int bytes = op->value.dtype().bytes();
-    int vectorized_lanes = current_vectorized_lanes_;
-
-    if (!IsValidCPAsyncTransferBytes(bytes * vectorized_lanes)) {
-      failed_on_shared_store_ = true;
-      return StmtMutator::VisitStmt_(op);
-    }
-
-    // Keep pointer metadata in tl.access_ptr form for downstream analysis;
-    // LowerAccessPtr will translate it to tvm_access_ptr later.
-    PrimExpr dst_access_ptr =
-        Call(DataType::Handle(), tvm::tl::access_ptr(),
-             {
-                 BufferLoad(op->buffer, op->indices),
-                 IntImm(DataType::Int(32), 1), // extent
-                 IntImm(DataType::Int(32), 2)  // rw_mask: write
-             });
-    PrimExpr src_access_ptr =
-        Call(DataType::Handle(), tvm::tl::access_ptr(),
-             {
-                 BufferLoad(load->buffer, load->indices),
-                 IntImm(DataType::Int(32), 1), // extent
-                 IntImm(DataType::Int(32), 1)  // rw_mask: read
-             });
-
-    Array<PrimExpr> args{dst_access_ptr, src_access_ptr, PrimExpr(bytes)};
-    if (predicate.defined()) {
-      args.push_back(predicate.value());
-    }
-    rewritten_any_store_ = true;
-    return Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async(), args));
-  }
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    int previous_vectorized_lanes = current_vectorized_lanes_;
-    if (op->kind == ForKind::kVectorized) {
-      // Assume vectorized access pattern is contiguous on the vectorized iter.
-      // This is guaranteed by tl.VectorizeLoop: if an access pattern is not
-      // vectorizable/contiguous for the chosen iter, it is scalarized instead
-      // of staying as ForKind::kVectorized.
-      const auto *extent_imm = op->extent.as<IntImmNode>();
-      ICHECK(extent_imm)
-          << "Vectorized loops must have constant extent, but got "
-          << op->extent;
-      int lanes = static_cast<int>(extent_imm->value);
-      if (lanes > 1 && current_vectorized_lanes_ <=
-                           std::numeric_limits<int>::max() / lanes) {
-        current_vectorized_lanes_ *= lanes;
-      }
-    }
-
-    Stmt stmt = StmtMutator::VisitStmt_(op);
-    current_vectorized_lanes_ = previous_vectorized_lanes;
-    return stmt;
-  }
-
-  bool rewritten_any_store_ = false;
-  bool failed_on_shared_store_ = false;
-  int current_vectorized_lanes_ = 1;
-};
 
 } // namespace
 
@@ -1144,9 +1012,24 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
 
   if (is_cpu_target || IsLocalBuffer(src) || IsLocalBuffer(dst)) {
     if (IsLocalBuffer(src) && !IsLocalBuffer(dst)) {
-      LOG(WARNING) << "Copy from local buffer `" << src->name << "` to "
-                   << dst.scope() << " buffer `" << dst->name
-                   << "` may cause conflicted write.";
+      // A conflict write only occurs when multiple threads write to the same
+      // global address. If any dst_range dimension's min depends on the thread
+      // variable, each thread targets a distinct location and there is no
+      // conflict.
+      bool dst_depends_on_thread = false;
+      for (const auto &range : dst_range) {
+        if (tir::UsesVar(range->min, [&](const VarNode *v) {
+              return v == T.thread_var.get();
+            })) {
+          dst_depends_on_thread = true;
+          break;
+        }
+      }
+      if (!dst_depends_on_thread) {
+        LOG(WARNING) << "Copy from local buffer `" << src->name << "` to "
+                     << dst.scope() << " buffer `" << dst->name
+                     << "` may cause conflicted write.";
+      }
     }
     vectorized_thread_loop = VectorizeLoop(fused_loop, T.layout_map);
     return vectorized_thread_loop;
@@ -1324,9 +1207,10 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     shared_coords = inv->Forward({local_index, thread_index});
   }
   shared_coords.pop_back(); // remove rep
-  PrimExpr shared_addr = shared_tensor.access_ptr(
-      is_ldmatrix ? 1 : 2, DataType::Handle(), 1,
-      shared_tensor.OffsetOf(shared_coords).back(), PrimExpr(2 * num));
+  PrimExpr shared_addr =
+      Call(DataType::Handle(), tl::access_ptr(),
+           {BufferLoad(shared_tensor, shared_coords), PrimExpr(2 * num),
+            make_const(DataType::Int(32), is_ldmatrix ? 1 : 2)});
   args.push_back(shared_addr);
 
   if (is_ldmatrix) {
@@ -1336,8 +1220,10 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       // copy
       return LowerNormalCopy(T, analyzer);
     }
-    PrimExpr local_addr = local_tensor.access_ptr(
-        2, DataType::Handle(), 1, local_iter * 2 * num, PrimExpr(2 * num));
+    PrimExpr local_addr =
+        Call(DataType::Handle(), tl::access_ptr(),
+             {BufferLoad(local_tensor, {local_iter * 2 * num}),
+              PrimExpr(2 * num), make_const(DataType::Int(32), 2)});
     args.push_back(local_addr);
   } else {
     for (int i = 0; i < num; i++) {
@@ -1515,7 +1401,6 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
       // unpack::16b) so MMA TS reads correctly packed bf16 from TMEM columns.
       // For tcgen05_ld, pack::16b is still needed when reading unpacked data.
       bool use_pack_unpack_modifier = is_ld ? needs_pack_unpack : false;
-      const char *bool_str = use_pack_unpack_modifier ? "true" : "false";
       int effective_chunks =
           needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
       PrimExpr relative_wg_idx =
@@ -1526,22 +1411,38 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
               : relative_wg_idx * (effective_chunks * meta.width);
       have_succeeded = true;
       Array<PrimExpr> args;
-      args.push_back(StringImm(meta.intrinsics_name + "<" +
-                               std::to_string(effective_chunks) + ", " +
-                               bool_str + ">"));
-      args.push_back(
-          BufferLoad(tmem_buf, {(int)logical_row_min,
-                                (int)logical_col_min})); // Will be translated
-                                                         // later in
-                                                         // lower_shared_tmem
-                                                         // pass
-      args.push_back(col_offset);
-      int reg_access_mode = is_ld ? 2 : 1;
-      args.push_back(reg_buf.access_ptr(reg_access_mode, DataType::Handle(), 1,
-                                        0, PrimExpr(tmem_phy_col_extent)));
-
-      Stmt call =
-          Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
+      Stmt call;
+      if (is_ld) {
+        args.push_back(IntImm(DataType::Int(32), meta.width * 32));
+        args.push_back(IntImm(DataType::Int(32), effective_chunks));
+        args.push_back(Bool(use_pack_unpack_modifier));
+        args.push_back(
+            BufferLoad(tmem_buf, {(int)logical_row_min,
+                                  (int)logical_col_min})); // Will be translated
+                                                           // later in
+                                                           // lower_shared_tmem
+                                                           // pass
+        args.push_back(col_offset);
+        args.push_back(reg_buf.access_ptr(/*access_mask=*/2, DataType::Handle(),
+                                          /*content_lanes=*/1, /*offset=*/0,
+                                          PrimExpr(tmem_phy_col_extent)));
+        call = Evaluate(Call(DataType::Handle(), tcgen05_ld(), args));
+      } else {
+        args.push_back(IntImm(DataType::Int(32), meta.width * 32));
+        args.push_back(IntImm(DataType::Int(32), effective_chunks));
+        args.push_back(Bool(use_pack_unpack_modifier));
+        args.push_back(
+            BufferLoad(tmem_buf, {(int)logical_row_min,
+                                  (int)logical_col_min})); // Will be translated
+                                                           // later in
+                                                           // lower_shared_tmem
+                                                           // pass
+        args.push_back(col_offset);
+        int reg_access_mode = 1;
+        args.push_back(reg_buf.access_ptr(reg_access_mode, DataType::Handle(),
+                                          1, 0, PrimExpr(tmem_phy_col_extent)));
+        call = Evaluate(Call(DataType::Handle(), tcgen05_st(), args));
+      }
       if (num_useful_threads != num_threads) {
         body =
             IfThenElse(T.thread_var < T.thread_bounds->min + num_useful_threads,

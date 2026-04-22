@@ -6,6 +6,7 @@
 #define TVM_TL_TARGET_CODEGEN_HIP_H_
 
 #include <tvm/target/codegen.h>
+#include <tvm/target/target.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 
@@ -21,6 +22,7 @@ class CodeGenTileLangHIP final : public CodeGenC {
 public:
   CodeGenTileLangHIP();
   std::string Finish();
+  void SetTarget(Target target) { target_ = std::move(target); }
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
   void PrintExtraAttrs(const PrimFunc &f, std::ostream &os) final;
@@ -88,6 +90,8 @@ private:
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
+  // Target
+  Target target_;
 };
 
 } // namespace codegen

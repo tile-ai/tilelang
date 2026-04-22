@@ -266,10 +266,10 @@ def assert_tl_matmul_correctness(
         (256, 256, 512, T.int8, T.int32, T.int32, False, False, 1, True, False),
         (256, 256, 512, T.int8, T.int32, T.int32, False, True, 2, True, False),
         (256, 256, 512, T.int8, T.int32, T.int32, False, False, 2, True, False),
-        (256, 256, 512, T.dtype(determine_fp8_type()), T.float32, T.float32, False, True, 1, True, False),
-        (256, 256, 512, T.dtype(determine_fp8_type()), T.float32, T.float32, False, False, 1, True, False),
-        (256, 256, 512, T.dtype(determine_fp8_type()), T.float32, T.float32, False, True, 2, True, False),
-        (256, 256, 512, T.dtype(determine_fp8_type()), T.float32, T.float32, False, False, 2, True, False),
+        (256, 256, 512, determine_fp8_type(), T.float32, T.float32, False, True, 1, True, False),
+        (256, 256, 512, determine_fp8_type(), T.float32, T.float32, False, False, 1, True, False),
+        (256, 256, 512, determine_fp8_type(), T.float32, T.float32, False, True, 2, True, False),
+        (256, 256, 512, determine_fp8_type(), T.float32, T.float32, False, False, 2, True, False),
     ],
 )
 @tilelang.testing.requires_rocm
