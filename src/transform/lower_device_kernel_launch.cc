@@ -38,6 +38,24 @@ namespace tl {
 using namespace tir;
 using namespace ffi;
 namespace {
+
+int64_t GetStorageBitsPerElement(DataType dtype) {
+  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+}
+
+PrimExpr LogicalElementsToStorageBytes(PrimExpr logical_elements,
+                                       DataType dtype) {
+  DataType out_dtype = logical_elements.dtype();
+  int64_t storage_bits = GetStorageBitsPerElement(dtype);
+  if (storage_bits <= 0) {
+    return make_const(out_dtype, 0);
+  }
+  PrimExpr logical_bits =
+      cast(out_dtype, logical_elements) * make_const(out_dtype, storage_bits);
+  return indexdiv(logical_bits + make_const(out_dtype, 7),
+                  make_const(out_dtype, 8));
+}
+
 struct KernelInfo {
   // The device on which the PrimFunc runs
   Target target;
@@ -173,7 +191,7 @@ private:
       for (const auto &extent : op->extents) {
         dyn_size *= extent;
       }
-      dyn_size *= op->dtype.bytes() * op->dtype.lanes();
+      dyn_size = LogicalElementsToStorageBytes(dyn_size, op->dtype);
 
       dyn_shmem_size = dyn_size;
     }

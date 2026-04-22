@@ -209,5 +209,35 @@ def test_tilelang_copy_fp4():
     run_tilelang_copy_fp4(src_dtype=T.float4_e2m1fn, dst_dtype=T.bfloat16)
 
 
+def run_tilelang_copy_fp4_fragment_shared(M=16, N=128):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), T.float4_e2m1fn),
+        B: T.Tensor((M, N), T.float4_e2m1fn),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_local = T.alloc_fragment((M, N), T.float4_e2m1fn)
+            B_shared = T.alloc_shared((M, N), T.float4_e2m1fn)
+            T.copy(A, A_local)
+            T.copy(A_local, B_shared)
+            T.copy(B_shared, B)
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+
+    src = torch.randint(0, 256, (M, N // 2), device="cuda", dtype=torch.uint8).view(torch.int8)
+    out = kernel(src)
+    assert torch.equal(out.view(torch.uint8), src.view(torch.uint8))
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+def test_tilelang_copy_fp4_fragment_shared():
+    run_tilelang_copy_fp4_fragment_shared()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -207,6 +207,37 @@ def test_tma_copy_store_pipeline_3_stages():
     run_gemm_tma_copy_store(num_stages=3)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_copy_fp4_roundtrip():
+    m, n = 256, 512
+
+    @T.prim_func
+    def fp4_tma_roundtrip(
+        x: T.Tensor((m, n), T.float4_e2m1fn),
+        y: T.Tensor((m, n), T.float4_e2m1fn),
+    ):
+        with T.Kernel(1, threads=32) as _:
+            x_shared = T.alloc_shared((m, n), T.float4_e2m1fn)
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(x, x_shared, barrier=mbar)
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+            T.tma_copy(x_shared, y)
+            T.tma_store_wait()
+
+    kernel = tilelang.compile(
+        fp4_tma_roundtrip,
+        out_idx=[1],
+        execution_backend="tvm_ffi",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+
+    source = kernel.get_kernel_source()
+    assert "tma_load" in source
+    assert "tma_store" in source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
     # test_tma_copy_pipeline_2_stages()

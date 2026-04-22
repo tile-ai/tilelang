@@ -148,7 +148,9 @@ PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 int to_CUtensorMapDataType(DataType dtype) {
   CUtensorMapDataType tp;
-  if (dtype.is_float()) {
+  if (dtype.is_float4()) {
+    tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+  } else if (dtype.is_float()) {
     switch (dtype.bits()) {
     case 64:
       tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT64;

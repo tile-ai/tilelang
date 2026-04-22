@@ -108,5 +108,39 @@ def test_tma_host_codegen_aligns_tvm_ffi_stack_alloca_for_descriptor():
     assert re.search(r"__attribute__\(\(aligned\(64\)\)\) TVMFFIAny stack(_\d+)?\[", source)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_host_codegen_uses_packed_fp4_descriptor_shape_and_stride():
+    m, k = 16, 256
+    threads = 32
+
+    @T.prim_func
+    def tma_copy_fp4_desc(
+        x: T.Tensor((m, k), T.float4_e2m1fn),
+        y: T.Tensor((m, k), T.float4_e2m1fn),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            x_shared = T.alloc_shared((m, k), dtype=T.float4_e2m1fn)
+            mbar = T.alloc_barrier(1)
+            T.tma_copy(x, x_shared, barrier=mbar)
+            T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+            T.tma_copy(x_shared, y)
+            T.tma_store_wait()
+
+    kernel = _compile_tvm_ffi(
+        tma_copy_fp4_desc,
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+
+    source = kernel.get_host_source()
+    assert "__tvm_tensormap_create_tiled_packed" in source
+    assert "CUtensorMapDataType x_desc_type= (CUtensorMapDataType)0;" in source
+    assert re.search(
+        r"__tvm_tensormap_create_tiled_packed\([^\\n]*x_desc[^\\n]*,\s*0,\s*2,\s*[^\\n]*,\s*128,\s*16,\s*1,\s*128",
+        source,
+    )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
