@@ -825,6 +825,26 @@ TVM_DLL const Op &match_all_sync();
 TVM_DLL const Op &loop_break();
 
 /*!
+ * \brief tilelang intrinsic for gfx950 LDS transpose read, 64-bit, 16-element.
+ *
+ * Reads 8 bytes from LDS with a 16-element transpose (FP16/BF16 MFMA B-load).
+ * Only available on gfx950 (MI350/MI355X).
+ *
+ * uint32x2 ds_read_tr16_b64(smem_access_ptr)
+ */
+TVM_DLL const Op &ds_read_tr16_b64();
+
+/*!
+ * \brief tilelang intrinsic for gfx950 LDS transpose read, 64-bit, 8-element.
+ *
+ * Reads 8 bytes from LDS with an 8-element transpose (FP32 MFMA B-load).
+ * Only available on gfx950 (MI350/MI355X).
+ *
+ * uint32x2 ds_read_tr8_b64(smem_access_ptr)
+ */
+TVM_DLL const Op &ds_read_tr8_b64();
+
+/*!
  * \brief tvm intrinsic for amd matrix core mfma instructions.
  *
  *  void tvm_mfma(StringImm shape, StringImm A_layout, StringImm B_layout,

@@ -1332,6 +1332,48 @@ def ptx_mma_sm70(
     )
 
 
+def ds_read_tr16_b64(src: BufferLikeType) -> PrimExpr:
+    """LDS transpose read, 64-bit, 16-element transpose (gfx950 only).
+
+    Reads 8 bytes from LDS (__shared__ memory) with a 16-element transpose.
+    Used for FP16/BF16 MFMA matrix B-loads on MI350/MI355X (gfx950).
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad` in shared memory.
+
+    Returns:
+        PrimExpr: The loaded 64-bit value as uint32x2.
+
+    Example:
+        >>> val = T.ds_read_tr16_b64(smem[i])
+    """
+    if not isinstance(src, BufferLikeTypeTuple):
+        raise TypeError(f"T.ds_read_tr16_b64 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ds_read_tr16_b64"), ptr)
+
+
+def ds_read_tr8_b64(src: BufferLikeType) -> PrimExpr:
+    """LDS transpose read, 64-bit, 8-element transpose (gfx950 only).
+
+    Reads 8 bytes from LDS (__shared__ memory) with an 8-element transpose.
+    Used for FP32 MFMA matrix B-loads on MI350/MI355X (gfx950).
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad` in shared memory.
+
+    Returns:
+        PrimExpr: The loaded 64-bit value as uint32x2.
+
+    Example:
+        >>> val = T.ds_read_tr8_b64(smem[i])
+    """
+    if not isinstance(src, BufferLikeTypeTuple):
+        raise TypeError(f"T.ds_read_tr8_b64 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ds_read_tr8_b64"), ptr)
+
+
 def ldg32(src: BufferLikeType, pred: PrimExpr = None) -> PrimExpr:
     """Load 32 bits (4 bytes) from global memory using explicit PTX instructions.
 

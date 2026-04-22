@@ -627,6 +627,20 @@ TIR_DEFINE_TL_BUILTIN(warp_reduce_bitor)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// ds_read_tr16_b64(smem_ptr) -> uint32x2
+// gfx950 LDS transpose read: 64-bit, 16-element transpose (FP16/BF16 MFMA)
+TIR_DEFINE_TL_BUILTIN(ds_read_tr16_b64)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+// ds_read_tr8_b64(smem_ptr) -> uint32x2
+// gfx950 LDS transpose read: 64-bit, 8-element transpose (FP32 MFMA)
+TIR_DEFINE_TL_BUILTIN(ds_read_tr8_b64)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 // __ldg(BufferLoad | Buffer, idx?) -> value
 // Treat as a pure call that returns the loaded value.
 TIR_DEFINE_TL_BUILTIN(__ldg).set_num_inputs(-1).set_attr<TCallEffectKind>(

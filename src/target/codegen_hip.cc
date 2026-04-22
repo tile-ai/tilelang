@@ -1022,6 +1022,14 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << ", " << PrintExpr(op->args[i]);
     }
     os << ")";
+  } else if (op->op.same_as(tl::ds_read_tr16_b64())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.ds_read_tr16_b64 expects one argument (smem_access_ptr).";
+    os << "tl::ds_read_tr16_b64(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ds_read_tr8_b64())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.ds_read_tr8_b64 expects one argument (smem_access_ptr).";
+    os << "tl::ds_read_tr8_b64(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::__ldg())) {
     // HIP fallback: regular load
     const BufferLoadNode *bl = op->args[0].as<BufferLoadNode>();
