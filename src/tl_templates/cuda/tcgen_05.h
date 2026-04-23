@@ -89,8 +89,7 @@ TL_DEVICE void tcgen05_mma_arrive(void const *smem_ptr,
 // UTCCP: Copy scale factors from shared memory to tensor memory.
 // Must be called by one warp; only one elected thread issues the instruction.
 template <bool use_2cta = false>
-TL_DEVICE void tcgen05_cp(uint64_t const &smem_desc,
-                          uint32_t const &tmem_col) {
+TL_DEVICE void tcgen05_cp(uint64_t const &smem_desc, uint32_t const &tmem_col) {
   if (cute::elect_one_sync()) {
     if constexpr (use_2cta) {
       asm volatile("tcgen05.cp.cta_group::2.32x128b.warpx4 [%0], %1;"
@@ -110,11 +109,11 @@ TL_DEVICE void tcgen05_cp(uint64_t const &smem_desc,
 TL_DEVICE void tcgen05_sf_warp_transpose(uint32_t *smem_ptr) {
   const uint32_t lane = threadIdx.x % 32;
   uint32_t values[4];
-  #pragma unroll
+#pragma unroll
   for (uint32_t i = 0; i < 4; ++i)
     values[i] = smem_ptr[(i ^ (lane >> 3)) * 32 + lane];
   __syncwarp();
-  #pragma unroll
+#pragma unroll
   for (uint32_t i = 0; i < 4; ++i)
     smem_ptr[lane * 4 + (i ^ (lane >> 3))] = values[i];
 }
@@ -130,10 +129,10 @@ TL_DEVICE uint64_t make_sf_smem_desc(void *smem_ptr) {
   // [46,48): version = 1 (SM100)
   // [61,64): layout_type = 0 (SWIZZLE_NONE)
   uint64_t desc = 0;
-  desc |= static_cast<uint64_t>(uint_ptr >> 4) & 0x3FFFull;            // start_address
+  desc |= static_cast<uint64_t>(uint_ptr >> 4) & 0x3FFFull; // start_address
   // leading_byte_offset = 0 (bits [16,30))
-  desc |= static_cast<uint64_t>(8u) << 32;                              // stride_byte_offset >> 4 = 8
-  desc |= static_cast<uint64_t>(1u) << 46;                              // version = 1
+  desc |= static_cast<uint64_t>(8u) << 32; // stride_byte_offset >> 4 = 8
+  desc |= static_cast<uint64_t>(1u) << 46; // version = 1
   // layout_type = 0 (SWIZZLE_NONE), base_offset = 0, lbo_mode = 0
   return desc;
 }

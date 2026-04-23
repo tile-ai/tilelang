@@ -9,7 +9,7 @@ except ModuleNotFoundError:
     from gemm_mxfp8_blockscaled_1d1d import mxfp8_blockscaled_gemm as mxfp8_blockscaled_gemm_1cta
 
 
-@tilelang.jit(execution_backend='cython')
+@tilelang.jit(execution_backend="cython")
 def mxfp8_blockscaled_gemm_2cta(
     A,
     B,
@@ -40,8 +40,8 @@ def mxfp8_blockscaled_gemm_2cta(
 
     A: T.Tensor[[M, K], in_dtype]
     B: T.Tensor[[K, N], in_dtype]
-    SFA: T.Tensor[[M, sf_k_padded], "uint8"]
-    SFB: T.Tensor[[N, sf_k_padded], "uint8"]
+    SFA: T.Tensor[[M, sf_k_padded], T.uint8]
+    SFB: T.Tensor[[N, sf_k_padded], T.uint8]
     C = T.empty((M, N), out_dtype)
 
     with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (bx, by):
@@ -50,12 +50,12 @@ def mxfp8_blockscaled_gemm_2cta(
 
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, half_N), in_dtype)
-        SFA_shared = T.alloc_shared((num_stages, block_M, 4), "uint8")
-        SFB_shared = T.alloc_shared((num_stages, half_N, 4), "uint8")
+        SFA_shared = T.alloc_shared((num_stages, block_M, 4), T.uint8)
+        SFB_shared = T.alloc_shared((num_stages, half_N, 4), T.uint8)
 
         C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
-        SFA_tmem = T.alloc_tmem([block_M, block_M // 128 * 4], "uint8")
-        SFB_tmem = T.alloc_tmem([block_M, block_N // 128 * 4], "uint8")
+        SFA_tmem = T.alloc_tmem([block_M, block_M // 128 * 4], T.uint8)
+        SFB_tmem = T.alloc_tmem([block_M, block_N // 128 * 4], T.uint8)
 
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
         C_shared = T.alloc_shared((block_M, block_N), out_dtype)
@@ -65,10 +65,12 @@ def mxfp8_blockscaled_gemm_2cta(
         consumed = T.alloc_cluster_barrier([1] * num_stages)
         tmem_full = T.alloc_barrier([1])
 
-        T.annotate_layout({
-            SFA_shared: tilelang.layout.make_linear_layout(SFA_shared),
-            SFB_shared: tilelang.layout.make_linear_layout(SFB_shared),
-        })
+        T.annotate_layout(
+            {
+                SFA_shared: tilelang.layout.make_linear_layout(SFA_shared),
+                SFB_shared: tilelang.layout.make_linear_layout(SFB_shared),
+            }
+        )
 
         tx = T.get_thread_binding()
         warp_idx = tx // 32
@@ -81,14 +83,14 @@ def mxfp8_blockscaled_gemm_2cta(
                 parity = (k // num_stages) & 1
                 T.mbarrier_wait_parity(consumed[stage], parity ^ 1)
                 T.tma_copy(
-                    A[bx * block_M:(bx + 1) * block_M, k * block_K:(k + 1) * block_K],
+                    A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
                     A_shared[stage, :, :],
                     barrier=loaded[stage],
                 )
                 T.tma_copy(
                     B[
-                        k * block_K:(k + 1) * block_K,
-                        (by * block_N + cta_id * half_N):(by * block_N + (cta_id + 1) * half_N),
+                        k * block_K : (k + 1) * block_K,
+                        (by * block_N + cta_id * half_N) : (by * block_N + (cta_id + 1) * half_N),
                     ],
                     B_shared[stage, :, :],
                     barrier=loaded[stage],
@@ -170,8 +172,8 @@ def blockscaled_gemm_ref(a, b, sfa_unpacked, sfb_unpacked, sf_granularity_k=128)
     for bi in range(sf_k_blocks):
         k_start = bi * sf_granularity_k
         k_end = min(k_start + sf_granularity_k, K)
-        a_block = a_f32[:, k_start:k_end] * sfa_scales[:, bi:bi + 1]
-        b_block = b_f32[k_start:k_end, :] * sfb_scales[:, bi:bi + 1].T
+        a_block = a_f32[:, k_start:k_end] * sfa_scales[:, bi : bi + 1]
+        b_block = b_f32[k_start:k_end, :] * sfb_scales[:, bi : bi + 1].T
         c += a_block @ b_block
     return c
 
@@ -249,10 +251,7 @@ def run_correctness_case(M, N, K, *, num_stages=4, all_ones=False):
 
     sim = cosine_similarity(c, ref_c)
     max_abs_err = (c.float() - ref_c.float()).abs().max().item()
-    print(
-        f"case M={M} N={N} K={K} all_ones={all_ones}: "
-        f"cos={sim.item():.6f}, max_abs_err={max_abs_err:.6f}"
-    )
+    print(f"case M={M} N={N} K={K} all_ones={all_ones}: cos={sim.item():.6f}, max_abs_err={max_abs_err:.6f}")
     assert sim > 0.99, f"Cosine similarity too low: {sim.item():.6f}"
     return a, b, sfa, sfb, c
 

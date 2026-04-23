@@ -2893,7 +2893,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
     std::string tcgen05_call =
-        "tl::(tcgen05_name)<(ABType), (USE_2CTA)>(uint64_t((desc_a) + (A_offset)), "
+        "tl::(tcgen05_name)<(ABType), (USE_2CTA)>(uint64_t((desc_a) + "
+        "(A_offset)), "
         "uint64_t((desc_b) + (B_offset)), (*reinterpret_cast<uint32_t*>((C))) "
         "+ (C_offset), "
         "(scale_out), static_cast<uint32_t>((desc_val)), "
@@ -2909,9 +2910,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(B_offset)", B_offset);
     replacer.register_rule("(C)", c_ref);
     replacer.register_rule("(C_offset)", c_offset);
-    replacer.register_rule(
-        "(tcgen05_name)",
-        enable_ws ? "tcgen05mma_blockscaled_ws_ss" : "tcgen05mma_blockscaled_ss");
+    replacer.register_rule("(tcgen05_name)",
+                           enable_ws ? "tcgen05mma_blockscaled_ws_ss"
+                                     : "tcgen05mma_blockscaled_ss");
     replacer.register_rule("(scale_out)", scale_out);
     replacer.register_rule("(desc_val)", this->PrintExpr(desc_expr));
     replacer.register_rule("(SFA)", sfa_ref);
@@ -2923,7 +2924,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ptx_tcgen05_cp())) {
     ICHECK_EQ(op->args.size(), 3U) << "ptx_tcgen05_cp expects 3 arguments";
     need_tcgen05_common_h_ = true;
-    // arg[0] = smem pointer, arg[1] = tmem data pointer, arg[2] = tmem column offset
+    // arg[0] = smem pointer, arg[1] = tmem data pointer, arg[2] = tmem column
+    // offset
     std::string smem_ptr = this->PrintExpr(op->args[0]);
     std::string tmem_ptr = this->PrintExpr(op->args[1]);
     std::string tmem_col_offset = this->PrintExpr(op->args[2]);
@@ -2933,8 +2935,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->PrintIndent();
     this->stream << "tl::tcgen05_cp<" << (use_2cta ? "true" : "false") << ">("
-                 << "tl::make_sf_smem_desc(reinterpret_cast<void*>(" << smem_ptr << ")), "
-                 << "(*reinterpret_cast<uint32_t*>(" << tmem_ptr << ")) + " << tmem_col_offset << ");\n";
+                 << "tl::make_sf_smem_desc(reinterpret_cast<void*>(" << smem_ptr
+                 << ")), "
+                 << "(*reinterpret_cast<uint32_t*>(" << tmem_ptr << ")) + "
+                 << tmem_col_offset << ");\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_sf_warp_transpose())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "ptx_tcgen05_sf_warp_transpose expects 1 argument";

@@ -1291,7 +1291,6 @@ def ptx_tcgen05_mma_blockscaled_ss(
     elif enable_2cta and bool(variant):
         raise ValueError("ptx_tcgen05_mma_blockscaled_ss: .ws and 2CTA cannot be combined")
 
-
     if isinstance(variant, str):
         v = variant.lower()
         if v in ("ws", "warp_specialized", "warp-specialized"):

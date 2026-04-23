@@ -101,11 +101,11 @@ class Use2CTACallDetector : public tir::StmtExprVisitor {
 public:
   bool found{false};
 
-  void VisitExpr_(const CallNode* op) final {
+  void VisitExpr_(const CallNode *op) final {
     auto it = op->annotations.find("use_2cta");
     if (it != op->annotations.end()) {
       PrimExpr val = Downcast<PrimExpr>((*it).second);
-      if (const auto* i = val.as<IntImmNode>()) {
+      if (const auto *i = val.as<IntImmNode>()) {
         if (i->value != 0) {
           found = true;
           return;
@@ -116,7 +116,7 @@ public:
   }
 };
 
-}  // namespace
+} // namespace
 
 class SharedTmemRewriter : public StmtExprMutator {
 public:
@@ -243,13 +243,13 @@ private:
       return StmtExprMutator::VisitStmt_(op);
     }
 
-    // If block has use_2cta attr, or contains any use_2cta call, add use_2cta: 1
-    // to tmem alloc/dealloc call annotations.
+    // If block has use_2cta attr, or contains any use_2cta call, add use_2cta:
+    // 1 to tmem alloc/dealloc call annotations.
     Map<String, ObjectRef> tmem_call_ann;
     bool enable_2cta_tmem = false;
     if (op->annotations.count("use_2cta")) {
       PrimExpr val = Downcast<PrimExpr>(op->annotations["use_2cta"]);
-      if (const auto* i = val.as<IntImmNode>()) {
+      if (const auto *i = val.as<IntImmNode>()) {
         if (i->value != 0) {
           enable_2cta_tmem = true;
         }

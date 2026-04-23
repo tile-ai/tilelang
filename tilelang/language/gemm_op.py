@@ -5,6 +5,7 @@ from __future__ import annotations
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
+from tilelang.layout import Layout
 from tvm import tir
 from tilelang.utils.language import (
     to_buffer_region,
@@ -363,13 +364,10 @@ def tcgen05_gemm_blockscaled(
     assert prim_expr_equal(K, K_B), f"T.tcgen05_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
     if use_2cta:
         assert prim_expr_equal(M_A, M) and prim_expr_equal(N_B * 2, N), (
-            f"T.tcgen05_gemm_blockscaled 2CTA shape check failed: "
-            f"M_A = {M_A}, expected M_C = {M}; N_B = {N_B}, expected N_C / 2 = {N} / 2"
+            f"T.tcgen05_gemm_blockscaled 2CTA shape check failed: M_A = {M_A}, expected M_C = {M}; N_B = {N_B}, expected N_C / 2 = {N} / 2"
         )
     else:
-        assert prim_expr_equal(N_B, N), (
-            f"T.tcgen05_gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
-        )
+        assert prim_expr_equal(N_B, N), f"T.tcgen05_gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
 
     A_stride = retrieve_stride(A_region)
     B_stride = retrieve_stride(B_region)
@@ -424,7 +422,7 @@ def tcgen05_gemm_blockscaled(
         stride_b,
         offset_a,
         offset_b,
-        1,       # k_pack
+        1,  # k_pack
         wg_wait,
         mbar,
         C_coords[0],
@@ -441,7 +439,7 @@ def make_blockscaled_gemm_layout(
     C: BufferLikeType,
     A: BufferLikeType,
     transpose_A: bool = False,
-) -> "Layout":
+) -> Layout:
     """Build the TMEM store layout for the C accumulator of a block-scaled GEMM.
 
     Users must call ``T.annotate_layout({C_tmem: layout})`` with the returned layout

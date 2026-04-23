@@ -210,8 +210,7 @@ class GemmTCGEN5(GemmBase):
             else _Simplify(_gemm_ss_cond, inline_let=True)
         )
 
-    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_var,
-                           mbar_phase_expr: tir.PrimExpr | None = None):
+    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_var, mbar_phase_expr: tir.PrimExpr | None = None):
         """Lower block-scaled MXFP8 GEMM to TIR.
 
         Block-scaled GEMM follows explicit-async TCGEN5MMA semantics: the MMA
@@ -258,16 +257,30 @@ class GemmTCGEN5(GemmBase):
         def _gemm_blockscaled_cond() -> None:
             if cluster_cond and thread_var // 32 == thread_bounds.min // warp_size:
                 mma_emitter.tcgen05mma_blockscaled(
-                    A_shared, B_shared, C_local, SFA_tmem, SFB_tmem,
-                    mbarptr, clear_accum, sf_a_id, sf_b_id,
+                    A_shared,
+                    B_shared,
+                    C_local,
+                    SFA_tmem,
+                    SFB_tmem,
+                    mbarptr,
+                    clear_accum,
+                    sf_a_id,
+                    sf_b_id,
                 )
 
         @T.prim_func
         def _gemm_blockscaled() -> None:
             if cluster_cond:
                 mma_emitter.tcgen05mma_blockscaled(
-                    A_shared, B_shared, C_local, SFA_tmem, SFB_tmem,
-                    mbarptr, clear_accum, sf_a_id, sf_b_id,
+                    A_shared,
+                    B_shared,
+                    C_local,
+                    SFA_tmem,
+                    SFB_tmem,
+                    mbarptr,
+                    clear_accum,
+                    sf_a_id,
+                    sf_b_id,
                 )
 
         return (

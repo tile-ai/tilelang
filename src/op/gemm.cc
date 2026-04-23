@@ -586,16 +586,16 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                                            scale_in_a, scale_in_b);
         return Integer(static_cast<int64_t>(desc));
       });
-  refl::GlobalDef().def(
-      "tl.get_tcgen5_blockscaled_instr_desc",
-      [](int atom_m, int atom_n, DataType ab_dtype, bool a_is_k_major,
-         bool b_is_k_major, int scale_in_a, int scale_in_b, int a_sf_id,
-         int b_sf_id) {
-        uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
-            atom_m, atom_n, ab_dtype, a_is_k_major, b_is_k_major, scale_in_a,
-            scale_in_b, a_sf_id, b_sf_id);
-        return Integer(static_cast<int64_t>(desc));
-      });
+  refl::GlobalDef().def("tl.get_tcgen5_blockscaled_instr_desc",
+                        [](int atom_m, int atom_n, DataType ab_dtype,
+                           bool a_is_k_major, bool b_is_k_major, int scale_in_a,
+                           int scale_in_b, int a_sf_id, int b_sf_id) {
+                          uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
+                              atom_m, atom_n, ab_dtype, a_is_k_major,
+                              b_is_k_major, scale_in_a, scale_in_b, a_sf_id,
+                              b_sf_id);
+                          return Integer(static_cast<int64_t>(desc));
+                        });
 }
 
 } // namespace tl

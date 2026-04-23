@@ -566,10 +566,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return _warp_mma_ts(a_tmem_data, B_buf, C_local_buf, mbar)
 
     def tcgen05mma_blockscaled(
-        self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer,
-        SFA_tmem, SFB_tmem,
-        mbar, clear_accum: PrimExpr = False,
-        sf_a_id=0, sf_b_id=0,
+        self,
+        A_buf: Buffer,
+        B_buf: Buffer,
+        C_local_buf: Buffer,
+        SFA_tmem,
+        SFB_tmem,
+        mbar,
+        clear_accum: PrimExpr = False,
+        sf_a_id=0,
+        sf_b_id=0,
     ):
         """Emit a block-scaled TCGEN5MMA (SS variant with TMEM scale factors).
 
@@ -607,9 +613,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
 
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        b_swizzle_atom_elems = (
-            n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        )
+        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * atom_m_per_cta * elems_in_bytes)
         a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
@@ -621,8 +625,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 a_m_axis_atoms = atom_m_per_cta // a_swizzle_atom_elems
                 a_leading_byte_offset = k_dim * a_swizzle_mode.swizzle_byte_size() if a_m_axis_atoms > 1 else 0
                 a_stride_byte_offset = (
-                    8 * elems_in_bytes * a_swizzle_atom_elems if a_m_axis_atoms > 1
-                    else 8 * elems_in_bytes * atom_m_per_cta
+                    8 * elems_in_bytes * a_swizzle_atom_elems if a_m_axis_atoms > 1 else 8 * elems_in_bytes * atom_m_per_cta
                 )
 
         b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
@@ -635,16 +638,21 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
                 b_leading_byte_offset = b_swizzle_mode.swizzle_byte_size() * k_dim if b_n_axis_atoms > 1 else 0
                 b_stride_byte_offset = (
-                    8 * elems_in_bytes * b_swizzle_atom_elems if b_n_axis_atoms > 1
-                    else 8 * elems_in_bytes * n_dim_per_cta
+                    8 * elems_in_bytes * b_swizzle_atom_elems if b_n_axis_atoms > 1 else 8 * elems_in_bytes * n_dim_per_cta
                 )
 
         ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
         bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
 
         base_instr_desc = self.get_tcgen5_blockscaled_instr_desc(
-            atom_m, atom_n, a_is_k_major, b_is_k_major,
-            scale_in_a, scale_in_b, 0, 0,
+            atom_m,
+            atom_n,
+            a_is_k_major,
+            b_is_k_major,
+            scale_in_a,
+            scale_in_b,
+            0,
+            0,
         )
 
         a_dtype_abbrv = self.a_dtype_abbrv
@@ -701,16 +709,22 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             B_ptr = access_ptr_from(B_buf, "r")
 
             T.initialize_tcgen05_descriptor(
-                desc_a, A_ptr,
+                desc_a,
+                A_ptr,
                 int(a_leading_byte_offset >> 4),
                 int(a_stride_byte_offset >> 4),
-                0, False, int(a_swizzle_mode),
+                0,
+                False,
+                int(a_swizzle_mode),
             )
             T.initialize_tcgen05_descriptor(
-                desc_b, B_ptr,
+                desc_b,
+                B_ptr,
                 int(b_leading_byte_offset >> 4),
                 int(b_stride_byte_offset >> 4),
-                0, False, int(b_swizzle_mode),
+                0,
+                False,
+                int(b_swizzle_mode),
             )
 
             tmem_col_step = atom_n // (128 // atom_m_per_cta)
@@ -767,15 +781,27 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return _warp_mma_blockscaled(A_buf, B_buf, C_local_buf, sfa_data, sfb_data, mbar)
 
     def get_tcgen5_blockscaled_instr_desc(
-        self, atom_m: int, atom_n: int, a_is_k_major: bool, b_is_k_major: bool,
-        scale_in_a: int, scale_in_b: int, a_sf_id: int, b_sf_id: int,
+        self,
+        atom_m: int,
+        atom_n: int,
+        a_is_k_major: bool,
+        b_is_k_major: bool,
+        scale_in_a: int,
+        scale_in_b: int,
+        a_sf_id: int,
+        b_sf_id: int,
     ) -> PrimExpr:
         """Build the block-scaled instruction descriptor via FFI."""
         desc = _ffi_api.get_tcgen5_blockscaled_instr_desc(
-            atom_m, atom_n, DataType(self.a_dtype),
-            a_is_k_major, b_is_k_major,
-            scale_in_a, scale_in_b,
-            a_sf_id, b_sf_id,
+            atom_m,
+            atom_n,
+            DataType(self.a_dtype),
+            a_is_k_major,
+            b_is_k_major,
+            scale_in_a,
+            scale_in_b,
+            a_sf_id,
+            b_sf_id,
         )
         return lift(desc)
 

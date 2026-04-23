@@ -8,9 +8,16 @@ import tilelang.language as T
 
 @tilelang.jit
 def mxfp8_blockscaled_gemm(
-    A, B, SFA, SFB,
-    block_M, block_N, block_K,
-    in_dtype, out_dtype, accum_dtype,
+    A,
+    B,
+    SFA,
+    SFB,
+    block_M,
+    block_N,
+    block_K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
     num_stages,
     sf_granularity_k=128,
 ):
@@ -20,8 +27,8 @@ def mxfp8_blockscaled_gemm(
 
     A: T.Tensor[[M, K], in_dtype]
     B: T.Tensor[[K, N], in_dtype]
-    SFA: T.Tensor[[M, T.ceildiv(K, sf_granularity_k)], "uint8"]
-    SFB: T.Tensor[[N, T.ceildiv(K, sf_granularity_k)], "uint8"]
+    SFA: T.Tensor[[M, T.ceildiv(K, sf_granularity_k)], T.uint8]
+    SFB: T.Tensor[[N, T.ceildiv(K, sf_granularity_k)], T.uint8]
     C = T.empty((M, N), out_dtype)
 
     with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128, cluster_dims=2) as (bx, by):
@@ -31,12 +38,12 @@ def mxfp8_blockscaled_gemm(
 
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
         B_shared = T.alloc_shared((num_stages, block_K, half_N), in_dtype)
-        SFA_shared = T.alloc_shared((num_stages, block_M, 4), "uint8")
-        SFB_shared = T.alloc_shared((num_stages, block_N, 4), "uint8")
+        SFA_shared = T.alloc_shared((num_stages, block_M, 4), T.uint8)
+        SFB_shared = T.alloc_shared((num_stages, block_N, 4), T.uint8)
 
         C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
-        SFA_tmem = T.alloc_tmem([block_M, block_M // 128 * 4], "uint8")
-        SFB_tmem = T.alloc_tmem([block_M, block_N // 128 * 4], "uint8")
+        SFA_tmem = T.alloc_tmem([block_M, block_M // 128 * 4], T.uint8)
+        SFB_tmem = T.alloc_tmem([block_M, block_N // 128 * 4], T.uint8)
 
         C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
         C_shared = T.alloc_shared((block_M, block_N), out_dtype)
@@ -46,10 +53,12 @@ def mxfp8_blockscaled_gemm(
         consumed = T.alloc_cluster_barrier([1] * num_stages)
         tmem_full = T.alloc_barrier([1])
 
-        T.annotate_layout({
-            SFA_shared: tilelang.layout.make_linear_layout(SFA_shared),
-            SFB_shared: tilelang.layout.make_linear_layout(SFB_shared),
-        })
+        T.annotate_layout(
+            {
+                SFA_shared: tilelang.layout.make_linear_layout(SFA_shared),
+                SFB_shared: tilelang.layout.make_linear_layout(SFB_shared),
+            }
+        )
 
         tx = T.get_thread_binding()
         warp_idx = tx // 32
@@ -60,14 +69,14 @@ def mxfp8_blockscaled_gemm(
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
                 T.tma_copy(
-                    A[by * block_M:(by + 1) * block_M, k * block_K:(k + 1) * block_K],
+                    A[by * block_M : (by + 1) * block_M, k * block_K : (k + 1) * block_K],
                     A_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
                 T.tma_copy(
                     B[
-                        k * block_K:(k + 1) * block_K,
-                        (bx * block_N + cta_id * half_N):(bx * block_N + (cta_id + 1) * half_N),
+                        k * block_K : (k + 1) * block_K,
+                        (bx * block_N + cta_id * half_N) : (bx * block_N + (cta_id + 1) * half_N),
                     ],
                     B_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
@@ -103,9 +112,7 @@ def mxfp8_blockscaled_gemm(
                     sf_k_idx = k // sf_load_period
                     for i in T.serial(block_M // 32):
                         for j in T.serial(4):
-                            SFA_shared[k % num_stages, i * 32 + lane, j] = SFA[
-                                by * block_M + i * 32 + lane, sf_k_idx * 4 + j
-                            ]
+                            SFA_shared[k % num_stages, i * 32 + lane, j] = SFA[by * block_M + i * 32 + lane, sf_k_idx * 4 + j]
                     for i in T.serial(half_N // 32):
                         for j in T.serial(4):
                             SFB_shared[k % num_stages, cta_id * half_N + i * 32 + lane, j] = SFB[
@@ -143,7 +150,7 @@ def blockscaled_gemm_ref(a, b, sfa_unpacked, sfb_unpacked, sf_granularity_k=128,
     for bi in range(sf_k_blocks):
         k_start = bi * sf_granularity_k
         k_end = min(k_start + sf_granularity_k, K)
-        a_block = a_f32[:, k_start:k_end] * sfa_scales[:, bi:bi + 1]
+        a_block = a_f32[:, k_start:k_end] * sfa_scales[:, bi : bi + 1]
         for ni in range(n_blocks):
             n_start = ni * sf_granularity_n
             n_end = min(n_start + sf_granularity_n, N)
@@ -178,16 +185,21 @@ def main():
     sfb_unpacked = sfb_coarse.repeat_interleave(sf_granularity_n, dim=0)[:N].contiguous()
 
     c = mxfp8_blockscaled_gemm(
-        a, b, sfa, sfb_unpacked,
-        block_M, block_N, block_K,
-        in_dtype, out_dtype, accum_dtype,
+        a,
+        b,
+        sfa,
+        sfb_unpacked,
+        block_M,
+        block_N,
+        block_K,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
         num_stages,
         sf_granularity_k,
     )
 
-    ref_c = blockscaled_gemm_ref(
-        a, b, sfa[:, :sf_k_blocks], sfb_coarse, sf_granularity_k, sf_granularity_n
-    ).to(torch.bfloat16)
+    ref_c = blockscaled_gemm_ref(a, b, sfa[:, :sf_k_blocks], sfb_coarse, sf_granularity_k, sf_granularity_n).to(torch.bfloat16)
     sim = cosine_similarity(c, ref_c)
     print(f"Output shape: {c.shape}, dtype: {c.dtype}")
     print(f"Cosine similarity: {sim.item():.6f}")

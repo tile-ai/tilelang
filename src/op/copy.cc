@@ -1255,12 +1255,13 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   // tcgen05.cp: shared memory → tensor memory
   if (is_cp) {
     // SMEM → TMEM copy for scale factors (UTCCP).
-    // Automatically emits sf_warp_transpose (in-place [4][32] → [32][4] transpose
-    // in SMEM to match tcgen05.cp.warpx4 hardware read pattern) followed by
-    // tcgen05.cp.cta_group::1.32x128b.warpx4 (512 bytes = 4 TMEM columns per call).
-    // Currently supports uint8 and uint32 source dtypes.
+    // Automatically emits sf_warp_transpose (in-place [4][32] → [32][4]
+    // transpose in SMEM to match tcgen05.cp.warpx4 hardware read pattern)
+    // followed by tcgen05.cp.cta_group::1.32x128b.warpx4 (512 bytes = 4 TMEM
+    // columns per call). Currently supports uint8 and uint32 source dtypes.
     constexpr int WARP_SIZE = 32;
-    constexpr int BYTES_PER_CP = 512;  // 128 uint32 = 512 bytes per tcgen05.cp call
+    constexpr int BYTES_PER_CP =
+        512; // 128 uint32 = 512 bytes per tcgen05.cp call
     constexpr int COLS_PER_CP = 4;
 
     int dtype_bytes = src->dtype.bytes();
@@ -1307,9 +1308,8 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
 
       // 1. sf_warp_transpose: in-place [4][32] → [32][4] transpose for warpx4
       PrimExpr transpose_ptr = make_smem_ptr(chunk_offset, elements_per_cp);
-      stmts.push_back(Evaluate(
-          Call(DataType::Void(), ptx_tcgen05_sf_warp_transpose(),
-               {transpose_ptr})));
+      stmts.push_back(Evaluate(Call(
+          DataType::Void(), ptx_tcgen05_sf_warp_transpose(), {transpose_ptr})));
 
       // 2. tcgen05.cp: copy transposed data from SMEM to TMEM
       PrimExpr cp_ptr = make_smem_ptr(chunk_offset, elements_per_cp);
@@ -1318,9 +1318,8 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
       if (annotations.find("use_2cta") != annotations.end()) {
         cp_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
       }
-      stmts.push_back(Evaluate(
-          Call(DataType::Void(), ptx_tcgen05_cp(),
-               {cp_ptr, tmem_ptr, col_offset}, cp_ann)));
+      stmts.push_back(Evaluate(Call(DataType::Void(), ptx_tcgen05_cp(),
+                                    {cp_ptr, tmem_ptr, col_offset}, cp_ann)));
     }
 
     Stmt body = stmts[0];
@@ -1333,10 +1332,9 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
         << "tcgen05.cp requires constant thread_bounds extent";
     int num_threads = *as_const_int(T.thread_bounds->extent);
     if (num_threads > WARP_SIZE) {
-      body = IfThenElse(
-          FloorDiv(T.thread_var, WARP_SIZE) ==
-              FloorDiv(T.thread_bounds->min, WARP_SIZE),
-          body);
+      body = IfThenElse(FloorDiv(T.thread_var, WARP_SIZE) ==
+                            FloorDiv(T.thread_bounds->min, WARP_SIZE),
+                        body);
     }
     return body;
   }

@@ -527,20 +527,20 @@ TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat8_e5m2>(
 }
 
 // ============================================================================
-// Block-scaled MMA variants: tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale
-// Used for MXFP8 block-scaled GEMM with scale factors in TMEM.
+// Block-scaled MMA variants:
+// tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale Used for MXFP8
+// block-scaled GEMM with scale factors in TMEM.
 // ============================================================================
 
 // Generic declaration: unsupported by default
 template <DataType C_type, bool use_2cta = false>
-TL_DEVICE void
-tcgen05mma_blockscaled_ss(uint64_t const & /*desc_a*/,
-                          uint64_t const & /*desc_b*/,
-                          uint32_t const & /*tmem_c*/,
-                          uint32_t const & /*scalec*/,
-                          uint32_t const & /*desc_val*/,
-                          uint32_t const & /*tmem_sfa*/,
-                          uint32_t const & /*tmem_sfb*/) {
+TL_DEVICE void tcgen05mma_blockscaled_ss(uint64_t const & /*desc_a*/,
+                                         uint64_t const & /*desc_b*/,
+                                         uint32_t const & /*tmem_c*/,
+                                         uint32_t const & /*scalec*/,
+                                         uint32_t const & /*desc_val*/,
+                                         uint32_t const & /*tmem_sfa*/,
+                                         uint32_t const & /*tmem_sfb*/) {
   static_assert(
       always_false_v<std::integral_constant<int, static_cast<int>(C_type)>>,
       "tl::tcgen05mma_blockscaled_ss: unsupported accumulator type");
@@ -550,8 +550,8 @@ tcgen05mma_blockscaled_ss(uint64_t const & /*desc_a*/,
 template <>
 TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, false>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
-    uint32_t const &scalec, uint32_t const &desc_val,
-    uint32_t const &tmem_sfa, uint32_t const &tmem_sfb) {
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
   if (cute::elect_one_sync()) {
     asm volatile(
         "{\n\t"
@@ -569,8 +569,8 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, false>(
 template <>
 TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, true>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
-    uint32_t const &scalec, uint32_t const &desc_val,
-    uint32_t const &tmem_sfa, uint32_t const &tmem_sfb) {
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
   if (cute::elect_one_sync()) {
     asm volatile(
         "{\n\t"
@@ -589,8 +589,8 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, true>(
 template <>
 TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e5m2, false>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
-    uint32_t const &scalec, uint32_t const &desc_val,
-    uint32_t const &tmem_sfa, uint32_t const &tmem_sfb) {
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
   tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, false>(
       desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
 }
@@ -598,8 +598,8 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e5m2, false>(
 template <>
 TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e5m2, true>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
-    uint32_t const &scalec, uint32_t const &desc_val,
-    uint32_t const &tmem_sfa, uint32_t const &tmem_sfb) {
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
   tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, true>(
       desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
 }

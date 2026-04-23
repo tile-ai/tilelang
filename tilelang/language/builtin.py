@@ -1233,14 +1233,6 @@ def tcgen05_after_thread_sync():
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
 
 
-def tcgen05_before_thread_sync():
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tcgen05_before_thread_sync"))
-
-
-def tcgen05_after_thread_sync():
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
-    
-
 def tcgen05_cp(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool = False):
     """Copy 128 scale factor elements from shared memory to tensor memory via UTCCP.
 
@@ -1250,9 +1242,7 @@ def tcgen05_cp(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool = False)
     smem_ptr = retrieve_ptr(smem_src, access_type="r")
     if isinstance(tmem_dst, (tir.Buffer,)):
         tmem_ptr = tmem_dst.data
-    elif isinstance(tmem_dst, BufferLoad):
-        tmem_ptr = tmem_dst.buffer.data
-    elif isinstance(tmem_dst, BufferRegion):
+    elif isinstance(tmem_dst, (BufferLoad, BufferRegion)):
         tmem_ptr = tmem_dst.buffer.data
     else:
         tmem_ptr = tmem_dst

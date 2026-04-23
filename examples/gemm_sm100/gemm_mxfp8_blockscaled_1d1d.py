@@ -15,9 +15,16 @@ from tilelang.profiler import do_bench
 
 @tilelang.jit
 def mxfp8_blockscaled_gemm(
-    A, B, SFA, SFB,
-    block_M, block_N, block_K,
-    in_dtype, out_dtype, accum_dtype,
+    A,
+    B,
+    SFA,
+    SFB,
+    block_M,
+    block_N,
+    block_K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
     num_stages,
     sf_granularity_k=128,
 ):
@@ -36,8 +43,8 @@ def mxfp8_blockscaled_gemm(
 
     A: T.Tensor[[M, K], in_dtype]
     B: T.Tensor[[K, N], in_dtype]
-    SFA: T.Tensor[[M, T.ceildiv(K, sf_granularity_k)], "uint8"]
-    SFB: T.Tensor[[N, T.ceildiv(K, sf_granularity_k)], "uint8"]
+    SFA: T.Tensor[[M, T.ceildiv(K, sf_granularity_k)], T.uint8]
+    SFB: T.Tensor[[N, T.ceildiv(K, sf_granularity_k)], T.uint8]
     C = T.empty((M, N), out_dtype)
 
     with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128) as (bx, by):
@@ -74,12 +81,12 @@ def mxfp8_blockscaled_gemm(
             for k in T.serial(k_iters):
                 T.mbarrier_wait_parity(consumed[k % num_stages], ((k // num_stages) & 1) ^ 1)
                 T.tma_copy(
-                    A[bx * block_M:(bx + 1) * block_M, k * block_K:(k + 1) * block_K],
+                    A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
                     A_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
                 T.tma_copy(
-                    B[k * block_K:(k + 1) * block_K, by * block_N:(by + 1) * block_N],
+                    B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N],
                     B_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
@@ -87,11 +94,11 @@ def mxfp8_blockscaled_gemm(
                 if k % sf_load_period == 0:
                     sf_k_idx = k // sf_load_period
                     T.copy(
-                        SFA[bx * block_M:(bx + 1) * block_M, sf_k_idx * 4:(sf_k_idx + 1) * 4],
+                        SFA[bx * block_M : (bx + 1) * block_M, sf_k_idx * 4 : (sf_k_idx + 1) * 4],
                         SFA_shared[k % num_stages, :, :],
                     )
                     T.copy(
-                        SFB[by * block_N:(by + 1) * block_N, sf_k_idx * 4:(sf_k_idx + 1) * 4],
+                        SFB[by * block_N : (by + 1) * block_N, sf_k_idx * 4 : (sf_k_idx + 1) * 4],
                         SFB_shared[k % num_stages, :, :],
                     )
                 T.mbarrier_arrive(loaded[k % num_stages])
@@ -164,9 +171,9 @@ def blockscaled_gemm_ref(a, b, sfa_unpacked, sfb_unpacked, sf_granularity_k=128)
         k_start = bi * sf_granularity_k
         k_end = min(k_start + sf_granularity_k, K)
         # Scale A block: [M, block_k] * [M, 1]
-        a_block = a_f32[:, k_start:k_end] * sfa_scales[:, bi:bi + 1]
+        a_block = a_f32[:, k_start:k_end] * sfa_scales[:, bi : bi + 1]
         # Scale B block: [block_k, N] * [1, N]  (sfb is [N, blocks], transpose for broadcast)
-        b_block = b_f32[k_start:k_end, :] * sfb_scales[:, bi:bi + 1].T
+        b_block = b_f32[k_start:k_end, :] * sfb_scales[:, bi : bi + 1].T
         c += a_block @ b_block
     return c
 
@@ -197,19 +204,35 @@ def main():
     sfb = torch.randint(127 - 5, 127 + 5, (N, sf_k_padded), device="cuda", dtype=torch.uint8)
 
     c = mxfp8_blockscaled_gemm(
-        a, b, sfa, sfb,
-        block_M, block_N, block_K,
-        in_dtype, out_dtype, accum_dtype,
+        a,
+        b,
+        sfa,
+        sfb,
+        block_M,
+        block_N,
+        block_K,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
         num_stages,
         sf_granularity_k,
     )
-    print(mxfp8_blockscaled_gemm.get_kernel_source(
-        a, b, sfa, sfb,
-        block_M, block_N, block_K,
-        in_dtype, out_dtype, accum_dtype,
-        num_stages,
-        sf_granularity_k,
-    ))
+    print(
+        mxfp8_blockscaled_gemm.get_kernel_source(
+            a,
+            b,
+            sfa,
+            sfb,
+            block_M,
+            block_N,
+            block_K,
+            in_dtype,
+            out_dtype,
+            accum_dtype,
+            num_stages,
+            sf_granularity_k,
+        )
+    )
 
     ref_c = blockscaled_gemm_ref(a, b, sfa[:, :sf_k_blocks], sfb[:, :sf_k_blocks], sf_granularity_k).to(torch.bfloat16)
     sim = cosine_similarity(c, ref_c)
@@ -218,12 +241,18 @@ def main():
     # print(f"Max abs error: {(c.float() - ref_c.float()).abs().max().item():.6f}")
     print(f"Cosine similarity: {sim.item():.6f}")
 
-
     tl_latency = do_bench(
         lambda: mxfp8_blockscaled_gemm(
-            a, b, sfa, sfb,
-            block_M, block_N, block_K,
-            in_dtype, out_dtype, accum_dtype,
+            a,
+            b,
+            sfa,
+            sfb,
+            block_M,
+            block_N,
+            block_K,
+            in_dtype,
+            out_dtype,
+            accum_dtype,
             num_stages,
             sf_granularity_k,
         ),
