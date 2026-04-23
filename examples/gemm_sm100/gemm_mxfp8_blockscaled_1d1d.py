@@ -12,8 +12,6 @@ import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
 
-tilelang.disable_cache()
-
 
 @tilelang.jit
 def mxfp8_blockscaled_gemm(

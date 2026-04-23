@@ -9,9 +9,6 @@ except ModuleNotFoundError:
     from gemm_mxfp8_blockscaled_1d1d import mxfp8_blockscaled_gemm as mxfp8_blockscaled_gemm_1cta
 
 
-tilelang.disable_cache()
-
-
 @tilelang.jit(execution_backend='cython')
 def mxfp8_blockscaled_gemm_2cta(
     A,

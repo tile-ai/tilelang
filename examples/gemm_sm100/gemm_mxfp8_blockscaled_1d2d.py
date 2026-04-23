@@ -5,8 +5,6 @@ import torch
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 @tilelang.jit
 def mxfp8_blockscaled_gemm(
