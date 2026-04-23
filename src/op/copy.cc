@@ -110,7 +110,8 @@ Array<PrimExpr> ConvertLogicalRangesToPackedMins(const Array<Range> &ranges,
 
 bool CheckPackedOuterBoxDimsLE256(const Array<Range> &ranges, DataType dtype,
                                   arith::Analyzer *analyzer) {
-  Array<PrimExpr> packed_extents = ConvertLogicalRangesToPackedExtents(ranges, dtype);
+  Array<PrimExpr> packed_extents =
+      ConvertLogicalRangesToPackedExtents(ranges, dtype);
   if (packed_extents.empty()) {
     return true;
   }
@@ -666,8 +667,9 @@ bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
     LOG(WARNING)
         << "src range must have last dim multiple of 16 for tma bulk load "
         << src->name << " range " << src_range[src_range.size() - 1]->extent
-        << " -> " << LogicalElementsToStorageBytes(
-                          src_range[src_range.size() - 1]->extent, src->dtype)
+        << " -> "
+        << LogicalElementsToStorageBytes(
+               src_range[src_range.size() - 1]->extent, src->dtype)
         << " bytes % 16 != 0";
     return false;
   }
@@ -788,8 +790,9 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
     LOG(WARNING)
         << "dst range must have last dim multiple of 16 for tma bulk store "
         << dst->name << " range " << dst_range[dst_range.size() - 1]->extent
-        << " -> " << LogicalElementsToStorageBytes(
-                          dst_range[dst_range.size() - 1]->extent, dst->dtype)
+        << " -> "
+        << LogicalElementsToStorageBytes(
+               dst_range[dst_range.size() - 1]->extent, dst->dtype)
         << " bytes % 16 != 0";
     return false;
   }
@@ -1611,9 +1614,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   // Global Tensor Shape and Stride
   desc.global_addr = global_tensor->data;
-  desc.global_shape =
-      ReverseArray(ConvertLogicalShapeToPackedShape(global_tensor->shape,
-                                                    global_tensor->dtype));
+  desc.global_shape = ReverseArray(ConvertLogicalShapeToPackedShape(
+      global_tensor->shape, global_tensor->dtype));
   Array<PrimExpr> global_coords = ReverseArray(
       ConvertLogicalRangesToPackedMins(global_range, global_tensor->dtype));
   if (!global_tensor->strides.empty()) {
@@ -1637,9 +1639,10 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   // Make global stride in bytes
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
     return cast(DataType::Int(64), e) *
-           make_const(DataType::Int(64), desc.data_type == CU_TENSOR_MAP_DATA_TYPE_UINT8
-                                              ? 1
-                                              : global_tensor->dtype.bytes());
+           make_const(DataType::Int(64),
+                      desc.data_type == CU_TENSOR_MAP_DATA_TYPE_UINT8
+                          ? 1
+                          : global_tensor->dtype.bytes());
   });
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
     auto stride = desc.global_stride[i].as<IntImmNode>();
@@ -1684,9 +1687,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   }
   // TODO(lei): find a much smarter way to deduce smem box dim
   // instead of using global_range
-  desc.smem_box =
-      ReverseArray(ConvertLogicalRangesToPackedExtents(global_range,
-                                                       global_tensor->dtype));
+  desc.smem_box = ReverseArray(
+      ConvertLogicalRangesToPackedExtents(global_range, global_tensor->dtype));
 
   desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
   // L2 & OOB
@@ -1842,12 +1844,12 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   for (size_t i = 0; i < global_range.size(); ++i) {
     PrimExpr extent = global_range[i]->extent;
     if (i == global_range.size() - 1) {
-      extent = IsSubByteStorage(global_tensor->dtype)
-                   ? IntImm(global_range[i]->extent.dtype(),
-                            instruction_dim *
-                                (8 / GetElementStorageBits(
-                                         global_tensor->dtype)))
-                   : IntImm(global_range[i]->extent.dtype(), instruction_dim);
+      extent =
+          IsSubByteStorage(global_tensor->dtype)
+              ? IntImm(global_range[i]->extent.dtype(),
+                       instruction_dim *
+                           (8 / GetElementStorageBits(global_tensor->dtype)))
+              : IntImm(global_range[i]->extent.dtype(), instruction_dim);
     }
     logical_total_elements *= extent;
   }
@@ -1875,9 +1877,9 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), op, args, ann_loop)));
   } else {
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, shared_offset,
-        logical_total_elements);
+    PrimExpr shared_addr =
+        shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
+                                 shared_offset, logical_total_elements);
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);
