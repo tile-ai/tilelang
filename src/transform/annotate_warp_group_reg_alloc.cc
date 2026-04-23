@@ -112,11 +112,10 @@ public:
     if (collector.warp_specialized_) {
       return {Array<IntImm>({}), true};
     }
-    Array<IntImm> nreg =
-        collector.has_no_set_max_nreg_
-            ? Array<IntImm>({IntImm(DataType::Int(32), -1),
-                             IntImm(DataType::Int(32), -1)})
-            : collector.nreg_;
+    Array<IntImm> nreg = collector.has_no_set_max_nreg_
+                             ? Array<IntImm>({IntImm(DataType::Int(32), -1),
+                                              IntImm(DataType::Int(32), -1)})
+                             : collector.nreg_;
     return {nreg, false};
   }
 
@@ -251,12 +250,14 @@ private:
         if (!has_simt_copy && dec_reg != -1 && inc_reg != -1) {
           int final_dec_reg = dec_reg == 0 ? 24 : dec_reg;
           int final_inc_reg = inc_reg == 0 ? 240 : inc_reg;
-          dec_reg_stmt = Evaluate(Call(
-              DataType::Handle(), set_max_nreg(),
-              {IntImm(DataType::Int(32), final_dec_reg), IntImm(DataType::Int(32), 0)}));
-          inc_reg_stmt = Evaluate(Call(
-              DataType::Handle(), set_max_nreg(),
-              {IntImm(DataType::Int(32), final_inc_reg), IntImm(DataType::Int(32), 1)}));
+          dec_reg_stmt =
+              Evaluate(Call(DataType::Handle(), set_max_nreg(),
+                            {IntImm(DataType::Int(32), final_dec_reg),
+                             IntImm(DataType::Int(32), 0)}));
+          inc_reg_stmt =
+              Evaluate(Call(DataType::Handle(), set_max_nreg(),
+                            {IntImm(DataType::Int(32), final_inc_reg),
+                             IntImm(DataType::Int(32), 1)}));
         }
 
         Array<Stmt> producer_stmts;
