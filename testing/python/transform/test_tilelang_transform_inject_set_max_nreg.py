@@ -73,6 +73,38 @@ def test_inject_set_max_nreg():
     print("InjectSetMaxNReg test passed!")
 
 
+def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
+    """Raw T.set_max_nreg should stay in place instead of being treated as annotation."""
+
+    @T.prim_func
+    def before(A: T.Tensor((512, 512), T.float16), B: T.Tensor((512, 512), T.float16)):
+        bx = T.launch_thread("blockIdx.x", 8)
+        v = T.launch_thread("threadIdx.x", 256)
+
+        with T.block(""):
+            T.reads(A[bx * 64, 0:64])
+            T.writes(B[bx * 64, 0:64])
+
+            A_shared = T.alloc_buffer((128,), T.float16, scope="shared")
+            T.attr([128, 128], "kWarpSpecializationScope", 0)
+
+            if v >= 128:
+                T.set_max_nreg(80, 0)
+                A_shared[v - 128] = A[bx * 64, v - 128]
+            else:
+                T.set_max_nreg(240, 1)
+                B[bx * 64, v] = A_shared[v]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
+    mod = tir.transform.LowerOpaqueBlock()(mod)
+
+    script = mod.script()
+    assert script.count("T.set_max_nreg(80, 0)") == 1
+    assert script.count("T.set_max_nreg(240, 1)") == 1
+    assert script.count("T.set_max_nreg(") == 2
+
+
 def test_inject_set_max_nreg_no_set_max_nreg():
     """Test the InjectSetMaxNReg pass with no_set_max_nreg"""
 

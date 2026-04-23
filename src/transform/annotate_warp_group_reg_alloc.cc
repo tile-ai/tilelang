@@ -123,15 +123,17 @@ private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
       if (call->op.same_as(set_max_nreg())) {
+        return;
+      } else if (call->op.same_as(annotate_producer_reg_dealloc())) {
         auto reg_hint = call->args[0].as<IntImmNode>()->value;
-        auto is_inc = call->args[1].as<IntImmNode>()->value;
         ICHECK(reg_hint <= 240 && reg_hint >= 24)
             << "Invalid reg hint: " << reg_hint;
-        ICHECK(is_inc == 0 || is_inc == 1) << "Invalid is_inc: " << is_inc;
-
-        // producer should decrease register hint while consumer should increase
-        // register hint
-        nreg_.Set(is_inc, IntImm(DataType::Int(32), reg_hint));
+        nreg_.Set(0, IntImm(DataType::Int(32), reg_hint));
+      } else if (call->op.same_as(annotate_consumer_reg_alloc())) {
+        auto reg_hint = call->args[0].as<IntImmNode>()->value;
+        ICHECK(reg_hint <= 240 && reg_hint >= 24)
+            << "Invalid reg hint: " << reg_hint;
+        nreg_.Set(1, IntImm(DataType::Int(32), reg_hint));
       } else if (call->op.same_as(no_set_max_nreg())) {
         has_no_set_max_nreg_ = true;
       }
@@ -202,14 +204,12 @@ private:
     if (const CallNode *call = op->value.as<CallNode>()) {
       if (!preserve_explicit_set_max_nreg_ &&
           call->op.same_as(set_max_nreg())) {
-        // Remove the original producer/consumer hints from the shared prelude.
-        // For auto-generated warp-specialization they will be re-inserted in
-        // the matching producer/consumer branch scope below.
-        return Evaluate(0);
+        return StmtExprMutator::VisitStmt_(op);
       }
-      if (call->op.same_as(no_set_max_nreg())) {
-        // Remove the original set_max_nreg calls as they will be re-inserted
-        // at appropriate locations
+      if (call->op.same_as(annotate_producer_reg_dealloc()) ||
+          call->op.same_as(annotate_consumer_reg_alloc()) ||
+          call->op.same_as(no_set_max_nreg())) {
+        // Remove annotations after they have been consumed by this pass.
         return Evaluate(0);
       }
     }

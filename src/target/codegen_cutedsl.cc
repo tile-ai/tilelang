@@ -723,6 +723,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string func_name =
         is_inc ? "tl.warpgroup_reg_alloc" : "tl.warpgroup_reg_dealloc";
     stream << func_name << "(" << nreg << ")\n";
+  } else if (op->op.same_as(tl::annotate_producer_reg_dealloc()) ||
+             op->op.same_as(tl::annotate_consumer_reg_alloc())) {
+    return;
   } else if (op->op.same_as(tl::wait_wgmma())) {
     PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;

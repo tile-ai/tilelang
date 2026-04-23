@@ -490,6 +490,22 @@ TVM_DLL const Op &tma_store_wait();
 TVM_DLL const Op &set_max_nreg();
 
 /*!
+ * \brief Annotation-only producer reg dealloc hint for warp specialization
+ *
+ * annotate_producer_reg_dealloc(num_reg)
+ *
+ */
+TVM_DLL const Op &annotate_producer_reg_dealloc();
+
+/*!
+ * \brief Annotation-only consumer reg alloc hint for warp specialization
+ *
+ * annotate_consumer_reg_alloc(num_reg)
+ *
+ */
+TVM_DLL const Op &annotate_consumer_reg_alloc();
+
+/*!
  * \brief No set reg hint for warp-specialized branched
  *
  * no_set_max_nreg()
