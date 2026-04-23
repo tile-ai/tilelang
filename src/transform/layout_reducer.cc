@@ -16,6 +16,7 @@
 #include "../op/finalize_reducer.h"
 #include "../op/region.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "common/pipeline_utils.h"
 #include "layout_reducer.h"
 
 namespace tvm {
@@ -100,12 +101,13 @@ private:
    * Buffer in var_to_buffer_.
    * - Recursively visits and rewrites the block body via the base mutator.
    * - Merges any layouts accumulated in new_layout_map_ into the block's
-   * `attr::kLayoutMap` annotation (creating or extending the annotation), then
+   * `attr::kLayoutHintMap` annotation (creating or extending the annotation),
+   * then
    * clears new_layout_map_ for subsequent blocks.
    *
    * Side effects:
    * - Updates reducer_info_map_, var_to_buffer_, and may set the block-level
-   * `kLayoutMap` annotation.
+   * `kLayoutHintMap` annotation.
    * - Clears new_layout_map_ after merging.
    *
    * @param op The Block node being visited.
@@ -126,15 +128,21 @@ private:
       var_to_buffer_.Set(buffer->data, buffer);
     }
     auto result = IRMutatorWithAnalyzer::VisitStmt_(op).as<Block>().value();
-    // After iterating over the body, set all layout_map to block
+    // After iterating over the body, attach pre-inference layout hints.
     auto p_result = result.CopyOnWrite();
-    auto layout_map = p_result->annotations.Get(attr::kLayoutMap)
-                          ->as<Map<Var, Layout>>()
-                          .value_or(Map<Var, Layout>());
+    Map<Var, Layout> layout_map;
+    if (p_result->annotations.count(attr::kLayoutHintMap)) {
+      auto layout_map_ref = p_result->annotations.Get(attr::kLayoutHintMap);
+      ICHECK(layout_map_ref.has_value());
+      auto maybe_layout_map = layout_map_ref.value().as<Map<Var, Layout>>();
+      ICHECK(maybe_layout_map.has_value())
+          << "layout hint map must be Map<Var, Layout>";
+      layout_map = maybe_layout_map.value();
+    }
     for (auto &&[k, v] : new_layout_map_)
       layout_map.Set(k, v);
     if (!layout_map.empty())
-      p_result->annotations.Set(attr::kLayoutMap, layout_map);
+      p_result->annotations.Set(attr::kLayoutHintMap, layout_map);
     new_layout_map_.clear();
     return result;
   }
@@ -202,11 +210,11 @@ private:
       for (auto &&[reducer_var, info] : inside_reducer_range_) {
         // analyze thread index bound, need to be inside WS section
         ICHECK(thread_var_.defined());
-        ICHECK(analyzer_->const_int_bound.IsBound(thread_var_->var));
-        auto const_int_bound = analyzer_->const_int_bound(thread_var_);
-        int thread_min = const_int_bound->min_value;
-        int thread_extent =
-            const_int_bound->max_value - const_int_bound->min_value + 1;
+        auto const_int_bound = GetThreadConstIntBound(thread_var_, *analyzer_);
+        ICHECK(const_int_bound.has_value());
+        int thread_min = const_int_bound.value()->min_value;
+        int thread_extent = const_int_bound.value()->max_value -
+                            const_int_bound.value()->min_value + 1;
 
         auto opt_buffer = var_to_buffer_.Get(reducer_var);
         ICHECK(opt_buffer);
@@ -381,6 +389,26 @@ public:
   }
 };
 
+class ReducerInfoDetector : public StmtVisitor {
+public:
+  bool has_reducer_info = false;
+
+private:
+  void VisitStmt_(const BlockNode *op) final {
+    if (op->annotations.count(attr::kReducerInfo)) {
+      has_reducer_info = true;
+      return;
+    }
+    StmtVisitor::VisitStmt_(op);
+  }
+};
+
+static bool HasReducerInfo(const PrimFunc &f) {
+  ReducerInfoDetector detector;
+  detector(f->body);
+  return detector.has_reducer_info;
+}
+
 /**
  * @brief Create a TVM transform pass that lowers local.reducer buffers to
  * local.fragment layouts.
@@ -396,6 +424,9 @@ public:
 tvm::transform::Pass LayoutReducer() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    if (!HasReducerInfo(f)) {
+      return f;
+    }
     return ReducerLayoutAnnotator::Substitute(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutReducer", {});

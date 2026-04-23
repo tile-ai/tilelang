@@ -304,7 +304,9 @@ Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
                                      const Buffer &buffer);
 
 namespace attr {
-// BlockAttr, Containing the layout for all the buffers in the block
+// BlockAttr before LayoutInference, keyed by buffer data vars.
+constexpr const char *kLayoutHintMap = "layout_hint_map";
+// BlockAttr after LayoutInference, keyed by concrete Buffer objects.
 constexpr const char *kLayoutMap = "layout_map";
 // ForAttr, Containing the parallel loop layout for a parallel for loop
 constexpr const char *kParallelLoopLayout = "parallel_loop_layout";

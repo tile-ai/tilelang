@@ -10,6 +10,7 @@ keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: GPU",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: C++",
@@ -31,6 +32,10 @@ dependencies = [
     # requirement as wide as possible to be compatible with other libraries
     # pip will try to use latest version whenever possible.
     "apache-tvm-ffi~=0.1.0,>=0.1.2",
+    # On Windows, install NVIDIA's PyPI CUDA toolkit into the runtime env so
+    # installed TileLang can find nvrtc, and source builds can discover nvcc
+    # and headers without a host CUDA installation.
+    "cuda-toolkit[cccl,nvcc,nvrtc]>=13; platform_system == 'Windows'",
     # torch-c-dlpack-ext provides prebuilt torch extensions.
     # Without it, TVM FFI may require JIT compilation on first import.
     "torch-c-dlpack-ext; python_version < '3.14'",
@@ -55,13 +60,16 @@ fp4 = ["ml-dtypes>=0.5.1"]
 vis = ["matplotlib"]
 # if you want to build with CUDA NVCC support
 nvcc = [
-    "nvidia-cuda-nvcc>=13.0.48",
-    "nvidia-cuda-cccl>=13.0.50",
+    "cuda-toolkit[cccl,nvcc,nvrtc]>=13; platform_system != 'Darwin'",
 ]
 
 [build-system]
 requires = [
+    # Mirror the Windows runtime CUDA toolkit in isolated build envs so
+    # CMake can detect it during PEP 517 builds from tools such as pip or uv.
+    "cuda-toolkit[cccl,nvcc,nvrtc]>=13; platform_system == 'Windows'",
     "cython>=3.1.0",
+    "ninja>=1.11",
     "scikit-build-core",
     "z3-solver>=4.13.0,<4.15.5",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
@@ -70,9 +78,34 @@ requires = [
 ]
 build-backend = "scikit_build_core.build"
 
+[dependency-groups]
+# Local development dependencies for tools that install dependency groups,
+# such as `uv sync`.
+dev = [
+    "cmake>=3.26.1",
+    "cython>=3.1.0",
+    "ninja>=1.11",
+    "pytest>=6.2.4",
+    "scikit-build-core",
+]
+
+[tool.uv.sources]
+# When resolving dependencies with uv on Windows, prefer CUDA-enabled PyTorch
+# wheels.
+torch = [
+    { index = "pytorch-cu130", marker = "platform_system == 'Windows'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
 [tool.scikit-build]
 wheel.py-api = "cp38"
 cmake.version = ">=3.26.1"
+ninja.version = ">=1.11"
+cmake.args = ["-G", "Ninja"]
 build-dir = "build"
 
 # editable.rebuild = true
@@ -136,8 +169,6 @@ tilelang = "tilelang"
 # Composable Kernel
 "tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
 "tilelang/3rdparty/composable_kernel/library" = "3rdparty/composable_kernel/library"
-
-
 
 [tool.codespell]
 ignore-words = "docs/spelling_wordlist.txt"

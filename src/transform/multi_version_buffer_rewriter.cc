@@ -74,18 +74,14 @@ Layout ExpandAnnotatedLayoutForMultiVersionedBuffer(const Layout &layout,
 bool UpdateExpandedLayoutMapForRemappedAllocs(
     const std::vector<std::pair<Buffer, Buffer>> &remapped_allocs,
     Map<String, Any> *annotations) {
-  if (remapped_allocs.empty() || !annotations->count(attr::kLayoutMap)) {
+  if (remapped_allocs.empty() || !annotations->count(attr::kLayoutHintMap)) {
     return false;
   }
 
-  auto layout_map_ref = annotations->Get(attr::kLayoutMap);
-  if (!layout_map_ref.has_value()) {
-    return false;
-  }
+  auto layout_map_ref = annotations->Get(attr::kLayoutHintMap);
+  ICHECK(layout_map_ref.has_value());
   auto layout_map = layout_map_ref.value().as<Map<Var, Layout>>();
-  if (!layout_map.has_value()) {
-    return false;
-  }
+  ICHECK(layout_map.has_value()) << "layout hint map must be Map<Var, Layout>";
 
   Map<Var, Layout> updated_layout_map = layout_map.value();
   std::unordered_set<const VarNode *> visited;
@@ -106,7 +102,7 @@ bool UpdateExpandedLayoutMapForRemappedAllocs(
   }
 
   if (changed) {
-    annotations->Set(attr::kLayoutMap, updated_layout_map);
+    annotations->Set(attr::kLayoutHintMap, updated_layout_map);
   }
   return changed;
 }

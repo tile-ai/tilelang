@@ -10,6 +10,72 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
 
 project(TILE_LANG C CXX)
 
+function(tilelang_get_python_interpreter OUTPUT_VAR)
+  if(DEFINED Python_EXECUTABLE AND NOT "${Python_EXECUTABLE}" STREQUAL "" AND EXISTS "${Python_EXECUTABLE}")
+    set(${OUTPUT_VAR} "${Python_EXECUTABLE}" PARENT_SCOPE)
+    return()
+  endif()
+
+  if(DEFINED Python3_EXECUTABLE AND NOT "${Python3_EXECUTABLE}" STREQUAL "" AND EXISTS "${Python3_EXECUTABLE}")
+    set(${OUTPUT_VAR} "${Python3_EXECUTABLE}" PARENT_SCOPE)
+    return()
+  endif()
+
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  set(${OUTPUT_VAR} "${Python3_EXECUTABLE}" PARENT_SCOPE)
+endfunction()
+
+function(tilelang_generate_windows_import_library DLL_PATH OUTPUT_VAR STEM)
+  if(NOT WIN32)
+    set(${OUTPUT_VAR} "${DLL_PATH}" PARENT_SCOPE)
+    return()
+  endif()
+
+  if(NOT EXISTS "${DLL_PATH}")
+    message(FATAL_ERROR "Cannot generate an import library from missing DLL: ${DLL_PATH}")
+  endif()
+
+  set(_tilelang_import_dir "${CMAKE_BINARY_DIR}/windows-import-libs/${STEM}")
+  file(MAKE_DIRECTORY "${_tilelang_import_dir}")
+  set(_tilelang_import_lib "${_tilelang_import_dir}/${STEM}.lib")
+  if(NOT EXISTS "${_tilelang_import_lib}")
+    tilelang_get_python_interpreter(_tilelang_python)
+    find_program(_tilelang_dumpbin NAMES dumpbin dumpbin.exe)
+    find_program(_tilelang_libexe NAMES lib lib.exe)
+    if(NOT _tilelang_python OR NOT _tilelang_dumpbin OR NOT _tilelang_libexe)
+      message(FATAL_ERROR "Could not find Python/dumpbin/lib.exe to generate an import library for ${DLL_PATH}")
+    endif()
+
+    set(_tilelang_def_file "${_tilelang_import_dir}/${STEM}.def")
+    execute_process(
+      COMMAND "${_tilelang_python}" "${CMAKE_CURRENT_LIST_DIR}/cmake/generate_windows_import_lib.py"
+              --dumpbin "${_tilelang_dumpbin}"
+              --dll "${DLL_PATH}"
+              --def "${_tilelang_def_file}"
+      RESULT_VARIABLE _tilelang_def_result
+    )
+    if(NOT _tilelang_def_result EQUAL 0 OR NOT EXISTS "${_tilelang_def_file}")
+      message(FATAL_ERROR "Failed to extract exports from ${DLL_PATH}")
+    endif()
+
+    set(_tilelang_machine "X64")
+    if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
+      set(_tilelang_machine "X86")
+    elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+      set(_tilelang_machine "ARM64")
+    endif()
+    execute_process(
+      COMMAND "${_tilelang_libexe}" "/def:${_tilelang_def_file}" "/machine:${_tilelang_machine}" "/out:${_tilelang_import_lib}"
+      RESULT_VARIABLE _tilelang_lib_result
+    )
+    if(NOT _tilelang_lib_result EQUAL 0 OR NOT EXISTS "${_tilelang_import_lib}")
+      message(FATAL_ERROR "Failed to generate import library ${_tilelang_import_lib} from ${DLL_PATH}")
+    endif()
+  endif()
+
+  set(${OUTPUT_VAR} "${_tilelang_import_lib}" PARENT_SCOPE)
+endfunction()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -215,9 +281,12 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
     elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
       # Build CPU-only when we explicitly disable CUDA
       set(USE_CUDA OFF)
-    else()
+    elseif(TILELANG_CUDA_TOOLKIT_AVAILABLE)
       message(STATUS "Enable CUDA support by default.")
       set(USE_CUDA ON)
+    else()
+      message(STATUS "CUDA toolkit not found; building without CUDA support by default.")
+      set(USE_CUDA OFF)
     endif()
   endif()
 endif()
@@ -307,11 +376,33 @@ elseif(USE_ROCM)
 elseif(USE_CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   find_package(CUDAToolkit REQUIRED)
-  set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc")
+  if(CUDAToolkit_NVCC_EXECUTABLE)
+    set(CMAKE_CUDA_COMPILER "${CUDAToolkit_NVCC_EXECUTABLE}" CACHE FILEPATH "CUDA compiler" FORCE)
+  elseif(WIN32)
+    set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc.exe" CACHE FILEPATH "CUDA compiler" FORCE)
+  else()
+    set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
+  endif()
   add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
 
   # Set `USE_CUDA=/usr/local/cuda-x.y`
   cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
+
+  if(WIN32)
+    file(GLOB _tilelang_nvrtc_candidates
+      "${CUDAToolkit_ROOT}/bin/x86_64/nvrtc64_*.dll"
+      "${CUDAToolkit_ROOT}/bin/nvrtc64_*.dll")
+    list(SORT _tilelang_nvrtc_candidates COMPARE NATURAL ORDER DESCENDING)
+    if(_tilelang_nvrtc_candidates)
+      list(GET _tilelang_nvrtc_candidates 0 _tilelang_nvrtc_library)
+      tilelang_generate_windows_import_library("${_tilelang_nvrtc_library}" _tilelang_nvrtc_import_lib "nvrtc")
+      set(CUDA_NVRTC_LIBRARY "${_tilelang_nvrtc_import_lib}" CACHE FILEPATH
+        "NVRTC runtime library to link against" FORCE)
+    endif()
+  endif()
+  if(TILELANG_USE_CUDA_STUBS)
+    add_compile_definitions(TILELANG_CUDA_STUBS_ENABLED=1)
+  endif()
 
   if(TILELANG_USE_CUDA_STUBS)
     if(WIN32 AND NOT CYGWIN)
@@ -454,6 +545,11 @@ endif()
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
 
 add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
+if(MSVC)
+  # Keep the wider project on its current baseline, but let TileLang's C++
+  # sources use C++20 so designated initializers compile under MSVC.
+  target_compile_features(tilelang_objs PRIVATE cxx_std_20)
+endif()
 
 # Set debug mode compile definitions
 # Enable the TVM debug option, i.e., TVM_LOG_DEBUG
@@ -464,19 +560,48 @@ endif()
 
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 target_compile_definitions(tilelang_objs PRIVATE TVM_LOG_CUSTOMIZE=1)
+if(WIN32)
+  # Some TVM headers define inline/template members behind TVM_DLL. MSVC
+  # rejects those definitions when TVM_DLL expands to dllimport in TileLang's
+  # consumer translation units, so consume them as ordinary declarations here.
+  target_compile_definitions(tilelang_objs PRIVATE TVM_DLL=)
+endif()
 if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
-add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-target_link_libraries(tilelang PUBLIC tvm)
+set(TILELANG_OUTPUT_TARGETS tvm)
+if(WIN32)
+  # On Windows, TileLang subclasses a large number of non-exported TVM C++
+  # classes. Building those objects into tvm.dll avoids an otherwise fragile
+  # cross-DLL ABI boundary while keeping Python-side registration semantics.
+  #
+  # MSVC can still discard translation-unit-local static init triggers from
+  # object-library inputs when those TUs are otherwise only referenced for
+  # side effects (for example TVM_FFI_STATIC_INIT_BLOCK() registrations).
+  # Archive the TileLang objects first, then force-include that archive into
+  # tvm.dll so tl.* object/global registrations survive the final link.
+  add_library(tilelang_archive STATIC $<TARGET_OBJECTS:tilelang_objs>)
+  set_target_properties(tilelang_archive PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    LINKER_LANGUAGE CXX
+  )
+  target_link_libraries(tvm PRIVATE tilelang_archive)
+  target_link_options(tvm PRIVATE
+    "/WHOLEARCHIVE:$<TARGET_FILE:tilelang_archive>"
+  )
+else()
+  add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
+  target_link_libraries(tilelang PUBLIC tvm)
 
-# Place dev build outputs under build/lib for consistency
-set_target_properties(tilelang PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
+  # Place dev build outputs under build/lib for consistency
+  set_target_properties(tilelang PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  )
+  list(PREPEND TILELANG_OUTPUT_TARGETS tilelang)
+endif()
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
@@ -496,6 +621,16 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
+if(WIN32)
+  # Python headers on Windows auto-link pythonXY_d.lib in Debug builds, but
+  # some managed CPython distributions only ship the stable import library we
+  # already link below.
+  target_compile_definitions(tilelang_cython_wrapper PRIVATE Py_NO_LINK_LIB=1)
+  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+    target_link_options(tilelang_cython_wrapper PRIVATE
+      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+  endif()
+endif()
 
 # Ensure dev builds drop the extension into build/lib alongside other shared libs
 set_target_properties(tilelang_cython_wrapper PROPERTIES
@@ -520,8 +655,6 @@ if(USE_Z3 AND USE_PYPI_Z3)
     set_target_properties(tvm PROPERTIES BUILD_RPATH "\$ORIGIN")
   endif()
 endif()
-
-set(TILELANG_OUTPUT_TARGETS tilelang tvm)
 
 if(USE_CUDA AND TILELANG_USE_CUDA_STUBS)
   # Link against CUDA stub library instead of libcuda.so

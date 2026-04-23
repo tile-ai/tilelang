@@ -752,11 +752,13 @@ private:
     // BufferLoad/BufferStore
     IRVisitorWithAnalyzer::VisitStmt_(op);
 
-    // After visiting, apply layouts to all collected buffers
-    if (op->annotations.count(attr::kLayoutMap)) {
-      // Check if the layout map is Map<Var, Layout>
-      auto map =
-          op->annotations.Get(attr::kLayoutMap)->as<Map<Var, Layout>>().value();
+    // After visiting, apply pre-inference layout hints to collected buffers.
+    if (op->annotations.count(attr::kLayoutHintMap)) {
+      auto layout_map_ref = op->annotations.Get(attr::kLayoutHintMap);
+      ICHECK(layout_map_ref.has_value());
+      auto map_opt = layout_map_ref.value().as<Map<Var, Layout>>();
+      ICHECK(map_opt.has_value()) << "layout hint map must be Map<Var, Layout>";
+      auto map = map_opt.value();
       for (const auto &[var, layout] : map) {
         ICHECK(buffer_data_to_buffers_.count(var))
             << "buffer " << var << " is not found in the block";
@@ -1206,8 +1208,8 @@ private:
    *
    * Converts the visited Block via the base visitor, asserts that every buffer
    * allocated with scope "local.framgent" has an inferred layout in
-   * result_.layout_map, and attaches result_.layout_map to the Block's
-   * annotations under attr::kLayoutMap.
+   * result_.layout_map, attaches it under attr::kLayoutMap, and clears any
+   * pre-inference attr::kLayoutHintMap annotation.
    *
    * If any "local.framgent" buffer lacks an entry in result_.layout_map an
    * ICHECK will fail with the offending buffer printed.
@@ -1225,6 +1227,7 @@ private:
       }
     }
     auto block_ptr = block.CopyOnWrite();
+    block_ptr->annotations.erase(attr::kLayoutHintMap);
     block_ptr->annotations.Set(attr::kLayoutMap, result_.layout_map);
     return block;
   }

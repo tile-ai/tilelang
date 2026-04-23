@@ -10,7 +10,12 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
-from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
+from tilelang.contrib.nvcc import (
+    get_nvcc_compiler,
+    get_nvcc_subprocess_env,
+    get_target_arch,
+    get_target_compute_version,
+)
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 
@@ -137,7 +142,7 @@ class LibraryGenerator:
         try:
             if verbose:
                 print(f"compile_lib compilation command: {' '.join(command)}")
-            ret = subprocess.run(command, timeout=timeout)
+            ret = subprocess.run(command, timeout=timeout, env=get_nvcc_subprocess_env())
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 

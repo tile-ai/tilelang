@@ -36,11 +36,11 @@ python -c "import tilelang; print(tilelang.__version__)"
 
 **Prerequisites for building from source:**
 
-- **Operating System**: Linux
+- **Operating System**: Linux or Windows
 - **Python Version**: >= 3.9
 - **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
 
-If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. This section focuses on building from source on a native Linux environment.
+If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. This section focuses on native source builds. Linux package commands below use Ubuntu/Debian as the example environment, and Windows-specific notes are called out where they differ.
 
 First, install the OS-level prerequisites on Ubuntu/Debian-based systems using the following commands:
 
@@ -48,6 +48,10 @@ First, install the OS-level prerequisites on Ubuntu/Debian-based systems using t
 apt-get update
 apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-essential cmake libedit-dev
 ```
+
+On Windows, install Python 3, CMake/Ninja, and Visual Studio Build Tools with
+the MSVC C++ toolchain. Run the commands below from a Visual Studio Developer
+Command Prompt, or call `VsDevCmd.bat` first so CMake can find the compiler.
 
 Then, clone the tilelang repository and install it using pip. The `-v` flag enables verbose output during the build process.
 
@@ -64,24 +68,68 @@ pip install . -v
 ### With pip-provided CUDA toolchain (no host CUDA required)
 
 If you don't have CUDA installed on the host, you can use pip-provided CUDA packages instead.
+The recommended package is NVIDIA's official `cuda-toolkit` meta-package.
 
-**Option A** — pip toolchain in the current environment (use `--no-build-isolation`):
+Any Python environment manager is fine here as long as it gives you an
+activated environment. The examples below show both plain `pip` commands and a
+`uv` workflow.
+
+**Option A** — pip toolchain in the current environment:
 
 ```bash
 git clone --recursive https://github.com/tile-ai/tilelang.git
 cd tilelang
 pip install -r requirements-dev.txt
-pip install "nvidia-cuda-nvcc>=13" "nvidia-cuda-cccl>=13" "nvidia-cuda-nvrtc>=13"
-pip install . -v --no-build-isolation
+pip install "cuda-toolkit[cccl,nvcc,nvrtc]>=13"
+pip install .[nvcc] -v
 ```
 
-**Option B** — pip toolchain in another virtualenv or path:
+If the current virtual environment is activated, TileLang will auto-detect the
+pip-installed CUDA toolkit even under build isolation. This works with `venv`,
+Conda, Poetry shell, or any other activated Python environment.
+
+**Option B** — project-local environment (example: `uv`):
+
+If you use `uv` on Windows, prefer the helper script so `uv sync` runs inside
+the official Visual Studio developer command environment without requiring
+PowerShell:
+
+```bat
+git clone --recursive https://github.com/tile-ai/tilelang.git
+cd tilelang
+.\scripts\windows\uv-sync.cmd
+```
+
+The script defaults to `uv sync --extra nvcc`. You can pass additional `uv sync`
+flags after it, for example:
+
+```bat
+.\scripts\windows\uv-sync.cmd --reinstall-package tilelang -vv
+```
+
+On Linux, or if you already launched the official Visual Studio developer shell
+manually on Windows, use:
 
 ```bash
-# Point to the cu<ver> directory inside another venv's site-packages
-export WITH_PIP_CUDA_TOOLCHAIN=/path/to/venv/lib/python3.x/site-packages/nvidia/cu13
+git clone --recursive https://github.com/tile-ai/tilelang.git
+cd tilelang
+uv sync --extra nvcc
+```
+
+The `nvcc` extra installs `cuda-toolkit[cccl,nvcc,nvrtc]`, and TileLang will
+auto-detect it from the active virtual environment or the project-local `.venv`.
+
+**Option C** — pip toolchain in another virtualenv or path:
+
+```bash
+# WITH_PIP_CUDA_TOOLCHAIN may point to a venv, site-packages dir, nvidia dir,
+# or the final cu<ver> directory.
+export WITH_PIP_CUDA_TOOLCHAIN=/path/to/venv
 pip install . -v
 ```
+
+On Windows, the equivalent path may look like `.\.venv` or
+`.\.venv\Lib\site-packages`.
 
 If you want to install tilelang in development mode, you can use the `-e` flag so that any changes to the Python files will be reflected immediately without reinstallation.
 
@@ -89,26 +137,24 @@ If you want to install tilelang in development mode, you can use the `-e` flag s
 pip install -e . -v
 ```
 
-> **Note**: changes to C++ files require rebuilding the tilelang C++ library. See [Faster Rebuild for Developers](#faster-rebuild-for-developers) below. A default `build` directory will be created if you use `pip install`, so you can also directly run `make` in the `build` directory to rebuild it as [Working from Source via PYTHONPATH](#working-from-source-via-pythonpath) suggested below.
+> **Note**: changes to C++ files require rebuilding the tilelang C++ library. See [Faster Rebuild for Developers](#faster-rebuild-for-developers) below. A default `build` directory will be created if you use `pip install`, so you can also run `cmake --build build --parallel` to rebuild it as [Working from Source via PYTHONPATH](#working-from-source-via-pythonpath) suggested below.
 
 (working-from-source-via-pythonpath)=
 
 ### Working from Source via `PYTHONPATH` (Recommended for Developers)
 
-If you prefer to work directly from the source tree via `PYTHONPATH` instead of using pip, make sure the native extension (`libtilelang.so`) is built first:
+If you prefer to work directly from the source tree via `PYTHONPATH` instead of using pip, make sure the native extension (`libtilelang`) is built first:
 
 ```bash
-mkdir -p build
-cd build
-cmake .. -DUSE_CUDA=ON
-make -j
+cmake -S . -B build -DUSE_CUDA=ON
+cmake --build build --parallel
 ```
 
-We also recommend using `ninja` to speed up compilation:
+We also recommend using `Ninja` to speed up compilation when it is available:
 
 ```bash
-cmake .. -DUSE_CUDA=ON -G Ninja
-ninja
+cmake -S . -B build -DUSE_CUDA=ON -G Ninja
+cmake --build build --parallel
 ```
 
 Then add the repository root to `PYTHONPATH` before importing `tilelang`, for example:
@@ -297,7 +343,10 @@ pip install tilelang -f https://tile-ai.github.io/whl/nightly
 ## Install Configs
 
 ### Build-time environment variables
-`USE_CUDA`: If to enable CUDA support, default: `ON` on Linux, set to `OFF` to build a CPU version. By default, we'll use `/usr/local/cuda` for building tilelang. Set `CUDAToolkit_ROOT` to use different cuda toolkit.
+`USE_CUDA`: If to enable CUDA support. When not set explicitly, TileLang enables
+CUDA only if it can find a host CUDA toolkit or a pip-installed CUDA toolkit;
+otherwise it falls back to a CPU-only build. Set `USE_CUDA=OFF` to force a CPU
+version, or set `CUDAToolkit_ROOT` to use a specific CUDA toolkit.
 
 `USE_ROCM`: If to enable ROCm support, default: `OFF`. If your ROCm SDK does not located in `/opt/rocm`, set `USE_ROCM=<rocm_sdk>` to enable build ROCm against custom sdk path.
 
@@ -305,7 +354,14 @@ pip install tilelang -f https://tile-ai.github.io/whl/nightly
 
 `TVM_ROOT`: TVM source root to use.
 
-`WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit directory (e.g., `/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`). When set, the build system uses this directory instead of a host CUDA installation. If not set and no host CUDA is found, the build system will attempt to auto-detect pip-installed CUDA packages from the current Python environment.
+`WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit. This may point
+to a virtual environment root, a `site-packages` directory, an `nvidia`
+directory, or a final `cu<ver>` directory such as
+`/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`. When set, the build
+system uses this directory instead of a host CUDA installation. If not set and
+no host CUDA is found, the build system will attempt to auto-detect pip-installed
+CUDA packages from the current Python environment, the active virtual environment,
+or the project-local `.venv`.
 
 `NO_VERSION_LABEL` and `NO_TOOLCHAIN_VERSION`:
 When building tilelang, we'll try to embed SDK and version information into package version as below,

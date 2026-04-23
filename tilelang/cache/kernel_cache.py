@@ -52,6 +52,11 @@ class KernelCache:
     @staticmethod
     @functools.cache
     def _get_compile_args() -> dict:
+        if sys.platform == "win32":
+            from tilelang.contrib.msvc import create_shared as msvc_create_shared
+
+            return {"fcompile": msvc_create_shared}
+
         if sys.platform != "darwin":
             return {}
 
@@ -84,7 +89,7 @@ class KernelCache:
             pass
 
         if sys.platform == "win32":
-            lib_names = ["tilelang.dll", "libtilelang.dll"]
+            lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll"]
         elif sys.platform == "darwin":
             lib_names = ["libtilelang.dylib", "libtilelang.so"]
         else:
@@ -105,6 +110,8 @@ class KernelCache:
     @functools.cache
     def _get_base_key() -> dict:
         base = {"version": __version__, "platform": platform.machine()}
+        if sys.platform == "win32":
+            base["runtime_export"] = "msvc-v2"
         lib_stamp = KernelCache._get_tilelang_lib_stamp()
         if lib_stamp:
             base["tilelang_lib"] = lib_stamp

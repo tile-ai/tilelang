@@ -3554,82 +3554,107 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto offset = op->args[1];
     os << "tl::increase_descriptor_offset<int>(" << PrintExpr(descriptor)
        << ", " << PrintExpr(offset) << ")";
-  } else if (op->op.same_as(tl::__exp())) {
+  } else if (HandleLateIntrinsicCall(op, os)) {
+    // Handled by a helper to keep MSVC's parser away from the giant tail chain.
+  } else {
+    CodeGenC::VisitExpr_(op, os);
+  }
+}
+
+bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
+                                                  std::ostream &os) {
+  if (op->op.same_as(tl::__exp())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "exp");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::__exp10())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "exp10");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::__log())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "log");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::__log2())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "log2");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::__log10())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "log10");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::__tan())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "tan");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::__cos())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "cos");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::__sin())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "sin");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::ieee_add())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fadd", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+    return true;
   } else if (op->op.same_as(tl::ieee_sub())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fsub", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+    return true;
   } else if (op->op.same_as(tl::ieee_mul())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fmul", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+    return true;
   } else if (op->op.same_as(tl::ieee_fmaf())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[3])->value;
     std::string func_name = math_func(op->dtype, "fmaf", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
+    return true;
   } else if (op->op.same_as(tl::ieee_frcp())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
     std::string func_name = math_func(op->dtype, "frcp", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::ieee_fsqrt())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
     std::string func_name = math_func(op->dtype, "fsqrt", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::ieee_frsqrt())) {
     CUDAIEEEMath math_func;
     std::string func_name = math_func(op->dtype, "frsqrt", "rn");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::ieee_fdiv())) {
     CUDAIEEEMath math_func;
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+    return true;
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
@@ -3712,6 +3737,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (need_cast) {
       os << ")";
     }
+    return true;
   } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
     this->curand_random_generator_state =
@@ -3725,10 +3751,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "curand_init(" << PrintExpr(op->args[0]) << ", "
                  << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2])
                  << ", &" << this->curand_random_generator_state << ");\n";
+    return true;
     // Store state_var for later use by rng_rand
   } else if (op->op.same_as(tl::rng_rand())) {
     this->need_curand_kernel_h_ = true;
     os << "curand(&" << this->curand_random_generator_state << ")";
+    return true;
   } else if (op->op.same_as(tl::rng_rand_float())) {
     this->need_curand_kernel_h_ = true;
     os << "curand_" << op->args[0].as<StringImmNode>()->value;
@@ -3736,16 +3764,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "_double";
     }
     os << "(&" << this->curand_random_generator_state << ")";
+    return true;
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
     os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::warp_reduce_max())) {
     os << "tl::warp_reduce_max(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::warp_reduce_min())) {
     os << "tl::warp_reduce_min(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::warp_reduce_bitand())) {
     os << "tl::warp_reduce_bitand(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::warp_reduce_bitor())) {
     os << "tl::warp_reduce_bitor(" << PrintExpr(op->args[0]) << ")";
+    return true;
   } else if (op->op.same_as(tl::atomic_add_elem_op())) {
     // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -3756,6 +3790,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
+    return true;
   } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
     // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
@@ -3765,6 +3800,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << ", " << PrintExpr(op->args[2]);
     }
     os << ")";
+    return true;
   } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
     // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -3775,6 +3811,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
+    return true;
   } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
     // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -3785,10 +3822,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
+    return true;
   } else if (op->op.same_as(tl::atomic_load_elem_op())) {
     // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
     os << "AtomicLoad(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+    return true;
   } else if (op->op.same_as(tl::atomic_store_elem_op())) {
     // atomic_store_elem_op(dst_ptr, value, memory_order)
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -3797,6 +3836,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "AtomicStore(" << dst_ptr << ", " << value << ", "
                  << memory_order << ");\n";
+    return true;
   } else if (op->op.same_as(tl::atomic_max_elem_op())) {
     // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -3807,6 +3847,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
+    return true;
   } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
     // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
@@ -3816,6 +3857,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << ", " << PrintExpr(op->args[2]);
     }
     os << ")";
+    return true;
   } else if (op->op.same_as(tl::atomic_min_elem_op())) {
     // atomic_min_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
@@ -3826,6 +3868,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << ", " << PrintExpr(op->args[2]);
     }
     this->stream << ");\n";
+    return true;
   } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
     // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
@@ -3835,9 +3878,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << ", " << PrintExpr(op->args[2]);
     }
     os << ")";
-  } else {
-    CodeGenC::VisitExpr_(op, os);
+    return true;
   }
+  return false;
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {

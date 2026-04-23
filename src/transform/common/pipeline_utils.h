@@ -10,6 +10,7 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/tir/stmt.h>
 
 namespace tvm {
@@ -87,17 +88,39 @@ inline Optional<Integer> GetPipelineNumStages(const ForNode *loop) {
 // ---------------------------------------------------------------------------
 
 /*!
+ * \brief Query the constant-int bound of a thread IterVar via its underlying
+ * Var.
+ *
+ * TVM's bound analyzer API is defined in terms of Var/PrimExpr. Routing all
+ * thread-bound queries through thread_var->var avoids relying on IterVar's
+ * implicit conversion path, which has proven compiler-sensitive on Windows.
+ *
+ * \return The analyzed bound, or nullopt if no bound is known.
+ */
+inline Optional<arith::ConstIntBound>
+GetThreadConstIntBound(const IterVar &thread_var,
+                       const arith::Analyzer &analyzer) {
+  if (!thread_var.defined() ||
+      !analyzer.const_int_bound.IsBound(thread_var->var)) {
+    return Optional<arith::ConstIntBound>();
+  }
+  auto const_int_bound = analyzer.const_int_bound(thread_var->var);
+  if (!const_int_bound.defined()) {
+    return Optional<arith::ConstIntBound>();
+  }
+  return const_int_bound;
+}
+
+/*!
  * \brief Compute the thread index bounds from an IterVar and an analyzer.
  *
  * \return Range covering the thread index, or [0, 1) if no bound is known.
  */
 inline Range ComputeThreadBounds(const IterVar &thread_var,
                                  const arith::Analyzer &analyzer) {
-  if (thread_var.defined() &&
-      analyzer.const_int_bound.IsBound(thread_var->var)) {
-    auto const_int_bound = analyzer.const_int_bound(thread_var);
-    auto min_value = const_int_bound->min_value;
-    auto max_value = const_int_bound->max_value;
+  if (auto const_int_bound = GetThreadConstIntBound(thread_var, analyzer)) {
+    auto min_value = const_int_bound.value()->min_value;
+    auto max_value = const_int_bound.value()->max_value;
     auto extent = max_value - min_value + 1;
     auto dtype = thread_var->var.dtype();
     return Range::FromMinExtent(IntImm(dtype, min_value),

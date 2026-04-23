@@ -39,6 +39,12 @@
 
 #pragma once
 
+#if !defined(TILELANG_CUDA_STUBS_ENABLED)
+
+#include <cuda.h>
+
+#else
+
 // Define guard before including vendor/cuda.h
 // This ensures vendor/cuda.h can only be included through this stub header.
 #define _TILELANG_CUDA_STUB_INCLUDE_GUARD
@@ -224,3 +230,5 @@ TILELANG_CUDA_STUB_API CUresult cuTensorMapEncodeIm2col(
 #endif
 
 } // extern "C"
+
+#endif // TILELANG_CUDA_STUBS_ENABLED
