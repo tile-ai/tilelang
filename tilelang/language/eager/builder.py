@@ -66,8 +66,7 @@ def unwrap_cond(expr):
         return bool(expr)
     else:
         logger.warning(
-            f"Python expression `{expr}` is used as condition in TileLang, \nthis is treated as a constant expression. ",
-            stack_info=True,
+            f"Python expression `{expr}` is used as condition in TileLang, this is treated as a constant expression.",
             stacklevel=3,
         )
         return bool(expr)
@@ -252,7 +251,7 @@ class Builder(BaseBuilder):
     def check_continue_break(self):
         idx = self.find_frame_idx(ContinueOrBreak)
         if idx is not None:
-            logger.warning("Writing code after continue/break may cause undefined behavior in tilelang.", stack_info=True, stacklevel=3)
+            logger.warning("Statements after continue/break have no effect and will be ignored.", stacklevel=3)
 
     @contextmanager
     def with_frame(self, frame: AbstractContextManager[Any] | None):
@@ -295,9 +294,8 @@ class Builder(BaseBuilder):
         elif isinstance(val, tir.frame.IRBuilderFrame):
             if isinstance(val, tir.frame.ForFrame):
                 logger.warning(
-                    "Evaluating a for frame may cause undefined behavior in tilelang.",
-                    stack_info=True,
-                    stacklevel=1,
+                    "A for-loop frame is being evaluated as a standalone expression. Did you mean to use it in a `for` statement?",
+                    stacklevel=2,
                 )
             self.enter_frame(val)
         elif isinstance(val, PrimExpr):
@@ -311,7 +309,7 @@ class Builder(BaseBuilder):
         elif isinstance(val, (Buffer, Var)):
             pass
         else:
-            logger.warning(f"Unused return value: {val}({type(val)})", stack_info=True, stacklevel=2)
+            logger.warning(f"Return value `{val}` ({type(val)}) is unused and will be discarded.", stacklevel=2)
 
     def ctx_for(self, it):
         self.check_continue_break()
@@ -327,7 +325,10 @@ class Builder(BaseBuilder):
                 else:
                     real_stop = tir.ceildiv(it.start - it.stop, -step_value)
             else:
-                logger.warning(f"Using a non-constant step `{it.step}` in stepped serial may lead to undefined behavior in tilelang")
+                logger.warning(
+                    f"Non-constant step `{it.step}` in serial range may produce unexpected results. Consider using a constant step if possible.",
+                    stacklevel=2,
+                )
                 real_stop = tir.ceildiv(it.stop - it.start, it.step)
             if isinstance(it, UnrollForWithStep):
                 real_frame = tir.unroll(real_stop, annotations=it.annotations)
@@ -374,9 +375,8 @@ class Builder(BaseBuilder):
                 )
             else:
                 logger.warning(
-                    "While loop with constant false condition detected in Tilelang, the loop body will never be executed.\n",
-                    f"Condition: {cond_v}({type(cond_v)}) => {cond_v_unwrap}({type(cond_v_unwrap)})\n",
-                    stack_info=True,
+                    "While loop condition is always false; the loop body will be skipped.\n"
+                    f"Condition: {cond_v} ({type(cond_v)}) => {cond_v_unwrap} ({type(cond_v_unwrap)})\n",
                     stacklevel=2,
                 )
         with self.with_frame(tir.While(cond_v_unwrap)):
@@ -471,8 +471,7 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
-                    f"Immutable value `{name}` is re-bound. If you want to modify its value, please use T.alloc_var to make it a variable!",
-                    stack_info=True,
+                    f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
                     stacklevel=2,
                 )
             self.name_inside_frame[name] = self.frames[frame]
@@ -527,7 +526,7 @@ class Builder(BaseBuilder):
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
         self.check_continue_break()
         if annot is not self.empty:
-            logger.warning("Type annotation in slice assignment has no effect", stack_info=True, stacklevel=2)
+            logger.warning("Type annotation on slice assignment is not supported and will be ignored.", stacklevel=2)
         if isinstance(lval, Buffer):
             tir.buffer_store(lval, value, sl)
         else:
@@ -571,8 +570,7 @@ class Builder(BaseBuilder):
                 assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
                 if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                     logger.warning(
-                        f"Immutable value `{name}` is re-bound. If you want to modify its value, please use T.alloc_var to make it a variable!",
-                        stack_info=True,
+                        f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
                         stacklevel=2,
                     )
                 self.name_inside_frame[name] = self.frames[frame]

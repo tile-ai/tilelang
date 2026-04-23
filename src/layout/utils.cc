@@ -325,8 +325,8 @@ std::pair<PrimExpr, IterVar> CompressIterator(const PrimExpr &expr,
   collector.Collect({iter_sum});
   IterMark mark;
   for (const IterMark &m : collector.visited_) {
-    ICHECK(m->source.as<Var>()) << "Not a normalized iterator: " << mark;
-    if (m->source.as<Var>().value().same_as(var)) {
+    auto v = m->source.as<Var>();
+    if (v && v.value().same_as(var)) {
       mark = m;
       break;
     }

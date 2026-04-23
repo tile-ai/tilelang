@@ -132,7 +132,6 @@ class AutoTuner:
     _function_parameters: dict[str, Any] | None = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
-    cache_dir: Path = Path(env.TILELANG_CACHE_DIR) / "autotuner"
 
     def __init__(self, fn: Callable, configs):
         self.fn = fn
@@ -141,6 +140,16 @@ class AutoTuner:
         self.jit_input_tensors = None
         self.ref_input_tensors = None
         self.jit_compile = None
+
+    @classmethod
+    def _get_cache_dir(cls) -> Path:
+        from tilelang.cache.kernel_cache import KernelCache
+
+        return Path(KernelCache._get_namespace_root()) / "autotuner"
+
+    @property
+    def cache_dir(self) -> Path:
+        return self._get_cache_dir()
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):

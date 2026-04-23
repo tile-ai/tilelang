@@ -379,6 +379,36 @@ TIR_DEFINE_TL_BUILTIN(block_rank_in_cluster)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(clc_try_cancel)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(clc_try_cancel_multicast)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(clc_is_canceled)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(clc_get_first_ctaid_x)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(clc_get_first_ctaid_y)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(clc_get_first_ctaid_z)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(sync_grid).set_num_inputs(0).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
@@ -611,6 +641,20 @@ TIR_DEFINE_TL_BUILTIN(warp_reduce_bitor)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+// ds_read_tr16_b64(smem_ptr) -> uint32x2
+// gfx950 LDS transpose read: 64-bit, 16-element transpose (FP16/BF16 MFMA)
+TIR_DEFINE_TL_BUILTIN(ds_read_tr16_b64)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+// ds_read_tr8_b64(smem_ptr) -> uint32x2
+// gfx950 LDS transpose read: 64-bit, 8-element transpose (FP32 MFMA)
+TIR_DEFINE_TL_BUILTIN(ds_read_tr8_b64)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
 
 // __ldg(BufferLoad | Buffer, idx?) -> value
 // Treat as a pure call that returns the loaded value.

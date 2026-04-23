@@ -57,6 +57,7 @@ ffi::Module BuildTileLangHIP(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
+  cg.SetTarget(target);
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
@@ -93,6 +94,7 @@ ffi::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
+  cg.SetTarget(target);
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())

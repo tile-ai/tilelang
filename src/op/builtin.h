@@ -458,8 +458,8 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 /*!
  * \brief TileLang intrinsic for PTX async copy from global to shared memory
  *
- * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes)
- * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate)
  *
  */
 TVM_DLL const Op &ptx_cp_async();
@@ -623,6 +623,55 @@ TVM_DLL const Op &cluster_sync();
  *
  */
 TVM_DLL const Op &block_rank_in_cluster();
+
+/*!
+ * \brief Issue a Blackwell cluster launch control query that writes a 16-byte
+ * response into shared memory and signals completion on the given mbarrier.
+ *
+ * clc_try_cancel(result_ptr, mbar_ptr)
+ *
+ */
+TVM_DLL const Op &clc_try_cancel();
+
+/*!
+ * \brief Cluster-wide multicast variant of cluster launch control query.
+ *
+ * clc_try_cancel_multicast(result_ptr, mbar_ptr)
+ *
+ */
+TVM_DLL const Op &clc_try_cancel_multicast();
+
+/*!
+ * \brief Return 1 when a CLC response represents a successful cancellation.
+ *
+ * int32 clc_is_canceled(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_is_canceled();
+
+/*!
+ * \brief Return the x coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_x(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_x();
+
+/*!
+ * \brief Return the y coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_y(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_y();
+
+/*!
+ * \brief Return the z coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_z(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_z();
 
 /*!
  * \brief Synchronize all threads in a grid
@@ -789,6 +838,26 @@ TVM_DLL const Op &match_all_sync();
  *
  */
 TVM_DLL const Op &loop_break();
+
+/*!
+ * \brief tilelang intrinsic for gfx950 LDS transpose read, 64-bit, 16-element.
+ *
+ * Reads 8 bytes from LDS with a 16-element transpose (FP16/BF16 MFMA B-load).
+ * Only available on gfx950 (MI350/MI355X).
+ *
+ * uint32x2 ds_read_tr16_b64(smem_access_ptr)
+ */
+TVM_DLL const Op &ds_read_tr16_b64();
+
+/*!
+ * \brief tilelang intrinsic for gfx950 LDS transpose read, 64-bit, 8-element.
+ *
+ * Reads 8 bytes from LDS with an 8-element transpose (FP32 MFMA B-load).
+ * Only available on gfx950 (MI350/MI355X).
+ *
+ * uint32x2 ds_read_tr8_b64(smem_access_ptr)
+ */
+TVM_DLL const Op &ds_read_tr8_b64();
 
 /*!
  * \brief tvm intrinsic for amd matrix core mfma instructions.

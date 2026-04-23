@@ -496,6 +496,14 @@ def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), mbarrier, tx)
 
 
+def mbarrier_arrive_expect_tx(mbarrier: BarrierType, tx: int):
+    """Arrive at a memory barrier and expect completion of async transactions."""
+    from tilelang.language.tir.op import ptx_arrive_barrier_expect_tx
+
+    mbarrier = _mbar_to_buffer_load(mbarrier)
+    return ptx_arrive_barrier_expect_tx(mbarrier, tx)
+
+
 def warpgroup_arrive():
     """Signal warpgroup readiness for subsequent WGMMA operations.
 
@@ -1371,6 +1379,48 @@ def ptx_mma_sm70(
         accumulator,
         c_index,
     )
+
+
+def ds_read_tr16_b64(src: BufferLikeType) -> PrimExpr:
+    """LDS transpose read, 64-bit, 16-element transpose (gfx950 only).
+
+    Reads 8 bytes from LDS (__shared__ memory) with a 16-element transpose.
+    Used for FP16/BF16 MFMA matrix B-loads on MI350/MI355X (gfx950).
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad` in shared memory.
+
+    Returns:
+        PrimExpr: The loaded 64-bit value as uint32x2.
+
+    Example:
+        >>> val = T.ds_read_tr16_b64(smem[i])
+    """
+    if not isinstance(src, BufferLikeTypeTuple):
+        raise TypeError(f"T.ds_read_tr16_b64 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ds_read_tr16_b64"), ptr)
+
+
+def ds_read_tr8_b64(src: BufferLikeType) -> PrimExpr:
+    """LDS transpose read, 64-bit, 8-element transpose (gfx950 only).
+
+    Reads 8 bytes from LDS (__shared__ memory) with an 8-element transpose.
+    Used for FP32 MFMA matrix B-loads on MI350/MI355X (gfx950).
+
+    Args:
+        src: A `Buffer`, `BufferRegion`, or `BufferLoad` in shared memory.
+
+    Returns:
+        PrimExpr: The loaded 64-bit value as uint32x2.
+
+    Example:
+        >>> val = T.ds_read_tr8_b64(smem[i])
+    """
+    if not isinstance(src, BufferLikeTypeTuple):
+        raise TypeError(f"T.ds_read_tr8_b64 expects Buffer, BufferRegion, or BufferLoad. Got {type(src)}: {src}")
+    ptr = retrieve_ptr(src, access_type="r")
+    return tir.call_intrin("uint32x2", tir.op.Op.get("tl.ds_read_tr8_b64"), ptr)
 
 
 def ldg32(src: BufferLikeType, pred: PrimExpr = None) -> PrimExpr:

@@ -432,6 +432,7 @@ def parse_tma_descriptor_args(
         if not isinstance(tensor_rank, int) or tensor_rank <= 0:
             raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
 
+        global_address = pythonic_expr_func(global_address)
         params = TMADescriptorParams(handle_name, dtype, tensor_rank, global_address, is_img2col)
 
         if not is_img2col:

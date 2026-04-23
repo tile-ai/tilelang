@@ -30,6 +30,7 @@ from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
+    CUDASourceCodeKernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
     get_thread_binding,  # noqa: F401
     get_thread_bindings,  # noqa: F401
@@ -101,6 +102,8 @@ from .customize import (
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 from .builtin import __ldg as __ldg  # noqa: F401
+from .builtin import ds_read_tr16_b64 as ds_read_tr16_b64  # noqa: F401
+from .builtin import ds_read_tr8_b64 as ds_read_tr8_b64  # noqa: F401
 from .builtin import ldg32 as ldg32  # noqa: F401
 from .builtin import ldg64 as ldg64  # noqa: F401
 from .builtin import ldg128 as ldg128  # noqa: F401
@@ -147,6 +150,12 @@ from .cluster import (
     cluster_wait,  # noqa: F401
     cluster_sync,  # noqa: F401
     block_rank_in_cluster,  # noqa: F401
+    clc_try_cancel,  # noqa: F401
+    clc_try_cancel_multicast,  # noqa: F401
+    clc_is_canceled,  # noqa: F401
+    clc_get_first_ctaid_x,  # noqa: F401
+    clc_get_first_ctaid_y,  # noqa: F401
+    clc_get_first_ctaid_z,  # noqa: F401
 )
 
 
