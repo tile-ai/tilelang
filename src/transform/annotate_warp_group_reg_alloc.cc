@@ -244,12 +244,16 @@ private:
         auto inc_reg_stmt = Evaluate(0);
         auto dec_reg_stmt = Evaluate(0);
 
-        // Only inject if we have valid register hints and no SIMT copy
+        // Default hints stay conservative: skip auto-injection when producer
+        // contains SIMT copy-like statements. Explicit user hints should still
+        // be honored even in that case.
         bool has_simt_copy = SimtCopyDetector::Detect(producer_body);
+        bool has_explicit_hints = dec_reg != 0 || inc_reg != 0;
 
-        if (!has_simt_copy && dec_reg != -1 && inc_reg != -1) {
-          int final_dec_reg = dec_reg == 0 ? 24 : dec_reg;
-          int final_inc_reg = inc_reg == 0 ? 240 : inc_reg;
+        if (dec_reg != -1 && inc_reg != -1 &&
+            (has_explicit_hints || !has_simt_copy)) {
+          int final_dec_reg = has_explicit_hints ? dec_reg : 24;
+          int final_inc_reg = has_explicit_hints ? inc_reg : 240;
           dec_reg_stmt =
               Evaluate(Call(DataType::Handle(), set_max_nreg(),
                             {IntImm(DataType::Int(32), final_dec_reg),
