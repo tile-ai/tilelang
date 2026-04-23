@@ -18,9 +18,9 @@
  */
 
 /*!
- * \file codegen_c_host.cc
+ * \file codegen_c.cc
  */
-#include "codegen_cpp.h"
+#include "codegen_c.h"
 
 #include <tvm/runtime/module.h>
 #include <tvm/target/codegen.h>
@@ -38,32 +38,31 @@
 namespace tvm {
 namespace codegen {
 
-CodeGenTileLangCPP::CodeGenTileLangCPP() {
+CodeGenTileLangC::CodeGenTileLangC() {
   module_name_ = name_supply_->FreshName("__tvm_ffi_library_ctx");
 }
 
-void CodeGenTileLangCPP::Init(bool output_ssa, bool emit_asserts,
-                              bool emit_fwd_func_decl, std::string target_str,
-                              const std::unordered_set<std::string> &devices) {
+void CodeGenTileLangC::Init(bool output_ssa, bool emit_asserts,
+                            bool emit_fwd_func_decl, std::string target_str,
+                            const std::unordered_set<std::string> &devices) {
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
   decl_stream << "// tilelang target: " << target_str << "\n";
   decl_stream << "#include <tl_templates/cpp/common.h>\n";
-  decl_stream << "#include <tl_templates/cpp/gemm.h>\n";
   decl_stream << "\n";
   CodeGenC::Init(output_ssa);
 }
 
-void CodeGenTileLangCPP::InitGlobalContext() {
+void CodeGenTileLangC::InitGlobalContext() {
   decl_stream << "void* " << ffi::symbol::tvm_ffi_library_ctx << " = NULL;\n";
 }
 
-void CodeGenTileLangCPP::DefineModuleName() {
+void CodeGenTileLangC::DefineModuleName() {
   decl_stream << "void* " << module_name_ << " = NULL;\n";
 }
 
-void CodeGenTileLangCPP::GenerateForwardFunctionDeclarations(
+void CodeGenTileLangC::GenerateForwardFunctionDeclarations(
     String global_symbol,
 
     const Array<Type> &arg_types, const Type &ret_type) {
@@ -87,13 +86,13 @@ void CodeGenTileLangCPP::GenerateForwardFunctionDeclarations(
   fwd_decl_stream << ");\n";
 }
 
-void CodeGenTileLangCPP::PrintFuncPrefix(std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangC::PrintFuncPrefix(std::ostream &os) { // NOLINT(*)
   os << "#ifdef __cplusplus\n"
      << "extern \"C\"\n"
      << "#endif\n";
 }
 
-void CodeGenTileLangCPP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangC::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
   int lanes = t.lanes();
   if (t.is_handle()) {
     ICHECK_EQ(lanes, 1) << "does not support vector types";
@@ -164,8 +163,8 @@ void CodeGenTileLangCPP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
   LOG(FATAL) << "Cannot convert type " << t << " to C type";
 }
 
-void CodeGenTileLangCPP::VisitExpr_(const BroadcastNode *op,
-                                    std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangC::VisitExpr_(const BroadcastNode *op,
+                                  std::ostream &os) { // NOLINT(*)
   std::string v = PrintExpr(op->value);
   int lanes = op->dtype.lanes();
   os << "((";
@@ -179,7 +178,7 @@ void CodeGenTileLangCPP::VisitExpr_(const BroadcastNode *op,
   os << "))";
 }
 
-void CodeGenTileLangCPP::PrintGetFuncFromBackend(
+void CodeGenTileLangC::PrintGetFuncFromBackend(
     const std::string &func_name, const std::string &packed_func_name) {
   this->PrintIndent();
   this->stream << "if (" << packed_func_name << " == NULL) {\n";
@@ -199,8 +198,8 @@ void CodeGenTileLangCPP::PrintGetFuncFromBackend(
   this->stream << "}\n";
 }
 
-void CodeGenTileLangCPP::PrintFuncCall(const std::string &packed_func_name,
-                                       int num_args) {
+void CodeGenTileLangC::PrintFuncCall(const std::string &packed_func_name,
+                                     int num_args) {
   this->PrintIndent();
   std::string ret_val = name_supply_->FreshName("ret_val");
   std::string ret_type_code = name_supply_->FreshName("ret_type_code");
@@ -223,9 +222,9 @@ void CodeGenTileLangCPP::PrintFuncCall(const std::string &packed_func_name,
   this->stream << "}\n";
 }
 
-void CodeGenTileLangCPP::PrintFuncCallC(
-    const std::string &packed_func_name, int num_args,
-    const std::string &resource_handle_name) {
+void CodeGenTileLangC::PrintFuncCallC(const std::string &packed_func_name,
+                                      int num_args,
+                                      const std::string &resource_handle_name) {
   this->PrintIndent();
   std::string ret_val = name_supply_->FreshName("ret_val");
   std::string ret_type_code = name_supply_->FreshName("ret_type_code");
@@ -251,7 +250,7 @@ void CodeGenTileLangCPP::PrintFuncCallC(
   this->stream << "}\n";
 }
 
-void CodeGenTileLangCPP::AddFunction(const PrimFunc &f) {
+void CodeGenTileLangC::AddFunction(const PrimFunc &f) {
   // clear previous generated state.
   this->InitFuncState(f);
   // reserve keywords
@@ -318,7 +317,7 @@ void CodeGenTileLangCPP::AddFunction(const PrimFunc &f) {
   this->stream << "}\n\n";
 }
 
-std::string CodeGenTileLangCPP::GetPackedName(const CallNode *op) {
+std::string CodeGenTileLangC::GetPackedName(const CallNode *op) {
   const StringImmNode *s = op->args[0].as<StringImmNode>();
   ICHECK(s != nullptr)
       << "tvm_call_packed_lowered expects first argument as function name";
@@ -336,9 +335,9 @@ std::string CodeGenTileLangCPP::GetPackedName(const CallNode *op) {
   return unique_name;
 }
 
-CodeGenTileLangCPP::FunctionInfo
-CodeGenTileLangCPP::GetFunctionInfo(const CallNode *op,
-                                    bool has_resource_handle) {
+CodeGenTileLangC::FunctionInfo
+CodeGenTileLangC::GetFunctionInfo(const CallNode *op,
+                                  bool has_resource_handle) {
   const StringImmNode *s = op->args[0].as<StringImmNode>();
   ICHECK(s != nullptr)
       << "tvm_call_[c]packed_lowered expects first argument as function name";
@@ -379,8 +378,8 @@ CodeGenTileLangCPP::GetFunctionInfo(const CallNode *op,
   return {func_name, num_args, "NULL"};
 }
 
-void CodeGenTileLangCPP::VisitExpr_(const CallNode *op,
-                                    std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangC::VisitExpr_(const CallNode *op,
+                                  std::ostream &os) { // NOLINT(*)
   if (op->op.same_as(builtin::tvm_stack_alloca())) {
     std::string stack_name = name_supply_->FreshName("stack");
     const std::string &type = op->args[0].as<StringImmNode>()->value;
@@ -425,7 +424,7 @@ void CodeGenTileLangCPP::VisitExpr_(const CallNode *op,
   }
 }
 
-void CodeGenTileLangCPP::VisitStmt_(const AssertStmtNode *op) { // NOLINT(*)
+void CodeGenTileLangC::VisitStmt_(const AssertStmtNode *op) { // NOLINT(*)
   if (emit_asserts_) {
     std::string cond = PrintExpr(op->condition);
     PrintIndent();
@@ -443,7 +442,7 @@ void CodeGenTileLangCPP::VisitStmt_(const AssertStmtNode *op) { // NOLINT(*)
   this->PrintStmt(op->body);
 }
 
-void CodeGenTileLangCPP::VisitStmt_(const AllocateNode *op) {
+void CodeGenTileLangC::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
   std::string vid = AllocVarID(op->buffer_var.get());
 
@@ -461,20 +460,20 @@ void CodeGenTileLangCPP::VisitStmt_(const AllocateNode *op) {
   this->PrintStmt(op->body);
 }
 
-void CodeGenTileLangCPP::VisitExpr_(const MinNode *op,
-                                    std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangC::VisitExpr_(const MinNode *op,
+                                  std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, "<", os);
 }
 
-void CodeGenTileLangCPP::VisitExpr_(const MaxNode *op,
-                                    std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangC::VisitExpr_(const MaxNode *op,
+                                  std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, ">", os);
 }
 
 template <typename T>
 inline void
-CodeGenTileLangCPP::PrintTernaryCondExpr(const T *op, const char *compare,
-                                         std::ostream &os) { // NOLINT(*)
+CodeGenTileLangC::PrintTernaryCondExpr(const T *op, const char *compare,
+                                       std::ostream &os) { // NOLINT(*)
   std::ostringstream temp_a;
   VisitExpr(op->a, temp_a);
   std::string a_id = SSAGetID(temp_a.str(), op->a.dtype());
