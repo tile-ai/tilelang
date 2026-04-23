@@ -1850,9 +1850,12 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   const VarNode *buffer_var = buffer->data.get();
   std::ostringstream os;
   std::string vid = GetVarID(buffer_var);
-  // For fp4 packed buffers, use the packed buffer name for vector accesses
+  // For fp4 packed buffers, use the packed buffer name.
+  // Scalar loads/stores are handled separately via tl_fp4_packed_load/store,
+  // so GetBufferRef for scalar fp4 is only reached from address_of, which
+  // needs the packed buffer address.
   auto it = fp4_packed_buffers_.find(buffer_var);
-  if (it != fp4_packed_buffers_.end() && !t.is_scalar()) {
+  if (it != fp4_packed_buffers_.end()) {
     vid = it->second;
   }
   std::string scope;
@@ -2451,11 +2454,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     PrimExpr a_bias_expr = op->args[7];
     PrimExpr b_bias_expr = op->args[9];
     if (dtype_a_enum == tl::codegen::ptx::DataType::kInt4 ||
-        dtype_a_enum == tl::codegen::ptx::DataType::kUInt4) {
+        dtype_a_enum == tl::codegen::ptx::DataType::kUInt4 ||
+        dtype_a_enum == tl::codegen::ptx::DataType::kFloat4_e2m1fn) {
       a_bias_expr = arith::Analyzer().Simplify(truncdiv(a_bias_expr, 2));
     }
     if (dtype_b_enum == tl::codegen::ptx::DataType::kInt4 ||
-        dtype_b_enum == tl::codegen::ptx::DataType::kUInt4) {
+        dtype_b_enum == tl::codegen::ptx::DataType::kUInt4 ||
+        dtype_b_enum == tl::codegen::ptx::DataType::kFloat4_e2m1fn) {
       b_bias_expr = arith::Analyzer().Simplify(truncdiv(b_bias_expr, 2));
     }
     std::string a_bias = this->PrintExpr(a_bias_expr);
@@ -4031,6 +4036,15 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
   } else {
     CodeGenC::VisitStmt_(op);
   }
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const VarNode *op, std::ostream &os) {
+  auto it = fp4_packed_buffers_.find(op);
+  if (it != fp4_packed_buffers_.end()) {
+    os << it->second;
+    return;
+  }
+  os << GetVarID(op);
 }
 
 void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {

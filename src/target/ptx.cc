@@ -40,15 +40,15 @@ static const char *enum_to_str[] = {
     "kUInt16",      "kInt32",         "kUInt32",  "kInt64",    "kUInt64",
     "kFloat8_e4m3", "kFloat8_e5m2",   "kFloat16", "kBFloat16", "kFloat16x2",
     "kFloat32",     "kTensorFloat32", "kFloat64", "kBit1",     "kBit8",
-    "kBit16",       "kBit32",         "kBit64"};
+    "kBit16",       "kBit32",         "kBit64",   "kFloat4_e2m1fn"};
 
 static const char *dtype_str[] = {
     ".s4",   ".u4",  ".s8",   ".u8",   ".s16", ".u16",  ".s32",   ".u32",
     ".s64",  ".u64", ".e4m3", ".e5m2", ".f16", ".bf16", ".f16x2", ".f32",
-    ".tf32", ".f64", ".b1",   ".b8",   ".b16", ".b32",  ".b64"};
+    ".tf32", ".f64", ".b1",   ".b8",   ".b16", ".b32",  ".b64",   ".e2m1"};
 static const uint32_t num_bits[] = {4,  4,  8, 8, 16, 16, 32, 32,
                                     64, 64, 8, 8, 16, 16, 32, 32,
-                                    32, 64, 1, 8, 16, 32, 64};
+                                    32, 64, 1, 8, 16, 32, 64, 4};
 
 /*!
  * \brief Create PTX data type from string.
@@ -102,6 +102,8 @@ DataType DTypeFromString(const std::string str) {
     return DataType::kBit32;
   } else if (str == ".b64") {
     return DataType::kBit64;
+  } else if (str == "float4_e2m1fn" || str == "e2m1" || str == ".e2m1") {
+    return DataType::kFloat4_e2m1fn;
   } else {
     LOG(FATAL) << "Unrecognized PTX data type " << str;
   }
@@ -257,6 +259,11 @@ const MMAConfig valid_mma_configs[] = {
     MMAConfig(16, 8, 64, DataType::kFloat8_e4m3, false, true),
     MMAConfig(16, 8, 32, DataType::kFloat8_e5m2, false, false),
     MMAConfig(16, 8, 64, DataType::kFloat8_e5m2, false, true),
+    MMAConfig(8, 8, 32, DataType::kFloat4_e2m1fn, false, false),
+    MMAConfig(16, 8, 32, DataType::kFloat4_e2m1fn, false, false),
+    MMAConfig(16, 8, 64, DataType::kFloat4_e2m1fn, false, false),
+    MMAConfig(16, 8, 64, DataType::kFloat4_e2m1fn, false, true),
+    MMAConfig(16, 8, 128, DataType::kFloat4_e2m1fn, false, true),
 };
 
 struct WGMMAConfig {
@@ -742,6 +749,10 @@ void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b,
           dtype_b == DataType::kFloat8_e5m2)
         << ab_not_match_err_str;
     break;
+  case DataType::kFloat4_e2m1fn:
+    CHECK(dtype_b == DataType::kFloat4_e2m1fn)
+        << ab_not_match_err_str;
+    break;
   default:
     CHECK(false) << "Invalid multiplicand data types: "
                  << DTypeToString(dtype_a) << DTypeToString(dtype_b);
@@ -756,6 +767,11 @@ void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b,
     CHECK(dtype_c == DataType::kInt32)
         << "For multiplicand data type " << DTypeToString(dtype_a)
         << DTypeToString(dtype_b) << ", accumulator data type should be s32.";
+    break;
+  case DataType::kFloat4_e2m1fn:
+    CHECK(dtype_c == DataType::kFloat32 || dtype_c == DataType::kInt32)
+        << "For multiplicand data type e2m1, accumulator data type should be "
+           "f32/s32.";
     break;
   case DataType::kFloat16:
     CHECK(dtype_c == DataType::kFloat16 || dtype_c == DataType::kFloat32)
@@ -888,6 +904,7 @@ inline FragAttrs GetFragAttrs(DataType dtype) {
   case DataType::kUInt8:
   case DataType::kFloat8_e4m3:
   case DataType::kFloat8_e5m2:
+  case DataType::kFloat4_e2m1fn:
   case DataType::kBit16:
   case DataType::kFloat16: // .f16x2 register
   case DataType::kBFloat16:

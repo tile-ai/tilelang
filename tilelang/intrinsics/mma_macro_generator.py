@@ -55,6 +55,7 @@ class TensorCoreIntrinEmitter:
         "float8_e4m3fnuz": "e4m3",
         "float8_e5m2": "e5m2",
         "float8_e5m2fnuz": "e5m2",
+        "float4_e2m1fn": "e2m1",
     }
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
@@ -144,7 +145,6 @@ class TensorCoreIntrinEmitter:
             self.mma_prefix = "m16n8k16"
         elif k_dim == 32:
             # typically used for int8/fp8
-            # sometimes int4/uint4 is also supported
             self.mma_prefix = "m16n8k32"
         elif k_dim == 64:
             # typically used for int4/uint4
@@ -493,6 +493,59 @@ class TensorCoreIntrinEmitter:
         b_is_fragment = is_fragment(B_local_buf)
         a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
         b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
+
+        is_fp4 = isinstance(self.a_dtype, str) and "float4" in self.a_dtype
+
+        if is_fp4:
+            # SM120 fp4 only has m16n8k32; chunk=64 / k_dim=64 needs 2x K split.
+            # Each tile issues 4 MMA calls: 2 K halves × 2 N halves (when n_dim=16).
+            fp4_mma_prefix = "m16n8k32"
+
+            @T.macro
+            def _warp_mma_fp4(A_local_buf, B_local_buf, C_local_buf):
+                for i, j in T.grid(warp_rows, warp_cols):
+                    base_a = a_local_stride + i * local_size_a
+                    base_b = b_local_stride + j * local_size_b
+                    base_c = i * warp_cols * local_size_out + j * local_size_out
+                    # A[0:16, 0:16] * B[0:8, 0:16] -> C[0:16, 0:8]
+                    T.ptx_mma(
+                        accum_dtype, fp4_mma_prefix, "row", "col",
+                        a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv,
+                        A_local_buf.data, base_a,
+                        B_local_buf.data, base_b,
+                        C_local_buf.data, base_c,
+                        T.bool(False),
+                    )
+                    # A[0:16, 16:32] * B[0:8, 16:32] -> C[0:16, 0:8]
+                    T.ptx_mma(
+                        accum_dtype, fp4_mma_prefix, "row", "col",
+                        a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv,
+                        A_local_buf.data, base_a + local_size_a // 2,
+                        B_local_buf.data, base_b + local_size_b // 4,
+                        C_local_buf.data, base_c,
+                        T.bool(False),
+                    )
+                    if replicate_b:
+                        # A[0:16, 0:16] * B[8:16, 0:16] -> C[0:16, 8:16]
+                        T.ptx_mma(
+                            accum_dtype, fp4_mma_prefix, "row", "col",
+                            a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv,
+                            A_local_buf.data, base_a,
+                            B_local_buf.data, base_b + local_size_b // 2,
+                            C_local_buf.data, base_c + local_size_out // 2,
+                            T.bool(False),
+                        )
+                        # A[0:16, 16:32] * B[8:16, 16:32] -> C[0:16, 8:16]
+                        T.ptx_mma(
+                            accum_dtype, fp4_mma_prefix, "row", "col",
+                            a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv,
+                            A_local_buf.data, base_a + local_size_a // 2,
+                            B_local_buf.data, base_b + local_size_b // 2 + local_size_b // 4,
+                            C_local_buf.data, base_c + local_size_out // 2,
+                            T.bool(False),
+                        )
+
+            return _warp_mma_fp4(A_local_buf, B_local_buf, C_local_buf)
 
         @T.macro
         def _warp_mma(A_local_buf, B_local_buf, C_local_buf):

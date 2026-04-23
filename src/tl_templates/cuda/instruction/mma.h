@@ -3,6 +3,7 @@
 #include "../common.h"
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
+#include <cute/arch/mma_sm120.hpp>
 
 #ifndef __CUDACC_RTC__
 #include <type_traits>
@@ -114,6 +115,23 @@ TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 32, false, true, false,
                          cute::SM80_16x8x32_S32U4U4S32_TN)
 TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 64, false, true, false,
                          cute::SM80_16x8x64_S32U4U4S32_TN)
+
+// FP4 (E2M1) inputs (k32) — explicit specialization to avoid macro comma issues
+template <>
+struct MmaDispatcher<DataType::kFloat4_e2m1fn, DataType::kFloat4_e2m1fn,
+                     DataType::kFloat32, 16, 8, 32, false, true, false> {
+  using Impl = cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e2m1_t, float>;
+  using Traits = MmaImplTraits<Impl>;
+  using CRegType = typename Traits::DReg;
+  using ARegType = typename Traits::AReg;
+  using BRegType = typename Traits::BReg;
+  static_assert(std::is_same_v<typename Traits::DReg, typename Traits::CReg>,
+                "tl::mma_sync requires matching accumulator/output regs");
+  static TL_DEVICE void exec(CRegType *d, const ARegType *a, const BRegType *b,
+                             const CRegType *c) {
+    call_fma<Impl>(d, a, b, c);
+  }
+};
 
 // FP8 inputs (k32)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e4m3, kFloat16, 16, 8, 32, false,
