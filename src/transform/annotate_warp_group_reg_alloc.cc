@@ -101,16 +101,23 @@ Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
 
 class SetMaxNRegCollector : public StmtExprVisitor {
 public:
-  static Array<IntImm> Collect(const PrimFunc &f) {
+  struct Result {
+    Array<IntImm> nreg;
+    bool preserve_explicit_set_max_nreg{false};
+  };
+
+  static Result Collect(const PrimFunc &f) {
     SetMaxNRegCollector collector;
     collector(f->body);
     if (collector.warp_specialized_) {
-      return Array<IntImm>({});
+      return {Array<IntImm>({}), true};
     }
-    return collector.has_no_set_max_nreg_
-               ? Array<IntImm>({IntImm(DataType::Int(32), -1),
-                                IntImm(DataType::Int(32), -1)})
-               : collector.nreg_;
+    Array<IntImm> nreg =
+        collector.has_no_set_max_nreg_
+            ? Array<IntImm>({IntImm(DataType::Int(32), -1),
+                             IntImm(DataType::Int(32), -1)})
+            : collector.nreg_;
+    return {nreg, false};
   }
 
 private:
@@ -181,7 +188,9 @@ class SetMaxNRegInjector : public StmtExprMutator {
 public:
   static PrimFunc Inject(PrimFunc f) {
     auto T = SetMaxNRegInjector();
-    T.nreg_ = SetMaxNRegCollector::Collect(f);
+    SetMaxNRegCollector::Result result = SetMaxNRegCollector::Collect(f);
+    T.nreg_ = result.nreg;
+    T.preserve_explicit_set_max_nreg_ = result.preserve_explicit_set_max_nreg;
     if (T.nreg_.empty()) {
       return f;
     }
@@ -192,6 +201,13 @@ public:
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
+      if (!preserve_explicit_set_max_nreg_ &&
+          call->op.same_as(set_max_nreg())) {
+        // Remove the original producer/consumer hints from the shared prelude.
+        // For auto-generated warp-specialization they will be re-inserted in
+        // the matching producer/consumer branch scope below.
+        return Evaluate(0);
+      }
       if (call->op.same_as(no_set_max_nreg())) {
         // Remove the original set_max_nreg calls as they will be re-inserted
         // at appropriate locations
@@ -232,13 +248,15 @@ private:
         // Only inject if we have valid register hints and no SIMT copy
         bool has_simt_copy = SimtCopyDetector::Detect(producer_body);
 
-        if (dec_reg == 0 && inc_reg == 0 && !has_simt_copy) {
-          auto inc_reg_num = IntImm(DataType::Int(32), 240);
-          auto dec_reg_num = IntImm(DataType::Int(32), 24);
-          inc_reg_stmt = Evaluate(
-              Call(DataType::Handle(), set_max_nreg(), {inc_reg_num, 1}));
-          dec_reg_stmt = Evaluate(
-              Call(DataType::Handle(), set_max_nreg(), {dec_reg_num, 0}));
+        if (!has_simt_copy && dec_reg != -1 && inc_reg != -1) {
+          int final_dec_reg = dec_reg == 0 ? 24 : dec_reg;
+          int final_inc_reg = inc_reg == 0 ? 240 : inc_reg;
+          dec_reg_stmt = Evaluate(Call(
+              DataType::Handle(), set_max_nreg(),
+              {IntImm(DataType::Int(32), final_dec_reg), IntImm(DataType::Int(32), 0)}));
+          inc_reg_stmt = Evaluate(Call(
+              DataType::Handle(), set_max_nreg(),
+              {IntImm(DataType::Int(32), final_inc_reg), IntImm(DataType::Int(32), 1)}));
         }
 
         Array<Stmt> producer_stmts;
@@ -270,6 +288,7 @@ private:
   }
 
   Array<IntImm> nreg_;
+  bool preserve_explicit_set_max_nreg_{false};
   IterVar thread_iv_;
   Optional<PrimExpr> updated_thread_extent_;
   bool need_update_thread_extent_ = false;
