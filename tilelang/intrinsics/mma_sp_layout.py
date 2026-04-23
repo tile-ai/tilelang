@@ -158,7 +158,7 @@ def get_ldmatrix_offset_b(
         if transposed:
             transform_func = ldmatrix_trans_32x8_to_shared_16x16_layout
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
-            return new_row_idx * stride + new_col_idx
+            return new_row_idx, new_col_idx
         else:
             raise ValueError("ldmatrix only supports B transposed for 32-bit dtype")
     elif dtype_bits == 16:
@@ -166,15 +166,15 @@ def get_ldmatrix_offset_b(
         transform_func_trans = ldmatrix_trans_32x16_to_shared_16x32_layout
         if transposed:
             new_row_idx, new_col_idx = transform_func_trans(row_idx, col_idx)
-            return new_row_idx * stride + new_col_idx
+            return new_row_idx, new_col_idx
         else:
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
-            return new_row_idx * stride + new_col_idx
+            return new_row_idx, new_col_idx
     elif dtype_bits == 8:
         if transposed:
             transform_func = ldmatrix_trans_32x32_to_shared_shared_16x64_layout
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
-            return new_row_idx * stride + new_col_idx
+            return new_row_idx, new_col_idx
         else:
             raise ValueError("ldmatrix only supports B transposed for 8-bit dtype")
     else:

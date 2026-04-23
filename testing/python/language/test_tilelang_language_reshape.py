@@ -260,5 +260,31 @@ def test_reshape_shape_mismatch():
         reshape_shape_mismatch_test(1024, 32, T.float32)
 
 
+def test_reduce_absmax_after_reshape_3d():
+    M, N, num_groups, num_per_channels = 2, 384, 3, 128
+    threads = 128
+    dtype = "int64"
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, num_groups), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            A_local = T.alloc_fragment((M, N), dtype)
+            A_reshaped = T.reshape(A_local, [M, num_groups, num_per_channels])
+            B_local = T.alloc_fragment((M, num_groups), dtype)
+            T.copy(A, A_local)
+            T.reduce_absmax(A_reshaped, B_local, dim=2)
+            T.copy(B_local, B)
+
+    jit_kernel = tl.compile(main, out_idx=-1)
+    A_torch = torch.randint(-100, 100, (M, N), dtype=getattr(torch, dtype)).cuda()
+    B_torch = jit_kernel(A_torch)
+
+    ref = A_torch.abs().reshape(M, num_groups, num_per_channels).max(dim=2).values
+    torch.testing.assert_close(B_torch, ref)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

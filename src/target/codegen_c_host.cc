@@ -103,15 +103,17 @@ void CodeGenCHost::AddFunction(const tvm::GlobalVar &gvar,
         << "CodeGenCHost: The entry func must have the global_symbol "
            "attribute, "
         << "but function " << gvar << " only has attributes " << func->attrs;
-    function_names_.push_back(tvm::ffi::symbol::tvm_ffi_main);
-    stream << "// CodegenC: NOTE: Auto-generated entry function\n";
-    PrintFuncPrefix(stream);
-    PrintType(func->ret_type, stream);
-    stream << " " << tvm::ffi::symbol::tvm_ffi_main
-           << "(void* self, void* args,int num_args, void* result) {\n";
-    stream << "  return " << static_cast<std::string>(global_symbol.value())
-           << "(self, args, num_args, result);\n";
-    stream << "}\n";
+    if (global_symbol.value() != tvm::ffi::symbol::tvm_ffi_main) {
+      function_names_.push_back(tvm::ffi::symbol::tvm_ffi_main);
+      stream << "// CodegenC: NOTE: Auto-generated entry function\n";
+      PrintFuncPrefix(stream);
+      PrintType(func->ret_type, stream);
+      stream << " " << tvm::ffi::symbol::tvm_ffi_main
+             << "(void* self, void* args,int num_args, void* result) {\n";
+      stream << "  return " << static_cast<std::string>(global_symbol.value())
+             << "(self, args, num_args, result);\n";
+      stream << "}\n";
+    }
     has_main_func_ = true;
   }
 }

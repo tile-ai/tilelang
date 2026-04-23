@@ -27,7 +27,7 @@ from tvm.tir.expr import FloatImm, IntImm
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
-from .proxy import Tensor
+from .proxy import Tensor, ptr as _ptr_sentinel
 
 
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
@@ -131,6 +131,9 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
 
     if not isinstance(parsed_scope, str):
         raise TypeError("Scope must be a string in alloc_var.")
+
+    if dtype is _ptr_sentinel:
+        dtype = _dtypes.int64
 
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:

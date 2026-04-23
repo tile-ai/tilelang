@@ -3,7 +3,16 @@
  * \brief Annotate warp group reg alloc for warp specialization
  */
 
-#include "warp_specialized_rewriter.h"
+#include <tvm/ffi/cast.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/tir/builtin.h>
+#include <tvm/tir/op.h>
+#include <tvm/tir/stmt_functor.h>
+#include <tvm/tir/transform.h>
+
+#include "../op/builtin.h"
+#include "runtime/thread_storage_scope.h"
+#include "tir/transforms/ir_utils.h"
 #include <functional>
 #include <unordered_set>
 #include <vector>
@@ -24,7 +33,7 @@ Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
 
   if (const auto *if_node = stmt.as<IfThenElseNode>()) {
     *rewrote = true;
-    return rewrite_if(GetRef<IfThenElse>(if_node));
+    return rewrite_if(ffi::GetRef<IfThenElse>(if_node));
   }
 
   if (const auto *seq = stmt.as<SeqStmtNode>()) {

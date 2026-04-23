@@ -426,8 +426,29 @@ if(USE_Z3 AND USE_PYPI_Z3)
   find_package(Z3 REQUIRED)
 endif()
 
+# Enable custom logging so we control the output format (e.g. strip build paths
+# from __FILE__ so wheel users don't see CI machine paths in warnings).
+set(USE_CUSTOM_LOGGING ON CACHE BOOL "Use custom logging implementation" FORCE)
+
+# Detect release (wheel) builds: in CI (cibuildwheel) or scikit-build-core wheel builds,
+# we strip source paths from LOG(WARNING) etc. for a cleaner user experience.
+# Local dev builds keep full paths for debugging.
+if(DEFINED ENV{CIBUILDWHEEL} OR "$ENV{SKBUILD_STATE}" STREQUAL "wheel")
+  set(TILELANG_RELEASE_BUILD_DEFAULT ON)
+else()
+  set(TILELANG_RELEASE_BUILD_DEFAULT OFF)
+endif()
+option(TILELANG_RELEASE_BUILD "Strip source paths from log messages (for wheel releases)" ${TILELANG_RELEASE_BUILD_DEFAULT})
+
 # Include tvm after configs have been populated
 add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+
+# Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
+# since TVM_LOG_CUSTOMIZE=1 requires them to be supplied by the user.
+target_sources(tvm_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
+if(TILELANG_RELEASE_BUILD)
+  target_compile_definitions(tvm_objs PRIVATE TILELANG_RELEASE_BUILD=1)
+endif()
 
 # Resolve compile warnings in tvm
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
@@ -442,6 +463,10 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
+target_compile_definitions(tilelang_objs PRIVATE TVM_LOG_CUSTOMIZE=1)
+if(TILELANG_RELEASE_BUILD)
+  target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
+endif()
 
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm)

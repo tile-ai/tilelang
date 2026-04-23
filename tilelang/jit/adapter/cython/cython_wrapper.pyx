@@ -6,7 +6,6 @@ import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tir
-from tilelang.utils.tensor import map_torch_type
 
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
@@ -199,7 +198,7 @@ cdef class CythonKernelWrapper:
                     if isinstance(s, tir.Var):
                         for key in self.dynamic_symbolic_map:
                             if(str(s) == str(key)):
-                                ref_id, ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[key]
+                                ref_id, ref_tensor_idx, ref_shape_idx, _stride_scale = self.dynamic_symbolic_map[key]
                                 shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
@@ -266,11 +265,11 @@ cdef class CythonKernelWrapper:
             self._check_static_contiguous(tensor_list)
 
         # Add dynamic dimension values to kernel arguments
-        for _, (ref_id, buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
+        for _, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():
             if ref_id == 0:
                 call_args.append(ctypes.c_int64(tensor_list[buffer_idx].shape[shape_idx]))
             else:
-                call_args.append(ctypes.c_int64(tensor_list[buffer_idx].stride(shape_idx)))
+                call_args.append(ctypes.c_int64(tensor_list[buffer_idx].stride(shape_idx) * stride_scale))
 
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))
