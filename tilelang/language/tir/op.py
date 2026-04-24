@@ -1324,6 +1324,7 @@ def ptx_tcgen05_mma_blockscaled_ss(
         enable_2cta,
     )
 
+
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
