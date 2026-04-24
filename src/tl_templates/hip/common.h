@@ -90,6 +90,7 @@ typedef
     __attribute__((__vector_size__(8 * sizeof(short)))) short bfloat16x8_vec;
 
 using int32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+using int32x16 = __attribute__((__vector_size__(16 * sizeof(int)))) int;
 using float32x4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 using float32x16 = __attribute__((__vector_size__(16 * sizeof(float)))) float;
 using float32x32 = __attribute__((__vector_size__(32 * sizeof(float)))) float;
