@@ -290,6 +290,42 @@ def test_tvm_ffi_adapter_converts_torch_tensors_before_executable_call():
     assert all(isinstance(arg, tvm.runtime.Tensor) for arg in seen_args)
 
 
+def test_tvm_ffi_adapter_accepts_non_contiguous_torch_tensors():
+    seen_args = None
+
+    class FakeExecutable:
+        def __call__(self, *args):
+            nonlocal seen_args
+            seen_args = args
+
+    @T.prim_func
+    def main(
+        A: T.StridedTensor((16, 16), (32, 1), T.float32),
+        B: T.Tensor((16, 16), T.float32),
+    ):
+        with T.Kernel(1, threads=1) as _:
+            for i, j in T.grid(16, 16):
+                B[i, j] = A[i, j]
+
+    adapter = TVMFFIKernelAdapter.__new__(TVMFFIKernelAdapter)
+    adapter.params = [KernelParam.from_buffer(main.buffer_map[p]) for p in main.params]
+    adapter.result_idx = [1]
+    adapter.ir_module = tvm.IRModule({"main": main.with_attr("global_symbol", "main")})
+    adapter.executable = FakeExecutable()
+    adapter.rt_mod = None
+
+    func = adapter._convert_torch_func()
+    base = torch.arange(16 * 32, dtype=torch.float32).reshape(16, 32)
+    inp = base[:, :16]
+    assert not inp.is_contiguous()
+    out = func(inp)
+
+    assert isinstance(out, torch.Tensor)
+    assert seen_args is not None
+    assert len(seen_args) == 2
+    assert all(isinstance(arg, tvm.runtime.Tensor) for arg in seen_args)
+
+
 def run_tvm_ffi_dynamic_shape(
     M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
 ):

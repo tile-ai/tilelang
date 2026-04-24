@@ -13,6 +13,7 @@ import sys
 
 import torch
 import torch.utils.dlpack
+import tvm_ffi
 from tilelang import tvm
 from tvm import runtime, tir
 from tvm.target import Target
@@ -247,7 +248,16 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 tensor_list.append(tensor)
 
             executable_args = tuple(
-                runtime.from_dlpack(torch.utils.dlpack.to_dlpack(tensor)) if isinstance(tensor, torch.Tensor) else tensor
+                # Use the legacy DLPack capsule explicitly so we bypass platform-specific
+                # torch.Tensor argument setters in tvm_ffi, while still accepting
+                # valid non-contiguous tensors/strided views.
+                tvm_ffi.from_dlpack(
+                    torch.utils.dlpack.to_dlpack(tensor),
+                    require_alignment=64,
+                    require_contiguous=False,
+                )
+                if isinstance(tensor, torch.Tensor)
+                else tensor
                 for tensor in tensor_list
             )
             executable(*executable_args)
