@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import tvm.script.parser.tir as T
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
+from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
 from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
-from tilelang.utils.language import retrieve_ptr
+from tilelang.utils.language import retrieve_ptr, retrieve_stride, get_buffer_region_from_load, retrieve_buffer_and_offset
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 
@@ -1233,43 +1235,81 @@ def tcgen05_after_thread_sync():
     return tir.call_intrin("void", tir.op.Op.get("tl.tcgen05_after_thread_sync"))
 
 
-def tcgen05_cp(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool = False):
-    """Copy 128 scale factor elements from shared memory to tensor memory via UTCCP.
+def _tcgen05_num_smem_chunks(smem_src, chunk_elems: int):
+    if isinstance(smem_src, tir.Buffer):
+        shape = list(smem_src.shape)
+    elif isinstance(smem_src, tir.BufferRegion):
+        shape = [r.extent for r in smem_src.region]
+    elif isinstance(smem_src, tir.BufferLoad):
+        region = get_buffer_region_from_load(smem_src)
+        if region is None:
+            raise TypeError("T.tcgen05_cp_warpx4 requires Buffer/BufferRegion-like scale-factor sources.")
+        shape = [r.extent for r in region.region]
+    else:
+        raise TypeError(f"Unsupported scale-factor buffer type: {type(smem_src)}")
 
-    Internally builds the SMEM descriptor and extracts the TMEM column address.
-    With ``use_2cta=True``, lowers to the true ``tcgen05.cp.cta_group::2`` path.
+    total_elems = 1
+    for extent in shape:
+        if not isinstance(extent, tir.IntImm):
+            raise ValueError("Packed scale-factor helpers require a static extent.")
+        total_elems *= extent.value
+    if total_elems % chunk_elems != 0:
+        raise ValueError(
+            f"Packed scale-factor helpers require total extent to be a multiple of {chunk_elems}, got {total_elems}."
+        )
+    return total_elems // chunk_elems
+
+
+def tcgen05_cp_warpx4(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool = False):
+    """Copy one or more packed scale-factor chunks from shared memory to tensor memory.
+
+    The helper lowers to one or more ``tcgen05.cp.cta_group::{1,2}.32x128b.warpx4``
+    instructions. For 1D packed ``uint32`` scale buffers, each 128-word chunk maps to
+    4 TMEM columns and the column offset is advanced automatically.
     """
-    smem_ptr = retrieve_ptr(smem_src, access_type="r")
-    if isinstance(tmem_dst, (tir.Buffer,)):
+    num_chunks = _tcgen05_num_smem_chunks(smem_src, 128)
+    if isinstance(tmem_dst, tir.Buffer):
         tmem_ptr = tmem_dst.data
     elif isinstance(tmem_dst, (BufferLoad, BufferRegion)):
         tmem_ptr = tmem_dst.buffer.data
     else:
         tmem_ptr = tmem_dst
     ann = {"use_2cta": 1} if use_2cta else None
-    return tir.call_intrin(
-        "void",
-        tir.op.Op.get("tl.ptx_tcgen05_cp"),
-        smem_ptr,
-        tmem_ptr,
-        tmem_col_offset,
-        annotations=ann,
-    )
+    buffer, base_offset = retrieve_buffer_and_offset(smem_src)
+
+    @macro
+    def _tcgen05_cp_warpx4_chunked(buffer, tmem_ptr, tmem_col_offset, base_offset):
+        for i in T.unroll(num_chunks):
+            chunk_ptr = buffer.access_ptr("r", offset=base_offset + i * 128)
+            tir.call_intrin(
+                "void",
+                tir.op.Op.get("tl.ptx_tcgen05_cp"),
+                chunk_ptr,
+                tmem_ptr,
+                tmem_col_offset + i * 4,
+                annotations=ann,
+            )
+
+    return _tcgen05_cp_warpx4_chunked(buffer, tmem_ptr, tmem_col_offset, base_offset)
 
 
-def sf_warp_transpose(smem_src):
-    """Warp-level transpose of 128 uint32 scale factor elements in shared memory.
+def tcgen05_sf_warp_transpose(smem_src):
+    """Warp-level transpose for one or more packed scale-factor chunks in shared memory.
 
-    Must be called by exactly one warp (32 threads). Transposes a 4x32 block in-place
-    to prepare data for UTCCP copy to tensor memory.
-
-    Parameters
-    ----------
-    smem_src : BufferLikeType
-        Buffer (region/load) pointing to 128 uint32 elements in shared memory.
+    For 1D packed ``uint32`` scale buffers, the helper automatically applies the
+    transpose to each 128-word chunk in order.
     """
-    smem_ptr = retrieve_ptr(smem_src, access_type="rw")
-    return tir.call_intrin("void", tir.op.Op.get("tl.ptx_tcgen05_sf_warp_transpose"), smem_ptr)
+    num_chunks = _tcgen05_num_smem_chunks(smem_src, 128)
+
+    buffer, base_offset = retrieve_buffer_and_offset(smem_src)
+
+    @macro
+    def _tcgen05_sf_warp_transpose_chunked(buffer, base_offset):
+        for i in T.unroll(num_chunks):
+            chunk_ptr = buffer.access_ptr("rw", offset=base_offset + i * 128)
+            tir.call_intrin("void", tir.op.Op.get("tl.ptx_tcgen05_sf_warp_transpose"), chunk_ptr)
+
+    return _tcgen05_sf_warp_transpose_chunked(buffer, base_offset)
 
 
 def ptx_mma_sm70(

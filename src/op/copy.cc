@@ -837,6 +837,11 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
     }
   }
 
+  if (IsSharedBuffer(src) && dst.scope() == "shared.tmem") {
+    LOG(FATAL) << "Currently prefer not to support general copy from " << src.scope() << " to " << dst.scope()
+               << ". For copying scaling factors, consider using tcgen05_cp_warpx4 instead.";
+  }
+
   // Check tensor memory operations first (highest priority for SM100/Blackwell)
   if (CheckLDSMCopy(target)) {
     return CopyInst::kLDSM;
