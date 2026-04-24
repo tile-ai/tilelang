@@ -1,9 +1,5 @@
 # Introduce CLC tile schedule
 
-import os
-
-os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
-
 import torch
 import tilelang
 import tilelang.language as T

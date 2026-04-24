@@ -1324,33 +1324,6 @@ def ptx_tcgen05_mma_blockscaled_ss(
         enable_2cta,
     )
 
-
-def ptx_tcgen05_cp(smem_desc, tmem_col, tmem_col_offset=0):
-    """TVM intrinsic for tcgen05 copy (shared memory to tensor memory).
-
-    Args:
-        smem_desc: Shared memory pointer for scale factor data.
-        tmem_col: TMEM data pointer (base column address).
-        tmem_col_offset: Offset in TMEM columns from base (default 0).
-    """
-    return call_intrin(
-        "handle",
-        _tvm_op.Op.get("tl.ptx_tcgen05_cp"),
-        smem_desc,
-        tmem_col,
-        tmem_col_offset,
-    )
-
-
-def ptx_tcgen05_sf_warp_transpose(smem_ptr):
-    """TVM intrinsic for warp-level transpose of scale factors in shared memory."""
-    return call_intrin(
-        "handle",
-        _tvm_op.Op.get("tl.ptx_tcgen05_sf_warp_transpose"),
-        smem_ptr,
-    )
-
-
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
