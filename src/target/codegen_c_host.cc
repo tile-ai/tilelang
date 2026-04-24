@@ -538,7 +538,7 @@ using tvm::ffi::String;
   std::vector<std::pair<::tvm::GlobalVar, ::tvm::tir::PrimFunc>> funcs;
   for (auto [gvar, base_func] : mod->functions) {
     ICHECK(base_func->IsInstance<::tvm::tir::PrimFuncNode>())
-        << "CodegenCHost: Can only take PrimFunc";
+        << "TileLangCodegenCHost: Can only take PrimFunc";
     auto prim_func = ::tvm::Downcast<::tvm::tir::PrimFunc>(base_func);
     funcs.push_back({gvar, prim_func});
   }

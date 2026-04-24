@@ -33,7 +33,7 @@ ffi::Module BuildTileLangC(IRModule mod, Target target) {
   std::vector<std::pair<GlobalVar, PrimFunc>> funcs;
   for (auto [gvar, base_func] : mod->functions) {
     ICHECK(base_func->IsInstance<PrimFuncNode>())
-        << "CodegenCPP: Can only take PrimFunc";
+        << "BuildTileLangC: Can only take PrimFunc";
     auto prim_func = Downcast<PrimFunc>(base_func);
     funcs.push_back({gvar, prim_func});
   }
