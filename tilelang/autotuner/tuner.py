@@ -52,6 +52,10 @@ def timeout_handler(signum, frame):
 
 
 def run_with_timeout(func, timeout, *args, **kwargs):
+    # Windows does not provide SIGALRM; run without a per-trial alarm there.
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "alarm"):
+        return func(*args, **kwargs)
+
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(timeout)
     try:
@@ -541,6 +545,10 @@ class AutoTuner:
                 f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used, but the max CPU count is {max_cpu_count}, so we will use {max_cpu_count} CPUs"
             )
             num_workers = max_cpu_count
+        # Concurrent TVM compilation can crash on Windows in this path.
+        if sys.platform == "win32" and num_workers > 1:
+            logger.info("Auto-tuning compile concurrency is limited to 1 on Windows")
+            num_workers = 1
 
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []

@@ -44,6 +44,13 @@ for lib in TL_LIBS:
     if lib not in sys.path:
         sys.path.insert(0, lib)
 
+if sys.platform.startswith("win32"):
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    normalized_entries = {os.path.normcase(os.path.abspath(path)) for path in path_entries if path}
+    prepend_entries = [lib for lib in TL_LIBS if os.path.normcase(os.path.abspath(lib)) not in normalized_entries]
+    if prepend_entries:
+        os.environ["PATH"] = os.pathsep.join(prepend_entries + path_entries)
+
 
 def _get_package_version(pkg: str) -> str | None:
     try:

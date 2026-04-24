@@ -19,6 +19,20 @@ from tvm.base import py_str
 from tvm.contrib import utils
 
 
+def get_nvcc_subprocess_env() -> dict[str, str] | None:
+    """Return the environment used by NVCC subprocesses.
+
+    On Windows, the pip CUDA toolkit can provide nvcc without a system CUDA
+    install, but nvcc still needs MSVC's host compiler environment.
+    """
+    if os.name != "nt":
+        return None
+
+    from tilelang.contrib.msvc import get_msvc_subprocess_env
+
+    return get_msvc_subprocess_env()
+
+
 def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=None):
     if kernels_output_dir is None:
         return temp.relpath(f"{file_name}.cu"), temp.relpath(f"{file_name}.{target_format}")
@@ -87,6 +101,8 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         cmd += arch
     elif isinstance(arch, str):
         cmd += ["-arch", arch]
+    if os.name == "nt":
+        cmd += ["-Xcompiler", "/Zc:preprocessor"]
 
     if options:
         if isinstance(options, str):
@@ -99,15 +115,11 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     cmd += ["-o", file_target]
     cmd += [temp_code]
 
-    # NOTE: ccbin option can be used to tell nvcc where to find the c++ compiler
-    # just in case it is not in the path. On Windows it is not in the path by default.
-    # However, we cannot use TVM_CXX_COMPILER_PATH because the runtime env.
-    # Because it is hard to do runtime compiler detection, we require nvcc is configured
-    # correctly by default.
-    # if cxx_compiler_path != "":
-    #    cmd += ["-ccbin", cxx_compiler_path]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    compiler_env = get_nvcc_subprocess_env()
+    if compiler_env is None:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    else:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=compiler_env)
 
     (out, _) = proc.communicate()
 
@@ -116,6 +128,12 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
 
     if proc.returncode != 0:
         msg = f"{code}\nCompilation error:\n{py_str(out)}\nCommand: {' '.join(cmd)}\n"
+        if os.name == "nt":
+            from tilelang.contrib.msvc import get_msvc_environment_error
+
+            msvc_error = get_msvc_environment_error()
+            if msvc_error:
+                msg += f"MSVC environment: {msvc_error}\n"
         raise RuntimeError(msg)
 
     with open(file_target, "rb") as f:

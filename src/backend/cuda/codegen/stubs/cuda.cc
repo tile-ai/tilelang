@@ -14,14 +14,8 @@
  */
 
 #include "cuda.h"
+#include "dynlib.h"
 
-#if defined(_WIN32) && !defined(__CYGWIN__)
-#error "cuda_stub is currently POSIX-only (requires <dlfcn.h> / dlopen). "         \
-    "On Windows, build TileLang from source with -DTILELANG_USE_CUDA_STUBS=OFF " \
-    "to link against the real CUDA libraries."
-#endif
-
-#include <dlfcn.h>
 #include <stdexcept>
 #include <string>
 
@@ -30,10 +24,16 @@ namespace tvm::tl::cuda {
 namespace {
 
 // Library names to try loading (in order of preference)
+#if defined(_WIN32) && !defined(__CYGWIN__)
+constexpr const char *kLibCudaPaths[] = {
+    "nvcuda.dll",
+};
+#else
 constexpr const char *kLibCudaPaths[] = {
     "libcuda.so.1", // Versioned library (most common)
     "libcuda.so",   // Unversioned library
 };
+#endif
 
 /**
  * \brief Try to load libcuda.so from various paths.
@@ -42,7 +42,7 @@ constexpr const char *kLibCudaPaths[] = {
 void *try_load_libcuda() {
   void *handle = nullptr;
   for (const char *path : kLibCudaPaths) {
-    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
+    handle = tvm::tl::stubs::dynlib_open(path);
     if (handle != nullptr) {
       break;
     }
@@ -54,11 +54,8 @@ void *try_load_libcuda() {
  * \brief Get symbol from library handle, returning nullptr on failure.
  */
 template <typename T> T get_symbol(void *handle, const char *name) {
-  // Clear any existing error
-  (void)dlerror();
-  void *sym = dlsym(handle, name);
-  // Check for error (symbol could legitimately be nullptr in some cases)
-  const char *error = dlerror();
+  void *sym = tvm::tl::stubs::dynlib_sym(handle, name);
+  const char *error = tvm::tl::stubs::dynlib_error();
   if (error != nullptr) {
     return nullptr;
   }
@@ -87,7 +84,7 @@ CUDADriverAPI create_driver_api() {
 #define LOOKUP_REQUIRED(name)                                                  \
   api.name##_ = get_symbol<decltype(&name)>(handle, #name);                    \
   if (api.name##_ == nullptr) {                                                \
-    const char *error = dlerror();                                             \
+    const char *error = tvm::tl::stubs::dynlib_error();                        \
     throw std::runtime_error(                                                  \
         std::string("Failed to load required CUDA driver symbol: ") + #name +  \
         ". Error: " + (error ? error : "unknown"));                            \
@@ -119,7 +116,11 @@ CUDADriverAPI *CUDADriverAPI::get() {
 
   if (!is_available()) {
     throw std::runtime_error(
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        "CUDA driver library (nvcuda.dll) not found. "
+#else
         "CUDA driver library (libcuda.so) not found. "
+#endif
         "Please ensure NVIDIA drivers are installed, or use CPU-only mode.");
   }
 
@@ -138,108 +139,109 @@ using tvm::tl::cuda::CUDADriverAPI;
 
 extern "C" {
 
-CUresult cuGetErrorName(CUresult error, const char **pStr) {
+CUresult CUDAAPI cuGetErrorName(CUresult error, const char **pStr) {
   return CUDADriverAPI::get()->cuGetErrorName_(error, pStr);
 }
 
-CUresult cuGetErrorString(CUresult error, const char **pStr) {
+CUresult CUDAAPI cuGetErrorString(CUresult error, const char **pStr) {
   return CUDADriverAPI::get()->cuGetErrorString_(error, pStr);
 }
 
-CUresult cuCtxGetDevice(CUdevice *device) {
+CUresult CUDAAPI cuCtxGetDevice(CUdevice *device) {
   return CUDADriverAPI::get()->cuCtxGetDevice_(device);
 }
 
-CUresult cuCtxGetLimit(size_t *pvalue, CUlimit limit) {
+CUresult CUDAAPI cuCtxGetLimit(size_t *pvalue, CUlimit limit) {
   return CUDADriverAPI::get()->cuCtxGetLimit_(pvalue, limit);
 }
 
-CUresult cuCtxSetLimit(CUlimit limit, size_t value) {
+CUresult CUDAAPI cuCtxSetLimit(CUlimit limit, size_t value) {
   return CUDADriverAPI::get()->cuCtxSetLimit_(limit, value);
 }
 
-CUresult cuCtxResetPersistingL2Cache(void) {
+CUresult CUDAAPI cuCtxResetPersistingL2Cache(void) {
   return CUDADriverAPI::get()->cuCtxResetPersistingL2Cache_();
 }
 
-CUresult cuDeviceGetName(char *name, int len, CUdevice dev) {
+CUresult CUDAAPI cuDeviceGetName(char *name, int len, CUdevice dev) {
   return CUDADriverAPI::get()->cuDeviceGetName_(name, len, dev);
 }
 
-CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib,
-                              CUdevice dev) {
+CUresult CUDAAPI cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib,
+                                      CUdevice dev) {
   return CUDADriverAPI::get()->cuDeviceGetAttribute_(pi, attrib, dev);
 }
 
-CUresult cuModuleLoadData(CUmodule *module, const void *image) {
+CUresult CUDAAPI cuModuleLoadData(CUmodule *module, const void *image) {
   return CUDADriverAPI::get()->cuModuleLoadData_(module, image);
 }
 
-CUresult cuModuleLoadDataEx(CUmodule *module, const void *image,
-                            unsigned int numOptions, CUjit_option *options,
-                            void **optionValues) {
+CUresult CUDAAPI cuModuleLoadDataEx(CUmodule *module, const void *image,
+                                    unsigned int numOptions,
+                                    CUjit_option *options,
+                                    void **optionValues) {
   return CUDADriverAPI::get()->cuModuleLoadDataEx_(module, image, numOptions,
                                                    options, optionValues);
 }
 
-CUresult cuModuleUnload(CUmodule hmod) {
+CUresult CUDAAPI cuModuleUnload(CUmodule hmod) {
   return CUDADriverAPI::get()->cuModuleUnload_(hmod);
 }
 
-CUresult cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod,
-                             const char *name) {
+CUresult CUDAAPI cuModuleGetFunction(CUfunction *hfunc, CUmodule hmod,
+                                     const char *name) {
   return CUDADriverAPI::get()->cuModuleGetFunction_(hfunc, hmod, name);
 }
 
-CUresult cuModuleGetGlobal_v2(CUdeviceptr *dptr, size_t *bytes, CUmodule hmod,
-                              const char *name) {
+CUresult CUDAAPI cuModuleGetGlobal_v2(CUdeviceptr *dptr, size_t *bytes,
+                                      CUmodule hmod, const char *name) {
   return CUDADriverAPI::get()->cuModuleGetGlobal_(dptr, bytes, hmod, name);
 }
 
-CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunction_attribute attrib,
-                            int value) {
+CUresult CUDAAPI cuFuncSetAttribute(CUfunction hfunc,
+                                    CUfunction_attribute attrib, int value) {
   return CUDADriverAPI::get()->cuFuncSetAttribute_(hfunc, attrib, value);
 }
 
-CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
-                        unsigned int gridDimY, unsigned int gridDimZ,
-                        unsigned int blockDimX, unsigned int blockDimY,
-                        unsigned int blockDimZ, unsigned int sharedMemBytes,
-                        CUstream hStream, void **kernelParams, void **extra) {
+CUresult CUDAAPI cuLaunchKernel(CUfunction f, unsigned int gridDimX,
+                                unsigned int gridDimY, unsigned int gridDimZ,
+                                unsigned int blockDimX, unsigned int blockDimY,
+                                unsigned int blockDimZ,
+                                unsigned int sharedMemBytes, CUstream hStream,
+                                void **kernelParams, void **extra) {
   return CUDADriverAPI::get()->cuLaunchKernel_(
       f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
       sharedMemBytes, hStream, kernelParams, extra);
 }
 
-CUresult cuLaunchKernelEx(const CUlaunchConfig *config, CUfunction f,
-                          void **kernelParams, void **extra) {
+CUresult CUDAAPI cuLaunchKernelEx(const CUlaunchConfig *config, CUfunction f,
+                                  void **kernelParams, void **extra) {
   return CUDADriverAPI::get()->cuLaunchKernelEx_(config, f, kernelParams,
                                                  extra);
 }
 
-CUresult cuLaunchCooperativeKernel(CUfunction f, unsigned int gridDimX,
-                                   unsigned int gridDimY, unsigned int gridDimZ,
-                                   unsigned int blockDimX,
-                                   unsigned int blockDimY,
-                                   unsigned int blockDimZ,
-                                   unsigned int sharedMemBytes,
-                                   CUstream hStream, void **kernelParams) {
+CUresult CUDAAPI cuLaunchCooperativeKernel(
+    CUfunction f, unsigned int gridDimX, unsigned int gridDimY,
+    unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
+    unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream,
+    void **kernelParams) {
   return CUDADriverAPI::get()->cuLaunchCooperativeKernel_(
       f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
       sharedMemBytes, hStream, kernelParams);
 }
 
-CUresult cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
+CUresult CUDAAPI cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui,
+                                size_t N) {
   return CUDADriverAPI::get()->cuMemsetD32_(dstDevice, ui, N);
 }
 
-CUresult cuStreamSetAttribute(CUstream hStream, CUstreamAttrID attr,
-                              const CUstreamAttrValue *value) {
+CUresult CUDAAPI cuStreamSetAttribute(CUstream hStream, CUstreamAttrID attr,
+                                      const CUstreamAttrValue *value) {
   return CUDADriverAPI::get()->cuStreamSetAttribute_(hStream, attr, value);
 }
 
 #if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
-CUresult cuTensorMapEncodeTiled(
+CUresult CUDAAPI cuTensorMapEncodeTiled(
     CUtensorMap *tensorMap, CUtensorMapDataType tensorDataType,
     cuuint32_t tensorRank, void *globalAddress, const cuuint64_t *globalDim,
     const cuuint64_t *globalStrides, const cuuint32_t *boxDim,
@@ -255,7 +257,7 @@ CUresult cuTensorMapEncodeTiled(
             l2Promotion, oobFill);
 }
 
-CUresult cuTensorMapEncodeIm2col(
+CUresult CUDAAPI cuTensorMapEncodeIm2col(
     CUtensorMap *tensorMap, CUtensorMapDataType tensorDataType,
     cuuint32_t tensorRank, void *globalAddress, const cuuint64_t *globalDim,
     const cuuint64_t *globalStrides, const int *pixelBoxLowerCorner,

@@ -58,14 +58,20 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
 """
 
 PREDEF_INIT_FUNC = """
+#ifdef _WIN32
+#define TL_EXPORT __declspec(dllexport)
+#else
+#define TL_EXPORT
+#endif
+
 #define ERROR_BUF_SIZE 1024
 static char error_buf[ERROR_BUF_SIZE];
 
-extern "C" const char* get_last_error() {{
+extern "C" TL_EXPORT const char* get_last_error() {{
     return error_buf;
 }}
 
-extern "C" int init() {{
+extern "C" TL_EXPORT int init() {{
     error_buf[0] = '\\0';
     {0}
     return 0;
@@ -73,7 +79,7 @@ extern "C" int init() {{
 """
 
 PREDEF_HOST_FUNC = """
-extern "C" int call({}) {{
+extern "C" TL_EXPORT int call({}) {{
 {}
 \treturn 0;
 }}

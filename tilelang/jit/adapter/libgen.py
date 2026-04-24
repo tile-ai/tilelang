@@ -3,6 +3,7 @@ import ctypes
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -60,9 +61,10 @@ class LibraryGenerator:
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
 
+            _lib_ext = ".dll" if sys.platform == "win32" else ".so"
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             target_arch = get_target_arch(get_target_compute_version(target))
-            libpath = src.name.replace(".cu", ".so")
+            libpath = src.name.replace(".cu", _lib_ext)
 
             enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 
@@ -75,11 +77,9 @@ class LibraryGenerator:
             command = [
                 get_nvcc_compiler(),
                 "-std=c++17",
-                "-w",  # Disable all warning messages
+                "-w",
                 "-Xcudafe",
                 "--diag_suppress=177",
-                "--compiler-options",
-                "-fPIC",
                 "-lineinfo",
                 "--shared",
                 src.name,
@@ -88,6 +88,10 @@ class LibraryGenerator:
                 "-gencode",
                 f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
+            if sys.platform == "win32":
+                command += ["-Xcompiler", "/Zc:preprocessor"]
+            else:
+                command += ["--compiler-options", "-fPIC"]
             if enable_fast_math:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
@@ -140,6 +144,8 @@ class LibraryGenerator:
 
         src.write(self.lib_code)
         src.flush()
+        if sys.platform == "win32":
+            src.close()
 
         try:
             if verbose:
