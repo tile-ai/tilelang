@@ -385,9 +385,9 @@ TVM_DLL const Op &ptx_tcgen05_mma_ts();
 TVM_DLL const Op &ptx_tcgen05_mma_blockscaled_ss();
 
 /*!
- * \brief tvm intrinsic for tcgen05 copy (smem to tmem).
+ * \brief tvm intrinsic for tcgen05 copy warpx4 (smem to tmem).
  */
-TVM_DLL const Op &ptx_tcgen05_cp();
+TVM_DLL const Op &ptx_tcgen05_cp_warpx4();
 
 /*!
  * \brief tvm intrinsic for scale factor warp transpose in shared memory.

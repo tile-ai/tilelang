@@ -2921,8 +2921,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(SFB_offset)", sfb_offset);
     tcgen05_call = replacer.rewrite(tcgen05_call);
     this->stream << tcgen05_call;
-  } else if (op->op.same_as(tl::ptx_tcgen05_cp())) {
-    ICHECK_EQ(op->args.size(), 3U) << "ptx_tcgen05_cp expects 3 arguments";
+  } else if (op->op.same_as(tl::ptx_tcgen05_cp_warpx4())) {
+    ICHECK_EQ(op->args.size(), 3U) << "ptx_tcgen05_cp_warpx4 expects 3 arguments";
     need_tcgen05_common_h_ = true;
     // arg[0] = smem pointer, arg[1] = tmem data pointer, arg[2] = tmem column
     // offset

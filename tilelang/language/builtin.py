@@ -1281,7 +1281,7 @@ def tcgen05_cp_warpx4(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool =
             chunk_ptr = buffer.access_ptr("r", offset=base_offset + i * 128)
             tir.call_intrin(
                 "void",
-                tir.op.Op.get("tl.ptx_tcgen05_cp"),
+                tir.op.Op.get("tl.ptx_tcgen05_cp_warpx4"),
                 chunk_ptr,
                 tmem_ptr,
                 tmem_col_offset + i * 4,
