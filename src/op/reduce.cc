@@ -484,7 +484,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       //   slot for batch item b, thread t = red_buf[b * reducing_threads + t])
       for (const auto &iter_split : iter_sum->args) {
         auto mark = iter_split->source->source.as<Var>();
-        ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
+        if (!mark)
+          continue;
         if (!mark.value().same_as(src_vars[this->dim]->var))
           continue;
         auto scale = as_const_int(iter_split->scale);
@@ -622,7 +623,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       // ================================================================
       for (const auto &iter_split : iter_sum->args) {
         auto mark = iter_split->source->source.as<Var>();
-        ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
+        if (!mark)
+          continue;
         if (mark.value().same_as(src_vars[this->dim]->var)) {
           auto scale = as_const_int(iter_split->scale);
           auto extent = as_const_int(iter_split->extent);

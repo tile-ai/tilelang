@@ -72,10 +72,35 @@ CK_TILE_DEVICE void async_buffer_load_dword_v(void *smem, int32x4_t rsrc,
                : "memory");
 }
 
+// gfx950 (CDNA4 / MI350): 128-bit direct-to-LDS async load.
+// buffer_load_dwordx4 ... lds bypasses VGPRs entirely, giving 4x the
+// bandwidth of the 32-bit path and overlapping with MFMA computation.
+#if defined(__gfx950__)
+CK_TILE_DEVICE void async_buffer_load_dwordx4_v(void *smem, int32x4_t rsrc,
+                                                index_t voffset) {
+  auto const lds_ptr_sgpr =
+      __builtin_amdgcn_readfirstlane((reinterpret_cast<uintptr_t>(smem)));
+  asm volatile(
+      "s_mov_b32 m0, %0; \n\t"
+      "buffer_load_dwordx4 %1, %2, 0 offen lds;\n\t" ::"s"(lds_ptr_sgpr),
+      "v"(voffset), "s"(rsrc)
+      : "memory");
+}
+#endif // __gfx950__
+
 template <int N>
 TL_DEVICE void cp_async_gs(void *lds_base_ptr, void const *global_base_ptr) {
   if constexpr (N == 16) {
+#if defined(__gfx950__)
+    // gfx950: use 128-bit direct-to-LDS async copy (buffer_load_dwordx4 lds)
+    async_buffer_load_dwordx4_v(
+        lds_base_ptr,
+        make_wave_buffer_resource(((const int32_t *)global_base_ptr) -
+                                  threadIdx.x),
+        threadIdx.x * N /*16 bytes*/);
+#else
     *(uint4 *)lds_base_ptr = *(const uint4 *)global_base_ptr;
+#endif
   } else if constexpr (N == 8) {
     *(uint2 *)lds_base_ptr = *(const uint2 *)global_base_ptr;
   } else if constexpr (N == 4) {
@@ -91,8 +116,21 @@ template <int N>
 TL_DEVICE void cp_async_gs_conditional(void *lds_base_ptr,
                                        void const *global_base_ptr, bool cond) {
   if constexpr (N == 16) {
+#if defined(__gfx950__)
+    // gfx950: use 128-bit direct-to-LDS async copy (buffer_load_dwordx4 lds)
+    if (cond) {
+      async_buffer_load_dwordx4_v(
+          lds_base_ptr,
+          make_wave_buffer_resource(((const int32_t *)global_base_ptr) -
+                                    threadIdx.x),
+          threadIdx.x * N /*16 bytes*/);
+    } else {
+      *(uint4 *)lds_base_ptr = make_uint4(0, 0, 0, 0);
+    }
+#else
     *(uint4 *)lds_base_ptr =
         cond ? *(const uint4 *)global_base_ptr : make_uint4(0, 0, 0, 0);
+#endif
   } else if constexpr (N == 8) {
     *(uint2 *)lds_base_ptr =
         cond ? *(const uint2 *)global_base_ptr : make_uint2(0, 0);

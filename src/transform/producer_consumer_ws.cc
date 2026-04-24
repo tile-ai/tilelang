@@ -21,7 +21,9 @@
  */
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -37,7 +39,6 @@
 #include "../target/utils.h"
 #include "common/mbarrier.h"
 #include "multi_version_buffer_rewriter.h"
-#include "warp_specialized_rewriter.h"
 
 namespace tvm {
 namespace tl {
@@ -362,7 +363,7 @@ private:
   }
 
   void VisitStmt_(const BlockNode *op) final {
-    CollectBuffers(GetRef<Block>(op));
+    CollectBuffers(ffi::GetRef<Block>(op));
     StmtExprVisitor::VisitStmt_(op);
   }
 
@@ -423,7 +424,7 @@ private:
   }
 
   void VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
+    Var var = ffi::GetRef<Var>(op);
     if (bound_vars_.count(var) || buffer_data_to_buffer_.count(var)) {
       return;
     }
@@ -487,7 +488,7 @@ private:
       ICHECK_EQ(op->args.size(), 5);
       const auto *var = op->args[1].as<VarNode>();
       ICHECK(var);
-      auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+      auto it = buffer_data_to_buffer_.find(ffi::GetRef<Var>(var));
       if (it != buffer_data_to_buffer_.end() &&
           IsBranchPrivateBuffer(it->second)) {
         int rw_mask = GetConstAccessMask(op->args[4]);
@@ -527,10 +528,15 @@ enum class PreludeStmtPlacement : uint8_t {
 
 static PreludeStmtPlacement
 ClassifyPreludeStmt(const Stmt &stmt, const BufferDataToBufferMap &buffer_map,
+                    const LocalLiveSet &shared_live_seed,
                     const LocalLiveSet &producer_live_seed,
                     const LocalLiveSet &consumer_live_seed) {
   LocalAccessSummary summary = LocalAccessCollector::Collect(stmt, buffer_map);
   if (!summary.HasTrackedDefs()) {
+    return PreludeStmtPlacement::kKeepSharedPrelude;
+  }
+
+  if (shared_live_seed.NeedsAnyDef(summary)) {
     return PreludeStmtPlacement::kKeepSharedPrelude;
   }
 
@@ -914,7 +920,7 @@ AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
         ICHECK_EQ(op->args.size(), 5);
         const auto *var = op->args[1].as<VarNode>();
         ICHECK(var);
-        auto it = buffer_map_.find(GetRef<Var>(var));
+        auto it = buffer_map_.find(ffi::GetRef<Var>(var));
         if (it != buffer_map_.end() && it->second->data.same_as(buffer_data_)) {
           MarkAccess(op->args[4]);
         }
@@ -1687,6 +1693,7 @@ private:
     // Consumer: threadIdx.x stays, but extent is consumer_extent
     Stmt rewritten_consumer = final_consumer_loop;
 
+    shared_prelude_live_seed_ = {};
     producer_prelude_live_seed_ = {};
     consumer_prelude_live_seed_ = {};
     producer_prelude_live_seed_.AddUses(LocalAccessCollector::Collect(
@@ -1735,7 +1742,7 @@ private:
       }
       auto maybe_clone = [&](const Buffer &buffer) {
         if (!buffer.defined() ||
-            !(IsFragmentBuffer(buffer) || IsLocalBuffer(buffer, true)) ||
+            !(IsFragmentBuffer(buffer) || IsLocalBuffer(buffer)) ||
             !block_alloc_buffers.count(buffer.get()) ||
             producer_buffer_remap.count(buffer.get())) {
           return;
@@ -1854,7 +1861,7 @@ private:
     ws_transformed_ = true;
 
     // Rebuild BlockRealize.
-    BlockRealize new_realize = GetRef<BlockRealize>(orig_realize);
+    BlockRealize new_realize = ffi::GetRef<BlockRealize>(orig_realize);
     new_realize.CopyOnWrite()->block = new_block;
     return new_realize;
   }
@@ -1928,7 +1935,7 @@ private:
       if (!SameExpr(ge->b, consumer_extent_)) {
         return false;
       }
-      *branch = GetRef<IfThenElse>(if_node);
+      *branch = ffi::GetRef<IfThenElse>(if_node);
       return true;
     }
 
@@ -2070,14 +2077,37 @@ private:
       if (loop_idx < 0) {
         return {stmt, false};
       }
+      // Propagate liveness backwards through prelude statements so that
+      // transitive dependencies are captured.  For example, if consumer
+      // needs `m_start` and `m_start` is defined by a prelude statement
+      // that reads `cur_batch_idx`, the loop defining `cur_batch_idx`
+      // must also be visible to the consumer.
+      {
+        LocalLiveSet producer_live = producer_prelude_live_seed_;
+        LocalLiveSet consumer_live = consumer_prelude_live_seed_;
+        for (int i = loop_idx - 1; i >= 0; --i) {
+          LocalAccessSummary summary = LocalAccessCollector::Collect(
+              seq->seq[i], buffer_data_to_buffer_);
+          if (!summary.HasTrackedDefs())
+            continue;
+          if (producer_live.NeedsAnyDef(summary)) {
+            producer_live.AddUses(summary);
+          }
+          if (consumer_live.NeedsAnyDef(summary)) {
+            consumer_live.AddUses(summary);
+          }
+        }
+        producer_prelude_live_seed_ = producer_live;
+        consumer_prelude_live_seed_ = consumer_live;
+      }
       // Classify pre-loop statements using branch-private def/use sets.
       // Shared-prelude statements stay in place; branch-private definitions
       // move next to the branch that consumes them, or are duplicated when
       // both producer and consumer need the same definition.
       for (int i = 0; i < loop_idx; ++i) {
-        switch (ClassifyPreludeStmt(seq->seq[i], buffer_data_to_buffer_,
-                                    producer_prelude_live_seed_,
-                                    consumer_prelude_live_seed_)) {
+        switch (ClassifyPreludeStmt(
+            seq->seq[i], buffer_data_to_buffer_, shared_prelude_live_seed_,
+            producer_prelude_live_seed_, consumer_prelude_live_seed_)) {
         case PreludeStmtPlacement::kProducerOnly:
           extracted_producer_init_.push_back(seq->seq[i]);
           break;
@@ -2109,6 +2139,18 @@ private:
       return {new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq), true};
     }
     if (auto *let = stmt.as<LetStmtNode>()) {
+      // The LetStmt value is evaluated in the shared prelude (outside
+      // both producer and consumer branches).  If it reads branch-private
+      // buffers or vars defined by a prelude statement, that definition
+      // must remain available in the shared scope.  Propagate such uses
+      // into both live seeds before visiting the body so the upstream
+      // prelude-statement classifier sees them when classifying the
+      // surrounding SeqStmt.
+      {
+        LocalAccessSummary val_summary = LocalAccessCollector::Collect(
+            Evaluate(let->value), buffer_data_to_buffer_);
+        shared_prelude_live_seed_.AddUses(val_summary);
+      }
       ReplaceResult result = ReplacePipelineLoopInStmt(
           let->body, pipeline_loop, ws_body, consumer_extent);
       if (!result.found) {
@@ -2124,7 +2166,7 @@ private:
       }
       Block block = realize->block;
       block.CopyOnWrite()->body = result.stmt;
-      BlockRealize new_realize = GetRef<BlockRealize>(realize);
+      BlockRealize new_realize = ffi::GetRef<BlockRealize>(realize);
       new_realize.CopyOnWrite()->block = block;
       return {new_realize, true};
     }
@@ -2134,7 +2176,7 @@ private:
       if (!result.found) {
         return {stmt, false};
       }
-      Block new_block = GetRef<Block>(block);
+      Block new_block = ffi::GetRef<Block>(block);
       new_block.CopyOnWrite()->body = result.stmt;
       return {new_block, true};
     }
@@ -2144,7 +2186,7 @@ private:
       if (!result.found) {
         return {stmt, false};
       }
-      AttrStmt new_attr = GetRef<AttrStmt>(attr);
+      AttrStmt new_attr = ffi::GetRef<AttrStmt>(attr);
       new_attr.CopyOnWrite()->body = result.stmt;
       return {new_attr, true};
     }
@@ -2186,6 +2228,7 @@ private:
   bool ws_transformed_{false};
   BufferDataToBufferMap buffer_data_to_buffer_;
   std::unordered_map<const StmtNode *, Stmt> common_prelude_rewrites_;
+  LocalLiveSet shared_prelude_live_seed_;
   LocalLiveSet producer_prelude_live_seed_;
   LocalLiveSet consumer_prelude_live_seed_;
   Array<Stmt> extracted_producer_init_;
@@ -2352,10 +2395,10 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     }
     // Only apply MVB + WS if the function is a tiled WS candidate.
     if (!TiledWSCandidate::Check(f->body, target.value())) {
-      LOG(WARNING) << "[WS] skipped: no TMA copies in pipeline loop";
+      DLOG(WARNING) << "[WS] skipped: no TMA copies in pipeline loop";
       return f;
     }
-    LOG(WARNING) << "[WS] candidate found, applying MVB + WS";
+    DLOG(WARNING) << "[WS] candidate found, applying MVB + WS";
     // Expand shared buffers for pipelining before the WS split.
     // Keep the original so we can fall back if the WS rewriter doesn't fire
     // (e.g. non-tile-op consumers in the loop body).
@@ -2363,7 +2406,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     f = ApplyMultiVersionBufferRewriter(std::move(f));
     PrimFunc result = ProducerConsumerWSRewriter::Substitute(std::move(f));
     if (!result->HasNonzeroAttr(kTiledWSApplied)) {
-      LOG(WARNING) << "[WS] rewriter did not fire, falling back";
+      DLOG(WARNING) << "[WS] rewriter did not fire, falling back";
       // The TMA kernel needs warp specialization for correct pipelined
       // execution.  Since the tiled rewriter could not apply WS (e.g.
       // conditional loop body), strip pipeline annotations so that
@@ -2390,7 +2433,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       fn->body = stripped;
       return original_f;
     }
-    LOG(WARNING) << "[WS] transformation applied successfully";
+    DLOG(WARNING) << "[WS] transformation applied successfully";
     return result;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ProducerConsumerWarpSpecialized",

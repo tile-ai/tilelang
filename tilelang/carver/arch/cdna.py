@@ -3,6 +3,10 @@ import tvm
 from tvm.target import Target
 from .arch_base import TileDevice
 
+# LDS size per CU for specific AMD GPU architectures (in bytes).
+# gfx950 (CDNA4 / MI350): 160 KB — larger than the 64 KB default for gfx942.
+_GFX950_LDS_SIZE = 160 * 1024  # 163840 bytes
+
 
 def is_cdna_arch(arch: TileDevice) -> bool:
     return isinstance(arch, CDNA)
@@ -18,7 +22,17 @@ class CDNA(TileDevice):
             raise RuntimeError("Cannot find HIP device 0.")
         self.device: tvm.runtime.Device = device
         self.platform: str = "CDNA"
-        self.smem_cap = device.max_shared_memory_per_block
+
+        # TVM runtime should correctly report 160 KB (163840 B) for gfx950; the
+        # override is kept as a safety net in case an older driver reports the
+        # conservative 64 KB default.
+        mcpu = str(target.attrs.get("mcpu", ""))
+        reported = device.max_shared_memory_per_block
+        if "gfx950" in mcpu and reported < _GFX950_LDS_SIZE:
+            self.smem_cap = _GFX950_LDS_SIZE
+        else:
+            self.smem_cap = reported
+
         self.compute_max_core = device.multi_processor_count
         self.warp_size = device.warp_size
         self.compute_capability = device.compute_version.replace(".", "")

@@ -526,7 +526,9 @@ private:
         }
         PrimExpr new_index =
             old_index +
-            floormod(pipeline_loop_->loop_var, new_buffer->shape[0]) * offset;
+            floormod((pipeline_loop_->loop_var - pipeline_loop_->min),
+                     new_buffer->shape[0]) *
+                offset;
         new_args.Set(i + 1, new_index);
       }
     }
@@ -1790,7 +1792,13 @@ private:
     for (size_t pos = 1; pos < suffix_wait_indices.size(); ++pos) {
       bool changed = false;
       int idx = suffix_wait_indices[pos];
-      seq.Set(idx, RewriteFirstStaticWaitInWrapper(seq[idx], retain, &changed));
+      // Tail consumers drain the final committed groups with no new commits in
+      // between. Relax them progressively from the end so the suffix becomes
+      // ..., wait<2>, wait<1>, wait<0> instead of rewriting every drain wait to
+      // the same retain count.
+      int new_wait_n = std::min(retain, static_cast<int>(pos));
+      seq.Set(idx,
+              RewriteFirstStaticWaitInWrapper(seq[idx], new_wait_n, &changed));
     }
     return seq;
   }

@@ -285,24 +285,20 @@ class SparseTensorCoreIntrinEmitter:
             trans = self.a_transposed
 
             for i in T.serial(warp_rows):
-                # Assign A_shared_buf_elem
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, (rk * warp_k + ki * micro_size_k) // self.SPARSE_FACTOR
-                A_shared_buf_elem = (
-                    A_buf[tuple(A_other) + (A_base0 + wk, A_base1 + wi)]
-                    if a_transposed
-                    else A_buf[tuple(A_other) + (A_base0 + wi, A_base1 + wk)]
-                )
 
                 if ldmatrix_available:
+                    row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
+                    src_indices = (
+                        tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
+                        if a_transposed
+                        else tuple(A_other) + (A_base0 + wi + row_off, A_base1 + wk + col_off)
+                    )
                     T.ptx_ldmatrix(
-                        a_dtype,
                         T.bool(trans),
                         4,
-                        ".b16",
-                        A_local_buf.data,
-                        i * local_size_a,
-                        T.access_ptr(A_shared_buf_elem, "r"),
-                        get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
+                        T.access_ptr(A_buf[src_indices], "r", extent=8),
+                        T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
                     )
                 else:
                     for j in T.serial(local_size_a):
@@ -443,44 +439,44 @@ class SparseTensorCoreIntrinEmitter:
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = (
-                        B_buf[tuple(B_other) + (B_base0 + wi, B_base1 + wk)]
-                        if b_transposed
-                        else B_buf[tuple(B_other) + (B_base0 + wk, B_base1 + wi)]
-                    )
-
                     if replicate_b:
+                        row_off, col_off = get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed)
+                        src_indices = (
+                            tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
+                            if b_transposed
+                            else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                        )
                         T.ptx_ldmatrix(
-                            b_dtype,
                             T.bool(trans),
                             4,
-                            ".b16",
-                            B_local_buf.data,
-                            i * local_size_b,
-                            T.access_ptr(B_shared_buf_elem, "r"),
-                            get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
+                            T.access_ptr(B_buf[src_indices], "r", extent=8),
+                            T.access_ptr(B_local_buf[i * local_size_b], "w", extent=8),
                         )
 
+                        row_off, col_off = get_ldmatrix_offset_b("B", tx, lift(local_size_b) // 2, stride, b_dtype, b_transposed)
+                        src_indices = (
+                            tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
+                            if b_transposed
+                            else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                        )
                         T.ptx_ldmatrix(
-                            b_dtype,
                             T.bool(trans),
                             4,
-                            ".b16",
-                            B_local_buf.data,
-                            i * local_size_b + lift(local_size_b) // 2,
-                            T.access_ptr(B_shared_buf_elem, "r"),
-                            get_ldmatrix_offset_b("B", tx, lift(local_size_b) // 2, stride, b_dtype, b_transposed),
+                            T.access_ptr(B_buf[src_indices], "r", extent=8),
+                            T.access_ptr(B_local_buf[i * local_size_b + lift(local_size_b) // 2], "w", extent=8),
                         )
                     else:
+                        row_off, col_off = get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed)
+                        src_indices = (
+                            tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
+                            if b_transposed
+                            else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
+                        )
                         T.ptx_ldmatrix(
-                            b_dtype,
                             T.bool(trans),
                             4,
-                            ".b16",
-                            B_local_buf.data,
-                            i * local_size_b,
-                            T.access_ptr(B_shared_buf_elem, "r"),
-                            get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
+                            T.access_ptr(B_buf[src_indices], "r", extent=8),
+                            T.access_ptr(B_local_buf[i * local_size_b], "w", extent=8),
                         )
 
                 else:

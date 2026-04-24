@@ -13,6 +13,8 @@
 #include <tvm/tir/op.h>
 
 #include <cmath>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,6 +64,69 @@ void ReplaceAll(std::string &str, const std::string &from,
     str.replace(pos, from.size(), to);
     pos = str.find(from, pos + to.size());
   }
+}
+
+bool IsValidCPAsyncTransferBytes(int64_t bytes) {
+  return bytes == 4 || bytes == 8 || bytes == 16;
+}
+
+std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
+  const auto *ptr_call = expr.as<CallNode>();
+  if (ptr_call == nullptr) {
+    return std::nullopt;
+  }
+  if (ptr_call->op.same_as(builtin::address_of())) {
+    const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+    ICHECK(buffer_load) << "address_of arg must be BufferLoad";
+    return buffer_load->buffer->dtype;
+  }
+  if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+    ICHECK(!ptr_call->args.empty());
+    return ptr_call->args[0].dtype();
+  }
+  if (ptr_call->op.same_as(tl::access_ptr())) {
+    ICHECK_EQ(ptr_call->args.size(), 3U)
+        << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+    const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+    ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
+    return buffer_load->buffer->dtype;
+  }
+  return std::nullopt;
+}
+
+int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
+  ICHECK(op->args.size() == 3 || op->args.size() == 4)
+      << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+         "src_access_ptr, num_elems, [predicate])";
+  const auto *num_elems_imm = op->args[2].as<IntImmNode>();
+  ICHECK(num_elems_imm) << "tl::ptx_cp_async num_elems must be IntImm, but got "
+                        << op->args[2];
+  int64_t num_elems = num_elems_imm->value;
+  ICHECK_GT(num_elems, 0);
+
+  auto dst_elem_type = GetAccessPtrElementType(op->args[0]);
+  auto src_elem_type = GetAccessPtrElementType(op->args[1]);
+  ICHECK(dst_elem_type.has_value() && src_elem_type.has_value())
+      << "tl::ptx_cp_async expects address_of, tl.access_ptr, or "
+         "tvm_access_ptr operands";
+
+  int64_t dst_total_bits =
+      num_elems * dst_elem_type.value().bits() * dst_elem_type.value().lanes();
+  int64_t src_total_bits =
+      num_elems * src_elem_type.value().bits() * src_elem_type.value().lanes();
+  ICHECK_EQ(dst_total_bits, src_total_bits)
+      << "tl::ptx_cp_async requires src/dst transfer widths to match, but got "
+      << dst_total_bits << " vs " << src_total_bits << " bits";
+  ICHECK_EQ(dst_total_bits % 8, 0)
+      << "tl::ptx_cp_async requires byte-aligned transfers, but got "
+      << dst_total_bits << " bits";
+
+  int64_t total_bytes = dst_total_bits / 8;
+  ICHECK(IsValidCPAsyncTransferBytes(total_bytes))
+      << "tl::ptx_cp_async requires a final PTX byte width in {4, 8, 16}, but "
+         "got "
+      << total_bytes;
+  return static_cast<int>(total_bytes);
 }
 
 } // namespace
@@ -429,14 +494,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     }
   } else if (op->op.same_as(tl::ptx_cp_async())) {
     // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
-    // args[2] = bytes, args[3] = predicate (optional)
-    ICHECK(op->args.size() == 3 || op->args.size() == 4)
-        << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-           "src_access_ptr, bytes, [predicate])";
+    // args[2] = num_elems, args[3] = predicate (optional)
+    int total_bytes = GetTileLangCPAsyncTransferBytes(op);
 
     std::string dst = PrintExpr_(op->args[0]);
     std::string src = PrintExpr_(op->args[1]);
-    std::string size = PrintExpr_(op->args[2]);
+    std::string size = std::to_string(total_bytes);
 
     if (op->args.size() == 3) {
       this->PrintIndent();
@@ -899,6 +962,30 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << "[0] + " << c_offset << ", " << desc_val << ", " << scale_out
            << ", " << mask0 << ", " << mask1 << ", " << mask2 << ", " << mask3
            << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_ld())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool pack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = PrintExpr_(op->args[3]);
+    std::string col_offset = PrintExpr_(op->args[4]);
+    std::string dst_ptr = PrintExpr_(op->args[5]);
+    PrintIndent();
+    stream << "tl.tcgen05_ld_32dp" << inst_bits << "bNx(" << chunks << ", "
+           << (pack16 ? "True" : "False") << ", " << tmem_start_col << ", "
+           << col_offset << ", " << dst_ptr << ")\n";
+  } else if (op->op.same_as(tl::tcgen05_st())) {
+    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    int inst_bits = Downcast<IntImm>(op->args[0])->value;
+    int chunks = Downcast<IntImm>(op->args[1])->value;
+    bool unpack16 = Downcast<Bool>(op->args[2])->value;
+    std::string tmem_start_col = PrintExpr_(op->args[3]);
+    std::string col_offset = PrintExpr_(op->args[4]);
+    std::string src_ptr = PrintExpr_(op->args[5]);
+    PrintIndent();
+    stream << "tl.tcgen05_st_32dp" << inst_bits << "bNx(" << chunks << ", "
+           << (unpack16 ? "True" : "False") << ", " << tmem_start_col << ", "
+           << col_offset << ", " << src_ptr << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     PrintIndent();

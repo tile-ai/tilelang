@@ -513,7 +513,10 @@ class TLCUDASourceWrapper:
 
             host_code = str(func)
             for function_name in function_names:
-                index = host_code.index(f'T.call_packed("{function_name}"')
+                try:
+                    index = host_code.index(f'T.call_packed("{function_name}"')
+                except ValueError:
+                    index = host_code.index(f'value="{function_name}"')
                 function_names_index[function_name] = index
         # sort function_names
         function_names = sorted(function_names, key=lambda x: function_names_index[x])

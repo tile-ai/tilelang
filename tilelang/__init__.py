@@ -88,7 +88,7 @@ def _init_logger():
 
     handler = TqdmLoggingHandler()
     formatter = logging.Formatter(
-        fmt="%(asctime)s  [TileLang:%(name)s:%(levelname)s]: %(message)s",
+        fmt="%(asctime)s  [TileLang:%(name)s:%(levelname)s] (%(filename)s:%(lineno)d): %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     handler.setFormatter(formatter)
