@@ -4,6 +4,8 @@ import tilelang.testing
 import tilelang
 import torch
 import pytest
+from tilelang.engine.param import KernelParam
+from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
 
 
 def matmul(
@@ -251,6 +253,41 @@ def run_tvm_ffi_kernel_multi_stream(
 
 def test_tvm_ffi_kernel_multi_stream():
     run_tvm_ffi_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float32, 128, 256, 32, 2)
+
+
+def test_tvm_ffi_adapter_converts_torch_tensors_before_executable_call():
+    seen_args = None
+
+    class FakeExecutable:
+        def __call__(self, *args):
+            nonlocal seen_args
+            seen_args = args
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((16,), T.int32),
+        B: T.Tensor((16,), T.int32),
+    ):
+        with T.Kernel(1, threads=1) as _:
+            for i in range(16):
+                B[i] = A[i]
+
+    adapter = TVMFFIKernelAdapter.__new__(TVMFFIKernelAdapter)
+    adapter.params = [KernelParam.from_buffer(main.buffer_map[p]) for p in main.params]
+    adapter.result_idx = [1]
+    adapter.ir_module = tvm.IRModule({"main": main.with_attr("global_symbol", "main")})
+    adapter.executable = FakeExecutable()
+    adapter.rt_mod = None
+
+    func = adapter._convert_torch_func()
+    inp = torch.arange(16, dtype=torch.int32)
+    out = func(inp)
+
+    assert isinstance(out, torch.Tensor)
+    assert seen_args is not None
+    assert len(seen_args) == 2
+    assert all(not isinstance(arg, torch.Tensor) for arg in seen_args)
+    assert all(isinstance(arg, tvm.runtime.Tensor) for arg in seen_args)
 
 
 def run_tvm_ffi_dynamic_shape(

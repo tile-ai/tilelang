@@ -12,6 +12,7 @@ from typing import Callable, Any
 import sys
 
 import torch
+import torch.utils.dlpack
 from tilelang import tvm
 from tvm import runtime, tir
 from tvm.target import Target
@@ -245,7 +246,11 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
-            executable(*tensor_list)
+            executable_args = tuple(
+                runtime.from_dlpack(torch.utils.dlpack.to_dlpack(tensor)) if isinstance(tensor, torch.Tensor) else tensor
+                for tensor in tensor_list
+            )
+            executable(*executable_args)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
