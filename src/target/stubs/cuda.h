@@ -39,12 +39,6 @@
 
 #pragma once
 
-#if !defined(TILELANG_CUDA_STUBS_ENABLED)
-
-#include <cuda.h>
-
-#else
-
 // Define guard before including vendor/cuda.h
 // This ensures vendor/cuda.h can only be included through this stub header.
 #define _TILELANG_CUDA_STUB_INCLUDE_GUARD
@@ -53,13 +47,12 @@
 
 #undef _TILELANG_CUDA_STUB_INCLUDE_GUARD
 
-// Symbol visibility macros for shared library export
+// Symbol visibility macros for shared library export.
+// On Windows, vendor/cuda.h already declares these functions (with CUDAAPI
+// calling convention). Adding __declspec(dllexport) would cause C2375
+// (different linkage). Use WINDOWS_EXPORT_ALL_SYMBOLS in CMake instead.
 #if defined(_WIN32) || defined(__CYGWIN__)
-#ifdef TILELANG_CUDA_STUB_EXPORTS
-#define TILELANG_CUDA_STUB_API __declspec(dllexport)
-#else
-#define TILELANG_CUDA_STUB_API __declspec(dllimport)
-#endif
+#define TILELANG_CUDA_STUB_API
 #else
 #define TILELANG_CUDA_STUB_API __attribute__((visibility("default")))
 #endif
@@ -158,7 +151,12 @@ struct TILELANG_CUDA_STUB_API CUDADriverAPI {
 // These functions provide drop-in replacements for CUDA driver API calls.
 // They are exported from the stub library and can be linked against directly.
 // The implementations are in cuda.cc.
+//
+// On Windows, vendor/cuda.h already declares all these functions (with CUDAAPI
+// calling convention), so we skip the re-declarations to avoid C2375 linkage
+// conflicts. On POSIX, we need them for __attribute__((visibility("default"))).
 
+#if !defined(_WIN32) || defined(__CYGWIN__)
 extern "C" {
 
 TILELANG_CUDA_STUB_API CUresult cuGetErrorName(CUresult error,
@@ -230,5 +228,4 @@ TILELANG_CUDA_STUB_API CUresult cuTensorMapEncodeIm2col(
 #endif
 
 } // extern "C"
-
-#endif // TILELANG_CUDA_STUBS_ENABLED
+#endif // !_WIN32

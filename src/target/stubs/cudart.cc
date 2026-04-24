@@ -15,19 +15,9 @@
  * API call, and symbols are resolved via dlsym().
  */
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
+#include "dynlib.h"
 #include <cuda_runtime_api.h>
 
-#if defined(_WIN32) && !defined(__CYGWIN__)
-#error "cudart_stub is currently POSIX-only (requires <dlfcn.h> / dlopen). "       \
-    "On Windows, build TileLang from source with -DTILELANG_USE_CUDA_STUBS=OFF " \
-    "to link against the real CUDA libraries."
-#endif
-
-#include <dlfcn.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,18 +39,31 @@ static_assert(CUDART_VERSION >= 11000,
               "cudart_stub requires CUDA Toolkit headers >= 11.0 "
               "(CUDART_VERSION >= 11000).");
 
-// Export symbols with default visibility for the shared stub library.
+#if defined(_WIN32) || defined(__CYGWIN__)
+// On Windows, symbols are exported via WINDOWS_EXPORT_ALL_SYMBOLS in CMake.
+// Using __declspec(dllexport) here would conflict with the plain declarations
+// in <cuda_runtime_api.h>.
+#define TILELANG_CUDART_STUB_API
+#else
 #define TILELANG_CUDART_STUB_API __attribute__((visibility("default")))
+#endif
 
 namespace {
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+constexpr const char *kLibCudartPaths[] = {
+    "cudart64_12.dll",
+    "cudart64_110.dll",
+    "cudart64_11.dll",
+};
+#else
 constexpr const char *kLibCudartPaths[] = {
     "libcudart.so",
-    // Some distros ship a versioned SONAME as well; try a few common ones.
     "libcudart.so.13",
     "libcudart.so.12",
     "libcudart.so.11",
 };
+#endif
 
 using CudaGraphInstantiateLegacy = cudaError_t (*)(cudaGraphExec_t *pGraphExec,
                                                    cudaGraph_t graph,
@@ -71,39 +74,30 @@ using CudaGraphInstantiateWithFlags = cudaError_t (*)(
     cudaGraphExec_t *pGraphExec, cudaGraph_t graph, unsigned long long flags);
 
 void *TryLoadLibCudart() {
-  // First, check if the symbols are already available globally.
-  // This handles cases where PyTorch or another library has already loaded
-  // libcudart, making its symbols available in the global namespace.
-  // We use a representative symbol like cudaGetErrorString.
-  // dlsym with RTLD_DEFAULT searches the global scope.
-  void *sym = dlsym(RTLD_DEFAULT, "cudaGetErrorString");
-  if (sym != nullptr && sym != reinterpret_cast<void *>(&cudaGetErrorString)) {
-    return RTLD_DEFAULT;
-  }
-  sym = dlsym(RTLD_NEXT, "cudaGetErrorString");
-  if (sym != nullptr) {
-    return RTLD_NEXT;
+  // Check if symbols are already available (e.g. loaded by PyTorch).
+  void *handle = tvm::tl::stubs::dynlib_find_loaded(
+      "cudaGetErrorString", reinterpret_cast<void *>(&cudaGetErrorString));
+  if (handle != nullptr) {
+    return handle;
   }
 
-  // Otherwise, attempt to dlopen the library directly.
-  void *handle = nullptr;
+  // Otherwise, attempt to load the library directly.
   for (const char *path : kLibCudartPaths) {
-    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
+    handle = tvm::tl::stubs::dynlib_open(path);
     if (handle != nullptr) {
       return handle;
     }
   }
 
   fprintf(stderr,
-          "TileLang Error: libcudart symbols not found. "
+          "TileLang Error: cudart symbols not found. "
           "Make sure PyTorch with CUDA is installed before using TileLang.\n");
   abort();
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
-  (void)dlerror();
-  void *sym = dlsym(handle, name);
-  const char *error = dlerror();
+  void *sym = tvm::tl::stubs::dynlib_sym(handle, name);
+  const char *error = tvm::tl::stubs::dynlib_error();
   if (error != nullptr) {
     return nullptr;
   }

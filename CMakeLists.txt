@@ -185,16 +185,11 @@ set(PREBUILD_CYTHON ON)
 
 # CUDA stub libraries (cuda/cudart/nvrtc) are used to build wheels that can run
 # across different CUDA Toolkit major versions and/or on CPU-only machines by
-# avoiding hard DT_NEEDED dependencies on versioned CUDA SONAMEs.
-#
-# These stubs are currently POSIX-only (dlopen/dlsym via <dlfcn.h>).
-if(WIN32 AND NOT CYGWIN)
-  set(_TILELANG_USE_CUDA_STUBS_DEFAULT OFF)
-else()
-  set(_TILELANG_USE_CUDA_STUBS_DEFAULT ON)
-endif()
+# lazy-loading the real libraries at runtime (dlopen/dlsym on POSIX,
+# LoadLibrary/GetProcAddress on Windows).
+set(_TILELANG_USE_CUDA_STUBS_DEFAULT ON)
 option(TILELANG_USE_CUDA_STUBS
-       "Use POSIX dlopen-based CUDA stub libraries (cuda/cudart/nvrtc) for portable wheels"
+       "Use stub libraries (cuda/cudart/nvrtc) for portable wheels"
        ${_TILELANG_USE_CUDA_STUBS_DEFAULT})
 unset(_TILELANG_USE_CUDA_STUBS_DEFAULT)
 
@@ -388,7 +383,7 @@ elseif(USE_CUDA)
   # Set `USE_CUDA=/usr/local/cuda-x.y`
   cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
 
-  if(WIN32)
+  if(WIN32 AND NOT TILELANG_USE_CUDA_STUBS)
     file(GLOB _tilelang_nvrtc_candidates
       "${CUDAToolkit_ROOT}/bin/x86_64/nvrtc64_*.dll"
       "${CUDAToolkit_ROOT}/bin/nvrtc64_*.dll")
@@ -400,16 +395,8 @@ elseif(USE_CUDA)
         "NVRTC runtime library to link against" FORCE)
     endif()
   endif()
-  if(TILELANG_USE_CUDA_STUBS)
-    add_compile_definitions(TILELANG_CUDA_STUBS_ENABLED=1)
-  endif()
 
   if(TILELANG_USE_CUDA_STUBS)
-    if(WIN32 AND NOT CYGWIN)
-      message(FATAL_ERROR "TILELANG_USE_CUDA_STUBS=ON is not supported on Windows. "
-                          "Please configure with -DTILELANG_USE_CUDA_STUBS=OFF.")
-    endif()
-
     # ============================================================================
     # CUDA Driver Stub Library (libcuda_stub.so)
     # ============================================================================
@@ -426,14 +413,17 @@ elseif(USE_CUDA)
     target_include_directories(cuda_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     # Export symbols with visibility="default" when building
     target_compile_definitions(cuda_stub PRIVATE TILELANG_CUDA_STUB_EXPORTS)
-    # Use dlopen/dlsym for runtime library loading
-    target_link_libraries(cuda_stub PRIVATE ${CMAKE_DL_LIBS})
+    if(WIN32)
+      target_link_libraries(cuda_stub PRIVATE psapi)
+    else()
+      target_link_libraries(cuda_stub PRIVATE ${CMAKE_DL_LIBS})
+    endif()
     set_target_properties(cuda_stub PROPERTIES
       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
       ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-      # Use consistent naming
       OUTPUT_NAME "cuda_stub"
+      WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
 
     # ============================================================================
@@ -449,12 +439,17 @@ elseif(USE_CUDA)
     add_library(cudart_stub SHARED src/target/stubs/cudart.cc)
     target_include_directories(cudart_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     target_compile_definitions(cudart_stub PRIVATE TILELANG_CUDART_STUB_EXPORTS)
-    target_link_libraries(cudart_stub PRIVATE ${CMAKE_DL_LIBS})
+    if(WIN32)
+      target_link_libraries(cudart_stub PRIVATE psapi)
+    else()
+      target_link_libraries(cudart_stub PRIVATE ${CMAKE_DL_LIBS})
+    endif()
     set_target_properties(cudart_stub PROPERTIES
       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
       ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
       OUTPUT_NAME "cudart_stub"
+      WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
 
     # Make TVM link against our CUDA Runtime stub instead of the real libcudart.
@@ -477,12 +472,17 @@ elseif(USE_CUDA)
     add_library(nvrtc_stub SHARED src/target/stubs/nvrtc.cc)
     target_include_directories(nvrtc_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     target_compile_definitions(nvrtc_stub PRIVATE TILELANG_NVRTC_STUB_EXPORTS)
-    target_link_libraries(nvrtc_stub PRIVATE ${CMAKE_DL_LIBS})
+    if(WIN32)
+      target_link_libraries(nvrtc_stub PRIVATE psapi)
+    else()
+      target_link_libraries(nvrtc_stub PRIVATE ${CMAKE_DL_LIBS})
+    endif()
     set_target_properties(nvrtc_stub PROPERTIES
       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
       ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
       OUTPUT_NAME "nvrtc_stub"
+      WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
 
     # Make TVM link against our NVRTC stub instead of the real libnvrtc.
