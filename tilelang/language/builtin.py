@@ -12,7 +12,7 @@ from tilelang.utils.target import check_hip_availability
 from tvm import DataType, tir
 from tvm.runtime import convert
 from tvm.tir import PrimExpr, Var, Call, BufferLoad, BufferRegion
-from tilelang.utils.language import retrieve_ptr, retrieve_stride, get_buffer_region_from_load, retrieve_buffer_and_offset
+from tilelang.utils.language import retrieve_ptr, get_buffer_region_from_load, retrieve_buffer_and_offset
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 
@@ -1254,9 +1254,7 @@ def _tcgen05_num_smem_chunks(smem_src, chunk_elems: int):
             raise ValueError("Packed scale-factor helpers require a static extent.")
         total_elems *= extent.value
     if total_elems % chunk_elems != 0:
-        raise ValueError(
-            f"Packed scale-factor helpers require total extent to be a multiple of {chunk_elems}, got {total_elems}."
-        )
+        raise ValueError(f"Packed scale-factor helpers require total extent to be a multiple of {chunk_elems}, got {total_elems}.")
     return total_elems // chunk_elems
 
 

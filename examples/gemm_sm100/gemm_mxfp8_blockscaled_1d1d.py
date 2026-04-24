@@ -1,20 +1,7 @@
 # MXFP8 Block-Scaled GEMM on SM100
 # Blockscale size: (M, N, K) = (1, 1, 128)
-# Explicit scale-factor path:
-#   1. load packed uint32 scale factors to shared memory
-#   2. transpose the 128-word tile in-place for UTCCP
-#   3. issue tcgen05_cp to move the transposed tile into TMEM
 
-import os
-import sys
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-os.environ.setdefault("TILELANG_CACHE_DIR", "/tmp/tilelang-cache")
-os.environ.setdefault("TILELANG_TMP_DIR", "/tmp/tilelang-cache/tmp")
-
+import argparse
 import torch
 import tilelang
 import tilelang.language as T
@@ -340,7 +327,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     waves = T.ceildiv(m_blocks * n_blocks, sm_num)
     group_size = 16  # in cluster
     assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
-    
+
     with T.Kernel(sm_num, threads=256, cluster_dims=2) as (block_id):
         cta_id = T.block_rank_in_cluster()
         T.assume(cta_id < 2)
@@ -498,13 +485,55 @@ def pack_sf_u8_to_u32_1d(sf_u8):
     mn, sf_k_padded = sf_u8.shape
     assert sf_k_padded % 4 == 0
     words = sf_u8.to(torch.int64)
-    packed = (
-        words[:, 0::4]
-        | (words[:, 1::4] << 8)
-        | (words[:, 2::4] << 16)
-        | (words[:, 3::4] << 24)
-    ).to(torch.uint32)
+    packed = (words[:, 0::4] | (words[:, 1::4] << 8) | (words[:, 2::4] << 16) | (words[:, 3::4] << 24)).to(torch.uint32)
     return packed.T.contiguous().reshape(-1)
+
+
+def quantize_fp8_with_packed_ue8m0(x, gran_k=128):
+    """DeepGEMM-style per-token FP8 quantization with UE8M0 scale factors.
+
+    Returns:
+        x_fp8: [MN, K] in float8_e4m3fn
+        sf_packed_u32: flattened group-major packed uint32 scale factors
+        sf_u8: [MN, ceil(K / gran_k)] unpacked E8M0 exponents
+    """
+
+    def ceil_div_int(x, y):
+        return (x + y - 1) // y
+
+    def align_up(x, y):
+        return ceil_div_int(x, y) * y
+
+    def ceil_to_ue8m0(x):
+        bits = x.abs().float().view(torch.int32)
+        exp = ((bits >> 23) & 0xFF) + (bits & 0x7FFFFF).ne(0).to(torch.int32)
+        return (exp.clamp(1, 254) << 23).view(torch.float32)
+
+    assert x.dim() == 2
+    mn, k = x.shape
+    padded_k = align_up(k, gran_k)
+
+    x_padded = torch.zeros((mn, padded_k), device=x.device, dtype=x.dtype)
+    x_padded[:, :k] = x
+    x_view = x_padded.view(mn, padded_k // gran_k, gran_k)
+
+    x_amax = x_view.abs().float().amax(dim=2).clamp_min(1e-4)
+    sf = ceil_to_ue8m0(x_amax / 448.0)
+
+    x_fp8 = (x_view * (1.0 / sf.unsqueeze(2))).to(torch.float8_e4m3fn)
+    x_fp8 = x_fp8.view(mn, padded_k)[:, :k].contiguous()
+
+    sf_u8 = (sf.contiguous().view(torch.int32) >> 23).to(torch.uint8)
+    sf_k_blocks = sf_u8.shape[1]
+    sf_k_padded = align_up(sf_k_blocks, 4)
+    if sf_k_padded != sf_k_blocks:
+        sf_u8_padded = torch.full((mn, sf_k_padded), 127, device=x.device, dtype=torch.uint8)
+        sf_u8_padded[:, :sf_k_blocks] = sf_u8
+    else:
+        sf_u8_padded = sf_u8
+
+    sf_packed_u32 = pack_sf_u8_to_u32_1d(sf_u8_padded)
+    return x_fp8, sf_packed_u32, sf_u8
 
 
 def blockscaled_gemm_ref(a, b, sfa_packed, sfb_packed, sf_granularity_k=128):
@@ -552,35 +581,55 @@ def cosine_similarity(a, b):
     return (a_flat @ b_flat) / (a_flat.norm() * b_flat.norm())
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--use-e2e-quant-path", action="store_true", default=True)
+    parser.add_argument("--persistent", action="store_true", default=True)
+    parser.add_argument("--enable-2cta", action="store_true", default=True)
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     M, N, K = 8192, 8192, 8192
     block_M, block_N, block_K = 128, 256, 128
     in_dtype, out_dtype, accum_dtype = T.float8_e4m3fn, T.bfloat16, T.float
-    persistent = True
-    enable_2cta = True
+    use_e2e_quant_path = args.use_e2e_quant_path
+    persistent = args.persistent
+    enable_2cta = args.enable_2cta
     num_stages = 6 if enable_2cta else 4
     if persistent:
-        assert enable_2cta, "2-CTA scheduling is required for the persistent version to achieve good performance"
+        assert enable_2cta
         kernel = mxfp8_blockscaled_gemm_2cta_persistent
     else:
         kernel = mxfp8_blockscaled_gemm_2cta if enable_2cta else mxfp8_blockscaled_gemm
     sf_granularity_k = 128
     assert sf_granularity_k == 128
 
-    a = torch.randn(M, K, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
-    b = torch.randn(K, N, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
+    if use_e2e_quant_path:
+        # End-to-end path:
+        #   fp16/bf16 source tensors -> per-token FP8 quantization with UE8M0 SF
+        #   -> pack 4 SF entries into one uint32 -> blockscaled GEMM
+        x = torch.randn(M, K, device="cuda", dtype=torch.float16)
+        w_nt = torch.randn(N, K, device="cuda", dtype=torch.float16)
 
-    # E8M0 scale factors: one uint32 per row per 4 K-blocks.
-    sf_k_blocks = (K + sf_granularity_k - 1) // sf_granularity_k
+        a, sfa, _ = quantize_fp8_with_packed_ue8m0(x, gran_k=sf_granularity_k)
+        b_nt, sfb, _ = quantize_fp8_with_packed_ue8m0(w_nt, gran_k=sf_granularity_k)
+        b = b_nt.T.contiguous()
+    else:
+        a = torch.randn(M, K, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
+        b = torch.randn(K, N, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
 
-    # Pad to multiple of 4 (UTCCP loads 4 K-blocks at a time)
-    sf_k_padded = ((sf_k_blocks + 3) // 4) * 4
-    sfa_u8 = torch.randint(127 - 5, 127 + 5, (M, sf_k_padded), device="cuda", dtype=torch.uint8)
-    sfb_u8 = torch.randint(127 - 5, 127 + 5, (N, sf_k_padded), device="cuda", dtype=torch.uint8)
-    sfa = pack_sf_u8_to_u32_1d(sfa_u8)
-    sfb = pack_sf_u8_to_u32_1d(sfb_u8)
+        # E8M0 scale factors: one uint32 per row per 4 K-blocks.
+        sf_k_blocks = (K + sf_granularity_k - 1) // sf_granularity_k
 
-
+        # Pad to multiple of 4 (UTCCP loads 4 K-blocks at a time)
+        sf_k_padded = ((sf_k_blocks + 3) // 4) * 4
+        sfa_u8 = torch.randint(127 - 5, 127 + 5, (M, sf_k_padded), device="cuda", dtype=torch.uint8)
+        sfb_u8 = torch.randint(127 - 5, 127 + 5, (N, sf_k_padded), device="cuda", dtype=torch.uint8)
+        sfa = pack_sf_u8_to_u32_1d(sfa_u8)
+        sfb = pack_sf_u8_to_u32_1d(sfb_u8)
 
     c = kernel(
         a,
@@ -613,12 +662,21 @@ def main():
         )
     )
 
-    ref_c = blockscaled_gemm_ref(a, b, sfa, sfb, sf_granularity_k).to(torch.bfloat16)
+    if use_e2e_quant_path:
+        # For the end-to-end quantization path, compare against the reference with bf16 gemm
+        ref_c = (x.float() @ w_nt.float().T).to(torch.bfloat16)
+    else:
+        ref_c = blockscaled_gemm_ref(a, b, sfa, sfb, sf_granularity_k).to(torch.bfloat16)
     sim = cosine_similarity(c, ref_c)
+
     print(f"Output shape: {c.shape}, dtype: {c.dtype}")
+    print(f"E2E quant path: {use_e2e_quant_path}")
     print(f"{c=}, {ref_c=}")
     # print(f"Max abs error: {(c.float() - ref_c.float()).abs().max().item():.6f}")
     print(f"Cosine similarity: {sim.item():.6f}")
+    if use_e2e_quant_path:
+        assert 1 - sim < 1e-3  # err tolerance from DeepGEMM
+        print("e2e check passed ✅")
 
     tl_latency = do_bench(
         lambda: kernel(
