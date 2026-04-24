@@ -110,6 +110,20 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
+// __habs overloads for hip_bfloat16 and float16_t to resolve ambiguity on ROCm.
+// hip_bfloat16 != __hip_bfloat16, and float16_t != __half, so the standard
+// __habs overloads don't match exactly, causing ambiguous overload errors.
+__device__ __forceinline__ hip_bfloat16 __habs(hip_bfloat16 a) {
+  unsigned short bits = *reinterpret_cast<unsigned short *>(&a);
+  bits &= 0x7FFFu;
+  return *reinterpret_cast<hip_bfloat16 *>(&bits);
+}
+__device__ __forceinline__ float16_t __habs(float16_t a) {
+  unsigned short bits = *reinterpret_cast<unsigned short *>(&a);
+  bits &= 0x7FFFu;
+  return *reinterpret_cast<float16_t *>(&bits);
+}
+
 namespace tl {
 
 // Packed x2 element-wise math helpers (HIP scalar fallbacks)

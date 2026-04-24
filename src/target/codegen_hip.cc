@@ -210,6 +210,10 @@ std::string CodeGenTileLangHIP::Finish() {
     decl_stream << "#include <tl_templates/hip/hip_fp8.h>\n";
   }
 
+  if (need_cooperative_groups_) {
+    decl_stream << "#include <hip/hip_cooperative_groups.h>\n";
+  }
+
   decl_stream << "#include <tl_templates/hip/gemm.h>\n";
   decl_stream << "#include <tl_templates/hip/copy.h>\n";
   decl_stream << "#include <tl_templates/hip/reduce.h>\n";
@@ -836,6 +840,15 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
     buffer_str = temp.str();
   }
 
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+  // local.var is a scalar — no indexing needed.
+  if (scope == "local.var") {
+    os << vid;
+    return os.str();
+  }
+
   std::string index_str = PrintExpr(index);
   if (t.bits() == 4 || (t.bits() == 1 && t.is_int())) {
     // This is a special case, because CodegenCUDA::PrintType()
@@ -940,6 +953,14 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::sync_grid())) {
+    this->need_cooperative_groups_ = true;
+    this->PrintIndent();
+    this->stream << "cooperative_groups::this_grid().sync();\n";
+  } else if (op->op.same_as(tl::sync_warp())) {
+    // AMD wavefronts execute in lockstep, so intra-wavefront convergence is
+    // guaranteed by the hardware. __syncwarp() has no HIP equivalent and is a
+    // no-op here. The mask argument (if present) is intentionally ignored.
   } else if (op->op.same_as(tl::any_sync())) {
     ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
     // HIP __any takes only the predicate; the mask is ignored because
@@ -1435,7 +1456,23 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocateNode *op) {
         scope == "shared") {
       constant_size = constant_size / (32 / op->dtype.bits());
     }
-    stream << ' ' << vid << '[' << constant_size << "];\n";
+
+    if (scope == "local.var") {
+      // Single-element variable: emit an initializer so the value is defined.
+      // Default to 0; respect the user-provided tl.local_var_init annotation.
+      PrimExpr init = tir::make_const(op->dtype, 0);
+      auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
+      if (init_it != op->annotations.end()) {
+        PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
+        if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
+          user_init = tir::Cast(op->dtype, user_init);
+        }
+        init = user_init;
+      }
+      stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
+    } else {
+      stream << ' ' << vid << '[' << constant_size << "];\n";
+    }
   }
 
   RegisterHandleType(op->buffer_var.get(), op->dtype);

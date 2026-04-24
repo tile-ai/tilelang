@@ -73,6 +73,8 @@ private:
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangHIP *p);
 
+  // whether need hip_cooperative_groups.h
+  bool need_cooperative_groups_{false};
   // whether need math_constants.h
   bool need_math_constants_h_{false};
   // whether need mfma.h
