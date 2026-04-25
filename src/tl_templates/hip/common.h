@@ -201,40 +201,40 @@ TL_DEVICE uint1 abs2(uint1 val) {
 }
 TL_DEVICE uint1 max2(uint1 a, uint1 b) {
   bfloat16_t a0, a1, b0, b1;
-  __builtin_memcpy(&a0, &a.x,       sizeof(a0));
-  __builtin_memcpy(&a1, (char*)&a.x + 2, sizeof(a1));
-  __builtin_memcpy(&b0, &b.x,       sizeof(b0));
-  __builtin_memcpy(&b1, (char*)&b.x + 2, sizeof(b1));
+  __builtin_memcpy(&a0, &a.x, sizeof(a0));
+  __builtin_memcpy(&a1, (char *)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x, sizeof(b0));
+  __builtin_memcpy(&b1, (char *)&b.x + 2, sizeof(b1));
   bfloat16_t r0 = (float)a0 > (float)b0 ? a0 : b0;
   bfloat16_t r1 = (float)a1 > (float)b1 ? a1 : b1;
   return uint1{__pack_bfloat162(r0, r1)};
 }
 TL_DEVICE uint1 min2(uint1 a, uint1 b) {
   bfloat16_t a0, a1, b0, b1;
-  __builtin_memcpy(&a0, &a.x,       sizeof(a0));
-  __builtin_memcpy(&a1, (char*)&a.x + 2, sizeof(a1));
-  __builtin_memcpy(&b0, &b.x,       sizeof(b0));
-  __builtin_memcpy(&b1, (char*)&b.x + 2, sizeof(b1));
+  __builtin_memcpy(&a0, &a.x, sizeof(a0));
+  __builtin_memcpy(&a1, (char *)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x, sizeof(b0));
+  __builtin_memcpy(&b1, (char *)&b.x + 2, sizeof(b1));
   bfloat16_t r0 = (float)a0 < (float)b0 ? a0 : b0;
   bfloat16_t r1 = (float)a1 < (float)b1 ? a1 : b1;
   return uint1{__pack_bfloat162(r0, r1)};
 }
 TL_DEVICE uint1 add2(uint1 a, uint1 b) {
   bfloat16_t a0, a1, b0, b1;
-  __builtin_memcpy(&a0, &a.x,       sizeof(a0));
-  __builtin_memcpy(&a1, (char*)&a.x + 2, sizeof(a1));
-  __builtin_memcpy(&b0, &b.x,       sizeof(b0));
-  __builtin_memcpy(&b1, (char*)&b.x + 2, sizeof(b1));
+  __builtin_memcpy(&a0, &a.x, sizeof(a0));
+  __builtin_memcpy(&a1, (char *)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x, sizeof(b0));
+  __builtin_memcpy(&b1, (char *)&b.x + 2, sizeof(b1));
   bfloat16_t r0 = (bfloat16_t)((float)a0 + (float)b0);
   bfloat16_t r1 = (bfloat16_t)((float)a1 + (float)b1);
   return uint1{__pack_bfloat162(r0, r1)};
 }
 TL_DEVICE uint1 mul2(uint1 a, uint1 b) {
   bfloat16_t a0, a1, b0, b1;
-  __builtin_memcpy(&a0, &a.x,       sizeof(a0));
-  __builtin_memcpy(&a1, (char*)&a.x + 2, sizeof(a1));
-  __builtin_memcpy(&b0, &b.x,       sizeof(b0));
-  __builtin_memcpy(&b1, (char*)&b.x + 2, sizeof(b1));
+  __builtin_memcpy(&a0, &a.x, sizeof(a0));
+  __builtin_memcpy(&a1, (char *)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x, sizeof(b0));
+  __builtin_memcpy(&b1, (char *)&b.x + 2, sizeof(b1));
   bfloat16_t r0 = (bfloat16_t)((float)a0 * (float)b0);
   bfloat16_t r1 = (bfloat16_t)((float)a1 * (float)b1);
   return uint1{__pack_bfloat162(r0, r1)};

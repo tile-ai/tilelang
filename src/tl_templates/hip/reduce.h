@@ -285,10 +285,10 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
   // require restructuring inter-warp shared-memory communication in all
   // kernels and is deferred to a separate optimisation pass.
   value = op(value, __shfl_xor(value, 16, 32));
-  value = op(value, __shfl_xor(value, 8,  32));
-  value = op(value, __shfl_xor(value, 4,  32));
-  value = op(value, __shfl_xor(value, 2,  32));
-  value = op(value, __shfl_xor(value, 1,  32));
+  value = op(value, __shfl_xor(value, 8, 32));
+  value = op(value, __shfl_xor(value, 4, 32));
+  value = op(value, __shfl_xor(value, 2, 32));
+  value = op(value, __shfl_xor(value, 1, 32));
   return value;
 }
 

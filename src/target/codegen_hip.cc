@@ -723,7 +723,7 @@ void CodeGenTileLangHIP::VisitExpr_(const ShuffleNode *op,
   // as HIP_vector_type<unsigned int, 1> which has a single .x member.
   DataType t = op->dtype;
   bool is_bf16x2 = t.is_bfloat16() && t.lanes() == 2;
-  bool is_fp16x2  = t.is_float16()  && t.lanes() == 2;
+  bool is_fp16x2 = t.is_float16() && t.lanes() == 2;
   if ((is_bf16x2 || is_fp16x2) && op->vectors.size() == 2 &&
       op->vectors[0].dtype().lanes() == 1 &&
       op->vectors[1].dtype().lanes() == 1) {

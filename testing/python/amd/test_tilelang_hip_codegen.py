@@ -56,7 +56,7 @@ def test_warp_reduce_no_nan(n_tokens, n_experts):
     def gate_reduce(n_tok: int, n_exp: int):
         @T.prim_func
         def kernel(
-            logits:  T.Tensor((n_tok, n_exp), T.float32),
+            logits: T.Tensor((n_tok, n_exp), T.float32),
             out_max: T.Tensor((n_tok,), T.float32),
             out_sum: T.Tensor((n_tok,), T.float32),
         ) -> None:
@@ -70,9 +70,10 @@ def test_warp_reduce_no_nan(n_tokens, n_experts):
                 if T.get_thread_binding() == 0:
                     out_max[pid] = mx[0]
                     out_sum[pid] = sm[0]
+
         return kernel
 
-    logits  = torch.randn(n_tokens, n_experts, dtype=torch.float32, device="cuda")
+    logits = torch.randn(n_tokens, n_experts, dtype=torch.float32, device="cuda")
     out_max = torch.zeros(n_tokens, dtype=torch.float32, device="cuda")
     out_sum = torch.zeros(n_tokens, dtype=torch.float32, device="cuda")
 
@@ -82,7 +83,7 @@ def test_warp_reduce_no_nan(n_tokens, n_experts):
     assert not out_max.isnan().any(), "reduce_max NaN — __shfl_xor(v,32) uninit VGPR bug"
     assert not out_sum.isnan().any(), "reduce_sum NaN — __shfl_xor(v,32) uninit VGPR bug"
     torch.testing.assert_close(out_max, logits.max(dim=1).values, atol=1e-5, rtol=1e-5)
-    torch.testing.assert_close(out_sum, logits.sum(dim=1),        atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(out_sum, logits.sum(dim=1), atol=1e-4, rtol=1e-4)
 
 
 @tilelang.testing.requires_rocm
@@ -99,7 +100,7 @@ def test_warp_reduce_correctness_32_threads():
     def reduce_kernel():
         @T.prim_func
         def kernel(
-            x:   T.Tensor((N,), T.float32),
+            x: T.Tensor((N,), T.float32),
             out: T.Tensor((1,), T.float32),
         ) -> None:
             with T.Kernel(1, threads=N) as _:
@@ -109,9 +110,10 @@ def test_warp_reduce_correctness_32_threads():
                 T.reduce_sum(frag, s, dim=0)
                 if T.get_thread_binding() == 0:
                     out[0] = s[0]
+
         return kernel
 
-    x   = torch.arange(1, N + 1, dtype=torch.float32, device="cuda")
+    x = torch.arange(1, N + 1, dtype=torch.float32, device="cuda")
     out = torch.zeros(1, dtype=torch.float32, device="cuda")
     reduce_kernel()(x, out)
     torch.cuda.synchronize()
@@ -135,7 +137,7 @@ def test_warp_reduce_with_64_threads_two_groups():
     def two_warp_reduce():
         @T.prim_func
         def kernel(
-            x:   T.Tensor((N, n_exp), T.float32),
+            x: T.Tensor((N, n_exp), T.float32),
             out: T.Tensor((N,), T.float32),
         ) -> None:
             with T.Kernel(1, threads=N) as _:
@@ -145,9 +147,10 @@ def test_warp_reduce_with_64_threads_two_groups():
                 s = T.alloc_fragment(1, T.float32)
                 T.reduce_sum(frag, s, dim=0)
                 out[tx] = s[0]
+
         return kernel
 
-    x   = torch.ones(N, n_exp, dtype=torch.float32, device="cuda")
+    x = torch.ones(N, n_exp, dtype=torch.float32, device="cuda")
     out = torch.zeros(N, dtype=torch.float32, device="cuda")
     two_warp_reduce()(x, out)
     torch.cuda.synchronize()
@@ -181,7 +184,7 @@ def test_bfloat16_shuffle_codegen_and_correctness():
     def bf16_reduce(n_t: int, n_e: int):
         @T.prim_func
         def kernel(
-            x:   T.Tensor((n_t, n_e), T.bfloat16),
+            x: T.Tensor((n_t, n_e), T.bfloat16),
             out: T.Tensor((n_t,), T.float32),
         ) -> None:
             with T.Kernel(n_t, threads=32) as pid:
@@ -194,19 +197,18 @@ def test_bfloat16_shuffle_codegen_and_correctness():
                 T.reduce_sum(frag_f32, s, dim=0)
                 if T.get_thread_binding() == 0:
                     out[pid] = s[0]
+
         return kernel
 
     kernel = bf16_reduce(n_tok, n_exp)
 
     # Source check: no invalid two-argument constructor
     src = kernel.get_kernel_source()
-    assert "uint1(a" not in src and "uint1(b" not in src, (
-        "Old `uint1(a, b)` constructor found — ShuffleNode fix not applied"
-    )
+    assert "uint1(a" not in src and "uint1(b" not in src, "Old `uint1(a, b)` constructor found — ShuffleNode fix not applied"
 
     # Runtime correctness
-    x   = torch.randn(n_tok, n_exp, dtype=torch.bfloat16, device="cuda")
-    out = torch.zeros(n_tok,        dtype=torch.float32,  device="cuda")
+    x = torch.randn(n_tok, n_exp, dtype=torch.bfloat16, device="cuda")
+    out = torch.zeros(n_tok, dtype=torch.float32, device="cuda")
     kernel(x, out)
     torch.cuda.synchronize()
     assert not out.isnan().any(), "bf16 ShuffleNode reduction NaN"
@@ -225,7 +227,7 @@ def test_float16_shuffle_correctness():
     def f16_reduce(n_t: int, n_e: int):
         @T.prim_func
         def kernel(
-            x:   T.Tensor((n_t, n_e), T.float16),
+            x: T.Tensor((n_t, n_e), T.float16),
             out: T.Tensor((n_t,), T.float32),
         ) -> None:
             with T.Kernel(n_t, threads=32) as pid:
@@ -238,10 +240,11 @@ def test_float16_shuffle_correctness():
                 T.reduce_sum(frag_f32, s, dim=0)
                 if T.get_thread_binding() == 0:
                     out[pid] = s[0]
+
         return kernel
 
-    x   = torch.randn(n_tok, n_exp, dtype=torch.float16, device="cuda")
-    out = torch.zeros(n_tok,        dtype=torch.float32, device="cuda")
+    x = torch.randn(n_tok, n_exp, dtype=torch.float16, device="cuda")
+    out = torch.zeros(n_tok, dtype=torch.float32, device="cuda")
     f16_reduce(n_tok, n_exp)(x, out)
     torch.cuda.synchronize()
     assert not out.isnan().any(), "float16 ShuffleNode reduction NaN"
@@ -290,8 +293,7 @@ def test_alloc_var_init_in_hip_source():
     """Init value must appear as `= 7;` in the generated HIP source."""
     src = _kernel_alloc_var_init().get_kernel_source()
     assert "= 7;" in src, (
-        "T.alloc_var(T.int32, init=7) should generate '= 7;' in HIP source, "
-        f"but it was not found.\nGenerated source:\n{src}"
+        f"T.alloc_var(T.int32, init=7) should generate '= 7;' in HIP source, but it was not found.\nGenerated source:\n{src}"
     )
 
 
@@ -300,8 +302,7 @@ def test_alloc_var_init_no_array_subscript_in_hip_source():
     """local.var must be declared as a scalar (no `counter[` array syntax)."""
     src = _kernel_alloc_var_init().get_kernel_source()
     assert "counter[" not in src, (
-        "local.var should be emitted as a scalar (e.g. 'int counter = 7'), "
-        f"but array-style access was found:\n{src}"
+        f"local.var should be emitted as a scalar (e.g. 'int counter = 7'), but array-style access was found:\n{src}"
     )
 
 
@@ -379,14 +380,17 @@ def test_alloc_var_zero_init_correctness():
 
 
 @tilelang.testing.requires_rocm
-@pytest.mark.parametrize("init_val,dtype_str", [
-    (0,    "int32"),
-    (7,    "int32"),
-    (-3,   "int32"),
-    (0.0,  "float32"),
-    (1.0,  "float32"),
-    (-0.5, "float32"),
-])
+@pytest.mark.parametrize(
+    "init_val,dtype_str",
+    [
+        (0, "int32"),
+        (7, "int32"),
+        (-3, "int32"),
+        (0.0, "float32"),
+        (1.0, "float32"),
+        (-0.5, "float32"),
+    ],
+)
 def test_alloc_var_literal_init_is_reliable(init_val, dtype_str):
     """
     alloc_var with any literal init must produce that exact value on HIP.
@@ -394,7 +398,7 @@ def test_alloc_var_literal_init_is_reliable(init_val, dtype_str):
     Old: int/float literals → block_attr (silently ignored) → uninit.
     New: always T.buffer_store → `vid = init_val;` in generated HIP C.
     """
-    tl_dtype    = T.int32   if dtype_str == "int32"   else T.float32
+    tl_dtype = T.int32 if dtype_str == "int32" else T.float32
     torch_dtype = torch.int32 if dtype_str == "int32" else torch.float32
     N = 32
 
@@ -406,6 +410,7 @@ def test_alloc_var_literal_init_is_reliable(init_val, dtype_str):
                 v = T.alloc_var(tld, init=iv)
                 for i in T.Parallel(N):
                     out[i] = v
+
         return kernel
 
     out = torch.zeros(N, dtype=torch_dtype, device="cuda")
@@ -414,9 +419,7 @@ def test_alloc_var_literal_init_is_reliable(init_val, dtype_str):
 
     expected = torch.full((N,), init_val, dtype=torch_dtype, device="cuda")
     if dtype_str == "int32":
-        assert torch.equal(out, expected), (
-            f"alloc_var(init={init_val}) got {out[0].item()}, expected {init_val}"
-        )
+        assert torch.equal(out, expected), f"alloc_var(init={init_val}) got {out[0].item()}, expected {init_val}"
     else:
         torch.testing.assert_close(out, expected, atol=0, rtol=0)
 
@@ -437,14 +440,13 @@ def test_alloc_var_inf_init():
                 v = T.alloc_var(T.float32, init=-T.infinity(T.float32))
                 for i in T.Parallel(N):
                     out[i] = v
+
         return kernel
 
     out = torch.zeros(N, dtype=torch.float32, device="cuda")
     inf_init_kernel()(out)
     torch.cuda.synchronize()
-    assert out.isinf().all() and (out < 0).all(), (
-        f"alloc_var(init=-inf) got {out[0].item()}, expected -inf"
-    )
+    assert out.isinf().all() and (out < 0).all(), f"alloc_var(init=-inf) got {out[0].item()}, expected -inf"
 
 
 @tilelang.testing.requires_rocm
@@ -464,14 +466,13 @@ def test_alloc_var_init_zero_persists_across_serial_loop():
                 for _ in T.serial(N):
                     count_var = count_var + 1
                 out[0] = count_var
+
         return kernel
 
     out = torch.zeros(1, dtype=torch.int32, device="cuda")
     serial_count_kernel()(out)
     torch.cuda.synchronize()
-    assert out[0].item() == N, (
-        f"count_var: got {out[0].item()}, expected {N} — init=0 not applied (block_attr bug)"
-    )
+    assert out[0].item() == N, f"count_var: got {out[0].item()}, expected {N} — init=0 not applied (block_attr bug)"
 
 
 @tilelang.testing.requires_rocm
@@ -495,14 +496,13 @@ def test_local_var_scalar_codegen():
                     v = v + 1
                 for i in T.Parallel(N):
                     out[i] = v
+
         return kernel
 
     out = torch.zeros(N, dtype=torch.int32, device="cuda")
     local_var_scalar()(out)
     torch.cuda.synchronize()
-    assert out[0].item() == 6, (
-        f"local.var scalar: got {out[0].item()}, expected 6 (5+1)"
-    )
+    assert out[0].item() == 6, f"local.var scalar: got {out[0].item()}, expected 6 (5+1)"
 
 
 @tilelang.testing.requires_rocm
@@ -511,6 +511,7 @@ def test_local_var_float_init_readable():
     local.var with float32 literal init must be readable on HIP.
     Before the alloc_storage_scope_ fix, GetBufferRef emitted invalid code.
     """
+
     @tilelang.jit
     def float_init_readback():
         @T.prim_func
@@ -519,6 +520,7 @@ def test_local_var_float_init_readable():
                 v = T.alloc_var(T.float32, init=3.14)
                 if T.get_thread_binding() == 0:
                     out[0] = v
+
         return kernel
 
     out = torch.zeros(1, dtype=torch.float32, device="cuda")
@@ -563,10 +565,7 @@ def _kernel_sync_warp_codegen():
 def test_sync_warp_no_syncwarp_in_hip_source():
     """__syncwarp must NOT appear in the generated HIP source."""
     src = _kernel_sync_warp_codegen().get_kernel_source()
-    assert "__syncwarp" not in src, (
-        "T.sync_warp() should be a no-op on HIP, "
-        f"but __syncwarp was found in the generated source:\n{src}"
-    )
+    assert "__syncwarp" not in src, f"T.sync_warp() should be a no-op on HIP, but __syncwarp was found in the generated source:\n{src}"
 
 
 @tilelang.testing.requires_rocm
@@ -590,7 +589,7 @@ def test_sync_warp_inside_conditional():
     def sync_warp_cond_kernel():
         @T.prim_func
         def kernel(
-            x:   T.Tensor((N,), T.float32),
+            x: T.Tensor((N,), T.float32),
             out: T.Tensor((M,), T.float32),
         ) -> None:
             with T.Kernel(1, threads=N) as _:
@@ -601,9 +600,10 @@ def test_sync_warp_inside_conditional():
                 T.sync_warp()
                 for i in T.Parallel(M):
                     out[i] = shmem[i]
+
         return kernel
 
-    x   = torch.randn(N, dtype=torch.float32, device="cuda")
+    x = torch.randn(N, dtype=torch.float32, device="cuda")
     out = torch.zeros(M, dtype=torch.float32, device="cuda")
     sync_warp_cond_kernel()(x, out)
     torch.cuda.synchronize()
@@ -651,12 +651,8 @@ def test_sync_grid_cooperative_groups_in_hip_source():
     is added via the stub infrastructure; this test validates codegen only.
     """
     src = _kernel_sync_grid_codegen().get_kernel_source()
-    assert "this_grid().sync()" in src, (
-        f"T.sync_grid() should generate 'this_grid().sync()' but not found:\n{src}"
-    )
-    assert "cooperative_groups" in src, (
-        f"T.sync_grid() should include cooperative_groups but not found:\n{src}"
-    )
+    assert "this_grid().sync()" in src, f"T.sync_grid() should generate 'this_grid().sync()' but not found:\n{src}"
+    assert "cooperative_groups" in src, f"T.sync_grid() should include cooperative_groups but not found:\n{src}"
 
 
 # ---------------------------------------------------------------------------
@@ -692,8 +688,8 @@ def test_pipelined_no_lds_overflow(num_stages):
     def pipelined_rowsum(n_stages: int):
         @T.prim_func
         def kernel(
-            x:   T.Tensor((M, K), T.float32),
-            out: T.Tensor((M,),   T.float32),
+            x: T.Tensor((M, K), T.float32),
+            out: T.Tensor((M,), T.float32),
         ) -> None:
             with T.Kernel(M, threads=64) as pid:
                 acc = T.alloc_fragment((1,), T.float32)
@@ -707,10 +703,11 @@ def test_pipelined_no_lds_overflow(num_stages):
                     T.reduce_sum(xl, s, dim=0)
                     acc[0] = acc[0] + s[0]
                 out[pid] = acc[0]
+
         return kernel
 
-    x   = torch.ones(M, K, dtype=torch.float32, device="cuda")
-    out = torch.zeros(M,   dtype=torch.float32, device="cuda")
+    x = torch.ones(M, K, dtype=torch.float32, device="cuda")
+    out = torch.zeros(M, dtype=torch.float32, device="cuda")
     pipelined_rowsum(num_stages)(x, out)
     torch.cuda.synchronize()
     torch.testing.assert_close(out, torch.full((M,), float(K), device="cuda"), atol=1e-4, rtol=0)
@@ -745,6 +742,7 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
                     T.copy(B[k * bK, bx * bN], B_s)
                     T.gemm(A_s, B_s, C_l)
                 T.copy(C_l, C[by * bM, bx * bN])
+
         return kernel
 
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")
