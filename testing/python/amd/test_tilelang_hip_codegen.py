@@ -1,13 +1,20 @@
 """
-Tests for HIP/AMD codegen fixes in TileLang.
+Regression tests for HIP/AMD codegen fixes in TileLang.
 
-Covers three fixes made to src/target/codegen_hip.cc:
-  1. T.sync_warp() is lowered to a no-op on HIP (AMD wavefronts execute in
-     lockstep so no explicit reconvergence barrier is needed).
-  2. T.alloc_var(dtype, init=value) emits a properly initialised scalar
-     declaration on HIP (previously the init value was silently dropped).
-  3. local.var buffers are accessed as plain scalars in GetBufferRef (no [0]
-     subscript), consistent with the scalar declaration emitted for them.
+Covers six bug fixes across five source files:
+
+  Fix 1 (reduce.h)            warp_reduce 5-step butterfly with width=32
+  Fix 2 (codegen_hip.cc,      ShuffleNode bfloat16x2/float16x2 packing;
+          common.h)            uint1 bf16x2 math overloads
+  Fix 3 (allocate.py,         T.alloc_var(init=<literal>) emits a correctly
+          codegen_hip.cc)      initialised scalar on HIP
+  Fix 4 (codegen_hip.cc)      T.sync_warp() lowered to no-op on HIP
+  Fix 5 (codegen_hip.cc,      T.sync_grid() lowered to cooperative groups
+          rt_mod_hip.cc,       grid barrier; runtime launch infrastructure
+          stubs/)              added
+  Fix 6 (pipeline_planning.cc) T.Pipelined(num_stages>1) falls back to a
+                               plain sequential loop on ROCM to avoid LDS
+                               overflow (hipModuleLaunchKernel EINVAL)
 """
 
 import pytest
@@ -18,244 +25,19 @@ import tilelang.language as T
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: T.sync_warp() → no-op on HIP
-# ---------------------------------------------------------------------------
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
-    }
-)
-def _kernel_sync_warp_codegen():
-    """Minimal kernel that exercises T.sync_warp()."""
-
-    @T.prim_func
-    def main(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
-        with T.Kernel(1, threads=32):
-            tx = T.get_thread_binding()
-            A_shared = T.alloc_shared((32,), "float32")
-            A_shared[tx] = A[tx]
-            T.sync_warp()
-            B[tx] = A_shared[tx] * 2.0
-
-    return main
-
-
-@tilelang.testing.requires_rocm
-def test_sync_warp_no_syncwarp_in_hip_source():
-    """__syncwarp must NOT appear in the HIP-generated kernel source."""
-    kernel = _kernel_sync_warp_codegen()
-    src = kernel.get_kernel_source()
-    assert "__syncwarp" not in src, (
-        "T.sync_warp() should be a no-op on HIP (AMD wavefronts are lockstep), "
-        f"but __syncwarp was found in the generated source:\n{src}"
-    )
-
-
-@tilelang.testing.requires_rocm
-def test_sync_warp_correctness():
-    """Kernel using T.sync_warp() should produce correct results on HIP."""
-    kernel = _kernel_sync_warp_codegen()
-    A = torch.arange(32, dtype=torch.float32, device="cuda")
-    B = torch.zeros(32, dtype=torch.float32, device="cuda")
-    kernel(A, B)
-    torch.testing.assert_close(B, A * 2.0)
-
-
-# ---------------------------------------------------------------------------
-# Fix 2: T.alloc_var(init=...) initialisation on HIP
-# ---------------------------------------------------------------------------
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
-    }
-)
-def _kernel_alloc_var_init():
-    """Kernel that initialises a local int32 variable and writes it to output."""
-
-    @T.prim_func
-    def main(Out: T.Tensor((64,), "int32")):
-        with T.Kernel(1, threads=64):
-            tx = T.get_thread_binding()
-            counter = T.alloc_var(T.int32, init=7)
-            Out[tx] = counter
-
-    return main
-
-
-@tilelang.testing.requires_rocm
-def test_alloc_var_init_in_hip_source():
-    """Init value must appear in the generated HIP source for T.alloc_var."""
-    kernel = _kernel_alloc_var_init()
-    src = kernel.get_kernel_source()
-    assert "= 7;" in src, (
-        "T.alloc_var(T.int32, init=7) should generate '= 7;' in HIP source, "
-        f"but it was not found.\nGenerated source:\n{src}"
-    )
-
-
-@tilelang.testing.requires_rocm
-def test_alloc_var_init_no_array_subscript_in_hip_source():
-    """local.var should be declared as a scalar, not as an array (no [0])."""
-    kernel = _kernel_alloc_var_init()
-    src = kernel.get_kernel_source()
-    # The kernel source should contain 'counter = 7' not 'counter[1]' or 'counter[0]'
-    assert "counter[" not in src, (
-        "local.var should be emitted as a scalar (e.g. 'int counter = 7'), "
-        f"but array-style access was found in the HIP source:\n{src}"
-    )
-
-
-@tilelang.testing.requires_rocm
-def test_alloc_var_init_correctness():
-    """Kernel should read back the initialised value correctly on HIP."""
-    kernel = _kernel_alloc_var_init()
-    out = torch.zeros(64, dtype=torch.int32, device="cuda")
-    kernel(out)
-    assert torch.all(out == 7), (
-        f"Expected all 7, got: {out}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Fix 2b: multiple T.alloc_var with distinct init values
-# ---------------------------------------------------------------------------
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
-    }
-)
-def _kernel_multi_alloc_var_init():
-    """Two local variables with different init values, summed into output."""
-
-    @T.prim_func
-    def main(Out: T.Tensor((32,), "int32")):
-        with T.Kernel(1, threads=32):
-            tx = T.get_thread_binding()
-            a = T.alloc_var(T.int32, init=3)
-            b = T.alloc_var(T.int32, init=4)
-            Out[tx] = a + b
-
-    return main
-
-
-@tilelang.testing.requires_rocm
-def test_multi_alloc_var_init_in_hip_source():
-    """Both init values must appear in the HIP source."""
-    kernel = _kernel_multi_alloc_var_init()
-    src = kernel.get_kernel_source()
-    assert src.count("= 3;") >= 1, f"Init value 3 not found in HIP source:\n{src}"
-    assert src.count("= 4;") >= 1, f"Init value 4 not found in HIP source:\n{src}"
-
-
-@tilelang.testing.requires_rocm
-def test_multi_alloc_var_init_correctness():
-    """Sum of two initialised local variables should equal 7 on HIP."""
-    kernel = _kernel_multi_alloc_var_init()
-    out = torch.zeros(32, dtype=torch.int32, device="cuda")
-    kernel(out)
-    assert torch.all(out == 7), f"Expected all 7 (3+4), got: {out}"
-
-
-# ---------------------------------------------------------------------------
-# Fix 2c: T.alloc_var(init=0) — the default zero-init case
-# ---------------------------------------------------------------------------
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
-    }
-)
-def _kernel_alloc_var_count():
-    """
-    Accumulates a count by incrementing a local variable in a loop.
-    Relies on the variable being zero-initialised (init=0 default).
-    """
-
-    @T.prim_func
-    def main(Out: T.Tensor((32,), "int32")):
-        with T.Kernel(1, threads=32):
-            tx = T.get_thread_binding()
-            count = T.alloc_var(T.int32, init=0)
-            for _ in T.unroll(5):
-                count += 1
-            Out[tx] = count
-
-    return main
-
-
-@tilelang.testing.requires_rocm
-def test_alloc_var_zero_init_correctness():
-    """Variable initialised to 0, incremented 5 times, should equal 5."""
-    kernel = _kernel_alloc_var_count()
-    out = torch.zeros(32, dtype=torch.int32, device="cuda")
-    kernel(out)
-    assert torch.all(out == 5), f"Expected all 5, got: {out}"
-
-
-# ---------------------------------------------------------------------------
-# Fix 3: T.sync_grid() codegen on HIP (codegen only; runtime not yet complete)
-# ---------------------------------------------------------------------------
-
-
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
-    }
-)
-def _kernel_sync_grid_codegen():
-    """Kernel that calls T.sync_grid() to trigger cooperative groups codegen."""
-
-    @T.prim_func
-    def main(A: T.Tensor((32,), "float32")):
-        with T.Kernel(1, threads=32):
-            tx = T.get_thread_binding()
-            T.sync_grid()
-            A[tx] = T.float32(tx)
-
-    return main
-
-
-@tilelang.testing.requires_rocm
-def test_sync_grid_cooperative_groups_in_hip_source():
-    """
-    T.sync_grid() should generate cooperative_groups::this_grid().sync()
-    and include <hip/hip_cooperative_groups.h> in the HIP source.
-
-    Note: runtime execution of this kernel is not yet supported because
-    rocm_module.cc does not yet call hipModuleLaunchCooperativeKernel.
-    This test validates codegen only.
-    """
-    kernel = _kernel_sync_grid_codegen()
-    src = kernel.get_kernel_source()
-    assert "this_grid().sync()" in src, (
-        "T.sync_grid() should generate 'this_grid().sync()' in HIP source, "
-        f"but it was not found:\n{src}"
-    )
-    assert "cooperative_groups" in src, (
-        "T.sync_grid() should include cooperative_groups in HIP source, "
-        f"but it was not found:\n{src}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Fix 4: warp_reduce — 5-step butterfly with width=32 (reduce.h)
+# Fix 1 — src/tl_templates/hip/reduce.h
+#   warp_reduce: 5-step butterfly with explicit width=32
 #
-# On CDNA (wave64) the old 6-step butterfly called __shfl_xor(value, 32)
-# without a width argument, reading uninitialised VGPRs in lanes 32-63 when
-# only 32 threads were active → NaN / garbage in reduce_max / reduce_sum.
-# Fix: remove step-32 shuffle; add width=32 to all remaining 5 steps.
+# Symptom: On CDNA (wave64) with 32 active threads the old 6-step butterfly
+#   called __shfl_xor(value, 32) without a width argument, reading uninitialised
+#   VGPRs in lanes 32-63.  This produced NaN or garbage in every reduction that
+#   went through warp_reduce (reduce_max, reduce_sum, AllReduce).
+#
+# Fix: remove the step-32 shuffle; add width=32 to every remaining step.
+#   __shfl_xor(v, N, 32) restricts the butterfly to the lower 32-lane group,
+#   matching CUDA warp semantics on CDNA wave64 and RDNA wave32 alike.
+#   With 64 threads and width=32 the wavefront splits into two independent
+#   32-lane groups — correct for kernels that assume logical warp_size=32.
 # ---------------------------------------------------------------------------
 
 
@@ -266,7 +48,7 @@ def test_warp_reduce_no_nan(n_tokens, n_experts):
     32-thread-per-block reduce_max / reduce_sum must not produce NaN on CDNA.
 
     Old: __shfl_xor(v, 32) with 32 active threads reads uninit VGPRs → NaN.
-    New: 5-step with width=32 stays in-group → correct result, no NaN.
+    New: 5-step with width=32 stays in [0,31] group → correct, no NaN.
     """
     assert n_experts <= 32
 
@@ -308,9 +90,8 @@ def test_warp_reduce_correctness_32_threads():
     """
     32-thread reduce_sum over 32 elements must return the exact sum on CDNA.
 
-    warp_reduce is exercised when T.reduce_sum falls through to the warp-level
-    shuffle path.  With the old __shfl_xor(v, 32) bug, reading uninitialised
-    lanes 32-63 on CDNA produced garbage.  With width=32 the result is exact.
+    Exercises the warp-level shuffle path directly.  With the old step-32
+    shuffle, uninitialised VGPR reads on CDNA produced garbage.
     """
     N = 32
 
@@ -335,26 +116,64 @@ def test_warp_reduce_correctness_32_threads():
     reduce_kernel()(x, out)
     torch.cuda.synchronize()
 
-    expected = x.sum()
     assert not out[0].isnan(), "reduce_sum NaN — warp_reduce VGPR bug on CDNA"
-    torch.testing.assert_close(out[0], expected, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(out[0], x.sum(), atol=1e-4, rtol=1e-4)
+
+
+@tilelang.testing.requires_rocm
+def test_warp_reduce_with_64_threads_two_groups():
+    """
+    With 64 threads and width=32 the wavefront splits into two independent
+    32-lane groups — each group's lane 0 holds its partial sum.
+
+    Old: __shfl_xor(v, 32) without width mixed the groups → wrong result.
+    New: width=32 confines each shuffle to its own 32-lane group → correct.
+    """
+    N, n_exp = 64, 4
+
+    @tilelang.jit
+    def two_warp_reduce():
+        @T.prim_func
+        def kernel(
+            x:   T.Tensor((N, n_exp), T.float32),
+            out: T.Tensor((N,), T.float32),
+        ) -> None:
+            with T.Kernel(1, threads=N) as _:
+                tx = T.get_thread_binding()
+                frag = T.alloc_fragment(n_exp, T.float32)
+                T.copy(x[tx, 0], frag)
+                s = T.alloc_fragment(1, T.float32)
+                T.reduce_sum(frag, s, dim=0)
+                out[tx] = s[0]
+        return kernel
+
+    x   = torch.ones(N, n_exp, dtype=torch.float32, device="cuda")
+    out = torch.zeros(N, dtype=torch.float32, device="cuda")
+    two_warp_reduce()(x, out)
+    torch.cuda.synchronize()
+
+    assert not out.isnan().any(), "NaN in two-warp reduce — width=32 fix not applied"
 
 
 # ---------------------------------------------------------------------------
-# Fix 5: ShuffleNode bfloat16x2 / float16x2 packing (codegen_hip.cc)
-#         uint1 bf16x2 math overloads (common.h)
+# Fix 2 — src/target/codegen_hip.cc (VisitExpr_ ShuffleNode)
+#         src/tl_templates/hip/common.h (uint1 bfloat16x2 math overloads)
 #
-# Old: CodeGenC emitted `uint1(a, b)` — invalid HIP constructor → compile error.
-# Fix: Override VisitExpr_(ShuffleNode) to emit `uint1{__pack_bfloat162(a,b)}`.
-#      Add abs2/max2/min2/add2/mul2 overloads for uint1 in common.h.
+# Symptom: Packing two bfloat16 scalars into a bfloat16x2 ShuffleNode caused
+#   CodeGenC to emit `uint1(a, b)` — invalid HIP constructor → compile error.
+#
+# Fix (codegen_hip.cc): Override VisitExpr_(ShuffleNode) to emit
+#   `uint1{__pack_bfloat162(a, b)}` / `uint1{__pack_half2(a, b)}`.
+# Fix (common.h): Add abs2/max2/min2/add2/mul2 overloads for uint1 as a
+#   packed bfloat16x2 carrier.
 # ---------------------------------------------------------------------------
 
 
 @tilelang.testing.requires_rocm
-def test_bfloat16_shuffle_emits_pack_intrinsic():
+def test_bfloat16_shuffle_codegen_and_correctness():
     """
-    A bfloat16 fragment reduction triggers ShuffleNode bfloat16x2 packing.
-    The generated HIP source must use __pack_bfloat162 (not `uint1(a,b)`).
+    bfloat16 fragment warp-reduction: source must use __pack_bfloat162
+    (not invalid `uint1(a,b)`) and the result must be numerically correct.
     """
     n_tok, n_exp = 16, 8
 
@@ -377,27 +196,479 @@ def test_bfloat16_shuffle_emits_pack_intrinsic():
                     out[pid] = s[0]
         return kernel
 
-    src = bf16_reduce(n_tok, n_exp).get_kernel_source()
-    # Must use the pack intrinsic, not the invalid two-argument constructor
-    assert "uint1(a" not in src and "uint1(b" not in src, \
+    kernel = bf16_reduce(n_tok, n_exp)
+
+    # Source check: no invalid two-argument constructor
+    src = kernel.get_kernel_source()
+    assert "uint1(a" not in src and "uint1(b" not in src, (
         "Old `uint1(a, b)` constructor found — ShuffleNode fix not applied"
+    )
 
     # Runtime correctness
     x   = torch.randn(n_tok, n_exp, dtype=torch.bfloat16, device="cuda")
     out = torch.zeros(n_tok,        dtype=torch.float32,  device="cuda")
-    bf16_reduce(n_tok, n_exp)(x, out)
+    kernel(x, out)
     torch.cuda.synchronize()
-    assert not out.isnan().any(), "bf16 ShuffleNode reduction produced NaN"
+    assert not out.isnan().any(), "bf16 ShuffleNode reduction NaN"
     torch.testing.assert_close(out, x.float().sum(dim=1), atol=5e-2, rtol=1e-2)
 
 
+@tilelang.testing.requires_rocm
+def test_float16_shuffle_correctness():
+    """
+    float16 fragment warp-reduction exercises the __pack_half2 path.
+    Analogous to the bfloat16 test but for float16x2 packing.
+    """
+    n_tok, n_exp = 64, 8
+
+    @tilelang.jit
+    def f16_reduce(n_t: int, n_e: int):
+        @T.prim_func
+        def kernel(
+            x:   T.Tensor((n_t, n_e), T.float16),
+            out: T.Tensor((n_t,), T.float32),
+        ) -> None:
+            with T.Kernel(n_t, threads=32) as pid:
+                frag = T.alloc_fragment(n_e, T.float16)
+                T.copy(x[pid, 0], frag)
+                frag_f32 = T.alloc_fragment(n_e, T.float32)
+                for i in T.Parallel(n_e):
+                    frag_f32[i] = T.cast(frag[i], T.float32)
+                s = T.alloc_fragment(1, T.float32)
+                T.reduce_sum(frag_f32, s, dim=0)
+                if T.get_thread_binding() == 0:
+                    out[pid] = s[0]
+        return kernel
+
+    x   = torch.randn(n_tok, n_exp, dtype=torch.float16, device="cuda")
+    out = torch.zeros(n_tok,        dtype=torch.float32, device="cuda")
+    f16_reduce(n_tok, n_exp)(x, out)
+    torch.cuda.synchronize()
+    assert not out.isnan().any(), "float16 ShuffleNode reduction NaN"
+    torch.testing.assert_close(out, x.float().sum(dim=1), atol=1e-1, rtol=1e-2)
+
+
 # ---------------------------------------------------------------------------
-# Fix 6: T.Pipelined(num_stages>1) on ROCM — skip pipeline planning
-#         (pipeline_planning.cc)
+# Fix 3 — tilelang/language/allocate.py + src/target/codegen_hip.cc
+#   T.alloc_var(init=<literal>) initialisation on HIP;
+#   local.var scalar declaration and GetBufferRef bare-name return
 #
-# Old: double-buffering doubled LDS per loop body → hipModuleLaunchKernel
-#      EINVAL on CDNA (≤128 KB LDS/workgroup).
-# Fix: TargetIsRocm() && num_stages>1 → fall back to plain sequential loop.
+# Symptom (allocate.py): int/float literals used block_attr("tl.local_var_init")
+#   which the HIP backend silently ignored → variable uninitialised at runtime.
+# Symptom (codegen_hip.cc): AllocateNode emitted `type vid[1];` for local.var;
+#   alloc_storage_scope_ was not updated → GetBufferRef fell through to an
+#   invalid pointer-cast path → compile failure.
+#
+# Fix (allocate.py): always route init through T.buffer_store → explicit
+#   BufferStore TIR node → assignment statement in every backend.
+# Fix (codegen_hip.cc): emit `type vid = init;`; register alloc_storage_scope_
+#   so GetBufferRef returns the bare name `vid`.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+    }
+)
+def _kernel_alloc_var_init():
+    """Kernel that initialises a local int32 variable to 7 and writes it out."""
+
+    @T.prim_func
+    def main(Out: T.Tensor((64,), "int32")):
+        with T.Kernel(1, threads=64):
+            tx = T.get_thread_binding()
+            counter = T.alloc_var(T.int32, init=7)
+            Out[tx] = counter
+
+    return main
+
+
+@tilelang.testing.requires_rocm
+def test_alloc_var_init_in_hip_source():
+    """Init value must appear as `= 7;` in the generated HIP source."""
+    src = _kernel_alloc_var_init().get_kernel_source()
+    assert "= 7;" in src, (
+        "T.alloc_var(T.int32, init=7) should generate '= 7;' in HIP source, "
+        f"but it was not found.\nGenerated source:\n{src}"
+    )
+
+
+@tilelang.testing.requires_rocm
+def test_alloc_var_init_no_array_subscript_in_hip_source():
+    """local.var must be declared as a scalar (no `counter[` array syntax)."""
+    src = _kernel_alloc_var_init().get_kernel_source()
+    assert "counter[" not in src, (
+        "local.var should be emitted as a scalar (e.g. 'int counter = 7'), "
+        f"but array-style access was found:\n{src}"
+    )
+
+
+@tilelang.testing.requires_rocm
+def test_alloc_var_init_correctness():
+    """All output elements must equal 7 — the initialised value."""
+    out = torch.zeros(64, dtype=torch.int32, device="cuda")
+    _kernel_alloc_var_init()(out)
+    assert torch.all(out == 7), f"Expected all 7, got: {out}"
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+    }
+)
+def _kernel_multi_alloc_var_init():
+    """Two local variables with different init values, summed into output."""
+
+    @T.prim_func
+    def main(Out: T.Tensor((32,), "int32")):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            a = T.alloc_var(T.int32, init=3)
+            b = T.alloc_var(T.int32, init=4)
+            Out[tx] = a + b
+
+    return main
+
+
+@tilelang.testing.requires_rocm
+def test_multi_alloc_var_init_in_hip_source():
+    """Both init values must appear in the HIP source."""
+    src = _kernel_multi_alloc_var_init().get_kernel_source()
+    assert src.count("= 3;") >= 1, f"Init value 3 not found in HIP source:\n{src}"
+    assert src.count("= 4;") >= 1, f"Init value 4 not found in HIP source:\n{src}"
+
+
+@tilelang.testing.requires_rocm
+def test_multi_alloc_var_init_correctness():
+    """Sum of two initialised local variables must equal 7 (3+4)."""
+    out = torch.zeros(32, dtype=torch.int32, device="cuda")
+    _kernel_multi_alloc_var_init()(out)
+    assert torch.all(out == 7), f"Expected all 7 (3+4), got: {out}"
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+    }
+)
+def _kernel_alloc_var_count():
+    """Counter initialised to 0, incremented 5 times in a loop."""
+
+    @T.prim_func
+    def main(Out: T.Tensor((32,), "int32")):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            count = T.alloc_var(T.int32, init=0)
+            for _ in T.unroll(5):
+                count += 1
+            Out[tx] = count
+
+    return main
+
+
+@tilelang.testing.requires_rocm
+def test_alloc_var_zero_init_correctness():
+    """Variable initialised to 0 and incremented 5 times must equal 5."""
+    out = torch.zeros(32, dtype=torch.int32, device="cuda")
+    _kernel_alloc_var_count()(out)
+    assert torch.all(out == 5), f"Expected all 5, got: {out}"
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("init_val,dtype_str", [
+    (0,    "int32"),
+    (7,    "int32"),
+    (-3,   "int32"),
+    (0.0,  "float32"),
+    (1.0,  "float32"),
+    (-0.5, "float32"),
+])
+def test_alloc_var_literal_init_is_reliable(init_val, dtype_str):
+    """
+    alloc_var with any literal init must produce that exact value on HIP.
+
+    Old: int/float literals → block_attr (silently ignored) → uninit.
+    New: always T.buffer_store → `vid = init_val;` in generated HIP C.
+    """
+    tl_dtype    = T.int32   if dtype_str == "int32"   else T.float32
+    torch_dtype = torch.int32 if dtype_str == "int32" else torch.float32
+    N = 32
+
+    @tilelang.jit
+    def var_init_kernel(iv, tld):
+        @T.prim_func
+        def kernel(out: T.Tensor((N,), tld)) -> None:
+            with T.Kernel(1, threads=N) as _:
+                v = T.alloc_var(tld, init=iv)
+                for i in T.Parallel(N):
+                    out[i] = v
+        return kernel
+
+    out = torch.zeros(N, dtype=torch_dtype, device="cuda")
+    var_init_kernel(init_val, tl_dtype)(out)
+    torch.cuda.synchronize()
+
+    expected = torch.full((N,), init_val, dtype=torch_dtype, device="cuda")
+    if dtype_str == "int32":
+        assert torch.equal(out, expected), (
+            f"alloc_var(init={init_val}) got {out[0].item()}, expected {init_val}"
+        )
+    else:
+        torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_rocm
+def test_alloc_var_inf_init():
+    """
+    alloc_var(init=-T.infinity(T.float32)) — the pattern used for top1_var /
+    top2_var in MoE topk gate kernels — must produce -inf on HIP.
+    """
+    N = 32
+
+    @tilelang.jit
+    def inf_init_kernel():
+        @T.prim_func
+        def kernel(out: T.Tensor((N,), T.float32)) -> None:
+            with T.Kernel(1, threads=N) as _:
+                v = T.alloc_var(T.float32, init=-T.infinity(T.float32))
+                for i in T.Parallel(N):
+                    out[i] = v
+        return kernel
+
+    out = torch.zeros(N, dtype=torch.float32, device="cuda")
+    inf_init_kernel()(out)
+    torch.cuda.synchronize()
+    assert out.isinf().all() and (out < 0).all(), (
+        f"alloc_var(init=-inf) got {out[0].item()}, expected -inf"
+    )
+
+
+@tilelang.testing.requires_rocm
+def test_alloc_var_init_zero_persists_across_serial_loop():
+    """
+    count_var = T.alloc_var(T.int32, init=0) must start at 0 and accumulate
+    correctly.  This is the exact pattern used by count_var in MoE kernels.
+    """
+    N = 8
+
+    @tilelang.jit
+    def serial_count_kernel():
+        @T.prim_func
+        def kernel(out: T.Tensor((1,), T.int32)) -> None:
+            with T.Kernel(1, threads=1) as _:
+                count_var = T.alloc_var(T.int32, init=0)
+                for _ in T.serial(N):
+                    count_var = count_var + 1
+                out[0] = count_var
+        return kernel
+
+    out = torch.zeros(1, dtype=torch.int32, device="cuda")
+    serial_count_kernel()(out)
+    torch.cuda.synchronize()
+    assert out[0].item() == N, (
+        f"count_var: got {out[0].item()}, expected {N} — init=0 not applied (block_attr bug)"
+    )
+
+
+@tilelang.testing.requires_rocm
+def test_local_var_scalar_codegen():
+    """
+    local.var must be emitted and accessed as a plain scalar on HIP.
+
+    Before: alloc_storage_scope_ not registered → GetBufferRef fell through to
+            an invalid pointer-cast path → compile failure.
+    After:  `type vid = init;` emitted; GetBufferRef returns bare `vid`.
+    """
+    N = 32
+
+    @tilelang.jit
+    def local_var_scalar():
+        @T.prim_func
+        def kernel(out: T.Tensor((N,), T.int32)) -> None:
+            with T.Kernel(1, threads=N) as _:
+                v = T.alloc_var(T.int32, init=5)
+                if T.get_thread_binding() == 0:
+                    v = v + 1
+                for i in T.Parallel(N):
+                    out[i] = v
+        return kernel
+
+    out = torch.zeros(N, dtype=torch.int32, device="cuda")
+    local_var_scalar()(out)
+    torch.cuda.synchronize()
+    assert out[0].item() == 6, (
+        f"local.var scalar: got {out[0].item()}, expected 6 (5+1)"
+    )
+
+
+@tilelang.testing.requires_rocm
+def test_local_var_float_init_readable():
+    """
+    local.var with float32 literal init must be readable on HIP.
+    Before the alloc_storage_scope_ fix, GetBufferRef emitted invalid code.
+    """
+    @tilelang.jit
+    def float_init_readback():
+        @T.prim_func
+        def kernel(out: T.Tensor((1,), T.float32)) -> None:
+            with T.Kernel(1, threads=32) as _:
+                v = T.alloc_var(T.float32, init=3.14)
+                if T.get_thread_binding() == 0:
+                    out[0] = v
+        return kernel
+
+    out = torch.zeros(1, dtype=torch.float32, device="cuda")
+    float_init_readback()(out)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out[0].item(), 3.14, atol=1e-5, rtol=0)
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — src/target/codegen_hip.cc
+#   T.sync_warp() → no-op on HIP
+#
+# Symptom: tl::sync_warp() had no handler → codegen assertion failure or
+#   undefined symbol at link time.
+# Fix: emit an empty statement; AMD wavefronts execute in lockstep so
+#   intra-wavefront convergence is guaranteed by hardware.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+    }
+)
+def _kernel_sync_warp_codegen():
+    """Minimal kernel that exercises T.sync_warp()."""
+
+    @T.prim_func
+    def main(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            A_shared = T.alloc_shared((32,), "float32")
+            A_shared[tx] = A[tx]
+            T.sync_warp()
+            B[tx] = A_shared[tx] * 2.0
+
+    return main
+
+
+@tilelang.testing.requires_rocm
+def test_sync_warp_no_syncwarp_in_hip_source():
+    """__syncwarp must NOT appear in the generated HIP source."""
+    src = _kernel_sync_warp_codegen().get_kernel_source()
+    assert "__syncwarp" not in src, (
+        "T.sync_warp() should be a no-op on HIP, "
+        f"but __syncwarp was found in the generated source:\n{src}"
+    )
+
+
+@tilelang.testing.requires_rocm
+def test_sync_warp_correctness():
+    """Kernel using T.sync_warp() must produce correct results on HIP."""
+    A = torch.arange(32, dtype=torch.float32, device="cuda")
+    B = torch.zeros(32, dtype=torch.float32, device="cuda")
+    _kernel_sync_warp_codegen()(A, B)
+    torch.testing.assert_close(B, A * 2.0)
+
+
+@tilelang.testing.requires_rocm
+def test_sync_warp_inside_conditional():
+    """
+    T.sync_warp() inside a conditional branch (pattern from moe/common.py
+    get_topk_group_idx).  Verifies compilation and deterministic output.
+    """
+    N, M = 32, 8
+
+    @tilelang.jit
+    def sync_warp_cond_kernel():
+        @T.prim_func
+        def kernel(
+            x:   T.Tensor((N,), T.float32),
+            out: T.Tensor((M,), T.float32),
+        ) -> None:
+            with T.Kernel(1, threads=N) as _:
+                shmem = T.alloc_shared((M,), T.float32)
+                tx = T.get_thread_binding()
+                if tx < M:
+                    shmem[tx] = x[tx]
+                T.sync_warp()
+                for i in T.Parallel(M):
+                    out[i] = shmem[i]
+        return kernel
+
+    x   = torch.randn(N, dtype=torch.float32, device="cuda")
+    out = torch.zeros(M, dtype=torch.float32, device="cuda")
+    sync_warp_cond_kernel()(x, out)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, x[:M])
+
+
+# ---------------------------------------------------------------------------
+# Fix 5 — src/target/codegen_hip.cc, src/target/rt_mod_hip.cc,
+#          src/target/stubs/hip.cc, src/target/stubs/hip.h
+#   T.sync_grid() → cooperative_groups::this_grid().sync()
+#
+# Symptom: tl::sync_grid() had no handler → same assertion / link failure.
+# Fix: emit cooperative_groups call; add need_cooperative_groups_ flag to
+#   conditionally include hip_cooperative_groups.h; add runtime launch
+#   infrastructure (hipModuleLaunchCooperativeKernel stubs).
+# ---------------------------------------------------------------------------
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+    }
+)
+def _kernel_sync_grid_codegen():
+    """Kernel that calls T.sync_grid() to trigger cooperative groups codegen."""
+
+    @T.prim_func
+    def main(A: T.Tensor((32,), "float32")):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            T.sync_grid()
+            A[tx] = T.float32(tx)
+
+    return main
+
+
+@tilelang.testing.requires_rocm
+def test_sync_grid_cooperative_groups_in_hip_source():
+    """
+    T.sync_grid() must emit cooperative_groups::this_grid().sync() and
+    include <hip/hip_cooperative_groups.h> in the generated HIP source.
+
+    Note: runtime execution requires hipModuleLaunchCooperativeKernel which
+    is added via the stub infrastructure; this test validates codegen only.
+    """
+    src = _kernel_sync_grid_codegen().get_kernel_source()
+    assert "this_grid().sync()" in src, (
+        f"T.sync_grid() should generate 'this_grid().sync()' but not found:\n{src}"
+    )
+    assert "cooperative_groups" in src, (
+        f"T.sync_grid() should include cooperative_groups but not found:\n{src}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 6 — src/transform/pipeline_planning.cc
+#   Skip T.Pipelined(num_stages>1) pipeline planning on ROCM
+#
+# Symptom: Double-buffering doubled the LDS allocation for every shared buffer
+#   inside the loop body.  On CDNA (≤128 KB LDS per workgroup), this caused
+#   hipModuleLaunchKernel to return HIPERRORINVALIDVALUE at runtime.
+#
+# Fix: when TargetIsRocm() && num_stages > 1, skip pipeline planning and fall
+#   back to a plain sequential loop with synchronous T.copy — always LDS-safe.
 # ---------------------------------------------------------------------------
 
 
@@ -405,10 +676,10 @@ def test_bfloat16_shuffle_emits_pack_intrinsic():
 @pytest.mark.parametrize("num_stages", [1, 2, 3])
 def test_pipelined_no_lds_overflow(num_stages):
     """
-    T.Pipelined(num_stages=N) must not raise hipModuleLaunchKernel EINVAL on
-    ROCM and must produce the correct result regardless of N.
+    T.Pipelined(num_stages=N) must not raise hipModuleLaunchKernel EINVAL and
+    must produce the correct result regardless of N.
 
-    Old: num_stages=2 doubled LDS allocation → EINVAL on CDNA.
+    Old: num_stages=2 doubled LDS → EINVAL on CDNA.
     New: multi-stage loops fall back to plain sequential on ROCM.
     """
     M, K, blk = 32, 256, 64
@@ -446,7 +717,8 @@ def test_pipelined_no_lds_overflow(num_stages):
 def test_pipelined_multi_stage_fp16_gemm(num_stages):
     """
     FP16 GEMM with T.Pipelined(num_stages>1) must launch and produce correct
-    results on ROCM — the most common pattern that triggered the LDS overflow.
+    results on ROCM — the most common pattern that triggered the LDS overflow
+    (A_s bM×bK + B_s bK×bN doubled per pipeline stage).
     """
     M, N, K = 128, 128, 128
     bM, bN, bK = 64, 64, 32
