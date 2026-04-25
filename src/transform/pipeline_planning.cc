@@ -1075,14 +1075,19 @@ private:
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno->as<IntImmNode>()->value;
     // On HIP/ROCM, skip software pipelining for multi-stage loops.
-    // Double-buffering (num_stages > 1) doubles the shared-memory (LDS)
-    // allocation for every buffer declared inside the loop body.  CDNA
-    // devices have at most 128 KB of LDS per workgroup; exceeding that limit
-    // causes hipModuleLaunchKernel to return HIPERRORINVALIDVALUE.
-    // Setting num_stages = 1 in the planner generates incorrect copy loops
-    // (only one async-copy issued instead of the full multi-row preload), so
-    // the safest fallback is a plain sequential loop where T.copy executes
-    // synchronously without any async-copy or double-buffering infrastructure.
+    // Double-buffering (num_stages > 1) doubles the LDS allocation for every
+    // shared buffer declared inside the loop body, which easily exhausts the
+    // per-workgroup LDS limit and causes hipModuleLaunchKernel to return
+    // HIPERRORINVALIDVALUE.  LDS limits by generation:
+    //   gfx942 (CDNA3 / MI300X): 64 KB per workgroup
+    //   gfx950 (CDNA4 / MI350):  160 KB per workgroup (see PR #2058)
+    // Even with the larger gfx950 budget, double-buffering a pair of large
+    // shared tiles (e.g. bM×bK + bK×bN in bf16) can exceed 160 KB, and the
+    // HIP async-copy infrastructure used by the CUDA pipeline planner has no
+    // equivalent on ROCM today.  Setting num_stages = 1 inside the planner
+    // generates incorrect copy loops, so the safest fallback is a plain
+    // sequential loop where T.copy executes synchronously without any
+    // async-copy or double-buffering infrastructure.
     if (TargetIsRocm(target_) && num_stages > 1) {
       return StmtExprMutator::VisitStmt_(loop);
     }

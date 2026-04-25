@@ -664,8 +664,12 @@ def test_sync_grid_cooperative_groups_in_hip_source():
 #   Skip T.Pipelined(num_stages>1) pipeline planning on ROCM
 #
 # Symptom: Double-buffering doubled the LDS allocation for every shared buffer
-#   inside the loop body.  On CDNA (≤128 KB LDS per workgroup), this caused
-#   hipModuleLaunchKernel to return HIPERRORINVALIDVALUE at runtime.
+#   inside the loop body, exhausting the per-workgroup LDS budget and causing
+#   hipModuleLaunchKernel to return HIPERRORINVALIDVALUE.  LDS limits:
+#     gfx942 (CDNA3 / MI300X): 64 KB;  gfx950 (CDNA4 / MI350): 160 KB (#2058)
+#   Even with gfx950's larger budget, double-buffering large shared tiles can
+#   still exceed 160 KB, and the HIP async-copy infrastructure has no ROCM
+#   equivalent, so the planner cannot safely pipeline on any ROCM target.
 #
 # Fix: when TargetIsRocm() && num_stages > 1, skip pipeline planning and fall
 #   back to a plain sequential loop with synchronous T.copy — always LDS-safe.
@@ -679,7 +683,7 @@ def test_pipelined_no_lds_overflow(num_stages):
     T.Pipelined(num_stages=N) must not raise hipModuleLaunchKernel EINVAL and
     must produce the correct result regardless of N.
 
-    Old: num_stages=2 doubled LDS → EINVAL on CDNA.
+    Old: num_stages=2 doubled LDS → EINVAL (64 KB on gfx942, 160 KB on gfx950).
     New: multi-stage loops fall back to plain sequential on ROCM.
     """
     M, K, blk = 32, 256, 64
