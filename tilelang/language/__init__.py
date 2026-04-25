@@ -43,6 +43,7 @@ from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
+    alloc_global,  # noqa: F401
     alloc_barrier,  # noqa: F401
     alloc_cluster_barrier,  # noqa: F401
     alloc_tmem,  # noqa: F401
@@ -52,7 +53,6 @@ from .allocate import (
     alloc_tcgen05_smem_desc,  # noqa: F401
     alloc_tcgen05_instr_desc,  # noqa: F401
     empty,  # noqa: F401
-    alloc_global,  # noqa: F401
 )
 from tvm.script.parser.tir import allocate as allocate  # noqa: F401
 from .copy_op import copy, async_copy, tma_copy, transpose, c2d_im2col  # noqa: F401

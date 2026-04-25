@@ -9,6 +9,7 @@ Available allocation functions:
     - alloc_local: Allocates local memory buffers for thread-private storage
     - alloc_fragment: Allocates fragment memory buffers for specialized operations
     - alloc_var: Allocates single-element variable buffers
+    - alloc_global: Allocates global memory buffers as workspace
 
 Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
@@ -142,6 +143,29 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
         else:
             T.buffer_store(buffer, parsed_init, 0)
     return buffer
+
+
+def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
+    """Allocate a global memory buffer as a global workspace.
+
+    NOTE(chaofan): Memory allocated in this way doesn't go through torch allocator. Instead,
+    it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
+    recommend allocating workspace in Torch side and pass it to the kernel via arguments,
+    which is managed under the hood by the framework. This API is mainly for testing
+    purposes and some specific purposes.
+
+    NOTE(chaofan): This API may not be available in all backends (e.g. CuteDSL).
+
+    Args:
+        shape (tuple): The shape of the buffer to allocate
+        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
+        scope (str, optional): The memory scope. Defaults to "global"
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated in global memory
+    """
+
+    return T.alloc_buffer(shape, dtype, scope=scope)
 
 
 def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
@@ -330,24 +354,3 @@ def empty(*shape, dtype: DType = _dtypes.float32) -> Tensor:
         return OutTensor(shape, dtype)
     else:
         raise TypeError(f"Invalid shape {shape}")
-
-
-def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
-    """Allocate a global memory buffer as a global workspace.
-
-    NOTE: Memory allocated in this way doesn't go through torch allocator. Instead,
-    it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
-    recommend allocating workspace in Torch side and pass it to the kernel via arguments,
-    which is managed under the hood by the framework. This API is mainly for testing
-    purposes and some specific purposes.
-
-    Args:
-        shape (tuple): The shape of the buffer to allocate
-        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
-        scope (str, optional): The memory scope. Defaults to "global"
-
-    Returns:
-        T.Buffer: A TVM buffer object allocated in global memory
-    """
-
-    return T.alloc_buffer(shape, dtype, scope=scope)
