@@ -1,6 +1,5 @@
 import contextlib
 import ctypes
-import importlib.util
 import logging
 import os
 import sys
@@ -50,11 +49,6 @@ del _compute_version
 
 
 logger = logging.getLogger(__name__)
-
-if sys.platform.startswith("win32") and not hasattr(os, "RTLD_LAZY"):
-    # TVM's Python loader ORs this flag into ctypes.CDLL mode; Windows has no
-    # lazy dlopen mode, so zero preserves the default LoadLibrary behavior.
-    os.RTLD_LAZY = 0  # type: ignore[attr-defined]
 
 
 def set_log_level(level):
@@ -112,40 +106,6 @@ if not env.is_light_import():
 del _init_logger
 
 
-def _prepend_windows_runtime_paths():
-    if not sys.platform.startswith("win32"):
-        return
-
-    runtime_paths = []
-
-    try:
-        from tvm_ffi import libinfo as tvm_ffi_libinfo
-
-        runtime_paths.append(os.path.dirname(tvm_ffi_libinfo.find_libtvm_ffi()))
-    except Exception:
-        pass
-
-    try:
-        spec = importlib.util.find_spec("z3")
-    except (ImportError, AttributeError, ValueError):
-        spec = None
-    if spec and spec.submodule_search_locations:
-        z3_root = next(iter(spec.submodule_search_locations), None)
-        if z3_root:
-            z3_lib = os.path.join(z3_root, "lib")
-            if os.path.isdir(z3_lib):
-                runtime_paths.append(z3_lib)
-
-    if not runtime_paths:
-        return
-
-    path_entries = os.environ.get("PATH", "").split(os.pathsep)
-    normalized_entries = {os.path.normcase(os.path.abspath(path)) for path in path_entries if path}
-    prepend_entries = [path for path in runtime_paths if os.path.normcase(os.path.abspath(path)) not in normalized_entries]
-    if prepend_entries:
-        os.environ["PATH"] = os.pathsep.join(prepend_entries + path_entries)
-
-
 @contextlib.contextmanager
 def _lazy_load_lib():
     import torch  # noqa: F401 # preload torch to avoid dlopen errors
@@ -172,35 +132,27 @@ def _lazy_load_lib():
 # Skip heavy imports in light import mode
 if not env.is_light_import():
     with _lazy_load_lib():
-        from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
+        from .env import (  # noqa: F401
+            enable_cache,
+            disable_cache,
+            is_cache_enabled,
+            get_windows_runtime_dll_dirs,
+            prepend_dll_search_path,
+        )
+        from . import libinfo
 
-        if sys.platform.startswith("win32") and sys.version_info >= (3, 8):
-            _prepend_windows_runtime_paths()
-            _dll_handles = []
-            cuda_home = getattr(env, "CUDA_HOME", "")
-            if cuda_home:
-                for path in (
-                    cuda_home,
-                    os.path.join(cuda_home, "bin"),
-                    os.path.join(cuda_home, "bin", "x86_64"),
-                    os.path.join(cuda_home, "lib", "x64"),
-                    os.path.join(cuda_home, "nvvm", "bin"),
-                ):
-                    if os.path.isdir(path):
-                        _dll_handles.append(os.add_dll_directory(path))
+        if sys.platform.startswith("win32"):
+            # Make sibling-package DLLs (tvm_ffi, z3) discoverable via PATH,
+            # then register tilelang + CUDA dirs with the secure DLL loader.
+            prepend_dll_search_path(get_windows_runtime_dll_dirs())
+            _dll_handles = [os.add_dll_directory(p) for p in libinfo.get_dll_directories()]
 
         import tvm
         import tvm.base  # noqa: F401
         from tvm import DataType  # noqa: F401
 
-        # Setup tvm search path before importing tvm
-        from . import libinfo
-
         def _load_tile_lang_lib():
             """Load Tile Lang lib"""
-            if sys.platform.startswith("win32") and sys.version_info >= (3, 8):
-                for path in libinfo.get_dll_directories():
-                    os.add_dll_directory(path)
             lib_path = libinfo.find_lib_path("tilelang")
             return ctypes.CDLL(lib_path), lib_path
 

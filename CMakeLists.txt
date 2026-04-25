@@ -17,6 +17,30 @@ set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 project(TILE_LANG C CXX)
 
+# MSVC-specific build configuration. Must run after project() so MSVC is
+# defined, but before add_subdirectory(${TVM_SOURCE}) below so subprojects
+# inherit these settings.
+if(MSVC)
+  # Force CMP0141 NEW for every subdirectory regardless of its own
+  # cmake_minimum_required. The bundled TVM declares 3.18; without this,
+  # CMake injects /Zi into the legacy CMAKE_*_FLAGS_DEBUG default there
+  # rather than via the generator expression, polluting cached flags and
+  # also overriding the Embedded format we set just below.
+  set(CMAKE_POLICY_DEFAULT_CMP0141 NEW)
+
+  # Use /Z7 (Embedded) so debug info lives inside each .obj instead of a
+  # side-channel vc140.pdb -- eliminates the parallel-write race (MSVC C1041)
+  # and gives compiler caches a single artifact to hash. /Zi + /FS would
+  # normally serialize PDB writes via mspdbsrv, but sccache wraps each cl.exe
+  # in its own subprocess and observably breaks that coordination -- the build
+  # still hits C1041 even with /FS on the command line. /FS is kept here as a
+  # best-effort fallback for any consumer that re-enables /Zi locally; sccache
+  # in front of cl.exe may neutralize it.
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "Embedded"
+      CACHE STRING "MSVC debug info format" FORCE)
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/FS>)
+endif()
+
 function(tilelang_get_python_interpreter OUTPUT_VAR)
   if(DEFINED Python_EXECUTABLE AND NOT "${Python_EXECUTABLE}" STREQUAL "" AND EXISTS "${Python_EXECUTABLE}")
     set(${OUTPUT_VAR} "${Python_EXECUTABLE}" PARENT_SCOPE)
@@ -122,14 +146,60 @@ endif()
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
   message(STATUS "Using ccache: ${CCACHE_PROGRAM} with base_dir=${CMAKE_SOURCE_DIR}")
-  if(APPLE)
+  if(APPLE OR WIN32)
     # Passing configs like `ccache base_dir=/xxx cc ...` is supported
     # (likely) since ccache 4.x, which has been provided by homebrew.
     # Our Linux builder image (manylinux2014 & manylinux_2_28) still
     # provides ccache 3.x and do not support this form.
     # `cibuildwheel` uses fixed folder on Linux (`/project`) as working directory,
     # so cache would work without setting `base_dir`.
-    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};base_dir=${CMAKE_SOURCE_DIR}")
+    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};base_dir=${CMAKE_SOURCE_DIR};hash_dir=false")
+  endif()
+
+  # Make ccache hits survive uv's PEP 517 build isolation on Windows.
+  #
+  # uv materializes each build into a freshly-named tempdir under
+  #   %LOCALAPPDATA%\Temp\.tmpXXXXXXXX\builds-v0\.tmpYYYYYYYY
+  # The path appears (a) as `-external:I` flags pointing at NVIDIA cu13 / z3
+  # and (b) inside cl.exe's preprocessed `#line` directives. Both feed into
+  # ccache's hash, so 3rdparty targets miss on every rebuild.
+  #
+  # ccache `-I*` / `-D*` options are already excluded from preprocessor-mode
+  # hashing because they reflect in the preprocessed output. But `-external:I`
+  # is an MSVC-specific extension ccache treats as opaque, so we tell it
+  # explicitly to ignore that whole class of flags. Combined with
+  # `prefix_command_cpp` below to rewrite #line paths in the preprocessed
+  # text, the resulting result-key is stable across .tmpXXX rotations.
+  if(WIN32)
+    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};ignore_options=-external:I*")
+  endif()
+
+  # Plug a wrapper around cl.exe -P so .tmpXXX path components in the
+  # preprocessor output are normalized before ccache hashes them. Pick a
+  # stable Python interpreter: the wrapper script's path is itself baked
+  # into ccache's hashed config, so a path containing .tmpXXX would defeat
+  # caching. Prefer the project's persistent .venv; skip the wrapper if no
+  # stable interpreter is available (caching still works for tilelang_objs
+  # but 3rdparty cross-rebuild hits will be reduced).
+  if(WIN32)
+    set(_tilelang_pep517_python "")
+    foreach(_candidate
+        "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe"
+        "${CMAKE_SOURCE_DIR}/venv/Scripts/python.exe")
+      if(EXISTS "${_candidate}")
+        set(_tilelang_pep517_python "${_candidate}")
+        break()
+      endif()
+    endforeach()
+    if(_tilelang_pep517_python)
+      set(_tilelang_pep517_wrapper
+          "${_tilelang_pep517_python} ${CMAKE_SOURCE_DIR}/cmake/ccache_strip_pep517.py")
+      set(CCACHE_PROGRAM
+          "${CCACHE_PROGRAM};prefix_command_cpp=${_tilelang_pep517_wrapper}")
+      message(STATUS "  ccache: stripping PEP 517 .tmpXXX paths via ${_tilelang_pep517_wrapper}")
+    else()
+      message(STATUS "  ccache: no stable .venv python found; PEP 517 .tmpXXX preprocessor leakage may reduce hits")
+    endif()
   endif()
   set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C compiler launcher")
   set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "CXX compiler launcher")
@@ -334,6 +404,25 @@ option(TILELANG_RELEASE_BUILD "Strip source paths from log messages (for wheel r
 
 # Include tvm after configs have been populated
 add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+
+# Strip the hardcoded /Zi PRIVATE option that tvm-ffi attaches in its
+# tvm_ffi_add_msvc_flags() helper. It overrides our Embedded debug info
+# format and forces a side-channel vc140.pdb that races under parallel
+# builds (C1041) and breaks compiler caches. Done via target property
+# rewrite so 3rdparty/tvm-ffi remains pristine.
+if(MSVC)
+  foreach(_tilelang_ffi_tgt IN ITEMS
+      tvm_ffi_objs tvm_ffi_shared tvm_ffi_static tvm_ffi_testing)
+    if(TARGET ${_tilelang_ffi_tgt})
+      get_target_property(_tilelang_ffi_opts ${_tilelang_ffi_tgt} COMPILE_OPTIONS)
+      if(_tilelang_ffi_opts)
+        list(REMOVE_ITEM _tilelang_ffi_opts "/Zi" "-Zi")
+        set_target_properties(${_tilelang_ffi_tgt}
+          PROPERTIES COMPILE_OPTIONS "${_tilelang_ffi_opts}")
+      endif()
+    endif()
+  endforeach()
+endif()
 
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
 # since TVM_LOG_CUSTOMIZE=1 requires them to be supplied by the user.

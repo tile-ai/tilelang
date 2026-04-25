@@ -18,7 +18,7 @@
 #include <psapi.h>
 // clang-format on
 #include <cstdio>
-#include <cstdlib>
+#include <vector>
 
 namespace tvm::tl::stubs {
 
@@ -32,6 +32,8 @@ inline void *dynlib_open(const char *path) {
 }
 
 inline void *dynlib_sym(void *handle, const char *name) {
+  // Clear-before-call mirrors the POSIX dlerror() pattern, so a follow-up
+  // dynlib_error() observes only the GetProcAddress failure (if any).
   SetLastError(0);
   return reinterpret_cast<void *>(
       GetProcAddress(reinterpret_cast<HMODULE>(handle), name));
@@ -59,38 +61,27 @@ inline const char *dynlib_error() {
 inline void *dynlib_find_loaded(const char *symbol_name,
                                 void *exclude = nullptr) {
   HANDLE process = GetCurrentProcess();
-  DWORD buf_bytes = 1024 * sizeof(HMODULE);
-  HMODULE *modules = static_cast<HMODULE *>(malloc(buf_bytes));
-  if (!modules)
-    return nullptr;
+  std::vector<HMODULE> modules(1024);
   DWORD needed = 0;
-  if (!EnumProcessModules(process, modules, buf_bytes, &needed)) {
-    free(modules);
-    return nullptr;
-  }
-  if (needed > buf_bytes) {
-    buf_bytes = needed;
-    HMODULE *resized = static_cast<HMODULE *>(realloc(modules, buf_bytes));
-    if (!resized) {
-      free(modules);
+  // Up to 4 retries handles the rare race where a module is loaded between
+  // EnumProcessModules calls. In practice this converges on the first call.
+  for (int retry = 0; retry < 4; ++retry) {
+    DWORD bytes = static_cast<DWORD>(modules.size() * sizeof(HMODULE));
+    if (!EnumProcessModules(process, modules.data(), bytes, &needed)) {
       return nullptr;
     }
-    modules = resized;
-    if (!EnumProcessModules(process, modules, buf_bytes, &needed)) {
-      free(modules);
-      return nullptr;
+    if (needed <= bytes) {
+      modules.resize(needed / sizeof(HMODULE));
+      break;
     }
+    modules.resize(needed / sizeof(HMODULE));
   }
-  DWORD count = needed / sizeof(HMODULE);
-  for (DWORD i = 0; i < count; i++) {
-    void *sym =
-        reinterpret_cast<void *>(GetProcAddress(modules[i], symbol_name));
+  for (HMODULE mod : modules) {
+    void *sym = reinterpret_cast<void *>(GetProcAddress(mod, symbol_name));
     if (sym != nullptr && sym != exclude) {
-      free(modules);
-      return reinterpret_cast<void *>(modules[i]);
+      return reinterpret_cast<void *>(mod);
     }
   }
-  free(modules);
   return nullptr;
 }
 

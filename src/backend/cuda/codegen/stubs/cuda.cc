@@ -52,14 +52,12 @@ void *try_load_libcuda() {
 
 /**
  * \brief Get symbol from library handle, returning nullptr on failure.
+ *
+ * Failure detection is the nullptr return — caller can then call
+ * dynlib_error() once to retrieve the loader's error string.
  */
 template <typename T> T get_symbol(void *handle, const char *name) {
-  void *sym = tvm::tl::stubs::dynlib_sym(handle, name);
-  const char *error = tvm::tl::stubs::dynlib_error();
-  if (error != nullptr) {
-    return nullptr;
-  }
-  return reinterpret_cast<T>(sym);
+  return reinterpret_cast<T>(tvm::tl::stubs::dynlib_sym(handle, name));
 }
 
 /**

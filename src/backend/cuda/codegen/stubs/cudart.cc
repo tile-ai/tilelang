@@ -111,12 +111,7 @@ void *TryLoadLibCudart() {
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
-  void *sym = tvm::tl::stubs::dynlib_sym(handle, name);
-  const char *error = tvm::tl::stubs::dynlib_error();
-  if (error != nullptr) {
-    return nullptr;
-  }
-  return reinterpret_cast<T>(sym);
+  return reinterpret_cast<T>(tvm::tl::stubs::dynlib_sym(handle, name));
 }
 
 struct CUDARuntimeAPI {

@@ -2,23 +2,11 @@ import importlib.machinery
 import os
 import sys
 
-from .env import TL_LIBS, env
+from .env import TL_LIBS, get_cuda_dll_search_dirs
 
 
 def get_dll_directories():
-    dll_dirs = list(TL_LIBS)
-    if sys.platform.startswith("win32"):
-        cuda_home = getattr(env, "CUDA_HOME", "")
-        if cuda_home:
-            dll_dirs.extend(
-                [
-                    cuda_home,
-                    os.path.join(cuda_home, "bin"),
-                    os.path.join(cuda_home, "bin", "x86_64"),
-                    os.path.join(cuda_home, "lib", "x64"),
-                    os.path.join(cuda_home, "nvvm", "bin"),
-                ]
-            )
+    dll_dirs = list(TL_LIBS) + get_cuda_dll_search_dirs()
     return [os.path.abspath(path) for path in dll_dirs if os.path.isdir(path)]
 
 

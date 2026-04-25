@@ -117,13 +117,32 @@ function(_tilelang_activate_msvc_env)
   string(REPLACE "\r" "\n" _tilelang_vs_env "${_tilelang_vs_env}")
   string(REPLACE "\n" ";" _tilelang_vs_env_lines "${_tilelang_vs_env}")
 
+  # Snapshot the original PATH so we can merge VsDevCmd's curated MSVC entries
+  # in front of the user's PATH. The cmd.exe subprocess that runs VsDevCmd has
+  # observably emitted a PATH containing only MSVC dev-env directories on this
+  # toolchain, dropping user-level entries (scoop, UniGetUI, etc.). Overwriting
+  # ENV{PATH} with that output makes find_program() unable to locate ccache /
+  # sccache later in the configure step. Other VsDevCmd-managed variables
+  # (INCLUDE / LIB / LIBPATH / VC*) are MSVC-specific and safe to overwrite.
+  set(_tilelang_pre_vsdev_path "$ENV{PATH}")
+
   foreach(_line IN LISTS _tilelang_vs_env_lines)
     if(_line MATCHES "^([^=]+)=(.*)$")
       set(_env_name "${CMAKE_MATCH_1}")
       set(_env_value "${CMAKE_MATCH_2}")
-      set(ENV{${_env_name}} "${_env_value}")
+      string(TOUPPER "${_env_name}" _env_name_upper)
+      if(_env_name_upper STREQUAL "PATH")
+        if(_tilelang_pre_vsdev_path STREQUAL "")
+          set(ENV{PATH} "${_env_value}")
+        else()
+          set(ENV{PATH} "${_env_value};${_tilelang_pre_vsdev_path}")
+        endif()
+      else()
+        set(ENV{${_env_name}} "${_env_value}")
+      endif()
     endif()
   endforeach()
+  unset(_tilelang_pre_vsdev_path)
 
   set(CMAKE_C_COMPILER cl CACHE FILEPATH "MSVC C compiler" FORCE)
   set(CMAKE_CXX_COMPILER cl CACHE FILEPATH "MSVC CXX compiler" FORCE)

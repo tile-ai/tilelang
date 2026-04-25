@@ -44,12 +44,29 @@ for lib in TL_LIBS:
     if lib not in sys.path:
         sys.path.insert(0, lib)
 
-if sys.platform.startswith("win32"):
+
+def prepend_dll_search_path(paths: list[str]) -> None:
+    """Prepend ``paths`` to ``%PATH%`` on Windows, skipping entries already present.
+
+    Used by Windows DLL discovery: PATH is consulted by ``LoadLibrary`` and by
+    ``os.add_dll_directory``-registered directories alike. POSIX is a no-op.
+    """
+    if not sys.platform.startswith("win32") or not paths:
+        return
     path_entries = os.environ.get("PATH", "").split(os.pathsep)
-    normalized_entries = {os.path.normcase(os.path.abspath(path)) for path in path_entries if path}
-    prepend_entries = [lib for lib in TL_LIBS if os.path.normcase(os.path.abspath(lib)) not in normalized_entries]
-    if prepend_entries:
-        os.environ["PATH"] = os.pathsep.join(prepend_entries + path_entries)
+    seen = {os.path.normcase(os.path.abspath(p)) for p in path_entries if p}
+    fresh = [p for p in paths if p and os.path.normcase(os.path.abspath(p)) not in seen]
+    if fresh:
+        os.environ["PATH"] = os.pathsep.join(fresh + path_entries)
+
+
+prepend_dll_search_path(TL_LIBS)
+
+# TVM's Python loader (3rdparty/tvm/python/tvm/base.py) ORs ``os.RTLD_LAZY``
+# into ``ctypes.CDLL`` mode unconditionally. Windows has no lazy dlopen mode,
+# so we expose a 0 sentinel to keep ``LoadLibrary``'s default behavior.
+if sys.platform.startswith("win32") and not hasattr(os, "RTLD_LAZY"):
+    os.RTLD_LAZY = 0  # type: ignore[attr-defined]
 
 
 def _get_package_version(pkg: str) -> str | None:
@@ -366,6 +383,56 @@ is_cache_enabled = env.is_cache_enabled  # CacheState.is_enabled
 # after initialization.
 CUDA_HOME = env.CUDA_HOME
 ROCM_HOME = env.ROCM_HOME
+
+
+def get_cuda_dll_search_dirs() -> list[str]:
+    """Return CUDA_HOME-derived DLL search directories (Windows only).
+
+    The CUDA_HOME value itself is auto-detected by ``_find_cuda_home`` (env vars,
+    ``nvcc`` on PATH, pip ``nvidia-cuda-nvcc`` package, or default install paths).
+    This helper expands it into the subdirectories that actually contain
+    ``nvcuda.dll`` / ``cudart64_*.dll`` / ``nvrtc64_*.dll`` / ``nvvm*.dll``.
+    """
+    if not sys.platform.startswith("win32") or not CUDA_HOME:
+        return []
+    cands = [
+        CUDA_HOME,
+        os.path.join(CUDA_HOME, "bin"),
+        os.path.join(CUDA_HOME, "bin", "x86_64"),
+        os.path.join(CUDA_HOME, "lib", "x64"),
+        os.path.join(CUDA_HOME, "nvvm", "bin"),
+    ]
+    return [os.path.abspath(p) for p in cands if os.path.isdir(p)]
+
+
+def get_windows_runtime_dll_dirs() -> list[str]:
+    """Return Windows-only DLL directories shipped with sibling Python packages.
+
+    Currently locates ``tvm_ffi`` and ``z3`` install dirs so their DLLs resolve
+    when TileLang is imported. Each lookup is best-effort; failures are ignored.
+    """
+    if not sys.platform.startswith("win32"):
+        return []
+    dirs: list[str] = []
+    try:
+        from tvm_ffi import libinfo as tvm_ffi_libinfo
+
+        dirs.append(os.path.dirname(tvm_ffi_libinfo.find_libtvm_ffi()))
+    except Exception:
+        pass
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("z3")
+    except (ImportError, AttributeError, ValueError):
+        spec = None
+    if spec and spec.submodule_search_locations:
+        z3_root = next(iter(spec.submodule_search_locations), None)
+        if z3_root:
+            z3_lib = os.path.join(z3_root, "lib")
+            if os.path.isdir(z3_lib):
+                dirs.append(z3_lib)
+    return dirs
 
 
 def prepend_pythonpath(path):
