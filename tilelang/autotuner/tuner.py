@@ -29,9 +29,9 @@ import concurrent.futures
 import torch
 import os
 import sys
-import signal
 import json
 import hashlib
+import signal
 import threading
 import traceback
 from pathlib import Path
@@ -47,24 +47,123 @@ class TimeoutException(Exception):
     pass
 
 
-def timeout_handler(signum, frame):
+def _timeout_handler(signum, frame):  # pragma: no cover - signal handler
     raise TimeoutException("Operation timed out")
 
 
-def run_with_timeout(func, timeout, *args, **kwargs):
-    # Windows does not provide SIGALRM; run without a per-trial alarm there.
-    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "alarm"):
-        return func(*args, **kwargs)
-
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(timeout)
+def _run_with_sigalrm(func, timeout, *args, **kwargs):
+    """POSIX path: ``SIGALRM`` interrupts ``func`` synchronously inside the
+    same thread. The runaway call actually stops, releasing CPU/GPU resources
+    held by e.g. a stuck CUDA benchmark.
+    """
+    prev_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(int(timeout))
     try:
-        result = func(*args, **kwargs)
-    except Exception as e:
-        raise e
+        return func(*args, **kwargs)
     finally:
         signal.alarm(0)
-    return result
+        signal.signal(signal.SIGALRM, prev_handler)
+
+
+def _async_raise_in_thread(tid: int, exc_type: type) -> bool:
+    """Asynchronously raise ``exc_type`` in the thread identified by ``tid``.
+
+    Uses CPython's :c:func:`PyThreadState_SetAsyncExc` — the same primitive the
+    interpreter itself uses to deliver ``KeyboardInterrupt`` to the main thread,
+    and the Python-level analogue of POSIX ``SIGALRM``. This is the strongest
+    cross-thread cancellation available without breaking process invariants:
+
+    * ``TerminateThread`` (WINAPI) is rejected on purpose — Microsoft's own
+      documentation labels it dangerous because it leaves CRT locks, DLL
+      thread-detach callbacks, and (relevant here) CUDA driver state in an
+      inconsistent state, which can corrupt subsequent kernels.
+    * ``PyThreadState_SetAsyncExc`` only fires at Python bytecode boundaries,
+      so a thread stuck in a C call (e.g. ``cudaStreamSynchronize``) won't
+      respond until it returns to Python. POSIX ``SIGALRM`` has the same
+      practical limitation.
+
+    Returns ``True`` when the exception was queued, ``False`` otherwise.
+    """
+    import ctypes
+
+    set_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    set_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
+    set_exc.restype = ctypes.c_int
+
+    affected = set_exc(ctypes.c_ulong(tid), ctypes.py_object(exc_type))
+    if affected == 0:
+        return False
+    if affected > 1:
+        # If more than one thread was affected (should not happen with a
+        # single tid), undo the side-effect to avoid leaving threads with a
+        # pending async exception.
+        set_exc(ctypes.c_ulong(tid), None)
+        return False
+    return True
+
+
+def _run_with_thread(func, timeout, *args, **kwargs):
+    """Cross-platform fallback when ``SIGALRM`` is unavailable (Windows) or
+    when called outside the main thread (``signal.signal`` is restricted to
+    the main thread on POSIX).
+
+    Mirrors POSIX ``SIGALRM`` semantics as closely as Python allows by running
+    ``func`` **on the current thread** while a daemon watchdog thread sleeps
+    until the deadline. On timeout the watchdog uses
+    ``PyThreadState_SetAsyncExc`` to inject :class:`TimeoutException` back into
+    the caller, which surfaces at the next Python bytecode boundary.
+
+    Crucially, this preserves ``threading.local()``-backed state (e.g.
+    ``set_autotune_inputs``'s capture stack) — moving ``func`` onto a worker
+    thread would silently zero out that state and break callers that read it.
+    """
+    target_tid = threading.get_ident()
+    cancel = threading.Event()
+    fired = threading.Event()
+
+    def _watchdog():
+        if cancel.wait(timeout):
+            # ``func`` finished before the deadline — nothing to do.
+            return
+        if _async_raise_in_thread(target_tid, TimeoutException):
+            fired.set()
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True, name="tl-tuner-watchdog")
+    watchdog.start()
+    try:
+        return func(*args, **kwargs)
+    except TimeoutException:
+        # Re-raise with the standard message regardless of whether the async
+        # exception we injected won the race against an in-flight Python
+        # exception in ``func``.
+        raise TimeoutException(f"Operation timed out after {timeout}s") from None
+    finally:
+        # Stop the watchdog. If we got here without timing out the watchdog is
+        # blocked in ``cancel.wait`` and will exit immediately. If the watchdog
+        # already fired, ``func`` raised TimeoutException above (caught and
+        # re-raised) — but a stray async exception may still be queued, so
+        # clear it defensively before the caller continues running Python code.
+        cancel.set()
+        if fired.is_set():
+            import ctypes
+
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(target_tid), ctypes.py_object(0))
+
+
+def run_with_timeout(func, timeout, *args, **kwargs):
+    """Run ``func`` under a deadline, raising :class:`TimeoutException` if exceeded.
+
+    Picks the strongest available primitive:
+
+    * **POSIX, main thread**: ``SIGALRM``. The deadline truly interrupts
+      ``func`` mid-execution and frees its resources.
+    * **Otherwise** (Windows, or POSIX off the main thread): a daemon
+      ``ThreadPoolExecutor``. The deadline only unblocks the caller; the
+      runaway worker keeps running until it returns on its own.
+    """
+    if hasattr(signal, "SIGALRM") and threading.current_thread() is threading.main_thread():
+        return _run_with_sigalrm(func, timeout, *args, **kwargs)
+    return _run_with_thread(func, timeout, *args, **kwargs)
 
 
 # Configure logging for the autotuner module
@@ -545,10 +644,6 @@ class AutoTuner:
                 f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used, but the max CPU count is {max_cpu_count}, so we will use {max_cpu_count} CPUs"
             )
             num_workers = max_cpu_count
-        # Concurrent TVM compilation can crash on Windows in this path.
-        if sys.platform == "win32" and num_workers > 1:
-            logger.info("Auto-tuning compile concurrency is limited to 1 on Windows")
-            num_workers = 1
 
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []

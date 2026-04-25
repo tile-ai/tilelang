@@ -126,9 +126,7 @@ TMA_DESC_INIT_FUNC = """
     &{0}, {0}_type, {0}_tensorRank, {0}_globalAddress, {0}_globalDim, {0}_globalStride + 1, {0}_boxDim, {0}_elementStrides, {0}_interleave, {0}_swizzle, {0}_l2Promotion, {0}_oobFill);
 
 \tif ({0}_result != CUDA_SUCCESS) {{
-\t\tstd::stringstream ss;
-\t\tss << "Error: Failed to initialize the TMA descriptor {0}";
-\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
+\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "Error: Failed to initialize the TMA descriptor {0}");
 \t\treturn -1;
 \t}}
 """
@@ -155,9 +153,7 @@ TMA_IM2COL_DESC_INIT_FUNC = """
     {0}_lowerCorner, {0}_upperCorner, {0}_channelsPerPixel, {0}_pixelsPerColumn, {0}_elementStrides, {0}_interleave, {0}_swizzle, {0}_l2Promotion, {0}_oobFill);
 
 \tif ({0}_result != CUDA_SUCCESS) {{
-\t\tstd::stringstream ss;
-\t\tss << "Error: Failed to initialize the TMA descriptor {0}";
-\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
+\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "Error: Failed to initialize the TMA descriptor {0}");
 \t\treturn -1;
 \t}}
 """

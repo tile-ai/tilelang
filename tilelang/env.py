@@ -68,6 +68,23 @@ prepend_dll_search_path(TL_LIBS)
 if sys.platform.startswith("win32") and not hasattr(os, "RTLD_LAZY"):
     os.RTLD_LAZY = 0  # type: ignore[attr-defined]
 
+    # tvm-ffi's Cython layer defaults to ``Py_BEGIN_ALLOW_THREADS`` around every
+    # global function call (see ``TVM_FFI_RELEASE_GIL_BY_DEFAULT`` in
+    # ``3rdparty/tvm/3rdparty/tvm-ffi/python/tvm_ffi/cython/function.pxi``).
+    # That default contradicts tvm-ffi's own ``TypeTable``/``GlobalFunctionTable``
+    # single-threaded contract: with the GIL released, two Python threads can
+    # enter the unsynchronized C++ registries concurrently. POSIX hides the race
+    # behind glibc/x86 luck; Windows MSVC turns it into access violations
+    # inside ``Map::find`` / vector reallocation under the autotuner ThreadPool.
+    #
+    # Pinning the default to "0" lets the GIL serialize tvm-ffi calls (matching
+    # the upstream contract). Subprocess work like ``nvcc`` still releases the
+    # GIL on its own via the ``subprocess`` module, so the autotuner pool keeps
+    # real concurrency exactly where it matters. Users that opt back into the
+    # upstream behavior can still set ``TVM_FFI_RELEASE_GIL_BY_DEFAULT=1`` in
+    # their environment.
+    os.environ.setdefault("TVM_FFI_RELEASE_GIL_BY_DEFAULT", "0")
+
 
 def _get_package_version(pkg: str) -> str | None:
     try:

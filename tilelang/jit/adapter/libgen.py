@@ -147,15 +147,32 @@ class LibraryGenerator:
         if sys.platform == "win32":
             src.close()
 
+        # On Windows, two concerns matter for parallel autotune:
+        # 1. nvcc needs MSVC's host compiler env (cl.exe, INCLUDE, LIB).
+        # 2. Concurrent subprocesses sharing the parent's console handle can
+        #    deadlock when their output interleaves with tqdm progress bars.
+        # Pipe stdio + isolate stdin to make the launch self-contained.
+        run_kwargs: dict[str, Any] = {"timeout": timeout}
+        if sys.platform == "win32":
+            from tilelang.contrib.nvcc import get_nvcc_subprocess_env
+
+            run_kwargs.update(
+                env=get_nvcc_subprocess_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
         try:
             if verbose:
                 print(f"compile_lib compilation command: {' '.join(command)}")
-            ret = subprocess.run(command, timeout=timeout)
+            ret = subprocess.run(command, **run_kwargs)
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
-            raise RuntimeError(f"Compilation Failed! {command}\n {self.lib_code}")
+            captured = ret.stdout.decode("utf-8", errors="replace") if ret.stdout else ""
+            raise RuntimeError(f"Compilation Failed! {command}\n{captured}\n{self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath

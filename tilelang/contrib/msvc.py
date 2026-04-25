@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import re
@@ -12,7 +13,6 @@ from tvm.base import py_str
 
 from tilelang.env import TL_LIBS
 
-_MSVC_ENV_CACHE: dict[str, str] | None = None
 _MSVC_ENV_ERROR: str | None = None
 
 _ALIGN_ATTRIBUTE_RE = re.compile(r"__attribute__\s*\(\(\s*aligned\s*\(\s*([0-9]+)\s*\)\s*\)\)")
@@ -110,39 +110,40 @@ def _import_vsdevcmd_environment(vsdevcmd: str) -> dict[str, str] | None:
     return compiler_env
 
 
+@functools.cache
 def get_msvc_subprocess_env() -> dict[str, str] | None:
+    """Return the resolved MSVC subprocess environment.
+
+    Memoized via :func:`functools.cache` (matching ``contrib/cc.py`` and
+    ``cache/kernel_cache.py``). Concurrent first callers may each spawn
+    ``vswhere.exe`` / ``VsDevCmd.bat`` once; ``functools.cache`` keeps only
+    the winning result. Subsequent calls hit the cache directly with no
+    locking.
+    """
     if os.name != "nt":
         return None
 
-    global _MSVC_ENV_CACHE, _MSVC_ENV_ERROR
-    if _MSVC_ENV_CACHE is not None:
-        return _MSVC_ENV_CACHE
-
+    global _MSVC_ENV_ERROR
     base_env = os.environ.copy()
     if shutil.which("cl.exe", path=get_env_path(base_env)):
-        _MSVC_ENV_CACHE = base_env
-        return _MSVC_ENV_CACHE
+        return base_env
 
     vsdevcmd = _find_vsdevcmd()
     if not vsdevcmd:
         _MSVC_ENV_ERROR = "Could not find VsDevCmd.bat. Install Visual Studio Build Tools or set VSDEVCMD_BAT."
-        _MSVC_ENV_CACHE = base_env
-        return _MSVC_ENV_CACHE
+        return base_env
 
     compiler_env = _import_vsdevcmd_environment(vsdevcmd)
     if compiler_env is None:
         _MSVC_ENV_ERROR = f"VsDevCmd.bat failed: {vsdevcmd}"
-        _MSVC_ENV_CACHE = base_env
-        return _MSVC_ENV_CACHE
+        return base_env
 
     if not shutil.which("cl.exe", path=get_env_path(compiler_env)):
         _MSVC_ENV_ERROR = f"VsDevCmd.bat did not expose cl.exe: {vsdevcmd}"
-        _MSVC_ENV_CACHE = base_env
-        return _MSVC_ENV_CACHE
+        return base_env
 
     _MSVC_ENV_ERROR = None
-    _MSVC_ENV_CACHE = compiler_env
-    return _MSVC_ENV_CACHE
+    return compiler_env
 
 
 def get_msvc_environment_error() -> str | None:
@@ -259,6 +260,10 @@ def create_shared(output: str, objects, options=None, cc=None, cwd=None, ccache_
             exports.extend(_collect_tvm_ffi_exports(path))
         link_options.extend("/EXPORT:" + name for name in sorted(set(exports)))
 
+        # "/Fo" isolates intermediate .obj output to this call's tmp_dir. # codespell:ignore
+        # Without it cl.exe writes ``<source>.obj`` next to the cwd, so two
+        # concurrent ``create_shared`` invocations (e.g. parallel autotune
+        # workers) race on the same path and one fails with Permission denied.
         cmd = [
             cl,
             "/nologo",
@@ -267,6 +272,7 @@ def create_shared(output: str, objects, options=None, cc=None, cwd=None, ccache_
             "/utf-8",
             "/W0",
             "/Fe:" + output,
+            "/Fo:" + os.path.join(tmp_dir, ""),  # codespell:ignore
         ]
         cmd += compile_options
         cmd += patched_objects
@@ -274,6 +280,7 @@ def create_shared(output: str, objects, options=None, cc=None, cwd=None, ccache_
 
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=cwd,
