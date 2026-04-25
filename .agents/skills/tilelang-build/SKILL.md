@@ -1,6 +1,6 @@
 ---
-name: tilelang-build
-description: Repository-specific build, rebuild, install, and test instructions for tilelang. Use when working in the tilelang repository and the correct commands are needed for building from source, reinstalling after changes, or running project tests.
+name: build
+description: "MUST load before any build, install, cmake, pip, or test operation in tilelang. Defines canonical build methods (pip install, cmake dev, editable-install ban) and test commands. ALWAYS re-read after rebase, merge, or dependency changes."
 ---
 
 # Build & Install
