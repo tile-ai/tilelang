@@ -83,7 +83,8 @@ def should_enable_race_check(pass_ctx: PassContext | None = None) -> bool:
 def should_enable_prelower_semantic_check(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    return not bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_PRELOWER_SEMANTIC_CHECK, False))
+    enabled = not pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_PRELOWER_SEMANTIC_CHECK, False)
+    return enabled
 
 
 def get_layout_visual_formats(pass_ctx: PassContext | None = None) -> list[str]:
