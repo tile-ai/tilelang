@@ -23,11 +23,12 @@ def mxfp8_blockscaled_gemm(
     accum_dtype,
     num_stages,
     sf_granularity_k=128,
+    transpose_B=False,
 ):
     """1D-1D Block-scaled MXFP8 GEMM.
 
     A:   [M, K] in FP8 (E4M3 or E5M2)
-    B:   [K, N] in FP8 (E4M3 or E5M2)
+    B:   [K, N] in FP8 (E4M3 or E5M2), or [N, K] when transpose_B=True
     SFA: [(K / sf_granularity_k) / 4) * M] in uint32
          Group-major packed E8M0 scale factors for A.
     SFB: [(K / sf_granularity_k) / 4) * N] in uint32
@@ -41,7 +42,7 @@ def mxfp8_blockscaled_gemm(
     sf_k_groups = T.ceildiv(T.ceildiv(K, sf_granularity_k), 4)
 
     A: T.Tensor[[M, K], in_dtype]
-    B: T.Tensor[[K, N], in_dtype]
+    B: T.Tensor[[N, K] if transpose_B else [K, N], in_dtype]
     SFA: T.Tensor[[sf_k_groups * M], T.uint32]
     SFB: T.Tensor[[sf_k_groups * N], T.uint32]
     C = T.empty((M, N), out_dtype)
@@ -49,7 +50,10 @@ def mxfp8_blockscaled_gemm(
     with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128) as (bx, by):
         # Data shared memory (pipelined)
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
-        B_shared = T.alloc_shared((num_stages, block_K, block_N), in_dtype)
+        B_shared = T.alloc_shared(
+            (num_stages, block_N, block_K) if transpose_B else (num_stages, block_K, block_N),
+            in_dtype,
+        )
 
         # Scale factor shared memory — one uint32 per row/column, packing 4 K-blocks.
         SFA_shared = T.alloc_shared((num_stages, block_M), "uint32")
@@ -84,11 +88,18 @@ def mxfp8_blockscaled_gemm(
                     A_shared[k % num_stages, :, :],
                     barrier=loaded[k % num_stages],
                 )
-                T.tma_copy(
-                    B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N],
-                    B_shared[k % num_stages, :, :],
-                    barrier=loaded[k % num_stages],
-                )
+                if transpose_B:
+                    T.tma_copy(
+                        B[by * block_N : (by + 1) * block_N, k * block_K : (k + 1) * block_K],
+                        B_shared[k % num_stages, :, :],
+                        barrier=loaded[k % num_stages],
+                    )
+                else:
+                    T.tma_copy(
+                        B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N],
+                        B_shared[k % num_stages, :, :],
+                        barrier=loaded[k % num_stages],
+                    )
                 # Load one packed uint32 SF word every sf_load_period iterations.
                 if k % sf_load_period == 0:
                     sf_group_idx = k // sf_load_period
@@ -123,6 +134,7 @@ def mxfp8_blockscaled_gemm(
                     C_tmem,
                     SFA_tmem,
                     SFB_tmem,
+                    transpose_B=transpose_B,
                     mbar=consumed[stage],
                     clear_accum=k == 0,
                     sf_a_id=k % sf_load_period,
@@ -169,6 +181,7 @@ def mxfp8_blockscaled_gemm_2cta(
     accum_dtype,
     num_stages,
     sf_granularity_k=128,
+    transpose_B=False,
 ):
     M, N, K = T.const("M, N, K")
 
@@ -184,7 +197,7 @@ def mxfp8_blockscaled_gemm_2cta(
     assert sf_load_period == 4
 
     A: T.Tensor[[M, K], in_dtype]
-    B: T.Tensor[[K, N], in_dtype]
+    B: T.Tensor[[N, K] if transpose_B else [K, N], in_dtype]
     SFA: T.Tensor[[sf_k_groups * M], T.uint32]
     SFB: T.Tensor[[sf_k_groups * N], T.uint32]
     C = T.empty((M, N), out_dtype)
@@ -194,7 +207,10 @@ def mxfp8_blockscaled_gemm_2cta(
         T.assume(cta_id < 2)
 
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
-        B_shared = T.alloc_shared((num_stages, block_K, half_N), in_dtype)
+        B_shared = T.alloc_shared(
+            (num_stages, half_N, block_K) if transpose_B else (num_stages, block_K, half_N),
+            in_dtype,
+        )
         SFA_shared = T.alloc_shared((num_stages, block_M), "uint32")
         SFB_shared = T.alloc_shared((num_stages, block_N), "uint32")
 
@@ -224,14 +240,24 @@ def mxfp8_blockscaled_gemm_2cta(
                     A_shared[stage, :, :],
                     barrier=loaded[stage],
                 )
-                T.tma_copy(
-                    B[
-                        k * block_K : (k + 1) * block_K,
-                        (by * block_N + cta_id * half_N) : (by * block_N + (cta_id + 1) * half_N),
-                    ],
-                    B_shared[stage, :, :],
-                    barrier=loaded[stage],
-                )
+                if transpose_B:
+                    T.tma_copy(
+                        B[
+                            (by * block_N + cta_id * half_N) : (by * block_N + (cta_id + 1) * half_N),
+                            k * block_K : (k + 1) * block_K,
+                        ],
+                        B_shared[stage, :, :],
+                        barrier=loaded[stage],
+                    )
+                else:
+                    T.tma_copy(
+                        B[
+                            k * block_K : (k + 1) * block_K,
+                            (by * block_N + cta_id * half_N) : (by * block_N + (cta_id + 1) * half_N),
+                        ],
+                        B_shared[stage, :, :],
+                        barrier=loaded[stage],
+                    )
                 if k % sf_load_period == 0:
                     sf_group_idx = k // sf_load_period
                     T.tma_copy(
@@ -261,6 +287,7 @@ def mxfp8_blockscaled_gemm_2cta(
                     C_tmem,
                     SFA_tmem,
                     SFB_tmem,
+                    transpose_B=transpose_B,
                     mbar=consumed[stage],
                     clear_accum=k == 0,
                     sf_a_id=k % sf_load_period,
@@ -302,6 +329,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     accum_dtype,
     num_stages,
     sf_granularity_k=128,
+    transpose_B=False,
     use_tma_store=True,
     store_block_N=64,
 ):
@@ -313,7 +341,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
     sf_k_groups = T.ceildiv(T.ceildiv(K, sf_granularity_k), 4)
 
     A: T.Tensor[[M, K], in_dtype]
-    B: T.Tensor[[K, N], in_dtype]
+    B: T.Tensor[[N, K] if transpose_B else [K, N], in_dtype]
     SFA: T.Tensor[[sf_k_groups * M], T.uint32]
     SFB: T.Tensor[[sf_k_groups * N], T.uint32]
     C = T.empty((M, N), out_dtype)
@@ -333,7 +361,10 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
         T.assume(cta_id < 2)
 
         A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
-        B_shared = T.alloc_shared((num_stages, block_K, half_N), in_dtype)
+        B_shared = T.alloc_shared(
+            (num_stages, half_N, block_K) if transpose_B else (num_stages, block_K, half_N),
+            in_dtype,
+        )
         SFA_shared = T.alloc_shared((num_stages, block_M), "uint32")
         SFB_shared = T.alloc_shared((num_stages, block_N), "uint32")
 
@@ -373,14 +404,24 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                             A_shared[stage, :, :],
                             barrier=loaded[stage],
                         )
-                        T.tma_copy(
-                            B[
-                                k * block_K : (k + 1) * block_K,
-                                by * block_N + cta_id * half_N : by * block_N + (cta_id + 1) * half_N,
-                            ],
-                            B_shared[stage, :, :],
-                            barrier=loaded[stage],
-                        )
+                        if transpose_B:
+                            T.tma_copy(
+                                B[
+                                    by * block_N + cta_id * half_N : by * block_N + (cta_id + 1) * half_N,
+                                    k * block_K : (k + 1) * block_K,
+                                ],
+                                B_shared[stage, :, :],
+                                barrier=loaded[stage],
+                            )
+                        else:
+                            T.tma_copy(
+                                B[
+                                    k * block_K : (k + 1) * block_K,
+                                    by * block_N + cta_id * half_N : by * block_N + (cta_id + 1) * half_N,
+                                ],
+                                B_shared[stage, :, :],
+                                barrier=loaded[stage],
+                            )
                         if k % sf_load_period == 0:
                             sf_group_idx = k // sf_load_period
                             T.tma_copy(
@@ -419,6 +460,7 @@ def mxfp8_blockscaled_gemm_2cta_persistent(
                             C_tmem,
                             SFA_tmem,
                             SFB_tmem,
+                            transpose_B=transpose_B,
                             mbar=consumed[stage],
                             clear_accum=k == 0,
                             sf_a_id=k % sf_load_period,
@@ -536,12 +578,12 @@ def quantize_fp8_with_packed_ue8m0(x, gran_k=128):
     return x_fp8, sf_packed_u32, sf_u8
 
 
-def blockscaled_gemm_ref(a, b, sfa_packed, sfb_packed, sf_granularity_k=128):
+def blockscaled_gemm_ref(a, b, sfa_packed, sfb_packed, sf_granularity_k=128, transpose_B=False):
     """Torch reference for block-scaled MXFP8 GEMM.
 
     Args:
         a: [M, K] FP8 tensor
-        b: [K, N] FP8 tensor
+        b: [K, N] FP8 tensor, or [N, K] when transpose_B=True
         sfa_packed: [(sf_k_blocks / 4) * M] uint32 packed E8M0 scale factors for A
         sfb_packed: [(sf_k_blocks / 4) * N] uint32 packed E8M0 scale factors for B
         sf_granularity_k: number of K elements per scale factor block (default 128)
@@ -550,7 +592,10 @@ def blockscaled_gemm_ref(a, b, sfa_packed, sfb_packed, sf_granularity_k=128):
         [M, N] float32 result
     """
     M, K = a.shape
-    K2, N = b.shape
+    if transpose_B:
+        N, K2 = b.shape
+    else:
+        K2, N = b.shape
     assert K == K2
     sf_k_blocks = (K + sf_granularity_k - 1) // sf_granularity_k
     sfa_unpacked = unpack_sf_u32_1d(sfa_packed, M, sf_k_blocks)
@@ -569,9 +614,14 @@ def blockscaled_gemm_ref(a, b, sfa_packed, sfb_packed, sf_granularity_k=128):
         k_end = min(k_start + sf_granularity_k, K)
         # Scale A block: [M, block_k] * [M, 1]
         a_block = a_f32[:, k_start:k_end] * sfa_scales[:, bi : bi + 1]
-        # Scale B block: [block_k, N] * [1, N]  (sfb is [N, blocks], transpose for broadcast)
-        b_block = b_f32[k_start:k_end, :] * sfb_scales[:, bi : bi + 1].T
-        c += a_block @ b_block
+        if transpose_B:
+            # Scale B block: [N, block_k] * [N, 1]
+            b_block = b_f32[:, k_start:k_end] * sfb_scales[:, bi : bi + 1]
+            c += a_block @ b_block.T
+        else:
+            # Scale B block: [block_k, N] * [1, N]
+            b_block = b_f32[k_start:k_end, :] * sfb_scales[:, bi : bi + 1].T
+            c += a_block @ b_block
     return c
 
 
@@ -586,6 +636,7 @@ def parse_args():
     parser.add_argument("--use-e2e-quant-path", action="store_true", default=True)
     parser.add_argument("--persistent", action="store_true", default=True)
     parser.add_argument("--enable-2cta", action="store_true", default=True)
+    parser.add_argument("--transpose-b", action="store_true", help="Use B as [N, K] and compute A @ B.T.")
     return parser.parse_args()
 
 
@@ -598,6 +649,7 @@ def main():
     use_e2e_quant_path = args.use_e2e_quant_path
     persistent = args.persistent
     enable_2cta = args.enable_2cta
+    transpose_B = args.transpose_b
     num_stages = 6 if enable_2cta else 4
     if persistent:
         assert enable_2cta
@@ -616,10 +668,13 @@ def main():
 
         a, sfa, _ = quantize_fp8_with_packed_ue8m0(x, gran_k=sf_granularity_k)
         b_nt, sfb, _ = quantize_fp8_with_packed_ue8m0(w_nt, gran_k=sf_granularity_k)
-        b = b_nt.T.contiguous()
+        b = b_nt if transpose_B else b_nt.T.contiguous()
     else:
         a = torch.randn(M, K, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
-        b = torch.randn(K, N, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
+        if transpose_B:
+            b = torch.randn(N, K, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
+        else:
+            b = torch.randn(K, N, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
 
         # E8M0 scale factors: one uint32 per row per 4 K-blocks.
         sf_k_blocks = (K + sf_granularity_k - 1) // sf_granularity_k
@@ -644,6 +699,7 @@ def main():
         accum_dtype,
         num_stages,
         sf_granularity_k,
+        transpose_B,
     )
     print(
         kernel.get_kernel_source(
@@ -659,6 +715,7 @@ def main():
             accum_dtype,
             num_stages,
             sf_granularity_k,
+            transpose_B,
         )
     )
 
@@ -666,11 +723,12 @@ def main():
         # For the end-to-end quantization path, compare against the reference with bf16 gemm
         ref_c = (x.float() @ w_nt.float().T).to(torch.bfloat16)
     else:
-        ref_c = blockscaled_gemm_ref(a, b, sfa, sfb, sf_granularity_k).to(torch.bfloat16)
+        ref_c = blockscaled_gemm_ref(a, b, sfa, sfb, sf_granularity_k, transpose_B=transpose_B).to(torch.bfloat16)
     sim = cosine_similarity(c, ref_c)
 
     print(f"Output shape: {c.shape}, dtype: {c.dtype}")
     print(f"E2E quant path: {use_e2e_quant_path}")
+    print(f"transpose_B: {transpose_B}")
     print(f"{c=}, {ref_c=}")
     # print(f"Max abs error: {(c.float() - ref_c.float()).abs().max().item():.6f}")
     print(f"Cosine similarity: {sim.item():.6f}")
@@ -692,6 +750,7 @@ def main():
             accum_dtype,
             num_stages,
             sf_granularity_k,
+            transpose_B,
         ),
         backend="cupti",
     )
