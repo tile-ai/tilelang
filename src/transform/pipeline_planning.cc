@@ -1074,6 +1074,18 @@ private:
     if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno->as<IntImmNode>()->value;
+    // On HIP/ROCM, skip software pipelining for multi-stage loops.
+    // Double-buffering (num_stages > 1) doubles the shared-memory (LDS)
+    // allocation for every buffer declared inside the loop body.  CDNA
+    // devices have at most 128 KB of LDS per workgroup; exceeding that limit
+    // causes hipModuleLaunchKernel to return HIPERRORINVALIDVALUE.
+    // Setting num_stages = 1 in the planner generates incorrect copy loops
+    // (only one async-copy issued instead of the full multi-row preload), so
+    // the safest fallback is a plain sequential loop where T.copy executes
+    // synchronously without any async-copy or double-buffering infrastructure.
+    if (TargetIsRocm(target_) && num_stages > 1) {
+      return StmtExprMutator::VisitStmt_(loop);
+    }
     Stmt pipeline_body_root{nullptr};
     if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;

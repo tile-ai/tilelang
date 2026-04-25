@@ -113,15 +113,22 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
 // __habs overloads for hip_bfloat16 and float16_t to resolve ambiguity on ROCm.
 // hip_bfloat16 != __hip_bfloat16, and float16_t != __half, so the standard
 // __habs overloads don't match exactly, causing ambiguous overload errors.
+// Use __builtin_memcpy instead of reinterpret_cast to avoid strict-aliasing UB.
 __device__ __forceinline__ hip_bfloat16 __habs(hip_bfloat16 a) {
-  unsigned short bits = *reinterpret_cast<unsigned short *>(&a);
+  uint16_t bits;
+  __builtin_memcpy(&bits, &a, sizeof(bits));
   bits &= 0x7FFFu;
-  return *reinterpret_cast<hip_bfloat16 *>(&bits);
+  hip_bfloat16 result;
+  __builtin_memcpy(&result, &bits, sizeof(result));
+  return result;
 }
 __device__ __forceinline__ float16_t __habs(float16_t a) {
-  unsigned short bits = *reinterpret_cast<unsigned short *>(&a);
+  uint16_t bits;
+  __builtin_memcpy(&bits, &a, sizeof(bits));
   bits &= 0x7FFFu;
-  return *reinterpret_cast<float16_t *>(&bits);
+  float16_t result;
+  __builtin_memcpy(&result, &bits, sizeof(result));
+  return result;
 }
 
 namespace tl {
@@ -178,6 +185,59 @@ TL_DEVICE float2 abs2(float2 a) {
   out.x = (a.x >= 0.0f) ? a.x : -a.x;
   out.y = (a.y >= 0.0f) ? a.y : -a.y;
   return out;
+}
+
+// Packed bfloat16x2 overloads for uint1 carrier.
+// On HIP, uint1 = HIP_vector_type<unsigned int, 1> (32-bit), already defined
+// by ROCm via amd_hip_vector_types.h — no additional typedef needed.
+// A packed bfloat16x2 word layout:
+//   bits [15: 0] = first  bfloat16 (sign at bit 15)
+//   bits [31:16] = second bfloat16 (sign at bit 31)
+// These overloads are required by the HIP codegen's ShuffleNode packing path
+// (VisitExpr_ ShuffleNode emits uint1{__pack_bfloat162(a, b)}).
+TL_DEVICE uint1 abs2(uint1 val) {
+  // Clear both sign bits simultaneously.
+  return uint1{val.x & 0x7FFF7FFFu};
+}
+TL_DEVICE uint1 max2(uint1 a, uint1 b) {
+  bfloat16_t a0, a1, b0, b1;
+  __builtin_memcpy(&a0, &a.x,       sizeof(a0));
+  __builtin_memcpy(&a1, (char*)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x,       sizeof(b0));
+  __builtin_memcpy(&b1, (char*)&b.x + 2, sizeof(b1));
+  bfloat16_t r0 = (float)a0 > (float)b0 ? a0 : b0;
+  bfloat16_t r1 = (float)a1 > (float)b1 ? a1 : b1;
+  return uint1{__pack_bfloat162(r0, r1)};
+}
+TL_DEVICE uint1 min2(uint1 a, uint1 b) {
+  bfloat16_t a0, a1, b0, b1;
+  __builtin_memcpy(&a0, &a.x,       sizeof(a0));
+  __builtin_memcpy(&a1, (char*)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x,       sizeof(b0));
+  __builtin_memcpy(&b1, (char*)&b.x + 2, sizeof(b1));
+  bfloat16_t r0 = (float)a0 < (float)b0 ? a0 : b0;
+  bfloat16_t r1 = (float)a1 < (float)b1 ? a1 : b1;
+  return uint1{__pack_bfloat162(r0, r1)};
+}
+TL_DEVICE uint1 add2(uint1 a, uint1 b) {
+  bfloat16_t a0, a1, b0, b1;
+  __builtin_memcpy(&a0, &a.x,       sizeof(a0));
+  __builtin_memcpy(&a1, (char*)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x,       sizeof(b0));
+  __builtin_memcpy(&b1, (char*)&b.x + 2, sizeof(b1));
+  bfloat16_t r0 = (bfloat16_t)((float)a0 + (float)b0);
+  bfloat16_t r1 = (bfloat16_t)((float)a1 + (float)b1);
+  return uint1{__pack_bfloat162(r0, r1)};
+}
+TL_DEVICE uint1 mul2(uint1 a, uint1 b) {
+  bfloat16_t a0, a1, b0, b1;
+  __builtin_memcpy(&a0, &a.x,       sizeof(a0));
+  __builtin_memcpy(&a1, (char*)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x,       sizeof(b0));
+  __builtin_memcpy(&b1, (char*)&b.x + 2, sizeof(b1));
+  bfloat16_t r0 = (bfloat16_t)((float)a0 * (float)b0);
+  bfloat16_t r1 = (bfloat16_t)((float)a1 * (float)b1);
+  return uint1{__pack_bfloat162(r0, r1)};
 }
 
 // Any

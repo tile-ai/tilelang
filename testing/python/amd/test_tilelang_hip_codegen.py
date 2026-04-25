@@ -10,6 +10,7 @@ Covers three fixes made to src/target/codegen_hip.cc:
      subscript), consistent with the scalar declaration emitted for them.
 """
 
+import pytest
 import torch
 import tilelang
 import tilelang.testing
@@ -246,6 +247,236 @@ def test_sync_grid_cooperative_groups_in_hip_source():
         "T.sync_grid() should include cooperative_groups in HIP source, "
         f"but it was not found:\n{src}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: warp_reduce — 5-step butterfly with width=32 (reduce.h)
+#
+# On CDNA (wave64) the old 6-step butterfly called __shfl_xor(value, 32)
+# without a width argument, reading uninitialised VGPRs in lanes 32-63 when
+# only 32 threads were active → NaN / garbage in reduce_max / reduce_sum.
+# Fix: remove step-32 shuffle; add width=32 to all remaining 5 steps.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("n_tokens,n_experts", [(64, 8), (128, 16), (512, 32)])
+def test_warp_reduce_no_nan(n_tokens, n_experts):
+    """
+    32-thread-per-block reduce_max / reduce_sum must not produce NaN on CDNA.
+
+    Old: __shfl_xor(v, 32) with 32 active threads reads uninit VGPRs → NaN.
+    New: 5-step with width=32 stays in-group → correct result, no NaN.
+    """
+    assert n_experts <= 32
+
+    @tilelang.jit
+    def gate_reduce(n_tok: int, n_exp: int):
+        @T.prim_func
+        def kernel(
+            logits:  T.Tensor((n_tok, n_exp), T.float32),
+            out_max: T.Tensor((n_tok,), T.float32),
+            out_sum: T.Tensor((n_tok,), T.float32),
+        ) -> None:
+            with T.Kernel(n_tok, threads=32) as pid:
+                lf = T.alloc_fragment(n_exp, T.float32)
+                T.copy(logits[pid, 0], lf)
+                mx = T.alloc_fragment(1, T.float32)
+                T.reduce_max(lf, mx, dim=0)
+                sm = T.alloc_fragment(1, T.float32)
+                T.reduce_sum(lf, sm, dim=0)
+                if T.get_thread_binding() == 0:
+                    out_max[pid] = mx[0]
+                    out_sum[pid] = sm[0]
+        return kernel
+
+    logits  = torch.randn(n_tokens, n_experts, dtype=torch.float32, device="cuda")
+    out_max = torch.zeros(n_tokens, dtype=torch.float32, device="cuda")
+    out_sum = torch.zeros(n_tokens, dtype=torch.float32, device="cuda")
+
+    gate_reduce(n_tokens, n_experts)(logits, out_max, out_sum)
+    torch.cuda.synchronize()
+
+    assert not out_max.isnan().any(), "reduce_max NaN — __shfl_xor(v,32) uninit VGPR bug"
+    assert not out_sum.isnan().any(), "reduce_sum NaN — __shfl_xor(v,32) uninit VGPR bug"
+    torch.testing.assert_close(out_max, logits.max(dim=1).values, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(out_sum, logits.sum(dim=1),        atol=1e-4, rtol=1e-4)
+
+
+@tilelang.testing.requires_rocm
+def test_warp_reduce_correctness_32_threads():
+    """
+    32-thread reduce_sum over 32 elements must return the exact sum on CDNA.
+
+    warp_reduce is exercised when T.reduce_sum falls through to the warp-level
+    shuffle path.  With the old __shfl_xor(v, 32) bug, reading uninitialised
+    lanes 32-63 on CDNA produced garbage.  With width=32 the result is exact.
+    """
+    N = 32
+
+    @tilelang.jit
+    def reduce_kernel():
+        @T.prim_func
+        def kernel(
+            x:   T.Tensor((N,), T.float32),
+            out: T.Tensor((1,), T.float32),
+        ) -> None:
+            with T.Kernel(1, threads=N) as _:
+                frag = T.alloc_fragment((N,), T.float32)
+                T.copy(x, frag)
+                s = T.alloc_fragment((1,), T.float32)
+                T.reduce_sum(frag, s, dim=0)
+                if T.get_thread_binding() == 0:
+                    out[0] = s[0]
+        return kernel
+
+    x   = torch.arange(1, N + 1, dtype=torch.float32, device="cuda")
+    out = torch.zeros(1, dtype=torch.float32, device="cuda")
+    reduce_kernel()(x, out)
+    torch.cuda.synchronize()
+
+    expected = x.sum()
+    assert not out[0].isnan(), "reduce_sum NaN — warp_reduce VGPR bug on CDNA"
+    torch.testing.assert_close(out[0], expected, atol=1e-4, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: ShuffleNode bfloat16x2 / float16x2 packing (codegen_hip.cc)
+#         uint1 bf16x2 math overloads (common.h)
+#
+# Old: CodeGenC emitted `uint1(a, b)` — invalid HIP constructor → compile error.
+# Fix: Override VisitExpr_(ShuffleNode) to emit `uint1{__pack_bfloat162(a,b)}`.
+#      Add abs2/max2/min2/add2/mul2 overloads for uint1 in common.h.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_rocm
+def test_bfloat16_shuffle_emits_pack_intrinsic():
+    """
+    A bfloat16 fragment reduction triggers ShuffleNode bfloat16x2 packing.
+    The generated HIP source must use __pack_bfloat162 (not `uint1(a,b)`).
+    """
+    n_tok, n_exp = 16, 8
+
+    @tilelang.jit
+    def bf16_reduce(n_t: int, n_e: int):
+        @T.prim_func
+        def kernel(
+            x:   T.Tensor((n_t, n_e), T.bfloat16),
+            out: T.Tensor((n_t,), T.float32),
+        ) -> None:
+            with T.Kernel(n_t, threads=32) as pid:
+                frag = T.alloc_fragment(n_e, T.bfloat16)
+                T.copy(x[pid, 0], frag)
+                frag_f32 = T.alloc_fragment(n_e, T.float32)
+                for i in T.Parallel(n_e):
+                    frag_f32[i] = T.cast(frag[i], T.float32)
+                s = T.alloc_fragment(1, T.float32)
+                T.reduce_sum(frag_f32, s, dim=0)
+                if T.get_thread_binding() == 0:
+                    out[pid] = s[0]
+        return kernel
+
+    src = bf16_reduce(n_tok, n_exp).get_kernel_source()
+    # Must use the pack intrinsic, not the invalid two-argument constructor
+    assert "uint1(a" not in src and "uint1(b" not in src, \
+        "Old `uint1(a, b)` constructor found — ShuffleNode fix not applied"
+
+    # Runtime correctness
+    x   = torch.randn(n_tok, n_exp, dtype=torch.bfloat16, device="cuda")
+    out = torch.zeros(n_tok,        dtype=torch.float32,  device="cuda")
+    bf16_reduce(n_tok, n_exp)(x, out)
+    torch.cuda.synchronize()
+    assert not out.isnan().any(), "bf16 ShuffleNode reduction produced NaN"
+    torch.testing.assert_close(out, x.float().sum(dim=1), atol=5e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Fix 6: T.Pipelined(num_stages>1) on ROCM — skip pipeline planning
+#         (pipeline_planning.cc)
+#
+# Old: double-buffering doubled LDS per loop body → hipModuleLaunchKernel
+#      EINVAL on CDNA (≤128 KB LDS/workgroup).
+# Fix: TargetIsRocm() && num_stages>1 → fall back to plain sequential loop.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("num_stages", [1, 2, 3])
+def test_pipelined_no_lds_overflow(num_stages):
+    """
+    T.Pipelined(num_stages=N) must not raise hipModuleLaunchKernel EINVAL on
+    ROCM and must produce the correct result regardless of N.
+
+    Old: num_stages=2 doubled LDS allocation → EINVAL on CDNA.
+    New: multi-stage loops fall back to plain sequential on ROCM.
+    """
+    M, K, blk = 32, 256, 64
+
+    @tilelang.jit
+    def pipelined_rowsum(n_stages: int):
+        @T.prim_func
+        def kernel(
+            x:   T.Tensor((M, K), T.float32),
+            out: T.Tensor((M,),   T.float32),
+        ) -> None:
+            with T.Kernel(M, threads=64) as pid:
+                acc = T.alloc_fragment((1,), T.float32)
+                T.clear(acc)
+                for k in T.Pipelined(K // blk, num_stages=n_stages):
+                    xs = T.alloc_shared((blk,), T.float32)
+                    xl = T.alloc_fragment((blk,), T.float32)
+                    T.copy(x[pid, k * blk], xs, disable_tma=True)
+                    T.copy(xs, xl, disable_tma=True)
+                    s = T.alloc_fragment((1,), T.float32)
+                    T.reduce_sum(xl, s, dim=0)
+                    acc[0] = acc[0] + s[0]
+                out[pid] = acc[0]
+        return kernel
+
+    x   = torch.ones(M, K, dtype=torch.float32, device="cuda")
+    out = torch.zeros(M,   dtype=torch.float32, device="cuda")
+    pipelined_rowsum(num_stages)(x, out)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, torch.full((M,), float(K), device="cuda"), atol=1e-4, rtol=0)
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_pipelined_multi_stage_fp16_gemm(num_stages):
+    """
+    FP16 GEMM with T.Pipelined(num_stages>1) must launch and produce correct
+    results on ROCM — the most common pattern that triggered the LDS overflow.
+    """
+    M, N, K = 128, 128, 128
+    bM, bN, bK = 64, 64, 32
+
+    @tilelang.jit
+    def fp16_gemm(n_stages: int):
+        @T.prim_func
+        def kernel(
+            A: T.Tensor((M, K), T.float16),
+            B: T.Tensor((K, N), T.float16),
+            C: T.Tensor((M, N), T.float32),
+        ) -> None:
+            with T.Kernel(T.ceildiv(N, bN), T.ceildiv(M, bM), threads=128) as (bx, by):
+                A_s = T.alloc_shared((bM, bK), T.float16)
+                B_s = T.alloc_shared((bK, bN), T.float16)
+                C_l = T.alloc_fragment((bM, bN), T.float32)
+                T.clear(C_l)
+                for k in T.Pipelined(K // bK, num_stages=n_stages):
+                    T.copy(A[by * bM, k * bK], A_s)
+                    T.copy(B[k * bK, bx * bN], B_s)
+                    T.gemm(A_s, B_s, C_l)
+                T.copy(C_l, C[by * bM, bx * bN])
+        return kernel
+
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    C = torch.zeros(M, N, dtype=torch.float32, device="cuda")
+    fp16_gemm(num_stages)(A, B, C)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(C, A.float() @ B.float(), atol=1.0, rtol=5e-2)
 
 
 if __name__ == "__main__":

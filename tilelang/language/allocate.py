@@ -137,10 +137,16 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
 
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
+        # Always use T.buffer_store for reliable initialisation across all
+        # backends.  The block_attr("tl.local_var_init") path feeds into the
+        # flatten_buffer transform which does not reliably emit initialiser
+        # code on some backends (e.g. HIP codegen silently drops the
+        # annotation for integer/float literals, leaving the scalar
+        # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
+        # node that every backend lowers to an assignment statement.
         if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
-            block_attr({"tl.local_var_init": {buffer.data: tl_dtype(dtype)(parsed_init)}})
-        else:
-            T.buffer_store(buffer, parsed_init, 0)
+            parsed_init = tl_dtype(dtype)(parsed_init)
+        T.buffer_store(buffer, parsed_init, 0)
     return buffer
 
 

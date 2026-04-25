@@ -49,6 +49,7 @@ public:
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
+  void VisitExpr_(const ShuffleNode *op, std::ostream &os) final;   // NOLINT(*)
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
 

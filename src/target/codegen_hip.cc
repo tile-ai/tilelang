@@ -714,6 +714,32 @@ std::string CodeGenTileLangHIP::CastFromTo(std::string value, DataType from,
   return os.str();
 }
 
+void CodeGenTileLangHIP::VisitExpr_(const ShuffleNode *op,
+                                    std::ostream &os) { // NOLINT(*)
+  // For bfloat16x2 / float16x2 construction from two scalar lanes, emit the
+  // HIP pack intrinsic instead of the invalid `uint1(a, b)` that CodeGenC
+  // would generate (HIP's uint1 has no two-argument constructor).
+  // `uint1{value}` aggregate initialisation is valid: uint1 is defined by ROCm
+  // as HIP_vector_type<unsigned int, 1> which has a single .x member.
+  DataType t = op->dtype;
+  bool is_bf16x2 = t.is_bfloat16() && t.lanes() == 2;
+  bool is_fp16x2  = t.is_float16()  && t.lanes() == 2;
+  if ((is_bf16x2 || is_fp16x2) && op->vectors.size() == 2 &&
+      op->vectors[0].dtype().lanes() == 1 &&
+      op->vectors[1].dtype().lanes() == 1) {
+    std::string e0 = PrintExpr(op->vectors[0]);
+    std::string e1 = PrintExpr(op->vectors[1]);
+    if (is_bf16x2) {
+      os << "uint1{__pack_bfloat162(" << e0 << ", " << e1 << ")}";
+    } else {
+      os << "uint1{__pack_half2(" << e0 << ", " << e1 << ")}";
+    }
+    return;
+  }
+  // Default path for all other shuffle patterns.
+  CodeGenC::VisitExpr_(op, os);
+}
+
 void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
   DataType from_ty = op->value.dtype();
   DataType target_ty = op->dtype;
