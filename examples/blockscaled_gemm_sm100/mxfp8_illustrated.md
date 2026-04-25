@@ -51,7 +51,7 @@ Two details are easy to miss:
 
 ## Scale-Factor Layout
 
-Blackwell blockscaled tcgen05 MMA instructions require special layout for scale factors in TMEM. Take K=32, SFA as an example: 
+Blackwell blockscaled tcgen05 MMA instructions require special layout for scale factors in TMEM. Take K=32, SFA as an example:
 ![Layout requirement for SFA in TMEM](figures/sfa.png)
 
 We need process like below to pack the scale factors into the required layout:

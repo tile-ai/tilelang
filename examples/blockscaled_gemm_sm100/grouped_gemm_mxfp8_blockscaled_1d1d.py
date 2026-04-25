@@ -53,7 +53,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
     B: T.Tensor[[E, N, K] if transpose_B else [E, K, N], in_dtype]
     SFA: T.Tensor[[sf_k_groups * M_total], T.uint32]
     SFB: T.Tensor[[sf_k_groups * E * N], T.uint32]
-    offsets: T.Tensor[[E1], "int32"]
+    offsets: T.Tensor[[E1], T.int32]
     C = T.empty((M_total, N), out_dtype)
 
     n_blocks = T.ceildiv(N, block_N)
@@ -134,13 +134,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta(
                         barrier=loaded[stage],
                     )
                     T.tma_copy(
-                        SFB[
-                            sf_group_idx * E * N
-                            + eid * N
-                            + pid_n * block_N : sf_group_idx * E * N
-                            + eid * N
-                            + (pid_n + 1) * block_N
-                        ],
+                        SFB[sf_group_idx * E * N + eid * N + pid_n * block_N : sf_group_idx * E * N + eid * N + (pid_n + 1) * block_N],
                         SFB_shared[stage, :],
                         barrier=loaded[stage],
                     )
@@ -234,7 +228,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
     B: T.Tensor[[E, N, K] if transpose_B else [E, K, N], in_dtype]
     SFA: T.Tensor[[sf_k_groups * M_total], T.uint32]
     SFB: T.Tensor[[sf_k_groups * E * N], T.uint32]
-    offsets: T.Tensor[[E1], "int32"]
+    offsets: T.Tensor[[E1], T.int32]
     C = T.empty((M_total, N), out_dtype)
 
     sm_num = driver.get_num_sms()
@@ -337,9 +331,7 @@ def grouped_mxfp8_blockscaled_gemm_2cta_persistent(
                             )
                             T.tma_copy(
                                 SFB[
-                                    sf_group_idx * E * N
-                                    + eid * N
-                                    + pid_n * block_N : sf_group_idx * E * N
+                                    sf_group_idx * E * N + eid * N + pid_n * block_N : sf_group_idx * E * N
                                     + eid * N
                                     + (pid_n + 1) * block_N
                                 ],
@@ -437,12 +429,7 @@ def pack_sf_u8_to_u32_rows(sf_u8):
     assert sf_u8.dim() == 2
     assert sf_u8.shape[1] % 4 == 0
     words = sf_u8.to(torch.int64)
-    return (
-        words[:, 0::4]
-        | (words[:, 1::4] << 8)
-        | (words[:, 2::4] << 16)
-        | (words[:, 3::4] << 24)
-    ).to(torch.uint32).contiguous()
+    return (words[:, 0::4] | (words[:, 1::4] << 8) | (words[:, 2::4] << 16) | (words[:, 3::4] << 24)).to(torch.uint32).contiguous()
 
 
 def pack_rows_to_group_major_flat(packed_rows):
