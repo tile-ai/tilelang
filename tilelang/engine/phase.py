@@ -197,6 +197,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
+    # On Metal, rewrite local.fragment GEMM accumulators to metal.simdgroup
+    # before layout inference (which would otherwise require a layout for them)
+    from tilelang.transform.metal_fragment_to_simdgroup import MetalFragmentToSimdgroup
+
+    mod = MetalFragmentToSimdgroup(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Visualize the layout

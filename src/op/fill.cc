@@ -156,7 +156,30 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (IsFragmentBuffer(dst)) {
+  if (IsSIMDGroupBuffer(dst)) {
+    int region_elements = 1;
+    for (auto r : region) {
+      auto imm = r->extent.as<IntImmNode>();
+      ICHECK(imm) << "simdgroup fill region must have constant extents";
+      region_elements *= imm->value;
+    }
+    int total_elements = region_elements;
+    ICHECK(total_elements % 64 == 0)
+        << "simdgroup buffer size must be multiple of 64 (8x8), got "
+        << total_elements;
+    int num_matrices = total_elements / 64;
+    PrimExpr fill_value = Cast(dst->dtype, value);
+    Array<Stmt> stmts;
+    for (int i = 0; i < num_matrices; i++) {
+      stmts.push_back(Evaluate(
+          Call(DataType::Handle(), builtin::make_filled_simdgroup_matrix(),
+               {dst->data, IntImm(DataType::Int(32), i), fill_value,
+                IntImm(DataType::Int(32), 8), IntImm(DataType::Int(32), 8)})));
+    }
+    if (stmts.size() == 1)
+      return stmts[0];
+    return SeqStmt(stmts);
+  } else if (IsFragmentBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target,
                          T.thread_bounds,

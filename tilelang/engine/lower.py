@@ -236,7 +236,7 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     elif target.kind.name == "hip":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
     elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
@@ -261,7 +261,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     elif target.kind.name == "webgpu":
         device_mod = tvm.ffi.get_global_func("target.build.webgpu")(device_mod, target)
     elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_metal")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
