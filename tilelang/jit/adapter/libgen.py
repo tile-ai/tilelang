@@ -89,7 +89,13 @@ class LibraryGenerator:
                 f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
             if sys.platform == "win32":
-                command += ["-Xcompiler", "/Zc:preprocessor"]
+                # /Zc:__cplusplus forces MSVC to report the actual C++ standard
+                # via __cplusplus. Without it cuda.h's `alignas(128)` on
+                # CUtensorMap is dropped (it is gated on
+                # ``__cplusplus >= 201103L``), so NVCC emits a kernel param
+                # with .align 8 and cuLaunchKernel later fails with
+                # CUDA_ERROR_MISALIGNED_ADDRESS.
+                command += ["-Xcompiler", "/Zc:preprocessor /Zc:__cplusplus"]
             else:
                 command += ["--compiler-options", "-fPIC"]
             if enable_fast_math:

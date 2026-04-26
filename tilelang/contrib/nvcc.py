@@ -102,7 +102,14 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     elif isinstance(arch, str):
         cmd += ["-arch", arch]
     if os.name == "nt":
-        cmd += ["-Xcompiler", "/Zc:preprocessor"]
+        # /Zc:preprocessor: standards-conforming preprocessor (needed by some
+        # CUDA macros).
+        # /Zc:__cplusplus: makes MSVC report the actual C++ standard via the
+        # __cplusplus macro. Without it MSVC reports 199711L, which silently
+        # disables `alignas(128)` on CUtensorMap in cuda.h (CUDA 13). NVCC
+        # then emits ``.param .align 8 .b8 ...[128]`` for the descriptor and
+        # cuLaunchKernel returns CUDA_ERROR_MISALIGNED_ADDRESS at runtime.
+        cmd += ["-Xcompiler", "/Zc:preprocessor /Zc:__cplusplus"]
 
     if options:
         if isinstance(options, str):

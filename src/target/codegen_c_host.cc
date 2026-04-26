@@ -58,6 +58,13 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   // snprintf for richer assert messages with actual values
   decl_stream << "#include <stdio.h>\n";
   decl_stream << "#include <stdbool.h>\n";
+  // Portable alignment specifier: MSVC uses __declspec(align(N)), every other
+  // compiler nvcc invokes (gcc/clang) accepts __attribute__((aligned(N))).
+  decl_stream << "#if defined(_MSC_VER)\n";
+  decl_stream << "#define TL_ALIGN(N) __declspec(align(N))\n";
+  decl_stream << "#else\n";
+  decl_stream << "#define TL_ALIGN(N) __attribute__((aligned(N)))\n";
+  decl_stream << "#endif\n";
 
   decl_stream << "#ifdef __OBJC__\n";
   decl_stream << "#include \"tvm/runtime/device_api.h\"\n";
@@ -377,9 +384,10 @@ void CodeGenCHost::VisitExpr_(const tvm::tir::CallNode *op,
     this->PrintIndent();
     if (type == "tvm_ffi_any") {
       // TMA descriptors are materialized through tvm_ffi_any stack allocas and
-      // must satisfy CUDA's 64-byte alignment requirement for CUtensorMap.
-      this->stream << "__attribute__((aligned(64))) TVMFFIAny " << stack_name
-                   << "[" << size << "];\n";
+      // are passed by value to the kernel as ``__grid_constant__ const
+      // CUtensorMap``.
+      this->stream << "TL_ALIGN(64) TVMFFIAny " << stack_name << "[" << size
+                   << "];\n";
     } else {
       this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
     }

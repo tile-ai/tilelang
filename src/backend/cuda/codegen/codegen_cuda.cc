@@ -571,6 +571,25 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
 }
 
 std::string CodeGenTileLangCUDA::Finish() {
+  // CUDA 13's cuda.h declares CUtensorMap with `alignas(128)`, which MSVC
+  // rejects as a function parameter alignment (C2719: "formal parameter
+  // requires <N>-byte alignment"). MSVC's hard limit for parameter alignment
+  // is 64. NVCC still feeds the kernel signature through MSVC's host
+  // frontend on Windows, so any kernel taking `__grid_constant__ const
+  // CUtensorMap` by value fails to compile.
+  //
+  // Cap alignas(N) at 64 just for the duration of <cuda.h>'s parsing. The
+  // host buffer is independently aligned to 128 (see codegen_c_host.cc /
+  // wrapper.py), and the .param area in PTX gets `.align 64`, which the
+  // driver still accepts for our 128-aligned source pointer.
+  decl_stream << "#if defined(_MSC_VER)\n";
+  decl_stream << "#define _tl_orig_alignas alignas\n";
+  decl_stream << "#define alignas(N) _tl_orig_alignas((N) <= 64 ? (N) : 64)\n";
+  decl_stream << "#include <cuda.h>\n";
+  decl_stream << "#undef alignas\n";
+  decl_stream << "#define alignas _tl_orig_alignas\n";
+  decl_stream << "#endif\n";
+
   if (need_mma_h_) {
     decl_stream << "#include <mma.h>\n";
   }
