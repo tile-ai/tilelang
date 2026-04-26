@@ -517,6 +517,10 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
     return result_map;
   }
 
+  if (copy_inst == CopyInst::kMetalSIMDGroup) {
+    return {};
+  }
+
   // for LDSM/STSM, the layout was deduced from register layout
   // so we can directly apply the layout of normal copy
   // Use parallel op to infer the layout
@@ -792,9 +796,14 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
   if (!CheckCPAsyncCopyPreconditions()) {
     return false;
   }
-  // Skip vectorize size check here because, during the Infer Layout stage,
-  // the layout is not stable and the vectorized size cannot be determined.
   return true;
+}
+
+bool CopyNode::CheckSIMDGroupCopy(Target target) const {
+  if (TargetIsMetal(target) && IsSIMDGroupBuffer(src)) {
+    return IsSharedBuffer(dst) || IsGlobalBuffer(dst);
+  }
+  return false;
 }
 
 // Selects the most specific copy instruction for the given target and buffers.
@@ -864,6 +873,8 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
     return CopyInst::kTMemLoad;
   } else if (CheckTMemStore(target)) {
     return CopyInst::kTMemStore;
+  } else if (CheckSIMDGroupCopy(target)) {
+    return CopyInst::kMetalSIMDGroup;
   } else {
     return CopyInst::kNormal;
   }
@@ -897,6 +908,8 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto cp_async_copy = LowerCPAsyncCopy(T, analyzer);
     ICHECK(cp_async_copy.defined()) << "Failed to lower cp.async copy";
     return cp_async_copy;
+  } else if (copy_inst == CopyInst::kMetalSIMDGroup) {
+    return LowerSIMDGroupCopy(T, analyzer);
   } else if (copy_inst == CopyInst::kNormal) {
     return LowerNormalCopy(T, analyzer);
   } else {
@@ -982,7 +995,88 @@ Stmt CopyNode::LowerCPAsyncCopy(const LowerArgs &T,
   return cp_async_loop;
 }
 
-// Lowers the copy using standard load/store with loop transformations.
+Stmt CopyNode::LowerSIMDGroupCopy(const LowerArgs &T,
+                                  arith::Analyzer *analyzer) const {
+  ICHECK(IsSIMDGroupBuffer(src));
+  int total_elements = 1;
+  for (auto s : src->shape) {
+    auto imm = s.as<IntImmNode>();
+    ICHECK(imm) << "simdgroup buffer must have constant shape";
+    total_elements *= imm->value;
+  }
+  ICHECK(total_elements % 64 == 0)
+      << "simdgroup buffer size must be multiple of 64 (8x8), got "
+      << total_elements;
+
+  ICHECK(dst_range.size() == 2)
+      << "Expected 2D destination for simdgroup store";
+  PrimExpr dst_row_base = dst_range[0]->min;
+  PrimExpr dst_col_base = dst_range[1]->min;
+  PrimExpr dst_stride = dst->shape[dst->shape.size() - 1];
+
+  int warp_size = TargetGetWarpSize(T.target);
+  int block_size = T.thread_bounds->extent.as<IntImmNode>()->value;
+  int num_warps = block_size / warp_size;
+  PrimExpr warp_id = FloorDiv(T.thread_var, warp_size);
+
+  int M = src_range[0]->extent.as<IntImmNode>()->value;
+  int N = src_range[1]->extent.as<IntImmNode>()->value;
+
+  int kMPerWarp = 8;
+  int kNPerWarp = 8;
+  int m_warp = 1, n_warp = num_warps;
+  int max_m = M / kMPerWarp;
+  int max_n = N / kNPerWarp;
+  float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
+  float best_score = std::numeric_limits<float>::max();
+  for (int m = 1; m <= std::min(num_warps, max_m); ++m) {
+    if (num_warps % m != 0)
+      continue;
+    int n = num_warps / m;
+    if (n > max_n)
+      continue;
+    float m_per = static_cast<float>(M) / (m * kMPerWarp);
+    float n_per = static_cast<float>(N) / (n * kNPerWarp);
+    float score = std::abs(m_per / n_per - ideal);
+    if (score < best_score) {
+      best_score = score;
+      m_warp = m;
+      n_warp = n;
+    }
+  }
+
+  ICHECK(M >= m_warp * 8 && N >= n_warp * 8)
+      << "Cannot partition " << M << "x" << N << " matrix across " << m_warp
+      << "x" << n_warp << " warps with 8x8 simdgroup tiles";
+  int warp_row_tiles = M / m_warp / 8;
+  int warp_col_tiles = N / n_warp / 8;
+  ICHECK(warp_row_tiles > 0 && warp_col_tiles > 0);
+  ICHECK(warp_row_tiles * warp_col_tiles * 64 <= total_elements)
+      << "Warp partition produces more tiles than buffer capacity";
+
+  PrimExpr warp_m = FloorMod(warp_id, m_warp);
+  PrimExpr warp_n = FloorDiv(warp_id, m_warp);
+
+  Array<Stmt> stmts;
+  for (int i = 0; i < warp_row_tiles; i++) {
+    for (int j = 0; j < warp_col_tiles; j++) {
+      int tile_idx = i * warp_col_tiles + j;
+      PrimExpr row = dst_row_base + warp_m * (warp_row_tiles * 8) + i * 8;
+      PrimExpr col = dst_col_base + warp_n * (warp_col_tiles * 8) + j * 8;
+      PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
+                          {BufferLoad(dst, {row, col})});
+      stmts.push_back(Evaluate(
+          Call(DataType::Handle(), builtin::simdgroup_store(),
+               {src->data, IntImm(DataType::Int(32), tile_idx), ptr, dst_stride,
+                IntImm(DataType::Int(32), 8), IntImm(DataType::Int(32), 8),
+                Cast(DataType::Bool(), IntImm(DataType::Int(32), 0))})));
+    }
+  }
+  if (stmts.size() == 1)
+    return stmts[0];
+  return SeqStmt(stmts);
+}
+
 Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
   bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;

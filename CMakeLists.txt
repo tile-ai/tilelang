@@ -190,6 +190,13 @@ list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
 )
 
+# Metal codegen is pure C++ (no Apple frameworks) and can generate Metal shader
+# source on any platform.  Always compile it so that "target.build.tilelang_metal"
+# is available for cross-compilation on Linux/Windows.
+list(APPEND TILE_LANG_SRCS
+  src/target/codegen_metal.cc
+)
+
 set(TILELANG_OUTPUT_TARGETS tilelang tvm)
 
 # Track if the user explicitly selected a backend via cache options.
