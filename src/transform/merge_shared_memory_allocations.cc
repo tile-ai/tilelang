@@ -1011,6 +1011,17 @@ private:
       }
     }
 
+    // Pending kill insertions are deferred until after the per-event loop
+    // below: ``event_map_[last_stmt_at_level].kill.push_back(...)`` may
+    // target the very same vector we are currently iterating, in which case
+    // the push_back can reallocate the underlying storage and invalidate
+    // ``it``. MSVC's debug iterator verification catches this on the next
+    // ``it != event.kill.end()`` check ("vector iterators incompatible");
+    // release builds silently dereference freed memory. Buffering the
+    // push-backs and applying them later removes the aliasing entirely.
+    std::vector<std::pair<const Object *, const VarNode *>>
+        pending_kill_inserts;
+
     for (auto &event_pair : event_map_) {
       const Object *stmt = event_pair.first;
       EventEntry &event = event_pair.second;
@@ -1100,13 +1111,22 @@ private:
             }
           }
           if (last_stmt_at_level) {
-            event_map_[last_stmt_at_level].kill.push_back(buffer);
+            // Defer: pushing into event.kill (the vector ``it`` iterates) or
+            // into any other event.kill while the outer ``event_map_`` range
+            // loop is live can invalidate iterators / dangling references.
+            pending_kill_inserts.emplace_back(last_stmt_at_level, buffer);
             visited_buffers.insert(buffer);
           }
         } else {
           ++it;
         }
       }
+    }
+
+    // Apply deferred kill insertions now that no iterator into ``event_map_``
+    // / ``event.kill`` is live.
+    for (const auto &insert : pending_kill_inserts) {
+      event_map_[insert.first].kill.push_back(insert.second);
     }
 
     std::vector<const Object *> stmt_keys;
