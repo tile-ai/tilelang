@@ -592,6 +592,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (enable_fp8_) {
     decl_stream << "#include <tl_templates/cuda/cuda_fp8.h>\n";
   }
+  if (enable_fp6_) {
+    decl_stream << "#include <cuda_fp6.h>\n";
+  }
   if (enable_fp4_) {
     decl_stream << "#include <tl_templates/cuda/cuda_fp4.h>\n";
   }
