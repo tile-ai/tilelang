@@ -13,20 +13,13 @@ import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+from tilelang.utils.target import determine_target, target_is_gfx950
 
 
 def _is_gfx950() -> bool:
     try:
-        from tilelang import tvm
-
-        mcpu = str(tvm.target.Target("rocm").attrs.get("mcpu", ""))
-        return "gfx950" in mcpu
-    except Exception:
+        return target_is_gfx950(determine_target("auto", return_object=True))
+    except (ValueError, RuntimeError):
         return False
 
 
@@ -86,11 +79,9 @@ def _matmul_kernel(
 # ---------------------------------------------------------------------------
 
 
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_gfx950
 def test_gfx950_cp_async_gs_16_in_codegen():
     """coalesced_width=8 (16 bytes) must emit cp_async_gs<16> in generated HIP source."""
-    if not _is_gfx950():
-        pytest.skip("cp_async_gs<16> is only generated for gfx950 (MI350/MI355X)")
     prog = _matmul_kernel(
         256,
         256,

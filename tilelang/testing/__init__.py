@@ -5,6 +5,7 @@ import random
 import torch
 import numpy as np
 from tilelang.contrib import nvcc
+from tilelang.utils.target import determine_target, target_is_gfx950
 from tvm.testing.utils import requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
@@ -24,23 +25,21 @@ __all__ = [
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
 
 
-def _get_rocm_gcn_arch() -> str:
+def _check_is_gfx950() -> bool:
     try:
-        import tvm
-        target = tvm.target.Target("auto")
-        return target.attrs.get("mcpu", "")
-    except Exception:
-        return ""
+        target = determine_target("auto", return_object=True)
+        return target_is_gfx950(target)
+    except (ValueError, RuntimeError):
+        return False
 
 
 def requires_gfx950(func):
     """Skip the test unless the ROCm device is gfx950 (CDNA4 / MI350)."""
-    gcn_arch = _get_rocm_gcn_arch()
-    is_gfx950 = gcn_arch.startswith("gfx950")
+    is_gfx950 = _check_is_gfx950()
     marks = [
         pytest.mark.skipif(
             not is_gfx950,
-            reason=f"Requires gfx950 (CDNA4/MI350), but current device is '{gcn_arch}'",
+            reason="Requires gfx950 (CDNA4/MI350)",
         ),
         *requires_rocm.marks(),
     ]
