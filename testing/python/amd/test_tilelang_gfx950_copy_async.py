@@ -89,6 +89,8 @@ def _matmul_kernel(
 @tilelang.testing.requires_rocm
 def test_gfx950_cp_async_gs_16_in_codegen():
     """coalesced_width=8 (16 bytes) must emit cp_async_gs<16> in generated HIP source."""
+    if not _is_gfx950():
+        pytest.skip("cp_async_gs<16> is only generated for gfx950 (MI350/MI355X)")
     prog = _matmul_kernel(
         256,
         256,
