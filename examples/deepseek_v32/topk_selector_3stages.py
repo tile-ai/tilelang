@@ -66,10 +66,10 @@ def tl_topk_stage1_impl(in_dtype=T.float32, out_dtype=T.int32):
 
     @T.prim_func
     def stage1_kernel(
-            input: T.Tensor[(batch, seq_len), in_dtype],
-            starts: T.Tensor[(batch,), out_dtype],
-            ends: T.Tensor[(batch,), out_dtype],
-            global_histogram: T.Tensor[(batch, RADIX), T.int32],
+        input: T.Tensor[(batch, seq_len), in_dtype],
+        starts: T.Tensor[(batch,), out_dtype],
+        ends: T.Tensor[(batch,), out_dtype],
+        global_histogram: T.Tensor[(batch, RADIX), T.int32],
     ):
         with T.Kernel(T.ceildiv(seq_len, CHUNK_SIZE), batch, threads=BLOCK_SIZE) as (cx, bx):
             tx = T.get_thread_binding()
@@ -89,15 +89,13 @@ def tl_topk_stage1_impl(in_dtype=T.float32, out_dtype=T.int32):
 
             for s in T.serial(T.ceildiv(CHUNK_SIZE, BLOCK_SIZE)):
                 input_idx = l_chunk_start + s * BLOCK_SIZE + tx
-                if (input_idx < seq_len and input_idx >= l_start_idx and
-                        input_idx < l_end_idx):
+                if input_idx < seq_len and input_idx >= l_start_idx and input_idx < l_end_idx:
                     bin_id = convert_to_uint16(input[bx, input_idx])
                     T.atomic_add(s_local_hist[bin_id], 1)
             T.sync_threads()
 
-            if tx < RADIX:
-                if s_local_hist[tx] > 0:
-                    T.atomic_add(global_histogram[bx, tx], s_local_hist[tx])
+            if tx < RADIX and s_local_hist[tx] > 0:
+                T.atomic_add(global_histogram[bx, tx], s_local_hist[tx])
 
     return stage1_kernel
 
@@ -123,14 +121,14 @@ def tl_topk_stage2_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
 
     @T.prim_func
     def stage2_kernel(
-            input: T.Tensor[(batch, seq_len), in_dtype],
-            starts: T.Tensor[(batch,), out_dtype],
-            ends: T.Tensor[(batch,), out_dtype],
-            index: T.Tensor[(batch, topk), out_dtype],
-            global_histogram: T.Tensor[(batch, RADIX), T.int32],
-            direct_counter: T.Tensor[(batch, RADIX + 1), T.int32],
-            candidate_idx: T.Tensor[(batch, SMEM_INPUT_SIZE), out_dtype],
-            candidate_count: T.Tensor[(batch,), T.int32],
+        input: T.Tensor[(batch, seq_len), in_dtype],
+        starts: T.Tensor[(batch,), out_dtype],
+        ends: T.Tensor[(batch,), out_dtype],
+        index: T.Tensor[(batch, topk), out_dtype],
+        global_histogram: T.Tensor[(batch, RADIX), T.int32],
+        direct_counter: T.Tensor[(batch, RADIX + 1), T.int32],
+        candidate_idx: T.Tensor[(batch, SMEM_INPUT_SIZE), out_dtype],
+        candidate_count: T.Tensor[(batch,), T.int32],
     ):
         with T.Kernel(T.ceildiv(seq_len, CHUNK_SIZE), batch, threads=BLOCK_SIZE) as (cx, bx):
             tx = T.get_thread_binding()
@@ -185,16 +183,14 @@ def tl_topk_stage2_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             # Re-scan ONLY this chunk and dispatch each element.
             for s in T.serial(T.ceildiv(CHUNK_SIZE, BLOCK_SIZE)):
                 input_idx = l_chunk_start + s * BLOCK_SIZE + tx
-                if (input_idx < seq_len and input_idx >= l_start_idx and
-                        input_idx < l_end_idx):
+                if input_idx < seq_len and input_idx >= l_start_idx and input_idx < l_end_idx:
                     bin_id = convert_to_uint16(input[bx, input_idx])
                     l_bin_id32 = T.cast(bin_id, T.int32)
                     if l_bin_id32 > l_threshold_bin_id:
                         # cumsum offset is consistent across blocks; use a
                         # per-(batch, bin) global counter for the within-bin slot.
                         l_bin_offset = s_histogram[l_bin_id32 + 1]
-                        pos = T.atomic_add(
-                            direct_counter[bx, l_bin_id32 + 1], 1, return_prev=True)
+                        pos = T.atomic_add(direct_counter[bx, l_bin_id32 + 1], 1, return_prev=True)
                         index[bx, l_bin_offset + pos] = input_idx
                     elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
                         pos = T.atomic_add(candidate_count[bx], 1, return_prev=True)
@@ -219,11 +215,11 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
 
     @T.prim_func
     def stage3_kernel(
-            input: T.Tensor[(batch, seq_len), in_dtype],
-            index: T.Tensor[(batch, topk), out_dtype],
-            global_histogram: T.Tensor[(batch, RADIX), T.int32],
-            candidate_idx: T.Tensor[(batch, SMEM_INPUT_SIZE), out_dtype],
-            candidate_count: T.Tensor[(batch,), T.int32],
+        input: T.Tensor[(batch, seq_len), in_dtype],
+        index: T.Tensor[(batch, topk), out_dtype],
+        global_histogram: T.Tensor[(batch, RADIX), T.int32],
+        candidate_idx: T.Tensor[(batch, SMEM_INPUT_SIZE), out_dtype],
+        candidate_count: T.Tensor[(batch,), T.int32],
     ):
         with T.Kernel(batch, threads=BLOCK_SIZE) as (bx,):
             tx = T.get_thread_binding()
@@ -301,8 +297,8 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     if s * BLOCK_SIZE + tx < l_num_input:
                         l_bin_id32 = T.cast(
-                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]])
-                              >> (24 - round * 8)) & 0xFF), T.int32)
+                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
+                        )
                         T.atomic_add(s_histogram[l_bin_id32], 1)
                 T.sync_threads()
 
@@ -329,22 +325,19 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                     T.sync_threads()
                     if s * BLOCK_SIZE + tx < l_num_input:
                         l_bin_id32 = T.cast(
-                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]])
-                              >> (24 - round * 8)) & 0xFF), T.int32)
+                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
+                        )
                         if l_bin_id32 > l_threshold_bin_id:
-                            pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1,
-                                               return_prev=True) + l_start_pos
+                            pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                             index[bx, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
                         elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
                             if round == 3:
-                                l_out_pos = T.atomic_add(
-                                    s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
+                                l_out_pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                                 if l_out_pos < topk:
                                     index[bx, l_out_pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
                             else:
                                 pos = T.atomic_add(s_num_input[r_idx ^ 1], 1, return_prev=True)
-                                s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx,
-                                                                          s * BLOCK_SIZE + tx]
+                                s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
 
     return stage3_kernel
 
@@ -362,19 +355,18 @@ def tl_topk(input, starts, ends, topk):
     stage3 = tl_topk_stage3_impl(topk)
 
     stage1(input, starts, ends, global_histogram)
-    stage2(input, starts, ends, indexes, global_histogram, direct_counter, candidate_idx,
-           candidate_count)
+    stage2(input, starts, ends, indexes, global_histogram, direct_counter, candidate_idx, candidate_count)
     stage3(input, indexes, global_histogram, candidate_idx, candidate_count)
     return indexes
 
 
-def test_topk_selector(batch=1, seq_len=131072, topk=2048):
+def test_topk_selector(batch=1, seq_len=131072, topk=4096):
     torch.manual_seed(1)
     input = torch.randn(batch, seq_len, dtype=torch.float32).cuda()
     starts = torch.zeros(batch, dtype=torch.int32).cuda()
     ends = torch.ones(batch, dtype=torch.int32).cuda() * seq_len
 
-    print(f'{input.shape=}')
+    print(f"{input.shape=}")
 
     indexes = tl_topk(input, starts, ends, topk)
     print(indexes)
@@ -388,8 +380,7 @@ def test_topk_selector(batch=1, seq_len=131072, topk=2048):
         set_ref = set(ref_np)
         set_trt = set(trt_np)
         intersection = set_ref & set_trt
-        print("selected/all:", len(intersection), "/", len(set_ref), "=",
-              len(intersection) / len(set_ref))
+        print("selected/all:", len(intersection), "/", len(set_ref), "=", len(intersection) / len(set_ref))
 
     torch.cuda.synchronize()
 
@@ -397,14 +388,14 @@ def test_topk_selector(batch=1, seq_len=131072, topk=2048):
         _ = tl_topk(input, starts, ends, topk)
     torch.cuda.synchronize()
 
-    # Theres some minor gap between triton benchmark result and tilelang's
+    # There's some minor gap between triton benchmark result and tilelang's
     # We choose to report both for clarity issues
-    tl_time = tilelang.profiler.do_bench(lambda: tl_topk(input, starts, ends, topk), backend='cupti')
+    tl_time = tilelang.profiler.do_bench(lambda: tl_topk(input, starts, ends, topk), backend="cupti")
     print(f"Average tl_topk time: {tl_time:.3f} ms")
     tl_time = triton.testing.do_bench(lambda: tl_topk(input, starts, ends, topk))
     print(f"Average triton-benched tl_topk time: {tl_time:.3f} ms")
 
-    torch_time = tilelang.profiler.do_bench(lambda: torch.topk(input, topk, dim=-1)[1], backend='cupti')
+    torch_time = tilelang.profiler.do_bench(lambda: torch.topk(input, topk, dim=-1)[1], backend="cupti")
     print(f"Average torch.topk time: {torch_time:.3f} ms")
 
 
