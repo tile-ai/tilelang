@@ -5,6 +5,9 @@
 
 #include "reduce.h"
 
+#include <cstdint>
+#include <limits>
+
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -85,6 +88,30 @@ TileOperator CumSumOpNode::Clone() const {
   return CumSumOp(op);
 }
 
+// The previous implementation used `1 << (bits - 1)` and `(1 << bits) - 1`
+// with the literal `1` (a 32-bit `int`). For 64-bit dtypes the shift count
+// is >= the width of `int`, which is undefined behavior; in practice
+// clang-cl evaluated `1 << 63` as `0x80000000` and the int64 max-init
+// collapsed to +2^31 instead of INT64_MIN, breaking
+// `reduce_max[max-int64]`. The helpers below compute the limits using
+// fixed-width 64-bit arithmetic so every supported `bits` value (8/16/32/64)
+// is well-defined.
+static inline int64_t SignedMin(int bits) {
+  if (bits >= 64)
+    return std::numeric_limits<int64_t>::min();
+  return -(static_cast<int64_t>(1) << (bits - 1));
+}
+static inline int64_t SignedMax(int bits) {
+  if (bits >= 64)
+    return std::numeric_limits<int64_t>::max();
+  return (static_cast<int64_t>(1) << (bits - 1)) - 1;
+}
+static inline uint64_t UnsignedMax(int bits) {
+  if (bits >= 64)
+    return std::numeric_limits<uint64_t>::max();
+  return (static_cast<uint64_t>(1) << bits) - 1;
+}
+
 PrimExpr ReduceOpNode::MakeInitValue() const {
   auto dst_dtype = dst->dtype;
   auto is_int = dst_dtype.is_int();
@@ -97,7 +124,7 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     return make_zero(dst->dtype);
   } else if (type->isMax()) {
     if (is_int) {
-      return make_const(dst->dtype, -(1 << (bits - 1)));
+      return make_const(dst->dtype, SignedMin(bits));
     } else if (is_uint) {
       return make_const(dst->dtype, 0);
     } else {
@@ -105,9 +132,9 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     }
   } else if (type->isMin()) {
     if (is_int) {
-      return make_const(dst->dtype, (1 << (bits - 1)) - 1);
+      return make_const(dst->dtype, SignedMax(bits));
     } else if (is_uint) {
-      return make_const(dst->dtype, (1 << bits) - 1);
+      return make_const(dst->dtype, UnsignedMax(bits));
     } else {
       return make_const(dst->dtype, INFINITY);
     }
@@ -117,7 +144,7 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     if (is_int) {
       return make_const(dst->dtype, -1);
     } else if (is_uint) {
-      return make_const(dst->dtype, (1 << bits) - 1);
+      return make_const(dst->dtype, UnsignedMax(bits));
     } else {
       // Should not arrive here
       return make_const(dst->dtype, -INFINITY);
