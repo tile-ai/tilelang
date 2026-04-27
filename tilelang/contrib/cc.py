@@ -52,11 +52,10 @@ def get_cc():
         return env_cxx
 
     if _is_windows_like():
-        from tilelang.contrib.msvc import get_msvc_subprocess_env, get_env_path
+        from tilelang.contrib.msvc import get_windows_compiler
 
-        compiler_env = get_msvc_subprocess_env()
-        cl = shutil.which("cl.exe", path=get_env_path(compiler_env or {}))
-        return cl
+        compiler, _kind = get_windows_compiler()
+        return compiler
 
     cc_names = ["g++", "gcc", "clang++", "clang", "c++", "cc"]
     dirs_in_path = os.get_exec_path()
@@ -83,11 +82,10 @@ def get_cplus_compiler():
         return env_cxx
 
     if _is_windows_like():
-        from tilelang.contrib.msvc import get_msvc_subprocess_env, get_env_path
+        from tilelang.contrib.msvc import get_windows_compiler
 
-        compiler_env = get_msvc_subprocess_env()
-        cl = shutil.which("cl.exe", path=get_env_path(compiler_env or {}))
-        return cl
+        compiler, _kind = get_windows_compiler()
+        return compiler
 
     cc_names = ["g++", "clang++", "c++"]
     dirs_in_path = os.get_exec_path()

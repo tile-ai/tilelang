@@ -316,10 +316,96 @@ function(_tilelang_activate_msvc_env)
   endif()
   message(STATUS "FindPipCUDAToolkit: RC compiler ${CMAKE_RC_COMPILER}")
   message(STATUS "FindPipCUDAToolkit: MT tool ${CMAKE_MT}")
+
+  # cl.exe is always required as the CUDA host compiler (nvcc on Windows
+  # only supports MSVC as host) and as a last-resort fallback for the C/CXX
+  # compiler if clang-cl cannot be located.
   find_program(_tilelang_cl_compiler NAMES cl.exe cl)
-  if(_tilelang_cl_compiler)
+
+  # Prefer clang-cl over cl.exe for C/CXX. clang-cl is MSVC-compatible at the
+  # command-line level (it accepts /Z7, /FS, /utf-8, /O2, /LD, /link, etc.)
+  # and uses the same MSVC headers, libraries, and linker that VsDevCmd just
+  # placed on PATH/INCLUDE/LIB above. Empirically clang-cl produces
+  # significantly faster code for TileLang's compute-heavy translation units
+  # than MSVC at /O2.
+  #
+  # Set TILELANG_DISABLE_CLANG_CL=1 (env var or -DTILELANG_DISABLE_CLANG_CL=ON)
+  # to force the legacy cl.exe path.
+  set(_tilelang_disable_clang_cl OFF)
+  if(DEFINED ENV{TILELANG_DISABLE_CLANG_CL} AND NOT "$ENV{TILELANG_DISABLE_CLANG_CL}" STREQUAL ""
+      AND NOT "$ENV{TILELANG_DISABLE_CLANG_CL}" STREQUAL "0"
+      AND NOT "$ENV{TILELANG_DISABLE_CLANG_CL}" STREQUAL "OFF")
+    set(_tilelang_disable_clang_cl ON)
+  endif()
+  if(TILELANG_DISABLE_CLANG_CL)
+    set(_tilelang_disable_clang_cl ON)
+  endif()
+
+  set(_tilelang_clang_cl "")
+  if(NOT _tilelang_disable_clang_cl)
+    # Honor explicit user override first.
+    if(DEFINED ENV{CLANG_CL} AND EXISTS "$ENV{CLANG_CL}")
+      set(_tilelang_clang_cl "$ENV{CLANG_CL}")
+    endif()
+
+    if(NOT _tilelang_clang_cl)
+      set(_tilelang_clang_cl_hints "")
+      # VS-bundled LLVM (when the "C++ Clang Compiler for Windows" workload is
+      # installed). VS 2022/2026 places it under VC/Tools/Llvm/{x64,}/bin.
+      if(NOT "${_tilelang_vs_install}" STREQUAL "")
+        list(APPEND _tilelang_clang_cl_hints
+          "${_tilelang_vs_install}/VC/Tools/Llvm/${_tilelang_target_arch}/bin"
+          "${_tilelang_vs_install}/VC/Tools/Llvm/x64/bin"
+          "${_tilelang_vs_install}/VC/Tools/Llvm/bin")
+      endif()
+      # Standalone LLVM installation.
+      list(APPEND _tilelang_clang_cl_hints
+        "C:/Program Files/LLVM/bin"
+        "C:/Program Files (x86)/LLVM/bin")
+      if(DEFINED ENV{LLVM_HOME} AND NOT "$ENV{LLVM_HOME}" STREQUAL "")
+        list(APPEND _tilelang_clang_cl_hints "$ENV{LLVM_HOME}/bin")
+      endif()
+      if(DEFINED ENV{LLVM_DIR} AND NOT "$ENV{LLVM_DIR}" STREQUAL "")
+        list(APPEND _tilelang_clang_cl_hints "$ENV{LLVM_DIR}/bin")
+      endif()
+
+      find_program(_tilelang_clang_cl_program
+        NAMES clang-cl clang-cl.exe
+        HINTS ${_tilelang_clang_cl_hints}
+        PATHS ${_tilelang_clang_cl_hints})
+      if(_tilelang_clang_cl_program)
+        set(_tilelang_clang_cl "${_tilelang_clang_cl_program}")
+      endif()
+    endif()
+  endif()
+
+  if(_tilelang_clang_cl AND EXISTS "${_tilelang_clang_cl}")
+    cmake_path(GET _tilelang_clang_cl PARENT_PATH _tilelang_clang_cl_dir)
+    # Prepend the LLVM bin dir so lld-link.exe / clang.exe are also found by
+    # any toolchain that expects them next to clang-cl.
+    if(EXISTS "${_tilelang_clang_cl_dir}")
+      set(ENV{PATH} "${_tilelang_clang_cl_dir};$ENV{PATH}")
+    endif()
+    set(CMAKE_C_COMPILER "${_tilelang_clang_cl}" CACHE FILEPATH "C compiler (clang-cl)" FORCE)
+    set(CMAKE_CXX_COMPILER "${_tilelang_clang_cl}" CACHE FILEPATH "CXX compiler (clang-cl)" FORCE)
+    # NOTE: do not pre-set CMAKE_C_COMPILER_ID / CMAKE_C_SIMULATE_ID via the
+    # cache. Doing so causes CMake to skip the compiler probe and leaves
+    # MSVC_VERSION / CMAKE_C_SIMULATE_VERSION unset, which breaks
+    # Windows-Clang.cmake when it includes Windows-MSVC.cmake. CMake
+    # auto-detects Clang+MSVC-like correctly when the compiler is just a
+    # plain path.
+    message(STATUS "FindPipCUDAToolkit: preferring clang-cl over MSVC for host C/C++ at ${_tilelang_clang_cl}")
+  elseif(_tilelang_cl_compiler)
     set(CMAKE_C_COMPILER "${_tilelang_cl_compiler}" CACHE FILEPATH "MSVC C compiler" FORCE)
     set(CMAKE_CXX_COMPILER "${_tilelang_cl_compiler}" CACHE FILEPATH "MSVC CXX compiler" FORCE)
+    if(NOT _tilelang_disable_clang_cl)
+      message(STATUS "FindPipCUDAToolkit: clang-cl not found; falling back to MSVC cl.exe for host C/C++")
+    endif()
+  endif()
+
+  # NVCC on Windows only officially supports MSVC as the host compiler, so
+  # always pin CUDA's host compiler to cl.exe regardless of the C/CXX choice.
+  if(_tilelang_cl_compiler)
     set(CMAKE_CUDA_HOST_COMPILER "${_tilelang_cl_compiler}" CACHE FILEPATH "CUDA host compiler" FORCE)
     set(ENV{CUDAHOSTCXX} "${_tilelang_cl_compiler}")
   endif()

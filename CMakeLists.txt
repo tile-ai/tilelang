@@ -19,7 +19,8 @@ project(TILE_LANG C CXX)
 
 # MSVC-specific build configuration. Must run after project() so MSVC is
 # defined, but before add_subdirectory(${TVM_SOURCE}) below so subprojects
-# inherit these settings.
+# inherit these settings. CMake also sets MSVC=1 when the compiler is
+# clang-cl (it simulates MSVC), so the same block applies to both toolchains.
 if(MSVC)
   # Force CMP0141 NEW for every subdirectory regardless of its own
   # cmake_minimum_required. The bundled TVM declares 3.18; without this,
@@ -35,10 +36,44 @@ if(MSVC)
   # in its own subprocess and observably breaks that coordination -- the build
   # still hits C1041 even with /FS on the command line. /FS is kept here as a
   # best-effort fallback for any consumer that re-enables /Zi locally; sccache
-  # in front of cl.exe may neutralize it.
+  # in front of cl.exe may neutralize it. clang-cl recognizes /FS as a no-op,
+  # so it is safe to keep in the shared MSVC-compatible flag block.
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "Embedded"
       CACHE STRING "MSVC debug info format" FORCE)
   add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/FS>)
+
+  # Exceptions: cl.exe enables C++ exceptions by default (with a C4530
+  # warning), but clang-cl disables them unless /EHsc is passed explicitly.
+  # The bundled TVM adds /EHsc inside its own subdirectory, but TileLang's
+  # native targets (tilelang_objs, cuda_stub, ...) live above that scope and
+  # never inherited the flag, so clang-cl rejected `throw` in those TUs.
+  # Apply /EHsc and /bigobj globally so every MSVC-compatible target picks
+  # them up regardless of subdirectory layering.
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/bigobj>)
+
+  # clang-cl-specific compatibility shims. clang-cl is invoked with
+  # MSVC-like flags but needs a couple of extra knobs to compile TVM/TileLang
+  # cleanly:
+  #   * -Wno-unused-command-line-argument: silence noise from MSVC-only
+  #     flags injected by CMake/TVM (e.g. /FS, /Zc:preprocessor, /MP).
+  #   * -fdelayed-template-parsing: TVM headers declare std::vector<T>
+  #     members where T is only forward-declared at that point (e.g.
+  #     std::vector<tvm::tir::Stmt> in src/transform/arg_binder.h). cl.exe
+  #     defers template parsing by default so the late stmt.h include in
+  #     the .cc file resolves T before instantiation; modern clang parses
+  #     templates eagerly and emits "incomplete type" errors. Re-enabling
+  #     delayed parsing matches MSVC semantics without touching the headers.
+  #   * -Wno-unknown-attributes: TVM's tvm-ffi headers spam
+  #     [[msvc::forceinline]] which clang-cl recognizes only in some
+  #     contexts; the warning floods build logs without changing codegen.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-command-line-argument>
+      $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unknown-attributes>
+      $<$<COMPILE_LANGUAGE:CXX>:-fdelayed-template-parsing>)
+  endif()
 endif()
 
 function(tilelang_get_python_interpreter OUTPUT_VAR)

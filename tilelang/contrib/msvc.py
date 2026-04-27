@@ -23,6 +23,98 @@ def get_env_path(compiler_env: dict[str, str]) -> str | None:
     return compiler_env.get("PATH") or compiler_env.get("Path") or compiler_env.get("path")
 
 
+def _clang_cl_disabled() -> bool:
+    val = os.environ.get("TILELANG_DISABLE_CLANG_CL", "")
+    return val not in ("", "0", "OFF", "off", "false", "False")
+
+
+def _vs_install_roots() -> list[str]:
+    roots: list[str] = []
+    for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)")):
+        if not base:
+            continue
+        vs_root = os.path.join(base, "Microsoft Visual Studio")
+        if os.path.isdir(vs_root):
+            roots.append(vs_root)
+    if vc_install := os.environ.get("VCINSTALLDIR"):
+        # VCINSTALLDIR points to <vs_install>/VC/, so its parent is the VS install root.
+        candidate = os.path.dirname(os.path.normpath(vc_install))
+        if os.path.isdir(candidate):
+            roots.append(candidate)
+    return roots
+
+
+def _candidate_clang_cl_paths(compiler_env: dict[str, str] | None) -> list[str]:
+    candidates: list[str] = []
+
+    def add(path: str | None) -> None:
+        if path and os.path.exists(path) and path not in candidates:
+            candidates.append(path)
+
+    if explicit := os.environ.get("CLANG_CL"):
+        add(explicit)
+
+    # VS-bundled LLVM (when the "C++ Clang Compiler for Windows" workload is installed).
+    for vs_root in _vs_install_roots():
+        for pattern in (
+            os.path.join(vs_root, "*", "*", "VC", "Tools", "Llvm", "x64", "bin", "clang-cl.exe"),
+            os.path.join(vs_root, "*", "*", "VC", "Tools", "Llvm", "bin", "clang-cl.exe"),
+        ):
+            for hit in sorted(glob.glob(pattern), reverse=True):
+                add(hit)
+
+    # Standalone LLVM installation.
+    for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)")):
+        if base:
+            add(os.path.join(base, "LLVM", "bin", "clang-cl.exe"))
+    for env_var in ("LLVM_HOME", "LLVM_DIR"):
+        if base := os.environ.get(env_var):
+            add(os.path.join(base, "bin", "clang-cl.exe"))
+
+    # PATH lookup using the compiler's own environment when available so we
+    # find the LLVM that VsDevCmd just exposed.
+    env_path = get_env_path(compiler_env or {}) if compiler_env else None
+    add(shutil.which("clang-cl.exe", path=env_path))
+    add(shutil.which("clang-cl", path=env_path))
+
+    return candidates
+
+
+def _find_clang_cl(compiler_env: dict[str, str] | None) -> str | None:
+    if _clang_cl_disabled():
+        return None
+    for candidate in _candidate_clang_cl_paths(compiler_env):
+        return candidate
+    return None
+
+
+@functools.cache
+def _resolve_windows_compiler(prefer_clang_cl: bool) -> tuple[str | None, str | None]:
+    """Return (compiler_path, kind) where kind is 'clang-cl' or 'msvc'.
+
+    Cached so repeated JIT compiles don't re-spawn vswhere or rescan PATH.
+    """
+    compiler_env = get_msvc_subprocess_env()
+    if prefer_clang_cl:
+        clang_cl = _find_clang_cl(compiler_env)
+        if clang_cl is not None:
+            return clang_cl, "clang-cl"
+    cl = shutil.which("cl.exe", path=get_env_path(compiler_env or {}))
+    if cl is not None:
+        return cl, "msvc"
+    return None, None
+
+
+def get_windows_compiler() -> tuple[str | None, str | None]:
+    """Resolve the preferred Windows host compiler.
+
+    Returns ``(path, kind)`` where ``kind`` is ``"clang-cl"`` or ``"msvc"``.
+    Set the ``TILELANG_DISABLE_CLANG_CL`` env var to force the legacy
+    ``cl.exe`` path.
+    """
+    return _resolve_windows_compiler(not _clang_cl_disabled())
+
+
 def _find_vsdevcmd() -> str | None:
     candidate = os.environ.get("VSDEVCMD_BAT")
     if candidate and os.path.exists(candidate):
@@ -139,8 +231,11 @@ def get_msvc_subprocess_env() -> dict[str, str] | None:
         return base_env
 
     if not shutil.which("cl.exe", path=get_env_path(compiler_env)):
+        # cl.exe missing is only a hard failure when the caller actually needs
+        # MSVC; clang-cl still benefits from the activated INCLUDE/LIB/PATH,
+        # so surface the diagnostic but keep the enriched env.
         _MSVC_ENV_ERROR = f"VsDevCmd.bat did not expose cl.exe: {vsdevcmd}"
-        return base_env
+        return compiler_env
 
     _MSVC_ENV_ERROR = None
     return compiler_env
@@ -228,13 +323,23 @@ def _find_import_libs() -> tuple[list[str], list[str]]:
 
 def create_shared(output: str, objects, options=None, cc=None, cwd=None, ccache_env=None):
     if os.name != "nt":
-        raise ValueError("MSVC shared-library compiler is only available on Windows")
+        raise ValueError("Windows shared-library compiler is only available on Windows")
 
     compiler_env = get_msvc_subprocess_env()
-    cl = cc or shutil.which("cl.exe", path=get_env_path(compiler_env or {}))
-    if cl is None:
+
+    if cc is not None:
+        compiler = cc
+        kind = "clang-cl" if "clang-cl" in os.path.basename(cc).lower() else "msvc"
+    else:
+        compiler, kind = get_windows_compiler()
+
+    if compiler is None:
         detail = get_msvc_environment_error()
-        msg = "Could not find cl.exe. Install Visual Studio Build Tools or set VSDEVCMD_BAT."
+        msg = (
+            "Could not find a Windows host compiler (clang-cl or cl.exe). "
+            "Install LLVM (clang-cl) or Visual Studio Build Tools, or set "
+            "VSDEVCMD_BAT / CLANG_CL."
+        )
         if detail:
             msg += f" ({detail})"
         raise RuntimeError(msg)
@@ -265,7 +370,7 @@ def create_shared(output: str, objects, options=None, cc=None, cwd=None, ccache_
         # concurrent ``create_shared`` invocations (e.g. parallel autotune
         # workers) race on the same path and one fails with Permission denied.
         cmd = [
-            cl,
+            compiler,
             "/nologo",
             "/LD",
             "/O2",
@@ -274,6 +379,8 @@ def create_shared(output: str, objects, options=None, cc=None, cwd=None, ccache_
             "/Fe:" + output,
             "/Fo:" + os.path.join(tmp_dir, ""),  # codespell:ignore
         ]
+        if kind == "clang-cl":
+            cmd.append("-Wno-unused-command-line-argument")
         cmd += compile_options
         cmd += patched_objects
         cmd += ["/link"] + link_options
