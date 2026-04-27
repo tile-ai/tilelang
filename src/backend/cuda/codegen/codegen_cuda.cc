@@ -4432,6 +4432,69 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
     }
     return;
   }
+
+  // 32-bit int/uint vectors with lanes > 4 are typed as (u)longlong{lanes/2}
+  // by PrintType. The base CodeGenC emits `make_<type>(v0, v1, ..., v_{N-1})`
+  // N args for N lanes, which produces e.g. `make_ulonglong4(8 args)` and
+  // nvcc rejects with "too many arguments in function call". Pack consecutive
+  // pairs of 32-bit values into a single 64-bit lane to match the type's real
+  // arity. Triggered e.g. by storing eight T.rng_rand() (uint32) results via
+  // a 256-bit vectorized store.
+  if ((t.is_int() || t.is_uint()) && t.bits() == 32 && t.lanes() > 4 &&
+      t.lanes() % 2 == 0) {
+    int lanes = t.lanes();
+    // Reuse CodeGenC's concat logic by reading individual scalars from the
+    // shuffle's source vectors at the indices the shuffle requested.
+    std::vector<std::string> scalars;
+    scalars.reserve(lanes);
+    if (op->vectors.size() == static_cast<size_t>(lanes) &&
+        op->indices.size() == static_cast<size_t>(lanes)) {
+      // Common case: each lane is a scalar expression in vectors[i] and
+      // indices[i] == 0. Print each scalar directly to avoid extra SSA copies.
+      for (int i = 0; i < lanes; ++i) {
+        scalars.push_back(PrintExpr(op->vectors[i]));
+      }
+    } else {
+      // Fall back to the generic concat-then-shuffle path used by CodeGenC.
+      std::vector<std::string> concat_vec;
+      for (const PrimExpr &vec : op->vectors) {
+        std::string vec_value = PrintExpr(vec);
+        if (vec.dtype().lanes() == 1) {
+          concat_vec.push_back(vec_value);
+        } else {
+          for (int j = 0; j < vec.dtype().lanes(); ++j) {
+            std::ostringstream s;
+            PrintVecElemLoad(vec_value, vec.dtype(), j, s);
+            concat_vec.push_back(s.str());
+          }
+        }
+      }
+      ICHECK_EQ(static_cast<int>(op->indices.size()), lanes);
+      for (const PrimExpr &idx : op->indices) {
+        ICHECK(idx->IsInstance<IntImmNode>())
+            << "ShuffleNode indices must be constants at codegen time, got "
+            << idx;
+        int64_t k = Downcast<IntImm>(idx)->value;
+        ICHECK_LT(k, static_cast<int64_t>(concat_vec.size()));
+        scalars.push_back(concat_vec[k]);
+      }
+    }
+
+    const char *u64 = t.is_uint() ? "unsigned long long" : "long long";
+    const char *u32 = t.is_uint() ? "unsigned int" : "int";
+    PrintVecConstructor(t, os);
+    os << '(';
+    for (int i = 0; i + 1 < lanes; i += 2) {
+      if (i != 0)
+        os << ", ";
+      // Pack lane i (lo) and lane i+1 (hi) into one 64-bit value.
+      os << "((" << u64 << ")(" << u32 << ")(" << scalars[i] << ")) | "
+         << "((" << u64 << ")(" << u32 << ")(" << scalars[i + 1] << ") << 32)";
+    }
+    os << ')';
+    return;
+  }
+
   // Default path for all other types.
   CodeGenC::VisitExpr_(op, os);
 }
@@ -4525,6 +4588,34 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
       if (i != 0)
         os << ", ";
       os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+    }
+    os << ')';
+    return;
+  }
+
+  // 32-bit int/uint broadcast with lanes > 4 lowers to (u)longlong{lanes/2}
+  // (each ulonglong holds two consecutive 32-bit lanes). Without packing,
+  // the generic loop below would emit one arg per lane, producing e.g.
+  // `make_ulonglong4(v, v, v, v, v, v, v, v)` which nvcc rejects with
+  // "too many arguments". This path is hit when a vectorized store of
+  // `T.rng_rand()` (uint32) is broadcast across the 8 lanes of a 256-bit
+  // store. PrintExpr is invoked twice per packed slot so the underlying
+  // side-effecting call (curand) executes once per uint32 lane, matching
+  // the lane count.
+  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 32 &&
+      op->dtype.lanes() > 4 && op->dtype.lanes() % 2 == 0) {
+    int lanes = op->dtype.lanes();
+    std::string v = PrintExpr(op->value);
+    const char *u64 = op->dtype.is_uint() ? "unsigned long long" : "long long";
+    const char *u32 = op->dtype.is_uint() ? "unsigned int" : "int";
+    os << "make_";
+    PrintType(op->dtype, os);
+    os << '(';
+    for (int i = 0; i < lanes / 2; ++i) {
+      if (i != 0)
+        os << ", ";
+      os << "((" << u64 << ")(" << u32 << ")(" << v << ")) | "
+         << "((" << u64 << ")(" << u32 << ")(" << v << ") << 32)";
     }
     os << ')';
     return;

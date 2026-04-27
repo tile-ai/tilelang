@@ -167,7 +167,9 @@ def default_compile_options(compile_flags: list[str] | None = None) -> list[str]
     List[str]
         A list of flags suitable for NVCC's command line.
     """
-    options: list[str] = ["-std=c++17"]
+    # Match libgen.py: tl_templates require C++20 (explicit lambda template
+    # parameters used in tl_templates/cuda/reduce.h).
+    options: list[str] = ["-std=c++20"]
     try:
         if TILELANG_TEMPLATE_PATH:
             options.append(f"-I{TILELANG_TEMPLATE_PATH}")

@@ -62,6 +62,8 @@ nvcc = [
     # On Windows, ship nvrtc through the runtime deps so `pip install tilelang`
     # works without a host CUDA install (TileLang JITs CUDA kernels via nvrtc).
     "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
+    # cuRAND is required when kernels use tilelang.language.random
+    "nvidia-curand>=10.4; platform_system == 'Windows'",
 ]
 
 [[tool.uv.index]]

@@ -76,7 +76,10 @@ class LibraryGenerator:
 
             command = [
                 get_nvcc_compiler(),
-                "-std=c++17",
+                # tl_templates/cuda/reduce.h uses explicit lambda template
+                # parameters (`[&]<typename T>(T) { ... }`) which are a C++20
+                # feature.
+                "-std=c++20",
                 "-w",
                 "-Xcudafe",
                 "--diag_suppress=177",
