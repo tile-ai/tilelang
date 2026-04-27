@@ -270,7 +270,7 @@ environment-pass = [
 before-build = "env -0 | sort -z | tr '\\0' '\\n'"
 windows.before-build = "set"
 test-command = [
-    "python -c 'import tilelang; print(tilelang.__version__)'",
+    'python -c "import tilelang; print(tilelang.__version__)"',
 ]
 
 [tool.cibuildwheel.linux]
