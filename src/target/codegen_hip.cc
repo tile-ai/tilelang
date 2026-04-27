@@ -195,7 +195,13 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    // AMD wavefront size is 64.  Sub-wavefront thread counts (e.g. 32)
+    // with __launch_bounds__ can cause the compiler to miscompile 64-bit
+    // shuffle operations when combined with #pragma unroll.  Only emit
+    // launch_bounds when we have at least a full wavefront.
+    if (threadIdx_ext_int->value >= 64) {
+      stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    }
   }
 }
 
