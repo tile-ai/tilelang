@@ -399,7 +399,7 @@ def test_assert_tl_matmul(
         (256, 256, 512, T.int8, T.int32, T.int32, True, 1, True, (32, 32, 32)),
     ],
 )
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_gfx950
 def test_assert_tl_matmul_extended_mfma(
     M,
     N,

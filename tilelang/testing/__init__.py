@@ -16,11 +16,35 @@ __all__ = [
     "requires_metal",
     "requires_rocm",
     "requires_llvm",
+    "requires_gfx950",
     "main",
     "requires_cuda_compute_version",
     "process_func",
     "regression",
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
+
+
+def _get_rocm_gcn_arch() -> str:
+    try:
+        import tvm
+        target = tvm.target.Target("auto")
+        return target.attrs.get("mcpu", "")
+    except Exception:
+        return ""
+
+
+def requires_gfx950(func):
+    """Skip the test unless the ROCm device is gfx950 (CDNA4 / MI350)."""
+    gcn_arch = _get_rocm_gcn_arch()
+    is_gfx950 = gcn_arch.startswith("gfx950")
+    marks = [
+        pytest.mark.skipif(
+            not is_gfx950,
+            reason=f"Requires gfx950 (CDNA4/MI350), but current device is '{gcn_arch}'",
+        ),
+        *requires_rocm.marks(),
+    ]
+    return _compose([func], marks)
 
 
 # pytest.main() wrapper to allow running single test file
