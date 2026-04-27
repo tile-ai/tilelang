@@ -80,6 +80,13 @@ def should_enable_race_check(pass_ctx: PassContext | None = None) -> bool:
     return enabled
 
 
+def should_enable_prelower_semantic_check(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    enabled = not pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_PRELOWER_SEMANTIC_CHECK, False)
+    return enabled
+
+
 def get_layout_visual_formats(pass_ctx: PassContext | None = None) -> list[str]:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -121,6 +128,9 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     in Python side instead of letting the error dive into the complicated TVM/C++ stack.
     Note: This is a validation-only pipeline of passes and does not modify or return the module.
     """
+
+    if not should_enable_prelower_semantic_check():
+        return
 
     # Print AST for debugging purpose
     if should_enable_ast_print():

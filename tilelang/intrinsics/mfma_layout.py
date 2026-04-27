@@ -128,6 +128,42 @@ def shared_16x64_to_local_64x16_layout_B(i, j):
     return thread_id, local
 
 
+def shared_32x32_to_local_64x16_layout_C(i, j):
+    thread_id = (i % 8 // 4) * 32 + j
+    local_id = (i // 8) * 4 + i % 4
+    return thread_id, local_id
+
+
+def thread_id_shared_access_64x16_to_32x32_layout_C_n_m(thread_id, local_id):
+    i = (thread_id // 32) * 4 + local_id % 4 + (local_id // 4) * 8
+    j = thread_id % 32
+    return i, j
+
+
+def shared_32x32_to_local_64x16_layout_A(i, j):
+    thread_id = i + 32 * (j // 16)
+    local_id = j % 16
+    return thread_id, local_id
+
+
+def thread_id_shared_access_64x16_to_32x32_layout_A(thread_id, local_id):
+    i = thread_id % 32
+    j = (thread_id // 32) * 16 + local_id
+    return i, j
+
+
+def shared_32x32_to_local_64x16_layout_B(i, j):
+    thread_id = j + 32 * (i // 16)
+    local_id = i % 16
+    return thread_id, local_id
+
+
+def thread_id_shared_access_64x16_to_32x32_layout_B(thread_id, local_id):
+    i = (thread_id // 32) * 16 + local_id
+    j = thread_id % 32
+    return i, j
+
+
 def make_mfma_swizzle_layout(shared_buf, vecSize=8):
     dtype = shared_buf.dtype
     shape = shared_buf.shape

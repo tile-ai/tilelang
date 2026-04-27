@@ -210,6 +210,10 @@ std::string CodeGenTileLangHIP::Finish() {
     decl_stream << "#include <tl_templates/hip/hip_fp8.h>\n";
   }
 
+  if (need_cooperative_groups_) {
+    decl_stream << "#include <hip/hip_cooperative_groups.h>\n";
+  }
+
   decl_stream << "#include <tl_templates/hip/gemm.h>\n";
   decl_stream << "#include <tl_templates/hip/copy.h>\n";
   decl_stream << "#include <tl_templates/hip/reduce.h>\n";
@@ -710,6 +714,32 @@ std::string CodeGenTileLangHIP::CastFromTo(std::string value, DataType from,
   return os.str();
 }
 
+void CodeGenTileLangHIP::VisitExpr_(const ShuffleNode *op,
+                                    std::ostream &os) { // NOLINT(*)
+  // For bfloat16x2 / float16x2 construction from two scalar lanes, emit the
+  // HIP pack intrinsic instead of the invalid `uint1(a, b)` that CodeGenC
+  // would generate (HIP's uint1 has no two-argument constructor).
+  // `uint1{value}` aggregate initialisation is valid: uint1 is defined by ROCm
+  // as HIP_vector_type<unsigned int, 1> which has a single .x member.
+  DataType t = op->dtype;
+  bool is_bf16x2 = t.is_bfloat16() && t.lanes() == 2;
+  bool is_fp16x2 = t.is_float16() && t.lanes() == 2;
+  if ((is_bf16x2 || is_fp16x2) && op->vectors.size() == 2 &&
+      op->vectors[0].dtype().lanes() == 1 &&
+      op->vectors[1].dtype().lanes() == 1) {
+    std::string e0 = PrintExpr(op->vectors[0]);
+    std::string e1 = PrintExpr(op->vectors[1]);
+    if (is_bf16x2) {
+      os << "uint1{__pack_bfloat162(" << e0 << ", " << e1 << ")}";
+    } else {
+      os << "uint1{__pack_half2(" << e0 << ", " << e1 << ")}";
+    }
+    return;
+  }
+  // Default path for all other shuffle patterns.
+  CodeGenC::VisitExpr_(op, os);
+}
+
 void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
   DataType from_ty = op->value.dtype();
   DataType target_ty = op->dtype;
@@ -836,6 +866,15 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
     buffer_str = temp.str();
   }
 
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+  // local.var is a scalar — no indexing needed.
+  if (scope == "local.var") {
+    os << vid;
+    return os.str();
+  }
+
   std::string index_str = PrintExpr(index);
   if (t.bits() == 4 || (t.bits() == 1 && t.is_int())) {
     // This is a special case, because CodegenCUDA::PrintType()
@@ -940,6 +979,14 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::sync_grid())) {
+    this->need_cooperative_groups_ = true;
+    this->PrintIndent();
+    this->stream << "cooperative_groups::this_grid().sync();\n";
+  } else if (op->op.same_as(tl::sync_warp())) {
+    // AMD wavefronts execute in lockstep, so intra-wavefront convergence is
+    // guaranteed by the hardware. __syncwarp() has no HIP equivalent and is a
+    // no-op here. The mask argument (if present) is intentionally ignored.
   } else if (op->op.same_as(tl::any_sync())) {
     ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
     // HIP __any takes only the predicate; the mask is ignored because
@@ -1136,7 +1183,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"int32", "int"},
         {"int8x4", "int32_t"},
         {"int8x8", "int64_t"},
+        {"int8x16", "int32x4"},
         {"int32x4", "int32x4"},
+        {"int32x16", "int32x16"},
         {"float16", "half"},
         {"float32", "float"},
         {"float64", "double"},
@@ -1435,7 +1484,23 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocateNode *op) {
         scope == "shared") {
       constant_size = constant_size / (32 / op->dtype.bits());
     }
-    stream << ' ' << vid << '[' << constant_size << "];\n";
+
+    if (scope == "local.var") {
+      // Single-element variable: emit an initializer so the value is defined.
+      // Default to 0; respect the user-provided tl.local_var_init annotation.
+      PrimExpr init = tir::make_const(op->dtype, 0);
+      auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
+      if (init_it != op->annotations.end()) {
+        PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
+        if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
+          user_init = tir::Cast(op->dtype, user_init);
+        }
+        init = user_init;
+      }
+      stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
+    } else {
+      stream << ' ' << vid << '[' << constant_size << "];\n";
+    }
   }
 
   RegisterHandleType(op->buffer_var.get(), op->dtype);

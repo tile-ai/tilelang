@@ -1242,6 +1242,10 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   }
   // Currently tcgen05.cp is not supported
   // TODO (mzw) Support tcgen05.cp
+
+  // NOTE(wt): For copying scaling factor from SMEM to TMEM,
+  // please use `T.tcgen05_cp_warpx4` instead,
+  // as blockscaled GEMM on SM100 requires 4 duplicated 32-row sf.
   ICHECK(!is_cp)
       << "Copy from shared memory to tensor memory is not supported yet";
   // Extract loop variables and ranges

@@ -43,6 +43,7 @@ from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
+    alloc_global,  # noqa: F401
     alloc_barrier,  # noqa: F401
     alloc_cluster_barrier,  # noqa: F401
     alloc_tmem,  # noqa: F401
@@ -52,12 +53,17 @@ from .allocate import (
     alloc_tcgen05_smem_desc,  # noqa: F401
     alloc_tcgen05_instr_desc,  # noqa: F401
     empty,  # noqa: F401
-    alloc_global,  # noqa: F401
 )
 from tvm.script.parser.tir import allocate as allocate  # noqa: F401
 from .copy_op import copy, async_copy, tma_copy, transpose, c2d_im2col  # noqa: F401
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
-from .gemm_op import gemm, wgmma_gemm, tcgen05_gemm  # noqa: F401
+from .gemm_op import (  # noqa: F401
+    gemm,
+    wgmma_gemm,
+    tcgen05_gemm,
+    tcgen05_gemm_blockscaled,
+    make_blockscaled_gemm_layout,
+)
 from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401
 from .fill_op import fill, clear  # noqa: F401
 from .reduce_op import (

@@ -80,7 +80,8 @@
   _(hipModuleUnload)                                                           \
   _(hipModuleGetFunction)                                                      \
   _(hipModuleGetGlobal)                                                        \
-  _(hipModuleLaunchKernel)
+  _(hipModuleLaunchKernel)                                                     \
+  _(hipModuleLaunchCooperativeKernel)
 
 namespace tvm::tl::hip {
 
@@ -132,6 +133,11 @@ struct TILELANG_HIP_STUB_API HIPDriverAPI {
                                        unsigned int, unsigned int, unsigned int,
                                        unsigned int, unsigned int, unsigned int,
                                        hipStream_t, void **, void **);
+  hipError_t (*hipModuleLaunchCooperativeKernel_)(hipFunction_t, unsigned int,
+                                                  unsigned int, unsigned int,
+                                                  unsigned int, unsigned int,
+                                                  unsigned int, unsigned int,
+                                                  hipStream_t, void **);
 
   static HIPDriverAPI *get();
   static bool is_available();
@@ -210,5 +216,11 @@ TILELANG_HIP_STUB_API hipError_t hipModuleLaunchKernel(
     unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
     unsigned int blockDimZ, unsigned int sharedMemBytes, hipStream_t stream,
     void **kernelParams, void **extra);
+
+TILELANG_HIP_STUB_API hipError_t hipModuleLaunchCooperativeKernel(
+    hipFunction_t f, unsigned int gridDimX, unsigned int gridDimY,
+    unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
+    unsigned int blockDimZ, unsigned int sharedMemBytes, hipStream_t stream,
+    void **kernelParams);
 
 } // extern "C"
