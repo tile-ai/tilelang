@@ -3,6 +3,7 @@
  */
 
 #include "codegen_cuda.h"
+#include "codegen_utils.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/tir/index_map.h>
@@ -4753,7 +4754,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << ">::quiet_NaN()";
     } else {
       p->PrintType(op->dtype, temp);
-      temp << '(' << std::hexfloat << op->value << 'f';
+      temp << '(' << FlexibleHexFormat(op->value) << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
       temp << ')';
     }
@@ -4764,7 +4765,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   // Type code is kFloat8_e5m2 or kE4M4Float
   if (op->dtype.is_float8() || op->dtype.is_float4()) {
     p->PrintType(op->dtype, os);
-    os << '(' << std::hexfloat << op->value << 'f';
+    os << '(' << FlexibleHexFormat(op->value) << 'f';
     os << "/*" << std::scientific << op->value << "*/";
     os << ')';
     return;
@@ -4784,7 +4785,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
       p->need_math_constants_h_ = true;
     } else {
-      temp << std::hexfloat << op->value;
+      temp << FlexibleHexFormat(op->value);
       if (op->dtype.bits() == 32)
         temp << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
