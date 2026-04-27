@@ -105,7 +105,8 @@ def test_tma_host_codegen_aligns_tvm_ffi_stack_alloca_for_descriptor():
 
     source = kernel.get_host_source()
     assert "__tvm_tensormap_create_tiled_packed" in source
-    assert re.search(r"TL_ALIGN\(64\) TVMFFIAny stack(_\d+)?\[", source)
+    assert re.search(r"TL_ALIGN\(128\) TVMFFIAny stack(_\d+)?\[", source)
+    assert not re.search(r"TL_ALIGN\(64\) TVMFFIAny stack(_\d+)?\[", source)
 
 
 if __name__ == "__main__":

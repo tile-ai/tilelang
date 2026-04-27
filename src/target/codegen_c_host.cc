@@ -386,7 +386,7 @@ void CodeGenCHost::VisitExpr_(const tvm::tir::CallNode *op,
       // TMA descriptors are materialized through tvm_ffi_any stack allocas and
       // are passed by value to the kernel as ``__grid_constant__ const
       // CUtensorMap``.
-      this->stream << "TL_ALIGN(64) TVMFFIAny " << stack_name << "[" << size
+      this->stream << "TL_ALIGN(128) TVMFFIAny " << stack_name << "[" << size
                    << "];\n";
     } else {
       this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";

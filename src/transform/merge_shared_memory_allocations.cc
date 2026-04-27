@@ -390,7 +390,17 @@ private:
     if (scope == "shared" || scope == "shared.dyn") {
       auto target = Target::Current();
       ICHECK(target.defined()) << "Target is not defined";
-      const int alignment = TargetHasBulkCopy(target) ? 1024 : 16;
+      // TMA bulk-copy operands have stricter shared-memory alignment than
+      // ordinary scalar/shared accesses. Hopper keeps the existing 1024-byte
+      // alignment used by the WGMMA/TMA path, while Blackwell/SM120 also needs
+      // TMA sources at least 128-byte aligned to avoid misaligned-address
+      // launch failures.
+      int alignment = 16;
+      if (TargetIsHopper(target)) {
+        alignment = 1024;
+      } else if (TargetHasBulkCopy(target)) {
+        alignment = 128;
+      }
       shmem_alignment_map_[op] = alignment;
     }
   }

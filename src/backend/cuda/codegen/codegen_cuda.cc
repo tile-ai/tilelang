@@ -578,11 +578,12 @@ std::string CodeGenTileLangCUDA::Finish() {
   // frontend on Windows, so any kernel taking `__grid_constant__ const
   // CUtensorMap` by value fails to compile.
   //
-  // Cap alignas(N) at 64 just for the duration of <cuda.h>'s parsing. The
-  // host buffer is independently aligned to 128 (see codegen_c_host.cc /
-  // wrapper.py), and the .param area in PTX gets `.align 64`, which the
-  // driver still accepts for our 128-aligned source pointer.
-  decl_stream << "#if defined(_MSC_VER)\n";
+  // Older MSVC frontends reject such a parameter, so cap alignas(N) at 64 just
+  // for the duration of <cuda.h>'s parsing there. Newer MSVC versions accept
+  // the 128-byte aligned parameter, and keeping that alignment avoids
+  // CUDA_ERROR_MISALIGNED_ADDRESS at launch time.
+  decl_stream
+      << "#if defined(_MSC_VER) && !defined(__clang__) && _MSC_VER < 1940\n";
   decl_stream << "#define _tl_orig_alignas alignas\n";
   decl_stream << "#define alignas(N) _tl_orig_alignas((N) <= 64 ? (N) : 64)\n";
   decl_stream << "#include <cuda.h>\n";
