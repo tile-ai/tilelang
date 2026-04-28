@@ -85,4 +85,3 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
         )
 
     return req
-

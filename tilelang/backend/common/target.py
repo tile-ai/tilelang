@@ -37,4 +37,3 @@ def is_llvm_target(target: Target) -> bool:
 
 def is_webgpu_target(target: Target) -> bool:
     return target_kind(target) == "webgpu"
-

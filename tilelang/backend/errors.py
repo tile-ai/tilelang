@@ -7,4 +7,3 @@ class BackendResolutionError(ValueError):
 
 class BackendCodegenError(ValueError):
     """Raised when resolved backend metadata cannot perform requested codegen."""
-

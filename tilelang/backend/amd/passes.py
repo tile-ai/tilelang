@@ -5,4 +5,3 @@ from tilelang.backend.base import BackendPassHooks
 
 class AmdPassHooks(BackendPassHooks):
     pass
-
