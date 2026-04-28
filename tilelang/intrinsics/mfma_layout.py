@@ -140,6 +140,20 @@ def thread_id_shared_access_64x16_to_32x32_layout_C_n_m(thread_id, local_id):
     return i, j
 
 
+def thread_id_shared_access_64x16_to_32x32_layout_C_m_n(thread_id, local_id):
+    """Return (m, n) = (row, col) for the 32x32 MFMA output register layout.
+
+    For v_mfma_i32_32x32x32_i8 (gfx950), each wave-64 lane holds 16 output
+    i32 values.  The column (N-dimension) is indexed by ``thread_id % 32``
+    and the row (M-dimension) is given by the interleaved formula below.
+    This function returns ``(m_idx, n_idx)`` matching the ``(row, col)``
+    convention expected by ``stmatrix``.
+    """
+    m = thread_id % 32
+    n = (thread_id // 32) * 4 + local_id % 4 + (local_id // 4) * 8
+    return m, n
+
+
 def shared_32x32_to_local_64x16_layout_A(i, j):
     thread_id = i + 32 * (j // 16)
     local_id = j % 16
