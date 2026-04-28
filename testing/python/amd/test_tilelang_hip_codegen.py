@@ -693,13 +693,13 @@ def test_pipelined_no_lds_overflow(num_stages):
         ) -> None:
             with T.Kernel(M, threads=64) as pid:
                 acc = T.alloc_fragment((1,), T.float32)
+                xs = T.alloc_shared((blk,), T.float32)
+                xl = T.alloc_fragment((blk,), T.float32)
+                s = T.alloc_fragment((1,), T.float32)
                 T.clear(acc)
                 for k in T.Pipelined(K // blk, num_stages=n_stages):
-                    xs = T.alloc_shared((blk,), T.float32)
-                    xl = T.alloc_fragment((blk,), T.float32)
                     T.copy(x[pid, k * blk], xs, disable_tma=True)
                     T.copy(xs, xl, disable_tma=True)
-                    s = T.alloc_fragment((1,), T.float32)
                     T.reduce_sum(xl, s, dim=0)
                     acc[0] = acc[0] + s[0]
                 out[pid] = acc[0]
