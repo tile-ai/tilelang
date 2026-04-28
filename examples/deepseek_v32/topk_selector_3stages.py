@@ -28,10 +28,31 @@ BLOCK_SIZE = 1024
 # CHUNK_SIZE == BLOCK_SIZE => one element per thread, maximum block count and
 # therefore maximum SM occupancy for the histogram passes.
 CHUNK_SIZE = 4096
-# Maximum number of threshold-bucket candidates carried from stage 2 to
-# stage 3's tail pass. Assumes the threshold bucket size after the first
-# pass is < 4K elements.
+# Default / minimum number of threshold-bucket candidates carried from
+# stage 2 to stage 3's tail pass. The wrapper grows this for large
+# ``seq_len`` (the threshold bucket scales roughly as ``seq_len / 32`` for
+# random fp32). Stage 3 keeps two ping-pong buffers of this size in shared
+# memory, so the runtime cost is ``2 * smem_size * 4`` bytes per block.
 SMEM_INPUT_SIZE = 4096
+
+
+# Stage 3 holds two ping-pong buffers of ``smem_size`` int32s in shared
+# memory, so its smem cost is ``8 * smem_size`` bytes plus ~1KB. Cap at
+# 16K so we stay under the ~228KB per-block opt-in shared memory limit on
+# H100/H200 (16K * 8 = 128KB).
+SMEM_INPUT_SIZE_MAX = 16384
+
+
+def _pick_smem_input_size(seq_len: int) -> int:
+    """Pick a per-call ``smem_size`` that comfortably bounds the threshold
+    bucket. Empirically the threshold bucket holds ~``seq_len / 32``
+    elements for N(0,1) inputs; we use 1/16 for headroom and round up to
+    the next power of two (a multiple of ``BLOCK_SIZE``)."""
+    target = max(SMEM_INPUT_SIZE, (seq_len + 15) // 16)
+    p = 1
+    while p < target:
+        p <<= 1
+    return min(p, SMEM_INPUT_SIZE_MAX)
 
 
 def convert_to_uint16(x):
@@ -101,7 +122,7 @@ def tl_topk_stage1_impl(in_dtype=T.float32, out_dtype=T.int32):
 
 
 @tilelang.jit(pass_configs=pass_configs)
-def tl_topk_stage2_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
+def tl_topk_stage2_impl(topk, smem_size=SMEM_INPUT_SIZE, in_dtype=T.float32, out_dtype=T.int32):
     """Stage 2: also multi-block per batch. Every block reads the merged
     global histogram, recomputes cumsum + threshold in its own shared memory
     (cheap: 256 entries), then re-scans ONLY its own chunk:
@@ -127,7 +148,7 @@ def tl_topk_stage2_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
         index: T.Tensor[(batch, topk), out_dtype],
         global_histogram: T.Tensor[(batch, RADIX), T.int32],
         direct_counter: T.Tensor[(batch, RADIX + 1), T.int32],
-        candidate_idx: T.Tensor[(batch, SMEM_INPUT_SIZE), out_dtype],
+        candidate_idx: T.Tensor[(batch, smem_size), out_dtype],
         candidate_count: T.Tensor[(batch,), T.int32],
     ):
         with T.Kernel(T.ceildiv(seq_len, CHUNK_SIZE), batch, threads=BLOCK_SIZE) as (cx, bx):
@@ -135,6 +156,18 @@ def tl_topk_stage2_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
 
             s_threshold_bin_id = T.alloc_shared([1], T.int32)
             s_histogram = T.alloc_shared([RADIX + 1], T.int32)
+            # Per-block local count of "above threshold" elements per bin
+            # (pass 1) and dual-use as a per-bin write cursor (pass 2).
+            # Index 0 is unused; bin b uses index b+1 so the layout matches
+            # the global ``direct_counter``.
+            s_local_hist = T.alloc_shared([RADIX + 1], T.int32)
+            # Per-block reserved global base offset per above-threshold bin
+            # (one ``atomic_add`` per non-empty bin per block).
+            s_local_base = T.alloc_shared([RADIX + 1], T.int32)
+            # [0] = local count of "== threshold" candidates (pass 1) /
+            # local cursor (pass 2). [1] = reserved base in
+            # ``candidate_count[bx]``.
+            s_cand_local = T.alloc_shared([2], T.int32)
 
             l_threshold_bin_id = T.alloc_var(T.int32)
             l_new_topk = T.alloc_var(T.int32)
@@ -144,6 +177,7 @@ def tl_topk_stage2_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             l_end_idx = T.alloc_var(T.int32)
             l_bin_id32 = T.alloc_var(T.int32)
             l_bin_offset = T.alloc_var(T.int32)
+            l_local_count = T.alloc_var(T.int32)
 
             pos = T.alloc_var(T.int32)
 
@@ -180,28 +214,75 @@ def tl_topk_stage2_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             l_new_topk = l_new_topk - s_histogram[l_threshold_bin_id + 1]
             T.sync_threads()
 
-            # Re-scan ONLY this chunk and dispatch each element.
+            # ---------- Two-pass dispatch with block-level reservation ----------
+            # The original kernel did one global ``atomic_add(direct_counter, 1)``
+            # per above-threshold element, which is O(N) global atomics per
+            # batch. Here we instead:
+            #   pass 1: build a per-block local histogram of "above threshold"
+            #           bins in shared memory (smem atomics only).
+            #   reserve: one global ``atomic_add(direct_counter[bin], local)``
+            #            per non-empty bin per block (O(num_blocks * RADIX)
+            #            worst-case, but typically only a handful of bins
+            #            above threshold are non-empty).
+            #   pass 2: re-scan and write at
+            #            ``s_histogram[bin+1] + reserved_base[bin] + local_pos``
+            #           where ``local_pos`` comes from a smem cursor.
+            # The candidate list (== threshold bin) gets the same treatment:
+            # one global atomic per block instead of one per element.
+
+            T.fill(s_local_hist, 0)
+            if tx < 2:
+                s_cand_local[tx] = 0
+            T.sync_threads()
+
+            # Pass 1: per-bin local count (smem atomics only).
             for s in T.serial(T.ceildiv(CHUNK_SIZE, BLOCK_SIZE)):
                 input_idx = l_chunk_start + s * BLOCK_SIZE + tx
                 if input_idx < seq_len and input_idx >= l_start_idx and input_idx < l_end_idx:
                     bin_id = convert_to_uint16(input[bx, input_idx])
                     l_bin_id32 = T.cast(bin_id, T.int32)
                     if l_bin_id32 > l_threshold_bin_id:
-                        # cumsum offset is consistent across blocks; use a
-                        # per-(batch, bin) global counter for the within-bin slot.
-                        l_bin_offset = s_histogram[l_bin_id32 + 1]
-                        pos = T.atomic_add(direct_counter[bx, l_bin_id32 + 1], 1, return_prev=True)
-                        index[bx, l_bin_offset + pos] = input_idx
+                        T.atomic_add(s_local_hist[l_bin_id32 + 1], 1)
                     elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
-                        pos = T.atomic_add(candidate_count[bx], 1, return_prev=True)
-                        if pos < SMEM_INPUT_SIZE:
+                        T.atomic_add(s_cand_local[0], 1)
+            T.sync_threads()
+
+            # Reservation: at most RADIX+1 global atomics per block.
+            # Threads [0, RADIX) each handle one bin.
+            if tx < RADIX:
+                l_local_count = s_local_hist[tx + 1]
+                if l_local_count > 0:
+                    s_local_base[tx + 1] = T.atomic_add(
+                        direct_counter[bx, tx + 1], l_local_count, return_prev=True)
+                # Reuse s_local_hist as a per-bin cursor in pass 2.
+                s_local_hist[tx + 1] = 0
+            # One atomic for the candidate slot reservation.
+            if tx == 0 and s_cand_local[0] > 0:
+                s_cand_local[1] = T.atomic_add(
+                    candidate_count[bx], s_cand_local[0], return_prev=True)
+                s_cand_local[0] = 0  # reuse as block-local cursor in pass 2
+            T.sync_threads()
+
+            # Pass 2: dispatch each element using shared-memory cursors only.
+            for s in T.serial(T.ceildiv(CHUNK_SIZE, BLOCK_SIZE)):
+                input_idx = l_chunk_start + s * BLOCK_SIZE + tx
+                if input_idx < seq_len and input_idx >= l_start_idx and input_idx < l_end_idx:
+                    bin_id = convert_to_uint16(input[bx, input_idx])
+                    l_bin_id32 = T.cast(bin_id, T.int32)
+                    if l_bin_id32 > l_threshold_bin_id:
+                        l_bin_offset = s_histogram[l_bin_id32 + 1]
+                        pos = T.atomic_add(s_local_hist[l_bin_id32 + 1], 1, return_prev=True)
+                        index[bx, l_bin_offset + s_local_base[l_bin_id32 + 1] + pos] = input_idx
+                    elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
+                        pos = T.atomic_add(s_cand_local[0], 1, return_prev=True) + s_cand_local[1]
+                        if pos < smem_size:
                             candidate_idx[bx, pos] = input_idx
 
     return stage2_kernel
 
 
 @tilelang.jit(pass_configs=pass_configs)
-def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
+def tl_topk_stage3_impl(topk, smem_size=SMEM_INPUT_SIZE, in_dtype=T.float32, out_dtype=T.int32):
     """Stage 3 (tail pass): single block per batch. Loads the threshold-bucket
     candidate list from HBM, recomputes the threshold from the global
     histogram to recover ``l_new_topk`` / ``l_start_pos``, and then runs up
@@ -218,7 +299,7 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
         input: T.Tensor[(batch, seq_len), in_dtype],
         index: T.Tensor[(batch, topk), out_dtype],
         global_histogram: T.Tensor[(batch, RADIX), T.int32],
-        candidate_idx: T.Tensor[(batch, SMEM_INPUT_SIZE), out_dtype],
+        candidate_idx: T.Tensor[(batch, smem_size), out_dtype],
         candidate_count: T.Tensor[(batch,), T.int32],
     ):
         with T.Kernel(batch, threads=BLOCK_SIZE) as (bx,):
@@ -227,7 +308,14 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             s_threshold_bin_id = T.alloc_shared([1], T.int32)
             s_histogram = T.alloc_shared([RADIX + 1], T.int32)
             s_num_input = T.alloc_shared([2], T.int32)
-            s_input_idx = T.alloc_shared([2, SMEM_INPUT_SIZE], T.int32)
+            s_input_idx = T.alloc_shared([2, smem_size], T.int32)
+            # Cache the uint32 representation of round-0 candidates so the
+            # dispatch pass does not have to gather
+            # ``input[bx, s_input_idx[0, ...]]`` from HBM a second time.
+            # Round 0 carries up to ~smem_size elements (this is the hot
+            # spot — round 1+ shrink by ~RADIX each, so the extra HBM
+            # gather there is cheap and we don't bother caching).
+            s_value_cache = T.alloc_shared([smem_size], T.uint32)
 
             l_threshold_bin_id = T.alloc_var(T.int32)
             l_new_topk = T.alloc_var(T.int32)
@@ -236,6 +324,7 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             l_val = T.alloc_var(T.int32)
             l_start_pos = T.alloc_var(T.int32)
             l_out_pos = T.alloc_var(T.int32)
+            l_val_uint = T.alloc_var(T.uint32)
             pos = T.alloc_var(T.int32)
 
             l_new_topk = topk
@@ -271,7 +360,7 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
             # of state inherited from stage 2 (besides l_new_topk which we
             # just recomputed from the histogram).
             l_num_input = candidate_count[bx]
-            for s in T.serial(T.ceildiv(SMEM_INPUT_SIZE, BLOCK_SIZE)):
+            for s in T.serial(T.ceildiv(smem_size, BLOCK_SIZE)):
                 pos = s * BLOCK_SIZE + tx
                 if pos < l_num_input:
                     s_input_idx[0, pos] = candidate_idx[bx, pos]
@@ -294,12 +383,18 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                 T.sync_threads()
 
                 l_num_input = s_num_input[r_idx]
+                # Hist pass. In round 0 we also stash the uint32 value into
+                # ``s_value_cache`` so the dispatch pass below can skip the
+                # global gather.
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     if s * BLOCK_SIZE + tx < l_num_input:
+                        l_val_uint = convert_to_uint32(
+                            input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]])
                         l_bin_id32 = T.cast(
-                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
-                        )
+                            (l_val_uint >> (24 - round * 8)) & 0xFF, T.int32)
                         T.atomic_add(s_histogram[l_bin_id32], 1)
+                        if round == 0:
+                            s_value_cache[s * BLOCK_SIZE + tx] = l_val_uint
                 T.sync_threads()
 
                 if tx < RADIX:
@@ -321,12 +416,18 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
                 l_new_topk = l_new_topk - s_histogram[l_threshold_bin_id + 1]
                 T.sync_threads()
 
+                # Dispatch pass. Round 0 reads the cached uint32 from smem;
+                # later rounds re-gather (their candidate set is tiny).
                 for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
                     T.sync_threads()
                     if s * BLOCK_SIZE + tx < l_num_input:
+                        if round == 0:
+                            l_val_uint = s_value_cache[s * BLOCK_SIZE + tx]
+                        else:
+                            l_val_uint = convert_to_uint32(
+                                input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]])
                         l_bin_id32 = T.cast(
-                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
-                        )
+                            (l_val_uint >> (24 - round * 8)) & 0xFF, T.int32)
                         if l_bin_id32 > l_threshold_bin_id:
                             pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                             index[bx, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
@@ -344,15 +445,16 @@ def tl_topk_stage3_impl(topk, in_dtype=T.float32, out_dtype=T.int32):
 
 def tl_topk(input, starts, ends, topk):
     batch, seq_len = input.shape
+    smem_size = _pick_smem_input_size(seq_len)
     indexes = torch.zeros(batch, topk, dtype=torch.int32, device=input.device)
     global_histogram = torch.zeros(batch, RADIX, dtype=torch.int32, device=input.device)
     direct_counter = torch.zeros(batch, RADIX + 1, dtype=torch.int32, device=input.device)
-    candidate_idx = torch.empty(batch, SMEM_INPUT_SIZE, dtype=torch.int32, device=input.device)
+    candidate_idx = torch.empty(batch, smem_size, dtype=torch.int32, device=input.device)
     candidate_count = torch.zeros(batch, dtype=torch.int32, device=input.device)
 
     stage1 = tl_topk_stage1_impl()
-    stage2 = tl_topk_stage2_impl(topk)
-    stage3 = tl_topk_stage3_impl(topk)
+    stage2 = tl_topk_stage2_impl(topk, smem_size)
+    stage3 = tl_topk_stage3_impl(topk, smem_size)
 
     stage1(input, starts, ends, global_histogram)
     stage2(input, starts, ends, indexes, global_histogram, direct_counter, candidate_idx, candidate_count)
@@ -414,4 +516,8 @@ def run_regression_perf(batch=64, seq_len=32 * 1024, topk=2048):
 
 
 if __name__ == "__main__":
-    test_topk_selector()
+    shapes = [(8192, 256), (32768, 1024), (131072, 2048), (262144, 2048)]
+    # shapes = [(8192, 256)]
+    for seq_len, topk in shapes:
+        print(f"\n===== (seq_len={seq_len}, topk={topk}) =====")
+        test_topk_selector(batch=1, seq_len=seq_len, topk=topk)
