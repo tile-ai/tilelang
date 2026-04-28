@@ -684,7 +684,7 @@ def test_pipelined_no_lds_overflow(num_stages):
     """
     M, K, blk = 32, 256, 64
 
-    @T.prim_func
+    @tilelang.jit
     def kernel(
         x: T.Tensor((M, K), T.float32),
         out: T.Tensor((M,), T.float32),
@@ -704,7 +704,7 @@ def test_pipelined_no_lds_overflow(num_stages):
 
     x = torch.ones(M, K, dtype=torch.float32, device="cuda")
     out = torch.zeros(M, dtype=torch.float32, device="cuda")
-    tilelang.jit(kernel)(x, out)
+    kernel(x, out)
     torch.cuda.synchronize()
     torch.testing.assert_close(out, torch.full((M,), float(K), device="cuda"), atol=1e-4, rtol=0)
 
@@ -720,7 +720,7 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
     M, N, K = 128, 128, 128
     bM, bN, bK = 64, 64, 32
 
-    @T.prim_func
+    @tilelang.jit
     def kernel(
         A: T.Tensor((M, K), T.float16),
         B: T.Tensor((K, N), T.float16),
@@ -740,7 +740,7 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")
     B = torch.randn(K, N, dtype=torch.float16, device="cuda")
     C = torch.zeros(M, N, dtype=torch.float32, device="cuda")
-    tilelang.jit(kernel)(A, B, C)
+    kernel(A, B, C)
     torch.cuda.synchronize()
     torch.testing.assert_close(C, A.float() @ B.float(), atol=1.0, rtol=5e-2)
 
