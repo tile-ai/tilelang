@@ -959,4 +959,26 @@ TL_DEVICE bfloat16_t shfl_sync(unsigned mask, bfloat16_t val, int srcLane) {
   return reinterpret_cast<bfloat16_t &>(ret16);
 }
 
+// Specializations for uint1 (packed bfloat16x2 / float16x2).
+// uint1 is a 32-bit struct { unsigned x; } used to represent packed pairs.
+// __shfl_xor_sync operates on native 32-bit types, so we pass the raw unsigned.
+
+template <>
+TL_DEVICE uint1 shfl_xor_sync(unsigned mask, uint1 val, int laneMask) {
+  return uint1{__shfl_xor_sync(mask, val.x, laneMask)};
+}
+
+template <>
+TL_DEVICE uint1 shfl_down_sync(unsigned mask, uint1 val, int delta) {
+  return uint1{__shfl_down_sync(mask, val.x, delta)};
+}
+
+template <> TL_DEVICE uint1 shfl_up_sync(unsigned mask, uint1 val, int delta) {
+  return uint1{__shfl_up_sync(mask, val.x, delta)};
+}
+
+template <> TL_DEVICE uint1 shfl_sync(unsigned mask, uint1 val, int srcLane) {
+  return uint1{__shfl_sync(mask, val.x, srcLane)};
+}
+
 } // namespace tl
