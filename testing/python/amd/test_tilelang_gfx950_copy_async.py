@@ -13,14 +13,7 @@ import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tilelang.utils.target import determine_target, target_is_gfx950
-
-
-def _is_gfx950() -> bool:
-    try:
-        return target_is_gfx950(determine_target("auto", return_object=True))
-    except (ValueError, RuntimeError):
-        return False
+from tilelang.testing import _check_is_gfx950 as _is_gfx950
 
 
 def _matmul_kernel(

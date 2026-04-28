@@ -149,8 +149,8 @@ def thread_id_shared_access_64x16_to_32x32_layout_C_m_n(thread_id, local_id):
     This function returns ``(m_idx, n_idx)`` matching the ``(row, col)``
     convention expected by ``stmatrix``.
     """
-    m = thread_id % 32
-    n = (thread_id // 32) * 4 + local_id % 4 + (local_id // 4) * 8
+    m = (thread_id // 32) * 4 + local_id % 4 + (local_id // 4) * 8
+    n = thread_id % 32
     return m, n
 
 
