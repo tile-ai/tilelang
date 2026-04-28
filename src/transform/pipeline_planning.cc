@@ -1078,7 +1078,8 @@ private:
     // software pipelining entirely.  For targets that do support async-copy
     // (gfx942 / MI300X and gfx950 / MI350), the HIP async-copy pipeline is
     // available and should proceed normally.
-    if (TargetIsRocm(target_) && !TargetHasAsyncCopy(target_) && num_stages >= 1) {
+    if (TargetIsRocm(target_) && !TargetHasAsyncCopy(target_) &&
+        num_stages >= 1) {
       return StmtExprMutator::VisitStmt_(loop);
     }
     Stmt pipeline_body_root{nullptr};
