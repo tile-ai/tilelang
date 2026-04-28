@@ -1081,7 +1081,21 @@ private:
     // been validated yet, so it falls back to a plain sequential loop as well.
     // RDNA targets have no async-copy support at all and also fall back.
     if (TargetIsRocm(target_) && !TargetIsGfx950(target_) && num_stages >= 1) {
-      return StmtExprMutator::VisitStmt_(loop);
+      // Strip the "num_stages" annotation before recursing so that downstream
+      // passes (InjectSoftwarePipeline, MultiVersionBufferRewriter, etc.) do
+      // not treat this loop as pipelined.  Leaving the annotation in place
+      // would cause those passes to multi-version shared buffers and inject
+      // cp.async / barrier code that is incompatible with the plain sequential
+      // execution path chosen here.
+      auto stripped = tvm::ffi::GetRef<For>(loop);
+      Map<String, Any> annotations;
+      for (const auto &[key, value] : loop->annotations) {
+        if (key != "num_stages") {
+          annotations.Set(key, value);
+        }
+      }
+      stripped.CopyOnWrite()->annotations = annotations;
+      return StmtExprMutator::VisitStmt_(stripped.get());
     }
     Stmt pipeline_body_root{nullptr};
     if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
