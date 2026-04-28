@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <string>
+
 // This stub supports CUDA 11+.
 //
 // Note: CUDA 12 changed the `cudaGraphInstantiate` entrypoint signature in
@@ -35,9 +37,22 @@
 #error                                                                         \
     "CUDART_VERSION is not defined. Ensure CUDA runtime headers are available."
 #endif
+#ifndef TILELANG_CUDA_TOOLKIT_VERSION_MAJOR
+#error "TILELANG_CUDA_TOOLKIT_VERSION_MAJOR is not defined by the build system."
+#endif
+#ifndef TILELANG_CUDA_TOOLKIT_VERSION_MINOR
+#error "TILELANG_CUDA_TOOLKIT_VERSION_MINOR is not defined by the build system."
+#endif
 static_assert(CUDART_VERSION >= 11000,
               "cudart_stub requires CUDA Toolkit headers >= 11.0 "
               "(CUDART_VERSION >= 11000).");
+static_assert(CUDART_VERSION / 1000 == TILELANG_CUDA_TOOLKIT_VERSION_MAJOR,
+              "CUDA runtime headers do not match CMake's CUDAToolkit major "
+              "version.");
+static_assert((CUDART_VERSION % 1000) / 10 ==
+                  TILELANG_CUDA_TOOLKIT_VERSION_MINOR,
+              "CUDA runtime headers do not match CMake's CUDAToolkit minor "
+              "version.");
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 // On Windows, symbols are exported via WINDOWS_EXPORT_ALL_SYMBOLS in CMake.
@@ -51,20 +66,21 @@ static_assert(CUDART_VERSION >= 11000,
 namespace {
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
-constexpr const char *kLibCudartPaths[] = {
-    "cudart64_13.dll",
-    "cudart64_12.dll",
-    "cudart64_110.dll",
-    "cudart64_11.dll",
-};
+std::string CurrentCudartLibraryName() {
+  const int major = TILELANG_CUDA_TOOLKIT_VERSION_MAJOR;
+  if (major >= 12) {
+    return "cudart64_" + std::to_string(major) + ".dll";
+  }
+  return "cudart64_110.dll";
+}
 #else
-constexpr const char *kLibCudartPaths[] = {
-    "libcudart.so",
-    // Some distros ship a versioned SONAME as well; try a few common ones.
-    "libcudart.so.13",
-    "libcudart.so.12",
-    "libcudart.so.11",
-};
+std::string CurrentCudartLibraryName() {
+  const int major = TILELANG_CUDA_TOOLKIT_VERSION_MAJOR;
+  if (major >= 12) {
+    return "libcudart.so." + std::to_string(major);
+  }
+  return "libcudart.so.11.0";
+}
 #endif
 
 using CudaGraphInstantiateLegacy = cudaError_t (*)(cudaGraphExec_t *pGraphExec,
@@ -76,19 +92,39 @@ using CudaGraphInstantiateWithFlags = cudaError_t (*)(
     cudaGraphExec_t *pGraphExec, cudaGraph_t graph, unsigned long long flags);
 
 void *TryLoadLibCudart() {
+  void *handle = nullptr;
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  // Prefer the real CUDA runtime DLL on Windows. Some already-loaded modules
-  // may re-export a subset of cudart symbols, which is not enough for TVM.
-  for (const char *path : kLibCudartPaths) {
-    void *handle = tvm::tl::stubs::dynlib_open(path);
-    if (handle != nullptr) {
-      return handle;
-    }
+  // Prefer a real CUDA runtime DLL on Windows. Some already-loaded modules may
+  // re-export a subset of cudart symbols, which is not enough for TVM.
+  handle = tvm::tl::stubs::dynlib_find_loaded_by_basename_prefix(
+      "cudart64_", "cudaGetErrorString",
+      reinterpret_cast<void *>(&cudaGetErrorString));
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle = tvm::tl::stubs::dynlib_open_first({CurrentCudartLibraryName()},
+                                             "cudaGetErrorString");
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle = tvm::tl::stubs::dynlib_open_matching("cudart64_*.dll",
+                                                "cudaGetErrorString");
+  if (handle != nullptr) {
+    return handle;
+  }
+#else
+  handle = tvm::tl::stubs::dynlib_find_loaded_by_basename_prefix(
+      "libcudart.so", "cudaGetErrorString",
+      reinterpret_cast<void *>(&cudaGetErrorString));
+  if (handle != nullptr) {
+    return handle;
   }
 #endif
 
   // Check if symbols are already available (e.g. loaded by PyTorch).
-  void *handle = tvm::tl::stubs::dynlib_find_loaded(
+  handle = tvm::tl::stubs::dynlib_find_loaded(
       "cudaGetErrorString", reinterpret_cast<void *>(&cudaGetErrorString));
   if (handle != nullptr) {
     return handle;
@@ -96,11 +132,16 @@ void *TryLoadLibCudart() {
 
 #if !defined(_WIN32) || defined(__CYGWIN__)
   // Otherwise, attempt to load the library directly.
-  for (const char *path : kLibCudartPaths) {
-    handle = tvm::tl::stubs::dynlib_open(path);
-    if (handle != nullptr) {
-      return handle;
-    }
+  handle = tvm::tl::stubs::dynlib_open_first(
+      {CurrentCudartLibraryName(), "libcudart.so"}, "cudaGetErrorString");
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle = tvm::tl::stubs::dynlib_open_matching("libcudart.so*",
+                                                "cudaGetErrorString");
+  if (handle != nullptr) {
+    return handle;
   }
 #endif
 

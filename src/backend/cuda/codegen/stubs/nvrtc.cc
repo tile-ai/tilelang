@@ -21,6 +21,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <string>
+
 #if defined(_WIN32) || defined(__CYGWIN__)
 #define TILELANG_NVRTC_STUB_API
 #else
@@ -29,44 +31,87 @@
 
 namespace {
 
+#ifndef TILELANG_CUDA_TOOLKIT_VERSION_MAJOR
+#error "TILELANG_CUDA_TOOLKIT_VERSION_MAJOR is not defined by the build system."
+#endif
+#ifndef TILELANG_CUDA_TOOLKIT_VERSION_MINOR
+#error "TILELANG_CUDA_TOOLKIT_VERSION_MINOR is not defined by the build system."
+#endif
+
+constexpr int kCudaToolkitMajor = TILELANG_CUDA_TOOLKIT_VERSION_MAJOR;
+constexpr int kCudaToolkitMinor = TILELANG_CUDA_TOOLKIT_VERSION_MINOR;
+
 #if defined(_WIN32) && !defined(__CYGWIN__)
-constexpr const char *kLibNvrtcPaths[] = {
-    "nvrtc64_130_0.dll", "nvrtc64_130.dll",   "nvrtc64_13.dll",
-    "nvrtc64_120_0.dll", "nvrtc64_120.dll",   "nvrtc64_12.dll",
-    "nvrtc64_112_0.dll", "nvrtc64_110_0.dll", "nvrtc64_110.dll",
-};
+std::string CurrentNvrtcLibraryName() {
+  constexpr int major = kCudaToolkitMajor;
+  constexpr int minor = kCudaToolkitMinor;
+  if constexpr (major > 11) {
+    return "nvrtc64_" + std::to_string(major) + "0_0.dll";
+  } else if constexpr (major == 11) {
+    constexpr int abi_minor = minor >= 3 ? 2 : minor;
+    return "nvrtc64_11" + std::to_string(abi_minor) + "_0.dll";
+  }
+  return std::string();
+}
 #else
-constexpr const char *kLibNvrtcPaths[] = {
-    "libnvrtc.so",
-    "libnvrtc.so.13",
-    "libnvrtc.so.12",
-    "libnvrtc.so.11",
-};
+std::string CurrentNvrtcLibraryName() {
+  constexpr int major = kCudaToolkitMajor;
+  constexpr int minor = kCudaToolkitMinor;
+  if constexpr (major > 11) {
+    return "libnvrtc.so." + std::to_string(major);
+  } else if constexpr (major == 11) {
+    constexpr int abi_minor = minor >= 3 ? 2 : minor;
+    return "libnvrtc.so.11." + std::to_string(abi_minor);
+  }
+  return std::string();
+}
 #endif
 
 void *TryLoadLibNvrtc() {
+  void *handle = nullptr;
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  for (const char *path : kLibNvrtcPaths) {
-    void *handle = tvm::tl::stubs::dynlib_open(path);
-    if (handle != nullptr) {
-      return handle;
-    }
+  handle = tvm::tl::stubs::dynlib_find_loaded_by_basename_prefix(
+      "nvrtc64_", "nvrtcVersion", reinterpret_cast<void *>(&nvrtcVersion));
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle = tvm::tl::stubs::dynlib_open_first({CurrentNvrtcLibraryName()},
+                                             "nvrtcVersion");
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle =
+      tvm::tl::stubs::dynlib_open_matching("nvrtc64_*.dll", "nvrtcVersion");
+  if (handle != nullptr) {
+    return handle;
+  }
+#else
+  handle = tvm::tl::stubs::dynlib_find_loaded_by_basename_prefix(
+      "libnvrtc.so", "nvrtcVersion", reinterpret_cast<void *>(&nvrtcVersion));
+  if (handle != nullptr) {
+    return handle;
   }
 #endif
 
   // Check if symbols are already available (e.g. loaded by PyTorch).
-  void *handle = tvm::tl::stubs::dynlib_find_loaded(
+  handle = tvm::tl::stubs::dynlib_find_loaded(
       "nvrtcVersion", reinterpret_cast<void *>(&nvrtcVersion));
   if (handle != nullptr) {
     return handle;
   }
 
 #if !defined(_WIN32) || defined(__CYGWIN__)
-  for (const char *path : kLibNvrtcPaths) {
-    handle = tvm::tl::stubs::dynlib_open(path);
-    if (handle != nullptr) {
-      return handle;
-    }
+  handle = tvm::tl::stubs::dynlib_open_first(
+      {CurrentNvrtcLibraryName(), "libnvrtc.so"}, "nvrtcVersion");
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle = tvm::tl::stubs::dynlib_open_matching("libnvrtc.so*", "nvrtcVersion");
+  if (handle != nullptr) {
+    return handle;
   }
 #endif
 

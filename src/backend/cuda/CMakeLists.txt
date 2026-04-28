@@ -13,6 +13,12 @@ else()
   set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc" CACHE FILEPATH "CUDA compiler" FORCE)
 endif()
 add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
+# CUDA stubs derive runtime DLL/SONAME candidates from the same toolkit
+# version parsed by find_package(CUDAToolkit).
+set(TILELANG_CUDA_TOOLKIT_VERSION_DEFINITIONS
+  "TILELANG_CUDA_TOOLKIT_VERSION_MAJOR=${CUDAToolkit_VERSION_MAJOR}"
+  "TILELANG_CUDA_TOOLKIT_VERSION_MINOR=${CUDAToolkit_VERSION_MINOR}"
+)
 
 # Set `USE_CUDA=/usr/local/cuda-x.y`
 cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
@@ -73,7 +79,8 @@ if(TILELANG_USE_CUDA_STUBS)
   # ============================================================================
   add_library(cudart_stub SHARED src/backend/cuda/codegen/stubs/cudart.cc)
   target_include_directories(cudart_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-  target_compile_definitions(cudart_stub PRIVATE TILELANG_CUDART_STUB_EXPORTS)
+  target_compile_definitions(cudart_stub PRIVATE TILELANG_CUDART_STUB_EXPORTS
+                                                 ${TILELANG_CUDA_TOOLKIT_VERSION_DEFINITIONS})
   if(WIN32)
     target_link_libraries(cudart_stub PRIVATE psapi)
   else()
@@ -106,7 +113,8 @@ if(TILELANG_USE_CUDA_STUBS)
   # ============================================================================
   add_library(nvrtc_stub SHARED src/backend/cuda/codegen/stubs/nvrtc.cc)
   target_include_directories(nvrtc_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-  target_compile_definitions(nvrtc_stub PRIVATE TILELANG_NVRTC_STUB_EXPORTS)
+  target_compile_definitions(nvrtc_stub PRIVATE TILELANG_NVRTC_STUB_EXPORTS
+                                                  ${TILELANG_CUDA_TOOLKIT_VERSION_DEFINITIONS})
   if(WIN32)
     target_link_libraries(nvrtc_stub PRIVATE psapi)
   else()
