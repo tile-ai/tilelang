@@ -10,6 +10,7 @@ from tvm import tir
 import tvm_ffi
 from tvm.ir import CallingConv
 from tvm.target import Target
+from tilelang.backend.registry import build_device_module
 from tilelang.contrib import hipcc, nvcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.transform import PassConfigKey
@@ -230,15 +231,7 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tir.transform.Simplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
 
-    if target.kind.name == "cuda":
-        global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda")
-        device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
-    elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
+    device_mod = build_device_module(device_mod, target, compile=True)
 
     return device_mod
 
@@ -249,21 +242,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     device_mod = tir.transform.Simplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
 
-    if target.kind.name == "cuda":
-        global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda") + "_without_compile"
-        device_mod = tvm.ffi.get_global_func(global_func)(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(device_mod, target)
-    elif target.kind.name == "c":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_c")(device_mod, target)
-    elif target.kind.name == "llvm":
-        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
-    elif target.kind.name == "webgpu":
-        device_mod = tvm.ffi.get_global_func("target.build.webgpu")(device_mod, target)
-    elif target.kind.name == "metal":
-        device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
+    device_mod = build_device_module(device_mod, target, compile=False)
 
     return device_mod
 

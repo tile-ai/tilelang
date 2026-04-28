@@ -1,66 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 from tvm.target import Target
-from tilelang.jit.adapter.utils import is_cutedsl_target
-
-# Canonical names for execution backends used internally
-_CANONICAL_MAP = {
-    "dlpack": "tvm_ffi",  # historical alias
-}
-
-
-def _canon_backend(name: str | None) -> str | None:
-    if name is None:
-        return None
-    key = str(name).lower()
-    return _CANONICAL_MAP.get(key, key)
-
-
-def _target_kind(target: Target) -> str:
-    # tvm.target.Target always has kind.name
-    return target.kind.name
+from tilelang.backend.registry import (
+    allowed_execution_backends_for_target,
+    resolve_execution_backend as _resolve_execution_backend,
+)
 
 
 def allowed_backends_for_target(target: Target, *, include_unavailable: bool = True) -> list[str]:
-    """Return allowed execution backends for a given TVM target kind.
+    """Return allowed execution backends for a given TVM target.
 
     include_unavailable: if False, this will filter out backends that are known
     to be unavailable at runtime (e.g., NVRTC without cuda-python installed).
     """
-    kind = _target_kind(target)
-
-    if is_cutedsl_target(target):
-        return ["cutedsl"]
-    elif kind == "cuda":
-        allowed = ["tvm_ffi", "nvrtc", "cython"]
-    elif kind == "hip":
-        allowed = ["tvm_ffi", "cython"]
-    elif kind == "metal":
-        allowed = ["tvm_ffi", "torch"]
-    elif kind == "c":  # CPU C backend
-        allowed = ["cython", "tvm_ffi"]
-    else:
-        # Fallback: prefer portable hosts
-        allowed = ["cython", "tvm_ffi"]
-
-    if not include_unavailable:
-        # Drop NVRTC if not importable
-        try:
-            from tilelang.jit.adapter.nvrtc import is_nvrtc_available  # lazy
-
-            if not is_nvrtc_available and "nvrtc" in allowed:
-                allowed = [b for b in allowed if b != "nvrtc"]
-        except Exception:
-            # Be conservative and keep nvrtc if detection itself fails
-            pass
-
-    return allowed
-
-
-def _format_options(options: Iterable[str]) -> str:
-    return ", ".join(sorted(options))
+    return allowed_execution_backends_for_target(target, include_unavailable=include_unavailable)
 
 
 def resolve_execution_backend(requested: str | None, target: Target) -> str:
@@ -71,36 +24,4 @@ def resolve_execution_backend(requested: str | None, target: Target) -> str:
     - Validates the combination (target, backend) and raises with helpful
       alternatives when invalid.
     """
-    req = _canon_backend(requested)
-    allowed_all = allowed_backends_for_target(target, include_unavailable=True)
-    allowed_avail = allowed_backends_for_target(target, include_unavailable=False)
-
-    # Default selection for auto/None
-    if req in (None, "auto"):
-        if is_cutedsl_target(target):
-            return "cutedsl"
-        kind = _target_kind(target)
-        if kind == "cuda" or kind == "metal" or kind == "hip":
-            choice = "tvm_ffi"
-        else:
-            choice = "cython"
-        # If the chosen default is not available (very rare), fall back to first available
-        if choice not in allowed_avail and allowed_avail:
-            choice = allowed_avail[0]
-        return choice
-
-    # Validate against allowed
-    if req not in allowed_all:
-        raise ValueError(
-            f"Invalid execution backend '{requested}' for target '{_target_kind(target)}'. "
-            f"Allowed: {_format_options(allowed_all)}. Tip: use execution_backend='auto'."
-        )
-
-    # Promote to availability-aware set for nicer errors (e.g., nvrtc not installed)
-    if req not in allowed_avail:
-        raise ValueError(
-            f"Execution backend '{requested}' requires extra dependencies and is not available now. "
-            f"Try one of: {_format_options(allowed_avail)}."
-        )
-
-    return req
+    return _resolve_execution_backend(requested, target)
