@@ -2261,6 +2261,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(func_name, 2);
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
+  } else if (op->op.same_as(tl::tensormap_copy_to_smem())) {
+    print_extern_call_stmt("tl::tensormap_copy_to_smem");
+  } else if (op->op.same_as(tl::tensormap_replace_box_dim())) {
+    int dim_idx = Downcast<IntImm>(op->args[1])->value;
+    this->PrintIndent();
+    this->stream << "tl::tensormap_replace_box_dim<" << dim_idx << ">("
+                 << this->PrintExpr(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[2]) << ");\n";
+  } else if (op->op.same_as(tl::tensormap_cp_fence_release())) {
+    print_extern_call_stmt("tl::tensormap_cp_fence_release");
+  } else if (op->op.same_as(tl::tensormap_fence_acquire())) {
+    print_extern_call_stmt("tl::tensormap_fence_acquire");
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl::tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {

@@ -1095,6 +1095,38 @@ TVM_DLL const Op &device_assert_with_msg();
 TVM_DLL const Op &warp_reduce_sum();
 
 /*!
+ * \brief Copy TMA descriptor (128 bytes) from global memory to shared memory.
+ *
+ * tensormap_copy_to_smem(smem_desc_ptr, gmem_desc_ptr)
+ *
+ */
+TVM_DLL const Op &tensormap_copy_to_smem();
+
+/*!
+ * \brief Replace box_dim field in SMEM TMA descriptor.
+ *
+ * tensormap_replace_box_dim(smem_desc_ptr, dim_idx, new_box_dim)
+ *
+ */
+TVM_DLL const Op &tensormap_replace_box_dim();
+
+/*!
+ * \brief Copy SMEM descriptor back to GMEM + tensormap release fence.
+ *
+ * tensormap_cp_fence_release(gmem_desc_ptr, smem_desc_ptr)
+ *
+ */
+TVM_DLL const Op &tensormap_cp_fence_release();
+
+/*!
+ * \brief Acquire fence on GMEM TMA descriptor.
+ *
+ * tensormap_fence_acquire(gmem_desc_ptr)
+ *
+ */
+TVM_DLL const Op &tensormap_fence_acquire();
+
+/*!
  * \brief tilelang intrinsic for warp reduction max.
  */
 TVM_DLL const Op &warp_reduce_max();

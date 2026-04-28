@@ -812,17 +812,22 @@ CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
     return CopyInst::kCPAsync;
   }
 
-  // Plain T.copy does not auto-upgrade to TMA loads anymore. Store-side TMA
-  // remains allowed because it is self-synchronized locally and does not
-  // participate in pipeline producer scheduling.
+  // Plain T.copy auto-upgrades to TMA for both loads and stores when
+  // conditions are satisfied. Store-side TMA is self-synchronized locally;
+  // load-side TMA is auto-equipped with an internal mbarrier.
   // Also honour the (deprecated) global pass config for backward compat.
   if (!GetDisableTMA() && !tvm::transform::PassContext::Current()
                                ->GetConfig<Bool>(kDisableTMALower, Bool(false))
                                .value()) {
     bool is_cutedsl = TargetIsCuTeDSL(target);
     if (!is_cutedsl && !buffer_oob &&
-        CheckBulkStore1D(target, layout_map, analyzer)) {
+        CheckBulkLoad1D(target, layout_map, analyzer)) {
+      return CopyInst::kBulkLoad1D;
+    } else if (!is_cutedsl && !buffer_oob &&
+               CheckBulkStore1D(target, layout_map, analyzer)) {
       return CopyInst::kBulkStore1D;
+    } else if (CheckBulkLoad(target, analyzer)) {
+      return CopyInst::kBulkLoad;
     } else if (CheckBulkStore(target, analyzer)) {
       return CopyInst::kBulkStore;
     }
@@ -1631,6 +1636,37 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     }
   }
 
+  // Detect dynamic box dimensions; substitute buffer-shape maxima into the
+  // descriptor so create_tma_descriptor receives compile-time constants.
+  // The actual runtime extents are applied later via tensormap.replace.
+  // smem_box is in reverse order (innermost dim first at index 0).
+  std::vector<std::pair<size_t, PrimExpr>> dynamic_box_dims;
+  for (size_t i = 0; i < desc.smem_box.size(); i++) {
+    if (as_const_int(desc.smem_box[i]) != nullptr)
+      continue;
+    int buf_dim = static_cast<int>(shared_tensor_unmapped->shape.size()) - 1 -
+                  static_cast<int>(i);
+    if (buf_dim < 0 ||
+        buf_dim >= static_cast<int>(shared_tensor_unmapped->shape.size())) {
+      LOG(FATAL) << "Dynamic box dim " << i << " (" << desc.smem_box[i]
+                 << ") cannot be mapped to buffer shape (rank="
+                 << shared_tensor_unmapped->shape.size() << "). "
+                 << "Use a compile-time constant in the copy region.";
+    }
+    PrimExpr max_val =
+        analyzer->Simplify(shared_tensor_unmapped->shape[buf_dim]);
+    auto max_val_int = as_const_int(max_val);
+    if (max_val_int == nullptr) {
+      LOG(FATAL) << "Buffer shape dim " << buf_dim << " (" << max_val
+                 << ") must be a compile-time constant to serve as "
+                    "the upper bound for dynamic TMA box dim "
+                 << i << ".";
+    }
+    dynamic_box_dims.push_back(
+        {i, analyzer->Simplify(desc.smem_box[i])});
+    desc.smem_box.Set(i, Integer(*max_val_int));
+  }
+
   auto inner_box_dim = as_const_int(desc.smem_box[0]);
   if (inner_box_dim == nullptr) {
     LOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
@@ -1680,6 +1716,16 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
 
+  // Bind descriptor to a variable so multiple references share the same object
+  Var desc_handle("tma_desc", DataType::Handle());
+
+  // When dynamic box dims exist, allocate SMEM workspace for the descriptor
+  // copy (128 bytes, 128B-aligned) so tensormap.replace can modify it there.
+  PrimExpr smem_desc_ptr;
+  if (!dynamic_box_dims.empty()) {
+    smem_desc_ptr = T.AddWorkspace(128, DataType::UInt(8));
+  }
+
   // For TMA loads, allocate mbarrier(s) for synchronous semantics.
   // Determine the mbarrier handle for TMA loads.
   // T.tma_copy(): requires user-provided barrier
@@ -1710,7 +1756,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   Array<PrimExpr> args;
   args.reserve(desc.rank + 4);
-  args.push_back(create_descriptor);
+  args.push_back(desc_handle);
   if (is_load)
     args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
   auto op = is_load ? tma_load() : tma_store();
@@ -1760,6 +1806,35 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     tma_copy = Evaluate(Call(DataType::Handle(), op, args, ann));
   }
 
+  // When dynamic box dims exist, prepend the tensormap.replace + fence
+  // sequence to modify the descriptor at runtime before the TMA operation.
+  // Sequence: copy GMEM→SMEM, replace box_dim(s), cp_fence_release,
+  // fence_acquire.
+  if (!dynamic_box_dims.empty()) {
+    Array<Stmt> replace_prefix;
+    // 1) Copy GMEM descriptor to SMEM workspace (128 bytes)
+    replace_prefix.push_back(Evaluate(Call(
+        DataType::Handle(), tensormap_copy_to_smem(),
+        {smem_desc_ptr, desc_handle})));
+    // 2) Replace each dynamic box dim in the SMEM copy
+    for (const auto &kv : dynamic_box_dims) {
+      replace_prefix.push_back(Evaluate(Call(
+          DataType::Handle(), tensormap_replace_box_dim(),
+          {smem_desc_ptr, Integer(static_cast<int>(kv.first)),
+           kv.second})));
+    }
+    // 3) Fence release: copy modified SMEM descriptor back to GMEM
+    replace_prefix.push_back(Evaluate(Call(
+        DataType::Handle(), tensormap_cp_fence_release(),
+        {desc_handle, smem_desc_ptr})));
+    // 4) Fence acquire on the GMEM descriptor
+    replace_prefix.push_back(Evaluate(Call(
+        DataType::Handle(), tensormap_fence_acquire(), {desc_handle})));
+    // 5) Prefix the TMA operation with the replace+fence sequence
+    replace_prefix.push_back(tma_copy);
+    tma_copy = SeqStmt(replace_prefix);
+  }
+
   // Bulk TMA stores participate in the cp.async.bulk group mechanism, so we
   // must commit and wait to ensure completion before the store buffer is
   // reused or the kernel exits.
@@ -1783,13 +1858,23 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   // The producer is annotated with the shared buffer so PipelinePlanning can
   // detect it as a copy stage and schedule it at pipeline stage 0.
   if (is_load && barrier_base_id >= 0) {
-    // Compute total bytes for all TMA sub-copies in this operation
-    PrimExpr total_bytes;
-    if ((*inner_box_dim) != instruction_dim) {
-      int loop_extent = (*inner_box_dim) / instruction_dim;
-      total_bytes = total_elements * loop_extent * shared_tensor->dtype.bytes();
-    } else {
-      total_bytes = total_elements * shared_tensor->dtype.bytes();
+    // Compute total bytes accounting for dynamic box dims that will be
+    // replaced at runtime.  total_elements is the product of the static
+    // (max) smem_box entries; we replace each dynamic dim with its runtime
+    // extent so expect_tx only accounts for the bytes actually transferred.
+    PrimExpr dyn_total_bytes;
+    {
+      PrimExpr dyn_elements = total_elements;
+      for (const auto &kv : dynamic_box_dims)
+        dyn_elements =
+            analyzer->Simplify(dyn_elements / desc.smem_box[kv.first] * kv.second);
+      if ((*inner_box_dim) != instruction_dim) {
+        int loop_extent = (*inner_box_dim) / instruction_dim;
+        dyn_total_bytes =
+            dyn_elements * loop_extent * shared_tensor->dtype.bytes();
+      } else {
+        dyn_total_bytes = dyn_elements * shared_tensor->dtype.bytes();
+      }
     }
 
     Stmt barrier_before_tma_stmt;
@@ -1803,7 +1888,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
         // CTA 0's barrier (via tma_load_2sm peer-bit clearing). So expect_tx
         // must account for ALL CTAs' bytes and only execute on CTA 0.
         PrimExpr cluster_total_bytes =
-            total_bytes * IntImm(DataType::Int(32), T.cluster_size);
+            dyn_total_bytes * IntImm(DataType::Int(32), T.cluster_size);
         Stmt expect_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
                           {mbar_handle, cluster_total_bytes}));
@@ -1813,7 +1898,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       } else {
         barrier_before_tma_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
-                          {mbar_handle, total_bytes}));
+                          {mbar_handle, dyn_total_bytes}));
       }
       // When emit_arrive is set (by InjectSoftwarePipeline for pipeline-level
       // barrier management), also emit arrive inside the thread-0 guard.
@@ -1830,7 +1915,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       // domain explicitly when TMA shares a stage barrier with cp.async.
       barrier_before_tma_stmt =
           Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
-                        {mbar_handle, total_bytes}));
+                        {mbar_handle, dyn_total_bytes}));
       barrier_after_tma_stmt = Evaluate(Call(
           DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
     }
@@ -1848,7 +1933,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     // producer (expect_tx + tma_load). The user manages synchronization
     // (arrive + wait) explicitly.
     if (GetIsTmaCopy()) {
-      return producer;
+      return LetStmt(desc_handle, create_descriptor, producer);
     }
 
     // For T.copy() with TMA: emit producer + wait pair so the pipeline/WS
@@ -1857,13 +1942,14 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
         Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
                       {mbar_handle, GetCopyMbarPhaseExpr(annotations, T)}));
 
-    return SeqStmt({producer, wait_stmt});
+    return LetStmt(desc_handle, create_descriptor,
+                   SeqStmt({producer, wait_stmt}));
   }
 
   tma_copy =
       IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
 
-  return tma_copy;
+  return LetStmt(desc_handle, create_descriptor, tma_copy);
 }
 
 Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,

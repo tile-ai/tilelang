@@ -1144,6 +1144,29 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
       return;
     }
+    // tensormap.replace machinery: these ops take SMEM workspace pointers
+    // but must not trigger tvm_storage_sync barriers because all the work
+    // is single-threaded (inside tl_shuffle_elect).  Visiting the args
+    // without marking shared memory accesses prevents the sync planner from
+    // inserting __syncthreads() inside the leader-gated block.
+    auto is_tensormap_replace_op = [&]() {
+      if (auto opt = op->op.as<Op>()) {
+        const Op &call_op = opt.value();
+        return call_op.same_as(tl::tensormap_copy_to_smem()) ||
+               call_op.same_as(tl::tensormap_replace_box_dim()) ||
+               call_op.same_as(tl::tensormap_cp_fence_release()) ||
+               call_op.same_as(tl::tensormap_fence_acquire());
+      }
+      return false;
+    }();
+    if (is_tensormap_replace_op) {
+      tensormap_depth_++;
+      for (const auto &a : op->args) {
+        this->VisitExpr(a);
+      }
+      tensormap_depth_--;
+      return;
+    }
     if (op->op.same_as(builtin::address_of())) {
       ICHECK_EQ(op->args.size(), 1U);
       if (auto load = op->args[0].as<BufferLoadNode>()) {
@@ -1248,12 +1271,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.scope = scope;
         if (flag->value & 1) {
           e.type = kRead;
-          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
+          e.is_async_copy =
+              (tma_depth_ > 0 || cp_async_depth_ > 0 || tensormap_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
         if (flag->value & 2) {
           e.type = kWrite;
-          e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
+          e.is_async_copy =
+              (tma_depth_ > 0 || cp_async_depth_ > 0 || tensormap_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
       }
@@ -1492,6 +1517,10 @@ private:
   int tma_depth_{0};
   // Nesting depth of cp.async calls (ptx_cp_async)
   int cp_async_depth_{0};
+  // Nesting depth of tensormap.replace machinery calls
+  // (tensormap_copy_to_smem / replace_box_dim / cp_fence_release /
+  // fence_acquire)
+  int tensormap_depth_{0};
   // Whether we're visiting the pointer argument expression of an atomic call
   // (e.g., atomic_add/atomic_max/atomic_load). When > 0, accesses produced by
   // the pointer metadata ops are tagged as atomic.

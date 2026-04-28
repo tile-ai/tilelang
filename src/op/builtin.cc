@@ -622,6 +622,30 @@ TIR_DEFINE_TL_BUILTIN(warp_reduce_sum)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// tensormap_copy_to_smem(smem_desc_ptr, gmem_desc_ptr)
+TIR_DEFINE_TL_BUILTIN(tensormap_copy_to_smem)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+// tensormap.replace.box_dim(smem_desc_ptr, dim_idx, new_box_dim)
+TIR_DEFINE_TL_BUILTIN(tensormap_replace_box_dim)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+// tensormap_cp_fence_release(gmem_desc_ptr, smem_desc_ptr)
+TIR_DEFINE_TL_BUILTIN(tensormap_cp_fence_release)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+// tensormap_fence_acquire(gmem_desc_ptr)
+TIR_DEFINE_TL_BUILTIN(tensormap_fence_acquire)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(warp_reduce_max)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",

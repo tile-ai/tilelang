@@ -411,4 +411,73 @@ TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {
   asm volatile("prefetch.tensormap [%0];" : : "l"(gmem_int_desc) : "memory");
 }
 
+#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
+    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 3)
+
+TL_DEVICE void tensormap_copy_to_smem(void *smem_desc,
+                                      const CUtensorMap &gmem_desc) {
+  uint4 *dst = reinterpret_cast<uint4 *>(smem_desc);
+  const uint4 *src = reinterpret_cast<const uint4 *>(&gmem_desc);
+  dst[0] = src[0];
+  dst[1] = src[1];
+}
+
+template <int32_t DimIdx>
+TL_DEVICE void tensormap_replace_box_dim(void *smem_desc,
+                                         int32_t new_box_dim) {
+  uint32_t smem_int_desc = smem_ptr_to_uint(smem_desc);
+  if constexpr (DimIdx == 0) {
+    asm volatile(
+        "tensormap.replace.tile.box_dim.shared::cta.b1024.b32 [%0], 0, %1;"
+        :
+        : "r"(smem_int_desc), "r"(new_box_dim)
+        : "memory");
+  } else if constexpr (DimIdx == 1) {
+    asm volatile(
+        "tensormap.replace.tile.box_dim.shared::cta.b1024.b32 [%0], 1, %1;"
+        :
+        : "r"(smem_int_desc), "r"(new_box_dim)
+        : "memory");
+  } else if constexpr (DimIdx == 2) {
+    asm volatile(
+        "tensormap.replace.tile.box_dim.shared::cta.b1024.b32 [%0], 2, %1;"
+        :
+        : "r"(smem_int_desc), "r"(new_box_dim)
+        : "memory");
+  } else if constexpr (DimIdx == 3) {
+    asm volatile(
+        "tensormap.replace.tile.box_dim.shared::cta.b1024.b32 [%0], 3, %1;"
+        :
+        : "r"(smem_int_desc), "r"(new_box_dim)
+        : "memory");
+  } else if constexpr (DimIdx == 4) {
+    asm volatile(
+        "tensormap.replace.tile.box_dim.shared::cta.b1024.b32 [%0], 4, %1;"
+        :
+        : "r"(smem_int_desc), "r"(new_box_dim)
+        : "memory");
+  }
+}
+
+TL_DEVICE void tensormap_cp_fence_release(const CUtensorMap &gmem_desc,
+                                          void *smem_desc) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&gmem_desc);
+  uint32_t smem_int_desc = smem_ptr_to_uint(smem_desc);
+  asm volatile(
+      "tensormap.cp_fenceproxy.global.shared::cta.tensormap::generic.release."
+      "gpu.sync.aligned [%0], [%1], 128;"
+      :
+      : "l"(gmem_int_desc), "r"(smem_int_desc)
+      : "memory");
+}
+
+TL_DEVICE void tensormap_fence_acquire(const CUtensorMap &gmem_desc) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&gmem_desc);
+  asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;"
+               :
+               : "l"(gmem_int_desc)
+               : "memory");
+}
+#endif // CUDA >= 12.3
+
 } // namespace tl
