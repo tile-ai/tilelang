@@ -8,13 +8,7 @@ from typing import Any
 
 from tvm.target import Target
 
-from tilelang import tvm as tvm
-from tilelang.transform import PassConfigKey
-from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
-from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
-from tilelang.env import TILELANG_TEMPLATE_PATH
-
-from .utils import is_cpu_target, is_cuda_target, is_hip_target
+from tilelang.backend.execution import get_library_compile_spec
 
 logger = logging.getLogger(__name__)
 
@@ -52,84 +46,13 @@ class LibraryGenerator:
     def compile_lib(self, timeout: float = None):
         target = self.target
         verbose = self.verbose
-        if is_cuda_target(target):
-            from tilelang.env import CUTLASS_INCLUDE_DIR
-
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
-            target_arch = get_target_arch(get_target_compute_version(target))
-            libpath = src.name.replace(".cu", ".so")
-
-            enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
-
-            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
-            if ptxas_usage_level is not None:
-                ptxas_usage_level = int(ptxas_usage_level)
-            verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
-
-            command = [
-                get_nvcc_compiler(),
-                "-std=c++17",
-                "-w",  # Disable all warning messages
-                "-Xcudafe",
-                "--diag_suppress=177",
-                "--compiler-options",
-                "-fPIC",
-                "-lineinfo",
-                "--shared",
-                src.name,
-                "-lcuda",
-                "-gencode",
-                f"arch=compute_{target_arch},code=sm_{target_arch}",
-            ]
-            if enable_fast_math:
-                command += ["--use_fast_math"]
-            if ptxas_usage_level is not None:
-                command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
-            if verbose_ptxas_output:
-                command += ["--ptxas-options=--verbose"]
-            command += [
-                "-I" + CUTLASS_INCLUDE_DIR,
-            ]
-
-        elif is_hip_target(target):
-            from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
-
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
-            libpath = src.name.replace(".cpp", ".so")
-            rocm_path = find_rocm_path()
-            arch = get_rocm_arch(rocm_path)
-            command = [
-                "hipcc",
-                "-std=c++17",
-                "-fPIC",
-                f"--offload-arch={arch}",
-                "--shared",
-                src.name,
-            ]
-            command += [
-                "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
-            ]
-        elif is_cpu_target(target):
-            from tilelang.contrib.cc import get_cplus_compiler
-
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
-            libpath = src.name.replace(".cpp", ".so")
-
-            command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
-            command += [
-                "-I" + TILELANG_TEMPLATE_PATH,
-            ]
-        else:
-            raise ValueError(f"Unsupported target: {target}")
-
-        command += [
-            "-I" + TILELANG_TEMPLATE_PATH,
-        ]
+        compile_spec = get_library_compile_spec(target)
+        src = tempfile.NamedTemporaryFile(mode="w", suffix=compile_spec.source_suffix, delete=False)  # noqa: SIM115
+        libpath = src.name[: -len(compile_spec.source_suffix)] + compile_spec.library_suffix
+        command = compile_spec.command_factory(target, src.name, libpath, self.pass_configs or {})
 
         if self.compile_flags:
             command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
-
-        command += ["-o", libpath]
 
         src.write(self.lib_code)
         src.flush()

@@ -3,28 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang import env
-from tilelang.jit.adapter.cutedsl.kernel_cache import CuTeDSLKernelCache
-from tilelang.jit.adapter.cython.kernel_cache import CythonKernelCache
-from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
-from tilelang.jit.adapter.torch.kernel_cache import TorchKernelCache
-from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
-
-if TYPE_CHECKING:
-    from .kernel_cache import KernelCache
-
-# Create a map of singleton instance of KernelCaches
-_dispatch_map: dict[str, KernelCache] = {
-    "tvm_ffi": TVMFFIKernelCache(),
-    "cython": CythonKernelCache(),
-    "nvrtc": NVRTCKernelCache(),
-    "cutedsl": CuTeDSLKernelCache(),
-    "torch": TorchKernelCache(),
-}
 
 
 def cached(
@@ -53,6 +36,7 @@ def cached(
     # Normalize target and resolve execution backend before proceeding
     from tilelang.utils.target import determine_target as _determine_target
     from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
+    from tilelang.backend.execution import get_kernel_cache
 
     norm_target = Target(_determine_target(target)) if isinstance(target, str) else target
     requested_backend = execution_backend
@@ -70,20 +54,18 @@ def cached(
                 norm_target.kind.name,
                 ", ".join(sorted(allowed_now)),
             )
-    if execution_backend in _dispatch_map:
-        return _dispatch_map[execution_backend].cached(
-            func,
-            out_idx,
-            *args,
-            target=norm_target,
-            target_host=target_host,
-            execution_backend=execution_backend,
-            verbose=verbose,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
-    else:
-        raise ValueError(f'Cannot find support for execution backend "{execution_backend}"')
+    kernel_cache = get_kernel_cache(norm_target, execution_backend)
+    return kernel_cache.cached(
+        func,
+        out_idx,
+        *args,
+        target=norm_target,
+        target_host=target_host,
+        execution_backend=execution_backend,
+        verbose=verbose,
+        pass_configs=pass_configs,
+        compile_flags=compile_flags,
+    )
 
 
 def clear_cache():

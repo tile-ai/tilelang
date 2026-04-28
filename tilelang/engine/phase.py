@@ -2,20 +2,9 @@ from __future__ import annotations
 from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
+from tilelang.backend.base import DeviceBackend
+from tilelang.backend.registry import get_device_backend
 from tilelang.transform import PassContext
-from tilelang.contrib.nvcc import have_tma, have_pdl
-
-
-def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
-    # avoid circular import
-    from tilelang.jit.adapter.utils import is_cuda_target
-
-    if pass_ctx is None:
-        pass_ctx = tilelang.transform.get_pass_context()
-    if (not is_cuda_target(target)) or (not have_tma(target)):
-        return False
-    disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
-    return not disable_warp_specialized
 
 
 def module_has_tma(mod: IRModule) -> bool:
@@ -42,15 +31,18 @@ def allow_global_thread_synchronization(pass_ctx: PassContext | None = None) -> 
     return enable_global_thread_sync
 
 
-def should_enable_aggressive_merge(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
+def should_enable_aggressive_merge(
+    pass_ctx: PassContext | None = None,
+    target: Target | None = None,
+    backend: DeviceBackend | None = None,
+) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     enable_aggressive_merge = bool(pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE, False))
-    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-        # This is a workaround to avoid the bug in the MergeSharedMemoryAllocations pass
-        # when warp specialization is enabled, as different warp threads may access different
-        # buffers, but the liveness analysis is hard because we need to do pipeline.
-        enable_aggressive_merge = False
+    if backend is None and target is not None:
+        backend = get_device_backend(target)
+    if backend is not None and target is not None:
+        enable_aggressive_merge = backend.pass_hooks.adjust_aggressive_shared_memory_merge(enable_aggressive_merge, target)
     return enable_aggressive_merge
 
 
@@ -142,7 +134,6 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
-    # Bind the target device information to the module
     """
     Bind target information and progressively legalize and lower frontend Tile IR into a form suitable for downstream optimization and codegen.
 
@@ -163,6 +154,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     Returns:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """
+    backend = get_device_backend(target)
+    # Bind the target device information to the module
     mod = tir.transform.BindTarget(target)(mod)
 
     if should_force_let_inline():
@@ -181,17 +174,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
-    # Tile-level warp specialization: runs before layout inference so that
-    # producer/consumer split happens at the high-level tile-op IR.
-    # The pass classifies copy ops as TMA/cp.async/sync inline (no prior
-    # InstructionAnnotation pass needed). Shared buffers are multi-versioned
-    # internally only for functions where the WS transformation actually
-    # applies.
-    if allow_warp_specialized(target=target):
-        mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
-    # Lower 2SM TCGEN5MMA and related on Blackwell target (must run before
-    # LayoutInference so that the use_2cta annotation is visible to infer_layout)
-    mod = tilelang.transform.LowerBlackwell2SM()(mod)
+    mod = backend.pass_hooks.pre_layout(mod, target)
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
@@ -203,8 +186,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
-    # Lower l2 persistent map
-    mod = tilelang.transform.LowerL2Persistent()(mod)
+    mod = backend.pass_hooks.post_tile_lowering(mod, target)
     # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
@@ -225,9 +207,9 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
+    backend = get_device_backend(target)
     pass_ctx = tilelang.transform.get_pass_context()
-    # Lower the shared.tmem into specific initialization slot
-    mod = tilelang.transform.LowerSharedTmem()(mod)
+    mod = backend.pass_hooks.optimize_entry(mod, target)
     # which may be introduced by the LegalizeSafeMemoryAccess
     mod = tilelang.transform.IfStmtBinding()(mod)
     has_tma = module_has_tma(mod)
@@ -235,9 +217,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # InjectSoftwarePipeline, so no late MVB barrier fixup is needed.
     # Buffer allocation placement is handled uniformly for both paths.
     mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-    mod = tilelang.transform.LowerSharedBarrier()(mod)
-    if has_tma:
-        mod = tilelang.transform.FuseMBarrierArriveExpectTx()(mod)
+    mod = backend.pass_hooks.lower_shared_barrier(mod, target)
+    mod = backend.pass_hooks.after_shared_barrier_lowering(mod, target, has_tma=has_tma)
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
@@ -269,8 +250,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # the Legalization.
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
-    mod = tilelang.transform.LowerLDGSTG()(mod)
-    mod = tilelang.transform.LowerHopperIntrin()(mod)
+    mod = backend.pass_hooks.before_split_host_device(mod, target)
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier
     if allow_global_thread_synchronization():
@@ -278,33 +258,22 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
 
-    # Mark the function contains pdl_sync or pdl_trigger
-    mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
+    mod = backend.pass_hooks.after_split_host_device(mod, target)
 
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
-    enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
+    enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target, backend=backend)
     mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
-    # InjectFenceProxy is a no-op on targets that lack the TMA / async-proxy
-    # programming model; the pass itself checks the PrimFunc's target.
-    mod = tilelang.transform.InjectFenceProxy()(mod)
+    mod = backend.pass_hooks.after_shared_memory_planning(mod, target)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    # Inject conservative tcgen05 fences on Blackwell (SM100+).
-    # Must run after ThreadSync so that tvm_storage_sync calls are present.
-    # The pass handles shared syncs and simple linear wait/use, use/arrive
-    # handoffs, and is a no-op on non-SM100 targets or functions without TMEM.
-    mod = tilelang.transform.InjectTcgen05Fence()(mod)
+    mod = backend.pass_hooks.after_shared_sync(mod, target)
     mod = tilelang.transform.MergeIfStmt()(mod)
-    # NOTE: LowerPTXAsyncCopy is applied earlier (before PipelinePlanning).
-    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-        mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 
-    # Transform threadblock to persistent threadblock
-    mod = tilelang.transform.PersistThreadblock()(mod)
+    mod = backend.pass_hooks.before_device_codegen(mod, target)
 
     return mod

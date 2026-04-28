@@ -2,7 +2,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from tilelang.backend.common.target import is_cutedsl_target, is_metal_target
+from tvm.target import Target
+
+from tilelang.backend.base import ExecutionBackendSpec, LibraryCompileSpec
+from tilelang.backend.registry import get_device_backend, resolve_execution_backend
+
+
+def get_execution_spec(target: Target, execution_backend: str | None) -> ExecutionBackendSpec:
+    resolved = resolve_execution_backend(execution_backend, target)
+    return get_device_backend(target).execution_spec(resolved)
+
+
+def _first_execution_spec_with(target: Target, attr_name: str) -> ExecutionBackendSpec:
+    backend = get_device_backend(target)
+    for spec in backend.execution_specs:
+        if getattr(spec, attr_name) is not None:
+            return spec
+    raise ValueError(f"Backend '{backend.name}' does not provide execution metadata '{attr_name}'")
 
 
 def create_execution_adapter(
@@ -17,87 +33,17 @@ def create_execution_adapter(
     pass_configs: dict[str, Any] | None,
     compile_flags: list[str] | None,
 ):
-    if execution_backend == "tvm_ffi":
-        from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
-
-        assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
-        return TVMFFIKernelAdapter(
-            params=params,
-            result_idx=result_idx,
-            target=target,
-            func_or_mod=func_or_mod,
-            host_mod=artifact.host_mod,
-            device_mod=artifact.device_mod,
-            rt_mod=artifact.rt_mod,
-            device_kernel_source=artifact.kernel_source,
-            verbose=verbose,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
-
-    if execution_backend == "cython":
-        from tilelang.jit.adapter.cython import CythonKernelAdapter
-
-        return CythonKernelAdapter(
-            params=params,
-            result_idx=result_idx,
-            target=target,
-            func_or_mod=func_or_mod,
-            host_mod=artifact.host_mod,
-            device_mod=artifact.device_mod,
-            device_kernel_source=artifact.kernel_source,
-            verbose=verbose,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
-
-    if execution_backend == "nvrtc":
-        from tilelang.jit.adapter.nvrtc import NVRTCKernelAdapter
-
-        return NVRTCKernelAdapter(
-            params=params,
-            result_idx=result_idx,
-            target=target,
-            func_or_mod=func_or_mod,
-            host_mod=artifact.host_mod,
-            device_mod=artifact.device_mod,
-            device_kernel_source=artifact.kernel_source,
-            verbose=verbose,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
-
-    if execution_backend == "torch":
-        from tilelang.jit.adapter.torch import MetalKernelAdapter
-
-        assert is_metal_target(target)
-        return MetalKernelAdapter(
-            params=params,
-            result_idx=result_idx,
-            func_or_mod=func_or_mod,
-            device_mod=artifact.device_mod,
-            kernel_global_source=artifact.kernel_source,
-            verbose=verbose,
-        )
-
-    if execution_backend == "cutedsl":
-        from tilelang.jit.adapter.cutedsl import CuTeDSLKernelAdapter
-
-        assert is_cutedsl_target(target)
-        return CuTeDSLKernelAdapter(
-            params=params,
-            result_idx=result_idx,
-            target=target,
-            func_or_mod=func_or_mod,
-            host_mod=artifact.host_mod,
-            device_mod=artifact.device_mod,
-            device_kernel_source=artifact.kernel_source,
-            verbose=verbose,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
-
-    raise ValueError(f"Invalid execution backend: {execution_backend}")
+    spec = get_execution_spec(target, execution_backend)
+    return spec.adapter_factory(
+        artifact=artifact,
+        params=params,
+        result_idx=result_idx,
+        target=target,
+        func_or_mod=func_or_mod,
+        verbose=verbose,
+        pass_configs=pass_configs,
+        compile_flags=compile_flags,
+    )
 
 
 def create_execution_adapter_from_database(
@@ -113,63 +59,37 @@ def create_execution_adapter_from_database(
     pass_configs: dict[str, Any] | None = None,
     compile_flags: list[str] | None = None,
 ):
-    if execution_backend == "tvm_ffi":
-        from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
+    spec = get_execution_spec(target, execution_backend)
+    if spec.database_adapter_factory is None:
+        raise ValueError(f"Execution backend '{execution_backend}' does not support database cache loading")
+    return spec.database_adapter_factory(
+        params=params,
+        result_idx=result_idx,
+        target=target,
+        func_or_mod=func_or_mod,
+        host_kernel_source=host_kernel_source,
+        device_kernel_source=device_kernel_source,
+        kernel_lib_path=kernel_lib_path,
+        pass_configs=pass_configs,
+        compile_flags=compile_flags,
+    )
 
-        return TVMFFIKernelAdapter.from_database(
-            params=params,
-            result_idx=result_idx,
-            target=target,
-            func_or_mod=func_or_mod,
-            host_kernel_source=host_kernel_source,
-            device_kernel_source=device_kernel_source,
-            kernel_lib_path=kernel_lib_path,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
 
-    if execution_backend == "cython":
-        from tilelang.jit.adapter.cython import CythonKernelAdapter
+def create_c_source_wrapper(device_target: Target, **kwargs):
+    spec = _first_execution_spec_with(device_target, "c_source_wrapper_factory")
+    return spec.c_source_wrapper_factory(**kwargs)
 
-        return CythonKernelAdapter.from_database(
-            params=params,
-            result_idx=result_idx,
-            target=target,
-            func_or_mod=func_or_mod,
-            host_kernel_source=host_kernel_source,
-            device_kernel_source=device_kernel_source,
-            kernel_lib_path=kernel_lib_path,
-            pass_configs=pass_configs,
-        )
 
-    if execution_backend == "nvrtc":
-        from tilelang.jit.adapter.nvrtc import NVRTCKernelAdapter
+def create_python_source_wrapper(device_target: Target, **kwargs):
+    spec = _first_execution_spec_with(device_target, "python_source_wrapper_factory")
+    return spec.python_source_wrapper_factory(**kwargs)
 
-        return NVRTCKernelAdapter.from_database(
-            params=params,
-            result_idx=result_idx,
-            target=target,
-            func_or_mod=func_or_mod,
-            host_kernel_source=host_kernel_source,
-            device_kernel_source=device_kernel_source,
-            kernel_lib_path=kernel_lib_path,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
 
-    if execution_backend == "cutedsl":
-        from tilelang.jit.adapter.cutedsl import CuTeDSLKernelAdapter
+def get_library_compile_spec(target: Target) -> LibraryCompileSpec:
+    spec = _first_execution_spec_with(target, "library_compile_spec")
+    return spec.library_compile_spec
 
-        return CuTeDSLKernelAdapter.from_database(
-            params=params,
-            result_idx=result_idx,
-            target=target,
-            func_or_mod=func_or_mod,
-            host_kernel_source=host_kernel_source,
-            device_kernel_source=device_kernel_source,
-            kernel_lib_path=kernel_lib_path,
-            pass_configs=pass_configs,
-            compile_flags=compile_flags,
-        )
 
-    raise ValueError(f"Invalid execution backend: {execution_backend}")
+def get_kernel_cache(target: Target, execution_backend: str):
+    spec = get_execution_spec(target, execution_backend)
+    return spec.cache_factory()

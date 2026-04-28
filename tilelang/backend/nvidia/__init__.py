@@ -5,8 +5,10 @@ from tilelang.backend.base import DeviceBackend
 from .execution import (
     CUDA_DEFAULT_EXECUTION_BACKEND,
     CUDA_EXECUTION_BACKENDS,
+    CUDA_EXECUTION_SPECS,
     CUTEDSL_DEFAULT_EXECUTION_BACKEND,
     CUTEDSL_EXECUTION_BACKENDS,
+    CUTEDSL_EXECUTION_SPECS,
     unavailable_cuda_execution_backends,
 )
 from .ffi import CUDA_COMPILED_BUILDER, CUDA_SOURCE_BUILDER, CUTEDSL_SOURCE_BUILDER
@@ -26,6 +28,7 @@ def get_backends() -> tuple[DeviceBackend, ...]:
             execution_backends=CUTEDSL_EXECUTION_BACKENDS,
             default_execution_backend=CUTEDSL_DEFAULT_EXECUTION_BACKEND,
             source_kind="cutedsl_py",
+            execution_specs=CUTEDSL_EXECUTION_SPECS,
             pass_hooks=hooks,
             metadata={"dialect": "cutedsl"},
         ),
@@ -38,9 +41,9 @@ def get_backends() -> tuple[DeviceBackend, ...]:
             execution_backends=CUDA_EXECUTION_BACKENDS,
             default_execution_backend=CUDA_DEFAULT_EXECUTION_BACKEND,
             source_kind="cuda",
+            execution_specs=CUDA_EXECUTION_SPECS,
             pass_hooks=hooks,
             unavailable_execution_backends=unavailable_cuda_execution_backends,
             metadata={"dialect": "cuda"},
         ),
     )
-

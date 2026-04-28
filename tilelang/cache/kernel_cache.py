@@ -383,6 +383,28 @@ class KernelCache:
         """
         return os.path.join(self._get_cache_root(), key)
 
+    def _validate_backend_cache_artifact(self, target: str | Target, execution_backend: str) -> None:
+        from tilelang.backend.execution import get_execution_spec
+        from tilelang.utils.target import determine_target
+
+        norm_target = Target(determine_target(target)) if isinstance(target, str) else target
+        artifact = get_execution_spec(norm_target, execution_backend).cache_artifact
+        expected = {
+            "device_kernel_path": artifact.device_kernel_path,
+            "host_kernel_path": artifact.host_kernel_path,
+            "kernel_lib_path": artifact.kernel_lib_path,
+        }
+        actual = {
+            "device_kernel_path": self.device_kernel_path,
+            "host_kernel_path": self.host_kernel_path,
+            "kernel_lib_path": self.kernel_lib_path,
+        }
+        if expected != actual:
+            raise RuntimeError(
+                f"Kernel cache artifact metadata mismatch for execution backend '{execution_backend}': "
+                f"expected {expected}, got {actual}"
+            )
+
     @staticmethod
     def _load_binary(path: str):
         with open(path, "rb") as file:
@@ -423,6 +445,7 @@ class KernelCache:
         # Env-backed cache roots may change across tests or at runtime; recreate the
         # namespace-specific directories lazily here so direct save helpers keep working
         # even when the singleton instance is reused.
+        self._validate_backend_cache_artifact(kernel.target, kernel.execution_backend)
         KernelCache._create_dirs()
         cache_path = self._get_cache_path(key)
 
@@ -502,6 +525,7 @@ class KernelCache:
         Returns:
             JITKernel: The loaded kernel if found, None otherwise.
         """
+        self._validate_backend_cache_artifact(target, execution_backend)
         cache_path = self._get_cache_path(key)
         device_kernel_path = os.path.join(cache_path, self.device_kernel_path)
         host_kernel_path = os.path.join(cache_path, self.host_kernel_path)

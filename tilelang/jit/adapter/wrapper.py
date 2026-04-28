@@ -5,14 +5,11 @@ from typing import Any
 from tvm import IRModule
 from tvm.target import Target
 
+from tilelang.backend.execution import create_c_source_wrapper, create_python_source_wrapper
+
 from .utils import (
-    is_metal_target,
-    is_cutedsl_target,
     match_declare_kernel,
     match_declare_kernel_cpu,
-    is_cuda_target,
-    is_hip_target,
-    is_cpu_target,
     get_annotated_mod,
     pythonic_expr,
     parse_function_call_args,
@@ -963,17 +960,8 @@ class TLWrapper(BaseWrapper):
     # Get Scheduled Rt Module and return source to be compiled
     def wrap(self, c_source: str):
         assert self.scheduled_ir_module is not None, "Please assign optimized module first."
-        if is_cuda_target(self.target):
-            wrapper_class = TLCUDASourceWrapper
-        elif is_hip_target(self.target):
-            wrapper_class = TLHIPSourceWrapper
-        elif is_cpu_target(self.target):
-            wrapper_class = TLCPUSourceWrapper
-        elif is_metal_target(self.target):
-            wrapper_class = TLMetalSourceWrapper
-        else:
-            raise ValueError(f"Unsupported platform: {self.arch.platform}")
-        wrapper = wrapper_class(
+        wrapper = create_c_source_wrapper(
+            self.target,
             scheduled_ir_module=self.scheduled_ir_module,
             source=c_source,
             target=self.target,
@@ -990,17 +978,8 @@ class TLPyWrapper(TLWrapper):
 
     def wrap(self, py_source: str):
         # assert self.scheduled_ir_module is not None, "Please assign optimized module first."
-        if is_cutedsl_target(self.target):
-            from tilelang.jit.adapter.cutedsl import TLCuTeDSLSourceWrapper
-
-            wrapper_class = TLCuTeDSLSourceWrapper
-        elif is_cuda_target(self.target):
-            from tilelang.jit.adapter.nvrtc import TLNVRTCSourceWrapper
-
-            wrapper_class = TLNVRTCSourceWrapper
-        else:
-            raise ValueError(f"Unsupported target for NVRTC backend: {self.target}")
-        wrapper = wrapper_class(
+        wrapper = create_python_source_wrapper(
+            self.target,
             scheduled_ir_module=self.scheduled_ir_module,
             source=py_source,
             target=self.target,

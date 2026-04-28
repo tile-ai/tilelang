@@ -4,9 +4,9 @@
  *
  */
 
-#include "runtime.h"
+#include "../../../runtime/runtime.h"
 
-#include "../target/stubs/cuda.h"
+#include "../../../target/stubs/cuda.h"
 #include <cstdint>
 #include <sstream>
 #include <tvm/ffi/function.h>

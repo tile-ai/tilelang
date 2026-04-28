@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tilelang.backend.base import DeviceBackend
 
-from .execution import WEBGPU_DEFAULT_EXECUTION_BACKEND, WEBGPU_EXECUTION_BACKENDS
+from .execution import WEBGPU_DEFAULT_EXECUTION_BACKEND, WEBGPU_EXECUTION_BACKENDS, WEBGPU_EXECUTION_SPECS
 from .ffi import WEBGPU_SOURCE_BUILDER
 from .passes import WebGPUPassHooks
 from .target import is_webgpu_target
@@ -19,8 +19,8 @@ def get_backends() -> tuple[DeviceBackend, ...]:
             execution_backends=WEBGPU_EXECUTION_BACKENDS,
             default_execution_backend=WEBGPU_DEFAULT_EXECUTION_BACKEND,
             source_kind="webgpu",
+            execution_specs=WEBGPU_EXECUTION_SPECS,
             pass_hooks=WebGPUPassHooks(),
             metadata={"dialect": "webgpu"},
         ),
     )
-

@@ -7,8 +7,13 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 
+from tilelang.backend.execution import (
+    create_execution_adapter,
+    create_execution_adapter_from_database,
+    get_execution_spec,
+)
 from tilelang.backend.common.target import is_cuda_target
-from tilelang.backend.execution import create_execution_adapter, create_execution_adapter_from_database
+from tilelang.backend.registry import resolve_execution_backend
 from tvm.target import Target
 from tvm.tir import PrimFunc
 
@@ -59,7 +64,7 @@ class JITKernel(Generic[_P, _T]):
         self,
         func: PrimFunc = None,
         out_idx: list[int] | int = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = "tvm_ffi",
         target: str | Target = "auto",
         target_host: str | Target = None,
         verbose: bool = False,
@@ -91,7 +96,6 @@ class JITKernel(Generic[_P, _T]):
             Whether to create a TorchFunction from a database.
         """
         self.prim_func = func
-        self.execution_backend = execution_backend
         self.target_host = target_host
         self.verbose = verbose
 
@@ -101,16 +105,10 @@ class JITKernel(Generic[_P, _T]):
 
         # Ensure the target is always a valid TVM Target object.
         self.target = determine_target(target, return_object=True)
+        self.execution_backend = resolve_execution_backend(execution_backend, self.target)
+        self.execution_spec = get_execution_spec(self.target, self.execution_backend)
 
-        # Validate the execution backend.
-        assert execution_backend in [
-            "tvm_ffi",
-            "cython",
-            "nvrtc",
-            "torch",
-            "cutedsl",
-        ], f"Invalid execution backend. {execution_backend}"
-        if execution_backend == "cython":
+        if self.execution_spec.requires_cxx_compiler:
             from tilelang.contrib.cc import get_cplus_compiler
 
             assert get_cplus_compiler() is not None, "Cython backend requires a C++ compiler, please install or use other backends."
@@ -229,8 +227,8 @@ class JITKernel(Generic[_P, _T]):
             )
 
         # Compile the function with TVM, optimizing with shared memory lowering.
-        enable_host_codegen = execution_backend == "tvm_ffi"
-        enable_device_compile = execution_backend == "tvm_ffi"
+        enable_host_codegen = self.execution_spec.requires_host_codegen
+        enable_device_compile = self.execution_spec.requires_device_compile
 
         # Additional pass instruments
         pass_instruments = []
@@ -333,7 +331,7 @@ class JITKernel(Generic[_P, _T]):
         str
             The source code of the compiled kernel function.
         """
-        if self.execution_backend in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
+        if self.execution_spec.kernel_source_from_adapter:
             return self.adapter.get_kernel_source(kernel_only=kernel_only)
         return self.artifact.kernel_source
 
@@ -341,7 +339,7 @@ class JITKernel(Generic[_P, _T]):
         """
         Returns the source code of the host function.
         """
-        if self.execution_backend in {"cython", "nvrtc", "tvm_ffi", "cutedsl"}:
+        if self.execution_spec.host_source_from_adapter:
             return self.adapter.get_host_source()
         assert self.artifact.host_mod is not None, "host_mod is not available"
         return str(self.artifact.host_mod)

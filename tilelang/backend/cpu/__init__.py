@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tilelang.backend.base import DeviceBackend
 
-from .execution import CPU_DEFAULT_EXECUTION_BACKEND, CPU_EXECUTION_BACKENDS
+from .execution import CPU_DEFAULT_EXECUTION_BACKEND, CPU_EXECUTION_BACKENDS, CPU_EXECUTION_SPECS
 from .ffi import C_SOURCE_BUILDER, LLVM_SOURCE_BUILDER
 from .passes import CpuPassHooks
 from .target import is_c_target, is_llvm_target
@@ -20,6 +20,7 @@ def get_backends() -> tuple[DeviceBackend, ...]:
             execution_backends=CPU_EXECUTION_BACKENDS,
             default_execution_backend=CPU_DEFAULT_EXECUTION_BACKEND,
             source_kind="c",
+            execution_specs=CPU_EXECUTION_SPECS,
             pass_hooks=hooks,
             metadata={"dialect": "c"},
         ),
@@ -32,8 +33,8 @@ def get_backends() -> tuple[DeviceBackend, ...]:
             execution_backends=CPU_EXECUTION_BACKENDS,
             default_execution_backend=CPU_DEFAULT_EXECUTION_BACKEND,
             source_kind="llvm",
+            execution_specs=CPU_EXECUTION_SPECS,
             pass_hooks=hooks,
             metadata={"dialect": "llvm"},
         ),
     )
-
