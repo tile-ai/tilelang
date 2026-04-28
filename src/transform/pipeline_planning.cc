@@ -1074,12 +1074,13 @@ private:
     if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno->as<IntImmNode>()->value;
-    // On HIP/ROCM targets that do NOT support async-copy (e.g. RDNA), skip
-    // software pipelining entirely.  For targets that do support async-copy
-    // (gfx942 / MI300X and gfx950 / MI350), the HIP async-copy pipeline is
-    // available and should proceed normally.
-    if (TargetIsRocm(target_) && !TargetHasAsyncCopy(target_) &&
-        num_stages >= 1) {
+    // Skip software pipelining on ROCm targets where async-copy pipelining
+    // has not been validated.  Currently only gfx950 (CDNA4 / MI350) supports
+    // the full HIP async-copy pipeline path.  gfx942 (CDNA3 / MI300X) has
+    // async-copy hardware but the software pipeline for that target has not
+    // been validated yet, so it falls back to a plain sequential loop as well.
+    // RDNA targets have no async-copy support at all and also fall back.
+    if (TargetIsRocm(target_) && !TargetIsGfx950(target_) && num_stages >= 1) {
       return StmtExprMutator::VisitStmt_(loop);
     }
     Stmt pipeline_body_root{nullptr};

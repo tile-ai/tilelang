@@ -184,7 +184,7 @@ def test_gfx950_smem_cap_160kb():
         (True, False, 1),
     ],
 )
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_gfx950
 def test_gfx950_copy_async_gemm_pipelined(trans_A, trans_B, k_pack):
     """Pipelined GEMM (num_stages=2) with gfx950 copy.async must be numerically correct."""
     prog = _matmul_kernel(
