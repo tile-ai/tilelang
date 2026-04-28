@@ -676,6 +676,13 @@ template <typename T> TL_DEVICE uint1 to_uint1(T v) {
   return r;
 }
 
+// Pack two half_t into a uint1.
+TL_DEVICE uint1 pack_half2(half_t a, half_t b) {
+  unsigned packed =
+      __pack_half2(static_cast<__half>(a), static_cast<__half>(b));
+  return uint1{packed};
+}
+
 // --- add2 ----------------------------------------------------------------
 
 TL_DEVICE float2 add2(float2 a, float2 b) {

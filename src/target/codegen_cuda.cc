@@ -4359,10 +4359,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
       os << "uint1{__pack_nv_bfloat162(" << e0 << ", " << e1 << ")}";
     } else {
       enable_fp16_ = true;
-      // __pack_half2 returns __half2 which is 32-bit.
-      // Reinterpret via aggregate initialisation.
-      os << "uint1{*(unsigned*)&(__pack_half2((__half)(" << e0 << "), (__half)("
-         << e1 << ")))}";
+      os << "uint1{tl::pack_half2(" << e0 << ", " << e1 << ")}";
     }
     return;
   }
