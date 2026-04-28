@@ -7,7 +7,6 @@ import torch
 
 tilelang.testing.set_random_seed()
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -76,6 +75,8 @@ REDUCE_CASES = [
     ("sum", T.float32, 128, 64, "shared", "fragment", 256, 2),
     ("sum", T.float32, 128, 64, "shared", "fragment", 256, 4),
     ("sum", T.float16, 64, 128, "fragment", "fragment", 256, 4),
+    ("sum", T.bfloat16, 128, 128, "fragment", "fragment", 32, 1),
+    ("sum", T.bfloat16, 64, 128, "fragment", "fragment", 256, 4),
     ("max", T.bfloat16, 128, 64, "shared", "fragment", 256, 2),
     ("max", T.float32, 128, 128, "fragment", "fragment", 256, 4),
     ("min", T.float32, 64, 128, "shared", "fragment", 128, 2),

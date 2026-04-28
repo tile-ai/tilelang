@@ -4366,6 +4366,27 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
     }
     return;
   }
+  // Handle ExtractElement: extract a scalar lane from a bfloat16x2 / float16x2
+  // vector (produced by packed reduction, etc.). The vector is stored as an
+  // opaque uint1 in the lowered code, but semantically it is a packed pair.
+  DataType vec_t = op->vectors.size() == 1 ? op->vectors[0].dtype() : DataType();
+  bool vec_is_bf16x2 = vec_t.is_bfloat16() && vec_t.lanes() == 2;
+  bool vec_is_fp16x2 = vec_t.is_float16() && vec_t.lanes() == 2;
+  if ((vec_is_bf16x2 || vec_is_fp16x2) && op->vectors.size() == 1 &&
+      op->indices.size() == 1) {
+    int lane = Downcast<IntImm>(op->indices[0])->value;
+    std::string vec = PrintExpr(op->vectors[0]);
+    if (vec_is_bf16x2) {
+      enable_bf16_ = true;
+      os << "bfloat16_t(((nv_bfloat162*)(&(" << vec << ")))->"
+         << (lane == 0 ? "x" : "y") << ")";
+    } else {
+      enable_fp16_ = true;
+      os << "half_t(((half2*)(&(" << vec << ")))->"
+         << (lane == 0 ? "x" : "y") << ")";
+    }
+    return;
+  }
   // Default path for all other types.
   CodeGenC::VisitExpr_(op, os);
 }

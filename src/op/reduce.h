@@ -130,7 +130,9 @@ private:
   /// Generate initial value for reduction
   PrimExpr MakeInitValue() const;
   /// Generate reduction expression
-  PrimExpr MakeReduce(const PrimExpr &acc, const PrimExpr &b) const;
+  /// pack_lanes = 1 for scalar, 2 for add2/max2/min2, etc.
+  PrimExpr MakeReduce(const PrimExpr &acc, const PrimExpr &b,
+                      int pack_lanes = 1) const;
   /// Generate codegen reducer string
   std::string MakeCodegenReducer() const;
 };
