@@ -70,6 +70,8 @@ def test_unknown_target_reports_backend_resolution_error():
 
 
 def test_execution_specs_own_adapter_codegen_and_cache_metadata():
+    from tilelang.cache import _dispatch_map
+
     cuda_backend = get_device_backend(Target("cuda"))
     cutedsl_backend = get_device_backend(Target("cuda -keys=cutedsl"))
 
@@ -78,6 +80,7 @@ def test_execution_specs_own_adapter_codegen_and_cache_metadata():
     assert tvm_ffi.requires_device_compile is True
     assert tvm_ffi.cache_artifact.kernel_lib_path == "executable.so"
     assert get_kernel_cache(Target("cuda"), "tvm_ffi").kernel_lib_path == "executable.so"
+    assert _dispatch_map["tvm_ffi"].kernel_lib_path == "executable.so"
 
     nvrtc = cuda_backend.execution_spec("nvrtc")
     assert nvrtc.requires_host_codegen is False
@@ -86,12 +89,15 @@ def test_execution_specs_own_adapter_codegen_and_cache_metadata():
     assert nvrtc.cache_artifact.kernel_lib_path == "kernel.cubin"
     assert "kernel.py" in nvrtc.cache_artifact.extra_required_paths
     assert nvrtc.cache_factory().kernel_lib_path == "kernel.cubin"
+    assert _dispatch_map["nvrtc"].kernel_lib_path == "kernel.cubin"
 
     cutedsl = cutedsl_backend.execution_spec("cutedsl")
     assert cutedsl.python_source_wrapper_factory is not None
     assert cutedsl.cache_artifact.kernel_lib_path == "kernel.py"
     assert cutedsl.cache_artifact.device_kernel_path == "kernel.py"
     assert "launcher_lib.so" in cutedsl.cache_artifact.extra_required_paths
+    assert _dispatch_map["cutedsl"].kernel_lib_path == "kernel.py"
+    assert sorted(_dispatch_map) == ["cutedsl", "cython", "nvrtc", "torch", "tvm_ffi"]
 
     assert get_execution_spec(Target("hip"), "cython").c_source_wrapper_factory is not None
     assert get_execution_spec(Target("c"), "cython").c_source_wrapper_factory is not None

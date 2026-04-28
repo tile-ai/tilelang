@@ -26,6 +26,7 @@ import tilelang.language as T
 import tvm_ffi
 import torch
 import uuid
+from functools import cache
 from pathlib import Path
 from tilelang.env import env
 from tilelang.cache import _dispatch_map
@@ -38,12 +39,61 @@ BACKENDS = [
 ]
 
 
+def test_dispatch_map_compatibility_export():
+    """The legacy cache singleton table remains importable and metadata-backed."""
+    expected_backends = {"tvm_ffi", "cython", "nvrtc", "cutedsl", "torch"}
+    assert expected_backends.issubset(_dispatch_map)
+    assert _dispatch_map["tvm_ffi"].kernel_lib_path == "executable.so"
+    assert _dispatch_map["cython"].kernel_lib_path == "kernel_lib.so"
+    assert _dispatch_map["nvrtc"].kernel_lib_path == "kernel.cubin"
+    assert _dispatch_map["cutedsl"].kernel_lib_path == "kernel.py"
+
+
 def _get_target_from_backend(backend: str):
     """Map backend to target string."""
     return "cutedsl" if backend == "cutedsl" else "auto"
 
 
+@cache
+def _nvrtc_unavailable_reason() -> str | None:
+    try:
+        from tilelang.jit.adapter.nvrtc import check_nvrtc_available
+        from tilelang.jit.adapter.nvrtc.libgen import NVRTCLibraryGenerator
+        from tvm.target import Target
+
+        check_nvrtc_available()
+        generator = NVRTCLibraryGenerator(Target("cuda"), verbose=True)
+        generator.update_lib_code("""
+#include <tl_templates/cuda/gemm.h>
+#include <tl_templates/cuda/copy.h>
+#include <tl_templates/cuda/reduce.h>
+#include <tl_templates/cuda/ldsm.h>
+#include <tl_templates/cuda/threadblock_swizzle.h>
+#include <tl_templates/cuda/debug.h>
+extern "C" __global__ void __tilelang_nvrtc_probe(const float* A, float* B) {
+    B[((int)blockIdx.x)] = A[((int)blockIdx.x)];
+}
+""")
+        generator.update_host_func("def call(*args, **kwargs):\n    pass\n")
+        generator.compile_lib()
+    except Exception as e:
+        message = [line.strip() for line in str(e).splitlines() if line.strip()]
+        for line in message:
+            if line == "Compilation error:":
+                continue
+            if "error:" in line or "catastrophic error" in line or "errors detected" in line:
+                return line[:240]
+        return message[-1][:240] if message else e.__class__.__name__
+    return None
+
+
 def _require_backend_available(backend: str) -> None:
+    if backend == "nvrtc":
+        reason = _nvrtc_unavailable_reason()
+        if reason is not None:
+            pytest.skip(f"NVRTC backend unavailable for current target: {reason}")
+        return
+
     if backend != "cutedsl":
         return
     try:

@@ -10,6 +10,21 @@ from tilelang.jit import JITKernel
 from tilelang import env
 
 
+def _build_dispatch_map():
+    from tilelang.backend.registry import registered_device_backends
+
+    dispatch = {}
+    for backend in registered_device_backends():
+        for spec in backend.execution_specs:
+            if spec.name in dispatch:
+                continue
+            dispatch[spec.name] = spec.cache_factory()
+    return dispatch
+
+
+_dispatch_map = _build_dispatch_map()
+
+
 def cached(
     func: PrimFunc = None,
     out_idx: list[int] = None,
@@ -36,7 +51,6 @@ def cached(
     # Normalize target and resolve execution backend before proceeding
     from tilelang.utils.target import determine_target as _determine_target
     from tilelang.jit.execution_backend import resolve_execution_backend, allowed_backends_for_target
-    from tilelang.backend.execution import get_kernel_cache
 
     norm_target = Target(_determine_target(target)) if isinstance(target, str) else target
     requested_backend = execution_backend
@@ -54,7 +68,10 @@ def cached(
                 norm_target.kind.name,
                 ", ".join(sorted(allowed_now)),
             )
-    kernel_cache = get_kernel_cache(norm_target, execution_backend)
+    if execution_backend not in _dispatch_map:
+        raise ValueError(f'Cannot find support for execution backend "{execution_backend}"')
+
+    kernel_cache = _dispatch_map[execution_backend]
     return kernel_cache.cached(
         func,
         out_idx,
