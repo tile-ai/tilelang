@@ -11,6 +11,8 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
+#include <functional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -211,18 +213,50 @@ struct SafeMemChecker : public StmtExprVisitor {
       return false;
     }
 
-    // Analyzer::ConstraintContext is not mutation-aware for BufferLoad-based
-    // guards. Use Z3 only as a local implication query over predicates that the
-    // rewriter has kept valid.
+    // Mirror the existing implication check used by thread_storage_sync:
+    // active_predicates => cond is proved as !active_predicates || cond. This
+    // keeps BufferLoad facts local to this query, while still letting Z3 reason
+    // across algebraic expressions over those facts.
     PrimExpr assumptions = active_predicates_[0];
     for (size_t i = 1; i < active_predicates_.size(); ++i) {
       assumptions = tir::And(assumptions, active_predicates_[i]);
     }
-    PrimExpr implication =
-        analyzer_->rewrite_simplify(tir::Or(Not(assumptions), cond));
     try {
-      return analyzer_->z3_prover.CanProve(implication);
+      PrimExpr implication =
+          analyzer_->rewrite_simplify(tir::Or(tir::Not(assumptions), cond));
+      if (analyzer_->z3_prover.CanProve(implication)) {
+        return true;
+      }
     } catch (const Error &e) {
+      // Fall through to the generic analyzer path below.
+    }
+
+    // Analyzer::ConstraintContext is not mutation-aware for BufferLoad-based
+    // guards. Enter only predicates that the rewriter has kept valid, and do so
+    // in a temporary scope so the existing analyzer machinery can still prove
+    // cases handled by const_int_bound, int_set, and rewrite_simplify.
+    std::vector<std::function<void()>> exits;
+    try {
+      exits.reserve(active_predicates_.size());
+      for (const PrimExpr &predicate : active_predicates_) {
+        exits.push_back(analyzer_->EnterConstraint(predicate));
+      }
+      bool proved =
+          analyzer_->CanProve(cond, arith::ProofStrength::kSymbolicBound);
+      while (!exits.empty()) {
+        if (exits.back()) {
+          exits.back()();
+        }
+        exits.pop_back();
+      }
+      return proved;
+    } catch (const Error &e) {
+      while (!exits.empty()) {
+        if (exits.back()) {
+          exits.back()();
+        }
+        exits.pop_back();
+      }
       return false;
     }
   }
@@ -367,6 +401,116 @@ private:
     }
   }
 
+  bool CanProveEqual(const PrimExpr &lhs, const PrimExpr &rhs) {
+    try {
+      return analyzer_->CanProveEqual(lhs, rhs);
+    } catch (const Error &e) {
+      return false;
+    }
+  }
+
+  static bool ExprDependsOnBuffer(const PrimExpr &expr, const Buffer &buffer) {
+    bool depends = false;
+    PostOrderVisit(expr, [&](const ObjectRef &obj) {
+      if (depends) {
+        return;
+      }
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        depends = load->buffer.same_as(buffer);
+      }
+    });
+    return depends;
+  }
+
+  static bool IsZ3SupportedCall(const CallNode *call) {
+    return call->op.same_as(builtin::bitwise_and()) ||
+           call->op.same_as(builtin::bitwise_or()) ||
+           call->op.same_as(builtin::bitwise_xor()) ||
+           call->op.same_as(builtin::bitwise_not()) ||
+           call->op.same_as(builtin::shift_left()) ||
+           call->op.same_as(builtin::shift_right());
+  }
+
+  static bool ContainsUnsupportedCall(const PrimExpr &expr) {
+    bool unsupported = false;
+    PostOrderVisit(expr, [&](const ObjectRef &obj) {
+      if (unsupported) {
+        return;
+      }
+      if (const auto *call = obj.as<CallNode>()) {
+        unsupported = !IsZ3SupportedCall(call);
+      }
+    });
+    return unsupported;
+  }
+
+  bool IsTrackableScalarLocalBufferAccess(const Buffer &buffer,
+                                          const Array<PrimExpr> &indices) {
+    std::string scope = buffer.scope();
+    if (scope.find("local.var") == std::string::npos) {
+      return false;
+    }
+    if (!buffer->dtype.is_int() && !buffer->dtype.is_uint()) {
+      return false;
+    }
+    if (buffer->shape.size() != 1 || indices.size() != 1) {
+      return false;
+    }
+    if (!CanProveEqual(buffer->shape[0], IntImm(buffer->shape[0].dtype(), 1))) {
+      return false;
+    }
+    if (!CanProveEqual(indices[0], IntImm(indices[0].dtype(), 0))) {
+      return false;
+    }
+    return true;
+  }
+
+  bool IsTrackableScalarLocalStore(const BufferStore &store) {
+    if (!IsTrackableScalarLocalBufferAccess(store->buffer, store->indices)) {
+      return false;
+    }
+    if (store->predicate.defined() &&
+        !is_one(analyzer_->Simplify(store->predicate.value()))) {
+      return false;
+    }
+    return true;
+  }
+
+  bool ValueLoadsOnlyTrackableScalarLocals(const PrimExpr &value) {
+    bool supported = true;
+    PostOrderVisit(value, [&](const ObjectRef &obj) {
+      if (!supported) {
+        return;
+      }
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        supported =
+            IsTrackableScalarLocalBufferAccess(load->buffer, load->indices);
+      }
+    });
+    return supported;
+  }
+
+  void TryPushStoreValuePredicate(const BufferStore &store) {
+    if (!IsTrackableScalarLocalStore(store)) {
+      return;
+    }
+    if (ExprDependsOnBuffer(store->value, store->buffer)) {
+      return;
+    }
+    if (!ValueLoadsOnlyTrackableScalarLocals(store->value)) {
+      return;
+    }
+    if (ContainsUnsupportedCall(store->value)) {
+      return;
+    }
+
+    // A scalar local.var store defines the value read by later BufferLoad
+    // nodes.
+    PrimExpr value = analyzer_->Simplify(store->value);
+    PrimExpr load = BufferLoad(store->buffer, store->indices);
+    PushActivePredicate(analyzer_->rewrite_simplify(EQ(load, value)));
+  }
+
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
 
@@ -411,14 +555,17 @@ private:
                "access may occur."
             << "\nAuto detect boundaries are " << conditions;
         InvalidatePredicatesDependingOn(store->buffer);
+        TryPushStoreValuePredicate(store);
         return store;
       }
       InvalidatePredicatesDependingOn(store->buffer);
+      TryPushStoreValuePredicate(store);
       return store;
     }
 
     if (conditions.empty()) {
       InvalidatePredicatesDependingOn(store->buffer);
+      TryPushStoreValuePredicate(store);
       return store;
     }
 
@@ -688,6 +835,15 @@ private:
     n->then_case = std::move(then_case);
     n->else_case = std::move(else_case);
     return Stmt(n);
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    std::vector<ActivePredicate> base_predicates = active_predicates_;
+    size_t base_size = base_predicates.size();
+    Stmt stmt = IRMutatorWithAnalyzer::VisitStmt_(op);
+    std::vector<bool> body_validity = PrefixValidity(base_size);
+    RestorePrefixValidity(base_predicates, body_validity);
+    return stmt;
   }
 
   Stmt VisitStmt_(const BlockNode *op) final {
