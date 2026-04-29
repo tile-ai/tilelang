@@ -172,10 +172,16 @@ std::optional<PrimExpr> ReduceOpNode::MakeReduce(int vsize, const PrimExpr &acc,
   if (type->isSum() || type->isAbsSum()) {
     return Call(acc.dtype(), tl::add2(), {acc, b});
   } else if (type->isMax()) {
+    if (nan_propagate)
+      return std::nullopt;
     return Call(acc.dtype(), tl::max2(), {acc, b});
   } else if (type->isMin()) {
+    if (nan_propagate)
+      return std::nullopt;
     return Call(acc.dtype(), tl::min2(), {acc, b});
   } else if (type->isAbsMax()) {
+    if (nan_propagate)
+      return std::nullopt;
     return Call(acc.dtype(), tl::max2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {b})});
   }
