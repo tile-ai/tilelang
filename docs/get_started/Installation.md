@@ -268,7 +268,7 @@ pip install -e . -v --no-build-isolation --no-deps
 
 # Manually install required runtime deps when using --no-deps.
 # Note: skip torch-c-dlpack-ext on ROCm (its wheel expects CUDA libs).
-pip install "apache-tvm-ffi>=0.1.6" "z3-solver>=4.13.0"
+pip install "apache-tvm-ffi==0.1.11rc2" "z3-solver>=4.13.0"
 # If you already installed torch-c-dlpack-ext and hit `libtorch_cuda.so` errors:
 # pip uninstall -y torch-c-dlpack-ext
 
