@@ -178,6 +178,12 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
       return static_cast<uint32_t>(0);
     } else if (dtype.is_float8_e5m2fnuz() || dtype.is_float8_e5m2()) {
       return static_cast<uint32_t>(1);
+    } else if (dtype.is_float6_e2m3fn()) {
+      return static_cast<uint32_t>(3);
+    } else if (dtype.is_float6_e3m2fn()) {
+      return static_cast<uint32_t>(4);
+    } else if (dtype.is_float4_e2m1fn()) {
+      return static_cast<uint32_t>(5);
     } else if (dtype.is_int() && dtype.bits() == 8) {
       return static_cast<uint32_t>(1);
     } else if (dtype.is_uint() && dtype.bits() == 8) {
@@ -259,6 +265,12 @@ inline uint32_t GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n,
       return 0u; // E4M3
     } else if (dtype.is_float8_e5m2fnuz() || dtype.is_float8_e5m2()) {
       return 1u; // E5M2
+    } else if (dtype.is_float6_e2m3fn()) {
+      return 3u; // E2M3
+    } else if (dtype.is_float6_e3m2fn()) {
+      return 4u; // E3M2
+    } else if (dtype.is_float4_e2m1fn()) {
+      return 5u; // E2M1
     }
     LOG(FATAL) << "Unsupported dtype for block-scaled descriptor: " << dtype;
     return 0u;
