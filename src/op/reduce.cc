@@ -153,6 +153,12 @@ std::optional<PrimExpr> ReduceOpNode::MakeReduce(int vsize, const PrimExpr &acc,
       auto abs_rhs = Max(rhs, -rhs);
       return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
                         : PrimExpr(Max(acc, abs_rhs));
+    } else if (type->isBitAnd()) {
+      return acc & rhs;
+    } else if (type->isBitOr()) {
+      return acc | rhs;
+    } else if (type->isBitXor()) {
+      return acc ^ rhs;
     }
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
     return std::nullopt;
