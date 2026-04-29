@@ -144,23 +144,15 @@ std::optional<PrimExpr> ReduceOpNode::MakeReduce(int vsize, const PrimExpr &acc,
     } else if (type->isAbsSum()) {
       return acc + Max(rhs, -rhs);
     } else if (type->isMax()) {
-      if (use_nan_op)
-        return Call(acc.dtype(), tl::max_nan(), {acc, rhs});
-      return Max(acc, rhs);
+      return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, rhs})
+                        : PrimExpr(Max(acc, rhs));
     } else if (type->isMin()) {
-      if (use_nan_op)
-        return Call(acc.dtype(), tl::min_nan(), {acc, rhs});
-      return Min(acc, rhs);
+      return use_nan_op ? Call(acc.dtype(), tl::min_nan(), {acc, rhs})
+                        : PrimExpr(Min(acc, rhs));
     } else if (type->isAbsMax()) {
-      if (use_nan_op)
-        return Call(acc.dtype(), tl::max_nan(), {acc, tvm::abs(rhs)});
-      return Max(acc, tvm::abs(rhs));
-    } else if (type->isBitAnd()) {
-      return acc & rhs;
-    } else if (type->isBitOr()) {
-      return acc | rhs;
-    } else if (type->isBitXor()) {
-      return acc ^ rhs;
+      auto abs_rhs = Max(rhs, -rhs);
+      return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
+                        : PrimExpr(Max(acc, abs_rhs));
     }
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
     return std::nullopt;
@@ -169,20 +161,19 @@ std::optional<PrimExpr> ReduceOpNode::MakeReduce(int vsize, const PrimExpr &acc,
   if (vsize != 2)
     return std::nullopt;
 
-  if (type->isSum() || type->isAbsSum()) {
+  if (type->isSum()) {
     return Call(acc.dtype(), tl::add2(), {acc, b});
+  } else if (type->isAbsSum()) {
+    return Call(acc.dtype(), tl::add2(),
+                {acc, Call(acc.dtype(), tl::abs2(), {b})});
   } else if (type->isMax()) {
-    if (nan_propagate)
-      return std::nullopt;
-    return Call(acc.dtype(), tl::max2(), {acc, b});
+    return Call(acc.dtype(), nan_propagate ? tl::max2_nan() : tl::max2(),
+                {acc, b});
   } else if (type->isMin()) {
-    if (nan_propagate)
-      return std::nullopt;
-    return Call(acc.dtype(), tl::min2(), {acc, b});
+    return Call(acc.dtype(), nan_propagate ? tl::min2_nan() : tl::min2(),
+                {acc, b});
   } else if (type->isAbsMax()) {
-    if (nan_propagate)
-      return std::nullopt;
-    return Call(acc.dtype(), tl::max2(),
+    return Call(acc.dtype(), nan_propagate ? tl::max2_nan() : tl::max2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {b})});
   }
   return std::nullopt;
@@ -429,7 +420,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Buffer clear_batch_pack_buffer;
     {
       int vsize = GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
-      if (vsize > 1 && !src_var_compressed.empty() && !nan_propagate) {
+      if (vsize > 1 && !src_var_compressed.empty()) {
         auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
         if (ext && ext->value >= vsize && ext->value % vsize == 0) {
           can_pack = true;

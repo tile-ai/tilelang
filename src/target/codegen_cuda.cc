@@ -1011,6 +1011,10 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         tl_func = "min2";
       else if (op == "max")
         tl_func = "max2";
+      else if (op == "min_nan")
+        tl_func = "min2_nan";
+      else if (op == "max_nan")
+        tl_func = "max2_nan";
 
       if (!tl_func.empty()) {
         // Decompose into lanes/2 independent x2 packed operations.
@@ -3718,6 +3722,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
+             op->op.same_as(tl::max2_nan()) || op->op.same_as(tl::min2_nan()) ||
              op->op.same_as(tl::abs2())) {
     // Packed x2 element-wise math intrinsics.
     //
@@ -3740,6 +3745,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       op_name = "max2";
     else if (op->op.same_as(tl::min2()))
       op_name = "min2";
+    else if (op->op.same_as(tl::max2_nan()))
+      op_name = "max2_nan";
+    else if (op->op.same_as(tl::min2_nan()))
+      op_name = "min2_nan";
     else
       op_name = "abs2";
 

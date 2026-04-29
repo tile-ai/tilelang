@@ -838,6 +838,42 @@ TL_DEVICE __half2 min2(__half2 a, __half2 b) {
 #endif
 }
 
+// --- max2_nan ------------------------------------------------------------
+
+TL_DEVICE __nv_bfloat162 max2_nan(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hmax2_nan(a, b);
+#else
+  return __nv_bfloat162{__hmax_nan(a.x, b.x), __hmax_nan(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 max2_nan(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hmax2_nan(a, b);
+#else
+  return __half2{__hmax_nan(a.x, b.x), __hmax_nan(a.y, b.y)};
+#endif
+}
+
+// --- min2_nan ------------------------------------------------------------
+
+TL_DEVICE __nv_bfloat162 min2_nan(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hmin2_nan(a, b);
+#else
+  return __nv_bfloat162{__hmin_nan(a.x, b.x), __hmin_nan(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 min2_nan(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hmin2_nan(a, b);
+#else
+  return __half2{__hmin_nan(a.x, b.x), __hmin_nan(a.y, b.y)};
+#endif
+}
+
 // --- abs2 ----------------------------------------------------------------
 
 TL_DEVICE float2 abs2(float2 a) { return make_float2(fabsf(a.x), fabsf(a.y)); }
