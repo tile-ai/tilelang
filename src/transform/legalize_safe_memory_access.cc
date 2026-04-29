@@ -311,7 +311,7 @@ public:
 private:
   struct ActivePredicate {
     PrimExpr predicate;
-    std::vector<Buffer> deps;
+    std::vector<Var> deps;
     bool valid{true};
   };
 
@@ -330,23 +330,39 @@ private:
     return predicates;
   }
 
-  static bool ContainsBuffer(const std::vector<Buffer> &buffers,
-                             const Buffer &buffer) {
-    for (const Buffer &candidate : buffers) {
-      if (candidate.same_as(buffer)) {
+  static bool ContainsStorage(const std::vector<Var> &storages,
+                              const Var &storage) {
+    for (const Var &candidate : storages) {
+      if (candidate.same_as(storage)) {
         return true;
       }
     }
     return false;
   }
 
-  static std::vector<Buffer> CollectPredicateDeps(const PrimExpr &predicate) {
-    std::vector<Buffer> deps;
+  Var CanonicalStorage(Var storage) const {
+    for (int depth = 0; depth < 16 && storage_aliases_.count(storage);
+         ++depth) {
+      Var next = storage_aliases_[storage];
+      if (next.same_as(storage)) {
+        break;
+      }
+      storage = next;
+    }
+    return storage;
+  }
+
+  Var StorageKey(const Buffer &buffer) const {
+    return CanonicalStorage(buffer->data);
+  }
+
+  std::vector<Var> CollectPredicateDeps(const PrimExpr &predicate) {
+    std::vector<Var> deps;
     PostOrderVisit(predicate, [&](const ObjectRef &obj) {
       if (const auto *load = obj.as<BufferLoadNode>()) {
-        Buffer buffer = load->buffer;
-        if (!ContainsBuffer(deps, buffer)) {
-          deps.push_back(buffer);
+        Var storage = StorageKey(load->buffer);
+        if (!ContainsStorage(deps, storage)) {
+          deps.push_back(storage);
         }
       }
     });
@@ -387,9 +403,43 @@ private:
     }
   }
 
+  std::vector<PrimExpr> ValidPredicatesFrom(size_t begin) const {
+    std::vector<PrimExpr> predicates;
+    for (size_t i = begin; i < active_predicates_.size(); ++i) {
+      if (active_predicates_[i].valid) {
+        predicates.push_back(active_predicates_[i].predicate);
+      }
+    }
+    return predicates;
+  }
+
+  PrimExpr Conjunction(const std::vector<PrimExpr> &predicates) {
+    if (predicates.empty()) {
+      return Bool(true);
+    }
+    PrimExpr result = predicates[0];
+    for (size_t i = 1; i < predicates.size(); ++i) {
+      result = tir::And(result, predicates[i]);
+    }
+    return analyzer_->rewrite_simplify(result);
+  }
+
+  void PushBranchSummary(const std::vector<PrimExpr> &then_predicates,
+                         const std::vector<PrimExpr> &else_predicates) {
+    if (then_predicates.empty() && else_predicates.empty()) {
+      return;
+    }
+    PrimExpr summary = analyzer_->rewrite_simplify(
+        tir::Or(Conjunction(then_predicates), Conjunction(else_predicates)));
+    if (!is_one(summary)) {
+      PushActivePredicate(summary);
+    }
+  }
+
   void InvalidatePredicatesDependingOn(const Buffer &buffer) {
+    Var storage = StorageKey(buffer);
     for (ActivePredicate &predicate : active_predicates_) {
-      if (predicate.valid && ContainsBuffer(predicate.deps, buffer)) {
+      if (predicate.valid && ContainsStorage(predicate.deps, storage)) {
         predicate.valid = false;
       }
     }
@@ -409,14 +459,15 @@ private:
     }
   }
 
-  static bool ExprDependsOnBuffer(const PrimExpr &expr, const Buffer &buffer) {
+  bool ExprDependsOnBuffer(const PrimExpr &expr, const Buffer &buffer) {
     bool depends = false;
+    Var storage = StorageKey(buffer);
     PostOrderVisit(expr, [&](const ObjectRef &obj) {
       if (depends) {
         return;
       }
       if (const auto *load = obj.as<BufferLoadNode>()) {
-        depends = load->buffer.same_as(buffer);
+        depends = StorageKey(load->buffer).same_as(storage);
       }
     });
     return depends;
@@ -494,9 +545,6 @@ private:
     if (!IsTrackableScalarLocalStore(store)) {
       return;
     }
-    if (ExprDependsOnBuffer(store->value, store->buffer)) {
-      return;
-    }
     if (!ValueLoadsOnlyTrackableScalarLocals(store->value)) {
       return;
     }
@@ -506,9 +554,19 @@ private:
 
     // A scalar local.var store defines the value read by later BufferLoad
     // nodes.
-    PrimExpr value = analyzer_->Simplify(store->value);
+    if (ExprDependsOnBuffer(store->value, store->buffer)) {
+      return;
+    }
+
+    PrimExpr value = store->value;
+    value = analyzer_->Simplify(value);
     PrimExpr load = BufferLoad(store->buffer, store->indices);
     PushActivePredicate(analyzer_->rewrite_simplify(EQ(load, value)));
+  }
+
+  void UpdatePredicatesForStore(const BufferStore &store) {
+    InvalidatePredicatesDependingOn(store->buffer);
+    TryPushStoreValuePredicate(store);
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
@@ -554,18 +612,15 @@ private:
             << "\nAs manual boundary check detected, potential out-of-bounds "
                "access may occur."
             << "\nAuto detect boundaries are " << conditions;
-        InvalidatePredicatesDependingOn(store->buffer);
-        TryPushStoreValuePredicate(store);
+        UpdatePredicatesForStore(store);
         return store;
       }
-      InvalidatePredicatesDependingOn(store->buffer);
-      TryPushStoreValuePredicate(store);
+      UpdatePredicatesForStore(store);
       return store;
     }
 
     if (conditions.empty()) {
-      InvalidatePredicatesDependingOn(store->buffer);
-      TryPushStoreValuePredicate(store);
+      UpdatePredicatesForStore(store);
       return store;
     }
 
@@ -796,8 +851,10 @@ private:
       }
     }
     std::vector<bool> then_validity = PrefixValidity(base_size);
+    std::vector<PrimExpr> then_predicates = ValidPredicatesFrom(base_size);
 
     std::vector<bool> else_validity;
+    std::vector<PrimExpr> else_predicates;
     if (op->else_case) {
       PrimExpr not_condition = analyzer_->rewrite_simplify(Not(real_condition));
       active_predicates_ = base_predicates;
@@ -809,6 +866,7 @@ private:
         else_case = this->VisitStmt(op->else_case.value());
       }
       else_validity = PrefixValidity(base_size);
+      else_predicates = ValidPredicatesFrom(base_size);
     } else {
       active_predicates_ = base_predicates;
       else_validity = PrefixValidity(base_size);
@@ -824,6 +882,9 @@ private:
     }
 
     MergeBranchValidity(base_predicates, then_validity, else_validity);
+    if (op->else_case) {
+      PushBranchSummary(then_predicates, else_predicates);
+    }
 
     if (condition.same_as(op->condition) && then_case.same_as(op->then_case) &&
         else_case.same_as(op->else_case)) {
@@ -847,8 +908,13 @@ private:
   }
 
   Stmt VisitStmt_(const BlockNode *op) final {
+    Map<Var, Var> base_storage_aliases = storage_aliases_;
     for (auto buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
+    for (const MatchBufferRegion &match_buffer : op->match_buffers) {
+      storage_aliases_.Set(match_buffer->buffer->data,
+                           StorageKey(match_buffer->source->buffer));
     }
     if (op->annotations.count(attr::kSafeValueMap)) {
       auto map = op->annotations.Get(attr::kSafeValueMap)
@@ -863,7 +929,9 @@ private:
         annotated_safe_value_by_data_.Set(var, safe_value);
       }
     }
-    return IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt stmt = IRMutatorWithAnalyzer::VisitStmt_(op);
+    storage_aliases_ = base_storage_aliases;
+    return stmt;
   }
 
   // Get the safe value of the buffer
@@ -880,6 +948,7 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, PrimExpr> annotated_safe_value_map_;
   Map<Var, PrimExpr> annotated_safe_value_by_data_;
+  Map<Var, Var> storage_aliases_;
   std::vector<ActivePredicate> active_predicates_;
 };
 
