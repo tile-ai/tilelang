@@ -56,6 +56,12 @@ ExtractFuncInfo(const IRModule &mod) {
           info.arg_types.push_back(DataType(runtime::kDLGridConstant, 64, 1));
           continue;
         }
+        // Mutable TMA descriptor workspace: passed as CUtensorMap *.
+        if (ptr && ptr->storage_scope == "global" &&
+            ptr->element_type.as<PrimTypeNode>()) {
+          info.arg_types.push_back(DataType::Handle(64));
+          continue;
+        }
       }
       DataType dtype = f->params[i].dtype();
       // Device runtime cannot directly take bool arguments, map to int32.

@@ -2208,7 +2208,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       ss << "tl::tma_load(";
     }
     auto desc = op->args[0];
-    ss << this->PrintExpr(desc) << ", ";
+    ss << ([&](const PrimExpr &e) { auto v=e.as<VarNode>(); \
+     if(v){auto p=v->type_annotation.as<PointerTypeNode>(); \
+     if(p&&p->storage_scope!="grid_constant"&&p->element_type.as<PrimTypeNode>())return"*"+this->PrintExpr(e);} \
+     return this->PrintExpr(e); })(desc) << ", ";
     ss << this->PrintExpr(op->args[1]) << ", ";
     for (size_t i = 2; i < op->args.size() - 1; i++) {
       if (i > 2)
@@ -2230,7 +2233,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::tma_store())) {
-    std::stringstream ss;
     auto need_reduce = op->args[op->args.size() - 2].as<IntImmNode>()->value;
     if (need_reduce) {
       print_extern_call_stmt("tl::tma_store_add", 0, 2);
@@ -2239,12 +2241,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto eviction_policy =
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    std::ostringstream ss;
     if (eviction_policy != "EVICT_NORMAL") {
-      ss << "tl::tma_store<tl::CacheHintSm90::" << eviction_policy << ">";
+      ss << "tl::tma_store<tl::CacheHintSm90::" << eviction_policy << ">(";
     } else {
-      ss << "tl::tma_store";
+      ss << "tl::tma_store(";
     }
-    print_extern_call_stmt(ss.str(), 0, 2);
+    ss << ([&](const PrimExpr &e) { auto v=e.as<VarNode>(); \
+     if(v){auto p=v->type_annotation.as<PointerTypeNode>(); \
+     if(p&&p->storage_scope!="grid_constant"&&p->element_type.as<PrimTypeNode>())return"*"+this->PrintExpr(e);} \
+     return this->PrintExpr(e); })(op->args[0]) << ", ";
+    ss << this->PrintExpr(op->args[1]);
+    for (size_t i = 2; i < op->args.size() - 2; i++) {
+      ss << ", " << this->PrintExpr(op->args[i]);
+    }
+    ss << ");\n";
+    this->PrintIndent();
+    this->stream << ss.str();
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
@@ -2262,7 +2275,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
   } else if (op->op.same_as(tl::tensormap_copy_to_smem())) {
-    print_extern_call_stmt("tl::tensormap_copy_to_smem");
+    this->PrintIndent();
+    this->stream << "tl::tensormap_copy_to_smem("
+                 << this->PrintExpr(op->args[0]) << ", "
+                 << ([&](const PrimExpr &e) { auto v=e.as<VarNode>(); \
+     if(v){auto p=v->type_annotation.as<PointerTypeNode>(); \
+     if(p&&p->storage_scope!="grid_constant"&&p->element_type.as<PrimTypeNode>())return"*"+this->PrintExpr(e);} \
+     return this->PrintExpr(e); })(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::tensormap_replace_box_dim())) {
     int dim_idx = Downcast<IntImm>(op->args[1])->value;
     this->PrintIndent();
@@ -2270,9 +2289,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << this->PrintExpr(op->args[0]) << ", "
                  << this->PrintExpr(op->args[2]) << ");\n";
   } else if (op->op.same_as(tl::tensormap_cp_fence_release())) {
-    print_extern_call_stmt("tl::tensormap_cp_fence_release");
+    this->PrintIndent();
+    this->stream << "tl::tensormap_cp_fence_release("
+                 << ([&](const PrimExpr &e) { auto v=e.as<VarNode>(); \
+     if(v){auto p=v->type_annotation.as<PointerTypeNode>(); \
+     if(p&&p->storage_scope!="grid_constant"&&p->element_type.as<PrimTypeNode>())return"*"+this->PrintExpr(e);} \
+     return this->PrintExpr(e); })(op->args[0]) << ", "
+                 << this->PrintExpr(op->args[1]) << ");\n";
   } else if (op->op.same_as(tl::tensormap_fence_acquire())) {
-    print_extern_call_stmt("tl::tensormap_fence_acquire");
+    this->PrintIndent();
+    this->stream << "tl::tensormap_fence_acquire("
+                 << ([&](const PrimExpr &e) { auto v=e.as<VarNode>(); \
+     if(v){auto p=v->type_annotation.as<PointerTypeNode>(); \
+     if(p&&p->storage_scope!="grid_constant"&&p->element_type.as<PrimTypeNode>())return"*"+this->PrintExpr(e);} \
+     return this->PrintExpr(e); })(op->args[0]) << ");\n";
+  } else if (op->op.same_as(tl::tma_desc_slot())) {
+    // Emit as: workspace_ptr[0]
+    // FIXME: use tl::smid() for multi-block kernels
+    os << this->PrintExpr(op->args[0]) << "[0]";
   } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl::tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
@@ -4838,6 +4872,14 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
           os << ' ' << vid;
           continue;
         }
+        // Mutable TMA descriptors: global scope, CUtensorMap element type.
+        // Emitted as CUtensorMap* (writable GMEM pointer) instead of
+        // __grid_constant__ const CUtensorMap.
+        if (ptr->storage_scope == "global" &&
+            ptr->element_type.as<PrimTypeNode>()) {
+          os << "CUtensorMap *" << vid;
+          continue;
+        }
       }
 
       auto it = alloc_storage_scope_.find(v.get());
@@ -4946,6 +4988,11 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           stream << "__grid_constant__ const ";
           CodeGenC::PrintType(ptr->element_type, stream);
           stream << ' ' << vid;
+          continue;
+        }
+        if (ptr->storage_scope == "global" &&
+            ptr->element_type.as<PrimTypeNode>()) {
+          stream << "CUtensorMap *" << vid;
           continue;
         }
       }

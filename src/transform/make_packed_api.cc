@@ -529,6 +529,9 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     arg_buffer_declarations.push_back(DeclBuffer(buffer, nop));
   }
 
+  // Save mutable TMA descriptor count before WithAttrs replaces it.
+  auto mutable_tma_count = func->GetAttr<Integer>("mutable_tma_descriptor_count");
+
   // reset global symbol to attach prefix
   func = WithAttrs(
       std::move(func),
@@ -536,6 +539,12 @@ PrimFunc MakePackedAPI(PrimFunc func) {
        {tvm::attr::kTarget, target_host},
        {tvm::attr::kGlobalSymbol,
         ffi::symbol::tvm_ffi_symbol_prefix + global_symbol.value()}});
+
+  // Re-attach mutable TMA count that WithAttrs stripped.
+  if (mutable_tma_count.defined()) {
+    func = WithAttr(std::move(func), "mutable_tma_descriptor_count",
+                    mutable_tma_count.value());
+  }
 
   Stmt body = ReturnRewriter(v_result)(func_ptr->body);
   body = AttrStmt(make_zero(DataType::Int(32)), tir::attr::compute_scope,

@@ -411,20 +411,34 @@ TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {
   asm volatile("prefetch.tensormap [%0];" : : "l"(gmem_int_desc) : "memory");
 }
 
+/*! \brief Read the SM (streaming multiprocessor) ID via PTX %smid. */
+TL_DEVICE unsigned smid() {
+  unsigned id;
+  asm volatile("mov.u32 %0, %%smid;" : "=r"(id));
+  return id;
+}
+
+/* Utility functions for tensormap, requires CUDA >= 12.3 */
+
 #if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 3)
 
 TL_DEVICE void tensormap_copy_to_smem(void *smem_desc,
                                       const CUtensorMap &gmem_desc) {
+  // Copy the full 128-byte descriptor (sizeof CUtensorMap = 128).
+  // uint4 is 16 bytes, so we need 8 copies.
   uint4 *dst = reinterpret_cast<uint4 *>(smem_desc);
   const uint4 *src = reinterpret_cast<const uint4 *>(&gmem_desc);
-  dst[0] = src[0];
-  dst[1] = src[1];
+  #pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    dst[i] = src[i];
+  }
 }
 
 template <int32_t DimIdx>
 TL_DEVICE void tensormap_replace_box_dim(void *smem_desc,
                                          int32_t new_box_dim) {
+  static_assert(DimIdx >= 0 && DimIdx < 5, "Invalid dimension index");
   uint32_t smem_int_desc = smem_ptr_to_uint(smem_desc);
   if constexpr (DimIdx == 0) {
     asm volatile(

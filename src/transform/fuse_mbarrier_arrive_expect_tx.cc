@@ -102,6 +102,17 @@ private:
       return true;
     }
 
+    // tensormap_replace machinery: these are descriptor-manipulation PTX
+    // intrinsics that don't perform async memory transfers and don't interact
+    // with the mbarrier. Treat them as transparent so that the expect_tx /
+    // arrive pair can be fused into arrive_and_expect_tx.
+    if (call.value()->op.same_as(tl::tensormap_copy_to_smem()) ||
+        call.value()->op.same_as(tl::tensormap_replace_box_dim()) ||
+        call.value()->op.same_as(tl::tensormap_cp_fence_release()) ||
+        call.value()->op.same_as(tl::tensormap_fence_acquire())) {
+      return true;
+    }
+
     if (call.value()->op.same_as(builtin::tvm_storage_sync())) {
       if (call.value()->args.size() == 1) {
         if (const auto *scope = call.value()->args[0].as<StringImmNode>()) {

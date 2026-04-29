@@ -646,6 +646,12 @@ TIR_DEFINE_TL_BUILTIN(tensormap_fence_acquire)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// tma_desc_slot(workspace_ptr, sm_idx)
+TIR_DEFINE_TL_BUILTIN(tma_desc_slot)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(warp_reduce_max)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",

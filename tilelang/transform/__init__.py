@@ -132,6 +132,20 @@ def LowerHopperIntrin():
     return _ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f  # type: ignore
 
 
+def DetectMutableDescriptors():
+    """DetectMutableDescriptors
+
+    Detects TMA descriptors that are mutated via tensormap.replace +
+    cp_fence_release.  Runs before LowerHopperIntrin.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.DetectMutableDescriptors() if hasattr(_ffi_api, "DetectMutableDescriptors") else lambda f: f  # type: ignore
+
+
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 

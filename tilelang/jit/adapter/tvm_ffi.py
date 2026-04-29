@@ -210,6 +210,21 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             ins_idx: int = 0
             tensor_list: list[torch.Tensor] = []
 
+            # Count workspace pointers from CUDA kernel source.
+            # Match "CUtensorMap *name" where name contains "workspace".
+            workspace_tensors = []
+            import re
+            ws_names = set()
+            for m in re.finditer(r'CUtensorMap\s+\*\s*(\w+)',
+                                 self.device_kernel_source):
+                if 'workspace' in m.group(1):
+                    ws_names.add(m.group(1))
+            if ws_names:
+                for _ in ws_names:
+                    workspace_tensors.append(
+                        torch.empty(128, dtype=torch.uint8, device='cuda')
+                    )
+
             # Prepare input and output tensors
             for i in range(len(self.params)):
                 if i in self.result_idx:
@@ -245,6 +260,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
+            tensor_list.extend(workspace_tensors)
             executable(*tensor_list)
 
             # Return outputs in the requested form

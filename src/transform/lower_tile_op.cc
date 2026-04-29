@@ -227,6 +227,17 @@ public:
     // later phases (OptimizeForTarget) can choose the right pass pipeline
     // without relying on pass-context side-channel mutation.
     f = WithAttr(std::move(f), kHasTMA, Bool(substituter.has_tma_));
+
+    // Record mutable TMA workspace var names for host-side allocation.
+    if (!substituter.mutable_workspace_vars_.empty()) {
+      Array<StringImm> ws_names;
+      for (const auto &v : substituter.mutable_workspace_vars_) {
+        ws_names.push_back(StringImm(v->name_hint));
+      }
+      f = WithAttr(std::move(f), "mutable_tma_workspace_names", ws_names);
+      f = WithAttr(std::move(f), "mutable_tma_descriptor_count",
+                   Integer(static_cast<int>(ws_names.size())));
+    }
     fptr = f.CopyOnWrite();
 
     // If any TMA copies allocated mbarriers, inject the barrier buffer
@@ -1068,9 +1079,22 @@ private:
       return id;
     };
 
+    AllocMutableTmaWorkspaceCallback mutable_ws_callback =
+        [this](const String &desc_name) -> PrimExpr {
+      auto it = mutable_workspace_map_.find(desc_name);
+      if (it != mutable_workspace_map_.end()) {
+        return (*it).second;
+      }
+      Var ws_ptr("tma_workspace_" + desc_name, DataType::Handle());
+      mutable_workspace_map_.Set(desc_name, ws_ptr);
+      mutable_workspace_vars_.push_back(ws_ptr);
+      return ws_ptr;
+    };
+
     auto lowered =
         tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_->var,
-                                 callback, mbarrier_callback, layout_map_,
+                                 callback, mbarrier_callback,
+                                 mutable_ws_callback, layout_map_,
                                  buffer_remap_, let_var_to_expr,
                                  loop_mbar_phase_stack_.empty()
                                      ? PrimExpr(IntImm(DataType::Int(32), 0))
@@ -1362,6 +1386,11 @@ private:
   // barrier_init annotation into the root block after all tile ops are lowered.
   int mbarrier_count_{0};
   std::vector<int> mbarrier_arrive_counts_;
+  // Counter and name->Var map for per-block mutable TMA descriptor workspace
+  // pointers, created by the AllocMutableTmaWorkspace callback and later
+  // converted to CUtensorMap * kernel params by LowerHopperIntrin.
+  std::vector<Var> mutable_workspace_vars_;
+  Map<String, Var> mutable_workspace_map_;
   // The shared.barrier scope buffer created lazily by AllocMBarrier callback.
   Optional<Buffer> mbarrier_buffer_;
   // Fallback mbarrier parity derived from the nearest enclosing serial loop.

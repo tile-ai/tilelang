@@ -1127,6 +1127,15 @@ TVM_DLL const Op &tensormap_cp_fence_release();
 TVM_DLL const Op &tensormap_fence_acquire();
 
 /*!
+ * \brief Access a per-block GMEM TMA descriptor slot.
+ *
+ * tma_desc_slot(workspace_ptr, sm_idx)
+ *
+ * codegen emits: workspace_ptr[sm_idx]
+ */
+TVM_DLL const Op &tma_desc_slot();
+
+/*!
  * \brief tilelang intrinsic for warp reduction max.
  */
 TVM_DLL const Op &warp_reduce_max();

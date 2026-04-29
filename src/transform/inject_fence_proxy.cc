@@ -213,6 +213,25 @@ ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   if (IsFenceProxyAsyncCall(call)) {
     return ProxyEvent::kNeutral;
   }
+
+  // tensormap_replace machinery: these ops manipulate TMA descriptors through
+  // opaque PTX intrinsics.  Although their arguments may contain SMEM pointers,
+  // the SMEM accesses are inside leader-gated blocks and do not interact with
+  // the async/generic proxy that IsAsyncIntrinsic / CallMayWriteSharedMemory
+  // track.  Return kNone to avoid injecting a spurious fence.proxy.async
+  // before the subsequent TMA load/store.
+  if (call->op.same_as(tensormap_copy_to_smem()) ||
+      call->op.same_as(tensormap_replace_box_dim()) ||
+      call->op.same_as(tensormap_cp_fence_release())) {
+    return ProxyEvent::kNone;
+  }
+  // tensormap_fence_acquire is an acquire fence on the TMA generic proxy;
+  // treat it as a proxy-state reset (kNeutral) so the proxy state machine
+  // does not accumulate stale generic state.
+  if (call->op.same_as(tensormap_fence_acquire())) {
+    return ProxyEvent::kNeutral;
+  }
+
   if (IsAsyncIntrinsic(call)) {
     return ProxyEvent::kAsync;
   }

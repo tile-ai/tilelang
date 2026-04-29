@@ -1719,11 +1719,19 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   // Bind descriptor to a variable so multiple references share the same object
   Var desc_handle("tma_desc", DataType::Handle());
 
-  // When dynamic box dims exist, allocate SMEM workspace for the descriptor
-  // copy (128 bytes, 128B-aligned) so tensormap.replace can modify it there.
+  // When dynamic box dims exist, allocate:
+  // 1) SMEM workspace for the descriptor copy (128 bytes, 128B-aligned)
+  //    so tensormap.replace can modify it there.
+  // 2) Per-block GMEM mutable descriptor workspace (via host-side allocation,
+  //    passed as CUtensorMap* kernel param).
   PrimExpr smem_desc_ptr;
+  PrimExpr mutable_handle;
   if (!dynamic_box_dims.empty()) {
     smem_desc_ptr = T.AddWorkspace(128, DataType::UInt(8));
+    PrimExpr mutable_ws = T.AllocMutableTmaWorkspace(
+        global_tensor->name + "_mutable");
+    mutable_handle = Call(DataType::Handle(), tma_desc_slot(),
+                          {mutable_ws, IntImm(DataType::Int(32), 0)});
   }
 
   // For TMA loads, allocate mbarrier(s) for synchronous semantics.
@@ -1756,7 +1764,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   Array<PrimExpr> args;
   args.reserve(desc.rank + 4);
-  args.push_back(desc_handle);
+  args.push_back(mutable_handle.defined() ? mutable_handle : desc_handle);
   if (is_load)
     args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
   auto op = is_load ? tma_load() : tma_store();
@@ -1806,34 +1814,44 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     tma_copy = Evaluate(Call(DataType::Handle(), op, args, ann));
   }
 
-  // When dynamic box dims exist, prepend the tensormap.replace + fence
-  // sequence to modify the descriptor at runtime before the TMA operation.
-  // Sequence: copy GMEM→SMEM, replace box_dim(s), cp_fence_release,
-  // fence_acquire.
+  // When dynamic box dims exist, build a two-part sequence:
+  //   Leader:  copy_to_smem + replace_box_dim (modify SMEM)
+  //   __syncthreads
+  //   All:     cp_fence_release + fence_acquire (publish to GMEM workspace)
+  //   Leader:  tma_load / tma_store (use workspace descriptor)
+  //
+  // The fence ops must run on ALL threads (CUTLASS requirement for
+  // tensormap.cp_fenceproxy with CTA sharing).
+  Stmt leader_smem_seq;
+  Array<Stmt> fence_stmts;
   if (!dynamic_box_dims.empty()) {
-    Array<Stmt> replace_prefix;
-    // 1) Copy GMEM descriptor to SMEM workspace (128 bytes)
-    replace_prefix.push_back(Evaluate(Call(
+    // Part 1: Leader modifies SMEM descriptor
+    Array<Stmt> smem_stmts;
+    smem_stmts.push_back(Evaluate(Call(
         DataType::Handle(), tensormap_copy_to_smem(),
         {smem_desc_ptr, desc_handle})));
-    // 2) Replace each dynamic box dim in the SMEM copy
     for (const auto &kv : dynamic_box_dims) {
-      replace_prefix.push_back(Evaluate(Call(
+      smem_stmts.push_back(Evaluate(Call(
           DataType::Handle(), tensormap_replace_box_dim(),
           {smem_desc_ptr, Integer(static_cast<int>(kv.first)),
            kv.second})));
     }
-    // 3) Fence release: copy modified SMEM descriptor back to GMEM
-    replace_prefix.push_back(Evaluate(Call(
+    leader_smem_seq = SeqStmt(smem_stmts);
+
+    // Part 2: All threads get SMEM fence + copy descriptor to workspace
+    fence_stmts.push_back(Evaluate(Call(
+        DataType::Int(32), builtin::tvm_storage_sync(),
+        {StringImm("shared")})));
+    fence_stmts.push_back(Evaluate(Call(
         DataType::Handle(), tensormap_cp_fence_release(),
-        {desc_handle, smem_desc_ptr})));
-    // 4) Fence acquire on the GMEM descriptor
-    replace_prefix.push_back(Evaluate(Call(
-        DataType::Handle(), tensormap_fence_acquire(), {desc_handle})));
-    // 5) Prefix the TMA operation with the replace+fence sequence
-    replace_prefix.push_back(tma_copy);
-    tma_copy = SeqStmt(replace_prefix);
+        {mutable_handle, smem_desc_ptr})));
+    fence_stmts.push_back(Evaluate(Call(
+        DataType::Handle(), tensormap_fence_acquire(), {mutable_handle})));
+
+    // Part 3: Leader uses workspace descriptor for TMA op
+    // (tma_copy already contains the tma_load/tma_store call)
   }
+
 
   // Bulk TMA stores participate in the cp.async.bulk group mechanism, so we
   // must commit and wait to ensure completion before the store buffer is
@@ -1920,34 +1938,61 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
           DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
     }
 
-    Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy};
-    if (barrier_after_tma_stmt.defined()) {
-      producer_seq.push_back(barrier_after_tma_stmt.value());
+    auto LeaderGate = [&](const Stmt &s) {
+      return IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), s);
+    };
+
+    Stmt tma_load_block;
+    if (!fence_stmts.empty()) {
+      // Dynamic extents: split into leader(smem) + all(fence) + leader(tma)
+      Array<Stmt> tma_seq{barrier_before_tma_stmt, tma_copy};
+      if (barrier_after_tma_stmt.defined())
+        tma_seq.push_back(barrier_after_tma_stmt.value());
+      Stmt tma_gated = LeaderGate(SeqStmt(tma_seq));
+
+      Array<Stmt> full_seq;
+      full_seq.push_back(LeaderGate(leader_smem_seq));
+      for (const auto &s : fence_stmts)
+        full_seq.push_back(s);
+      full_seq.push_back(tma_gated);
+      tma_load_block = SeqStmt(full_seq);
+    } else {
+      Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy};
+      if (barrier_after_tma_stmt.defined())
+        producer_seq.push_back(barrier_after_tma_stmt.value());
+      tma_load_block = LeaderGate(SeqStmt(producer_seq));
     }
 
-    // Thread-gated block: expect_tx + tma_load (+ optional arrive)
-    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                               SeqStmt(producer_seq));
-
-    // tma_copy (from T.tma_copy()) is fire-and-forget: only emit the
-    // producer (expect_tx + tma_load). The user manages synchronization
-    // (arrive + wait) explicitly.
     if (GetIsTmaCopy()) {
-      return LetStmt(desc_handle, create_descriptor, producer);
+      return LetStmt(desc_handle, create_descriptor, tma_load_block);
     }
 
-    // For T.copy() with TMA: emit producer + wait pair so the pipeline/WS
-    // passes can split them into different stages.
     Stmt wait_stmt =
         Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
                       {mbar_handle, GetCopyMbarPhaseExpr(annotations, T)}));
 
     return LetStmt(desc_handle, create_descriptor,
-                   SeqStmt({producer, wait_stmt}));
+                   SeqStmt({tma_load_block, wait_stmt}));
   }
 
-  tma_copy =
-      IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
+  // Leader gate for SMEM ops and TMA ops (separated by all-threads fence).
+  auto LeaderGate = [&](const Stmt &s) {
+    return IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), s);
+  };
+
+  if (!fence_stmts.empty()) {
+    Array<Stmt> full_seq;
+    // Part 1: Leader modifies SMEM descriptor
+    full_seq.push_back(LeaderGate(leader_smem_seq));
+    // Part 2: All threads: __syncthreads + cp_fence_release + fence_acquire
+    for (const auto &s : fence_stmts)
+      full_seq.push_back(s);
+    // Part 3: Leader uses workspace descriptor for TMA op
+    full_seq.push_back(LeaderGate(tma_copy));
+    tma_copy = SeqStmt(full_seq);
+  } else {
+    tma_copy = LeaderGate(tma_copy);
+  }
 
   return LetStmt(desc_handle, create_descriptor, tma_copy);
 }
