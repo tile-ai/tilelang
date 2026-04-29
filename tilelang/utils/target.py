@@ -23,6 +23,66 @@ SUPPORTED_TARGETS: dict[str, str] = {
     "cutedsl": "CuTe DSL GPU target.",
 }
 
+ROCM_MTRIPLE = "amdgcn-amd-amdhsa-hcc"
+
+
+def normalize_rocm_arch(arch: str | None) -> str | None:
+    if arch is None:
+        return None
+    normalized = str(arch).strip().split(":", maxsplit=1)[0]
+    return normalized if normalized.startswith("gfx") else None
+
+
+def target_get_mcpu(target: str | Target | None) -> str | None:
+    if target is None:
+        return None
+    if isinstance(target, str):
+        target = Target(target)
+    return normalize_rocm_arch(target.attrs.get("mcpu"))
+
+
+def rocm_warp_size_for_arch(arch: str | None) -> int | None:
+    if arch is None:
+        return None
+    if arch.startswith("gfx9"):
+        return 64
+    if arch.startswith("gfx"):
+        return 32
+    return None
+
+
+def with_rocm_target_attrs(target: Target) -> Target:
+    if target.kind.name != "hip":
+        return target
+    arch = target_get_mcpu(target)
+    if arch is None:
+        return target
+
+    target_dict = dict(target.export())
+    target_dict.setdefault("mtriple", ROCM_MTRIPLE)
+    target_dict["thread_warp_size"] = rocm_warp_size_for_arch(arch)
+    return Target(target_dict)
+
+
+def _detect_torch_rocm_arch() -> str | None:
+    if not torch.cuda.is_available():
+        return None
+    props = torch.cuda.get_device_properties(0)
+    return normalize_rocm_arch(getattr(props, "gcnArchName", None))
+
+
+def _rocm_target_from_arch(arch: str | None) -> Target | str:
+    if arch is None:
+        return "hip"
+    return Target(
+        {
+            "kind": "hip",
+            "mcpu": arch,
+            "mtriple": ROCM_MTRIPLE,
+            "thread_warp_size": rocm_warp_size_for_arch(arch),
+        }
+    )
+
 
 def describe_supported_targets() -> dict[str, str]:
     """
@@ -140,23 +200,29 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
     if target == "auto":
         target = tvm.target.Target.current(allow_none=True)
         if target is not None:
-            return target
-        # Check for CUDA and HIP availability
-        is_cuda_available = check_cuda_availability()
-        is_hip_available = check_hip_availability()
-
-        # Determine the target based on availability
-        if is_cuda_available:
-            if torch.cuda.is_available() and (cap := torch.cuda.get_device_capability(0)):
-                return_var = Target({"kind": "cuda", "arch": f"sm_{nvcc.get_target_arch(cap)}"})
-            else:
-                return_var = "cuda"
-        elif is_hip_available:
-            return_var = "hip"
-        elif check_metal_availability():
-            return_var = "metal"
+            return with_rocm_target_attrs(target)
+        # ROCm PyTorch exposes devices through torch.cuda. If CUDA tooling is
+        # also present, prefer HIP so APUs such as gfx1151 are not misread as
+        # CUDA architectures like sm_115a.
+        if torch.version.hip is not None and check_hip_availability():
+            return_var = _rocm_target_from_arch(_detect_torch_rocm_arch())
         else:
-            raise ValueError("No CUDA or HIP or MPS available on this system.")
+            # Check for CUDA and HIP availability
+            is_cuda_available = check_cuda_availability()
+            is_hip_available = check_hip_availability()
+
+            # Determine the target based on availability
+            if is_cuda_available:
+                if torch.cuda.is_available() and (cap := torch.cuda.get_device_capability(0)):
+                    return_var = Target({"kind": "cuda", "arch": f"sm_{nvcc.get_target_arch(cap)}"})
+                else:
+                    return_var = "cuda"
+            elif is_hip_available:
+                return_var = _rocm_target_from_arch(_detect_torch_rocm_arch())
+            elif check_metal_availability():
+                return_var = "metal"
+            else:
+                raise ValueError("No CUDA or HIP or MPS available on this system.")
 
     else:
         possible_cutedsl_target = normalize_cutedsl_target(target)
@@ -172,20 +238,23 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
         else:
             # Validate the target if it's not "auto"
             if isinstance(target, Target):
-                return_var = target
+                return_var = with_rocm_target_attrs(target)
             elif isinstance(target, str):
                 normalized_target = target.strip()
                 if not normalized_target:
                     raise AssertionError(f"Target {target} is not supported")
                 try:
-                    Target(normalized_target)
+                    parsed_target = Target(normalized_target)
                 except Exception as err:
                     examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
                     raise AssertionError(
                         f"Target {target} is not supported. Supported targets include: {examples}. "
                         "Pass additional options after the base name, e.g. `cuda -arch=sm_80`."
                     ) from err
-                return_var = normalized_target
+                if parsed_target.kind.name == "hip" and target_get_mcpu(parsed_target) is not None:
+                    return_var = with_rocm_target_attrs(parsed_target)
+                else:
+                    return_var = normalized_target
             else:
                 raise AssertionError(f"Target {target} is not supported")
 
@@ -234,6 +303,10 @@ def target_is_cdna(target: Target) -> bool:
     return _ffi_api.TargetIsCDNA(target)
 
 
+def target_is_rdna(target: Target) -> bool:
+    return _ffi_api.TargetIsRDNA(target)
+
+
 def target_is_gfx950(target: Target) -> bool:
     return _ffi_api.TargetIsGfx950(target)
 
@@ -256,3 +329,7 @@ def target_has_bulk_copy(target: Target) -> bool:
 
 def target_get_warp_size(target: Target) -> int:
     return _ffi_api.TargetGetWarpSize(target)
+
+
+def target_get_rdna_generation(target: Target) -> int:
+    return _ffi_api.TargetGetRDNAGeneration(target)

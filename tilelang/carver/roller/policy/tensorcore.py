@@ -212,6 +212,13 @@ class TensorCorePolicy(DefaultPolicy):
                     return False
         return super().check_tile_shape_isvalid(td)
 
+    def score_block_size(self, n):
+        base_score = super().score_block_size(n)
+        if getattr(self.arch, "platform", None) == "RDNA":
+            warps = (n + self.arch.warp_size - 1) // self.arch.warp_size
+            return (0 if warps == 8 else 1, abs(warps - 8), *base_score)
+        return base_score
+
     def _can_implement_layout(self, node: PrimFuncNode, td: TileDict):
         # Not implemented yet
         # This function is used to check whether we can implement swizzling
@@ -255,6 +262,8 @@ class TensorCorePolicy(DefaultPolicy):
         space = [tile[i] // wmma_tile[i] for i in range(ndim)]
         if tile[ax_m] < wmma_tile[ax_m] or tile[ax_n] < wmma_tile[ax_n]:
             # allow pad, otherwise, we can not get a valid tile shape
+            return None
+        if np.prod(space) < warps:
             return None
 
         factors = factorize(np.prod(space) // warps)

@@ -16,6 +16,17 @@ from tvm.base import py_str
 from tvm.contrib.rocm import get_rocm_arch, find_rocm_path
 
 
+def _target_mcpu(target):
+    try:
+        mcpu = target.attrs.get("mcpu")
+    except AttributeError:
+        return None
+    if mcpu is None:
+        return None
+    arch = str(mcpu).strip().split(":", maxsplit=1)[0]
+    return arch if arch.startswith("gfx") else None
+
+
 def compile_hip(code, target_format="hsaco", arch=None, options=None, path_target=None, verbose=False):
     """Compile HIP code with hipcc.
 
@@ -94,5 +105,5 @@ def compile_hip(code, target_format="hsaco", arch=None, options=None, path_targe
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
     """use hipcc to generate fatbin code for better optimization"""
-    hsaco = compile_hip(code, target_format="hsaco")
+    hsaco = compile_hip(code, target_format="hsaco", arch=_target_mcpu(target))
     return hsaco

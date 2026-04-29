@@ -15,7 +15,7 @@ from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TIL
 from tilelang.transform import PassConfigKey
 from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.utils.target import determine_target
+from tilelang.utils.target import determine_target, target_get_mcpu
 from tilelang.engine.phase import (
     PreLowerSemanticCheck,
     LowerAndLegalize,
@@ -160,9 +160,11 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
+    arch = target_get_mcpu(target)
     hsaco = hipcc.compile_hip(
         code,
         target_format="hsaco",
+        arch=arch,
         options=[
             "-std=c++17",
             "-I" + TILELANG_TEMPLATE_PATH,
