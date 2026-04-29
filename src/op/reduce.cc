@@ -85,56 +85,54 @@ TileOperator CumSumOpNode::Clone() const {
   return CumSumOp(op);
 }
 
-PrimExpr ReduceOpNode::MakeInitValue() const {
+PrimExpr ReduceOpNode::MakeInitValue(int vsize) const {
   auto dst_dtype = dst->dtype;
   auto is_int = dst_dtype.is_int();
   bool is_uint = dst_dtype.is_uint();
   auto bits = dst_dtype.bits();
 
-  if (type->isSum()) {
-    return make_zero(dst->dtype);
-  } else if (type->isAbsSum()) {
-    return make_zero(dst->dtype);
+  PrimExpr scalar;
+  if (type->isSum() || type->isAbsSum()) {
+    scalar = make_zero(dst->dtype);
   } else if (type->isMax()) {
-    if (is_int) {
-      return make_const(dst->dtype, -(1 << (bits - 1)));
-    } else if (is_uint) {
-      return make_const(dst->dtype, 0);
-    } else {
-      return make_const(dst->dtype, -INFINITY);
-    }
+    if (is_int)
+      scalar = make_const(dst->dtype, -(1 << (bits - 1)));
+    else if (is_uint)
+      scalar = make_const(dst->dtype, 0);
+    else
+      scalar = make_const(dst->dtype, -INFINITY);
   } else if (type->isMin()) {
-    if (is_int) {
-      return make_const(dst->dtype, (1 << (bits - 1)) - 1);
-    } else if (is_uint) {
-      return make_const(dst->dtype, (1 << bits) - 1);
-    } else {
-      return make_const(dst->dtype, INFINITY);
-    }
+    if (is_int)
+      scalar = make_const(dst->dtype, (1 << (bits - 1)) - 1);
+    else if (is_uint)
+      scalar = make_const(dst->dtype, (1 << bits) - 1);
+    else
+      scalar = make_const(dst->dtype, INFINITY);
   } else if (type->isAbsMax()) {
-    return make_const(dst->dtype, 0);
+    scalar = make_const(dst->dtype, 0);
   } else if (type->isBitAnd()) {
-    if (is_int) {
-      return make_const(dst->dtype, -1);
-    } else if (is_uint) {
-      return make_const(dst->dtype, (1 << bits) - 1);
-    } else {
-      // Should not arrive here
-      return make_const(dst->dtype, -INFINITY);
-    }
-  } else if (type->isBitOr()) {
-    return make_zero(dst->dtype);
-  } else if (type->isBitXor()) {
-    return make_zero(dst->dtype);
+    if (is_int)
+      scalar = make_const(dst->dtype, -1);
+    else if (is_uint)
+      scalar = make_const(dst->dtype, (1 << bits) - 1);
+    else
+      scalar = make_const(dst->dtype, -INFINITY);
+  } else if (type->isBitOr() || type->isBitXor()) {
+    scalar = make_zero(dst->dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
-    return PrimExpr();
+    scalar = PrimExpr();
   }
+
+  if (vsize <= 1)
+    return scalar;
+  return Broadcast(scalar, vsize);
 }
 
-PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc, const PrimExpr &b,
-                                  int pack_lanes) const {
-  if (pack_lanes == 1) {
+std::optional<PrimExpr> ReduceOpNode::MakeReduce(int vsize, const PrimExpr &acc,
+                                                 const PrimExpr &b) const {
+  if (vsize == 1) {
+
     PrimExpr rhs = b;
     if (acc->dtype != rhs->dtype) {
       rhs = Cast(acc->dtype, rhs);
@@ -146,19 +144,16 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc, const PrimExpr &b,
     } else if (type->isAbsSum()) {
       return acc + Max(rhs, -rhs);
     } else if (type->isMax()) {
-      if (use_nan_op) {
+      if (use_nan_op)
         return Call(acc.dtype(), tl::max_nan(), {acc, rhs});
-      }
       return Max(acc, rhs);
     } else if (type->isMin()) {
-      if (use_nan_op) {
+      if (use_nan_op)
         return Call(acc.dtype(), tl::min_nan(), {acc, rhs});
-      }
       return Min(acc, rhs);
     } else if (type->isAbsMax()) {
-      if (use_nan_op) {
+      if (use_nan_op)
         return Call(acc.dtype(), tl::max_nan(), {acc, tvm::abs(rhs)});
-      }
       return Max(acc, tvm::abs(rhs));
     } else if (type->isBitAnd()) {
       return acc & rhs;
@@ -166,10 +161,13 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc, const PrimExpr &b,
       return acc | rhs;
     } else if (type->isBitXor()) {
       return acc ^ rhs;
-    } else {
-      LOG(FATAL) << "Unsupported reduce type: " << type->type;
     }
+    LOG(FATAL) << "Unsupported reduce type: " << type->type;
+    return std::nullopt;
   }
+
+  if (vsize != 2)
+    return std::nullopt;
 
   if (type->isSum() || type->isAbsSum()) {
     return Call(acc.dtype(), tl::add2(), {acc, b});
@@ -180,35 +178,43 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc, const PrimExpr &b,
   } else if (type->isAbsMax()) {
     return Call(acc.dtype(), tl::max2(),
                 {acc, Call(acc.dtype(), tl::abs2(), {b})});
-  } else {
-    LOG(FATAL) << "Unsupported packed reduce type: " << type->type;
-    return PrimExpr();
   }
+  return std::nullopt;
 }
 
-std::string ReduceOpNode::MakeCodegenReducer() const {
+std::optional<std::string> ReduceOpNode::MakeCodegenReducer(int vsize) const {
   const bool use_nan_op =
       nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16());
-  if (type->isSum()) {
-    return "tl::SumOp";
-  } else if (type->isAbsSum()) {
-    return "tl::SumOp";
-  } else if (type->isMax()) {
-    return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-  } else if (type->isMin()) {
-    return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
-  } else if (type->isAbsMax()) {
-    return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-  } else if (type->isBitAnd()) {
-    return "tl::BitAndOp";
-  } else if (type->isBitOr()) {
-    return "tl::BitOrOp";
-  } else if (type->isBitXor()) {
-    return "tl::BitXorOp";
-  } else {
+
+  auto base = [&]() -> std::string {
+    if (type->isSum() || type->isAbsSum())
+      return "tl::SumOp";
+    if (type->isMax())
+      return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
+    if (type->isMin())
+      return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
+    if (type->isAbsMax())
+      return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
+    if (type->isBitAnd())
+      return "tl::BitAndOp";
+    if (type->isBitOr())
+      return "tl::BitOrOp";
+    if (type->isBitXor())
+      return "tl::BitXorOp";
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
     return "";
+  }();
+
+  if (vsize <= 1)
+    return base;
+
+  if (vsize == 2) {
+    if (dst->dtype.is_bfloat16())
+      return base + "_bf16x2";
+    if (dst->dtype.is_float16())
+      return base + "_fp16x2";
   }
+  return std::nullopt;
 }
 
 static Array<PrimExpr> InputPlaceholders(size_t n) {
@@ -282,36 +288,12 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
 
-struct ReducePackConfig {
-  int pack_lanes;
-  DataType vec_dtype;
-};
-
-static std::optional<ReducePackConfig> GetReducePackConfig(DataType dt,
-                                                           Target target) {
+static int GetPreferedVectorizedSize(DataType dt, Target target) {
   if (!TargetIsCuda(target))
-    return std::nullopt;
-  int pack = 0;
-  if (dt.is_bfloat16() || dt.is_float16()) {
-    pack = 2;
-  } else if (dt.is_float() && dt.bits() == 32) {
-    if (TargetHasSMVersionGE(target, 100))
-      pack = 2;
-  }
-  if (pack == 0)
-    return std::nullopt;
-  return ReducePackConfig{pack, dt.with_lanes(pack)};
-}
-
-static std::string
-getBatchReducerSuffix(const std::optional<ReducePackConfig> &cfg) {
-  if (!cfg)
-    return "";
-  if (cfg->vec_dtype.is_bfloat16())
-    return "_bf16x2";
-  if (cfg->vec_dtype.is_float16())
-    return "_fp16x2";
-  return "";
+    return 1;
+  if (dt.is_bfloat16() || dt.is_float16())
+    return 2;
+  return 1;
 }
 
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
@@ -439,14 +421,15 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     bool need_batch_pack_buffer = false;
     Buffer clear_buffer_packed;
     Buffer clear_batch_pack_buffer;
-    if (auto cfg = GetReducePackConfig(clear_buffer->dtype, T.target)) {
-      if (!src_var_compressed.empty() && !nan_propagate) {
+    {
+      int vsize = GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
+      if (vsize > 1 && !src_var_compressed.empty() && !nan_propagate) {
         auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
-        if (ext && ext->value >= cfg->pack_lanes &&
-            ext->value % cfg->pack_lanes == 0) {
+        if (ext && ext->value >= vsize && ext->value % vsize == 0) {
           can_pack = true;
+          DataType vec_dtype = clear_buffer->dtype.with_lanes(vsize);
           clear_buffer_packed =
-              decl_buffer(red_layout->OutputShape(), cfg->vec_dtype,
+              decl_buffer(red_layout->OutputShape(), vec_dtype,
                           clear_buffer->name + "_pack",
                           GetPtrStorageScope(clear_buffer->data));
           need_pack_buffer = true;
@@ -456,16 +439,14 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           if (require_init ||
               (need_duplicate && (this->type->isMax() || this->type->isMin() ||
                                   this->type->isAbsMax()))) {
-            auto init = this->MakeInitValue();
-            local_body.push_back(BufferStore(clear_buffer_packed,
-                                             Broadcast(init, cfg->pack_lanes),
-                                             red_indices));
+            local_body.push_back(BufferStore(
+                clear_buffer_packed, this->MakeInitValue(vsize), red_indices));
           }
 
           const auto *ext_int =
               as_const_int(src_var_compressed.back()->dom->extent);
           int64_t inner_extent = *ext_int;
-          PrimExpr halved_extent = Integer(inner_extent / cfg->pack_lanes);
+          PrimExpr halved_extent = Integer(inner_extent / vsize);
 
           auto &inner_var = src_var_compressed.back();
 
@@ -474,16 +455,18 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                          {{inner_var->var, inner_var->var * Integer(2)}});
           src_indice_compressed.Set(
               src_indice_compressed.size() - 1,
-              Ramp(ramp_base, IntImm(DataType::Int(32), 1), cfg->pack_lanes));
+              Ramp(ramp_base, IntImm(DataType::Int(32), 1), vsize));
 
           auto src_load = BufferLoad(src_buffer, src_indice_compressed);
           auto *src_writer = src_load.CopyOnWrite();
-          src_writer->dtype = cfg->vec_dtype;
+          src_writer->dtype = vec_dtype;
 
           Stmt reduce_local = BufferStore(
               clear_buffer_packed,
-              this->MakeReduce(BufferLoad(clear_buffer_packed, red_indices),
-                               src_load, cfg->pack_lanes),
+              this->MakeReduce(vsize,
+                               BufferLoad(clear_buffer_packed, red_indices),
+                               src_load)
+                  .value(),
               red_indices);
 
           reduce_local =
@@ -504,7 +487,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           auto acc_vec = BufferLoad(clear_buffer_packed, red_indices);
           auto lane0 = Shuffle::ExtractElement(acc_vec, 0);
           auto lane1 = Shuffle::ExtractElement(acc_vec, 1);
-          auto scalar_result = this->MakeReduce(lane0, lane1, /*pack_lanes=*/1);
+          auto scalar_result = this->MakeReduce(1, lane0, lane1).value();
           local_body.push_back(
               BufferStore(clear_buffer, scalar_result, red_indices));
 
@@ -523,8 +506,9 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
       Stmt reduce_local = BufferStore(
           clear_buffer,
-          this->MakeReduce(BufferLoad(clear_buffer, red_indices),
-                           BufferLoad(src_buffer, src_indice_compressed)),
+          this->MakeReduce(1, BufferLoad(clear_buffer, red_indices),
+                           BufferLoad(src_buffer, src_indice_compressed))
+              .value(),
           red_indices);
 
       for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0; --i) {
@@ -631,24 +615,12 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
         // Use run_batch (not run) to avoid overload-resolution ambiguity when
         // a pointer is passed as first argument.
-        auto batch_pack_cfg =
-            GetReducePackConfig(clear_buffer->dtype, T.target);
-        bool can_batch_pack = batch_pack_cfg.has_value() &&
-                              batch >= batch_pack_cfg->pack_lanes &&
-                              batch % batch_pack_cfg->pack_lanes == 0;
-        int eff_batch =
-            can_batch_pack ? (batch / batch_pack_cfg->pack_lanes) : batch;
+        int vsize = GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
+        bool can_batch_pack = vsize > 1 && batch >= vsize && batch % vsize == 0;
+        int eff_batch = can_batch_pack ? (batch / vsize) : batch;
 
-        // Build AllReduce template string using the scalar reducer, then
-        // optionally replace with the packed variant via MakeCodegenReducer.
-        std::string reducer = std::string(this->MakeCodegenReducer());
-        if (can_batch_pack) {
-          std::string suffix = getBatchReducerSuffix(batch_pack_cfg);
-          // Suffix format is e.g. "_bf16x2" and must be appended before the
-          // closing '"' of the reducer name inside the template string.
-          // Store it for interpolation when building the string below.
-          reducer += suffix;
-        }
+        std::string reducer =
+            this->MakeCodegenReducer(can_batch_pack ? vsize : 1).value();
 
         if (TargetHasSMVersionGE(T.target, 90)) {
           auto all_threads = T.thread_bounds->extent;
@@ -669,8 +641,9 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
         // Workspace is only needed for cross-warp reduce (> 32 threads).
         // Allocate once; all chunks share the same workspace buffer.
-        DataType ws_dtype =
-            can_batch_pack ? batch_pack_cfg->vec_dtype : clear_buffer->dtype;
+        DataType ws_dtype = can_batch_pack
+                                ? clear_buffer->dtype.with_lanes(vsize)
+                                : clear_buffer->dtype;
         PrimExpr workspace;
         bool need_workspace = reducing_threads > 32;
         if (need_workspace) {
@@ -696,13 +669,13 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         std::string template_str = ss.str();
 
         if (can_batch_pack) {
-          int K = batch_pack_cfg->pack_lanes;
+          int K = vsize;
           int packed_batch = batch / K;
 
-          Buffer pack_buf =
-              decl_buffer({Integer(packed_batch)}, batch_pack_cfg->vec_dtype,
-                          clear_buffer->name + "_pack",
-                          GetPtrStorageScope(clear_buffer->data));
+          Buffer pack_buf = decl_buffer({Integer(packed_batch)},
+                                        clear_buffer->dtype.with_lanes(K),
+                                        clear_buffer->name + "_pack",
+                                        GetPtrStorageScope(clear_buffer->data));
 
           need_batch_pack_buffer = true;
           clear_batch_pack_buffer = pack_buf;
@@ -874,11 +847,11 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           auto thread_offset = T.thread_bounds->min;
           if (TargetHasSMVersionGE(T.target, 90)) {
             auto all_threads = T.thread_bounds->extent;
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer().value() << ", "
                << reducing_threads << ", " << (*scale) << ", " << thread_offset
                << ", tl::NamedBarrier<" << all_threads << ">>::run";
           } else {
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer().value() << ", "
                << reducing_threads << ", " << (*scale) << ", " << thread_offset
                << ">::run";
           }
