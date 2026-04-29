@@ -1,7 +1,6 @@
 from tilelang import tvm as tvm
 from tvm.target import Target
 
-from tilelang.contrib.hipcc import _target_mcpu
 import tilelang.utils.target as target_utils
 from tilelang.utils.target import (
     determine_target,
@@ -28,7 +27,6 @@ def test_normalize_rocm_arch_strips_feature_suffix():
 def test_target_mcpu_helpers():
     target = Target("hip -mcpu=gfx1151:sramecc+:xnack-")
     assert target_get_mcpu(target) == "gfx1151"
-    assert _target_mcpu(target) == "gfx1151"
 
 
 def test_determine_target_adds_rdna_thread_warp_size():

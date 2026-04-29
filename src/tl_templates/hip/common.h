@@ -147,7 +147,11 @@ TL_DEVICE int tl_dp4a(const int a, const int b, const int c) {
 }
 
 template <typename InDatatype, typename OutDatatype>
-TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
+TL_DEVICE void DP4A(const InDatatype *a, const InDatatype *b, OutDatatype *c) {
+  static_assert(sizeof(InDatatype) == 1,
+                "DP4A expects a pointer to packed int8 lanes");
+  static_assert(sizeof(OutDatatype) == sizeof(int),
+                "DP4A expects 4-byte accumulator/output type");
   int a_int;
   int b_int;
   int c_int;

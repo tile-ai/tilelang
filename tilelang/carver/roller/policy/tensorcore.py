@@ -263,10 +263,11 @@ class TensorCorePolicy(DefaultPolicy):
         if tile[ax_m] < wmma_tile[ax_m] or tile[ax_n] < wmma_tile[ax_n]:
             # allow pad, otherwise, we can not get a valid tile shape
             return None
-        if np.prod(space) < warps:
+        space_prod = int(np.prod(space))
+        if space_prod < warps:
             return None
 
-        factors = factorize(np.prod(space) // warps)
+        factors = factorize(space_prod // warps)
 
         def _score(node, warp_tile):  # small is better
             score = 0
