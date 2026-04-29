@@ -244,9 +244,13 @@ static Fragment ComputeMetalReplicatedReducerLayout(const Fragment &src_layout,
                                                     Range thread_bounds) {
   auto reducer_shape = ComputeReducerShape(src_layout, dim);
   auto forward_index = InputPlaceholders(reducer_shape.size());
+  auto thread_range = src_layout->ThreadRange();
+  if (!thread_range.defined()) {
+    thread_range = thread_bounds;
+  }
   return Fragment(reducer_shape, forward_index, ReplicationPlaceholder(),
-                  thread_bounds->extent, std::nullopt)
-      ->BindThreadRange(thread_bounds);
+                  src_layout->ReplicateExtent(), std::nullopt)
+      ->BindThreadRange(thread_range);
 }
 
 /**
