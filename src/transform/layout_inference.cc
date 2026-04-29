@@ -1284,14 +1284,22 @@ private:
 tvm::transform::Pass LayoutInference() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    ThreadBindingCollector collector;
-    collector(f->body);
-    bool has_thread_binding = !collector.thread_binding_.empty();
-    bool skip_thread_partition = !has_thread_binding;
-    f = LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
-    // Validate parallel loop layout annotations
-    ParallelLoopLayoutValidator::Validate(f->body);
-    return f;
+    auto target = f->GetAttr<Target>(tvm::attr::kTarget);
+    auto run = [&]() {
+      ThreadBindingCollector collector;
+      collector(f->body);
+      bool has_thread_binding = !collector.thread_binding_.empty();
+      bool skip_thread_partition = !has_thread_binding;
+      f = LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+      // Validate parallel loop layout annotations
+      ParallelLoopLayoutValidator::Validate(f->body);
+      return f;
+    };
+    if (target.defined()) {
+      With<Target> target_scope(target.value());
+      return run();
+    }
+    return run();
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }

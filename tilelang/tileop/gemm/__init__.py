@@ -13,6 +13,7 @@ from .gemm_tcgen05 import GemmTCGEN5
 from .gemm_mfma import GemmMFMA
 from .gemm_wmma import GemmWMMA
 from .gemm_scalar import GemmScalar
+from .gemm_metal_scalar import GemmMetalScalar
 from tilelang import _ffi_api
 from tilelang.utils.target import target_is_volta
 
@@ -196,6 +197,8 @@ class Gemm(Node, Scriptable):
         elif gemm_inst.is_wmma():
             return GemmWMMA
         elif gemm_inst.is_scalar():
+            if target.kind.name == "metal":
+                return GemmMetalScalar
             return GemmScalar
         else:
             raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")

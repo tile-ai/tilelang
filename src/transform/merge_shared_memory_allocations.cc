@@ -439,13 +439,20 @@ public:
   explicit SharedMemoryRewriter(
       const std::unordered_map<const VarNode *, const AllocateNode *>
           &shmem_allocs,
-      bool is_dynamic = true, bool verbose = false, int align_bytes = 0)
+      bool is_dynamic = true, bool verbose = false, int align_bytes = 0,
+      bool use_static_scope_for_dynamic = false,
+      bool preserve_single_allocation = false)
       : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
-        align_bytes_{align_bytes} {
-    if (!is_dynamic) {
-      merged_buf_var_ =
-          Var("buf_shmem", PointerType(PrimType(DataType::UInt(8)), "shared"));
-    }
+        align_bytes_{align_bytes},
+        preserve_single_allocation_{preserve_single_allocation} {
+    ICHECK(!preserve_single_allocation_ || shmem_allocs_.size() == 1);
+    std::string scope =
+        is_dynamic && !use_static_scope_for_dynamic ? "shared.dyn" : "shared";
+    std::string name = is_dynamic ? "buf_dyn_shmem" : "buf_shmem";
+    DataType pointer_dtype = preserve_single_allocation_
+                                 ? shmem_allocs_.begin()->second->dtype
+                                 : DataType::UInt(8);
+    merged_buf_var_ = Var(name, PointerType(PrimType(pointer_dtype), scope));
   }
 
   /*!
@@ -501,9 +508,15 @@ private:
       }
 
       allocated_ = true;
-      Allocate new_body(merged_buf_var_, DataType::UInt(8),
-                        {merged_alloc_size_}, const_true(),
-                        StmtExprMutator::VisitStmt(op->body));
+      DataType alloc_dtype = DataType::UInt(8);
+      Array<PrimExpr> alloc_extents = {merged_alloc_size_};
+      if (preserve_single_allocation_) {
+        const auto *alloc = shmem_allocs_.begin()->second;
+        alloc_dtype = alloc->dtype;
+        alloc_extents = alloc->extents;
+      }
+      Allocate new_body(merged_buf_var_, alloc_dtype, alloc_extents,
+                        const_true(), StmtExprMutator::VisitStmt(op->body));
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);
     }
     return StmtMutator::VisitStmt_(op);
@@ -643,7 +656,9 @@ private:
   // Wrapper function to determine if the shared memory allocation for a
   // variable is appropriate.
   bool IsAppropriateSharedMemory(const Var &var) {
-    return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
+    if (!(is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var)))
+      return false;
+    return shmem_allocs_.count(var.get()) != 0;
   }
 
   using StmtEntry = SharedMemLinearAccessPatternFinder::StmtEntry;
@@ -1376,11 +1391,12 @@ private:
 
   // Whether enable verbose logging.
   bool verbose_{false};
+  // Whether to preserve dtype/extents while converting one allocation's scope.
+  bool preserve_single_allocation_{false};
   // The alignment bytes for the merged buffer
   int align_bytes_{16};
   // The var for the merged buffer
-  Var merged_buf_var_{"buf_dyn_shmem",
-                      PointerType(PrimType(DataType::UInt(8)), "shared.dyn")};
+  Var merged_buf_var_;
   // The mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocateNode *> shmem_allocs_;
   // The size of the merged buffer
@@ -1400,12 +1416,17 @@ private:
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
-                                  int align_bytes = 16, bool verbose = false) {
+                                  int align_bytes = 16, bool verbose = false,
+                                  bool use_static_scope_for_dynamic = false) {
   AllocateCollector collector;
   collector(stmt);
-  if (collector.dyn_shmem_allocs_.size() > 1) {
+  if (collector.dyn_shmem_allocs_.size() > 1 ||
+      (use_static_scope_for_dynamic && !collector.dyn_shmem_allocs_.empty())) {
+    bool preserve_single_allocation =
+        use_static_scope_for_dynamic && collector.dyn_shmem_allocs_.size() == 1;
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
-                                  align_bytes);
+                                  align_bytes, use_static_scope_for_dynamic,
+                                  preserve_single_allocation);
     rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
@@ -1431,11 +1452,22 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     bool debug_merge_shared_memory_allocations =
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
-    auto *n = f.CopyOnWrite();
-    n->body = tl::MergeSharedMemoryAllocations(
-        std::move(n->body), merge_static_smem, enable_aggressive_merge,
-        align_bytes, debug_merge_shared_memory_allocations);
-    return f;
+    auto target = f->GetAttr<Target>(tvm::attr::kTarget);
+    bool use_static_scope_for_dynamic =
+        target.defined() && TargetIsMetal(target.value());
+    auto run = [&]() {
+      auto *n = f.CopyOnWrite();
+      n->body = tl::MergeSharedMemoryAllocations(
+          std::move(n->body), merge_static_smem, enable_aggressive_merge,
+          align_bytes, debug_merge_shared_memory_allocations,
+          use_static_scope_for_dynamic);
+      return f;
+    };
+    if (target.defined()) {
+      With<Target> target_scope(target.value());
+      return run();
+    }
+    return run();
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",
                             {});

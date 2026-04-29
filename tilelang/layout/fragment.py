@@ -21,7 +21,15 @@ class Fragment(Layout):
     # Disable the linter warning about not calling super().__init__()
     # because this object is created via TVM's FFI constructor mechanism.
     # pylint: disable=super-init-not-called
-    def __init__(self, shape, forward_fn=None, forward_thread_fn=None, replicate=1, forward_index_fn=None):
+    def __init__(
+        self,
+        shape,
+        forward_fn=None,
+        forward_thread_fn=None,
+        replicate=1,
+        forward_index_fn=None,
+        force_replicate_var=False,
+    ):
         """
         Initialize the Fragment with iteration variables and optional thread replication.
 
@@ -46,6 +54,10 @@ class Fragment(Layout):
             A function that takes iteration variables and returns an index or list
             of indices for this fragment. Used when `forward_fn` is None and
             the index transformation is derived separately.
+        force_replicate_var : bool, optional
+            Create a replicate IterVar even when ``replicate`` is 1. This is
+            useful for layouts whose forward thread expression must remain the
+            replication placeholder for semantic checks.
         """
 
         # Create a list of IterVar objects based on shape dimensions
@@ -67,7 +79,7 @@ class Fragment(Layout):
         if forward_fn is not None:
             # If replication is greater than 1, create a replicate IterVar
             # and pass it to forward_fn
-            if replicate > 1:
+            if replicate > 1 or force_replicate_var:
                 thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
                 forward_thread, forward_index = forward_fn(*vars, thread_replicate)
             else:
@@ -77,7 +89,7 @@ class Fragment(Layout):
             # If no forward_fn is provided, compute forward_index (if any) via forward_index_fn
             forward_index = forward_index_fn(*vars) if forward_index_fn else None
             # Then compute forward_thread via forward_thread_fn
-            if replicate > 1:
+            if replicate > 1 or force_replicate_var:
                 thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
                 forward_thread = forward_thread_fn(*vars, thread_replicate.var)
             else:

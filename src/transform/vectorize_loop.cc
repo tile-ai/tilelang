@@ -1202,13 +1202,21 @@ Stmt SkipVectorize(Stmt stmt) { return VectorizeSkipper()(std::move(stmt)); }
 tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    auto *n = f.CopyOnWrite();
-    if (enable_vectorize) {
-      n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
-    } else {
-      n->body = tvm::tl::VectorizeSkipper()(std::move(n->body));
+    auto target = f->GetAttr<Target>(tvm::attr::kTarget);
+    auto run = [&]() {
+      auto *n = f.CopyOnWrite();
+      if (enable_vectorize) {
+        n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
+      } else {
+        n->body = tvm::tl::VectorizeSkipper()(std::move(n->body));
+      }
+      return f;
+    };
+    if (target.defined()) {
+      With<Target> target_scope(target.value());
+      return run();
     }
-    return f;
+    return run();
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.VectorizeLoop", {});
 }

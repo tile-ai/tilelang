@@ -183,6 +183,8 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kMMA;
   } else if (TargetIsCPU(target)) {
     return GemmInst::kScalar;
+  } else if (TargetIsMetal(target)) {
+    return GemmInst::kScalar;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
     return GemmInst::kMMA;

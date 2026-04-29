@@ -63,6 +63,29 @@ private:
   Map<Buffer, Layout> layout_map_;
 };
 
+bool IndicesAreLoopInvariant(const Array<PrimExpr> &indices,
+                             const Array<IterVar> &loop_vars) {
+  bool depends_on_loop_var = false;
+  auto visitor = [&](const ObjectRef &obj) {
+    if (depends_on_loop_var)
+      return;
+    if (const auto *var = obj.as<VarNode>()) {
+      for (const auto &iv : loop_vars) {
+        if (var == iv->var.get()) {
+          depends_on_loop_var = true;
+          return;
+        }
+      }
+    }
+  };
+  for (const auto &index : indices) {
+    PostOrderVisit(index, visitor);
+    if (depends_on_loop_var)
+      return false;
+  }
+  return true;
+}
+
 } // anonymous namespace
 
 /**
@@ -360,12 +383,24 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         continue;
 
       auto frag = T.layout_map[buffer].as<Fragment>().value();
+      bool is_completed_replicated = frag->IsCompletedReplicated();
       bool is_fully_replicated =
           IsBufferCompletelyReplicated(buffer, T.layout_map);
 
       if (access.is_write) {
-        source_buffer = buffer;
+        if (is_fully_replicated) {
+          if (!replicated_write_buffer.defined()) {
+            replicated_write_buffer = buffer;
+          }
+        } else {
+          source_buffer = buffer;
+        }
       } else {
+        // Copy-out loops should not inherit a fully replicated source layout:
+        // that would guard the shared/global store to one replicate thread.
+        if (is_completed_replicated && !store_shared_global_buffers_.empty()) {
+          continue;
+        }
         // Keep the buffer with largest number of indices
         // (which means the inference based on that buffer is more accurate)
         // as read_source_buffer to get more accurate layout
@@ -384,6 +419,12 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         }
       }
     }
+  }
+  if (!source_buffer.defined() && read_source_buffer.defined()) {
+    source_buffer = read_source_buffer;
+  }
+  if (!source_buffer.defined() && replicated_write_buffer.defined()) {
+    source_buffer = replicated_write_buffer;
   }
   // moved to ComputeLoopLayoutFromBuffer
 
@@ -571,7 +612,12 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     auto fragment = T.layout_map[buffer].as<Fragment>().value();
     std::ostringstream oss;
     bool success = true;
-    if (access.is_read &&
+    bool replicated_read = access.is_read && fragment->IsCompletedReplicated();
+    bool replicated_local_write =
+        access.is_write && fragment->IsCompletedReplicated() &&
+        store_shared_global_buffers_.empty() &&
+        IndicesAreLoopInvariant(access.indices, loop_vars_);
+    if (access.is_read && !replicated_read &&
         !ProveFragmentContains(candidate, fragment, vars, access.indices,
                                analyzer_, check_forward_index)) {
       if (throw_on_error) {
@@ -582,7 +628,7 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
       }
       success = false;
     }
-    if (access.is_write &&
+    if (access.is_write && !replicated_local_write &&
         !ProveFragmentContains(fragment, candidate, access.indices, vars,
                                analyzer_, check_forward_index)) {
       if (throw_on_error) {
