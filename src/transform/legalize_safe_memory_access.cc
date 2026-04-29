@@ -4,6 +4,7 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/node/structural_equal.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -11,6 +12,7 @@
 #include <tvm/tir/utils.h>
 
 #include <utility>
+#include <vector>
 
 #include "../op/builtin.h"
 #include "../op/parallel.h"
@@ -33,9 +35,11 @@ struct SafeMemChecker : public StmtExprVisitor {
 
   bool disableOOBWarning = false;
 
-  SafeMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds)
+  SafeMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds,
+                 Array<PrimExpr> active_predicates = {})
       : analyzer_(analyzer),
-        recursively_collect_conds_(recursively_collect_conds) {
+        recursively_collect_conds_(recursively_collect_conds),
+        active_predicates_(std::move(active_predicates)) {
     disableOOBWarning =
         tvm::transform::PassContext::Current()
             ->GetConfig(kDisableOutOfBoundWarning, Optional<Bool>())
@@ -116,16 +120,21 @@ struct SafeMemChecker : public StmtExprVisitor {
       // If analyzer->CanProve(index < shape_dim) returns false,
       // it means we cannot prove the access is within bounds.
       PrimExpr upper_bound_cond = index < shape_dim;
-      bool can_prove_upper = false;
-      try {
-        can_prove_upper = analyzer_->CanProve(
-            upper_bound_cond, arith::ProofStrength::kSymbolicBound);
-      } catch (const Error &e) {
-        // Some layout-lowered sparse/global indices contain arithmetic that
-        // defeats interval reasoning.  Safe-memory legalization should remain
-        // conservative in that case and emit an explicit runtime guard instead
-        // of hard-failing compilation.
-        can_prove_upper = false;
+      bool can_prove_upper = IsKnownActivePredicate(upper_bound_cond);
+      if (!can_prove_upper) {
+        try {
+          can_prove_upper = analyzer_->CanProve(
+              upper_bound_cond, arith::ProofStrength::kSymbolicBound);
+        } catch (const Error &e) {
+          // Some layout-lowered sparse/global indices contain arithmetic that
+          // defeats interval reasoning.  Safe-memory legalization should remain
+          // conservative in that case and emit an explicit runtime guard
+          // instead of hard-failing compilation.
+          can_prove_upper = false;
+        }
+        if (!can_prove_upper) {
+          can_prove_upper = CanProveWithActivePredicates(upper_bound_cond);
+        }
       }
       if (!can_prove_upper) {
         if (throw_warning) {
@@ -138,12 +147,17 @@ struct SafeMemChecker : public StmtExprVisitor {
       }
       // Check if index >= 0 can be proven.
       PrimExpr lower_bound_cond = index >= 0;
-      bool can_prove_lower = false;
-      try {
-        can_prove_lower = analyzer_->CanProve(
-            lower_bound_cond, arith::ProofStrength::kSymbolicBound);
-      } catch (const Error &e) {
-        can_prove_lower = false;
+      bool can_prove_lower = IsKnownActivePredicate(lower_bound_cond);
+      if (!can_prove_lower) {
+        try {
+          can_prove_lower = analyzer_->CanProve(
+              lower_bound_cond, arith::ProofStrength::kSymbolicBound);
+        } catch (const Error &e) {
+          can_prove_lower = false;
+        }
+        if (!can_prove_lower) {
+          can_prove_lower = CanProveWithActivePredicates(lower_bound_cond);
+        }
       }
       if (!can_prove_lower) {
         if (throw_warning) {
@@ -178,12 +192,69 @@ struct SafeMemChecker : public StmtExprVisitor {
     return fragile;
   }
 
+  bool IsKnownActivePredicate(const PrimExpr &cond) {
+    PrimExpr target = analyzer_->Simplify(cond);
+    for (const PrimExpr &predicate : active_predicates_) {
+      std::vector<PrimExpr> conjuncts;
+      CollectConjuncts(predicate, &conjuncts);
+      for (const PrimExpr &conjunct : conjuncts) {
+        if (StructuralEqual()(analyzer_->Simplify(conjunct), target)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool CanProveWithActivePredicates(const PrimExpr &cond) {
+    if (active_predicates_.empty()) {
+      return false;
+    }
+
+    // Analyzer::ConstraintContext is not mutation-aware for BufferLoad-based
+    // guards. Use Z3 only as a local implication query over predicates that the
+    // rewriter has kept valid.
+    PrimExpr assumptions = active_predicates_[0];
+    for (size_t i = 1; i < active_predicates_.size(); ++i) {
+      assumptions = tir::And(assumptions, active_predicates_[i]);
+    }
+    PrimExpr implication =
+        analyzer_->rewrite_simplify(tir::Or(Not(assumptions), cond));
+    try {
+      return analyzer_->z3_prover.CanProve(implication);
+    } catch (const Error &e) {
+      return false;
+    }
+  }
+
+  static PrimExpr StripLikely(const PrimExpr &expr) {
+    static auto op_likely = Op::Get("tir.likely");
+    if (const auto *call = expr.as<CallNode>()) {
+      if (call->op.same_as(op_likely)) {
+        return call->args[0];
+      }
+    }
+    return expr;
+  }
+
+  static void CollectConjuncts(const PrimExpr &expr,
+                               std::vector<PrimExpr> *conjuncts) {
+    PrimExpr stripped = StripLikely(expr);
+    if (const auto *and_node = stripped.as<AndNode>()) {
+      CollectConjuncts(and_node->a, conjuncts);
+      CollectConjuncts(and_node->b, conjuncts);
+    } else {
+      conjuncts->push_back(stripped);
+    }
+  }
+
   Array<PrimExpr> GetConditions() { return _conditions; }
 
 private:
   Array<PrimExpr> _conditions;
   arith::Analyzer *analyzer_;
   bool recursively_collect_conds_;
+  Array<PrimExpr> active_predicates_;
 };
 
 class SafeMemorysRewriter : public IRMutatorWithAnalyzer {
@@ -204,17 +275,105 @@ public:
   }
 
 private:
+  struct ActivePredicate {
+    PrimExpr predicate;
+    std::vector<Buffer> deps;
+    bool valid{true};
+  };
+
   // Constructor initializing the base class with the analyzer
   SafeMemorysRewriter(arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer) {}
   // Constructor initializing the base class with the analyzer
+
+  Array<PrimExpr> ActivePredicates() const {
+    Array<PrimExpr> predicates;
+    for (const ActivePredicate &predicate : active_predicates_) {
+      if (predicate.valid) {
+        predicates.push_back(predicate.predicate);
+      }
+    }
+    return predicates;
+  }
+
+  static bool ContainsBuffer(const std::vector<Buffer> &buffers,
+                             const Buffer &buffer) {
+    for (const Buffer &candidate : buffers) {
+      if (candidate.same_as(buffer)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static std::vector<Buffer> CollectPredicateDeps(const PrimExpr &predicate) {
+    std::vector<Buffer> deps;
+    PostOrderVisit(predicate, [&](const ObjectRef &obj) {
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        Buffer buffer = load->buffer;
+        if (!ContainsBuffer(deps, buffer)) {
+          deps.push_back(buffer);
+        }
+      }
+    });
+    return deps;
+  }
+
+  void PushActivePredicate(const PrimExpr &predicate) {
+    active_predicates_.push_back(
+        ActivePredicate{predicate, CollectPredicateDeps(predicate), true});
+  }
+
+  std::vector<bool> PrefixValidity(size_t size) const {
+    std::vector<bool> validity;
+    validity.reserve(size);
+    for (size_t i = 0; i < size; ++i) {
+      validity.push_back(active_predicates_[i].valid);
+    }
+    return validity;
+  }
+
+  void RestorePrefixValidity(const std::vector<ActivePredicate> &base,
+                             const std::vector<bool> &validity) {
+    active_predicates_ = base;
+    ICHECK_LE(validity.size(), active_predicates_.size());
+    for (size_t i = 0; i < validity.size(); ++i) {
+      active_predicates_[i].valid = validity[i];
+    }
+  }
+
+  void MergeBranchValidity(const std::vector<ActivePredicate> &base,
+                           const std::vector<bool> &then_validity,
+                           const std::vector<bool> &else_validity) {
+    active_predicates_ = base;
+    ICHECK_EQ(then_validity.size(), else_validity.size());
+    ICHECK_LE(then_validity.size(), active_predicates_.size());
+    for (size_t i = 0; i < then_validity.size(); ++i) {
+      active_predicates_[i].valid = then_validity[i] && else_validity[i];
+    }
+  }
+
+  void InvalidatePredicatesDependingOn(const Buffer &buffer) {
+    for (ActivePredicate &predicate : active_predicates_) {
+      if (predicate.valid && ContainsBuffer(predicate.deps, buffer)) {
+        predicate.valid = false;
+      }
+    }
+  }
+
+  void InvalidateAllActivePredicates() {
+    for (ActivePredicate &predicate : active_predicates_) {
+      predicate.valid = false;
+    }
+  }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
 
     // For Load/Store, we only check the current node, not its children.
     // Since rewriter will recursively visit children.
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false,
+                           ActivePredicates());
     checker(load);
     Array<PrimExpr> conditions = checker.GetConditions();
 
@@ -237,7 +396,8 @@ private:
     // Check if the buffer is in global scope
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false,
+                           ActivePredicates());
     checker(store);
     Array<PrimExpr> conditions = checker.GetConditions();
 
@@ -250,12 +410,15 @@ private:
             << "\nAs manual boundary check detected, potential out-of-bounds "
                "access may occur."
             << "\nAuto detect boundaries are " << conditions;
+        InvalidatePredicatesDependingOn(store->buffer);
         return store;
       }
+      InvalidatePredicatesDependingOn(store->buffer);
       return store;
     }
 
     if (conditions.empty()) {
+      InvalidatePredicatesDependingOn(store->buffer);
       return store;
     }
 
@@ -264,6 +427,7 @@ private:
     for (auto cond : conditions) {
       store_with_conditions = IfThenElse(cond, store_with_conditions);
     }
+    InvalidatePredicatesDependingOn(store->buffer);
     return store_with_conditions;
   }
 
@@ -337,7 +501,8 @@ private:
     BufferLoad src_base_load =
         GetBaseLoadFromAccessPtrExpr(call->args[kCPAsyncSrcPtrArg]);
 
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false,
+                           ActivePredicates());
     checker.CheckBufferIndices(src_base_load->buffer, src_base_load->indices,
                                /*is_load=*/true, /*throw_warning=*/false);
     return checker.GetConditions();
@@ -431,25 +596,98 @@ private:
         if (conditions.empty()) {
           // Fallback when we cannot recover the underlying buffer access
           // directly from the access_ptr arguments.
-          SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
+          SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true,
+                                 ActivePredicates());
           checker(call);
           conditions = checker.GetConditions();
         }
-        return RewriteCPAsync(evaluate, call, conditions);
+        Stmt rewritten = RewriteCPAsync(evaluate, call, conditions);
+        InvalidateAllActivePredicates();
+        return rewritten;
       }
 
       if (NeedsEvaluateBoundaryCheck(call)) {
         // For side-effect calls (extern/atomic), recursively collect
         // conditions from all children. We avoid rewriting BufferLoad in call
         // arguments directly to prevent nullptr issues in downstream lowering.
-        SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
+        SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true,
+                               ActivePredicates());
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();
-        return WrapEvaluateWithConditions(evaluate, conditions);
+        Stmt rewritten = WrapEvaluateWithConditions(evaluate, conditions);
+        InvalidateAllActivePredicates();
+        return rewritten;
       }
     }
 
     return evaluate;
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    PrimExpr condition = this->VisitExpr(op->condition);
+    PrimExpr real_condition = SafeMemChecker::StripLikely(condition);
+    bool condition_has_buffer_load =
+        !CollectPredicateDeps(real_condition).empty();
+    std::vector<ActivePredicate> base_predicates = active_predicates_;
+    size_t base_size = base_predicates.size();
+
+    Stmt then_case;
+    Optional<Stmt> else_case;
+    {
+      active_predicates_ = base_predicates;
+      PushActivePredicate(real_condition);
+      if (condition_has_buffer_load) {
+        // Do not enter Analyzer::ConstraintContext for BufferLoad conditions:
+        // a BufferStore in this branch can change the loaded value while the
+        // analyzer would still keep the old condition in scope.
+        then_case = this->VisitStmt(op->then_case);
+      } else {
+        With<arith::ConstraintContext> ctx(analyzer_, real_condition);
+        WithRecordIterPredicate(real_condition, [&] {
+          then_case = this->VisitStmt(op->then_case);
+        });
+      }
+    }
+    std::vector<bool> then_validity = PrefixValidity(base_size);
+
+    std::vector<bool> else_validity;
+    if (op->else_case) {
+      PrimExpr not_condition = analyzer_->rewrite_simplify(Not(real_condition));
+      active_predicates_ = base_predicates;
+      PushActivePredicate(not_condition);
+      if (condition_has_buffer_load) {
+        else_case = this->VisitStmt(op->else_case.value());
+      } else {
+        With<arith::ConstraintContext> ctx(analyzer_, not_condition);
+        else_case = this->VisitStmt(op->else_case.value());
+      }
+      else_validity = PrefixValidity(base_size);
+    } else {
+      active_predicates_ = base_predicates;
+      else_validity = PrefixValidity(base_size);
+    }
+
+    if (is_one(real_condition)) {
+      RestorePrefixValidity(base_predicates, then_validity);
+      return then_case;
+    }
+    if (is_zero(real_condition)) {
+      RestorePrefixValidity(base_predicates, else_validity);
+      return else_case.value_or(Evaluate(0));
+    }
+
+    MergeBranchValidity(base_predicates, then_validity, else_validity);
+
+    if (condition.same_as(op->condition) && then_case.same_as(op->then_case) &&
+        else_case.same_as(op->else_case)) {
+      return ffi::GetRef<Stmt>(op);
+    }
+
+    auto n = this->CopyOnWrite(op);
+    n->condition = std::move(condition);
+    n->then_case = std::move(then_case);
+    n->else_case = std::move(else_case);
+    return Stmt(n);
   }
 
   Stmt VisitStmt_(const BlockNode *op) final {
@@ -486,6 +724,7 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, PrimExpr> annotated_safe_value_map_;
   Map<Var, PrimExpr> annotated_safe_value_by_data_;
+  std::vector<ActivePredicate> active_predicates_;
 };
 
 // Create a pass that legalizes vectorized loops in the IRModule
