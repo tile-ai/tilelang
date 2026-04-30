@@ -264,7 +264,7 @@ class TensorCorePolicy(DefaultPolicy):
             # allow pad, otherwise, we can not get a valid tile shape
             return None
         space_prod = int(np.prod(space))
-        if space_prod < warps:
+        if space_prod < warps or space_prod % warps != 0:
             return None
 
         factors = factorize(space_prod // warps)
