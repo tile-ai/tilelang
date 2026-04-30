@@ -82,6 +82,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
+    for name, value in (("m", M), ("n", N), ("k", K), ("repeats", args.repeats)):
+        if value <= 0:
+            raise SystemExit(f"--{name} must be a positive integer, got {value}")
+    if args.warmup < 0:
+        raise SystemExit(f"--warmup must be non-negative, got {args.warmup}")
 
     print(f"torch:    {torch.__version__}")
     print(f"tilelang: {tilelang.__version__}")

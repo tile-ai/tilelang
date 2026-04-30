@@ -66,11 +66,12 @@ class GemmMetal(GemmBase):
         clear_accum = self.clear_accum
         c_in_simdgroup_reg = is_metal_simdgroup(C_buf) or is_fragment(C_buf)
 
-        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
-        assert is_full_region(C_region), "Fragment output C must be a full region"
-        assert c_in_simdgroup_reg or is_shared(C_buf), (
-            f"Metal GEMM requires C in local.fragment, metal.simdgroup, or shared scope, got {C_buf.scope()}"
-        )
+        if block_K < micro_size_k:
+            raise ValueError(f"Metal GEMM requires block_K ({block_K}) to be >= micro_size_k ({micro_size_k})")
+        if not is_full_region(C_region):
+            raise ValueError(f"Metal GEMM requires full output C region, got {C_region}")
+        if not c_in_simdgroup_reg and not is_shared(C_buf):
+            raise ValueError(f"Metal GEMM requires C in local.fragment, metal.simdgroup, or shared scope, got {C_buf.scope()}")
 
         if self.is_gemm_ss():
             if c_in_simdgroup_reg:

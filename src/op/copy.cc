@@ -827,10 +827,11 @@ bool CopyNode::CheckSIMDGroupCopy(Target target) const {
   }
 
   for (int i = 0; i < 2; ++i) {
+    auto src_min = src_range[i]->min.as<IntImmNode>();
     auto src_extent = src_range[i]->extent.as<IntImmNode>();
     auto dst_extent = dst_range[i]->extent.as<IntImmNode>();
-    if (!src_extent || !dst_extent || src_extent->value != dst_extent->value ||
-        src_extent->value % 8 != 0) {
+    if (!src_min || src_min->value != 0 || !src_extent || !dst_extent ||
+        src_extent->value != dst_extent->value || src_extent->value % 8 != 0) {
       return false;
     }
   }
@@ -1054,26 +1055,42 @@ Stmt CopyNode::LowerSIMDGroupCopy(const LowerArgs &T,
       stride *= dst->shape[i];
     }
   }
-  ICHECK_EQ(dst_strides.size(), dst->shape.size())
-      << "simdgroup store requires complete destination strides";
-  ICHECK(analyzer->CanProveEqual(dst_strides[1], 1))
-      << "simdgroup store requires contiguous destination columns, got stride "
-      << dst_strides[1];
+  if (dst_strides.size() != dst->shape.size()) {
+    return LowerNormalCopy(T, analyzer);
+  }
+  if (!analyzer->CanProveEqual(dst_strides[1], 1)) {
+    return LowerNormalCopy(T, analyzer);
+  }
   PrimExpr dst_stride = dst_strides[0];
 
   int warp_size = TargetGetWarpSize(T.target);
-  int block_size = T.thread_bounds->extent.as<IntImmNode>()->value;
+  auto block_extent = T.thread_bounds->extent.as<IntImmNode>();
+  if (!block_extent || warp_size <= 0 || block_extent->value % warp_size != 0) {
+    return LowerNormalCopy(T, analyzer);
+  }
+  int block_size = block_extent->value;
   int num_warps = block_size / warp_size;
+  if (num_warps <= 0) {
+    return LowerNormalCopy(T, analyzer);
+  }
   PrimExpr warp_id = FloorDiv(T.thread_var, warp_size);
 
-  int M = src_range[0]->extent.as<IntImmNode>()->value;
-  int N = src_range[1]->extent.as<IntImmNode>()->value;
+  auto M_imm = src_range[0]->extent.as<IntImmNode>();
+  auto N_imm = src_range[1]->extent.as<IntImmNode>();
+  if (!M_imm || !N_imm) {
+    return LowerNormalCopy(T, analyzer);
+  }
+  int M = M_imm->value;
+  int N = N_imm->value;
 
   int kMPerWarp = 8;
   int kNPerWarp = 8;
   int m_warp = 1, n_warp = num_warps;
   int max_m = M / kMPerWarp;
   int max_n = N / kNPerWarp;
+  if (max_m <= 0 || max_n <= 0) {
+    return LowerNormalCopy(T, analyzer);
+  }
   float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
   float best_score = std::numeric_limits<float>::max();
   for (int m = 1; m <= std::min(num_warps, max_m); ++m) {
@@ -1092,14 +1109,16 @@ Stmt CopyNode::LowerSIMDGroupCopy(const LowerArgs &T,
     }
   }
 
-  ICHECK(M >= m_warp * 8 && N >= n_warp * 8)
-      << "Cannot partition " << M << "x" << N << " matrix across " << m_warp
-      << "x" << n_warp << " warps with 8x8 simdgroup tiles";
+  if (best_score == std::numeric_limits<float>::max() || M < m_warp * 8 ||
+      N < n_warp * 8) {
+    return LowerNormalCopy(T, analyzer);
+  }
   int warp_row_tiles = M / m_warp / 8;
   int warp_col_tiles = N / n_warp / 8;
-  ICHECK(warp_row_tiles > 0 && warp_col_tiles > 0);
-  ICHECK(warp_row_tiles * warp_col_tiles * 64 <= total_elements)
-      << "Warp partition produces more tiles than buffer capacity";
+  if (warp_row_tiles <= 0 || warp_col_tiles <= 0 ||
+      warp_row_tiles * warp_col_tiles * 64 > total_elements) {
+    return LowerNormalCopy(T, analyzer);
+  }
 
   PrimExpr warp_m = FloorMod(warp_id, m_warp);
   PrimExpr warp_n = FloorDiv(warp_id, m_warp);

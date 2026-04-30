@@ -15,7 +15,7 @@ if(NOT APPLE)
   # On non-Apple platforms USE_METAL=ON enables only codegen (Metal source
   # generation) without requiring the Metal/Foundation frameworks.
   message(STATUS "Metal backend on non-Apple: enabling codegen-only mode (no Metal runtime)")
-  set(USE_METAL OFF)
+  return()
 endif()
 
 file(GLOB TILE_LANG_METAL_SRCS

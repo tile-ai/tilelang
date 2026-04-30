@@ -393,6 +393,9 @@ void CodeGenTileLangMetal::VisitExpr_(const BufferLoadNode *op,
     ICHECK_EQ(op->indices.size(), 1)
         << "Load from non-flat local.var memory not supported.";
     ICHECK(op->dtype.is_scalar()) << "Vector local.var load is not supported.";
+    auto index = op->indices[0].as<IntImmNode>();
+    ICHECK(index && index->value == 0)
+        << "local.var load requires scalar index 0.";
     os << GetVarID(op->buffer->data.get());
     return;
   }
@@ -413,6 +416,9 @@ void CodeGenTileLangMetal::VisitStmt_(const BufferStoreNode *op) {
         << "Store to non-flat local.var memory not supported.";
     ICHECK(op->value.dtype().is_scalar())
         << "Vector local.var store is not supported.";
+    auto index = op->indices[0].as<IntImmNode>();
+    ICHECK(index && index->value == 0)
+        << "local.var store requires scalar index 0.";
     this->PrintIndent();
     stream << GetVarID(op->buffer->data.get()) << " = " << PrintExpr(op->value)
            << ";\n";
