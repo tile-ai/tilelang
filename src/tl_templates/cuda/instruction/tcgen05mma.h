@@ -169,7 +169,7 @@ TL_DEVICE void tcgen05mma_ts<DataType::kUInt8, true>(
                                        mask0, mask1, mask2, mask3);
 }
 
-// FP8 family instruction kind (maps to f8f6f4)
+// FP8 family instruction kind (maps to kind::f8f6f4)
 template <>
 TL_DEVICE void tcgen05mma_ts<DataType::kFloat8_e4m3, false>(
     uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
@@ -220,6 +220,43 @@ TL_DEVICE void tcgen05mma_ts<DataType::kFloat8_e5m2, true>(
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
   tcgen05mma_ts<DataType::kFloat8_e4m3, true>(
+      tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+// FP6 family instruction kind (maps to kind::f8f6f4)
+template <>
+TL_DEVICE void tcgen05mma_ts<DataType::kFloat6_e2m3fn, false>(
+    uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ts<DataType::kFloat8_e4m3, false>(
+      tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_ts<DataType::kFloat6_e2m3fn, true>(
+    uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ts<DataType::kFloat8_e4m3, true>(
+      tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_ts<DataType::kFloat6_e3m2fn, false>(
+    uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ts<DataType::kFloat6_e2m3fn, false>(
+      tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_ts<DataType::kFloat6_e3m2fn, true>(
+    uint32_t const &tmem_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ts<DataType::kFloat6_e2m3fn, true>(
       tmem_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
@@ -358,7 +395,7 @@ TL_DEVICE void tcgen05mma_ss<DataType::kUInt8, true>(
                                        mask0, mask1, mask2, mask3);
 }
 
-// FP8 family instruction kind (maps to f8f6f4)
+// FP8 family instruction kind (maps to kind::f8f6f4)
 template <>
 TL_DEVICE void tcgen05mma_ss<DataType::kFloat8_e4m3, false>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
@@ -409,6 +446,43 @@ TL_DEVICE void tcgen05mma_ss<DataType::kFloat8_e5m2, true>(
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
   tcgen05mma_ss<DataType::kFloat8_e4m3, true>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+// FP6 family instruction kind (maps to kind::f8f6f4)
+template <>
+TL_DEVICE void tcgen05mma_ss<DataType::kFloat6_e2m3fn, false>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ss<DataType::kFloat8_e4m3, false>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_ss<DataType::kFloat6_e2m3fn, true>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ss<DataType::kFloat8_e4m3, true>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_ss<DataType::kFloat6_e3m2fn, false>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ss<DataType::kFloat6_e2m3fn, false>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_ss<DataType::kFloat6_e3m2fn, true>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ss<DataType::kFloat6_e2m3fn, true>(
       desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
@@ -499,7 +573,7 @@ TL_DEVICE void tcgen05mma_ws_ss<DataType::kUInt8>(
                                     mask0, mask1, mask2, mask3);
 }
 
-// FP8 ws (maps to f8f6f4)
+// FP8 ws (maps to kind::f8f6f4)
 template <>
 TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat8_e4m3>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
@@ -523,6 +597,25 @@ TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat8_e5m2>(
     uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
     int const &mask1, int const &mask2, int const &mask3) {
   tcgen05mma_ws_ss<DataType::kFloat8_e4m3>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+// FP6 ws (maps to kind::f8f6f4)
+template <>
+TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat6_e2m3fn>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ws_ss<DataType::kFloat8_e4m3>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_ws_ss<DataType::kFloat6_e3m2fn>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, int const &mask0,
+    int const &mask1, int const &mask2, int const &mask3) {
+  tcgen05mma_ws_ss<DataType::kFloat6_e2m3fn>(
       desc_a, desc_b, tmem_c, scalec, desc_val, mask0, mask1, mask2, mask3);
 }
 
@@ -585,7 +678,7 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, true>(
   }
 }
 
-// FP8 E5M2 maps to same instruction
+// FP8 E5M2 maps to the same instruction
 template <>
 TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e5m2, false>(
     uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,

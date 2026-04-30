@@ -121,6 +121,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         self.micro_size_x = m_dim
         self.micro_size_k = k_dim
 
+    def _initialize_k_dim(self, a_dtype=T.float16):
+        if isinstance(a_dtype, str):
+            a_dtype = DataType(a_dtype)
+        if a_dtype.bits == 6:
+            self.k_dim = 32
+            return
+        super()._initialize_k_dim(a_dtype)
+
     def _determinate_swizzle_mode(self, buffer: Buffer, layout: Layout) -> SwizzleMode:
         # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
         if layout is None or layout.is_equal(make_linear_layout(buffer)):
@@ -199,7 +207,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
 
         elems_in_bits = DataType(self.a_dtype).bits
-        elems_in_bytes = elems_in_bits // 8
+        elems_in_bytes = (elems_in_bits + 7) // 8
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
@@ -423,7 +431,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         a_dtype_in_bits = DataType(self.a_dtype).bits
         elems_in_bits = a_dtype_in_bits
-        elems_in_bytes = elems_in_bits // 8
+        elems_in_bytes = (elems_in_bits + 7) // 8
         b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
