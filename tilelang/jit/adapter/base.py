@@ -80,6 +80,8 @@ class BaseKernelAdapter(ABC):
                 return lambda: torch.device("cuda", current_device())
             except Exception:
                 return lambda: torch.device("cuda", torch.cuda.current_device())
+        if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            return lambda: torch.device("mps")
         # CPU fallback
         return lambda: torch.device("cpu")
 
