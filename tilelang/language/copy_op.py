@@ -302,6 +302,14 @@ def tma_gather4(
         raise ValueError(f"tma_gather4 expects rank-2 global buffer, got {len(src.shape)}")
     if len(dst.shape) != 2:
         raise ValueError(f"tma_gather4 expects rank-2 shared buffer (4 x K_box), got {len(dst.shape)}")
+    if src.dtype != dst.dtype:
+        raise ValueError(f"tma_gather4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
+    if not (isinstance(dst.shape[0], int) and dst.shape[0] == 4) and not (hasattr(dst.shape[0], "value") and int(dst.shape[0].value) == 4):
+        raise ValueError(f"tma_gather4 shared tile leading dim must be 4, got {dst.shape[0]}")
+    if src.strides:
+        inner = src.strides[1]
+        if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
+            raise ValueError(f"tma_gather4 requires unit innermost global stride, got {inner}")
     rows = list(rows)
     if len(rows) != 4:
         raise ValueError(f"tma_gather4 expects exactly 4 row indices, got {len(rows)}")
@@ -354,9 +362,7 @@ def tma_gather4(
     eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
     ep = 0 if eviction_policy is None else eviction_policy_map[eviction_policy]
 
-    return _tma_load_gather4(
-        desc, bar_load, smem_addr, col, rows[0], rows[1], rows[2], rows[3], ep
-    )
+    return _tma_load_gather4(desc, bar_load, smem_addr, col, rows[0], rows[1], rows[2], rows[3], ep)
 
 
 def tma_gather4_bytes(K_box, dtype: str) -> int:
@@ -394,6 +400,14 @@ def tma_scatter4(
         raise ValueError(f"tma_scatter4 expects rank-2 shared buffer (4 x K_box), got {len(src.shape)}")
     if len(dst.shape) != 2:
         raise ValueError(f"tma_scatter4 expects rank-2 global buffer, got {len(dst.shape)}")
+    if src.dtype != dst.dtype:
+        raise ValueError(f"tma_scatter4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
+    if not (isinstance(src.shape[0], int) and src.shape[0] == 4) and not (hasattr(src.shape[0], "value") and int(src.shape[0].value) == 4):
+        raise ValueError(f"tma_scatter4 shared tile leading dim must be 4, got {src.shape[0]}")
+    if dst.strides:
+        inner = dst.strides[1]
+        if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
+            raise ValueError(f"tma_scatter4 requires unit innermost global stride, got {inner}")
     rows = list(rows)
     if len(rows) != 4:
         raise ValueError(f"tma_scatter4 expects exactly 4 row indices, got {len(rows)}")
@@ -444,9 +458,7 @@ def tma_scatter4(
     eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
     ep = 0 if eviction_policy is None else eviction_policy_map[eviction_policy]
 
-    return _tma_store_scatter4(
-        desc, smem_addr, col, rows[0], rows[1], rows[2], rows[3], ep
-    )
+    return _tma_store_scatter4(desc, smem_addr, col, rows[0], rows[1], rows[2], rows[3], ep)
 
 
 def transpose(

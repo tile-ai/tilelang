@@ -1,9 +1,25 @@
-"""Round-trip test for TMA tile::gather4 / tile::scatter4 (sm_90+)."""
+"""Round-trip test for TMA tile::gather4 / tile::scatter4 (sm_100a, Blackwell)."""
+
+import pytest
 
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 import tilelang
+
+
+def _has_sm100():
+    try:
+        import torch
+    except ImportError:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability(0)
+    return major >= 10
+
+
+requires_sm100 = pytest.mark.skipif(not _has_sm100(), reason="tile::gather4/scatter4 require sm_100a (Blackwell)")
 
 
 def gather_scatter_program(N: int, K: int, K_box: int, in_dtype: str = "float16"):
@@ -71,6 +87,7 @@ def run_gather_scatter(N=64, K=64, K_box=64):
     torch.testing.assert_close(Dst, expected)
 
 
+@requires_sm100
 def test_gather_scatter_basic():
     run_gather_scatter(N=64, K=64, K_box=64)
 
