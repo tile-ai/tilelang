@@ -411,4 +411,49 @@ TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {
   asm volatile("prefetch.tensormap [%0];" : : "l"(gmem_int_desc) : "memory");
 }
 
+// tile::gather4 / scatter4 require a rank=2 tiled descriptor with box dim
+// along the gathered axis = 1; the four-row pack is implicit in the PTX,
+// not the descriptor. Coordinate operands are {col, r0, r1, r2, r3}.
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          typename BarrierType = uint64_t>
+TL_DEVICE void
+tma_load_gather4(const CUtensorMap &descriptor, BarrierType &smem_mbar,
+                 void const *const smem_ptr, int32_t const &col,
+                 int32_t const &r0, int32_t const &r1, int32_t const &r2,
+                 int32_t const &r3) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_mbar;
+  if constexpr (std::is_pointer_v<BarrierType>) {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
+  } else {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
+  }
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cluster.global.tile::gather4."
+      "mbarrier::complete_tx::bytes.L2::cache_hint"
+      " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
+      :
+      : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar), "r"(col),
+        "r"(r0), "r"(r1), "r"(r2), "r"(r3), "l"(cache_hint)
+      : "memory");
+}
+
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
+TL_DEVICE void tma_store_scatter4(const CUtensorMap &descriptor,
+                                  void const *const smem_ptr,
+                                  int32_t const &col, int32_t const &r0,
+                                  int32_t const &r1, int32_t const &r2,
+                                  int32_t const &r3) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "cp.async.bulk.tensor.2d.global.shared::cta.tile::scatter4.bulk_group"
+      ".L2::cache_hint [%0, {%2, %3, %4, %5, %6}], [%1], %7;"
+      :
+      : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(col), "r"(r0), "r"(r1),
+        "r"(r2), "r"(r3), "l"(cache_hint)
+      : "memory");
+}
+
 } // namespace tl
