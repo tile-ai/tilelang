@@ -68,6 +68,8 @@ class GemmMetal(GemmBase):
 
         if block_K < micro_size_k:
             raise ValueError(f"Metal GEMM requires block_K ({block_K}) to be >= micro_size_k ({micro_size_k})")
+        if block_K % micro_size_k != 0:
+            raise ValueError(f"Metal GEMM requires block_K ({block_K}) to be divisible by micro_size_k ({micro_size_k})")
         if not is_full_region(C_region):
             raise ValueError(f"Metal GEMM requires full output C region, got {C_region}")
         if not c_in_simdgroup_reg and not is_shared(C_buf):

@@ -827,10 +827,12 @@ bool CopyNode::CheckSIMDGroupCopy(Target target) const {
   }
 
   for (int i = 0; i < 2; ++i) {
+    auto src_shape = src->shape[i].as<IntImmNode>();
     auto src_min = src_range[i]->min.as<IntImmNode>();
     auto src_extent = src_range[i]->extent.as<IntImmNode>();
     auto dst_extent = dst_range[i]->extent.as<IntImmNode>();
-    if (!src_min || src_min->value != 0 || !src_extent || !dst_extent ||
+    if (!src_shape || !src_min || src_min->value != 0 || !src_extent ||
+        !dst_extent || src_extent->value != src_shape->value ||
         src_extent->value != dst_extent->value || src_extent->value % 8 != 0) {
       return false;
     }
@@ -1073,7 +1075,8 @@ Stmt CopyNode::LowerSIMDGroupCopy(const LowerArgs &T,
   if (num_warps <= 0) {
     return LowerNormalCopy(T, analyzer);
   }
-  PrimExpr warp_id = FloorDiv(T.thread_var, warp_size);
+  PrimExpr relative_thread = T.thread_var - T.thread_bounds->min;
+  PrimExpr warp_id = FloorDiv(relative_thread, warp_size);
 
   auto M_imm = src_range[0]->extent.as<IntImmNode>();
   auto N_imm = src_range[1]->extent.as<IntImmNode>();
@@ -1098,6 +1101,8 @@ Stmt CopyNode::LowerSIMDGroupCopy(const LowerArgs &T,
       continue;
     int n = num_warps / m;
     if (n > max_n)
+      continue;
+    if (M % (m * kMPerWarp) != 0 || N % (n * kNPerWarp) != 0)
       continue;
     float m_per = static_cast<float>(M) / (m * kMPerWarp);
     float n_per = static_cast<float>(N) / (n * kNPerWarp);
