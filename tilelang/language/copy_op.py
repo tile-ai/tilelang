@@ -254,15 +254,17 @@ _CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE = 0
 
 
 def _swizzle_str_to_int(s):
+    # cuTensorMapEncodeTiled accepts non-None swizzle modes for gather4/scatter4
+    # descriptors, but the shared tile layout the user allocates via
+    # T.alloc_shared has to match — otherwise the gather4 rows land in a
+    # swizzled pattern that subsequent reads (gemm, etc.) see as row-major.
+    # That plumbing isn't wired yet, so reject non-None to fail fast instead
+    # of silently corrupting data.
     if s in (None, "none", 0):
         return _CU_TENSOR_MAP_SWIZZLE_NONE
-    if s in ("32B", 32, "32"):
-        return _CU_TENSOR_MAP_SWIZZLE_32B
-    if s in ("64B", 64, "64"):
-        return _CU_TENSOR_MAP_SWIZZLE_64B
-    if s in ("128B", 128, "128"):
-        return _CU_TENSOR_MAP_SWIZZLE_128B
-    raise ValueError(f"Unknown swizzle mode: {s!r}")
+    raise NotImplementedError(
+        f"swizzle={s!r} is not supported yet for tma_gather4/scatter4; shared-tile swizzle plumbing is a follow-up. Pass swizzle=None."
+    )
 
 
 def tma_gather4(
@@ -291,13 +293,19 @@ def tma_gather4(
         col: Scalar i32 column origin.
         rows: Sequence of 4 i32 row indices.
         barrier: Mbarrier handle.
-        swizzle: One of None / "32B" / "64B" / "128B" (or int 0/32/64/128).
+        swizzle: Only ``None`` is currently supported. Non-None modes will be
+            rejected with NotImplementedError until the matching shared-tile
+            layout plumbing lands.
         eviction_policy: Cache eviction policy.
     """
     if not isinstance(src, tir.Buffer):
         raise TypeError("tma_gather4 src must be a tir.Buffer (global)")
     if not isinstance(dst, tir.Buffer):
         raise TypeError("tma_gather4 dst must be a tir.Buffer (shared)")
+    if src.scope() != "global":
+        raise ValueError(f"tma_gather4 src must be a global buffer, got scope={src.scope()}")
+    if dst.scope() not in ("shared", "shared.dyn"):
+        raise ValueError(f"tma_gather4 dst must be a shared buffer, got scope={dst.scope()}")
     if len(src.shape) != 2:
         raise ValueError(f"tma_gather4 expects rank-2 global buffer, got {len(src.shape)}")
     if len(dst.shape) != 2:
@@ -391,11 +399,17 @@ def tma_scatter4(
 
     The caller is responsible for ``tma_store_arrive`` / ``tma_store_wait``,
     and the call must be inside a leader-thread guard.
+
+    Only ``swizzle=None`` is currently supported (see :func:`tma_gather4`).
     """
     if not isinstance(src, tir.Buffer):
         raise TypeError("tma_scatter4 src must be a tir.Buffer (shared)")
     if not isinstance(dst, tir.Buffer):
         raise TypeError("tma_scatter4 dst must be a tir.Buffer (global)")
+    if src.scope() not in ("shared", "shared.dyn"):
+        raise ValueError(f"tma_scatter4 src must be a shared buffer, got scope={src.scope()}")
+    if dst.scope() != "global":
+        raise ValueError(f"tma_scatter4 dst must be a global buffer, got scope={dst.scope()}")
     if len(src.shape) != 2:
         raise ValueError(f"tma_scatter4 expects rank-2 shared buffer (4 x K_box), got {len(src.shape)}")
     if len(dst.shape) != 2:
