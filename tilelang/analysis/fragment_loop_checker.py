@@ -62,8 +62,12 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
         self.loop_stack.append(op)
         child = op.body
 
-        # Reach the innermost loop
-        # This may cause repeated check for cases like: For1{Stmt1; For2{}; For3{};};
+        # Reach the innermost loop -- This may cause repeated checks for cases like:
+        #   For1{
+        #       Stmt1;
+        #       For2{};
+        #       For3{};
+        #   };
         # But it's OK since the check is idempotent.
         if not isinstance(child, For):
             buffer_accesses = collect_fragment_accesses(child)
