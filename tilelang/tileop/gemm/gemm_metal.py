@@ -22,9 +22,16 @@ class GemmMetal(GemmBase):
         self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var, mbar_phase_expr: tir.PrimExpr | None = None
     ):
         thread_nums = thread_bounds.extent
+        for name, value in (("M", self.M), ("N", self.N), ("K", self.chunk)):
+            if value % 8 != 0:
+                raise ValueError(f"Metal GEMM requires {name} to be a multiple of 8, got {value}")
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.METAL_SIMDGROUP)
+        if self.M % m_warp != 0 or self.N % n_warp != 0:
+            raise ValueError(f"Metal GEMM cannot evenly partition {self.M}x{self.N} across {m_warp}x{n_warp} warps")
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
+        if warp_row_tiles % 8 != 0 or warp_col_tiles % 8 != 0:
+            raise ValueError(f"Metal GEMM per-warp tile must be a multiple of 8x8, got {warp_row_tiles}x{warp_col_tiles}")
 
         from tilelang.intrinsics.metal_macro_generator import MPSIntrinEmitter
 

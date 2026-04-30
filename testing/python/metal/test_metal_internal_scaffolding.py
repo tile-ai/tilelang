@@ -481,16 +481,13 @@ def _run_native_dtype_probe(tmp_path: Path, dtype_name: str) -> subprocess.Compl
             import tilelang
             import tilelang.language as T
 
-            @tilelang.jit(out_idx=[-1])
-            def bad_kernel(M):
-                @T.prim_func
-                def main(A: T.Tensor((M,), T.float32), B: T.Tensor((M,), T.{dtype_name})):
-                    with T.Kernel(T.ceildiv(M, 32), threads=32) as bx:
-                        for i in T.Parallel(32):
-                            B[bx * 32 + i] = A[bx * 32 + i]
-                return main
+            @T.prim_func
+            def bad_kernel(A: T.Tensor((32,), T.float32), B: T.Tensor((32,), T.{dtype_name})):
+                with T.Kernel(1, threads=32) as bx:
+                    for i in T.Parallel(32):
+                        B[bx * 32 + i] = A[bx * 32 + i]
 
-            bad_kernel(32)
+            tilelang.compile(bad_kernel, target="metal")
             """
         )
     )

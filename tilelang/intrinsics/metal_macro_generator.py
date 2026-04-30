@@ -72,7 +72,7 @@ class MPSIntrinEmitter:
             buffer = buf
             off_row = 0
             off_col = 0
-        stride = buffer.shape[-1]
+        stride = buffer.strides[-2] if len(buffer.strides) == len(buffer.shape) else buffer.shape[-1]
         return buffer, off_row, off_col, stride
 
     def ldmatrix_a(self, A_local_buf, A_shared_buf: Buffer | BufferRegion, ki):

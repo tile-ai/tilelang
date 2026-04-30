@@ -36,11 +36,23 @@ class RegisterTile:
     cols: int = 8
     layout: TileLayout = TileLayout.ROW_MAJOR
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.layout, TileLayout):
+            object.__setattr__(self, "layout", TileLayout(self.layout))
+        if self.fragments_m <= 0 or self.fragments_n <= 0:
+            raise ValueError(f"RegisterTile fragment counts must be positive, got {self.fragments_m}x{self.fragments_n}")
+        if self.rows != 8 or self.cols != 8:
+            raise ValueError(f"Metal register tiles are 8x8 fragments, got {self.rows}x{self.cols}")
+
     @property
     def data(self):
         return self.fragment.data
 
     def index(self, tile_m: int, tile_n: int = 0) -> int:
+        if isinstance(tile_m, int) and not 0 <= tile_m < self.fragments_m:
+            raise IndexError(f"tile_m {tile_m} out of bounds for {self.fragments_m} register-tile rows")
+        if isinstance(tile_n, int) and not 0 <= tile_n < self.fragments_n:
+            raise IndexError(f"tile_n {tile_n} out of bounds for {self.fragments_n} register-tile columns")
         return tile_m * self.fragments_n + tile_n
 
 
@@ -97,8 +109,6 @@ def alloc_rt(
     layout: TileLayout = TileLayout.ROW_MAJOR,
 ) -> RegisterTile:
     """Allocate an internal Metal register tile backed by 8x8 fragments."""
-    if rows != 8 or cols != 8:
-        raise ValueError(f"Metal register tiles are 8x8 fragments, got {rows}x{cols}")
     rt_fragment = T.alloc_fragment((fragments_m * fragments_n, rows, cols), dtype, scope="metal.simdgroup")
     return RegisterTile(rt_fragment, fragments_m, fragments_n, rows, cols, layout)
 
@@ -467,6 +477,8 @@ def prefix_block_vector(
             value = acc
             if writeback is not None and writeback_guard:
                 writeback[token, head] = value
+        if writeback is not None and not writeback_guard:
+            writeback[token, head] = value
         dst[local_idx] = value
 
 

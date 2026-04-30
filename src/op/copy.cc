@@ -800,10 +800,41 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
 }
 
 bool CopyNode::CheckSIMDGroupCopy(Target target) const {
-  if (TargetIsMetal(target) && IsSIMDGroupBuffer(src)) {
-    return IsSharedBuffer(dst) || IsGlobalBuffer(dst);
+  if (!TargetIsMetal(target) || !IsSIMDGroupBuffer(src)) {
+    return false;
   }
-  return false;
+  if (!IsSharedBuffer(dst) && !IsGlobalBuffer(dst)) {
+    return false;
+  }
+  if (src->dtype != dst->dtype) {
+    return false;
+  }
+  if (src_range.size() != 2 || dst_range.size() != 2 ||
+      dst->shape.size() != 2) {
+    return false;
+  }
+
+  int total_elements = 1;
+  for (auto extent : src->shape) {
+    auto imm = extent.as<IntImmNode>();
+    if (!imm) {
+      return false;
+    }
+    total_elements *= imm->value;
+  }
+  if (total_elements % 64 != 0) {
+    return false;
+  }
+
+  for (int i = 0; i < 2; ++i) {
+    auto src_extent = src_range[i]->extent.as<IntImmNode>();
+    auto dst_extent = dst_range[i]->extent.as<IntImmNode>();
+    if (!src_extent || !dst_extent || src_extent->value != dst_extent->value ||
+        src_extent->value % 8 != 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Selects the most specific copy instruction for the given target and buffers.
@@ -1012,7 +1043,23 @@ Stmt CopyNode::LowerSIMDGroupCopy(const LowerArgs &T,
       << "Expected 2D destination for simdgroup store";
   PrimExpr dst_row_base = dst_range[0]->min;
   PrimExpr dst_col_base = dst_range[1]->min;
-  PrimExpr dst_stride = dst->shape[dst->shape.size() - 1];
+  ICHECK_EQ(dst->shape.size(), 2U)
+      << "simdgroup store currently supports 2D destination buffers";
+  Array<PrimExpr> dst_strides = dst->strides;
+  if (dst_strides.empty()) {
+    PrimExpr stride = 1;
+    dst_strides.resize(dst->shape.size());
+    for (int i = static_cast<int>(dst->shape.size()) - 1; i >= 0; --i) {
+      dst_strides.Set(i, stride);
+      stride *= dst->shape[i];
+    }
+  }
+  ICHECK_EQ(dst_strides.size(), dst->shape.size())
+      << "simdgroup store requires complete destination strides";
+  ICHECK(analyzer->CanProveEqual(dst_strides[1], 1))
+      << "simdgroup store requires contiguous destination columns, got stride "
+      << dst_strides[1];
+  PrimExpr dst_stride = dst_strides[0];
 
   int warp_size = TargetGetWarpSize(T.target);
   int block_size = T.thread_bounds->extent.as<IntImmNode>()->value;

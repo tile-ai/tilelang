@@ -86,6 +86,8 @@ if __name__ == "__main__":
     print(f"torch:    {torch.__version__}")
     print(f"tilelang: {tilelang.__version__}")
     print(f"MPS:      {torch.backends.mps.is_available()}")
+    if not torch.backends.mps.is_available():
+        raise SystemExit("Metal GEMM benchmark requires PyTorch MPS support")
     print(f"M={M}, N={N}, K={K}, warmup={args.warmup}, repeats={args.repeats}")
     print()
 
