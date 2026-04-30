@@ -390,7 +390,7 @@ private:
     if (scope == "shared" || scope == "shared.dyn") {
       auto target = Target::Current();
       ICHECK(target.defined()) << "Target is not defined";
-      const int alignment = TargetIsHopper(target) ? 1024 : 16;
+      const int alignment = TargetHasBulkCopy(target) ? 1024 : 16;
       shmem_alignment_map_[op] = alignment;
     }
   }
