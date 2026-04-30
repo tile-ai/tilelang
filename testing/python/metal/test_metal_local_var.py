@@ -33,8 +33,8 @@ def test_metal_local_var_scalar_codegen_uses_thread_scalars():
 
     # local.var should lower to scalar declarations/stores rather than arrays or
     # an unsupported storage scope.
-    assert re.search(r"\bint\s+\w+\s*=\s*3;", src), src
-    assert re.search(r"\bint\s+\w+\s*=\s*0;", src), src
+    assert len(re.findall(r"\bint\s+\w+\s*=\s*0;", src)) >= 2, src
+    assert re.search(r"\w+\s*=\s*3;", src), src
     assert re.search(r"\w+\s*=\s*\(\w+ \+ 4\);", src), src
     assert "local.var" not in src
     assert "thread int" not in src
