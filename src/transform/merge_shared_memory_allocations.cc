@@ -23,7 +23,6 @@
  * memory allocation. This pass merges multiple TIR-level dynamic or static
  * shared memory allocations into one allocation.
  */
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
@@ -792,7 +791,8 @@ private:
       size_t head = aligned - blk.offset;
       size_t tail = blk.size - head - need;
 
-      // Insert tail first so indices are not disturbed by head insertion.
+      // InsertBlock uses lower_bound + coalesce, so insertion order is
+      // irrelevant for correctness.
       if (tail)
         InsertBlock(aligned + need, tail);
       if (head)
