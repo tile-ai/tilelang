@@ -170,9 +170,7 @@ def _make_deepseek_packed_quant_matmul_probe():
                     nibble_index = k - (k // 2) * 2
                     decoded_act = metal_quant.fp8_e4m3fn_to_float(q8_act[m, k])
                     decoded_weight = metal_quant.fp4_e2m1fn_to_float(q4_weight[n, k // 2], nibble_index)
-                    scale = metal_quant.e8m0_to_float(act_scale[m, k]) * metal_quant.e8m0_to_float(
-                        weight_scale[n, k]
-                    )
+                    scale = metal_quant.e8m0_to_float(act_scale[m, k]) * metal_quant.e8m0_to_float(weight_scale[n, k])
                     acc += decoded_act * decoded_weight * scale
                 out[m, n] = acc
 
@@ -199,9 +197,7 @@ def _make_deepseek_component_quant_matmul_probe():
                     nibble_index = k - (k // 2) * 2
                     decoded_act = metal_quant.fp8_e4m3fn_to_float(q8_act[m, k])
                     decoded_weight = metal_quant.fp4_e2m1fn_to_float(q4_weight[n, k // 2], nibble_index)
-                    scale = metal_quant.e8m0_to_float(act_scale[m, k]) * metal_quant.e8m0_to_float(
-                        weight_scale[n, k]
-                    )
+                    scale = metal_quant.e8m0_to_float(act_scale[m, k]) * metal_quant.e8m0_to_float(weight_scale[n, k])
                     acc += decoded_act * decoded_weight * scale
                 out[m, n] = acc
 
@@ -481,7 +477,7 @@ def _run_native_dtype_probe(tmp_path: Path, dtype_name: str) -> subprocess.Compl
     script = tmp_path / f"probe_{dtype_name}.py"
     script.write_text(
         textwrap.dedent(
-            f'''
+            f"""
             import tilelang
             import tilelang.language as T
 
@@ -495,7 +491,7 @@ def _run_native_dtype_probe(tmp_path: Path, dtype_name: str) -> subprocess.Compl
                 return main
 
             bad_kernel(32)
-            '''
+            """
         )
     )
     env = os.environ.copy()

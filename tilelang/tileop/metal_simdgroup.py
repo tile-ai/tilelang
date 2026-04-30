@@ -465,9 +465,8 @@ def prefix_block_vector(
         if token < length:
             acc += src[token, head]
             value = acc
-            if writeback is not None:
-                if writeback_guard:
-                    writeback[token, head] = value
+            if writeback is not None and writeback_guard:
+                writeback[token, head] = value
         dst[local_idx] = value
 
 

@@ -65,9 +65,7 @@ def fp8_e4m3fn_to_float(bits):
 
     mant = T.Cast(FP32, mant_bits)
     subnormal = mant * T.float32(1.0 / 512.0)
-    normal = (T.float32(1.0) + mant * T.float32(1.0 / 8.0)) * T.exp2(
-        T.Cast(FP32, T.Cast("int32", exp_bits) - T.int32(7))
-    )
+    normal = (T.float32(1.0) + mant * T.float32(1.0 / 8.0)) * T.exp2(T.Cast(FP32, T.Cast("int32", exp_bits) - T.int32(7)))
     value = T.if_then_else(exp_bits == T.uint32(0), subnormal, normal)
     value = T.if_then_else(abs_bits == T.uint32(0x7F), T.float32(0.0), value)
     return T.if_then_else(sign != T.uint32(0), -value, value)

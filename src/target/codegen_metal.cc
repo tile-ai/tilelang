@@ -31,9 +31,9 @@
 #include <unordered_map>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "runtime/metal/metal_module.h"
 #include "runtime/thread_storage_scope.h"
-#include "../op/builtin.h"
 #include "target/build_common.h"
 
 namespace tvm {
@@ -354,7 +354,8 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocateNode *op) {
     stream << "simdgroup_" << dtype_str << "8x8 " << vid << '['
            << constant_size / 64 << "];\n";
   } else if (scope == "local.var") {
-    ICHECK(op->dtype.is_scalar()) << "Vector local.var allocation is not supported.";
+    ICHECK(op->dtype.is_scalar())
+        << "Vector local.var allocation is not supported.";
     ICHECK_EQ(constant_size, 1)
         << "Only scalar local.var allocation is supported.";
     PrimExpr init = tir::make_const(op->dtype, 0);
@@ -413,8 +414,8 @@ void CodeGenTileLangMetal::VisitStmt_(const BufferStoreNode *op) {
     ICHECK(op->value.dtype().is_scalar())
         << "Vector local.var store is not supported.";
     this->PrintIndent();
-    stream << GetVarID(op->buffer->data.get()) << " = "
-           << PrintExpr(op->value) << ";\n";
+    stream << GetVarID(op->buffer->data.get()) << " = " << PrintExpr(op->value)
+           << ";\n";
     return;
   }
   CodeGenC::VisitStmt_(op);
