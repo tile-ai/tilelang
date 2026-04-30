@@ -23,8 +23,7 @@ from tilelang.quantize import get_mxfp_intrin_group
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
 
-def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr,
-                           scale: tir.PrimExpr, dtype: str):
+def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr, dtype: str):
     """Convert a packed 4-bit FP4 field to bfloat16 (mirrors Hopper example, ignoring overflow clamp)."""
     assert nbit == 4
     assert dtype == T.bfloat16
@@ -37,8 +36,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr,
     m_f4 = f4 & tir.const(1, T.uint16)
     val_bf16 = tir.reinterpret(
         T.bfloat16,
-        ((((s << tir.const(8, T.uint16)) | e_bf16) << tir.const(7, T.uint16))
-         | (m_f4 << tir.const(6, T.uint16))).astype(T.uint16),
+        ((((s << tir.const(8, T.uint16)) | e_bf16) << tir.const(7, T.uint16)) | (m_f4 << tir.const(6, T.uint16))).astype(T.uint16),
     )
     return val_bf16
 
@@ -57,10 +55,7 @@ def get_configs():
         threads=[128, 256],
         split=[1, 2],
     )
-    return [
-        {k: v for k, v in zip(iter_params, values)}
-        for values in itertools.product(*iter_params.values())
-    ]
+    return [{k: v for k, v in zip(iter_params, values)} for values in itertools.product(*iter_params.values())]
 
 
 @tilelang.autotune(configs=get_configs())
@@ -219,14 +214,10 @@ def matmul(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            T.annotate_layout(
-                {B_shared: tilelang.layout.make_swizzled_layout(B_shared)}
-            )
+            T.annotate_layout({B_shared: tilelang.layout.make_swizzled_layout(B_shared)})
 
             if with_bias:
-                T.annotate_layout(
-                    {Bias_shared: tilelang.layout.make_swizzled_layout(Bias_shared)}
-                )
+                T.annotate_layout({Bias_shared: tilelang.layout.make_swizzled_layout(Bias_shared)})
 
             if with_bias:
                 T.copy(
@@ -258,6 +249,7 @@ def matmul(
 # ---------------------------------------------------------------------------
 # Reference implementations (CPU/CUDA torch, for correctness checking)
 # ---------------------------------------------------------------------------
+
 
 def ref_program_twiddling(A, qB, Scale, Bias=None):
     """Reference: dequantize via bit-twiddling then matmul."""
@@ -293,22 +285,41 @@ def ref_program_simple_with_bias(A, qB, Scale, Bias):
 # Main entry point
 # ---------------------------------------------------------------------------
 
+
 def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False, tune=False):
     total_flops = 2 * m * n * k
 
     if tune:
         kernel = matmul(
-            m, n, k, T.bfloat16, T.bfloat16, T.float32,
-            num_bits=4, scale_size=scale_size,
-            fast_dequant=fast_dequant, with_bias=with_bias,
+            m,
+            n,
+            k,
+            T.bfloat16,
+            T.bfloat16,
+            T.float32,
+            num_bits=4,
+            scale_size=scale_size,
+            fast_dequant=fast_dequant,
+            with_bias=with_bias,
         )
     else:
         kernel = matmul(
-            m, n, k, T.bfloat16, T.bfloat16, T.float32,
-            num_bits=4, scale_size=scale_size,
-            block_M=128, block_N=128, block_K=128,
-            num_stages=2, threads=256, split=1,
-            fast_dequant=fast_dequant, with_bias=with_bias,
+            m,
+            n,
+            k,
+            T.bfloat16,
+            T.bfloat16,
+            T.float32,
+            num_bits=4,
+            scale_size=scale_size,
+            block_M=128,
+            block_N=128,
+            block_K=128,
+            num_stages=2,
+            threads=256,
+            split=1,
+            fast_dequant=fast_dequant,
+            with_bias=with_bias,
         )
 
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)

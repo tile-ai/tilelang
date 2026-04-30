@@ -12,17 +12,16 @@ Test coverage:
 
 import pytest
 import torch
-import numpy as np
 import tilelang
 import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tvm import DataType
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _hip_target():
     return "hip -mcpu=gfx950"
@@ -30,8 +29,7 @@ def _hip_target():
 
 def _fp4_encode(vals):
     """Encode a list of floats to packed uint8 FP4 E2M1 (2 per byte)."""
-    fp4_values = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-                  -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+    fp4_values = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
 
     def encode_one(v):
         best_idx, best_diff = 0, abs(v - fp4_values[0])
@@ -48,8 +46,7 @@ def _fp4_encode(vals):
 
 def _fp4_decode(packed: bytes):
     """Decode packed uint8 FP4 E2M1 to list of floats."""
-    lut = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-           -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+    lut = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
     result = []
     for byte in packed:
         result.append(lut[byte & 0xF])
@@ -60,6 +57,7 @@ def _fp4_decode(packed: bytes):
 # ---------------------------------------------------------------------------
 # Test 1: FP4 copy — shared-memory round-trip
 # ---------------------------------------------------------------------------
+
 
 @tilelang.testing.requires_gfx950
 def test_fp4_copy_shared_roundtrip():
@@ -96,25 +94,38 @@ def test_fp4_copy_shared_roundtrip():
 # Test 2: FP4 -> float16 vectorized cast
 # ---------------------------------------------------------------------------
 
+
 @tilelang.testing.requires_gfx950
 def test_fp4_to_float16_cast():
     """FP4 -> float16 cast: dequantize packed uint8 to float16 via the simple path."""
     # The FP4->F16 cast is exercised inside the dequantize GEMM kernel (simple path).
     # This test validates that the simple dequantize path compiles and produces
     # correct results for a small problem size.
-    import sys, os
-    _examples_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "..", "..", "..", "examples", "dequantize_gemm")
+    import sys
+    import os
+
+    _examples_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "examples", "dequantize_gemm")
     sys.path.insert(0, _examples_dir)
     from example_dequant_gemm_bf16_mxfp4_cdna4 import matmul, ref_program_simple
 
     M, N, K = 64, 64, 64
     kernel = matmul(
-        M, N, K, T.bfloat16, T.bfloat16, T.float32,
-        num_bits=4, scale_size=32,
-        block_M=64, block_N=64, block_K=64,
-        num_stages=0, threads=128, split=1,
-        fast_dequant=False, with_bias=False,
+        M,
+        N,
+        K,
+        T.bfloat16,
+        T.bfloat16,
+        T.float32,
+        num_bits=4,
+        scale_size=32,
+        block_M=64,
+        block_N=64,
+        block_K=64,
+        num_stages=0,
+        threads=128,
+        split=1,
+        fast_dequant=False,
+        with_bias=False,
     )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     profiler.assert_allclose(ref_program_simple, rtol=0.02, atol=0.02)
@@ -124,24 +135,36 @@ def test_fp4_to_float16_cast():
 # Test 3: MXFP4 dequantize GEMM - simple path
 # ---------------------------------------------------------------------------
 
+
 @tilelang.testing.requires_gfx950
 @pytest.mark.parametrize("M,N,K", [(256, 256, 256), (128, 512, 128)])
 def test_mxfp4_dequant_gemm_simple(M, N, K):
     """MXFP4 dequantize-GEMM (simple path) produces correct BF16 output."""
     import sys
     import os
-    _examples_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "..", "..", "..", "examples", "dequantize_gemm")
+
+    _examples_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "examples", "dequantize_gemm")
     sys.path.insert(0, _examples_dir)
     from example_dequant_gemm_bf16_mxfp4_cdna4 import matmul, ref_program_simple
 
     scale_size = 32
     kernel = matmul(
-        M, N, K, T.bfloat16, T.bfloat16, T.float32,
-        num_bits=4, scale_size=scale_size,
-        block_M=128, block_N=128, block_K=128,
-        num_stages=2, threads=256, split=1,
-        fast_dequant=False, with_bias=False,
+        M,
+        N,
+        K,
+        T.bfloat16,
+        T.bfloat16,
+        T.float32,
+        num_bits=4,
+        scale_size=scale_size,
+        block_M=128,
+        block_N=128,
+        block_K=128,
+        num_stages=2,
+        threads=256,
+        split=1,
+        fast_dequant=False,
+        with_bias=False,
     )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     profiler.assert_allclose(ref_program_simple, rtol=0.02, atol=0.02)
@@ -151,24 +174,36 @@ def test_mxfp4_dequant_gemm_simple(M, N, K):
 # Test 4: MXFP4 dequantize GEMM - fast twiddling path
 # ---------------------------------------------------------------------------
 
+
 @tilelang.testing.requires_gfx950
 @pytest.mark.parametrize("M,N,K", [(256, 256, 256)])
 def test_mxfp4_dequant_gemm_twiddling(M, N, K):
     """MXFP4 dequantize-GEMM (fast twiddling path) produces correct BF16 output."""
     import sys
     import os
-    _examples_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "..", "..", "..", "examples", "dequantize_gemm")
+
+    _examples_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "examples", "dequantize_gemm")
     sys.path.insert(0, _examples_dir)
     from example_dequant_gemm_bf16_mxfp4_cdna4 import matmul, ref_program_twiddling
 
     scale_size = 32
     kernel = matmul(
-        M, N, K, T.bfloat16, T.bfloat16, T.float32,
-        num_bits=4, scale_size=scale_size,
-        block_M=128, block_N=128, block_K=128,
-        num_stages=2, threads=256, split=1,
-        fast_dequant=True, with_bias=False,
+        M,
+        N,
+        K,
+        T.bfloat16,
+        T.bfloat16,
+        T.float32,
+        num_bits=4,
+        scale_size=scale_size,
+        block_M=128,
+        block_N=128,
+        block_K=128,
+        num_stages=2,
+        threads=256,
+        split=1,
+        fast_dequant=True,
+        with_bias=False,
     )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     profiler.assert_allclose(ref_program_twiddling, rtol=0.02, atol=0.02)
@@ -177,6 +212,7 @@ def test_mxfp4_dequant_gemm_twiddling(M, N, K):
 # ---------------------------------------------------------------------------
 # Test 5: get_mxfp_intrin_group returns HIP source for gfx950
 # ---------------------------------------------------------------------------
+
 
 @tilelang.testing.requires_gfx950
 def test_get_mxfp_intrin_group_returns_hip_source():
@@ -202,6 +238,7 @@ def test_get_mxfp_intrin_group_returns_hip_source():
 # ---------------------------------------------------------------------------
 # Test 6: get_mxfp_intrin_group for non-gfx950 still returns CUDA PTX
 # ---------------------------------------------------------------------------
+
 
 def test_get_mxfp_intrin_group_returns_ptx_for_cuda():
     """get_mxfp_intrin_group() returns CUDA PTX source when target is None."""

@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Literal
 from tilelang import language as T
 
 # Implementation asm for fp4 to bf16, using twiddling
@@ -201,6 +201,7 @@ def get_mxfp_intrin_group(
     if target is not None:
         try:
             from tilelang.utils.target import target_is_gfx950
+
             _is_gfx950 = target_is_gfx950(target)
         except Exception:
             pass

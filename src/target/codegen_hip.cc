@@ -139,7 +139,8 @@ static std::string GetFP4Type(DataType type) {
   } else if (lanes == 32) {
     stream << "fp4_e2_32_t";
   } else {
-    LOG(FATAL) << "Only support scalar and vector types of width (2,4,8,16,32) for FP4 on HIP";
+    LOG(FATAL) << "Only support scalar and vector types of width (2,4,8,16,32) "
+                  "for FP4 on HIP";
   }
   return stream.str();
 }
@@ -816,7 +817,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     // packed byte for each pair via reinterpret as uint8_t array.
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream val;
-      val << "__tl_cvt_fp4x2_to_half2(((uint8_t*)&(" << src << "))[" << i / 2 << "])";
+      val << "__tl_cvt_fp4x2_to_half2(((uint8_t*)&(" << src << "))[" << i / 2
+          << "])";
       // Store both elements of the half2
       std::ostringstream v0, v1;
       v0 << "((half_t*)(&(" << val.str() << ")))[0]";
@@ -838,11 +840,12 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream val;
-      val << "__tl_cvt_fp4x2_to_float2(((uint8_t*)&(" << src << "))[" << i / 2 << "])";
+      val << "__tl_cvt_fp4x2_to_float2(((uint8_t*)&(" << src << "))[" << i / 2
+          << "])";
       std::string tmp = name_supply_->FreshName("_fp4f2_");
       this->PrintIndent();
       stream << "float2 " << tmp << " = " << val.str() << ";\n";
-      PrintVecElemStore(sret, target_ty, i,     tmp + ".x");
+      PrintVecElemStore(sret, target_ty, i, tmp + ".x");
       PrintVecElemStore(sret, target_ty, i + 1, tmp + ".y");
     }
     os << sret;
@@ -859,11 +862,12 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream val;
-      val << "__tl_cvt_fp4x2_to_double2(((uint8_t*)&(" << src << "))[" << i / 2 << "])";
+      val << "__tl_cvt_fp4x2_to_double2(((uint8_t*)&(" << src << "))[" << i / 2
+          << "])";
       std::string tmp = name_supply_->FreshName("_fp4d2_");
       this->PrintIndent();
       stream << "double2 " << tmp << " = " << val.str() << ";\n";
-      PrintVecElemStore(sret, target_ty, i,     tmp + ".x");
+      PrintVecElemStore(sret, target_ty, i, tmp + ".x");
       PrintVecElemStore(sret, target_ty, i + 1, tmp + ".y");
     }
     os << sret;
@@ -879,12 +883,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream val;
-      val << "__tl_cvt_fp4x2_to_bfloat162(((uint8_t*)&(" << src << "))[" << i / 2 << "])";
+      val << "__tl_cvt_fp4x2_to_bfloat162(((uint8_t*)&(" << src << "))["
+          << i / 2 << "])";
       std::string tmp = name_supply_->FreshName("_fp4bf2_");
       this->PrintIndent();
       stream << "uint1 " << tmp << " = " << val.str() << ";\n";
-      PrintVecElemStore(sret, target_ty, i,     "((bfloat16_t*)(&(" + tmp + ")))[0]");
-      PrintVecElemStore(sret, target_ty, i + 1, "((bfloat16_t*)(&(" + tmp + ")))[1]");
+      PrintVecElemStore(sret, target_ty, i,
+                        "((bfloat16_t*)(&(" + tmp + ")))[0]");
+      PrintVecElemStore(sret, target_ty, i + 1,
+                        "((bfloat16_t*)(&(" + tmp + ")))[1]");
     }
     os << sret;
     return;
@@ -899,13 +906,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream h0, h1;
-      PrintVecElemLoad(src, from_ty, i,     h0);
+      PrintVecElemLoad(src, from_ty, i, h0);
       PrintVecElemLoad(src, from_ty, i + 1, h1);
       std::string tmp = name_supply_->FreshName("_h2fp4_");
       this->PrintIndent();
-      stream << "uint1 " << tmp << " = uint1{__pack_half2(" << h0.str() << ", " << h1.str() << ")};\n";
+      stream << "uint1 " << tmp << " = uint1{__pack_half2(" << h0.str() << ", "
+             << h1.str() << ")};\n";
       this->PrintIndent();
-      stream << "((uint8_t*)&(" << sret << "))[" << i / 2 << "] = __tl_cvt_half2_to_fp4x2(" << tmp << ");\n";
+      stream << "((uint8_t*)&(" << sret << "))[" << i / 2
+             << "] = __tl_cvt_half2_to_fp4x2(" << tmp << ");\n";
     }
     os << sret;
     return;
@@ -921,10 +930,11 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream f0, f1;
-      PrintVecElemLoad(src, from_ty, i,     f0);
+      PrintVecElemLoad(src, from_ty, i, f0);
       PrintVecElemLoad(src, from_ty, i + 1, f1);
       this->PrintIndent();
-      stream << "((uint8_t*)&(" << sret << "))[" << i / 2 << "] = __tl_cvt_float2_to_fp4x2("
+      stream << "((uint8_t*)&(" << sret << "))[" << i / 2
+             << "] = __tl_cvt_float2_to_fp4x2("
              << "float2{" << f0.str() << ", " << f1.str() << "});\n";
     }
     os << sret;
@@ -941,10 +951,11 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream d0, d1;
-      PrintVecElemLoad(src, from_ty, i,     d0);
+      PrintVecElemLoad(src, from_ty, i, d0);
       PrintVecElemLoad(src, from_ty, i + 1, d1);
       this->PrintIndent();
-      stream << "((uint8_t*)&(" << sret << "))[" << i / 2 << "] = __tl_cvt_double2_to_fp4x2("
+      stream << "((uint8_t*)&(" << sret << "))[" << i / 2
+             << "] = __tl_cvt_double2_to_fp4x2("
              << "double2{" << d0.str() << ", " << d1.str() << "});\n";
     }
     os << sret;
@@ -960,13 +971,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream b0, b1;
-      PrintVecElemLoad(src, from_ty, i,     b0);
+      PrintVecElemLoad(src, from_ty, i, b0);
       PrintVecElemLoad(src, from_ty, i + 1, b1);
       std::string tmp = name_supply_->FreshName("_bf2fp4_");
       this->PrintIndent();
-      stream << "uint1 " << tmp << " = uint1{__pack_bfloat162(" << b0.str() << ", " << b1.str() << ")};\n";
+      stream << "uint1 " << tmp << " = uint1{__pack_bfloat162(" << b0.str()
+             << ", " << b1.str() << ")};\n";
       this->PrintIndent();
-      stream << "((uint8_t*)&(" << sret << "))[" << i / 2 << "] = __tl_cvt_bfloat162_to_fp4x2(" << tmp << ");\n";
+      stream << "((uint8_t*)&(" << sret << "))[" << i / 2
+             << "] = __tl_cvt_bfloat162_to_fp4x2(" << tmp << ");\n";
     }
     os << sret;
     return;
@@ -1071,7 +1084,8 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
     auto packed_it = fp4_packed_buffers_.find(buffer_var);
     if (packed_it != fp4_packed_buffers_.end()) {
       // Packed local buffer: use the pre-allocated fp4_e2_2_t array.
-      os << "tl_fp4_packed_load(" << packed_it->second << ", " << idx_str << ")";
+      os << "tl_fp4_packed_load(" << packed_it->second << ", " << idx_str
+         << ")";
     } else {
       // Non-packed (e.g. shared) buffer: reinterpret as fp4_e2_2_t*.
       os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
@@ -1738,8 +1752,8 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocateNode *op) {
       // local register arrays.  Record the mapping so BufferLoad/Store
       // can emit tl_fp4_packed_load / tl_fp4_packed_store calls.
       auto vid_packed = vid + "_packed";
-      stream << "fp4_e2_2_t " << vid_packed << '['
-             << (constant_size + 1) / 2 << "];\n";
+      stream << "fp4_e2_2_t " << vid_packed << '[' << (constant_size + 1) / 2
+             << "];\n";
       fp4_packed_buffers_[op->buffer_var.get()] = vid_packed;
     } else if (scope == "local.var") {
       // Single-element variable: emit an initializer so the value is defined.
@@ -1765,7 +1779,8 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocateNode *op) {
 
 void CodeGenTileLangHIP::VisitStmt_(const BufferStoreNode *op) {
   ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
-  ICHECK(!op->predicate.defined()) << "Predicated buffer store is not supported.";
+  ICHECK(!op->predicate.defined())
+      << "Predicated buffer store is not supported.";
 
   DataType value_dtype = op->value.dtype();
   DataType element_dtype = op->buffer->dtype;
@@ -1773,17 +1788,19 @@ void CodeGenTileLangHIP::VisitStmt_(const BufferStoreNode *op) {
 
   // FP4 scalar store: use tl_fp4_packed_store to correctly handle nibble-level
   // writes without corrupting the neighbouring nibble.
-  if (element_dtype.is_float4() && element_dtype.is_scalar() && value_dtype.is_scalar()) {
+  if (element_dtype.is_float4() && element_dtype.is_scalar() &&
+      value_dtype.is_scalar()) {
     std::string idx_str = PrintExpr(op->indices[0]);
     std::string value = this->PrintExpr(op->value);
     this->PrintIndent();
     auto packed_it = fp4_packed_buffers_.find(buffer_var.get());
     if (packed_it != fp4_packed_buffers_.end()) {
-      stream << "tl_fp4_packed_store(" << packed_it->second << ", "
-             << idx_str << ", " << value << ");\n";
+      stream << "tl_fp4_packed_store(" << packed_it->second << ", " << idx_str
+             << ", " << value << ");\n";
     } else {
-      stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << GetVarID(buffer_var.get())
-             << ", " << idx_str << ", " << value << ");\n";
+      stream << "tl_fp4_packed_store((fp4_e2_2_t*)"
+             << GetVarID(buffer_var.get()) << ", " << idx_str << ", " << value
+             << ");\n";
     }
     return;
   }

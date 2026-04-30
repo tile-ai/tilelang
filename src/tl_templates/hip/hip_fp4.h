@@ -16,7 +16,7 @@
 // Layout: bit3 = sign, bits[2:1] = exponent, bit0 = mantissa.
 // ---------------------------------------------------------------------------
 struct fp4_e2_t {
-  uint8_t __x;  // only low 4 bits are used
+  uint8_t __x; // only low 4 bits are used
 
   TL_DEVICE fp4_e2_t() = default;
   TL_DEVICE explicit fp4_e2_t(uint8_t raw) : __x(raw & 0x0Fu) {}
@@ -26,9 +26,10 @@ struct fp4_e2_t {
   //                value = (-1)^s * 0.5 * m                 for e == 0
   TL_DEVICE operator float() const {
     uint8_t bits = __x & 0x0Fu;
-    if (bits == 0u) return 0.0f;
+    if (bits == 0u)
+      return 0.0f;
     uint32_t sign = (bits >> 3u) & 0x1u;
-    uint32_t exp  = (bits >> 1u) & 0x3u;
+    uint32_t exp = (bits >> 1u) & 0x3u;
     uint32_t mant = bits & 0x1u;
     float result;
     if (exp == 0u) {
@@ -39,8 +40,12 @@ struct fp4_e2_t {
       float mantissa = 1.0f + mant * 0.5f;
       float scale = 1.0f;
       int e = (int)exp - 1;
-      if (e >= 0) { for (int i = 0; i < e; ++i) scale *= 2.0f; }
-      else        { scale = 0.5f; }
+      if (e >= 0) {
+        for (int i = 0; i < e; ++i)
+          scale *= 2.0f;
+      } else {
+        scale = 0.5f;
+      }
       result = mantissa * scale;
     }
     return sign ? -result : result;
@@ -57,15 +62,23 @@ TL_DEVICE fp4_e2_t __tl_float_to_fp4(float x) {
   const float fp4_max = 6.0f;
   const float fp4_vals[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
   uint8_t sign = 0u;
-  if (x < 0.0f) { sign = 1u; x = -x; }
-  if (x > fp4_max) x = fp4_max;
+  if (x < 0.0f) {
+    sign = 1u;
+    x = -x;
+  }
+  if (x > fp4_max)
+    x = fp4_max;
   // Find the closest representable value by brute-force over 8 candidates.
   uint8_t best = 0u;
-  float best_diff = x;  // diff from 0
+  float best_diff = x; // diff from 0
   for (uint8_t i = 1u; i < 8u; ++i) {
     float diff = x - fp4_vals[i];
-    if (diff < 0.0f) diff = -diff;
-    if (diff < best_diff) { best_diff = diff; best = i; }
+    if (diff < 0.0f)
+      diff = -diff;
+    if (diff < best_diff) {
+      best_diff = diff;
+      best = i;
+    }
   }
   // Encode: bit3=sign, bits[2:1]=exp, bit0=mant
   uint8_t enc = (uint8_t)((sign << 3u) | best);
@@ -80,7 +93,7 @@ TL_DEVICE fp4_e2_t __tl_float_to_fp4(float x) {
 // ---------------------------------------------------------------------------
 class fp4_e2_2_t {
 public:
-  uint8_t __x;  // packed storage
+  uint8_t __x; // packed storage
 
   TL_DEVICE fp4_e2_2_t() = default;
   TL_DEVICE explicit fp4_e2_2_t(uint8_t data) : __x(data) {}
@@ -88,7 +101,9 @@ public:
   TL_DEVICE fp4_e2_t x() const { return fp4_e2_t(__x & 0x0Fu); }
   TL_DEVICE fp4_e2_t y() const { return fp4_e2_t((__x >> 4u) & 0x0Fu); }
 
-  TL_DEVICE void set_x(fp4_e2_t val) { __x = (__x & 0xF0u) | (val.__x & 0x0Fu); }
+  TL_DEVICE void set_x(fp4_e2_t val) {
+    __x = (__x & 0xF0u) | (val.__x & 0x0Fu);
+  }
   TL_DEVICE void set_y(fp4_e2_t val) {
     __x = (__x & 0x0Fu) | ((val.__x & 0x0Fu) << 4u);
   }
@@ -125,18 +140,17 @@ TL_DEVICE fp4_e2_2_t make_fp4_e2_2_t(fp4_e2_t x, fp4_e2_t y) {
   return fp4_e2_2_t((uint8_t)((x.__x & 0x0Fu) | ((y.__x & 0x0Fu) << 4u)));
 }
 
-TL_DEVICE fp4_e2_4_t make_fp4_e2_4_t(fp4_e2_t x0, fp4_e2_t x1,
-                                      fp4_e2_t x2, fp4_e2_t x3) {
+TL_DEVICE fp4_e2_4_t make_fp4_e2_4_t(fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2,
+                                     fp4_e2_t x3) {
   fp4_e2_4_t r;
   r.x = make_fp4_e2_2_t(x0, x1);
   r.y = make_fp4_e2_2_t(x2, x3);
   return r;
 }
 
-TL_DEVICE fp4_e2_8_t make_fp4_e2_8_t(fp4_e2_t x0, fp4_e2_t x1,
-                                      fp4_e2_t x2, fp4_e2_t x3,
-                                      fp4_e2_t x4, fp4_e2_t x5,
-                                      fp4_e2_t x6, fp4_e2_t x7) {
+TL_DEVICE fp4_e2_8_t make_fp4_e2_8_t(fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2,
+                                     fp4_e2_t x3, fp4_e2_t x4, fp4_e2_t x5,
+                                     fp4_e2_t x6, fp4_e2_t x7) {
   fp4_e2_8_t r;
   r.x = make_fp4_e2_4_t(x0, x1, x2, x3);
   r.y = make_fp4_e2_4_t(x4, x5, x6, x7);
@@ -240,4 +254,4 @@ TL_DEVICE void tl_fp4_packed_store(fp4_e2_2_t *packed, int idx, fp4_e2_t val) {
   }
 }
 
-#endif  // defined(__gfx950__)
+#endif // defined(__gfx950__)
