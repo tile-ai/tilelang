@@ -85,114 +85,139 @@ TileOperator CumSumOpNode::Clone() const {
   return CumSumOp(op);
 }
 
-PrimExpr ReduceOpNode::MakeInitValue() const {
+PrimExpr ReduceOpNode::MakeInitValue(int vsize) const {
   auto dst_dtype = dst->dtype;
   auto is_int = dst_dtype.is_int();
   bool is_uint = dst_dtype.is_uint();
   auto bits = dst_dtype.bits();
 
-  if (type->isSum()) {
-    return make_zero(dst->dtype);
-  } else if (type->isAbsSum()) {
-    return make_zero(dst->dtype);
+  PrimExpr scalar;
+  if (type->isSum() || type->isAbsSum()) {
+    scalar = make_zero(dst->dtype);
   } else if (type->isMax()) {
-    if (is_int) {
-      return make_const(dst->dtype, -(1 << (bits - 1)));
-    } else if (is_uint) {
-      return make_const(dst->dtype, 0);
-    } else {
-      return make_const(dst->dtype, -INFINITY);
-    }
+    if (is_int)
+      scalar = make_const(dst->dtype, -(1 << (bits - 1)));
+    else if (is_uint)
+      scalar = make_const(dst->dtype, 0);
+    else
+      scalar = make_const(dst->dtype, -INFINITY);
   } else if (type->isMin()) {
-    if (is_int) {
-      return make_const(dst->dtype, (1 << (bits - 1)) - 1);
-    } else if (is_uint) {
-      return make_const(dst->dtype, (1 << bits) - 1);
-    } else {
-      return make_const(dst->dtype, INFINITY);
-    }
+    if (is_int)
+      scalar = make_const(dst->dtype, (1 << (bits - 1)) - 1);
+    else if (is_uint)
+      scalar = make_const(dst->dtype, (1 << bits) - 1);
+    else
+      scalar = make_const(dst->dtype, INFINITY);
   } else if (type->isAbsMax()) {
-    return make_const(dst->dtype, 0);
+    scalar = make_const(dst->dtype, 0);
   } else if (type->isBitAnd()) {
-    if (is_int) {
-      return make_const(dst->dtype, -1);
-    } else if (is_uint) {
-      return make_const(dst->dtype, (1 << bits) - 1);
-    } else {
-      // Should not arrive here
-      return make_const(dst->dtype, -INFINITY);
-    }
-  } else if (type->isBitOr()) {
-    return make_zero(dst->dtype);
-  } else if (type->isBitXor()) {
-    return make_zero(dst->dtype);
+    if (is_int)
+      scalar = make_const(dst->dtype, -1);
+    else if (is_uint)
+      scalar = make_const(dst->dtype, (1 << bits) - 1);
+    else
+      scalar = make_const(dst->dtype, -INFINITY);
+  } else if (type->isBitOr() || type->isBitXor()) {
+    scalar = make_zero(dst->dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
-    return PrimExpr();
+    scalar = PrimExpr();
   }
+
+  if (vsize <= 1)
+    return scalar;
+  return Broadcast(scalar, vsize);
 }
 
-PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &acc,
-                                  const PrimExpr &b) const {
-  PrimExpr rhs = b;
-  if (acc->dtype != rhs->dtype) {
-    rhs = Cast(acc->dtype, rhs);
-  }
-  const bool use_nan_op =
-      nan_propagate && (acc.dtype().is_float16() || acc.dtype().is_bfloat16());
-  if (type->isSum()) {
-    return acc + rhs;
-  } else if (type->isAbsSum()) {
-    return acc + Max(rhs, -rhs);
-  } else if (type->isMax()) {
-    if (use_nan_op) {
-      return Call(acc.dtype(), tl::max_nan(), {acc, rhs});
+std::optional<PrimExpr> ReduceOpNode::MakeReduce(int vsize, const PrimExpr &acc,
+                                                 const PrimExpr &b) const {
+  if (vsize == 1) {
+
+    PrimExpr rhs = b;
+    if (acc->dtype != rhs->dtype) {
+      rhs = Cast(acc->dtype, rhs);
     }
-    return Max(acc, rhs);
-  } else if (type->isMin()) {
-    if (use_nan_op) {
-      return Call(acc.dtype(), tl::min_nan(), {acc, rhs});
+    const bool use_nan_op = nan_propagate && (acc.dtype().is_float16() ||
+                                              acc.dtype().is_bfloat16());
+    if (type->isSum()) {
+      return acc + rhs;
+    } else if (type->isAbsSum()) {
+      return acc + Max(rhs, -rhs);
+    } else if (type->isMax()) {
+      return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, rhs})
+                        : PrimExpr(Max(acc, rhs));
+    } else if (type->isMin()) {
+      return use_nan_op ? Call(acc.dtype(), tl::min_nan(), {acc, rhs})
+                        : PrimExpr(Min(acc, rhs));
+    } else if (type->isAbsMax()) {
+      auto abs_rhs = Max(rhs, -rhs);
+      return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
+                        : PrimExpr(Max(acc, abs_rhs));
+    } else if (type->isBitAnd()) {
+      return acc & rhs;
+    } else if (type->isBitOr()) {
+      return acc | rhs;
+    } else if (type->isBitXor()) {
+      return acc ^ rhs;
     }
-    return Min(acc, rhs);
-  } else if (type->isAbsMax()) {
-    if (use_nan_op) {
-      return Call(acc.dtype(), tl::max_nan(), {acc, tvm::abs(rhs)});
-    }
-    return Max(acc, tvm::abs(rhs));
-  } else if (type->isBitAnd()) {
-    return acc & rhs;
-  } else if (type->isBitOr()) {
-    return acc | rhs;
-  } else if (type->isBitXor()) {
-    return acc ^ rhs;
-  } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
+    return std::nullopt;
   }
+
+  if (vsize != 2)
+    return std::nullopt;
+
+  if (type->isSum()) {
+    return Call(acc.dtype(), tl::add2(), {acc, b});
+  } else if (type->isAbsSum()) {
+    return Call(acc.dtype(), tl::add2(),
+                {acc, Call(acc.dtype(), tl::abs2(), {b})});
+  } else if (type->isMax()) {
+    return Call(acc.dtype(), nan_propagate ? tl::max2_nan() : tl::max2(),
+                {acc, b});
+  } else if (type->isMin()) {
+    return Call(acc.dtype(), nan_propagate ? tl::min2_nan() : tl::min2(),
+                {acc, b});
+  } else if (type->isAbsMax()) {
+    return Call(acc.dtype(), nan_propagate ? tl::max2_nan() : tl::max2(),
+                {acc, Call(acc.dtype(), tl::abs2(), {b})});
+  }
+  return std::nullopt;
 }
 
-std::string ReduceOpNode::MakeCodegenReducer() const {
+std::optional<std::string> ReduceOpNode::MakeCodegenReducer(int vsize) const {
   const bool use_nan_op =
       nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16());
-  if (type->isSum()) {
-    return "tl::SumOp";
-  } else if (type->isAbsSum()) {
-    return "tl::SumOp";
-  } else if (type->isMax()) {
-    return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-  } else if (type->isMin()) {
-    return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
-  } else if (type->isAbsMax()) {
-    return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-  } else if (type->isBitAnd()) {
-    return "tl::BitAndOp";
-  } else if (type->isBitOr()) {
-    return "tl::BitOrOp";
-  } else if (type->isBitXor()) {
-    return "tl::BitXorOp";
-  } else {
+
+  auto base = [&]() -> std::string {
+    if (type->isSum() || type->isAbsSum())
+      return "tl::SumOp";
+    if (type->isMax())
+      return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
+    if (type->isMin())
+      return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
+    if (type->isAbsMax())
+      return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
+    if (type->isBitAnd())
+      return "tl::BitAndOp";
+    if (type->isBitOr())
+      return "tl::BitOrOp";
+    if (type->isBitXor())
+      return "tl::BitXorOp";
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
     return "";
+  }();
+
+  if (vsize <= 1)
+    return base;
+
+  if (vsize == 2) {
+    if (dst->dtype.is_bfloat16())
+      return base + "_bf16x2";
+    if (dst->dtype.is_float16())
+      return base + "_fp16x2";
   }
+  return std::nullopt;
 }
 
 static Array<PrimExpr> InputPlaceholders(size_t n) {
@@ -265,6 +290,15 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * normalization.
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
+
+static int GetPreferedVectorizedSize(DataType dt, Target target) {
+  if (!TargetIsCuda(target))
+    return 1;
+  if (dt.is_bfloat16() || dt.is_float16())
+    return 2;
+  return 1;
+}
+
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16()) &&
       !TargetIsCuda(T.target)) {
@@ -374,12 +408,6 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     // For max/min/absmax with clear=false and need_duplicate, we still need to
     // initialize the temporary buffer with identity values since the original
     // dst values will be combined later via need_update
-    if (require_init ||
-        (need_duplicate && (this->type->isMax() || this->type->isMin() ||
-                            this->type->isAbsMax()))) {
-      stmts.push_back(
-          BufferStore(clear_buffer, this->MakeInitValue(), red_indices));
-    }
 
     // make thread-local reduce
     Array<PrimExpr> src_indice_compressed;
@@ -391,19 +419,109 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       src_var_compressed.push_back(var);
     }
 
-    Stmt reduce_local = BufferStore(
-        clear_buffer,
-        this->MakeReduce(BufferLoad(clear_buffer, red_indices),
-                         BufferLoad(src_buffer, src_indice_compressed)),
-        red_indices);
+    bool can_pack = false;
+    bool need_pack_buffer = false;
+    bool need_batch_pack_buffer = false;
+    Buffer clear_buffer_packed;
+    Buffer clear_batch_pack_buffer;
+    {
+      int vsize = GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
+      if (vsize > 1 && !src_var_compressed.empty()) {
+        auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
+        if (ext && ext->value >= vsize && ext->value % vsize == 0) {
+          can_pack = true;
+          DataType vec_dtype = clear_buffer->dtype.with_lanes(vsize);
+          clear_buffer_packed =
+              decl_buffer(red_layout->OutputShape(), vec_dtype,
+                          clear_buffer->name + "_pack",
+                          GetPtrStorageScope(clear_buffer->data));
+          need_pack_buffer = true;
 
-    for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0; --i) {
-      reduce_local =
-          For(src_var_compressed[i]->var, 0, src_var_compressed[i]->dom->extent,
-              ForKind::kUnrolled, reduce_local, std::nullopt,
-              {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+          Array<Stmt> local_body;
+
+          if (require_init ||
+              (need_duplicate && (this->type->isMax() || this->type->isMin() ||
+                                  this->type->isAbsMax()))) {
+            local_body.push_back(BufferStore(
+                clear_buffer_packed, this->MakeInitValue(vsize), red_indices));
+          }
+
+          const auto *ext_int =
+              as_const_int(src_var_compressed.back()->dom->extent);
+          int64_t inner_extent = *ext_int;
+          PrimExpr halved_extent = Integer(inner_extent / vsize);
+
+          auto &inner_var = src_var_compressed.back();
+
+          PrimExpr ramp_base =
+              Substitute(src_indice_compressed.back(),
+                         {{inner_var->var, inner_var->var * Integer(2)}});
+          src_indice_compressed.Set(
+              src_indice_compressed.size() - 1,
+              Ramp(ramp_base, IntImm(DataType::Int(32), 1), vsize));
+
+          auto src_load = BufferLoad(src_buffer, src_indice_compressed);
+          auto *src_writer = src_load.CopyOnWrite();
+          src_writer->dtype = vec_dtype;
+
+          Stmt reduce_local = BufferStore(
+              clear_buffer_packed,
+              this->MakeReduce(vsize,
+                               BufferLoad(clear_buffer_packed, red_indices),
+                               src_load)
+                  .value(),
+              red_indices);
+
+          reduce_local =
+              For(inner_var->var, 0, halved_extent, ForKind::kUnrolled,
+                  reduce_local, std::nullopt,
+                  {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+
+          for (int i = static_cast<int>(src_layout->OutputDim()) - 2; i >= 0;
+               --i) {
+            reduce_local =
+                For(src_var_compressed[i]->var, 0,
+                    src_var_compressed[i]->dom->extent, ForKind::kUnrolled,
+                    reduce_local, std::nullopt,
+                    {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+          }
+          local_body.push_back(reduce_local);
+
+          auto acc_vec = BufferLoad(clear_buffer_packed, red_indices);
+          auto lane0 = Shuffle::ExtractElement(acc_vec, 0);
+          auto lane1 = Shuffle::ExtractElement(acc_vec, 1);
+          auto scalar_result = this->MakeReduce(1, lane0, lane1).value();
+          local_body.push_back(
+              BufferStore(clear_buffer, scalar_result, red_indices));
+
+          stmts.push_back(SeqStmt(local_body));
+        }
+      }
     }
-    stmts.push_back(reduce_local);
+
+    if (!can_pack) {
+      if (require_init ||
+          (need_duplicate && (this->type->isMax() || this->type->isMin() ||
+                              this->type->isAbsMax()))) {
+        stmts.push_back(
+            BufferStore(clear_buffer, this->MakeInitValue(), red_indices));
+      }
+
+      Stmt reduce_local = BufferStore(
+          clear_buffer,
+          this->MakeReduce(1, BufferLoad(clear_buffer, red_indices),
+                           BufferLoad(src_buffer, src_indice_compressed))
+              .value(),
+          red_indices);
+
+      for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0; --i) {
+        reduce_local = For(src_var_compressed[i]->var, 0,
+                           src_var_compressed[i]->dom->extent,
+                           ForKind::kUnrolled, reduce_local, std::nullopt,
+                           {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+      }
+      stmts.push_back(reduce_local);
+    }
 
     auto src_thread = src_layout->ForwardThread(
         src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
@@ -500,30 +618,40 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
         // Use run_batch (not run) to avoid overload-resolution ambiguity when
         // a pointer is passed as first argument.
+        int vsize = GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
+        bool can_batch_pack = vsize > 1 && batch >= vsize && batch % vsize == 0;
+        int eff_batch = can_batch_pack ? (batch / vsize) : batch;
+
+        std::string reducer =
+            this->MakeCodegenReducer(can_batch_pack ? vsize : 1).value();
+
         if (TargetHasSMVersionGE(T.target, 90)) {
           auto all_threads = T.thread_bounds->extent;
-          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-             << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ", tl::NamedBarrier<" << all_threads << ">, " << batch << ", "
-             << reducing_threads << ">::run_batch";
+          ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
+             << (*scale) << ", " << thread_offset << ", tl::NamedBarrier<"
+             << all_threads << ">, " << eff_batch << ", " << reducing_threads
+             << ">::run_batch";
         } else if (TargetIsRocm(T.target)) {
-          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-             << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ", " << batch << ", " << reducing_threads << ">::run_batch";
+          ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
+             << (*scale) << ", " << thread_offset << ", " << eff_batch << ", "
+             << reducing_threads << ">::run_batch";
         } else {
-          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-             << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ", tl::SyncThreadsBarrier, " << batch << ", "
+          ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
+             << (*scale) << ", " << thread_offset
+             << ", tl::SyncThreadsBarrier, " << eff_batch << ", "
              << reducing_threads << ">::run_batch";
         }
 
         // Workspace is only needed for cross-warp reduce (> 32 threads).
         // Allocate once; all chunks share the same workspace buffer.
+        DataType ws_dtype = can_batch_pack
+                                ? clear_buffer->dtype.with_lanes(vsize)
+                                : clear_buffer->dtype;
         PrimExpr workspace;
         bool need_workspace = reducing_threads > 32;
         if (need_workspace) {
-          int ws_size = reducing_threads * batch;
-          workspace = T.AddWorkspace(ws_size, clear_buffer->dtype);
+          int ws_size = reducing_threads * eff_batch;
+          workspace = T.AddWorkspace(ws_size, ws_dtype);
         }
 
         // Compute N_total and num_chunks for this buffer.
@@ -541,23 +669,98 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         for (int d = buf_ndim - 2; d >= 0; d--)
           buf_strides[d] = buf_strides[d + 1] * buf_shape_vals[d + 1];
 
-        for (int chunk = 0; chunk < num_chunks; chunk++) {
-          int64_t flat_offset = (int64_t)chunk * batch;
-          // Map flat_offset to multi-dim indices in clear_buffer.
-          Array<PrimExpr> chunk_indices;
-          for (int d = 0; d < buf_ndim; d++) {
-            int64_t idx = (flat_offset / buf_strides[d]) % buf_shape_vals[d];
-            chunk_indices.push_back(Integer(idx));
-          }
-          // Pointer to the start of this chunk's elements in clear_buffer.
-          PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
-                              {BufferLoad(clear_buffer, chunk_indices)});
+        std::string template_str = ss.str();
 
-          Array<PrimExpr> args = {StringImm(ss.str()), ptr};
-          if (need_workspace)
-            args.push_back(workspace);
-          phases.push_back(
-              Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
+        if (can_batch_pack) {
+          int K = vsize;
+          int packed_batch = batch / K;
+
+          Buffer pack_buf = decl_buffer({Integer(packed_batch)},
+                                        clear_buffer->dtype.with_lanes(K),
+                                        clear_buffer->name + "_pack",
+                                        GetPtrStorageScope(clear_buffer->data));
+
+          need_batch_pack_buffer = true;
+          clear_batch_pack_buffer = pack_buf;
+
+          for (int chunk = 0; chunk < num_chunks; chunk++) {
+            int64_t flat_offset = (int64_t)chunk * batch;
+
+            // --- Pack loop ---
+            Var pack_j("pack_j");
+            PrimExpr base = Integer(flat_offset);
+            PrimExpr scaled = pack_j * K;
+
+            Array<PrimExpr> idx_a, idx_b;
+            PrimExpr fa = base + scaled;
+            PrimExpr fb = base + scaled + Integer(1);
+            for (int d = 0; d < buf_ndim; d++) {
+              idx_a.push_back(FloorMod(FloorDiv(fa, Integer(buf_strides[d])),
+                                       Integer(buf_shape_vals[d])));
+              idx_b.push_back(FloorMod(FloorDiv(fb, Integer(buf_strides[d])),
+                                       Integer(buf_shape_vals[d])));
+            }
+            auto a_load = BufferLoad(clear_buffer, idx_a);
+            auto b_load = BufferLoad(clear_buffer, idx_b);
+            Stmt pack_body = BufferStore(
+                pack_buf, Shuffle({a_load, b_load}, {0, 1}), {pack_j});
+            Stmt pack_loop =
+                For(pack_j, 0, packed_batch, ForKind::kUnrolled, pack_body);
+            phases.push_back(pack_loop);
+
+            // --- AllReduce on packed buffer ---
+            PrimExpr packed_ptr =
+                Call(DataType::Handle(), builtin::address_of(),
+                     {BufferLoad(pack_buf, {Integer(0)})});
+            Array<PrimExpr> args = {StringImm(template_str), packed_ptr};
+            if (need_workspace)
+              args.push_back(workspace);
+            phases.push_back(Evaluate(
+                Call(DataType::Handle(), builtin::call_extern(), args)));
+
+            // --- Unpack loop ---
+            Var unpack_j("unpack_j");
+            PrimExpr ubase = Integer(flat_offset);
+            PrimExpr uscaled = unpack_j * K;
+            Array<PrimExpr> uidx_a, uidx_b;
+            PrimExpr ufa = ubase + uscaled;
+            PrimExpr ufb = ubase + uscaled + Integer(1);
+            for (int d = 0; d < buf_ndim; d++) {
+              uidx_a.push_back(FloorMod(FloorDiv(ufa, Integer(buf_strides[d])),
+                                        Integer(buf_shape_vals[d])));
+              uidx_b.push_back(FloorMod(FloorDiv(ufb, Integer(buf_strides[d])),
+                                        Integer(buf_shape_vals[d])));
+            }
+            auto packed_val = BufferLoad(pack_buf, {unpack_j});
+            Stmt unpack_body = SeqStmt({
+                BufferStore(clear_buffer,
+                            Shuffle::ExtractElement(packed_val, 0), uidx_a),
+                BufferStore(clear_buffer,
+                            Shuffle::ExtractElement(packed_val, 1), uidx_b),
+            });
+            Stmt unpack_loop =
+                For(unpack_j, 0, packed_batch, ForKind::kUnrolled, unpack_body);
+            phases.push_back(unpack_loop);
+          }
+        } else {
+          for (int chunk = 0; chunk < num_chunks; chunk++) {
+            int64_t flat_offset = (int64_t)chunk * batch;
+            // Map flat_offset to multi-dim indices in clear_buffer.
+            Array<PrimExpr> chunk_indices;
+            for (int d = 0; d < buf_ndim; d++) {
+              int64_t idx = (flat_offset / buf_strides[d]) % buf_shape_vals[d];
+              chunk_indices.push_back(Integer(idx));
+            }
+            // Pointer to the start of this chunk's elements in clear_buffer.
+            PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
+                                {BufferLoad(clear_buffer, chunk_indices)});
+
+            Array<PrimExpr> args = {StringImm(template_str), ptr};
+            if (need_workspace)
+              args.push_back(workspace);
+            phases.push_back(Evaluate(
+                Call(DataType::Handle(), builtin::call_extern(), args)));
+          }
         }
       }
 
@@ -615,6 +818,15 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         body = Allocate(clear_buffer->data, clear_buffer->dtype,
                         clear_buffer->shape, const_true(), body);
       }
+      if (need_pack_buffer) {
+        body = Allocate(clear_buffer_packed->data, clear_buffer_packed->dtype,
+                        clear_buffer_packed->shape, const_true(), body);
+      }
+      if (need_batch_pack_buffer) {
+        body = Allocate(clear_batch_pack_buffer->data,
+                        clear_batch_pack_buffer->dtype,
+                        clear_batch_pack_buffer->shape, const_true(), body);
+      }
       return body;
 
     } else {
@@ -638,11 +850,11 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           auto thread_offset = T.thread_bounds->min;
           if (TargetHasSMVersionGE(T.target, 90)) {
             auto all_threads = T.thread_bounds->extent;
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer().value() << ", "
                << reducing_threads << ", " << (*scale) << ", " << thread_offset
                << ", tl::NamedBarrier<" << all_threads << ">>::run";
           } else {
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+            ss << "tl::AllReduce<" << this->MakeCodegenReducer().value() << ", "
                << reducing_threads << ", " << (*scale) << ", " << thread_offset
                << ">::run";
           }
@@ -721,6 +933,10 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       if (need_duplicate) {
         body = Allocate(clear_buffer->data, clear_buffer->dtype,
                         clear_buffer->shape, const_true(), body);
+      }
+      if (need_pack_buffer) {
+        body = Allocate(clear_buffer_packed->data, clear_buffer_packed->dtype,
+                        clear_buffer_packed->shape, const_true(), body);
       }
       return body;
     }

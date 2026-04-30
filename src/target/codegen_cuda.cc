@@ -1012,6 +1012,10 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         tl_func = "min2";
       else if (op == "max")
         tl_func = "max2";
+      else if (op == "min_nan")
+        tl_func = "min2_nan";
+      else if (op == "max_nan")
+        tl_func = "max2_nan";
 
       if (!tl_func.empty()) {
         // Decompose into lanes/2 independent x2 packed operations.
@@ -3719,6 +3723,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
+             op->op.same_as(tl::max2_nan()) || op->op.same_as(tl::min2_nan()) ||
              op->op.same_as(tl::abs2())) {
     // Packed x2 element-wise math intrinsics.
     //
@@ -3741,6 +3746,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       op_name = "max2";
     else if (op->op.same_as(tl::min2()))
       op_name = "min2";
+    else if (op->op.same_as(tl::max2_nan()))
+      op_name = "max2_nan";
+    else if (op->op.same_as(tl::min2_nan()))
+      op_name = "min2_nan";
     else
       op_name = "abs2";
 
@@ -4360,10 +4369,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
       os << "uint1{__pack_nv_bfloat162(" << e0 << ", " << e1 << ")}";
     } else {
       enable_fp16_ = true;
-      // __pack_half2 returns __half2 which is 32-bit.
-      // Reinterpret via aggregate initialisation.
-      os << "uint1{*(unsigned*)&(__pack_half2((__half)(" << e0 << "), (__half)("
-         << e1 << ")))}";
+      os << "uint1{tl::pack_half2(" << e0 << ", " << e1 << ")}";
+    }
+    return;
+  }
+  // Handle ExtractElement: extract a scalar lane from a bfloat16x2 / float16x2
+  // vector (produced by packed reduction, etc.). The vector is stored as an
+  // opaque uint1 in the lowered code, but semantically it is a packed pair.
+  DataType vec_t =
+      op->vectors.size() == 1 ? op->vectors[0].dtype() : DataType();
+  bool vec_is_bf16x2 = vec_t.is_bfloat16() && vec_t.lanes() == 2;
+  bool vec_is_fp16x2 = vec_t.is_float16() && vec_t.lanes() == 2;
+  if ((vec_is_bf16x2 || vec_is_fp16x2) && op->vectors.size() == 1 &&
+      op->indices.size() == 1) {
+    int lane = Downcast<IntImm>(op->indices[0])->value;
+    std::string vec = PrintExpr(op->vectors[0]);
+    if (vec_is_bf16x2) {
+      enable_bf16_ = true;
+      os << "bfloat16_t(((nv_bfloat162*)(&(" << vec << ")))->"
+         << (lane == 0 ? "x" : "y") << ")";
+    } else {
+      enable_fp16_ = true;
+      os << "half_t(((half2*)(&(" << vec << ")))->" << (lane == 0 ? "x" : "y")
+         << ")";
     }
     return;
   }

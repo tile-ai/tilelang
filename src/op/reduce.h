@@ -127,12 +127,15 @@ public:
   TileOperator Clone() const;
 
 private:
-  /// Generate initial value for reduction
-  PrimExpr MakeInitValue() const;
-  /// Generate reduction expression
-  PrimExpr MakeReduce(const PrimExpr &acc, const PrimExpr &b) const;
-  /// Generate codegen reducer string
-  std::string MakeCodegenReducer() const;
+  /// Generate initial value for reduction, broadcast to vsize lanes.
+  PrimExpr MakeInitValue(int vsize = 1) const;
+  /// Generate reduction expression. Returns nullopt if vsize is not supported
+  /// (e.g. bitwise ops cannot be packed).
+  std::optional<PrimExpr> MakeReduce(int vsize, const PrimExpr &acc,
+                                     const PrimExpr &b) const;
+  /// Generate codegen reducer name, with packed suffix when vsize > 1.
+  /// Returns nullopt if vsize is not supported for this reducer type.
+  std::optional<std::string> MakeCodegenReducer(int vsize = 1) const;
 };
 
 /// Wrapper class for reduction operations
