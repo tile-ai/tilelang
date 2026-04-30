@@ -39,7 +39,7 @@ struct SafeMemChecker : public StmtExprVisitor {
     disableOOBWarning =
         tvm::transform::PassContext::Current()
             ->GetConfig(kDisableOutOfBoundWarning, Optional<Bool>())
-            .value_or(false);
+            .value_or(true);
   }
   void VisitExpr_(const BufferLoadNode *op) final {
     // If the buffer is in global scope, we will check its indices and add
