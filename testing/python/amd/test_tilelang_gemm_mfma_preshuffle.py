@@ -356,7 +356,7 @@ def assert_tl_matmul_correctness(
         (256, 256, 512, determine_fp8_type(), T.float32, T.float32, False, True, 1, True, True, False),
     ],
 )
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_cdna
 def test_assert_tl_matmul(
     M,
     N,
