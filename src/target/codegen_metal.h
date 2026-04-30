@@ -54,6 +54,8 @@ public:
                          const std::string &value) final;
   // overload visitor
   void VisitStmt_(const AllocateNode *op) final;                    // NOLINT(*)
+  void VisitStmt_(const BufferStoreNode *op) final;                 // NOLINT(*)
+  void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;    // NOLINT(*)
   void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const CallNode *op, std::ostream &os) final;      // NOLINT(*)

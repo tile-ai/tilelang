@@ -33,6 +33,7 @@
 
 #include "runtime/metal/metal_module.h"
 #include "runtime/thread_storage_scope.h"
+#include "../op/builtin.h"
 #include "target/build_common.h"
 
 namespace tvm {
@@ -352,6 +353,21 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocateNode *op) {
     simdgroup_dtype_[op->buffer_var.get()] = dtype_str;
     stream << "simdgroup_" << dtype_str << "8x8 " << vid << '['
            << constant_size / 64 << "];\n";
+  } else if (scope == "local.var") {
+    ICHECK(op->dtype.is_scalar()) << "Vector local.var allocation is not supported.";
+    ICHECK_EQ(constant_size, 1)
+        << "Only scalar local.var allocation is supported.";
+    PrimExpr init = tir::make_const(op->dtype, 0);
+    auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
+    if (init_it != op->annotations.end()) {
+      PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
+      if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
+        user_init = tir::Cast(op->dtype, user_init);
+      }
+      init = user_init;
+    }
+    PrintType(op->dtype, stream);
+    stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
   } else {
     PrintStorageScope(scope, stream);
     PrintType(op->dtype, stream);
@@ -360,6 +376,48 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocateNode *op) {
 
   RegisterHandleType(op->buffer_var.get(), op->dtype);
   this->PrintStmt(op->body);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const BufferLoadNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  std::string scope;
+  auto it = alloc_storage_scope_.find(op->buffer->data.get());
+  if (it != alloc_storage_scope_.end()) {
+    scope = it->second;
+  }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(op->buffer->data);
+  }
+  if (scope == "local.var") {
+    ICHECK_EQ(op->indices.size(), 1)
+        << "Load from non-flat local.var memory not supported.";
+    ICHECK(op->dtype.is_scalar()) << "Vector local.var load is not supported.";
+    os << GetVarID(op->buffer->data.get());
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitStmt_(const BufferStoreNode *op) {
+  std::string scope;
+  auto it = alloc_storage_scope_.find(op->buffer->data.get());
+  if (it != alloc_storage_scope_.end()) {
+    scope = it->second;
+  }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(op->buffer->data);
+  }
+  if (scope == "local.var") {
+    ICHECK_EQ(op->indices.size(), 1)
+        << "Store to non-flat local.var memory not supported.";
+    ICHECK(op->value.dtype().is_scalar())
+        << "Vector local.var store is not supported.";
+    this->PrintIndent();
+    stream << GetVarID(op->buffer->data.get()) << " = "
+           << PrintExpr(op->value) << ";\n";
+    return;
+  }
+  CodeGenC::VisitStmt_(op);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const SelectNode *op,
