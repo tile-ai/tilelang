@@ -31,6 +31,7 @@ The test has two parts:
    sm_90 (Hopper) the kernel happens to land buffers correctly even
    pre-fix. Post-fix it passes on every TMA-capable arch.
 """
+
 import torch
 
 import tilelang
@@ -79,8 +80,8 @@ def _make_buggy_arena_kernel(M, N, K, BM, BN, BK):
             T.clear(c_local)
 
             for k in T.Pipelined(T.ceildiv(K, BK), num_stages=2):
-                T.copy(a[bx * BM:(bx + 1) * BM, k * BK:(k + 1) * BK], s_a)
-                T.copy(b[k * BK:(k + 1) * BK, by * BN:(by + 1) * BN], s_b)
+                T.copy(a[bx * BM : (bx + 1) * BM, k * BK : (k + 1) * BK], s_a)
+                T.copy(b[k * BK : (k + 1) * BK, by * BN : (by + 1) * BN], s_b)
                 T.gemm(s_a, s_b, c_local)
                 # Touch the scalar *inside* the loop so its lifetime
                 # overlaps the TMA-loaded `s_a` / `s_b` tiles. Without
@@ -91,7 +92,7 @@ def _make_buggy_arena_kernel(M, N, K, BM, BN, BK):
                 for _i in T.Parallel(1):
                     s_acc_scalar[0] = s_acc_scalar[0] + T.cast(s_a[0, 0], "float32")
 
-            T.copy(c_local, c[bx * BM:(bx + 1) * BM, by * BN:(by + 1) * BN])
+            T.copy(c_local, c[bx * BM : (bx + 1) * BM, by * BN : (by + 1) * BN])
             # Use s_acc_scalar after the loop so it can't be dead-code
             # eliminated.
             for _i in T.Parallel(1):
@@ -104,6 +105,7 @@ def _make_buggy_arena_kernel(M, N, K, BM, BN, BK):
 # --------------------------------------------------------------------------
 # Generated TIR check (host-independent)
 # --------------------------------------------------------------------------
+
 
 def _lower_for(arch: str):
     M, N, K = 128, 128, 256
@@ -122,11 +124,7 @@ def _lower_for(arch: str):
 
 
 def _is_op_call(node, op_name: str) -> bool:
-    return (
-        isinstance(node, tvm.tir.Call)
-        and isinstance(node.op, tvm.ir.Op)
-        and node.op.name == op_name
-    )
+    return isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name
 
 
 def _collect_tma_loads(mod):
@@ -149,23 +147,18 @@ def _byte_offset(access_ptr):
 
 def _assert_tma_destinations_128_aligned(arch: str, mod):
     loads = _collect_tma_loads(mod)
-    assert loads, (
-        f"[{arch}] expected at least one tl.tma_load in generated TIR — "
-        "the kernel layout should produce TMA loads"
-    )
+    assert loads, f"[{arch}] expected at least one tl.tma_load in generated TIR — the kernel layout should produce TMA loads"
 
     analyzer = tvm.arith.Analyzer()
     for load in loads:
         assert len(load.args) >= 3, f"[{arch}] malformed tl.tma_load call: {load}"
         access_ptr = load.args[2]
         assert _is_op_call(access_ptr, "tir.tvm_access_ptr"), (
-            f"[{arch}] expected tl.tma_load destination argument to be "
-            f"tir.tvm_access_ptr, got: {access_ptr}"
+            f"[{arch}] expected tl.tma_load destination argument to be tir.tvm_access_ptr, got: {access_ptr}"
         )
         byte_offset = analyzer.simplify(_byte_offset(access_ptr))
         assert analyzer.can_prove(byte_offset % 128 == 0), (
-            f"[{arch}] TMA load destination byte offset is not provably "
-            f"128-byte aligned: {byte_offset}. access_ptr={access_ptr}"
+            f"[{arch}] TMA load destination byte offset is not provably 128-byte aligned: {byte_offset}. access_ptr={access_ptr}"
         )
 
 
