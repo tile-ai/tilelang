@@ -125,6 +125,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         if a_dtype.bits == 6:
+            if self.chunk % 32 != 0:
+                raise ValueError(f"TCGEN5MMA FP6 requires chunk to be a multiple of 32, got {self.chunk}")
             self.k_dim = 32
             return
         super()._initialize_k_dim(a_dtype)
@@ -605,7 +607,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
 
         elems_in_bits = DataType(self.a_dtype).bits
-        elems_in_bytes = elems_in_bits // 8
+        elems_in_bytes = (elems_in_bits + 7) // 8
         accum_dtype_in_bits = DataType(accum_dtype).bits
 
         if len(self.meta) != 5:
