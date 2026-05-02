@@ -35,23 +35,25 @@ namespace codegen {
 // PTX related data structures and functions.
 namespace ptx {
 
+// clang-format off
 static const char *enum_to_str[] = {
-    "kInt4",          "kUInt4",    "kInt8",        "kUInt8",
-    "kInt16",         "kUInt16",   "kInt32",       "kUInt32",
-    "kInt64",         "kUInt64",   "kFloat8_e4m3", "kFloat8_e5m2",
-    "kFloat16",       "kBFloat16", "kFloat16x2",   "kFloat32",
-    "kTensorFloat32", "kFloat64",  "kBit1",        "kBit8",
-    "kBit16",         "kBit32",    "kBit64",       "kFloat6_e2m3fn",
+    "kInt4",        "kUInt4",         "kInt8",    "kUInt8",    "kInt16",
+    "kUInt16",      "kInt32",         "kUInt32",  "kInt64",    "kUInt64",
+    "kFloat8_e4m3", "kFloat8_e5m2",   "kFloat16", "kBFloat16", "kFloat16x2",
+    "kFloat32",     "kTensorFloat32", "kFloat64", "kBit1",     "kBit8",
+    "kBit16",       "kBit32",         "kBit64",   "kFloat6_e2m3fn",
     "kFloat6_e3m2fn"};
 
-static const char *dtype_str[] = {".s4",   ".u4",   ".s8",  ".u8",   ".s16",
-                                  ".u16",  ".s32",  ".u32", ".s64",  ".u64",
-                                  ".e4m3", ".e5m2", ".f16", ".bf16", ".f16x2",
-                                  ".f32",  ".tf32", ".f64", ".b1",   ".b8",
-                                  ".b16",  ".b32",  ".b64", ".e2m3", ".e3m2"};
-static const uint32_t num_bits[] = {4,  4, 8,  8,  16, 16, 32, 32, 64,
-                                    64, 8, 8,  16, 16, 32, 32, 32, 64,
-                                    1,  8, 16, 32, 64, 6,  6};
+static const char *dtype_str[] = {
+    ".s4",   ".u4",  ".s8",   ".u8",   ".s16", ".u16",  ".s32",   ".u32",
+    ".s64",  ".u64", ".e4m3", ".e5m2", ".f16", ".bf16", ".f16x2", ".f32",
+    ".tf32", ".f64", ".b1",   ".b8",   ".b16", ".b32",  ".b64",
+    ".e2m3", ".e3m2"};
+static const uint32_t num_bits[] = {4,  4,  8, 8, 16, 16, 32, 32,
+                                    64, 64, 8, 8, 16, 16, 32, 32,
+                                    32, 64, 1, 8, 16, 32, 64,
+                                    6,  6};
+// clang-format on
 
 /*!
  * \brief Create PTX data type from string.
