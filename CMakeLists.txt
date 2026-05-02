@@ -309,6 +309,13 @@ endif()
 
 python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
 
+# Disable Cython's PEP-489 multi-phase init for the wrapper. The generated
+# C++ depends on CPython's private `_xxsubinterpreters` module at import
+# time, which is stripped from some distributor-built Python 3.12 builds
+# (notably Red Hat's RHEL 9 system Python). Single-phase init avoids that
+# dependency and matches Cython's own suggested workaround. See #2125.
+target_compile_definitions(tilelang_cython_wrapper PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
+
 # Ensure dev builds drop the extension into build/lib alongside other shared libs
 set_target_properties(tilelang_cython_wrapper PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
