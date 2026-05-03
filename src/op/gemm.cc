@@ -383,8 +383,7 @@ bool GemmNode::checkWgmma() const {
     else if (a_->dtype == DataType::BFloat(16) &&
              b_->dtype == DataType::BFloat(16))
       return k_ % 16 == 0;
-    else if (a_->dtype == DataType::Float(32) &&
-             b_->dtype == DataType::Float(32))
+    else if (a_->dtype.is_tfloat32() && b_->dtype.is_tfloat32())
       return (!transA_) && transB_ && k_ % 8 == 0;
     else if (a_->dtype.is_float8() && b_->dtype.is_float8())
       return (!transA_) && transB_ && k_ % 32 == 0;

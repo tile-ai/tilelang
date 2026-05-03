@@ -88,7 +88,7 @@ DataType DTypeFromString(const std::string str) {
     return DataType::kFloat16x2;
   } else if (str == "float32" || str == "fp32" || str == ".f32") {
     return DataType::kFloat32;
-  } else if (str == "tfloat32" || str == "tf32") {
+  } else if (str == "tfloat32" || str == "tf32" || str == "custom[tfloat32]") {
     return DataType::kTensorFloat32;
   } else if (str == "float64" || str == "fp64" || str == ".f64") {
     return DataType::kFloat64;
