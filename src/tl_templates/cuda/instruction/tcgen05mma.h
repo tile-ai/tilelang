@@ -697,4 +697,41 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat8_e5m2, true>(
       desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
 }
 
+// FP6 block-scaled
+template <>
+TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat6_e2m3fn, false>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, false>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat6_e2m3fn, true>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, true>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat6_e3m2fn, false>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  tcgen05mma_blockscaled_ss<DataType::kFloat6_e2m3fn, false>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
+}
+
+template <>
+TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat6_e3m2fn, true>(
+    uint64_t const &desc_a, uint64_t const &desc_b, uint32_t const &tmem_c,
+    uint32_t const &scalec, uint32_t const &desc_val, uint32_t const &tmem_sfa,
+    uint32_t const &tmem_sfb) {
+  tcgen05mma_blockscaled_ss<DataType::kFloat6_e2m3fn, true>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
+}
+
 } // namespace tl
