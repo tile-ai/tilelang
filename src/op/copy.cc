@@ -483,6 +483,13 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
                              thread_extent, T.thread_bounds, result_map);
     }
 
+    if (is_tma_1d) {
+      // 1D TMA requires contiguous shared memory. Do not infer a swizzled
+      // shared layout here, otherwise the final instruction selection may fall
+      // back to descriptor-based multidimensional TMA.
+      return result_map;
+    }
+
     // check shared layout is non-swizzle
     // skip layout inference if shared layout is already annotated
     if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
