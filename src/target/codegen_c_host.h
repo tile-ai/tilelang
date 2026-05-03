@@ -19,10 +19,10 @@
 
 /*!
  * \file codegen_c_host.h
- * \brief Generate C host code (TileLang copy).
+ * \brief Generate C host code with TVM FFI when Host CodeGen is enabled.
  */
-#ifndef TL_TARGET_SOURCE_CODEGEN_C_HOST_H_
-#define TL_TARGET_SOURCE_CODEGEN_C_HOST_H_
+#ifndef TVM_TL_CODEGEN_C_HOST_H_
+#define TVM_TL_CODEGEN_C_HOST_H_
 
 #include <string>
 #include <unordered_map>
@@ -130,4 +130,4 @@ private:
 } // namespace tl
 } // namespace tvm
 
-#endif // TL_TARGET_SOURCE_CODEGEN_C_HOST_H_
+#endif // TVM_TL_CODEGEN_C_HOST_H_

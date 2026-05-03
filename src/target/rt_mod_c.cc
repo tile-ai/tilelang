@@ -1,4 +1,4 @@
-#include "codegen_cpp.h"
+#include "codegen_c.h"
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/reflection/registry.h>
 
@@ -7,7 +7,7 @@
 namespace tvm {
 namespace codegen {
 
-ffi::Module BuildCPPHost(IRModule mod, Target target) {
+ffi::Module BuildTileLangC(IRModule mod, Target target) {
   bool output_ssa = false;
   bool emit_asserts = false;
   bool emit_fwd_func_decl = true;
@@ -21,7 +21,7 @@ ffi::Module BuildCPPHost(IRModule mod, Target target) {
     }
   }
 
-  CodeGenTileLangCPP cg;
+  CodeGenTileLangC cg;
   cg.Init(output_ssa, emit_asserts, emit_fwd_func_decl, target->str(), devices);
   cg.SetConstantsByteAlignment(
       target->GetAttr<Integer>("constants-byte-alignment").value_or(16));
@@ -33,7 +33,7 @@ ffi::Module BuildCPPHost(IRModule mod, Target target) {
   std::vector<std::pair<GlobalVar, PrimFunc>> funcs;
   for (auto [gvar, base_func] : mod->functions) {
     ICHECK(base_func->IsInstance<PrimFuncNode>())
-        << "CodegenCHost: Can only take PrimFunc";
+        << "BuildTileLangC: Can only take PrimFunc";
     auto prim_func = Downcast<PrimFunc>(base_func);
     funcs.push_back({gvar, prim_func});
   }
@@ -72,7 +72,7 @@ ffi::Module BuildCPPHost(IRModule mod, Target target) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("target.build.tilelang_cpp", BuildCPPHost);
+  refl::GlobalDef().def("target.build.tilelang_c", BuildTileLangC);
 }
 
 } // namespace codegen

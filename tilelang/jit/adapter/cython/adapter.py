@@ -18,7 +18,6 @@ from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target, is_metal_target
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
-from tilelang.utils.tensor import map_torch_type
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +254,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 name, dtype = buffer.name, buffer.dtype
-                buffer_dtype_map[name] = (i, map_torch_type(dtype))
+                buffer_dtype_map[name] = (i, dtype.as_torch())
         return buffer_dtype_map
 
     def _process_ptr_map(self) -> dict[int, str]:

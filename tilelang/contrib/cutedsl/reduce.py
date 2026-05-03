@@ -384,7 +384,7 @@ class NamedBarrier:
         self.all_threads = all_threads
 
 
-def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
+def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_size=1, workspace_stride=0):
     """
     AllReduce operation implementing warp/block-level reduction.
     Based on tl::AllReduce from reduce.h
@@ -394,7 +394,9 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
         threads: Number of threads participating in reduction
         scale: Reduction scale factor
         thread_offset: Thread ID offset
-        all_threads: Total number of threads in block
+        all_threads: Total number of threads in block (or NamedBarrier instance)
+        batch_size: Number of elements per thread to reduce in parallel (default 1)
+        workspace_stride: Stride between batch channels in shared memory (default 0)
 
     Returns:
         A callable object with run() and run_hopper() methods
@@ -416,6 +418,8 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
             thread_offset: cutlass.Constexpr[int],
             all_threads: cutlass.Constexpr[int],
             use_named_barrier: cutlass.Constexpr[bool],
+            batch_size: cutlass.Constexpr[int],
+            workspace_stride: cutlass.Constexpr[int],
         ):
             self.reducer = reducer
             self.threads = threads
@@ -423,12 +427,15 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
             self.thread_offset = thread_offset
             self.all_threads = all_threads if all_threads is not None else threads
             self.use_named_barrier = use_named_barrier
+            self.batch_size = batch_size
+            self.workspace_stride = workspace_stride
 
         def run(self, x, red_buf: cute.Pointer = None):
             """
             Perform all-reduce across threads.
             Based on tl::AllReduce<...>::run from reduce.h
             When NamedBarrier is used, delegates to run_hopper.
+            Supports both scalar (x is a value) and batched (x is a pointer) modes.
             """
             if self.use_named_barrier:
                 return self.run_hopper(x, red_buf)
@@ -436,47 +443,78 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None):
             offset = self.threads // 2
 
             if offset >= 32:
-                # Use shared memory for large thread counts
                 cute.arch.sync_threads()
                 tidx, _, _ = cute.arch.thread_idx()
-                cute.make_tensor(red_buf + tidx - self.thread_offset, (1,))[0] = x
-                cute.arch.sync_threads()
-                x = self.reducer()(x, cute.make_tensor(red_buf + ((tidx - self.thread_offset) ^ offset), (1,))[0])
+                if self.batch_size > 1:
+                    x_tensor = cute.make_tensor(x, (self.batch_size,))
+                    for i in range(self.batch_size):
+                        cute.make_tensor(red_buf + (tidx - self.thread_offset) + i * self.workspace_stride, (1,))[0] = x_tensor[i]
+                    cute.arch.sync_threads()
+                    for i in range(self.batch_size):
+                        x_tensor[i] = self.reducer()(
+                            x_tensor[i],
+                            cute.make_tensor(red_buf + ((tidx - self.thread_offset) ^ offset) + i * self.workspace_stride, (1,))[0],
+                        )
+                else:
+                    cute.make_tensor(red_buf + tidx - self.thread_offset, (1,))[0] = x
+                    cute.arch.sync_threads()
+                    x = self.reducer()(x, cute.make_tensor(red_buf + ((tidx - self.thread_offset) ^ offset), (1,))[0])
             else:
-                # Use warp shuffle for small thread counts
-                # Use the pre-existing shuffle_sync_op with butterfly (XOR) mode
-                other = shuffle_sync_op(x, offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
-                x = self.reducer()(x, other)
+                if self.batch_size > 1:
+                    x_tensor = cute.make_tensor(x, (self.batch_size,))
+                    for i in range(self.batch_size):
+                        other = shuffle_sync_op(x_tensor[i], offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                        x_tensor[i] = self.reducer()(x_tensor[i], other)
+                else:
+                    other = shuffle_sync_op(x, offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                    x = self.reducer()(x, other)
 
-            return (
-                x
-                if offset == self.scale
-                else AllReduce(self.reducer, offset, self.scale, self.thread_offset, self.all_threads).run(x, red_buf)
-            )
+            if offset == self.scale:
+                return x
+            else:
+                return AllReduce(
+                    self.reducer, offset, self.scale, self.thread_offset, self.all_threads, self.batch_size, self.workspace_stride
+                ).run(x, red_buf)
 
         def run_hopper(self, x, red_buf: cute.Pointer = None):
             """
             Perform all-reduce on Hopper architecture using bar.sync.
             Based on tl::AllReduce<...>::run_hopper from reduce.h
+            Supports both scalar and batched modes.
             """
             offset = self.threads // 2
             tidx, _, _ = cute.arch.thread_idx()
             if offset >= 32:
-                # Use inlined asm for bar.sync to avoid instruction reordering
                 bar_sync_ptx(1, self.all_threads)
-                cute.make_tensor(red_buf + tidx - self.thread_offset, (1,))[0] = x
-                bar_sync_ptx(2, self.all_threads)
-                x = self.reducer()(x, cute.make_tensor(red_buf + ((tidx - self.thread_offset) ^ offset), (1,))[0])
+                if self.batch_size > 1:
+                    x_tensor = cute.make_tensor(x, (self.batch_size,))
+                    for i in range(self.batch_size):
+                        cute.make_tensor(red_buf + (tidx - self.thread_offset) + i * self.workspace_stride, (1,))[0] = x_tensor[i]
+                    bar_sync_ptx(2, self.all_threads)
+                    for i in range(self.batch_size):
+                        x_tensor[i] = self.reducer()(
+                            x_tensor[i],
+                            cute.make_tensor(red_buf + ((tidx - self.thread_offset) ^ offset) + i * self.workspace_stride, (1,))[0],
+                        )
+                else:
+                    cute.make_tensor(red_buf + tidx - self.thread_offset, (1,))[0] = x
+                    bar_sync_ptx(2, self.all_threads)
+                    x = self.reducer()(x, cute.make_tensor(red_buf + ((tidx - self.thread_offset) ^ offset), (1,))[0])
             else:
-                # Use warp shuffle for small thread counts
-                # Use the pre-existing shuffle_sync_op with butterfly (XOR) mode
-                other = shuffle_sync_op(x, offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
-                x = self.reducer()(x, other)
+                if self.batch_size > 1:
+                    x_tensor = cute.make_tensor(x, (self.batch_size,))
+                    for i in range(self.batch_size):
+                        other = shuffle_sync_op(x_tensor[i], offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                        x_tensor[i] = self.reducer()(x_tensor[i], other)
+                else:
+                    other = shuffle_sync_op(x, offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                    x = self.reducer()(x, other)
 
-            return (
-                x
-                if offset == self.scale
-                else AllReduce(self.reducer, offset, self.scale, self.thread_offset, self.all_threads).run_hopper(x, red_buf)
-            )
+            if offset == self.scale:
+                return x
+            else:
+                return AllReduce(
+                    self.reducer, offset, self.scale, self.thread_offset, self.all_threads, self.batch_size, self.workspace_stride
+                ).run_hopper(x, red_buf)
 
-    return AllReduceInstance(reducer, threads, scale, thread_offset, barrier_threads, use_named_barrier)
+    return AllReduceInstance(reducer, threads, scale, thread_offset, barrier_threads, use_named_barrier, batch_size, workspace_stride)

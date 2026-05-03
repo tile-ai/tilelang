@@ -6,7 +6,7 @@ import tilelang.language as T
 
 from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
 from tilelang.layout import make_cutlass_metadata_layout
-from tilelang.utils.tensor import torch_assert_close, map_torch_type
+from tilelang.utils.tensor import torch_assert_close
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -21,11 +21,11 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
             low, high = (0, 4) if is_unsigned else (-2, 2)
         else:
             low, high = (0, 128) if is_unsigned else (-64, 64)
-        A = randint_semi_sparse(M, K, low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
-        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda")
+        A = randint_semi_sparse(M, K, low=low, high=high, dtype=T.dtype(in_dtype).as_torch(), device="cuda", transposed=trans_A)
+        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=T.dtype(in_dtype).as_torch(), device="cuda")
     else:
-        A = randn_semi_sparse(M, K, dtype=torch.float32, device="cuda", transposed=trans_A).to(map_torch_type(in_dtype))
-        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(map_torch_type(in_dtype))
+        A = randn_semi_sparse(M, K, dtype=torch.float32, device="cuda", transposed=trans_A).to(T.dtype(in_dtype).as_torch())
+        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(T.dtype(in_dtype).as_torch())
     return A, B
 
 

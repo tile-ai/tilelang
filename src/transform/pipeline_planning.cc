@@ -1074,6 +1074,29 @@ private:
     if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno->as<IntImmNode>()->value;
+    // Skip software pipelining on ROCm targets where async-copy pipelining
+    // has not been validated.  Currently only gfx950 (CDNA4 / MI350) supports
+    // the full HIP async-copy pipeline path.  gfx942 (CDNA3 / MI300X) has
+    // async-copy hardware but the software pipeline for that target has not
+    // been validated yet, so it falls back to a plain sequential loop as well.
+    // RDNA targets have no async-copy support at all and also fall back.
+    if (TargetIsRocm(target_) && !TargetIsGfx950(target_) && num_stages >= 1) {
+      // Strip the "num_stages" annotation before recursing so that downstream
+      // passes (InjectSoftwarePipeline, MultiVersionBufferRewriter, etc.) do
+      // not treat this loop as pipelined.  Leaving the annotation in place
+      // would cause those passes to multi-version shared buffers and inject
+      // cp.async / barrier code that is incompatible with the plain sequential
+      // execution path chosen here.
+      auto stripped = tvm::ffi::GetRef<For>(loop);
+      Map<String, Any> annotations;
+      for (const auto &[key, value] : loop->annotations) {
+        if (key != "num_stages") {
+          annotations.Set(key, value);
+        }
+      }
+      stripped.CopyOnWrite()->annotations = annotations;
+      return StmtExprMutator::VisitStmt_(stripped.get());
+    }
     Stmt pipeline_body_root{nullptr};
     if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;

@@ -9,15 +9,85 @@
 #include <tvm/tir/op.h>
 
 #include <cmath>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "../op/builtin.h"
 #include "target/source/ptx.h"
+#include "utils.h"
 
 namespace tvm {
 namespace codegen {
+
+namespace {
+
+bool IsValidCPAsyncTransferBytes(int64_t bytes) {
+  return bytes == 4 || bytes == 8 || bytes == 16;
+}
+
+std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
+  const auto *ptr_call = expr.as<CallNode>();
+  if (ptr_call == nullptr) {
+    return std::nullopt;
+  }
+  if (ptr_call->op.same_as(builtin::address_of())) {
+    const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+    ICHECK(buffer_load) << "address_of arg must be BufferLoad";
+    return buffer_load->buffer->dtype;
+  }
+  if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+    ICHECK(!ptr_call->args.empty());
+    return ptr_call->args[0].dtype();
+  }
+  if (ptr_call->op.same_as(tl::access_ptr())) {
+    ICHECK_EQ(ptr_call->args.size(), 3U)
+        << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+    const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
+    ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
+    return buffer_load->buffer->dtype;
+  }
+  return std::nullopt;
+}
+
+int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
+  ICHECK(op->args.size() == 3 || op->args.size() == 4)
+      << "tl::ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
+         "src_access_ptr, num_elems, [predicate])";
+  const auto *num_elems_imm = op->args[2].as<IntImmNode>();
+  ICHECK(num_elems_imm) << "tl::ptx_cp_async num_elems must be IntImm, but got "
+                        << op->args[2];
+  int64_t num_elems = num_elems_imm->value;
+  ICHECK_GT(num_elems, 0);
+
+  auto dst_elem_type = GetAccessPtrElementType(op->args[0]);
+  auto src_elem_type = GetAccessPtrElementType(op->args[1]);
+  ICHECK(dst_elem_type.has_value() && src_elem_type.has_value())
+      << "tl::ptx_cp_async expects address_of, tl.access_ptr, or "
+         "tvm_access_ptr operands";
+
+  int64_t dst_total_bits =
+      num_elems * dst_elem_type.value().bits() * dst_elem_type.value().lanes();
+  int64_t src_total_bits =
+      num_elems * src_elem_type.value().bits() * src_elem_type.value().lanes();
+  ICHECK_EQ(dst_total_bits, src_total_bits)
+      << "tl::ptx_cp_async requires src/dst transfer widths to match, but got "
+      << dst_total_bits << " vs " << src_total_bits << " bits";
+  ICHECK_EQ(dst_total_bits % 8, 0)
+      << "tl::ptx_cp_async requires byte-aligned transfers, but got "
+      << dst_total_bits << " bits";
+
+  int64_t total_bytes = dst_total_bits / 8;
+  ICHECK(IsValidCPAsyncTransferBytes(total_bytes))
+      << "tl::ptx_cp_async requires a final PTX byte width in {4, 8, 16}, but "
+         "got "
+      << total_bytes;
+  return static_cast<int>(total_bytes);
+}
+
+} // namespace
 
 static std::string GetFP8Type(DataType type) {
   std::stringstream stream;
@@ -125,7 +195,13 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    // AMD wavefront size is 64.  Sub-wavefront thread counts (e.g. 32)
+    // with __launch_bounds__ can cause the compiler to miscompile 64-bit
+    // shuffle operations when combined with #pragma unroll.  Only emit
+    // launch_bounds when we have at least a full wavefront.
+    if (threadIdx_ext_int->value >= 64) {
+      stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    }
   }
 }
 
@@ -138,6 +214,10 @@ std::string CodeGenTileLangHIP::Finish() {
 
   if (enable_fp8_) {
     decl_stream << "#include <tl_templates/hip/hip_fp8.h>\n";
+  }
+
+  if (need_cooperative_groups_) {
+    decl_stream << "#include <hip/hip_cooperative_groups.h>\n";
   }
 
   decl_stream << "#include <tl_templates/hip/gemm.h>\n";
@@ -640,6 +720,32 @@ std::string CodeGenTileLangHIP::CastFromTo(std::string value, DataType from,
   return os.str();
 }
 
+void CodeGenTileLangHIP::VisitExpr_(const ShuffleNode *op,
+                                    std::ostream &os) { // NOLINT(*)
+  // For bfloat16x2 / float16x2 construction from two scalar lanes, emit the
+  // HIP pack intrinsic instead of the invalid `uint1(a, b)` that CodeGenC
+  // would generate (HIP's uint1 has no two-argument constructor).
+  // `uint1{value}` aggregate initialisation is valid: uint1 is defined by ROCm
+  // as HIP_vector_type<unsigned int, 1> which has a single .x member.
+  DataType t = op->dtype;
+  bool is_bf16x2 = t.is_bfloat16() && t.lanes() == 2;
+  bool is_fp16x2 = t.is_float16() && t.lanes() == 2;
+  if ((is_bf16x2 || is_fp16x2) && op->vectors.size() == 2 &&
+      op->vectors[0].dtype().lanes() == 1 &&
+      op->vectors[1].dtype().lanes() == 1) {
+    std::string e0 = PrintExpr(op->vectors[0]);
+    std::string e1 = PrintExpr(op->vectors[1]);
+    if (is_bf16x2) {
+      os << "uint1{__pack_bfloat162(" << e0 << ", " << e1 << ")}";
+    } else {
+      os << "uint1{__pack_half2(" << e0 << ", " << e1 << ")}";
+    }
+    return;
+  }
+  // Default path for all other shuffle patterns.
+  CodeGenC::VisitExpr_(op, os);
+}
+
 void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
   DataType from_ty = op->value.dtype();
   DataType target_ty = op->dtype;
@@ -766,6 +872,15 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
     buffer_str = temp.str();
   }
 
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+  // local.var is a scalar — no indexing needed.
+  if (scope == "local.var") {
+    os << vid;
+    return os.str();
+  }
+
   std::string index_str = PrintExpr(index);
   if (t.bits() == 4 || (t.bits() == 1 && t.is_int())) {
     // This is a special case, because CodegenCUDA::PrintType()
@@ -798,8 +913,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   };
-  if (op->op.same_as(builtin::ptx_cp_async()) ||
-      op->op.same_as(tl::ptx_cp_async())) {
+  if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
@@ -815,6 +929,20 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ");\n";
     } else {
       // Predicated version
+      std::string condition = this->PrintExpr(op->args[3]);
+      this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
+                   << ", " << src << ", " << condition << ");\n";
+    }
+  } else if (op->op.same_as(tl::ptx_cp_async())) {
+    int total_bytes = GetTileLangCPAsyncTransferBytes(op);
+    std::string dst = this->PrintExpr(op->args[0]);
+    std::string src = this->PrintExpr(op->args[1]);
+    std::string size = std::to_string(total_bytes);
+    this->PrintIndent();
+    if (op->args.size() == 3) {
+      this->stream << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src
+                   << ");\n";
+    } else {
       std::string condition = this->PrintExpr(op->args[3]);
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
                    << ", " << src << ", " << condition << ");\n";
@@ -857,6 +985,14 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::sync_grid())) {
+    this->need_cooperative_groups_ = true;
+    this->PrintIndent();
+    this->stream << "cooperative_groups::this_grid().sync();\n";
+  } else if (op->op.same_as(tl::sync_warp())) {
+    // AMD wavefronts execute in lockstep, so intra-wavefront convergence is
+    // guaranteed by the hardware. __syncwarp() has no HIP equivalent and is a
+    // no-op here. The mask argument (if present) is intentionally ignored.
   } else if (op->op.same_as(tl::any_sync())) {
     ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
     // HIP __any takes only the predicate; the mask is ignored because
@@ -940,6 +1076,14 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << ", " << PrintExpr(op->args[i]);
     }
     os << ")";
+  } else if (op->op.same_as(tl::ds_read_tr16_b64())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.ds_read_tr16_b64 expects one argument (smem_access_ptr).";
+    os << "tl::ds_read_tr16_b64(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ds_read_tr8_b64())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.ds_read_tr8_b64 expects one argument (smem_access_ptr).";
+    os << "tl::ds_read_tr8_b64(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::__ldg())) {
     // HIP fallback: regular load
     const BufferLoadNode *bl = op->args[0].as<BufferLoadNode>();
@@ -1045,7 +1189,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"int32", "int"},
         {"int8x4", "int32_t"},
         {"int8x8", "int64_t"},
+        {"int8x16", "int32x4"},
         {"int32x4", "int32x4"},
+        {"int32x16", "int32x16"},
         {"float16", "half"},
         {"float32", "float"},
         {"float64", "double"},
@@ -1110,32 +1256,54 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string c_ref = this->PrintExpr(op->args[10]);
     std::string c_bias = this->PrintExpr(op->args[11]);
 
+    // Get RDNA Generation
+    ICHECK(target_.defined()) << "CodeGenTileLangHIP target is not set";
+    int rdna_gen = tvm::tl::TargetGetRDNAGeneration(target_);
+    ICHECK(rdna_gen == 11 || rdna_gen == 12)
+        << "Unsupported RDNA target for WMMA: gfx" << target_->str();
+
     // Determine wmma builtin name from shape
     // shape = "f32_16x16x16_f16_w32" ->
     // "__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12" For gfx12 targets use
-    // the _gfx12 suffix variant.
-    std::string wmma_builtin = "__builtin_amdgcn_wmma_" + shape + "_gfx12";
+    // the _gfx12 suffix variant, which gfx11 targets don't have.
+    std::string wmma_builtin = "__builtin_amdgcn_wmma_" + shape;
+
+    int ab_half_elems = 16;
+    std::string ab_vec_typedef = "tl_v16f16";
+    if (rdna_gen == 12) {
+      wmma_builtin += "_gfx12";
+      ab_half_elems = 8;
+      ab_vec_typedef = "tl_v8f16";
+    }
 
     // Emit the WMMA call.
+    // For gfx12:
     // Signature: v8f32 = wmma_builtin(v8f16 a, v8f16 b, v8f32 c)
     // where v8f16 = __fp16 x 8, v8f32 = float x 8.
+    // For gfx11:
+    // Signature: v8f32 = wmma_builtin(v16f16 a, v16f16 b, v8f32 c)
+    // where v16f16 = __fp16 x 16, v8f32 = float x 8.
+    //
     // A/B buffers hold half_t (fp16), C/D buffers hold float.
-    // Each element index accesses a packed vector of 8 elements.
+    // Each element index accesses a packed vector of 8/16 elements.
     //
     // Using typedef'd vector types for the cast:
-    //   typedef __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16
-    //   tl_v8f16; typedef __attribute__((__vector_size__(8 * sizeof(float))))
-    //   float tl_v8f32;
+    //   typedef __attribute__((__vector_size__(8/16 * sizeof(__fp16)))) __fp16
+    //   tl_v8/16f16; typedef __attribute__((__vector_size__(8 *
+    //   sizeof(float)))) float tl_v8f32;
     std::string call_wmma_code = R"({
-      typedef __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16 tl_v8f16;
+      typedef __attribute__((__vector_size__({ab_half_elems} * sizeof(__fp16)))) __fp16 {ab_vec_typedef};
       typedef __attribute__((__vector_size__(8 * sizeof(float)))) float tl_v8f32;
       *((tl_v8f32*){c_ref} + {c_bias}) = {wmma_builtin}(
-          *((tl_v8f16*){a_ref} + {a_bias}),
-          *((tl_v8f16*){b_ref} + {b_bias}),
+          *(({ab_vec_typedef}*){a_ref} + {a_bias}),
+          *(({ab_vec_typedef}*){b_ref} + {b_bias}),
           *((tl_v8f32*){c_ref} + {c_bias}));
     })";
     Replacer wmma_replacer;
     wmma_replacer.register_rule("{wmma_builtin}", wmma_builtin);
+    wmma_replacer.register_rule("{ab_half_elems}",
+                                std::to_string(ab_half_elems));
+    wmma_replacer.register_rule("{ab_vec_typedef}", ab_vec_typedef);
     wmma_replacer.register_rule("{a_ref}", a_ref);
     wmma_replacer.register_rule("{a_bias}", a_bias);
     wmma_replacer.register_rule("{b_ref}", b_ref);
@@ -1322,7 +1490,23 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocateNode *op) {
         scope == "shared") {
       constant_size = constant_size / (32 / op->dtype.bits());
     }
-    stream << ' ' << vid << '[' << constant_size << "];\n";
+
+    if (scope == "local.var") {
+      // Single-element variable: emit an initializer so the value is defined.
+      // Default to 0; respect the user-provided tl.local_var_init annotation.
+      PrimExpr init = tir::make_const(op->dtype, 0);
+      auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
+      if (init_it != op->annotations.end()) {
+        PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
+        if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
+          user_init = tir::Cast(op->dtype, user_init);
+        }
+        init = user_init;
+      }
+      stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
+    } else {
+      stream << ' ' << vid << '[' << constant_size << "];\n";
+    }
   }
 
   RegisterHandleType(op->buffer_var.get(), op->dtype);
@@ -1497,13 +1681,17 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangHIP *p) { // NOLINT(*)
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
-    os << "bfloat16_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << "bfloat16_t(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
     return;
   } else if (op->dtype.is_float8_e4m3fnuz() || op->dtype.is_float8_e4m3() ||
              op->dtype.is_float8_e4m3fn()) {
-    os << "fp8_e4_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << "fp8_e4_t(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
     return;
   }
   // Type code is kFloat

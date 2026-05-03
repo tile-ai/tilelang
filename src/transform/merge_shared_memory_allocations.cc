@@ -589,10 +589,11 @@ private:
       return Call(op->dtype, op->op,
                   {op->args[0], merged_buf_var_, extra_offset + offset, extent,
                    op->args[4]});
-    } else if (op->op.same_as(builtin::ptx_cp_async())) {
+    } else if (op->op.same_as(builtin::ptx_cp_async()) ||
+               op->op.same_as(tl::ptx_cp_async())) {
       ICHECK(op->args.size() == 3U || op->args.size() == 4U)
           << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
-             "src_access_ptr, bytes[, predicate])";
+             "src_access_ptr, count[, predicate])";
 
       // Extract dst_access_ptr and check if it needs merging
       Call dst_access_ptr = Downcast<Call>(op->args[0]);
@@ -703,66 +704,100 @@ private:
       for (int i = 0, n = static_cast<int>(blocks_.size()); i < n; ++i) {
         size_t aligned = AlignUpSize(blocks_[i].offset, alignment);
         size_t head = aligned - blocks_[i].offset;
-        if (head <= blocks_[i].size && (blocks_[i].size - head) >= need) {
-          size_t waste = blocks_[i].size - head - need;
-          if (waste < best_waste) {
-            best_waste = waste;
-            best = i;
-          }
+        if (head > blocks_[i].size)
+          continue;
+        size_t usable = blocks_[i].size - head;
+        if (usable < need)
+          continue;
+        size_t waste = blocks_[i].size - need;
+        if (waste < best_waste) {
+          best_waste = waste;
+          best = i;
         }
       }
-      if (best < 0) {
+      if (best < 0)
         return std::nullopt;
-      }
-      FreeBlock blk = blocks_[best];
-      size_t aligned = AlignUpSize(blk.offset, alignment);
+      return CarveBlock(best, need, alignment);
+    }
+
+    // Try to allocate from the free block whose end touches arena_top.
+    // The block may be smaller than need; the caller grows the arena to
+    // cover the deficit.  Returns the aligned start offset on success.
+    std::optional<size_t> AllocateFromTail(size_t need, size_t alignment,
+                                           size_t arena_top) {
+      if (blocks_.empty())
+        return std::nullopt;
+      int tail_idx = static_cast<int>(blocks_.size()) - 1;
+      if (blocks_[tail_idx].offset + blocks_[tail_idx].size != arena_top)
+        return std::nullopt;
+
+      size_t aligned = AlignUpSize(blocks_[tail_idx].offset, alignment);
+      if (aligned >= arena_top)
+        return std::nullopt;
+
+      FreeBlock blk = blocks_[tail_idx];
       size_t head = aligned - blk.offset;
-      size_t tail = blk.size - head - need;
-      blocks_.erase(blocks_.begin() + best);
+
+      blocks_.erase(blocks_.begin() + tail_idx);
       if (head) {
-        blocks_.push_back({blk.offset, head});
+        InsertBlock(blk.offset, head);
       }
-      if (tail) {
-        blocks_.push_back({aligned + need, tail});
-      }
-      Normalize();
       return aligned;
     }
 
     void Free(size_t offset, size_t size) {
       if (size == 0)
         return;
-      blocks_.push_back({offset, size});
-      Normalize();
+      InsertBlock(offset, size);
     }
 
   private:
-    void Normalize() {
-      if (blocks_.empty())
-        return;
-      std::sort(blocks_.begin(), blocks_.end(),
-                [](const FreeBlock &a, const FreeBlock &b) {
-                  return a.offset < b.offset;
-                });
-      std::vector<FreeBlock> merged;
-      merged.reserve(blocks_.size());
-      for (const FreeBlock &blk : blocks_) {
-        if (merged.empty()) {
-          merged.push_back(blk);
-          continue;
-        }
-        FreeBlock &last = merged.back();
-        size_t last_end = last.offset + last.size;
-        if (blk.offset <= last_end) {
-          size_t blk_end = blk.offset + blk.size;
-          if (blk_end > last_end) {
-            last.size = blk_end - last.offset;
-          }
-        } else {
-          merged.push_back(blk);
+    // Insert a block at the correct sorted position and merge with adjacent
+    // neighbours so the sorted-and-coalesced invariant is preserved.
+    void InsertBlock(size_t offset, size_t size) {
+      FreeBlock entry{offset, size};
+      auto it = std::lower_bound(
+          blocks_.begin(), blocks_.end(), offset,
+          [](const FreeBlock &b, size_t off) { return b.offset < off; });
+      it = blocks_.insert(it, entry);
+
+      // Merge with the next neighbour.
+      auto next = std::next(it);
+      if (next != blocks_.end() && it->offset + it->size >= next->offset) {
+        size_t merged_end =
+            std::max(it->offset + it->size, next->offset + next->size);
+        it->size = merged_end - it->offset;
+        blocks_.erase(next);
+      }
+      // Merge with the previous neighbour.
+      if (it != blocks_.begin()) {
+        auto prev = std::prev(it);
+        if (prev->offset + prev->size >= it->offset) {
+          size_t merged_end =
+              std::max(prev->offset + prev->size, it->offset + it->size);
+          prev->size = merged_end - prev->offset;
+          blocks_.erase(it);
         }
       }
-      blocks_ = std::move(merged);
+    }
+
+    // Remove blocks_[idx], allocate `need` bytes at the aligned offset
+    // within it, and return any head/tail fragments to the free list.
+    size_t CarveBlock(int idx, size_t need, size_t alignment) {
+      FreeBlock blk = blocks_[idx];
+      blocks_.erase(blocks_.begin() + idx);
+
+      size_t aligned = AlignUpSize(blk.offset, alignment);
+      size_t head = aligned - blk.offset;
+      size_t tail = blk.size - head - need;
+
+      // InsertBlock uses lower_bound + coalesce, so insertion order is
+      // irrelevant for correctness.
+      if (tail)
+        InsertBlock(aligned + need, tail);
+      if (head)
+        InsertBlock(blk.offset, head);
+      return aligned;
     }
 
     std::vector<FreeBlock> blocks_;
@@ -789,8 +824,6 @@ private:
                 if (lhs.size_bytes != rhs.size_bytes) {
                   return lhs.size_bytes > rhs.size_bytes;
                 }
-                // Use name comparison for deterministic ordering instead of
-                // pointer comparison
                 return lhs.var->name_hint < rhs.var->name_hint;
               });
 
@@ -801,7 +834,6 @@ private:
     size_t arena_top = 0;
     std::unordered_map<const VarNode *, size_t> offsets;
 
-    // Expire intervals that end before or at program counter `pc`.
     auto retire = [&](int pc) {
       while (!active.empty() && active.top().end <= pc) {
         const ActiveInterval top = active.top();
@@ -813,13 +845,23 @@ private:
     for (const Interval &interval : intervals) {
       retire(interval.start);
       size_t offset = 0;
-      // Try to recycle previously freed memory first; fall back to bumping the
-      // arena.
+      // 1) Reuse a fully fitting free block (best-fit).
+      // 2) Extend the tail free block that touches arena_top.
+      // 3) Bump-allocate at arena_top (reclaim alignment gap).
       if (auto slot =
               freelist.Allocate(interval.size_bytes, interval.alignment)) {
         offset = slot.value();
+      } else if (auto tail_slot = freelist.AllocateFromTail(
+                     interval.size_bytes, interval.alignment, arena_top)) {
+        offset = tail_slot.value();
+        arena_top = offset + interval.size_bytes;
       } else {
         offset = AlignUpSize(arena_top, interval.alignment);
+        // Reclaim the alignment gap [arena_top, offset) so future small
+        // allocations can reuse it.
+        if (offset > arena_top) {
+          freelist.Free(arena_top, offset - arena_top);
+        }
         arena_top = offset + interval.size_bytes;
       }
       active.push(ActiveInterval{interval.end, offset, interval.size_bytes,

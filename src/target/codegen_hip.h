@@ -6,6 +6,7 @@
 #define TVM_TL_TARGET_CODEGEN_HIP_H_
 
 #include <tvm/target/codegen.h>
+#include <tvm/target/target.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 
@@ -21,6 +22,7 @@ class CodeGenTileLangHIP final : public CodeGenC {
 public:
   CodeGenTileLangHIP();
   std::string Finish();
+  void SetTarget(Target target) { target_ = std::move(target); }
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
   void PrintExtraAttrs(const PrimFunc &f, std::ostream &os) final;
@@ -47,6 +49,7 @@ public:
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
+  void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
 
@@ -71,6 +74,8 @@ private:
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangHIP *p);
 
+  // whether need hip_cooperative_groups.h
+  bool need_cooperative_groups_{false};
   // whether need math_constants.h
   bool need_math_constants_h_{false};
   // whether need mfma.h
@@ -88,6 +93,8 @@ private:
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
+  // Target
+  Target target_;
 };
 
 } // namespace codegen

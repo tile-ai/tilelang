@@ -9,6 +9,7 @@ Available allocation functions:
     - alloc_local: Allocates local memory buffers for thread-private storage
     - alloc_fragment: Allocates fragment memory buffers for specialized operations
     - alloc_var: Allocates single-element variable buffers
+    - alloc_global: Allocates global memory buffers as workspace
 
 Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
@@ -27,7 +28,7 @@ from tvm.tir.expr import FloatImm, IntImm
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
-from .proxy import Tensor
+from .proxy import Tensor, ptr as _ptr_sentinel
 
 
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
@@ -132,13 +133,45 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
     if not isinstance(parsed_scope, str):
         raise TypeError("Scope must be a string in alloc_var.")
 
+    if dtype is _ptr_sentinel:
+        dtype = _dtypes.int64
+
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
+        # Always use T.buffer_store for reliable initialisation across all
+        # backends.  The block_attr("tl.local_var_init") path feeds into the
+        # flatten_buffer transform which does not reliably emit initialiser
+        # code on some backends (e.g. HIP codegen silently drops the
+        # annotation for integer/float literals, leaving the scalar
+        # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
+        # node that every backend lowers to an assignment statement.
         if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
-            block_attr({"tl.local_var_init": {buffer.data: tl_dtype(dtype)(parsed_init)}})
-        else:
-            T.buffer_store(buffer, parsed_init, 0)
+            parsed_init = tl_dtype(dtype)(parsed_init)
+        T.buffer_store(buffer, parsed_init, 0)
     return buffer
+
+
+def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
+    """Allocate a global memory buffer as a global workspace.
+
+    NOTE(chaofan): Memory allocated in this way doesn't go through torch allocator. Instead,
+    it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
+    recommend allocating workspace in Torch side and pass it to the kernel via arguments,
+    which is managed under the hood by the framework. This API is mainly for testing
+    purposes and some specific purposes.
+
+    NOTE(chaofan): This API may not be available in all backends (e.g. CuteDSL).
+
+    Args:
+        shape (tuple): The shape of the buffer to allocate
+        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
+        scope (str, optional): The memory scope. Defaults to "global"
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated in global memory
+    """
+
+    return T.alloc_buffer(shape, dtype, scope=scope)
 
 
 def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
@@ -327,24 +360,3 @@ def empty(*shape, dtype: DType = _dtypes.float32) -> Tensor:
         return OutTensor(shape, dtype)
     else:
         raise TypeError(f"Invalid shape {shape}")
-
-
-def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
-    """Allocate a global memory buffer as a global workspace.
-
-    NOTE: Memory allocated in this way doesn't go through torch allocator. Instead,
-    it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
-    recommend allocating workspace in Torch side and pass it to the kernel via arguments,
-    which is managed under the hood by the framework. This API is mainly for testing
-    purposes and some specific purposes.
-
-    Args:
-        shape (tuple): The shape of the buffer to allocate
-        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
-        scope (str, optional): The memory scope. Defaults to "global"
-
-    Returns:
-        T.Buffer: A TVM buffer object allocated in global memory
-    """
-
-    return T.alloc_buffer(shape, dtype, scope=scope)

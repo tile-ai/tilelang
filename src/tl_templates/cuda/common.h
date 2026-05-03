@@ -204,6 +204,44 @@ TL_DEVICE uint4 make_uint4(unsigned short x0, unsigned short x1,
   return result;
 }
 
+// ============================================================================
+// Packed INT4 Buffer Access Helpers
+// ============================================================================
+// TileLang lowers scalar int4/uint4 storage through byte-packed buffers, where
+// each byte carries 2 logical 4-bit elements.
+
+TL_DEVICE int tl_int4_packed_load(const signed char *packed, int idx) {
+  unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
+  unsigned int shift = (idx & 1) * 4;
+  int value = static_cast<int>((byte >> shift) & 0xF);
+  return (value << 28) >> 28;
+}
+
+TL_DEVICE unsigned int tl_uint4_packed_load(const unsigned char *packed,
+                                            int idx) {
+  unsigned char byte = packed[idx >> 1];
+  unsigned int shift = (idx & 1) * 4;
+  return (byte >> shift) & 0xF;
+}
+
+TL_DEVICE void tl_int4_packed_store(signed char *packed, int idx, int val) {
+  unsigned int shift = (idx & 1) * 4;
+  unsigned char mask = static_cast<unsigned char>(0xFu << shift);
+  unsigned char nibble = static_cast<unsigned char>(
+      (static_cast<unsigned int>(val) & 0xF) << shift);
+  unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
+  packed[idx >> 1] = static_cast<signed char>((byte & ~mask) | nibble);
+}
+
+TL_DEVICE void tl_uint4_packed_store(unsigned char *packed, int idx,
+                                     unsigned int val) {
+  unsigned int shift = (idx & 1) * 4;
+  unsigned char mask = static_cast<unsigned char>(0xFu << shift);
+  unsigned char nibble = static_cast<unsigned char>((val & 0xF) << shift);
+  packed[idx >> 1] =
+      static_cast<unsigned char>((packed[idx >> 1] & ~mask) | nibble);
+}
+
 // Pack eight int values.
 TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
                                    int z1, int w0, int w1) {

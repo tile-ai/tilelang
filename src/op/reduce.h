@@ -84,9 +84,17 @@ public:
   tir::Buffer src, dst; ///< Source and destination buffers
   // Optional: keep the original regions used to construct this op
   BufferRegion srcRegion_, dstRegion_;
-  int dim;                   ///< Dimension to reduce along
-  ReduceType type;           ///< Type of reduction operation
-  bool clear;                ///< Whether to clear destination before reduction
+  int dim;         ///< Dimension to reduce along
+  ReduceType type; ///< Type of reduction operation
+  bool clear;      ///< Whether to clear destination before reduction
+  int batch{1};    ///< Number of output elements per batched AllReduce
+                   ///< call. Default 1 = scalar (current behaviour).
+                   ///< When batch > 1, the compiler emits
+                   ///< ceil(N/batch) batched AllReduce calls each
+                   ///< sharing a single pair of barriers across batch
+                   ///< elements. batch must evenly divide the
+                   ///< per-thread output element count N derived from
+                   ///< the fragment layout.
   bool nan_propagate{false}; ///< For fp16/bf16 max/min/absmax: propagate NaN
                              ///< (use __hmax_nan/__hmin_nan) instead of the
                              ///< default __hmax/__hmin which return the
@@ -105,6 +113,7 @@ public:
         .def_ro("dim", &ReduceOpNode::dim)
         .def_ro("type", &ReduceOpNode::type)
         .def_ro("clear", &ReduceOpNode::clear)
+        .def_ro("batch", &ReduceOpNode::batch)
         .def_ro("nan_propagate", &ReduceOpNode::nan_propagate);
   }
 

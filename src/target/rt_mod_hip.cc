@@ -41,6 +41,10 @@ ExtractFuncInfo(const IRModule &mod) {
         dtype = DataType::Int(32);
       info.arg_types.push_back(dtype);
     }
+    if (f->HasNonzeroAttr("use_cooperative_groups")) {
+      info.launch_param_tags.push_back(
+          runtime::launch_param::kUseCooperativeLaunch);
+    }
     if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
             tir::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
@@ -57,6 +61,7 @@ ffi::Module BuildTileLangHIP(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
+  cg.SetTarget(target);
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
@@ -93,6 +98,7 @@ ffi::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
+  cg.SetTarget(target);
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())

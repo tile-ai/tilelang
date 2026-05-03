@@ -461,13 +461,13 @@ def test_pipeline_predicated_copy_preserves_shared_fill_correctness():
                 T.ptx_cp_async(
                     T.access_ptr(S[0], "w", 16),
                     T.access_ptr(A[0], "r", 16),
-                    16,
+                    8,
                     True,
                 )
                 T.ptx_cp_async(
                     T.access_ptr(S[8], "w", 16),
                     T.access_ptr(A[0], "r", 16),
-                    16,
+                    8,
                     False,
                 )
                 T.ptx_commit_group()
@@ -487,4 +487,5 @@ def test_pipeline_predicated_copy_preserves_shared_fill_correctness():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_pipeline_predicated_copy_preserves_shared_fill_correctness()

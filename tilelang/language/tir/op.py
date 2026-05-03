@@ -1253,6 +1253,78 @@ def ptx_tcgen05_mma_ts(
     )
 
 
+def ptx_tcgen05_mma_blockscaled_ss(
+    kind_dtype,
+    desc_a,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    C_offset,
+    desc_val,
+    scale_out,
+    sfa_ptr,
+    sfa_offset,
+    sfb_ptr,
+    sfb_offset,
+    reserved0=0,
+    reserved1=0,
+    variant=False,
+    enable_2cta=False,
+):
+    """TVM intrinsic for tcgen05.mma block-scaled (mxf8f6f4.block_scale) instructions.
+
+    Block-scaled TCGEN05 is explicit-async and carries an explicit ``enable_2cta``
+    flag, analogous to the regular SS/TS TCGEN05 intrinsics. There is no
+    fallback path if 2CTA is requested.
+
+    Positional args:
+    kind_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr, C_offset,
+    desc_val, scale_out, sfa_ptr, sfa_offset, sfb_ptr, sfb_offset,
+    reserved0, reserved1, enable_ws, enable_2cta.
+    """
+
+    if enable_2cta and isinstance(variant, str):
+        v_check = variant.lower()
+        if v_check in ("ws", "warp_specialized", "warp-specialized"):
+            raise ValueError("ptx_tcgen05_mma_blockscaled_ss: .ws and 2CTA cannot be combined")
+    elif enable_2cta and bool(variant):
+        raise ValueError("ptx_tcgen05_mma_blockscaled_ss: .ws and 2CTA cannot be combined")
+
+    if isinstance(variant, str):
+        v = variant.lower()
+        if v in ("ws", "warp_specialized", "warp-specialized"):
+            enable_ws = True
+        elif v in ("default", "std", "ss"):
+            enable_ws = False
+        else:
+            raise ValueError(f"ptx_tcgen05_mma_blockscaled_ss: unknown variant: {variant}")
+    else:
+        enable_ws = bool(variant)
+
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_blockscaled_ss"),
+        kind_dtype,
+        desc_a,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        C_offset,
+        desc_val,
+        scale_out,
+        sfa_ptr,
+        sfa_offset,
+        sfb_ptr,
+        sfb_offset,
+        reserved0,
+        reserved1,
+        enable_ws,
+        enable_2cta,
+    )
+
+
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
@@ -1312,45 +1384,44 @@ def mma_fill(dtype, local_size, local_ptr, offset):
     return _tvm_op.mma_fill(dtype, local_size, local_ptr, offset)
 
 
-def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset):
-    """TVM intrinsic for ptx load matrix from shared memory
+def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
+    """TileLang intrinsic for ptx load matrix from shared memory
+
+    Uses `tl.ptx_ldmatrix` which expects access pointers created via
+    `T.access_ptr` (i.e. `tl.access_ptr` wrapping a `BufferLoad`).
+
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-ldmatrix
 
     Parameters
     ----------
-    dtype : str
-       The data type of the result.
-
     trans : bool
         The matrix is loaded in column-major format.
 
     num : IntImm
-        The number of matrices.
+        The number of matrices (2 or 4).
 
-    type : Literal[".b16"]
-        The data type of the matrices.
+    src_access_ptr : PrimExpr
+        A `tl.access_ptr` pointing to the source (shared memory) buffer.
 
-    local_ptr : Var
-        The local pointer variable.
-
-    local_offset : Expr
-        The offset of local pointer.
-
-    smem_ptr : Var
-        The shared memory pointer variable.
-
-    smem_offset : Expr
-        The offset of shared memort pointer.
+    dst_access_ptr : PrimExpr
+        A `tl.access_ptr` pointing to the destination (local/register) buffer.
 
     Returns
     -------
     call : PrimExpr
-        The call expression.
+        The call expression (handle-typed).
     """
-    return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset)
+    return tvm.tir.call_intrin(
+        "handle",
+        tvm.tir.op.Op.get("tl.ptx_ldmatrix"),
+        trans,
+        num,
+        src_access_ptr,
+        dst_access_ptr,
+    )
 
 
-def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
+def ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate=None):
     """TVM intrinsic for ptx async copy from global to shared memory using cp.async
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async
 
@@ -1364,8 +1435,12 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
         The source (global memory) access pointer created by tvm_access_ptr.
         Should include pointer, offset, extent, and read access flag (rw_mask=1).
 
-    bytes : int or PrimExpr
-        The number of bytes to copy (must be 4, 8, or 16).
+    num_elems : int or PrimExpr
+        The number of logical elements to copy.
+
+        For TileLang's ``tl.ptx_cp_async`` frontend op, the final PTX byte width
+        is derived later from ``num_elems * element_bits(access_ptr)`` and must
+        eventually land on a legal ``cp.async`` width of 4, 8, or 16 bytes.
 
     predicate : PrimExpr, optional
         Optional predicate condition for conditional cp.async. When provided, the copy
@@ -1379,11 +1454,11 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
 
     Examples
     --------
-    >>> # Copy 16 bytes from global to shared memory
+    >>> # Copy 16 uint8 elements (= 16 bytes) from global to shared memory
     >>> T.ptx_cp_async(
     ...     T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 16, 2),  # dst
     ...     T.tvm_access_ptr(T.type_annotation(T.uint8), B_global.data, 0, 16, 1),  # src
-    ...     16  # bytes
+    ...     16  # num_elems
     ... )
     >>>
     >>> # Predicated cp.async (only copy if condition is true)
@@ -1397,9 +1472,9 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate=None):
     from tvm import tir
 
     if predicate is None:
-        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, bytes)
+        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems)
     else:
-        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, bytes, predicate)
+        return tir.call_intrin("", tir.op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems, predicate)
 
 
 def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id):

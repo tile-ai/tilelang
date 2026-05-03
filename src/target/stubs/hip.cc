@@ -139,6 +139,7 @@ HIPDriverAPI CreateHIPDriverAPI() {
   LOOKUP(hipModuleGetFunction_, "hipModuleGetFunction")
   LOOKUP(hipModuleGetGlobal_, "hipModuleGetGlobal")
   LOOKUP(hipModuleLaunchKernel_, "hipModuleLaunchKernel")
+  LOOKUP(hipModuleLaunchCooperativeKernel_, "hipModuleLaunchCooperativeKernel")
 #undef LOOKUP
 
   return api;
@@ -395,6 +396,17 @@ hipError_t hipModuleLaunchKernel(hipFunction_t f, unsigned int gridDimX,
   return HIPDriverAPI::get()->hipModuleLaunchKernel_(
       f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
       sharedMemBytes, stream, kernelParams, extra);
+}
+
+hipError_t hipModuleLaunchCooperativeKernel(
+    hipFunction_t f, unsigned int gridDimX, unsigned int gridDimY,
+    unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
+    unsigned int blockDimZ, unsigned int sharedMemBytes, hipStream_t stream,
+    void **kernelParams) {
+  // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
+  return HIPDriverAPI::get()->hipModuleLaunchCooperativeKernel_(
+      f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
+      sharedMemBytes, stream, kernelParams);
 }
 
 // --- Minimal HSA wrappers

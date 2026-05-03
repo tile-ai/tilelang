@@ -39,8 +39,19 @@ static uint64_t PtrModulo(const void *ptr, uint64_t align) {
   return reinterpret_cast<uintptr_t>(ptr) % align;
 }
 
+// The vendored CUDA stub may lag the installed toolkit. Keep the numeric
+// values from the CUDA Driver API enum order so runtime validation can accept
+// descriptors produced for newer drivers without requiring newer headers.
+static constexpr int kTensorMapDataType16U4Align8B = 13;
+static constexpr int kTensorMapDataType16U4Align16B = 14;
+static constexpr int kTensorMapDataType16U6Align16B = 15;
+
+static constexpr int kTensorMapSwizzle128BAtom32B = 4;
+static constexpr int kTensorMapSwizzle128BAtom32BFlip8B = 5;
+static constexpr int kTensorMapSwizzle128BAtom64B = 6;
+
 static const char *TensorMapDataTypeToString(CUtensorMapDataType type) {
-  switch (type) {
+  switch (static_cast<int>(type)) {
   case CU_TENSOR_MAP_DATA_TYPE_UINT8:
     return "CU_TENSOR_MAP_DATA_TYPE_UINT8";
   case CU_TENSOR_MAP_DATA_TYPE_UINT16:
@@ -67,6 +78,12 @@ static const char *TensorMapDataTypeToString(CUtensorMapDataType type) {
     return "CU_TENSOR_MAP_DATA_TYPE_TFLOAT32";
   case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ:
     return "CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ";
+  case kTensorMapDataType16U4Align8B:
+    return "CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B";
+  case kTensorMapDataType16U4Align16B:
+    return "CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B";
+  case kTensorMapDataType16U6Align16B:
+    return "CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B";
   default:
     return "<unknown CUtensorMapDataType>";
   }
@@ -87,7 +104,7 @@ TensorMapInterleaveToString(CUtensorMapInterleave interleave) {
 }
 
 static const char *TensorMapSwizzleToString(CUtensorMapSwizzle swizzle) {
-  switch (swizzle) {
+  switch (static_cast<int>(swizzle)) {
   case CU_TENSOR_MAP_SWIZZLE_NONE:
     return "CU_TENSOR_MAP_SWIZZLE_NONE";
   case CU_TENSOR_MAP_SWIZZLE_32B:
@@ -96,6 +113,12 @@ static const char *TensorMapSwizzleToString(CUtensorMapSwizzle swizzle) {
     return "CU_TENSOR_MAP_SWIZZLE_64B";
   case CU_TENSOR_MAP_SWIZZLE_128B:
     return "CU_TENSOR_MAP_SWIZZLE_128B";
+  case kTensorMapSwizzle128BAtom32B:
+    return "CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B";
+  case kTensorMapSwizzle128BAtom32BFlip8B:
+    return "CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B_FLIP_8B";
+  case kTensorMapSwizzle128BAtom64B:
+    return "CU_TENSOR_MAP_SWIZZLE_128B_ATOM_64B";
   default:
     return "<unknown CUtensorMapSwizzle>";
   }
@@ -128,7 +151,7 @@ static const char *TensorMapOOBFillToString(CUtensorMapFloatOOBfill oob_fill) {
 }
 
 static uint64_t TensorMapDataTypeBits(CUtensorMapDataType type) {
-  switch (type) {
+  switch (static_cast<int>(type)) {
   case CU_TENSOR_MAP_DATA_TYPE_UINT8:
     return 8;
   case CU_TENSOR_MAP_DATA_TYPE_UINT16:
@@ -146,6 +169,11 @@ static uint64_t TensorMapDataTypeBits(CUtensorMapDataType type) {
   case CU_TENSOR_MAP_DATA_TYPE_INT64:
   case CU_TENSOR_MAP_DATA_TYPE_FLOAT64:
     return 64;
+  case kTensorMapDataType16U4Align8B:
+  case kTensorMapDataType16U4Align16B:
+    return 4;
+  case kTensorMapDataType16U6Align16B:
+    return 6;
   default:
     return 0;
   }
@@ -166,10 +194,57 @@ static bool IsFloatTensorMapType(CUtensorMapDataType type) {
   }
 }
 
+static bool IsTensorMapDataType16U4Align8B(CUtensorMapDataType type) {
+  return static_cast<int>(type) == kTensorMapDataType16U4Align8B;
+}
+
+static bool IsTensorMapDataType16U4Align16B(CUtensorMapDataType type) {
+  return static_cast<int>(type) == kTensorMapDataType16U4Align16B;
+}
+
+static bool IsTensorMapDataType16U6Align16B(CUtensorMapDataType type) {
+  return static_cast<int>(type) == kTensorMapDataType16U6Align16B;
+}
+
+static bool IsPackedAlign16TensorMapType(CUtensorMapDataType type) {
+  return IsTensorMapDataType16U4Align16B(type) ||
+         IsTensorMapDataType16U6Align16B(type);
+}
+
+static bool IsTensorMapSwizzle128BFamily(CUtensorMapSwizzle swizzle) {
+  switch (static_cast<int>(swizzle)) {
+  case CU_TENSOR_MAP_SWIZZLE_128B:
+  case kTensorMapSwizzle128BAtom32B:
+  case kTensorMapSwizzle128BAtom32BFlip8B:
+  case kTensorMapSwizzle128BAtom64B:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool IsSupportedPackedTensorMapSwizzle(CUtensorMapDataType type,
+                                              CUtensorMapSwizzle swizzle) {
+  int swizzle_value = static_cast<int>(swizzle);
+  if (IsTensorMapDataType16U6Align16B(type)) {
+    return swizzle_value == CU_TENSOR_MAP_SWIZZLE_NONE ||
+           swizzle_value == CU_TENSOR_MAP_SWIZZLE_128B ||
+           swizzle_value == kTensorMapSwizzle128BAtom32B ||
+           swizzle_value == kTensorMapSwizzle128BAtom64B;
+  }
+  if (IsTensorMapDataType16U4Align16B(type)) {
+    return swizzle_value == CU_TENSOR_MAP_SWIZZLE_NONE ||
+           swizzle_value == CU_TENSOR_MAP_SWIZZLE_128B ||
+           swizzle_value == kTensorMapSwizzle128BAtom32B;
+  }
+  return true;
+}
+
 static uint64_t
 RequiredGlobalAddressAlignment(CUtensorMapDataType type,
                                CUtensorMapInterleave interleave) {
-  if (interleave == CU_TENSOR_MAP_INTERLEAVE_32B) {
+  if (interleave == CU_TENSOR_MAP_INTERLEAVE_32B ||
+      IsPackedAlign16TensorMapType(type)) {
     return 32;
   }
   return 16;
@@ -178,22 +253,24 @@ RequiredGlobalAddressAlignment(CUtensorMapDataType type,
 static uint64_t
 RequiredGlobalStrideAlignment(CUtensorMapDataType type,
                               CUtensorMapInterleave interleave) {
-  if (interleave == CU_TENSOR_MAP_INTERLEAVE_32B) {
+  if (interleave == CU_TENSOR_MAP_INTERLEAVE_32B ||
+      IsPackedAlign16TensorMapType(type)) {
     return 32;
   }
   return 16;
 }
 
 static uint64_t SwizzleSpanBytes(CUtensorMapSwizzle swizzle) {
-  switch (swizzle) {
+  if (IsTensorMapSwizzle128BFamily(swizzle)) {
+    return 128;
+  }
+  switch (static_cast<int>(swizzle)) {
   case CU_TENSOR_MAP_SWIZZLE_NONE:
     return 0;
   case CU_TENSOR_MAP_SWIZZLE_32B:
     return 32;
   case CU_TENSOR_MAP_SWIZZLE_64B:
     return 64;
-  case CU_TENSOR_MAP_SWIZZLE_128B:
-    return 128;
   default:
     return 0;
   }
@@ -348,6 +425,18 @@ static std::vector<std::string> ValidateTensorMapArgs(const TensorMapArgs &T) {
                        std::to_string(T.globalDim[i]));
     }
   }
+  if (T.tensorRank > 0) {
+    if (IsPackedAlign16TensorMapType(T.type) && T.globalDim[0] % 128 != 0) {
+      issues.push_back("globalDim[0] must be a multiple of 128 for " +
+                       std::string(TensorMapDataTypeToString(T.type)) +
+                       ", but got " + std::to_string(T.globalDim[0]));
+    }
+    if (IsTensorMapDataType16U4Align8B(T.type) && T.globalDim[0] % 2 != 0) {
+      issues.push_back("globalDim[0] must be a multiple of 2 for " +
+                       std::string(TensorMapDataTypeToString(T.type)) +
+                       ", but got " + std::to_string(T.globalDim[0]));
+    }
+  }
 
   for (size_t raw_i = 1; raw_i < T.tensorRank; ++raw_i) {
     cuuint64_t stride = T.globalStride[raw_i];
@@ -382,6 +471,12 @@ static std::vector<std::string> ValidateTensorMapArgs(const TensorMapArgs &T) {
                        std::to_string(T.boxDim[i]));
     }
   }
+  if (T.tensorRank > 0 && IsPackedAlign16TensorMapType(T.type) &&
+      T.boxDim[0] != 128) {
+    issues.push_back("boxDim[0] must be 128 for " +
+                     std::string(TensorMapDataTypeToString(T.type)) +
+                     ", but got " + std::to_string(T.boxDim[0]));
+  }
 
   if (T.tensorRank > 0 && T.interleave == CU_TENSOR_MAP_INTERLEAVE_NONE &&
       type_bits != 0 && ((uint64_t{T.boxDim[0]} * type_bits) % 128 != 0)) {
@@ -403,6 +498,16 @@ static std::vector<std::string> ValidateTensorMapArgs(const TensorMapArgs &T) {
       T.swizzle != CU_TENSOR_MAP_SWIZZLE_32B) {
     issues.push_back("swizzle must be CU_TENSOR_MAP_SWIZZLE_32B when "
                      "interleave is CU_TENSOR_MAP_INTERLEAVE_32B");
+  }
+  if (IsTensorMapDataType16U6Align16B(T.type) &&
+      T.interleave != CU_TENSOR_MAP_INTERLEAVE_NONE) {
+    issues.push_back("interleave must be CU_TENSOR_MAP_INTERLEAVE_NONE for " +
+                     std::string(TensorMapDataTypeToString(T.type)));
+  }
+  if (!IsSupportedPackedTensorMapSwizzle(T.type, T.swizzle)) {
+    issues.push_back(std::string(TensorMapSwizzleToString(T.swizzle)) +
+                     " is not supported for " +
+                     TensorMapDataTypeToString(T.type));
   }
 
   uint64_t swizzle_bytes = SwizzleSpanBytes(T.swizzle);
@@ -587,6 +692,18 @@ ValidateTensorMapIm2ColArgs(const TensorMapIm2ColArgs &T) {
                        std::to_string(T.elementStrides[i]));
     }
   }
+  if (T.tensorRank > 0) {
+    if (IsPackedAlign16TensorMapType(T.type) && T.globalDim[0] % 128 != 0) {
+      issues.push_back("globalDim[0] must be a multiple of 128 for " +
+                       std::string(TensorMapDataTypeToString(T.type)) +
+                       ", but got " + std::to_string(T.globalDim[0]));
+    }
+    if (IsTensorMapDataType16U4Align8B(T.type) && T.globalDim[0] % 2 != 0) {
+      issues.push_back("globalDim[0] must be a multiple of 2 for " +
+                       std::string(TensorMapDataTypeToString(T.type)) +
+                       ", but got " + std::to_string(T.globalDim[0]));
+    }
+  }
 
   for (size_t raw_i = 1; raw_i < T.tensorRank; ++raw_i) {
     cuuint64_t stride = T.globalStride[raw_i];
@@ -611,10 +728,34 @@ ValidateTensorMapIm2ColArgs(const TensorMapIm2ColArgs &T) {
     }
   }
 
+  if (T.smem_box_channel == 0 || T.smem_box_channel > 256) {
+    issues.push_back("channelsPerPixel must be in [1, 256], but got " +
+                     std::to_string(T.smem_box_channel));
+  }
+  if (IsPackedAlign16TensorMapType(T.type) && T.smem_box_channel != 128) {
+    issues.push_back("channelsPerPixel must be 128 for " +
+                     std::string(TensorMapDataTypeToString(T.type)) +
+                     ", but got " + std::to_string(T.smem_box_channel));
+  }
+  if (T.smem_box_pixel == 0 || T.smem_box_pixel > 1024) {
+    issues.push_back("pixelsPerColumn must be in [1, 1024], but got " +
+                     std::to_string(T.smem_box_pixel));
+  }
+
   if (T.interleave == CU_TENSOR_MAP_INTERLEAVE_32B &&
       T.swizzle != CU_TENSOR_MAP_SWIZZLE_32B) {
     issues.push_back("swizzle must be CU_TENSOR_MAP_SWIZZLE_32B when "
                      "interleave is CU_TENSOR_MAP_INTERLEAVE_32B");
+  }
+  if (IsTensorMapDataType16U6Align16B(T.type) &&
+      T.interleave != CU_TENSOR_MAP_INTERLEAVE_NONE) {
+    issues.push_back("interleave must be CU_TENSOR_MAP_INTERLEAVE_NONE for " +
+                     std::string(TensorMapDataTypeToString(T.type)));
+  }
+  if (!IsSupportedPackedTensorMapSwizzle(T.type, T.swizzle)) {
+    issues.push_back(std::string(TensorMapSwizzleToString(T.swizzle)) +
+                     " is not supported for " +
+                     TensorMapDataTypeToString(T.type));
   }
 
   if (T.oobFill == CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA &&

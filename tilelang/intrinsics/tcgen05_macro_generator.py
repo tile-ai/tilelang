@@ -565,6 +565,246 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         return _warp_mma_ts(a_tmem_data, B_buf, C_local_buf, mbar)
 
+    def tcgen05mma_blockscaled(
+        self,
+        A_buf: Buffer,
+        B_buf: Buffer,
+        C_local_buf: Buffer,
+        SFA_tmem,
+        SFB_tmem,
+        mbar,
+        clear_accum: PrimExpr = False,
+        sf_a_id=0,
+        sf_b_id=0,
+    ):
+        """Emit a block-scaled TCGEN5MMA (SS variant with TMEM scale factors).
+
+        Uses ``tcgen05.mma.cta_group::1|2.kind::mxf8f6f4.block_scale`` PTX instruction.
+        Scale factors must already reside in tensor memory.
+        """
+        accum_dtype = self.accum_dtype
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        micro_size_k = self.micro_size_k
+        k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
+        scale_in_a = 1
+        scale_in_b = 1
+
+        assert k_dim >= micro_size_k
+
+        a_is_k_major = not self.a_transposed
+        b_is_k_major = self.b_transposed
+        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
+        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+
+        elems_in_bits = DataType(self.a_dtype).bits
+        elems_in_bytes = elems_in_bits // 8
+        accum_dtype_in_bits = DataType(accum_dtype).bits
+
+        if len(self.meta) != 5:
+            self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim, disable_2cta=False)
+        if len(self.meta) != 5:
+            raise ValueError(
+                f"Unsupported TCGEN5MMA configuration for block-scaled: M={m_dim}, N={n_dim}, "
+                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
+            )
+        atom_m, atom_n, atom_k, _enable_ws, enable_2cta = (int(x) for x in self.meta)
+        enable_ws = 0
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+
+        a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+
+        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * atom_m_per_cta * elems_in_bytes)
+        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
+        if not a_swizzle_mode.is_none():
+            if a_is_k_major:
+                a_leading_byte_offset = 16
+                a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
+            else:
+                a_m_axis_atoms = atom_m_per_cta // a_swizzle_atom_elems
+                a_leading_byte_offset = k_dim * a_swizzle_mode.swizzle_byte_size() if a_m_axis_atoms > 1 else 0
+                a_stride_byte_offset = (
+                    8 * elems_in_bytes * a_swizzle_atom_elems if a_m_axis_atoms > 1 else 8 * elems_in_bytes * atom_m_per_cta
+                )
+
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
+        if not b_swizzle_mode.is_none():
+            if b_is_k_major:
+                b_leading_byte_offset = 16
+                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
+            else:
+                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
+                b_leading_byte_offset = b_swizzle_mode.swizzle_byte_size() * k_dim if b_n_axis_atoms > 1 else 0
+                b_stride_byte_offset = (
+                    8 * elems_in_bytes * b_swizzle_atom_elems if b_n_axis_atoms > 1 else 8 * elems_in_bytes * n_dim_per_cta
+                )
+
+        ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
+        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
+
+        base_instr_desc = self.get_tcgen5_blockscaled_instr_desc(
+            atom_m,
+            atom_n,
+            a_is_k_major,
+            b_is_k_major,
+            scale_in_a,
+            scale_in_b,
+            0,
+            0,
+        )
+
+        a_dtype_abbrv = self.a_dtype_abbrv
+        num_inst_m = m_dim // atom_m_per_cta
+        num_inst_n = n_dim // atom_n
+
+        def access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
+            if isinstance(buffer_or_load_or_region, Buffer):
+                return buffer_or_load_or_region.access_ptr(access_type)
+            elif isinstance(buffer_or_load_or_region, BufferLoad):
+                buffer_load = buffer_or_load_or_region
+                offset, stride = 0, 1
+                buffer = buffer_load.buffer
+                for i, shape in enumerate(reversed(buffer.shape)):
+                    indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
+                    if isinstance(indice, tvm.tir.Ramp):
+                        offset += indice.base * stride
+                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                        offset += indice * stride
+                    else:
+                        raise ValueError(f"Unsupported index type: {type(indice)}")
+                    stride *= shape
+                return buffer.access_ptr(access_type, offset=offset)
+            elif isinstance(buffer_or_load_or_region, BufferRegion):
+                buffer_region = buffer_or_load_or_region
+                buffer = buffer_region.buffer
+                offset, stride = 0, 1
+                for i, shape in enumerate(reversed(buffer.shape)):
+                    offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
+                    stride *= shape
+                return buffer.access_ptr(access_type, offset=offset)
+            else:
+                raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+
+        if isinstance(SFA_tmem, BufferRegion):
+            sfa_data = SFA_tmem.buffer.data
+        elif isinstance(SFA_tmem, Buffer):
+            sfa_data = SFA_tmem.data
+        else:
+            raise ValueError(f"Unsupported SFA_tmem type: {type(SFA_tmem)}")
+
+        if isinstance(SFB_tmem, BufferRegion):
+            sfb_data = SFB_tmem.buffer.data
+        elif isinstance(SFB_tmem, Buffer):
+            sfb_data = SFB_tmem.data
+        else:
+            raise ValueError(f"Unsupported SFB_tmem type: {type(SFB_tmem)}")
+
+        @T.macro
+        def _warp_mma_blockscaled(A_buf, B_buf, C_local_buf, sfa_data, sfb_data, mbar):
+            desc_a = T.alloc_tcgen05_smem_desc()
+            desc_b = T.alloc_tcgen05_smem_desc()
+            A_ptr = access_ptr_from(A_buf, "r")
+            B_ptr = access_ptr_from(B_buf, "r")
+
+            T.initialize_tcgen05_descriptor(
+                desc_a,
+                A_ptr,
+                int(a_leading_byte_offset >> 4),
+                int(a_stride_byte_offset >> 4),
+                0,
+                False,
+                int(a_swizzle_mode),
+            )
+            T.initialize_tcgen05_descriptor(
+                desc_b,
+                B_ptr,
+                int(b_leading_byte_offset >> 4),
+                int(b_stride_byte_offset >> 4),
+                0,
+                False,
+                int(b_swizzle_mode),
+            )
+
+            tmem_col_step = atom_n // (128 // atom_m_per_cta)
+            _sf_a = tvm.tir.const(sf_a_id, "int32") if isinstance(sf_a_id, int) else sf_a_id
+            _sf_b = tvm.tir.const(sf_b_id, "int32") if isinstance(sf_b_id, int) else sf_b_id
+            runtime_instr_desc = base_instr_desc | (_sf_a << 29) | (_sf_b << 4)
+            for j in T.unroll(num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(0, (k_dim // micro_size_k)):
+                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+                        A_elem_offset = (
+                            (ki % ak_atom_size) * micro_size_k
+                            + i * atom_m_per_cta * a_swizzle_atom_elems
+                            + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                            if a_is_k_major
+                            else i * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                        )
+                        B_elem_offset = (
+                            (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
+                            + (ki % bk_atom_size) * micro_size_k
+                            + j * atom_n * b_swizzle_atom_elems
+                            if b_is_k_major
+                            else (
+                                ki * b_swizzle_atom_elems * micro_size_k
+                                + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+                            )
+                        )
+
+                        A_byte_offset = A_elem_offset * elems_in_bytes
+                        B_byte_offset = B_elem_offset * elems_in_bytes
+                        C_offset = (i * n_dim + j * tmem_col_step) * accum_dtype_in_bits // 32
+
+                        T.ptx_tcgen05_mma_blockscaled_ss(
+                            a_dtype_abbrv,
+                            desc_a.data,
+                            A_byte_offset,
+                            desc_b.data,
+                            B_byte_offset,
+                            C_local_buf.data,
+                            C_offset,
+                            runtime_instr_desc,
+                            scale_out,
+                            sfa_data,
+                            0,
+                            sfb_data,
+                            0,
+                            0,
+                            0,
+                            enable_ws,
+                            enable_2cta,
+                        )
+            T.tcgen05_mma_arrive(mbar, arrive_2cta=enable_2cta)
+
+        return _warp_mma_blockscaled(A_buf, B_buf, C_local_buf, sfa_data, sfb_data, mbar)
+
+    def get_tcgen5_blockscaled_instr_desc(
+        self,
+        atom_m: int,
+        atom_n: int,
+        a_is_k_major: bool,
+        b_is_k_major: bool,
+        scale_in_a: int,
+        scale_in_b: int,
+        a_sf_id: int,
+        b_sf_id: int,
+    ) -> PrimExpr:
+        """Build the block-scaled instruction descriptor via FFI."""
+        desc = _ffi_api.get_tcgen5_blockscaled_instr_desc(
+            atom_m,
+            atom_n,
+            DataType(self.a_dtype),
+            a_is_k_major,
+            b_is_k_major,
+            scale_in_a,
+            scale_in_b,
+            a_sf_id,
+            b_sf_id,
+        )
+        return lift(desc)
+
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         raise NotImplementedError
 

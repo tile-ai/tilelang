@@ -112,6 +112,8 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
 
     ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+    if ptxas_usage_level is not None:
+        ptxas_usage_level = int(ptxas_usage_level)
     verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
 
     options = [
@@ -216,7 +218,7 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
-        host_mod = tvm.ffi.get_global_func("target.build.tilelang_c")(host_mod, target_host)
+        host_mod = tvm.ffi.get_global_func("target.build.tilelang_c_host")(host_mod, target_host)
     else:
         raise ValueError(f"Target host {target_host.kind.name} is not supported")
     return host_mod
@@ -253,7 +255,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     elif target.kind.name == "hip":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(device_mod, target)
     elif target.kind.name == "c":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_c")(device_mod, target)
     elif target.kind.name == "llvm":
         device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
     elif target.kind.name == "webgpu":

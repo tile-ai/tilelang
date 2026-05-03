@@ -86,6 +86,18 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+  if (args.size() > 19) {
+    node->sfaRegion_ = NormalizeToBufferRegion(args[19]);
+  }
+  if (args.size() > 20) {
+    node->sfbRegion_ = NormalizeToBufferRegion(args[20]);
+  }
+  if (args.size() > 21) {
+    node->sfAId_ = args[21].as<PrimExpr>().value();
+  }
+  if (args.size() > 22) {
+    node->sfBId_ = args[22].as<PrimExpr>().value();
+  }
   node->annotations_ = annotations;
   data_ = std::move(node);
 }
@@ -96,6 +108,12 @@ AccessRegions GemmNode::GetAccessRegions() const {
   result.reads.push_back(bRegion_);
   if (!is_one(clearAccum_)) {
     result.reads.push_back(cRegion_);
+  }
+  if (sfaRegion_.defined()) {
+    result.reads.push_back(sfaRegion_);
+  }
+  if (sfbRegion_.defined()) {
+    result.reads.push_back(sfbRegion_);
   }
   result.writes.push_back(cRegion_);
   return result;
@@ -567,6 +585,16 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                                            scale_in_a, scale_in_b);
         return Integer(static_cast<int64_t>(desc));
       });
+  refl::GlobalDef().def("tl.get_tcgen5_blockscaled_instr_desc",
+                        [](int atom_m, int atom_n, DataType ab_dtype,
+                           bool a_is_k_major, bool b_is_k_major, int scale_in_a,
+                           int scale_in_b, int a_sf_id, int b_sf_id) {
+                          uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
+                              atom_m, atom_n, ab_dtype, a_is_k_major,
+                              b_is_k_major, scale_in_a, scale_in_b, a_sf_id,
+                              b_sf_id);
+                          return Integer(static_cast<int64_t>(desc));
+                        });
 }
 
 } // namespace tl

@@ -16,11 +16,11 @@ from tilelang.transform.simplify import _Simplify
 
 
 class GemmMMA(GemmBase):
-    def infer_layout(self, target: Target, thread_nums: int):
+    def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tir.Var | None = None):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
+        emitter = TensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
             b_dtype=self.in_dtype,
             accum_dtype=self.accum_dtype,
@@ -31,7 +31,12 @@ class GemmMMA(GemmBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
+            thread_var=thread_var,
         )
+        return emitter
+
+    def infer_layout(self, target: Target, thread_nums: int):
+        mma_emitter = self._make_mma_emitter(target, thread_nums)
         if self.is_gemm_ss():
             return {
                 self.A: make_swizzled_layout(self.A),
@@ -68,22 +73,7 @@ class GemmMMA(GemmBase):
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
-        warp_row_tiles = int(self.M // m_warp)
-        warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
-            a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
-            accum_dtype=self.accum_dtype,
-            a_transposed=self.trans_A,
-            b_transposed=self.trans_B,
-            block_row_warps=m_warp,
-            block_col_warps=n_warp,
-            warp_row_tiles=warp_row_tiles,
-            warp_col_tiles=warp_col_tiles,
-            chunk=self.chunk,
-            thread_var=thread_var,
-        )
+        mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=thread_var)
 
         in_dtype = self.in_dtype
         warp_rows = mma_emitter.warp_rows

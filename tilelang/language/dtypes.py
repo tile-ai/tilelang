@@ -197,7 +197,7 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float8_e5m2":
         assert hasattr(torch, "float8_e5m2"), "torch.float8_e5m2 is not supported in this version of torch. Please upgrade torch >= 2.1.0"
         return torch.float8_e5m2
-    elif dtype_str == "float8_e4m3fnuz":
+    elif dtype_str in ("float8_e4m3fnuz", "e4m3fnuz_float8"):
         assert hasattr(torch, "float8_e4m3fnuz"), (
             "torch.float8_e4m3fnuz is not supported in this version of torch. Please upgrade torch >= 2.2.0"
         )
@@ -217,6 +217,9 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
         return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
     elif dtype_str == "custom[tfloat32]":
         return torch.float32
+    elif dtype_str == "int4":
+        logger.info("torch doesn't support int4, using int8 as storage dtype.")
+        return torch.int8
     elif dtype_str == "handle":
         return None
     elif dtype_str in _STR_TO_TORCH_DTYPE:
@@ -229,6 +232,8 @@ __orig_dtype_new = dtype.__new__
 
 
 def __dtype_new__(cls, value: AnyDType) -> dtype:
+    if isinstance(value, dtype):
+        return value
     if isinstance(value, str):
         return __orig_dtype_new(cls, _CANONICAL_TO_DISPLAY_STR.get(value, value))
     elif value in _DTYPE_TO_STR:
