@@ -23,7 +23,6 @@ def fast_round_scale(amax, fp8_max_inv):
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     }
 )
 def fp8_quant_kernel(
@@ -64,7 +63,7 @@ def fp8_quant_kernel(
         y_shared = T.alloc_shared((blk_m, group_size), out_dtype)
 
         for _ in T.Pipelined(1, num_stages=num_stages):
-            T.copy(x[bx * blk_m, by * group_size], x_shared)
+            T.copy(x[bx * blk_m, by * group_size], x_shared, disable_tma=True)
             T.copy(x_shared, x_local)
 
             T.reduce_absmax(x_local, amax_local, dim=1)
@@ -82,7 +81,7 @@ def fp8_quant_kernel(
             for i in T.Parallel(blk_m):
                 scale[bx * blk_m + i, by] = s_local[i]
             T.copy(y_local, y_shared)
-            T.copy(y_shared, quant[bx * blk_m, by * group_size])
+            T.copy(y_shared, quant[bx * blk_m, by * group_size], disable_tma=True)
 
     return quant, scale
 
@@ -109,7 +108,6 @@ def fp8_act_quant(x: torch.Tensor, block_size: int = 128, round_scale: bool = Fa
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     }
 )
 def fp4_quant_kernel(
@@ -148,7 +146,7 @@ def fp4_quant_kernel(
         y_shared = T.alloc_shared((blk_m, group_size), out_dtype)
 
         for _ in T.Pipelined(1, num_stages=2):
-            T.copy(x[bx * blk_m, by * group_size], x_shared)
+            T.copy(x[bx * blk_m, by * group_size], x_shared, disable_tma=True)
             T.copy(x_shared, x_local)
 
             T.reduce_absmax(x_local, amax_local, dim=1)
@@ -163,7 +161,7 @@ def fp4_quant_kernel(
             for i in T.Parallel(blk_m):
                 scale[bx * blk_m + i, by] = s_local[i]
             T.copy(y_local, y_shared)
-            T.copy(y_shared, quant[bx * blk_m, by * group_size])
+            T.copy(y_shared, quant[bx * blk_m, by * group_size], disable_tma=True)
 
     return quant, scale
 
