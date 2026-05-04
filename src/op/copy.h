@@ -10,7 +10,6 @@
 #include "operator.h"
 #include "parallel.h"
 
-#include <cstdint>
 #include <utility>
 
 namespace tvm {
@@ -203,18 +202,6 @@ protected:
 
 using CopyTargetPredicate = bool (*)(Target target);
 
-enum class CopyInstructionKind : uint8_t {
-  kSync = 0,
-  kTMA = 1,
-  kCPAsync = 2,
-};
-
-enum class CopyPipelineRole : uint8_t {
-  kConsumer = 0,
-  kTMAProducer = 1,
-  kCPAsyncProducer = 2,
-};
-
 struct CopyImpl {
   const char *name;
   CopyTargetPredicate match_target;
@@ -225,43 +212,12 @@ struct CopyImpl {
 
   Stmt (*lower)(const CopyNode &op, const LowerArgs &T,
                 arith::Analyzer *analyzer);
-
-  CopyInstructionKind (*classify_instruction)(const CopyNode &op, Target target,
-                                              bool in_pipeline,
-                                              arith::Analyzer *analyzer);
-
-  CopyPipelineRole (*classify_pipeline_role)(const CopyNode &op, Target target,
-                                             arith::Analyzer *analyzer);
-
-  bool (*can_pipeline_managed_async)(const CopyNode &op, Target target,
-                                     arith::Analyzer *analyzer);
-
-  bool (*is_sync_global_to_shared_prefix)(const CopyNode &op, Target target,
-                                          arith::Analyzer *analyzer);
 };
 
 void RegisterCopyImpl(CopyImpl impl);
 
-CopyInstructionKind ClassifyCopyInstructionForTarget(const CopyNode &op,
-                                                     Target target,
-                                                     bool in_pipeline,
-                                                     arith::Analyzer *analyzer);
-
-CopyPipelineRole ClassifyCopyPipelineRoleForTarget(const CopyNode &op,
-                                                   Target target,
-                                                   arith::Analyzer *analyzer);
-
-bool CanPipelineManageCopyAsyncForTarget(const CopyNode &op, Target target,
-                                         arith::Analyzer *analyzer);
-
-bool IsSyncGlobalToSharedCopyLikeForTarget(const CopyNode &op, Target target,
-                                           arith::Analyzer *analyzer);
-
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer);
-
-Stmt LowerCPAsyncCopy(const CopyNode &op, const LowerArgs &T,
-                      arith::Analyzer *analyzer);
 
 class Copy : public TileOperator {
 public:

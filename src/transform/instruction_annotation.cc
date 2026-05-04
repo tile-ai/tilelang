@@ -26,7 +26,6 @@
  * depend on the inferred memory layout.
  */
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -38,6 +37,7 @@
 #include "../op/gemm.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
+#include "../target/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -48,6 +48,30 @@ namespace {
 
 /// Annotation key written by this pass.
 static constexpr const char *kInstructionKind = "tl_instruction_kind";
+
+static bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true) {
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  return TargetHasAsyncCopy(target) &&
+         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
+             .value();
+}
+
+static bool CheckCPAsyncCopy(const CopyNode *copy, Target target) {
+  return copy != nullptr && TargetHasAsyncCopy(target) &&
+         IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst) &&
+         copy->src->dtype == copy->dst->dtype;
+}
+
+static bool CheckBulkCopyPattern(const CopyNode *copy, Target target) {
+  if (copy == nullptr || !TargetHasBulkCopy(target) ||
+      copy->src->dtype != copy->dst->dtype) {
+    return false;
+  }
+  bool is_load = IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst);
+  bool is_store = IsSharedBuffer(copy->src) && IsGlobalBuffer(copy->dst);
+  return is_load || is_store;
+}
 
 // ---------------------------------------------------------------------------
 // Classify copy ops
@@ -61,21 +85,27 @@ static constexpr const char *kInstructionKind = "tl_instruction_kind";
  * collapses BulkLoad/BulkLoad1D/BulkStore/BulkStore1D into "tma" and skips
  * checks that require layout information.
  */
-std::string ClassifyCopy(const CopyNode *copy, Target target, bool in_pipeline,
-                         arith::Analyzer *analyzer) {
+std::string ClassifyCopy(const CopyNode *copy, Target target,
+                         bool in_pipeline) {
   if (copy == nullptr) {
     return "sync";
   }
-  switch (
-      ClassifyCopyInstructionForTarget(*copy, target, in_pipeline, analyzer)) {
-  case CopyInstructionKind::kTMA:
-    return "tma";
-  case CopyInstructionKind::kCPAsync:
-    return "cp_async";
-  case CopyInstructionKind::kSync:
-  default:
-    return "sync";
+
+  if (copy->GetIsTmaCopy()) {
+    return CheckBulkCopyPattern(copy, target) ? "tma" : "sync";
   }
+
+  if (copy->GetIsAsyncCopy()) {
+    return "cp_async";
+  }
+
+  if (in_pipeline && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
+      IsAutoAsyncCopyEnabled(target, /*default_enabled=*/false) &&
+      CheckCPAsyncCopy(copy, target)) {
+    return "cp_async";
+  }
+
+  return "sync";
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +188,7 @@ private:
     std::string kind;
 
     if (auto *copy_node = tile_op.as<CopyNode>()) {
-      kind = ClassifyCopy(copy_node, target_, in_pipeline_, &analyzer_);
+      kind = ClassifyCopy(copy_node, target_, in_pipeline_);
     } else if (auto *gemm_node = tile_op.as<GemmNode>()) {
       kind = ClassifyGemm(gemm_node, block_size_, target_);
     } else {
@@ -175,7 +205,6 @@ private:
   Target target_;
   bool in_pipeline_{false};
   int block_size_{0};
-  arith::Analyzer analyzer_;
 };
 
 } // namespace

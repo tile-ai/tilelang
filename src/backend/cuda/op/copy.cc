@@ -201,21 +201,6 @@ struct Copy {
   static Stmt Lower(const CopyNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer);
 
-  static CopyInstructionKind ClassifyInstruction(const CopyNode &op,
-                                                 Target target,
-                                                 bool in_pipeline,
-                                                 arith::Analyzer *analyzer);
-
-  static CopyPipelineRole ClassifyPipelineRole(const CopyNode &op,
-                                               Target target,
-                                               arith::Analyzer *analyzer);
-
-  static bool CanPipelineManageAsync(const CopyNode &op, Target target,
-                                     arith::Analyzer *analyzer);
-
-  static bool IsSyncGlobalToSharedPrefix(const CopyNode &op, Target target,
-                                         arith::Analyzer *analyzer);
-
 private:
   static bool CheckGlobalStrides(const Buffer &buffer,
                                  arith::Analyzer *analyzer);
@@ -295,14 +280,6 @@ struct Conv2DIm2Col {
   static Stmt Lower(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer);
 };
-
-bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true) {
-  using namespace tvm::transform;
-  PassContext pass_ctx = PassContext::Current();
-  return TargetHasAsyncCopy(target) &&
-         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
-             .value();
-}
 
 bool Copy::CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer) {
   Array<PrimExpr> strides = buffer->strides;
@@ -529,59 +506,6 @@ bool Copy::CheckCPAsyncCopy(const CopyNode &op, Target target,
   // Skip vectorize size checks here because the layout is not stable during
   // layout inference and transform classification.
   return true;
-}
-
-CopyInstructionKind Copy::ClassifyInstruction(const CopyNode &op, Target target,
-                                              bool in_pipeline,
-                                              arith::Analyzer *analyzer) {
-  if (op.GetIsTmaCopy()) {
-    if (CheckBulkLoad(op, target, analyzer, /*check_last_dim=*/false) ||
-        CheckBulkStore(op, target, analyzer, /*check_last_dim=*/false)) {
-      return CopyInstructionKind::kTMA;
-    }
-    return CopyInstructionKind::kSync;
-  }
-  if (op.GetIsAsyncCopy()) {
-    return CopyInstructionKind::kCPAsync;
-  }
-  if (in_pipeline && !op.GetIsTmaCopy() && !op.GetIsAsyncCopy() &&
-      IsAutoAsyncCopyEnabled(target, /*default_enabled=*/false) &&
-      CheckCPAsyncCopy(op, target, LayoutMap(), analyzer)) {
-    return CopyInstructionKind::kCPAsync;
-  }
-  return CopyInstructionKind::kSync;
-}
-
-CopyPipelineRole Copy::ClassifyPipelineRole(const CopyNode &op, Target target,
-                                            arith::Analyzer *analyzer) {
-  if (op.GetIsTmaCopy()) {
-    if (CheckBulkLoad(op, target, analyzer, /*check_last_dim=*/false)) {
-      return CopyPipelineRole::kTMAProducer;
-    }
-    return CopyPipelineRole::kConsumer;
-  }
-  if (op.GetIsAsyncCopy()) {
-    return CopyPipelineRole::kCPAsyncProducer;
-  }
-  if (!op.GetDisableTMA() &&
-      CheckBulkLoad(op, target, analyzer, /*check_last_dim=*/true)) {
-    return CopyPipelineRole::kTMAProducer;
-  }
-  return CopyPipelineRole::kConsumer;
-}
-
-bool Copy::CanPipelineManageAsync(const CopyNode &op, Target target,
-                                  arith::Analyzer *analyzer) {
-  return CheckPipelineManagedCPAsyncCopy(op, target, analyzer);
-}
-
-bool Copy::IsSyncGlobalToSharedPrefix(const CopyNode &op, Target target,
-                                      arith::Analyzer *analyzer) {
-  if (!CheckCPAsyncCopyPreconditions(op) || op.GetIsTmaCopy() ||
-      op.GetIsAsyncCopy()) {
-    return false;
-  }
-  return !CheckBulkLoad(op, target, analyzer, /*check_last_dim=*/true);
 }
 
 LayoutMap Copy::InferLayout(const CopyNode &op, const LayoutInferArgs &T,
@@ -844,7 +768,75 @@ Stmt Copy::Lower(const CopyNode &op, const LowerArgs &T,
 
 Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
                         arith::Analyzer *analyzer) {
-  return tl::LowerCPAsyncCopy(op, T, analyzer);
+  using namespace tvm::transform;
+
+  PassContext pass_ctx = PassContext::Current();
+  bool enable_async_copy =
+      pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
+  bool no_implicit_commit_wait = op.GetNoImplicitAsyncCommitWait();
+  bool explicit_async_semantics =
+      no_implicit_commit_wait || op.GetIsAsyncCopy();
+  if (!enable_async_copy && !explicit_async_semantics) {
+    return LowerNormal(op, T, analyzer);
+  }
+
+  auto simt_loop = op.MakeSIMTLoop(analyzer);
+  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+  auto par_op = ParallelOp(fused_loop);
+
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  for (auto level : levels) {
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
+                        level);
+  }
+  auto loop_layout = par_op->GetLoopLayout();
+  Stmt lowered_loop =
+      LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var, analyzer,
+                        T.layout_map, par_op->GetPredicate(T.thread_var));
+
+  auto inject_result =
+      InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
+                         /*async_without_async_commit_wait=*/
+                         no_implicit_commit_wait || op.GetIsAsyncCopy());
+  Stmt cp_async_loop = inject_result.stmt;
+  if (!inject_result.injected_ptx_async_copy) {
+    LOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
+                 << " (scope=" << op.src.scope() << ", dtype=" << op.src->dtype
+                 << "), dst=" << op.dst->name << " (scope=" << op.dst.scope()
+                 << ", dtype=" << op.dst->dtype
+                 << "), no_implicit_async_commit_wait="
+                 << no_implicit_commit_wait
+                 << ", is_async_copy=" << op.GetIsAsyncCopy();
+    if (no_implicit_commit_wait) {
+      LOG(WARNING)
+          << "Pipeline-managed async copy fallback to normal copy because "
+             "cp.async rewrite found no eligible global->shared store.";
+      return lowered_loop;
+    }
+    if (explicit_async_semantics) {
+      LOG(FATAL) << "Explicit async copy semantics require cp.async lowering, "
+                    "but no eligible global->shared store was rewritten.";
+    }
+    LOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
+                    "no eligible global->shared store.";
+    return LowerNormal(op, T, analyzer);
+  }
+  if (no_implicit_commit_wait) {
+    return cp_async_loop;
+  }
+  if (op.GetIsAsyncCopy()) {
+    Stmt commit_group =
+        Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
+    return SeqStmt({cp_async_loop, commit_group});
+  }
+  return cp_async_loop;
 }
 
 Stmt Copy::LowerNormal(const CopyNode &op, const LowerArgs &T,
@@ -1921,10 +1913,6 @@ bool RegisterCudaCopy() {
       100,
       cuda::Copy::InferLayout,
       cuda::Copy::Lower,
-      cuda::Copy::ClassifyInstruction,
-      cuda::Copy::ClassifyPipelineRole,
-      cuda::Copy::CanPipelineManageAsync,
-      cuda::Copy::IsSyncGlobalToSharedPrefix,
   });
   return true;
 }

@@ -22,6 +22,7 @@
 #include "../op/operator.h"
 #include "../op/region.h"
 #include "../op/utils.h"
+#include "../target/utils.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
 #include "support/utils.h"
@@ -44,6 +45,15 @@ bool CheckTargetIndependentAsyncCopyPreconditions(const CopyNode &op) {
     return false;
   }
   return true;
+}
+
+bool CheckPipelineManagedCPAsyncCopy(const CopyNode &op,
+                                     Optional<Target> target) {
+  if (op.GetIsTmaCopy() || op.GetIsAsyncCopy() ||
+      !CheckTargetIndependentAsyncCopyPreconditions(op)) {
+    return false;
+  }
+  return !target.defined() || TargetHasAsyncCopy(target.value());
 }
 
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
@@ -375,16 +385,10 @@ private:
     if (copy == nullptr) {
       return false;
     }
-    if (!target_.defined()) {
-      return !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
-             CheckTargetIndependentAsyncCopyPreconditions(*copy);
-    }
-    return CanPipelineManageCopyAsyncForTarget(*copy, target_.value(),
-                                               &analyzer_);
+    return CheckPipelineManagedCPAsyncCopy(*copy, target_);
   }
 
   Optional<Target> target_;
-  mutable arith::Analyzer analyzer_;
 };
 
 class TileOpMbarPhaseAnnotator : public StmtExprMutator {

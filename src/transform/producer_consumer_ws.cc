@@ -595,6 +595,42 @@ static bool IsBarrierOrTmaControlCall(const CallNode *call) {
          call->op.same_as(builtin::tvm_storage_sync());
 }
 
+static PrimExpr BitsFromElements(PrimExpr elements, DataType dtype) {
+  return cast(DataType::Int(64), elements) *
+         IntImm(DataType::Int(64), dtype.bits());
+}
+
+static bool CheckCPAsyncCopyPreconditions(const CopyNode *copy) {
+  return copy != nullptr && IsGlobalBuffer(copy->src) &&
+         IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
+}
+
+static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
+                                            Target target) {
+  return copy != nullptr && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
+         TargetHasAsyncCopy(target) && CheckCPAsyncCopyPreconditions(copy);
+}
+
+static bool CheckBulkLoadPattern(const CopyNode *copy, Target target,
+                                 arith::Analyzer *analyzer,
+                                 bool check_last_dim) {
+  if (copy == nullptr || !TargetHasBulkCopy(target) ||
+      !IsGlobalBuffer(copy->src) || !IsSharedBuffer(copy->dst) ||
+      copy->src->dtype != copy->dst->dtype) {
+    return false;
+  }
+  if (check_last_dim &&
+      analyzer->CanProve(
+          FloorMod(BitsFromElements(
+                       copy->src_range[copy->src_range.size() - 1]->extent,
+                       copy->src->dtype),
+                   IntImm(DataType::Int(64), 128)) != 0,
+          arith::ProofStrength::kSymbolicBound)) {
+    return false;
+  }
+  return true;
+}
+
 static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
   const auto *call = GetEvaluateCallInSimpleWrapper(stmt);
   if (!call) {
@@ -610,7 +646,10 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
   }
 
   arith::Analyzer analyzer;
-  return IsSyncGlobalToSharedCopyLikeForTarget(*copy, target, &analyzer);
+  return CheckCPAsyncCopyPreconditions(copy) && !copy->GetIsTmaCopy() &&
+         !copy->GetIsAsyncCopy() &&
+         !CheckBulkLoadPattern(copy, target, &analyzer,
+                               /*check_last_dim=*/true);
 }
 
 static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
@@ -661,21 +700,31 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
 }
 
 /// Classify a tile-op copy as TMA load producer, cp.async producer, or
-/// consumer using the target-specific copy implementation.
+/// consumer using coarse pre-layout checks.
 static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
   if (copy == nullptr) {
     return TileStmtKind::kConsumer;
   }
   arith::Analyzer analyzer;
-  switch (ClassifyCopyPipelineRoleForTarget(*copy, target, &analyzer)) {
-  case CopyPipelineRole::kTMAProducer:
-    return TileStmtKind::kTmaProducer;
-  case CopyPipelineRole::kCPAsyncProducer:
-    return TileStmtKind::kCpAsyncProducer;
-  case CopyPipelineRole::kConsumer:
-  default:
+
+  if (copy->GetIsTmaCopy()) {
+    if (CheckBulkLoadPattern(copy, target, &analyzer,
+                             /*check_last_dim=*/false)) {
+      return TileStmtKind::kTmaProducer;
+    }
     return TileStmtKind::kConsumer;
   }
+
+  if (copy->GetIsAsyncCopy()) {
+    return TileStmtKind::kCpAsyncProducer;
+  }
+
+  if (!copy->GetDisableTMA() && CheckBulkLoadPattern(copy, target, &analyzer,
+                                                     /*check_last_dim=*/true)) {
+    return TileStmtKind::kTmaProducer;
+  }
+
+  return TileStmtKind::kConsumer;
 }
 
 /// Classify a single statement in the pipeline loop body.
@@ -796,11 +845,10 @@ private:
     if (copy == nullptr) {
       return false;
     }
-    return CanPipelineManageCopyAsyncForTarget(*copy, target_, &analyzer_);
+    return CheckPipelineManagedCPAsyncCopy(copy, target_);
   }
 
   Target target_;
-  mutable arith::Analyzer analyzer_;
 };
 
 class TileOpMbarPhaseAnnotator : public StmtExprMutator {
