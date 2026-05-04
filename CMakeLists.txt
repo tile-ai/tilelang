@@ -179,6 +179,7 @@ file(GLOB TILE_LANG_SRCS
   src/transform/common/*.cc
   src/op/*.cc
   src/backend/cpu/op/*.cc
+  src/backend/metal/op/*.cc
   src/target/utils.cc
   src/target/codegen_c_host.cc
   src/target/codegen_c.cc

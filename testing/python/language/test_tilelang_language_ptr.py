@@ -233,4 +233,5 @@ def test_pointer_table_grouped_matmul():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_pointer_table_grouped_matmul()
