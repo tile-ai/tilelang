@@ -66,11 +66,6 @@ public:
                         InferLevel level) const override;
 
   /*!
-   * \brief Default layout inference implementation used by fallback dispatch.
-   */
-  LayoutMap InferLayoutImpl(const LayoutInferArgs &T, InferLevel level) const;
-
-  /*!
    * \brief Infer layout through the generated SIMT copy loop.
    */
   LayoutMap InferSIMTLayout(const LayoutInferArgs &T, InferLevel level) const;

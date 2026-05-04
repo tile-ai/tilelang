@@ -1,11 +1,10 @@
 /*!
  * \file tl/op/copy.cc
- * \brief Define the copy operator, backend dispatch, and shared fallback
+ * \brief Define the copy operator, backend dispatch, and shared normal-copy
  *        lowering helpers.
  */
 
 #include "copy.h"
-#include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
@@ -24,35 +23,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-namespace {
-
-bool GetBoolAnnotation(const CopyNode &op, const char *key) {
-  if (auto val = op.annotations.Get(key)) {
-    if (auto int_val = val->as<IntImmNode>()) {
-      return int_val->value != 0;
-    }
-  }
-  return false;
-}
-
-bool GetIsTmaCopy(const CopyNode &op) {
-  return GetBoolAnnotation(op, "is_tma_copy");
-}
-
-bool GetIsAsyncCopy(const CopyNode &op) {
-  if (GetBoolAnnotation(op, "is_async_copy")) {
-    return true;
-  }
-  // Backward-compatibility with historical annotation key.
-  return GetBoolAnnotation(op, "force_cp_async");
-}
-
-bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
-  return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
-}
-
-} // namespace
 
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer) {
@@ -113,47 +83,7 @@ std::vector<CopyImpl> &CopyImplRegistry() {
   return registry;
 }
 
-LayoutMap DefaultInferCopyLayout(const CopyNode &op, const LayoutInferArgs &T,
-                                 InferLevel level) {
-  return op.InferLayoutImpl(T, level);
-}
-
-bool DefaultMatchTarget(Target target) { return true; }
-
-Stmt DefaultLowerCopy(const CopyNode &op, const LowerArgs &T,
-                      arith::Analyzer *analyzer) {
-  if (GetIsTmaCopy(op)) {
-    LOG(FATAL) << "T.tma_copy() requires a target-specific copy "
-                  "implementation, but no implementation is registered for "
-               << T.target->ToDebugString();
-  }
-  if (GetIsAsyncCopy(op) || GetNoImplicitAsyncCommitWait(op)) {
-    LOG(FATAL) << "Async copy requires a target-specific copy implementation, "
-                  "but no implementation is registered for "
-               << T.target->ToDebugString();
-  }
-  return LowerNormalCopy(op, T, analyzer);
-}
-
-CopyImpl MakeDefaultCopyImpl() {
-  return CopyImpl{
-      "default.Copy",
-      DefaultMatchTarget,
-      std::numeric_limits<int>::min(),
-      DefaultInferCopyLayout,
-      DefaultLowerCopy,
-  };
-}
-
-void EnsureDefaultCopyImplRegistered() {
-  auto &registry = CopyImplRegistry();
-  if (registry.empty()) {
-    registry.push_back(MakeDefaultCopyImpl());
-  }
-}
-
 const CopyImpl &ResolveCopyImpl(Target target) {
-  EnsureDefaultCopyImplRegistered();
   const auto &registry = CopyImplRegistry();
   const CopyImpl *best_impl = nullptr;
   int best_priority = std::numeric_limits<int>::min();
@@ -163,7 +93,10 @@ const CopyImpl &ResolveCopyImpl(Target target) {
       best_priority = impl.priority;
     }
   }
-  ICHECK(best_impl != nullptr);
+  ICHECK(best_impl != nullptr)
+      << "tl.copy requires a target-specific implementation, but no copy "
+         "implementation is registered for "
+      << target->ToDebugString();
   return *best_impl;
 }
 
@@ -182,32 +115,7 @@ std::vector<Conv2DIm2ColImpl> &Conv2DIm2ColImplRegistry() {
   return registry;
 }
 
-Stmt DefaultLowerConv2DIm2Col(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
-                              arith::Analyzer *analyzer) {
-  LOG(FATAL) << "Conv2D im2col requires a target-specific implementation, "
-                "but no implementation is registered for "
-             << T.target->ToDebugString();
-  return Stmt();
-}
-
-Conv2DIm2ColImpl MakeDefaultConv2DIm2ColImpl() {
-  return Conv2DIm2ColImpl{
-      "default.Conv2DIm2Col",
-      DefaultMatchTarget,
-      std::numeric_limits<int>::min(),
-      DefaultLowerConv2DIm2Col,
-  };
-}
-
-void EnsureDefaultConv2DIm2ColImplRegistered() {
-  auto &registry = Conv2DIm2ColImplRegistry();
-  if (registry.empty()) {
-    registry.push_back(MakeDefaultConv2DIm2ColImpl());
-  }
-}
-
 const Conv2DIm2ColImpl &ResolveConv2DIm2ColImpl(Target target) {
-  EnsureDefaultConv2DIm2ColImplRegistered();
   const auto &registry = Conv2DIm2ColImplRegistry();
   const Conv2DIm2ColImpl *best_impl = nullptr;
   int best_priority = std::numeric_limits<int>::min();
@@ -217,7 +125,10 @@ const Conv2DIm2ColImpl &ResolveConv2DIm2ColImpl(Target target) {
       best_priority = impl.priority;
     }
   }
-  ICHECK(best_impl != nullptr);
+  ICHECK(best_impl != nullptr)
+      << "Conv2D im2col requires a target-specific implementation, but no "
+         "implementation is registered for "
+      << target->ToDebugString();
   return *best_impl;
 }
 
@@ -233,7 +144,6 @@ void RegisterCopyImpl(CopyImpl impl) {
   ICHECK(impl.match_target != nullptr);
   ICHECK(impl.infer_layout != nullptr);
   ICHECK(impl.lower != nullptr);
-  EnsureDefaultCopyImplRegistered();
   CopyImplRegistry().push_back(impl);
 }
 
@@ -241,7 +151,6 @@ void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
   ICHECK(impl.lower != nullptr);
-  EnsureDefaultConv2DIm2ColImplRegistered();
   Conv2DIm2ColImplRegistry().push_back(impl);
 }
 
@@ -482,22 +391,6 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
                                 InferLevel level) const {
   return InferCopyLayout(*this, T, level);
-}
-
-// Infers memory layouts for the default target-independent copy path.
-LayoutMap CopyNode::InferLayoutImpl(const LayoutInferArgs &T,
-                                    InferLevel level) const {
-  if (GetIsTmaCopy(*this)) {
-    LOG(FATAL) << "T.tma_copy() requires a target-specific copy "
-                  "implementation, but no implementation is registered for "
-               << T.target->ToDebugString();
-  }
-  if (GetIsAsyncCopy(*this) || GetNoImplicitAsyncCommitWait(*this)) {
-    LOG(FATAL) << "Async copy requires a target-specific copy implementation, "
-                  "but no implementation is registered for "
-               << T.target->ToDebugString();
-  }
-  return InferSIMTLayout(T, level);
 }
 
 LayoutMap CopyNode::InferSIMTLayout(const LayoutInferArgs &T,

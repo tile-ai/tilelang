@@ -11,6 +11,7 @@ if(NOT APPLE)
 endif()
 
 file(GLOB TILE_LANG_METAL_SRCS
+  src/backend/metal/op/*.cc
   src/target/rt_mod_metal.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_METAL_SRCS})
