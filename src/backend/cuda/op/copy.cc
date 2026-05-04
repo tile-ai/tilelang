@@ -730,6 +730,13 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
                            thread_extent, T.thread_bounds, result_map);
   }
 
+  if (is_tma_1d) {
+    // 1D TMA requires contiguous shared memory. Do not infer a swizzled shared
+    // layout here, otherwise final instruction selection may fall back to
+    // descriptor-based multidimensional TMA.
+    return result_map;
+  }
+
   if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
     if (is_store) {
       // For BulkStore, infer a swizzled shared-memory layout when possible.
