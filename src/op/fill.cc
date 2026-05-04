@@ -156,7 +156,51 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (IsFragmentBuffer(dst)) {
+  if (IsSIMDGroupBuffer(dst)) {
+    int region_elements = 1;
+    for (auto r : region) {
+      auto imm = r->extent.as<IntImmNode>();
+      ICHECK(imm) << "simdgroup fill region must have constant extents";
+      region_elements *= imm->value;
+    }
+    int total_elements = region_elements;
+    ICHECK(total_elements % 64 == 0)
+        << "simdgroup buffer size must be multiple of 64 (8x8), got "
+        << total_elements;
+    int num_matrices = total_elements / 64;
+    PrimExpr fill_value = Cast(dst->dtype, value);
+    Array<PrimExpr> strides = dst->strides;
+    if (strides.empty()) {
+      PrimExpr stride = 1;
+      strides.resize(dst->shape.size());
+      for (int i = static_cast<int>(dst->shape.size()) - 1; i >= 0; --i) {
+        strides.Set(i, stride);
+        stride *= dst->shape[i];
+      }
+    }
+    ICHECK_EQ(strides.size(), dst->shape.size())
+        << "simdgroup fill requires complete destination strides";
+    PrimExpr element_offset = 0;
+    for (size_t i = 0; i < region.size(); ++i) {
+      element_offset += region[i]->min * strides[i];
+    }
+    PrimExpr matrix_elements = IntImm(element_offset.dtype(), 64);
+    ICHECK(
+        analyzer->CanProveEqual(FloorMod(element_offset, matrix_elements), 0))
+        << "simdgroup fill region must start on an 8x8 matrix boundary";
+    PrimExpr matrix_index_base = FloorDiv(element_offset, matrix_elements);
+    Array<Stmt> stmts;
+    for (int i = 0; i < num_matrices; i++) {
+      stmts.push_back(Evaluate(
+          Call(DataType::Handle(), builtin::make_filled_simdgroup_matrix(),
+               {dst->data, matrix_index_base + IntImm(DataType::Int(32), i),
+                fill_value, IntImm(DataType::Int(32), 8),
+                IntImm(DataType::Int(32), 8)})));
+    }
+    if (stmts.size() == 1)
+      return stmts[0];
+    return SeqStmt(stmts);
+  } else if (IsFragmentBuffer(dst)) {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target,
                          T.thread_bounds,
