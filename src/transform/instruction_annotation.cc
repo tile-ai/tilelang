@@ -38,7 +38,6 @@
 #include "../op/gemm.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
-#include "../target/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -49,22 +48,6 @@ namespace {
 
 /// Annotation key written by this pass.
 static constexpr const char *kInstructionKind = "tl_instruction_kind";
-
-static bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true) {
-  using namespace tvm::transform;
-  PassContext pass_ctx = PassContext::Current();
-  return TargetHasAsyncCopy(target) &&
-         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
-             .value();
-}
-
-static bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
-                                  arith::Analyzer *analyzer,
-                                  bool default_enabled = true) {
-  return copy != nullptr && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
-         IsAutoAsyncCopyEnabled(target, default_enabled) &&
-         copy->CheckCPAsyncCopy(target, LayoutMap(), analyzer);
-}
 
 // ---------------------------------------------------------------------------
 // Classify copy ops
@@ -80,39 +63,19 @@ static bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
  */
 std::string ClassifyCopy(const CopyNode *copy, Target target, bool in_pipeline,
                          arith::Analyzer *analyzer) {
-  // Explicit T.tma_copy() — always TMA.
-  if (copy->GetIsTmaCopy()) {
-    // Verify target can do TMA at all.
-    if (copy->CheckBulkLoad(target, analyzer, /*check_last_dim=*/false) ||
-        copy->CheckBulkStore(target, analyzer, /*check_last_dim=*/false)) {
-      return "tma";
-    }
-    // User asked for TMA but target doesn't support it — leave unannotated
-    // so that LowerTileOp can produce a proper error later.
+  if (copy == nullptr) {
     return "sync";
   }
-
-  // Explicit T.async_copy() — always cp.async.
-  if (copy->GetIsAsyncCopy()) {
+  switch (
+      ClassifyCopyInstructionForTarget(*copy, target, in_pipeline, analyzer)) {
+  case CopyInstructionKind::kTMA:
+    return "tma";
+  case CopyInstructionKind::kCPAsync:
     return "cp_async";
-  }
-
-  // Generic T.copy() stays synchronous here. Auto-TMA is only introduced by
-  // warp-specialized rewriting, which rewrites the op to explicit T.tma_copy.
-
-  // LDSM / STSM / TMem — these are synchronous from the WS perspective.
-  if (copy->CheckLDSMCopy(target) || copy->CheckSTSMCopy(target) ||
-      copy->CheckTMemLoad(target) || copy->CheckTMemStore(target)) {
+  case CopyInstructionKind::kSync:
+  default:
     return "sync";
   }
-
-  // Inside a pipelined loop, eligible copies may be lowered to cp.async.
-  if (in_pipeline && CanUseAutoCPAsyncCopy(copy, target, analyzer,
-                                           /*default_enabled=*/false)) {
-    return "cp_async";
-  }
-
-  return "sync";
 }
 
 // ---------------------------------------------------------------------------

@@ -28,26 +28,6 @@ namespace tl {
 
 using namespace tir;
 
-namespace {
-
-static PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
-  PrimExpr elements_i64 = cast(DataType::Int(64), elements);
-  int bits = dtype.bits();
-  if (bits % 8 == 0) {
-    return elements_i64 * IntImm(DataType::Int(64), bits / 8);
-  }
-  return FloorDiv(elements_i64 * IntImm(DataType::Int(64), bits) +
-                      IntImm(DataType::Int(64), 7),
-                  IntImm(DataType::Int(64), 8));
-}
-
-static PrimExpr TMABitsFromElements(PrimExpr elements, DataType dtype) {
-  return cast(DataType::Int(64), elements) *
-         IntImm(DataType::Int(64), dtype.bits());
-}
-
-} // namespace
-
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer) {
   bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
@@ -202,6 +182,35 @@ Stmt DefaultLowerCopy(const CopyNode &op, const LowerArgs &T,
   return LowerNormalCopy(op, T, analyzer);
 }
 
+CopyInstructionKind DefaultClassifyCopyInstruction(const CopyNode &op,
+                                                   Target target,
+                                                   bool in_pipeline,
+                                                   arith::Analyzer *analyzer) {
+  if (op.GetIsAsyncCopy()) {
+    return CopyInstructionKind::kCPAsync;
+  }
+  return CopyInstructionKind::kSync;
+}
+
+CopyPipelineRole DefaultClassifyCopyPipelineRole(const CopyNode &op,
+                                                 Target target,
+                                                 arith::Analyzer *analyzer) {
+  if (op.GetIsAsyncCopy()) {
+    return CopyPipelineRole::kCPAsyncProducer;
+  }
+  return CopyPipelineRole::kConsumer;
+}
+
+bool DefaultCanPipelineManageCopyAsync(const CopyNode &op, Target target,
+                                       arith::Analyzer *analyzer) {
+  return false;
+}
+
+bool DefaultIsSyncGlobalToSharedCopyLike(const CopyNode &op, Target target,
+                                         arith::Analyzer *analyzer) {
+  return false;
+}
+
 CopyImpl MakeDefaultCopyImpl() {
   return CopyImpl{
       "default.Copy",
@@ -209,6 +218,10 @@ CopyImpl MakeDefaultCopyImpl() {
       std::numeric_limits<int>::min(),
       DefaultInferCopyLayout,
       DefaultLowerCopy,
+      DefaultClassifyCopyInstruction,
+      DefaultClassifyCopyPipelineRole,
+      DefaultCanPipelineManageCopyAsync,
+      DefaultIsSyncGlobalToSharedCopyLike,
   };
 }
 
@@ -300,8 +313,37 @@ void RegisterCopyImpl(CopyImpl impl) {
   ICHECK(impl.match_target != nullptr);
   ICHECK(impl.infer_layout != nullptr);
   ICHECK(impl.lower != nullptr);
+  ICHECK(impl.classify_instruction != nullptr);
+  ICHECK(impl.classify_pipeline_role != nullptr);
+  ICHECK(impl.can_pipeline_managed_async != nullptr);
+  ICHECK(impl.is_sync_global_to_shared_prefix != nullptr);
   EnsureDefaultCopyImplRegistered();
   CopyImplRegistry().push_back(impl);
+}
+
+CopyInstructionKind
+ClassifyCopyInstructionForTarget(const CopyNode &op, Target target,
+                                 bool in_pipeline, arith::Analyzer *analyzer) {
+  return ResolveCopyImpl(target).classify_instruction(op, target, in_pipeline,
+                                                      analyzer);
+}
+
+CopyPipelineRole ClassifyCopyPipelineRoleForTarget(const CopyNode &op,
+                                                   Target target,
+                                                   arith::Analyzer *analyzer) {
+  return ResolveCopyImpl(target).classify_pipeline_role(op, target, analyzer);
+}
+
+bool CanPipelineManageCopyAsyncForTarget(const CopyNode &op, Target target,
+                                         arith::Analyzer *analyzer) {
+  return ResolveCopyImpl(target).can_pipeline_managed_async(op, target,
+                                                            analyzer);
+}
+
+bool IsSyncGlobalToSharedCopyLikeForTarget(const CopyNode &op, Target target,
+                                           arith::Analyzer *analyzer) {
+  return ResolveCopyImpl(target).is_sync_global_to_shared_prefix(op, target,
+                                                                 analyzer);
 }
 
 void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl) {
@@ -595,276 +637,6 @@ LayoutMap CopyNode::InferSIMTLayout(const LayoutInferArgs &T,
   }
   return par_op_->InferLayout(T, level);
 }
-// Shared stride validation for TMA bulk load/store.
-bool CopyNode::CheckGlobalStrides(const Buffer &buffer,
-                                  arith::Analyzer *analyzer) {
-  Array<PrimExpr> strides = buffer->strides;
-  if (strides.empty()) {
-    PrimExpr stride = 1;
-    strides.resize(buffer->shape.size());
-    for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
-      strides.Set(i, stride);
-      stride *= buffer->shape[i];
-    }
-  }
-
-  if (!strides.empty() &&
-      analyzer->CanProve(strides[strides.size() - 1] != 1,
-                         arith::ProofStrength::kSymbolicBound)) {
-    LOG(WARNING) << "TMA bulk copy requires contiguous innermost global stride"
-                 << ", but got " << strides[strides.size() - 1]
-                 << " for buffer " << buffer->name
-                 << ", fallback to normal copy.";
-    return false;
-  }
-
-  for (size_t i = 0; i + 1 < strides.size(); ++i) {
-    PrimExpr stride_bytes = TMABytesFromElements(strides[i], buffer->dtype);
-    if (analyzer->CanProve(
-            FloorMod(stride_bytes, IntImm(DataType::Int(64), 16)) != 0,
-            arith::ProofStrength::kSymbolicBound)) {
-      LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
-                   << stride_bytes << " for buffer " << buffer->name
-                   << ", fallback to normal copy.";
-      return false;
-    }
-    if (const int64_t *stride =
-            as_const_int(analyzer->Simplify(stride_bytes))) {
-      if (*stride >= (int64_t{1} << 40)) {
-        LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
-                     << stride_bytes << " for buffer " << buffer->name
-                     << ", fallback to normal copy.";
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-// Checks if this copy can be lowered to a Bulk Load (TMA) instruction.
-// Requires: TMA support, global->shared scope, matching dtypes.
-bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
-                             bool check_last_dim) const {
-  // 1. arch must have bulk copy support
-  if (!TargetHasBulkCopy(target))
-    return false;
-  // 2. src and dst must be global and shared
-  if (src.scope() != "global" ||
-      (dst.scope() != "shared.dyn" && dst.scope() != "shared"))
-    return false;
-  // 3. check shape.
-  // last dim of src * dtype.bits() must be a multiple of 16
-  // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
-  // now we check src (gmem) as tma box dim is deduced from src
-  if (check_last_dim &&
-      analyzer->CanProve(
-          FloorMod(TMABitsFromElements(src_range[src_range.size() - 1]->extent,
-                                       src->dtype),
-                   IntImm(DataType::Int(64), 128)) != 0,
-          arith::ProofStrength::kSymbolicBound)) {
-    LOG(WARNING)
-        << "src range must have last dim multiple of 16 for tma bulk load "
-        << src->name << " range " << src_range[src_range.size() - 1]->extent
-        << " * " << src->dtype.bits() << " bits % 128 != 0";
-    return false;
-  }
-
-  // 4. src and dst must have the same dtype
-  if (src->dtype != dst->dtype) {
-    LOG(WARNING) << "src and dst must have the same dtype for tma load "
-                 << src->name << " vs. " << dst->name << " dtype " << src->dtype
-                 << " vs. " << dst->dtype << " will be fallback to normal copy";
-    return false;
-  }
-  if (!CheckGlobalStrides(src, analyzer))
-    return false;
-  return true;
-}
-
-bool CopyNode::CheckBulkCopy1D(const Buffer &global_tensor,
-                               const Buffer &shared_tensor,
-                               const Array<Range> &global_range,
-                               const Array<Range> &shared_range,
-                               const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer) const {
-
-  // Step 1: check shared is contiguous (linear layout is also contiguous)
-  bool shared_is_contiguous = true;
-  if (layout_map.count(shared_tensor)) {
-    // Check if the layout is linear
-    Layout existing =
-        layout_map.Get(shared_tensor).value().as<Layout>().value();
-    Layout linear_layout = makeLinearLayout(shared_tensor->shape);
-    shared_is_contiguous = StructuralEqual()(existing, linear_layout);
-  }
-  // Step 2: check global is contiguous
-  bool global_is_contiguous = true;
-  bool global_not_full_dim_encounter = false;
-  for (int i = global_range.size() - 1; i >= 0; i--) {
-    if (!global_not_full_dim_encounter) {
-      if (!analyzer->CanProve(global_range[i]->extent ==
-                                      global_tensor->shape[i] &&
-                                  global_range[i]->min == 0,
-                              arith::ProofStrength::kSymbolicBound)) {
-        global_not_full_dim_encounter = true;
-      }
-    } else {
-      if (!analyzer->CanProve(global_range[i]->extent == 1,
-                              arith::ProofStrength::kSymbolicBound)) {
-        global_is_contiguous = false;
-        break;
-      }
-    }
-  }
-
-  // Step 3: check element match and no OOB
-  PrimExpr shared_elements = 1;
-  for (size_t i = 0; i < shared_range.size(); i++) {
-    shared_elements *= shared_range[i]->extent;
-  }
-  PrimExpr global_elements = 1;
-  for (size_t i = 0; i < global_range.size(); i++) {
-    global_elements *= global_range[i]->extent;
-  }
-  bool element_match =
-      analyzer->CanProveEqual(shared_elements, global_elements);
-
-  return (shared_is_contiguous && global_is_contiguous && element_match);
-}
-
-bool CopyNode::CheckBulkLoad1D(Target target, const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer) const {
-  if (!CheckBulkLoad(target, analyzer, false))
-    return false;
-  auto global_tensor = src;
-  auto shared_tensor = dst;
-  auto global_range = src_range;
-  auto shared_range = dst_range;
-  return CheckBulkCopy1D(global_tensor, shared_tensor, global_range,
-                         shared_range, layout_map, analyzer);
-}
-
-bool CopyNode::CheckBulkStore1D(Target target, const LayoutMap &layout_map,
-                                arith::Analyzer *analyzer) const {
-  if (!CheckBulkStore(target, analyzer, false))
-    return false;
-  auto shared_tensor = src;
-  auto global_tensor = dst;
-  auto shared_range = src_range;
-  auto global_range = dst_range;
-  return CheckBulkCopy1D(global_tensor, shared_tensor, global_range,
-                         shared_range, layout_map, analyzer);
-}
-
-// Checks if this copy can be lowered to a Bulk Store (TMA) instruction.
-// Requires: TMA support, shared->global scope, matching dtypes.
-bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
-                              bool check_last_dim) const {
-  // 1. arch must have bulk copy support
-  if (!TargetHasBulkCopy(target))
-    return false;
-  // 2. src and dst must be shared.dyn and local.fragment
-  if ((src.scope() != "shared.dyn" && src.scope() != "shared") ||
-      dst.scope() != "global")
-    return false;
-  // 3. check shape.
-  // last dim of dst * dtype.bits() must be a multiple of 16
-  // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
-  // now we check dst (gmem) as tma box dim is deduced from dst
-  if (check_last_dim &&
-      analyzer->CanProve(
-          FloorMod(TMABitsFromElements(dst_range[dst_range.size() - 1]->extent,
-                                       dst->dtype),
-                   IntImm(DataType::Int(64), 128)) != 0,
-          arith::ProofStrength::kSymbolicBound)) {
-    LOG(WARNING)
-        << "dst range must have last dim multiple of 16 for tma bulk store "
-        << dst->name << " range " << dst_range[dst_range.size() - 1]->extent
-        << " * " << dst->dtype.bits() << " bits % 128 != 0";
-    return false;
-  }
-  // 4. src and dst must have the same dtype
-  if (src->dtype != dst->dtype) {
-    LOG(WARNING) << "src and dst must have the same dtype for tma store "
-                 << src->name << " vs. " << dst->name << " dtype " << src->dtype
-                 << " vs. " << dst->dtype << " will be fallback to normal copy";
-    return false;
-  }
-  if (!CheckGlobalStrides(dst, analyzer))
-    return false;
-  return true;
-}
-
-// Checks if copy can use CUDA's Load Matrix (LDSM) instruction.
-// Requires: LDMATRIX support, shared->fragment scope.
-bool CopyNode::CheckLDSMCopy(Target target) const {
-  return TargetHasLdmatrix(target) && IsSharedBuffer(src) &&
-         IsFragmentBuffer(dst);
-}
-
-// Checks if copy can use CUDA's Store Matrix (STSM) instruction.
-// Requires: STMATRIX support, fragment->shared scope.
-bool CopyNode::CheckSTSMCopy(Target target) const {
-  return TargetHasStmatrix(target) && IsFragmentBuffer(src) &&
-         IsSharedBuffer(dst);
-}
-
-// Checks if copy can use tensor memory load (tcgen05.ld).
-// Requires: tmem support, shared.tmem->fragment scope.
-bool CopyNode::CheckTMemLoad(Target target) const {
-  return TargetHasTmem(target) && src.scope() == "shared.tmem" &&
-         IsFragmentBuffer(dst);
-}
-
-// Checks if copy can use tensor memory store (tcgen05.st).
-// Requires: tmem support, fragment->shared.tmem scope.
-bool CopyNode::CheckTMemStore(Target target) const {
-  return TargetHasTmem(target) && IsFragmentBuffer(src) &&
-         dst.scope() == "shared.tmem";
-}
-
-// Checks if copy can use cp.async global->shared path.
-// Requirements:
-// - target has async copy capability
-// - source is global and destination is shared/shared.dyn
-// - source/destination dtypes match
-// - vectorized copy width (bytes) is one of {4, 8, 16}
-// - if OOB guards are required, only a *uniform* (scalar) source predicate
-//   is supported (dst must be in-bounds)
-bool CopyNode::CheckCPAsyncCopyPreconditions() const {
-  if (!IsGlobalBuffer(src) || !IsSharedBuffer(dst)) {
-    return false;
-  }
-  if (src->dtype != dst->dtype) {
-    return false;
-  }
-  return true;
-}
-
-bool CopyNode::CheckPipelineManagedCPAsyncCopy() const {
-  return !GetIsTmaCopy() && !GetIsAsyncCopy() &&
-         CheckCPAsyncCopyPreconditions();
-}
-
-bool CopyNode::CheckPipelineManagedCPAsyncCopy(
-    Target target, arith::Analyzer *analyzer) const {
-  return CheckPipelineManagedCPAsyncCopy() &&
-         CheckCPAsyncCopy(target, LayoutMap(), analyzer);
-}
-
-bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
-                                arith::Analyzer *analyzer) const {
-  if (!TargetHasAsyncCopy(target)) {
-    return false;
-  }
-  if (!CheckCPAsyncCopyPreconditions()) {
-    return false;
-  }
-  // Skip vectorize size check here because, during the Infer Layout stage,
-  // the layout is not stable and the vectorized size cannot be determined.
-  return true;
-}
-
 // Lowers the copy operation by dispatching to the selected target
 // implementation.
 Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {

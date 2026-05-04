@@ -37,6 +37,35 @@ struct Copy {
     CheckSupported(op, T.target);
     return LowerNormalCopy(op, T, analyzer);
   }
+
+  static CopyInstructionKind ClassifyInstruction(const CopyNode &op,
+                                                 Target target,
+                                                 bool in_pipeline,
+                                                 arith::Analyzer *analyzer) {
+    if (op.GetIsAsyncCopy()) {
+      return CopyInstructionKind::kCPAsync;
+    }
+    return CopyInstructionKind::kSync;
+  }
+
+  static CopyPipelineRole ClassifyPipelineRole(const CopyNode &op,
+                                               Target target,
+                                               arith::Analyzer *analyzer) {
+    if (op.GetIsAsyncCopy()) {
+      return CopyPipelineRole::kCPAsyncProducer;
+    }
+    return CopyPipelineRole::kConsumer;
+  }
+
+  static bool CanPipelineManageAsync(const CopyNode &op, Target target,
+                                     arith::Analyzer *analyzer) {
+    return false;
+  }
+
+  static bool IsSyncGlobalToSharedPrefix(const CopyNode &op, Target target,
+                                         arith::Analyzer *analyzer) {
+    return false;
+  }
 };
 
 } // namespace cpu
@@ -52,6 +81,10 @@ bool RegisterCPUCopy() {
       100,
       cpu::Copy::InferLayout,
       cpu::Copy::Lower,
+      cpu::Copy::ClassifyInstruction,
+      cpu::Copy::ClassifyPipelineRole,
+      cpu::Copy::CanPipelineManageAsync,
+      cpu::Copy::IsSyncGlobalToSharedPrefix,
   });
   return true;
 }

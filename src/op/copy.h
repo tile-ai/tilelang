@@ -10,6 +10,7 @@
 #include "operator.h"
 #include "parallel.h"
 
+#include <cstdint>
 #include <utility>
 
 namespace tvm {
@@ -123,83 +124,6 @@ public:
                         InferLevel level) const override;
 
   /*!
-   * \brief Check if bulk copy is supported.
-   */
-  bool CheckBulkLoad(Target target, arith::Analyzer *analyzer,
-                     bool check_last_dim = true) const;
-
-  /*!
-   * \brief Check if bulk store is supported.
-   */
-  bool CheckBulkStore(Target target, arith::Analyzer *analyzer,
-                      bool check_last_dim = true) const;
-
-  /*!
-   * \brief Check if bulk copy 1d load is supported.
-   */
-  bool CheckBulkLoad1D(Target target, const LayoutMap &layout_map,
-                       arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Check if bulk copy 1d store is supported.
-   */
-  bool CheckBulkStore1D(Target target, const LayoutMap &layout_map,
-                        arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Check if bulk copy 1d is supported.
-   */
-  bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
-                       const Array<Range> &global_range,
-                       const Array<Range> &shared_range,
-                       const LayoutMap &layout_map,
-                       arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Check if lds memory copy is supported.
-   */
-  bool CheckLDSMCopy(Target target) const;
-
-  /*!
-   * \brief Check if stsm memory copy is supported.
-   */
-  bool CheckSTSMCopy(Target target) const;
-
-  /*!
-   * \brief Check if tensor memory load is supported.
-   */
-  bool CheckTMemLoad(Target target) const;
-
-  /*!
-   * \brief Check if tensor memory store is supported.
-   */
-  bool CheckTMemStore(Target target) const;
-
-  /*!
-   * \brief Check target-independent cp.async prerequisites.
-   */
-  bool CheckCPAsyncCopyPreconditions() const;
-
-  /*!
-   * \brief Check whether this copy can participate in pipeline-managed
-   * cp.async synchronization using only target-independent prerequisites.
-   */
-  bool CheckPipelineManagedCPAsyncCopy() const;
-
-  /*!
-   * \brief Check whether this copy can participate in pipeline-managed
-   * cp.async synchronization for a concrete target.
-   */
-  bool CheckPipelineManagedCPAsyncCopy(Target target,
-                                       arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Check if cp.async copy is supported.
-   */
-  bool CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
-                        arith::Analyzer *analyzer) const;
-
-  /*!
    * \brief Default layout inference implementation used by fallback dispatch.
    */
   LayoutMap InferLayoutImpl(const LayoutInferArgs &T, InferLevel level) const;
@@ -275,20 +199,21 @@ protected:
    * @return Reference to the singleton TVM Op representing this operator.
    */
   TileOperator Clone() const;
-
-  /*!
-   * \brief Check that a global buffer's strides satisfy TMA requirements.
-   *
-   * Validates: contiguous innermost stride, 16-byte alignment for outer
-   * strides, and stride < 2^40.
-   *
-   * \return true if all stride checks pass.
-   */
-  static bool CheckGlobalStrides(const Buffer &buffer,
-                                 arith::Analyzer *analyzer);
 };
 
 using CopyTargetPredicate = bool (*)(Target target);
+
+enum class CopyInstructionKind : uint8_t {
+  kSync = 0,
+  kTMA = 1,
+  kCPAsync = 2,
+};
+
+enum class CopyPipelineRole : uint8_t {
+  kConsumer = 0,
+  kTMAProducer = 1,
+  kCPAsyncProducer = 2,
+};
 
 struct CopyImpl {
   const char *name;
@@ -300,9 +225,37 @@ struct CopyImpl {
 
   Stmt (*lower)(const CopyNode &op, const LowerArgs &T,
                 arith::Analyzer *analyzer);
+
+  CopyInstructionKind (*classify_instruction)(const CopyNode &op, Target target,
+                                              bool in_pipeline,
+                                              arith::Analyzer *analyzer);
+
+  CopyPipelineRole (*classify_pipeline_role)(const CopyNode &op, Target target,
+                                             arith::Analyzer *analyzer);
+
+  bool (*can_pipeline_managed_async)(const CopyNode &op, Target target,
+                                     arith::Analyzer *analyzer);
+
+  bool (*is_sync_global_to_shared_prefix)(const CopyNode &op, Target target,
+                                          arith::Analyzer *analyzer);
 };
 
 void RegisterCopyImpl(CopyImpl impl);
+
+CopyInstructionKind ClassifyCopyInstructionForTarget(const CopyNode &op,
+                                                     Target target,
+                                                     bool in_pipeline,
+                                                     arith::Analyzer *analyzer);
+
+CopyPipelineRole ClassifyCopyPipelineRoleForTarget(const CopyNode &op,
+                                                   Target target,
+                                                   arith::Analyzer *analyzer);
+
+bool CanPipelineManageCopyAsyncForTarget(const CopyNode &op, Target target,
+                                         arith::Analyzer *analyzer);
+
+bool IsSyncGlobalToSharedCopyLikeForTarget(const CopyNode &op, Target target,
+                                           arith::Analyzer *analyzer);
 
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer);

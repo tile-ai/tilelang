@@ -605,13 +605,12 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
     return false;
   }
   const auto *copy = tile_op.as<CopyNode>();
-  if (copy == nullptr || !copy->CheckCPAsyncCopyPreconditions() ||
-      copy->GetIsTmaCopy() || copy->GetIsAsyncCopy()) {
+  if (copy == nullptr) {
     return false;
   }
 
   arith::Analyzer analyzer;
-  return !copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/true);
+  return IsSyncGlobalToSharedCopyLikeForTarget(*copy, target, &analyzer);
 }
 
 static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
@@ -662,33 +661,21 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
 }
 
 /// Classify a tile-op copy as TMA load producer, cp.async producer, or
-/// consumer. Replicates the coarse checks from InstructionAnnotation inline so
-/// that the tiled WS pass does not depend on a prior annotation pass.
+/// consumer using the target-specific copy implementation.
 static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
-  // Explicit T.tma_copy() is a load-side primitive: only treat valid
-  // global->shared TMA loads as producers.  TMA stores consume previously
-  // produced shared data and must stay on the consumer side to preserve
-  // per-iteration ordering.
-  if (copy->GetIsTmaCopy()) {
-    arith::Analyzer analyzer;
-    if (copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/false)) {
-      return TileStmtKind::kTmaProducer;
-    }
-    return TileStmtKind::kConsumer; // target doesn't support TMA
+  if (copy == nullptr) {
+    return TileStmtKind::kConsumer;
   }
-  // Explicit T.async_copy()
-  if (copy->GetIsAsyncCopy()) {
+  arith::Analyzer analyzer;
+  switch (ClassifyCopyPipelineRoleForTarget(*copy, target, &analyzer)) {
+  case CopyPipelineRole::kTMAProducer:
+    return TileStmtKind::kTmaProducer;
+  case CopyPipelineRole::kCPAsyncProducer:
     return TileStmtKind::kCpAsyncProducer;
+  case CopyPipelineRole::kConsumer:
+  default:
+    return TileStmtKind::kConsumer;
   }
-  // Generic T.copy(): check if TMA is possible
-  {
-    arith::Analyzer analyzer;
-    if (!copy->GetDisableTMA() &&
-        copy->CheckBulkLoad(target, &analyzer, /*check_last_dim=*/true)) {
-      return TileStmtKind::kTmaProducer;
-    }
-  }
-  return TileStmtKind::kConsumer;
 }
 
 /// Classify a single statement in the pipeline loop body.
@@ -809,7 +796,7 @@ private:
     if (copy == nullptr) {
       return false;
     }
-    return copy->CheckPipelineManagedCPAsyncCopy(target_, &analyzer_);
+    return CanPipelineManageCopyAsyncForTarget(*copy, target_, &analyzer_);
   }
 
   Target target_;

@@ -36,6 +36,16 @@ namespace software_pipeline {
 
 namespace {
 
+bool CheckTargetIndependentAsyncCopyPreconditions(const CopyNode &op) {
+  if (!IsGlobalBuffer(op.src) || !IsSharedBuffer(op.dst)) {
+    return false;
+  }
+  if (op.src->dtype != op.dst->dtype) {
+    return false;
+  }
+  return true;
+}
+
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
                  arith::Analyzer *analyzer) {
   if (lhs.size() != rhs.size()) {
@@ -366,9 +376,11 @@ private:
       return false;
     }
     if (!target_.defined()) {
-      return copy->CheckPipelineManagedCPAsyncCopy();
+      return !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
+             CheckTargetIndependentAsyncCopyPreconditions(*copy);
     }
-    return copy->CheckPipelineManagedCPAsyncCopy(target_.value(), &analyzer_);
+    return CanPipelineManageCopyAsyncForTarget(*copy, target_.value(),
+                                               &analyzer_);
   }
 
   Optional<Target> target_;

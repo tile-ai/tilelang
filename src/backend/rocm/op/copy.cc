@@ -5,7 +5,10 @@
 
 #include "op/copy.h"
 
+#include "op/utils.h"
 #include "target/utils.h"
+
+#include <tvm/tir/transform.h>
 
 #include <cstdint>
 
@@ -38,7 +41,7 @@ struct Copy {
 
     if (op.GetIsAsyncCopy() || op.GetNoImplicitAsyncCommitWait()) {
       bool cp_async_supported =
-          op.CheckCPAsyncCopy(target, layout_map, analyzer);
+          CheckCPAsyncCopy(op, target, layout_map, analyzer);
       ICHECK(cp_async_supported)
           << "Explicit async copy semantics require ROCm async copy lowering, "
              "but constraints were not satisfied. Got src="
@@ -63,6 +66,71 @@ struct Copy {
     }
     LOG(FATAL) << "Unsupported ROCm copy inst " << static_cast<int>(copy_inst);
   }
+
+  static CopyInstructionKind ClassifyInstruction(const CopyNode &op,
+                                                 Target target,
+                                                 bool in_pipeline,
+                                                 arith::Analyzer *analyzer) {
+    if (op.GetIsAsyncCopy()) {
+      return CopyInstructionKind::kCPAsync;
+    }
+    if (in_pipeline && !op.GetIsTmaCopy() && !op.GetIsAsyncCopy() &&
+        IsAutoAsyncCopyEnabled(target, /*default_enabled=*/false) &&
+        CheckCPAsyncCopy(op, target, LayoutMap(), analyzer)) {
+      return CopyInstructionKind::kCPAsync;
+    }
+    return CopyInstructionKind::kSync;
+  }
+
+  static CopyPipelineRole ClassifyPipelineRole(const CopyNode &op,
+                                               Target target,
+                                               arith::Analyzer *analyzer) {
+    if (op.GetIsAsyncCopy()) {
+      return CopyPipelineRole::kCPAsyncProducer;
+    }
+    return CopyPipelineRole::kConsumer;
+  }
+
+  static bool CanPipelineManageAsync(const CopyNode &op, Target target,
+                                     arith::Analyzer *analyzer) {
+    return !op.GetIsTmaCopy() && !op.GetIsAsyncCopy() &&
+           CheckCPAsyncCopy(op, target, LayoutMap(), analyzer);
+  }
+
+  static bool IsSyncGlobalToSharedPrefix(const CopyNode &op, Target target,
+                                         arith::Analyzer *analyzer) {
+    return !op.GetIsTmaCopy() && !op.GetIsAsyncCopy() &&
+           CheckCPAsyncCopyPreconditions(op);
+  }
+
+private:
+  static bool IsAutoAsyncCopyEnabled(Target target,
+                                     bool default_enabled = true) {
+    using namespace tvm::transform;
+    PassContext pass_ctx = PassContext::Current();
+    return TargetHasAsyncCopy(target) &&
+           pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
+               .value();
+  }
+
+  static bool CheckCPAsyncCopyPreconditions(const CopyNode &op) {
+    if (!IsGlobalBuffer(op.src) || !IsSharedBuffer(op.dst)) {
+      return false;
+    }
+    if (op.src->dtype != op.dst->dtype) {
+      return false;
+    }
+    return true;
+  }
+
+  static bool CheckCPAsyncCopy(const CopyNode &op, Target target,
+                               const LayoutMap &layout_map,
+                               arith::Analyzer *analyzer) {
+    if (!TargetHasAsyncCopy(target)) {
+      return false;
+    }
+    return CheckCPAsyncCopyPreconditions(op);
+  }
 };
 
 } // namespace rocm
@@ -78,6 +146,10 @@ bool RegisterROCmCopy() {
       100,
       rocm::Copy::InferLayout,
       rocm::Copy::Lower,
+      rocm::Copy::ClassifyInstruction,
+      rocm::Copy::ClassifyPipelineRole,
+      rocm::Copy::CanPipelineManageAsync,
+      rocm::Copy::IsSyncGlobalToSharedPrefix,
   });
   return true;
 }

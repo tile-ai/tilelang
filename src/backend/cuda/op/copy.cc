@@ -45,6 +45,11 @@ PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
                   IntImm(DataType::Int(64), 8));
 }
 
+PrimExpr TMABitsFromElements(PrimExpr elements, DataType dtype) {
+  return cast(DataType::Int(64), elements) *
+         IntImm(DataType::Int(64), dtype.bits());
+}
+
 int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
   return (elements * dtype.bits() + 7) / 8;
 }
@@ -196,7 +201,65 @@ struct Copy {
   static Stmt Lower(const CopyNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer);
 
+  static CopyInstructionKind ClassifyInstruction(const CopyNode &op,
+                                                 Target target,
+                                                 bool in_pipeline,
+                                                 arith::Analyzer *analyzer);
+
+  static CopyPipelineRole ClassifyPipelineRole(const CopyNode &op,
+                                               Target target,
+                                               arith::Analyzer *analyzer);
+
+  static bool CanPipelineManageAsync(const CopyNode &op, Target target,
+                                     arith::Analyzer *analyzer);
+
+  static bool IsSyncGlobalToSharedPrefix(const CopyNode &op, Target target,
+                                         arith::Analyzer *analyzer);
+
 private:
+  static bool CheckGlobalStrides(const Buffer &buffer,
+                                 arith::Analyzer *analyzer);
+
+  static bool CheckBulkLoad(const CopyNode &op, Target target,
+                            arith::Analyzer *analyzer,
+                            bool check_last_dim = true);
+
+  static bool CheckBulkStore(const CopyNode &op, Target target,
+                             arith::Analyzer *analyzer,
+                             bool check_last_dim = true);
+
+  static bool CheckBulkLoad1D(const CopyNode &op, Target target,
+                              const LayoutMap &layout_map,
+                              arith::Analyzer *analyzer);
+
+  static bool CheckBulkStore1D(const CopyNode &op, Target target,
+                               const LayoutMap &layout_map,
+                               arith::Analyzer *analyzer);
+
+  static bool CheckBulkCopy1D(const Buffer &global_tensor,
+                              const Buffer &shared_tensor,
+                              const Array<Range> &global_range,
+                              const Array<Range> &shared_range,
+                              const LayoutMap &layout_map,
+                              arith::Analyzer *analyzer);
+
+  static bool CheckLDSMCopy(const CopyNode &op, Target target);
+
+  static bool CheckSTSMCopy(const CopyNode &op, Target target);
+
+  static bool CheckTMemLoad(const CopyNode &op, Target target);
+
+  static bool CheckTMemStore(const CopyNode &op, Target target);
+
+  static bool CheckCPAsyncCopyPreconditions(const CopyNode &op);
+
+  static bool CheckPipelineManagedCPAsyncCopy(const CopyNode &op, Target target,
+                                              arith::Analyzer *analyzer);
+
+  static bool CheckCPAsyncCopy(const CopyNode &op, Target target,
+                               const LayoutMap &layout_map,
+                               arith::Analyzer *analyzer);
+
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
                              arith::Analyzer *analyzer, bool buffer_oob);
@@ -232,6 +295,294 @@ struct Conv2DIm2Col {
   static Stmt Lower(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer);
 };
+
+bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true) {
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  return TargetHasAsyncCopy(target) &&
+         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
+             .value();
+}
+
+bool Copy::CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer) {
+  Array<PrimExpr> strides = buffer->strides;
+  if (strides.empty()) {
+    PrimExpr stride = 1;
+    strides.resize(buffer->shape.size());
+    for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
+      strides.Set(i, stride);
+      stride *= buffer->shape[i];
+    }
+  }
+
+  if (!strides.empty() &&
+      analyzer->CanProve(strides[strides.size() - 1] != 1,
+                         arith::ProofStrength::kSymbolicBound)) {
+    LOG(WARNING) << "TMA bulk copy requires contiguous innermost global stride"
+                 << ", but got " << strides[strides.size() - 1]
+                 << " for buffer " << buffer->name
+                 << ", fallback to normal copy.";
+    return false;
+  }
+
+  for (size_t i = 0; i + 1 < strides.size(); ++i) {
+    PrimExpr stride_bytes = TMABytesFromElements(strides[i], buffer->dtype);
+    if (analyzer->CanProve(
+            FloorMod(stride_bytes, IntImm(DataType::Int(64), 16)) != 0,
+            arith::ProofStrength::kSymbolicBound)) {
+      LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
+                   << stride_bytes << " for buffer " << buffer->name
+                   << ", fallback to normal copy.";
+      return false;
+    }
+    if (const int64_t *stride =
+            as_const_int(analyzer->Simplify(stride_bytes))) {
+      if (*stride >= (int64_t{1} << 40)) {
+        LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
+                     << stride_bytes << " for buffer " << buffer->name
+                     << ", fallback to normal copy.";
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool Copy::CheckBulkLoad(const CopyNode &op, Target target,
+                         arith::Analyzer *analyzer, bool check_last_dim) {
+  if (!TargetHasBulkCopy(target)) {
+    return false;
+  }
+  if (op.src.scope() != "global" ||
+      (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
+    return false;
+  }
+  if (check_last_dim &&
+      analyzer->CanProve(
+          FloorMod(
+              TMABitsFromElements(op.src_range[op.src_range.size() - 1]->extent,
+                                  op.src->dtype),
+              IntImm(DataType::Int(64), 128)) != 0,
+          arith::ProofStrength::kSymbolicBound)) {
+    LOG(WARNING)
+        << "src range must have last dim multiple of 16 for tma bulk load "
+        << op.src->name << " range "
+        << op.src_range[op.src_range.size() - 1]->extent << " * "
+        << op.src->dtype.bits() << " bits % 128 != 0";
+    return false;
+  }
+
+  if (op.src->dtype != op.dst->dtype) {
+    LOG(WARNING) << "src and dst must have the same dtype for tma load "
+                 << op.src->name << " vs. " << op.dst->name << " dtype "
+                 << op.src->dtype << " vs. " << op.dst->dtype
+                 << " will be fallback to normal copy";
+    return false;
+  }
+  return CheckGlobalStrides(op.src, analyzer);
+}
+
+bool Copy::CheckBulkStore(const CopyNode &op, Target target,
+                          arith::Analyzer *analyzer, bool check_last_dim) {
+  if (!TargetHasBulkCopy(target)) {
+    return false;
+  }
+  if ((op.src.scope() != "shared.dyn" && op.src.scope() != "shared") ||
+      op.dst.scope() != "global") {
+    return false;
+  }
+  if (check_last_dim &&
+      analyzer->CanProve(
+          FloorMod(
+              TMABitsFromElements(op.dst_range[op.dst_range.size() - 1]->extent,
+                                  op.dst->dtype),
+              IntImm(DataType::Int(64), 128)) != 0,
+          arith::ProofStrength::kSymbolicBound)) {
+    LOG(WARNING)
+        << "dst range must have last dim multiple of 16 for tma bulk store "
+        << op.dst->name << " range "
+        << op.dst_range[op.dst_range.size() - 1]->extent << " * "
+        << op.dst->dtype.bits() << " bits % 128 != 0";
+    return false;
+  }
+  if (op.src->dtype != op.dst->dtype) {
+    LOG(WARNING) << "src and dst must have the same dtype for tma store "
+                 << op.src->name << " vs. " << op.dst->name << " dtype "
+                 << op.src->dtype << " vs. " << op.dst->dtype
+                 << " will be fallback to normal copy";
+    return false;
+  }
+  return CheckGlobalStrides(op.dst, analyzer);
+}
+
+bool Copy::CheckBulkCopy1D(const Buffer &global_tensor,
+                           const Buffer &shared_tensor,
+                           const Array<Range> &global_range,
+                           const Array<Range> &shared_range,
+                           const LayoutMap &layout_map,
+                           arith::Analyzer *analyzer) {
+  bool shared_is_contiguous = true;
+  if (layout_map.count(shared_tensor)) {
+    Layout existing =
+        layout_map.Get(shared_tensor).value().as<Layout>().value();
+    Layout linear_layout = makeLinearLayout(shared_tensor->shape);
+    shared_is_contiguous = StructuralEqual()(existing, linear_layout);
+  }
+
+  bool global_is_contiguous = true;
+  bool global_not_full_dim_encounter = false;
+  for (int i = global_range.size() - 1; i >= 0; i--) {
+    if (!global_not_full_dim_encounter) {
+      if (!analyzer->CanProve(global_range[i]->extent ==
+                                      global_tensor->shape[i] &&
+                                  global_range[i]->min == 0,
+                              arith::ProofStrength::kSymbolicBound)) {
+        global_not_full_dim_encounter = true;
+      }
+    } else {
+      if (!analyzer->CanProve(global_range[i]->extent == 1,
+                              arith::ProofStrength::kSymbolicBound)) {
+        global_is_contiguous = false;
+        break;
+      }
+    }
+  }
+
+  PrimExpr shared_elements = 1;
+  for (size_t i = 0; i < shared_range.size(); i++) {
+    shared_elements *= shared_range[i]->extent;
+  }
+  PrimExpr global_elements = 1;
+  for (size_t i = 0; i < global_range.size(); i++) {
+    global_elements *= global_range[i]->extent;
+  }
+  bool element_match =
+      analyzer->CanProveEqual(shared_elements, global_elements);
+  return shared_is_contiguous && global_is_contiguous && element_match;
+}
+
+bool Copy::CheckBulkLoad1D(const CopyNode &op, Target target,
+                           const LayoutMap &layout_map,
+                           arith::Analyzer *analyzer) {
+  if (!CheckBulkLoad(op, target, analyzer, false)) {
+    return false;
+  }
+  return CheckBulkCopy1D(op.src, op.dst, op.src_range, op.dst_range, layout_map,
+                         analyzer);
+}
+
+bool Copy::CheckBulkStore1D(const CopyNode &op, Target target,
+                            const LayoutMap &layout_map,
+                            arith::Analyzer *analyzer) {
+  if (!CheckBulkStore(op, target, analyzer, false)) {
+    return false;
+  }
+  return CheckBulkCopy1D(op.dst, op.src, op.dst_range, op.src_range, layout_map,
+                         analyzer);
+}
+
+bool Copy::CheckLDSMCopy(const CopyNode &op, Target target) {
+  return TargetHasLdmatrix(target) && IsSharedBuffer(op.src) &&
+         IsFragmentBuffer(op.dst);
+}
+
+bool Copy::CheckSTSMCopy(const CopyNode &op, Target target) {
+  return TargetHasStmatrix(target) && IsFragmentBuffer(op.src) &&
+         IsSharedBuffer(op.dst);
+}
+
+bool Copy::CheckTMemLoad(const CopyNode &op, Target target) {
+  return TargetHasTmem(target) && op.src.scope() == "shared.tmem" &&
+         IsFragmentBuffer(op.dst);
+}
+
+bool Copy::CheckTMemStore(const CopyNode &op, Target target) {
+  return TargetHasTmem(target) && IsFragmentBuffer(op.src) &&
+         op.dst.scope() == "shared.tmem";
+}
+
+bool Copy::CheckCPAsyncCopyPreconditions(const CopyNode &op) {
+  if (!IsGlobalBuffer(op.src) || !IsSharedBuffer(op.dst)) {
+    return false;
+  }
+  if (op.src->dtype != op.dst->dtype) {
+    return false;
+  }
+  return true;
+}
+
+bool Copy::CheckPipelineManagedCPAsyncCopy(const CopyNode &op, Target target,
+                                           arith::Analyzer *analyzer) {
+  return !op.GetIsTmaCopy() && !op.GetIsAsyncCopy() &&
+         CheckCPAsyncCopy(op, target, LayoutMap(), analyzer);
+}
+
+bool Copy::CheckCPAsyncCopy(const CopyNode &op, Target target,
+                            const LayoutMap &layout_map,
+                            arith::Analyzer *analyzer) {
+  if (!TargetHasAsyncCopy(target)) {
+    return false;
+  }
+  if (!CheckCPAsyncCopyPreconditions(op)) {
+    return false;
+  }
+  // Skip vectorize size checks here because the layout is not stable during
+  // layout inference and transform classification.
+  return true;
+}
+
+CopyInstructionKind Copy::ClassifyInstruction(const CopyNode &op, Target target,
+                                              bool in_pipeline,
+                                              arith::Analyzer *analyzer) {
+  if (op.GetIsTmaCopy()) {
+    if (CheckBulkLoad(op, target, analyzer, /*check_last_dim=*/false) ||
+        CheckBulkStore(op, target, analyzer, /*check_last_dim=*/false)) {
+      return CopyInstructionKind::kTMA;
+    }
+    return CopyInstructionKind::kSync;
+  }
+  if (op.GetIsAsyncCopy()) {
+    return CopyInstructionKind::kCPAsync;
+  }
+  if (in_pipeline && !op.GetIsTmaCopy() && !op.GetIsAsyncCopy() &&
+      IsAutoAsyncCopyEnabled(target, /*default_enabled=*/false) &&
+      CheckCPAsyncCopy(op, target, LayoutMap(), analyzer)) {
+    return CopyInstructionKind::kCPAsync;
+  }
+  return CopyInstructionKind::kSync;
+}
+
+CopyPipelineRole Copy::ClassifyPipelineRole(const CopyNode &op, Target target,
+                                            arith::Analyzer *analyzer) {
+  if (op.GetIsTmaCopy()) {
+    if (CheckBulkLoad(op, target, analyzer, /*check_last_dim=*/false)) {
+      return CopyPipelineRole::kTMAProducer;
+    }
+    return CopyPipelineRole::kConsumer;
+  }
+  if (op.GetIsAsyncCopy()) {
+    return CopyPipelineRole::kCPAsyncProducer;
+  }
+  if (!op.GetDisableTMA() &&
+      CheckBulkLoad(op, target, analyzer, /*check_last_dim=*/true)) {
+    return CopyPipelineRole::kTMAProducer;
+  }
+  return CopyPipelineRole::kConsumer;
+}
+
+bool Copy::CanPipelineManageAsync(const CopyNode &op, Target target,
+                                  arith::Analyzer *analyzer) {
+  return CheckPipelineManagedCPAsyncCopy(op, target, analyzer);
+}
+
+bool Copy::IsSyncGlobalToSharedPrefix(const CopyNode &op, Target target,
+                                      arith::Analyzer *analyzer) {
+  if (!CheckCPAsyncCopyPreconditions(op) || op.GetIsTmaCopy() ||
+      op.GetIsAsyncCopy()) {
+    return false;
+  }
+  return !CheckBulkLoad(op, target, analyzer, /*check_last_dim=*/true);
+}
 
 LayoutMap Copy::InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                             InferLevel level) {
@@ -400,14 +751,14 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
   if (op.GetIsTmaCopy()) {
     bool is_cutedsl = TargetIsCuTeDSL(target);
     if (!is_cutedsl && !buffer_oob &&
-        op.CheckBulkLoad1D(target, layout_map, analyzer)) {
+        CheckBulkLoad1D(op, target, layout_map, analyzer)) {
       return CopyInst::kBulkLoad1D;
     } else if (!is_cutedsl && !buffer_oob &&
-               op.CheckBulkStore1D(target, layout_map, analyzer)) {
+               CheckBulkStore1D(op, target, layout_map, analyzer)) {
       return CopyInst::kBulkStore1D;
-    } else if (op.CheckBulkLoad(target, analyzer)) {
+    } else if (CheckBulkLoad(op, target, analyzer)) {
       return CopyInst::kBulkLoad;
-    } else if (op.CheckBulkStore(target, analyzer)) {
+    } else if (CheckBulkStore(op, target, analyzer)) {
       return CopyInst::kBulkStore;
     } else {
       LOG(FATAL) << "T.tma_copy() requires TMA-capable target and "
@@ -421,7 +772,8 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
   bool no_implicit_commit_wait = op.GetNoImplicitAsyncCommitWait();
 
   if (is_async_copy || no_implicit_commit_wait) {
-    bool cp_async_supported = op.CheckCPAsyncCopy(target, layout_map, analyzer);
+    bool cp_async_supported =
+        CheckCPAsyncCopy(op, target, layout_map, analyzer);
     ICHECK(cp_async_supported)
         << "Explicit async copy semantics require cp.async lowering, but "
            "constraints were not satisfied. Got src="
@@ -437,20 +789,20 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
            .value()) {
     bool is_cutedsl = TargetIsCuTeDSL(target);
     if (!is_cutedsl && !buffer_oob &&
-        op.CheckBulkStore1D(target, layout_map, analyzer)) {
+        CheckBulkStore1D(op, target, layout_map, analyzer)) {
       return CopyInst::kBulkStore1D;
-    } else if (op.CheckBulkStore(target, analyzer)) {
+    } else if (CheckBulkStore(op, target, analyzer)) {
       return CopyInst::kBulkStore;
     }
   }
 
-  if (op.CheckLDSMCopy(target)) {
+  if (CheckLDSMCopy(op, target)) {
     return CopyInst::kLDSM;
-  } else if (op.CheckSTSMCopy(target)) {
+  } else if (CheckSTSMCopy(op, target)) {
     return CopyInst::kSTSM;
-  } else if (op.CheckTMemLoad(target)) {
+  } else if (CheckTMemLoad(op, target)) {
     return CopyInst::kTMemLoad;
-  } else if (op.CheckTMemStore(target)) {
+  } else if (CheckTMemStore(op, target)) {
     return CopyInst::kTMemStore;
   } else {
     return CopyInst::kNormal;
@@ -1569,6 +1921,10 @@ bool RegisterCudaCopy() {
       100,
       cuda::Copy::InferLayout,
       cuda::Copy::Lower,
+      cuda::Copy::ClassifyInstruction,
+      cuda::Copy::ClassifyPipelineRole,
+      cuda::Copy::CanPipelineManageAsync,
+      cuda::Copy::IsSyncGlobalToSharedPrefix,
   });
   return true;
 }
