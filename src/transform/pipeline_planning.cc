@@ -6,6 +6,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../backend/cuda/op/copy.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
@@ -280,13 +281,12 @@ private:
     AccessRegions access = tile_op->GetAccessRegions();
     reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
     writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
-    // Detect explicit TMA-like producer ops for pipeline planning.
-    // Plain T.copy no longer auto-upgrades to TMA in the generic pipeline
-    // path; only warp-specialized rewriting may turn it into
-    // tl.tileop.tma_copy.
     if (const auto *copy = tile_op.as<CopyNode>()) {
       if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
         is_global_copy_pattern_ = true;
+      }
+      if (cuda::IsPipelinePlanningTmaCopy(*copy, target_)) {
+        is_tma_copy_ = true;
       }
     }
     // Conv2D im2col always uses TMA on Hopper.
@@ -770,6 +770,9 @@ private:
         return;
       }
       pinfo->copy_stage = true;
+      if (cuda::IsPipelinePlanningTmaCopy(*copy, target_)) {
+        pinfo->tma_copy = true;
+      }
       return;
     }
 

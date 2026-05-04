@@ -29,6 +29,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../backend/cuda/op/copy.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/fill.h"
@@ -595,67 +596,25 @@ static bool IsBarrierOrTmaControlCall(const CallNode *call) {
          call->op.same_as(builtin::tvm_storage_sync());
 }
 
-static PrimExpr BitsFromElements(PrimExpr elements, DataType dtype) {
-  return cast(DataType::Int(64), elements) *
-         IntImm(DataType::Int(64), dtype.bits());
-}
-
-static bool GetBoolAnnotation(const CopyNode *copy, const char *key) {
-  if (copy == nullptr) {
-    return false;
-  }
-  if (auto val = copy->annotations.Get(key)) {
-    if (auto int_val = val->as<IntImmNode>()) {
-      return int_val->value != 0;
-    }
-  }
-  return false;
-}
-
-static bool GetDisableTMA(const CopyNode *copy) {
-  return GetBoolAnnotation(copy, "disable_tma");
-}
-
-static bool GetIsTmaCopy(const CopyNode *copy) {
-  return GetBoolAnnotation(copy, "is_tma_copy");
-}
-
-static bool GetIsAsyncCopy(const CopyNode *copy) {
-  if (GetBoolAnnotation(copy, "is_async_copy")) {
-    return true;
-  }
-  return GetBoolAnnotation(copy, "force_cp_async");
-}
-
-static bool CheckCPAsyncCopyPreconditions(const CopyNode *copy) {
+static bool HasGlobalToSharedCopyShape(const CopyNode *copy) {
   return copy != nullptr && IsGlobalBuffer(copy->src) &&
          IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
 }
 
-static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
-                                            Target target) {
-  return copy != nullptr && !GetIsTmaCopy(copy) && !GetIsAsyncCopy(copy) &&
-         TargetHasAsyncCopy(target) && CheckCPAsyncCopyPreconditions(copy);
+static cuda::CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode *copy,
+                                                           Target target) {
+  if (copy == nullptr) {
+    return {cuda::CopyInst::kNormal, true, ""};
+  }
+  return cuda::ClassifyWarpSpecializedProducerCopy(*copy, target);
 }
 
-static bool CheckBulkLoadPattern(const CopyNode *copy, Target target,
-                                 arith::Analyzer *analyzer,
-                                 bool check_last_dim) {
-  if (copy == nullptr || !TargetHasBulkCopy(target) ||
-      !IsGlobalBuffer(copy->src) || !IsSharedBuffer(copy->dst) ||
-      copy->src->dtype != copy->dst->dtype) {
+static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
+                                            Target target) {
+  if (copy == nullptr) {
     return false;
   }
-  if (check_last_dim &&
-      analyzer->CanProve(
-          FloorMod(BitsFromElements(
-                       copy->src_range[copy->src_range.size() - 1]->extent,
-                       copy->src->dtype),
-                   IntImm(DataType::Int(64), 128)) != 0,
-          arith::ProofStrength::kSymbolicBound)) {
-    return false;
-  }
-  return true;
+  return cuda::IsPipelineManagedCPAsyncCopy(*copy, target);
 }
 
 static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
@@ -672,11 +631,10 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
     return false;
   }
 
-  arith::Analyzer analyzer;
-  return CheckCPAsyncCopyPreconditions(copy) && !GetIsTmaCopy(copy) &&
-         !GetIsAsyncCopy(copy) &&
-         !CheckBulkLoadPattern(copy, target, &analyzer,
-                               /*check_last_dim=*/true);
+  cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
+  return HasGlobalToSharedCopyShape(copy) && result.supported &&
+         !cuda::CopyInstIsTMA(result.inst) &&
+         !cuda::CopyInstIsCPAsync(result.inst);
 }
 
 static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
@@ -732,23 +690,13 @@ static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
   if (copy == nullptr) {
     return TileStmtKind::kConsumer;
   }
-  arith::Analyzer analyzer;
 
-  if (GetIsTmaCopy(copy)) {
-    if (CheckBulkLoadPattern(copy, target, &analyzer,
-                             /*check_last_dim=*/false)) {
-      return TileStmtKind::kTmaProducer;
-    }
-    return TileStmtKind::kConsumer;
-  }
-
-  if (GetIsAsyncCopy(copy)) {
-    return TileStmtKind::kCpAsyncProducer;
-  }
-
-  if (!GetDisableTMA(copy) && CheckBulkLoadPattern(copy, target, &analyzer,
-                                                   /*check_last_dim=*/true)) {
+  cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
+  if (cuda::CopyInstIsTMA(result.inst)) {
     return TileStmtKind::kTmaProducer;
+  }
+  if (cuda::CopyInstIsCPAsync(result.inst)) {
+    return TileStmtKind::kCpAsyncProducer;
   }
 
   return TileStmtKind::kConsumer;

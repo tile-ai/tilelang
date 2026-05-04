@@ -293,10 +293,12 @@ def get_cuda_library_dirs(cuda_path=None):
         for target_name in sorted(os.listdir(targets_dir)):
             base_dirs.append(os.path.join(targets_dir, target_name, "lib"))
 
-    base_dirs.extend([
-        os.path.join(cuda_path, "lib64"),
-        os.path.join(cuda_path, "lib"),
-    ])
+    base_dirs.extend(
+        [
+            os.path.join(cuda_path, "lib64"),
+            os.path.join(cuda_path, "lib"),
+        ]
+    )
 
     candidates = []
     for lib_dir in base_dirs:

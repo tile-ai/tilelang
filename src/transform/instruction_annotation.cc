@@ -32,6 +32,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../backend/cuda/op/copy.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/gemm.h"
@@ -49,53 +50,6 @@ namespace {
 /// Annotation key written by this pass.
 static constexpr const char *kInstructionKind = "tl_instruction_kind";
 
-static bool GetBoolAnnotation(const CopyNode *copy, const char *key) {
-  if (copy == nullptr) {
-    return false;
-  }
-  if (auto val = copy->annotations.Get(key)) {
-    if (auto int_val = val->as<IntImmNode>()) {
-      return int_val->value != 0;
-    }
-  }
-  return false;
-}
-
-static bool GetIsTmaCopy(const CopyNode *copy) {
-  return GetBoolAnnotation(copy, "is_tma_copy");
-}
-
-static bool GetIsAsyncCopy(const CopyNode *copy) {
-  if (GetBoolAnnotation(copy, "is_async_copy")) {
-    return true;
-  }
-  return GetBoolAnnotation(copy, "force_cp_async");
-}
-
-static bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true) {
-  using namespace tvm::transform;
-  PassContext pass_ctx = PassContext::Current();
-  return TargetHasAsyncCopy(target) &&
-         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
-             .value();
-}
-
-static bool CheckCPAsyncCopy(const CopyNode *copy, Target target) {
-  return copy != nullptr && TargetHasAsyncCopy(target) &&
-         IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst) &&
-         copy->src->dtype == copy->dst->dtype;
-}
-
-static bool CheckBulkCopyPattern(const CopyNode *copy, Target target) {
-  if (copy == nullptr || !TargetHasBulkCopy(target) ||
-      copy->src->dtype != copy->dst->dtype) {
-    return false;
-  }
-  bool is_load = IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst);
-  bool is_store = IsSharedBuffer(copy->src) && IsGlobalBuffer(copy->dst);
-  return is_load || is_store;
-}
-
 // ---------------------------------------------------------------------------
 // Classify copy ops
 // ---------------------------------------------------------------------------
@@ -104,31 +58,16 @@ static bool CheckBulkCopyPattern(const CopyNode *copy, Target target) {
  * \brief Determine the coarse instruction kind for a CopyNode.
  *
  * The classification does **not** depend on layout_map (which is unavailable
- * at this point).  It mirrors the priority order in CopyNode::GetCopyInst but
- * collapses BulkLoad/BulkLoad1D/BulkStore/BulkStore1D into "tma" and skips
- * checks that require layout information.
+ * at this point).  For CUDA targets it mirrors CUDA copy instruction
+ * selection but collapses BulkLoad/BulkLoad1D/BulkStore/BulkStore1D into
+ * "tma" and skips checks that require layout information.
  */
 std::string ClassifyCopy(const CopyNode *copy, Target target,
                          bool in_pipeline) {
   if (copy == nullptr) {
     return "sync";
   }
-
-  if (GetIsTmaCopy(copy)) {
-    return CheckBulkCopyPattern(copy, target) ? "tma" : "sync";
-  }
-
-  if (GetIsAsyncCopy(copy)) {
-    return "cp_async";
-  }
-
-  if (in_pipeline && !GetIsTmaCopy(copy) && !GetIsAsyncCopy(copy) &&
-      IsAutoAsyncCopyEnabled(target, /*default_enabled=*/false) &&
-      CheckCPAsyncCopy(copy, target)) {
-    return "cp_async";
-  }
-
-  return "sync";
+  return cuda::ClassifyCopyForInstructionAnnotation(*copy, target, in_pipeline);
 }
 
 // ---------------------------------------------------------------------------

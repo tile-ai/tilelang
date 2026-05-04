@@ -36,10 +36,6 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
   return false;
 }
 
-bool GetIsTmaCopy(const CopyNode &op) {
-  return GetBoolAnnotation(op, "is_tma_copy");
-}
-
 bool GetIsAsyncCopy(const CopyNode &op) {
   if (GetBoolAnnotation(op, "is_async_copy")) {
     return true;
@@ -68,11 +64,6 @@ struct Copy {
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
                              arith::Analyzer *analyzer) {
-    if (GetIsTmaCopy(op)) {
-      LOG(FATAL) << "T.tma_copy() is not supported on ROCm target "
-                 << target->ToDebugString();
-    }
-
     if (GetIsAsyncCopy(op) || GetNoImplicitAsyncCommitWait(op)) {
       bool cp_async_supported =
           CheckCPAsyncCopy(op, target, layout_map, analyzer);
@@ -85,7 +76,6 @@ struct Copy {
           << ").";
       return CopyInst::kCPAsync;
     }
-
     return CopyInst::kNormal;
   }
 
