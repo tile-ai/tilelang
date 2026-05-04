@@ -10,9 +10,13 @@
 #include "operator.h"
 #include "parallel.h"
 
+#include <utility>
+
 namespace tvm {
 namespace tl {
 using namespace tir;
+
+class CopyLoweringAccess;
 
 /// Copy instruction types for different memory access patterns
 enum class CopyInst : uint8_t {
@@ -117,6 +121,8 @@ struct TMAIm2ColDesc {
  */
 class CopyNode : public TileOperatorNode {
 public:
+  friend class CopyLoweringAccess;
+
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
   Map<String, ObjectRef> annotations; // Annotations for the copy operation
@@ -291,45 +297,16 @@ public:
 
 protected:
   /*!
+   * \brief Original layout inference implementation used by copy backends.
+   */
+  LayoutMap InferLayoutImpl(const LayoutInferArgs &T, InferLevel level) const;
+
+  /*!
    * \brief Get the copy instruction type.
    */
   CopyInst GetCopyInst(Target target, const LayoutMap &layout_map,
                        arith::Analyzer *analyzer,
                        bool buffer_oob = false) const;
-
-  /*!
-   * \brief Generate lowering for bulk/global-to-shared copy.
-   */
-  Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
-                     CopyInst copy_inst) const;
-
-  /*!
-   * \brief Generate lowering for bulk copy 1d.
-   */
-  Stmt LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
-                       CopyInst copy_inst) const;
-
-  /*!
-   * \brief Generate lowering for LDS Memory Copy (shared memory to shared
-   * memory or smem usage).
-   */
-  Stmt LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
-                     CopyInst copy_inst) const;
-
-  /*!
-   * \brief Generate lowering for tensor memory copy (tcgen05.ld/st/cp).
-   */
-  Stmt LowerTmemCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Generate lowering for normal copy.
-   */
-  Stmt LowerNormalCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Generate lowering for cp.async global->shared copy.
-   */
-  Stmt LowerCPAsyncCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
@@ -415,6 +392,64 @@ private:
                               const LayoutMap &existing_layouts,
                               PrimExpr thread_extent, Range thread_bounds,
                               Map<Buffer, Layout> &result_map) const;
+};
+
+using CopyTargetPredicate = bool (*)(Target target);
+
+struct CopyImpl {
+  const char *name;
+  CopyTargetPredicate match_target;
+  int priority;
+
+  LayoutMap (*infer_layout)(const CopyNode &op, const LayoutInferArgs &T,
+                            InferLevel level);
+
+  CopyInst (*select_inst)(const CopyNode &op, Target target,
+                          const LayoutMap &layout_map,
+                          arith::Analyzer *analyzer, bool buffer_oob);
+
+  Stmt (*lower)(const CopyNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterCopyImpl(CopyImpl impl);
+
+Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
+                     arith::Analyzer *analyzer);
+
+Stmt LowerCPAsyncCopy(const CopyNode &op, const LowerArgs &T,
+                      arith::Analyzer *analyzer);
+
+class CopyLoweringAccess {
+public:
+  static LayoutMap InferLayoutImpl(const CopyNode &op, const LayoutInferArgs &T,
+                                   InferLevel level) {
+    return op.InferLayoutImpl(T, level);
+  }
+
+  static For MakeSIMTLoop(const CopyNode &op, arith::Analyzer *analyzer) {
+    return op.MakeSIMTLoop(analyzer);
+  }
+
+  static Layout ComputeLinearLayout(const CopyNode &op,
+                                    const Buffer &shared_tensor) {
+    return op.ComputeLinearLayout(shared_tensor);
+  }
+
+  static Array<IterVar> MakeIterVars(const CopyNode &op) {
+    return op.MakeIterVars();
+  }
+
+  static Array<PrimExpr> MakeIndices(const CopyNode &op,
+                                     const Array<IterVar> &ivs, int src_dst) {
+    return op.MakeIndices(ivs, src_dst);
+  }
+
+  static PrimExpr MakePredicate(const CopyNode &op, arith::Analyzer *analyzer,
+                                const Array<IterVar> &ivs,
+                                Array<PrimExpr> extents, int src_dst) {
+    return op.MakePredicate(analyzer, ivs, std::move(extents), src_dst);
+  }
 };
 
 class Copy : public TileOperator {

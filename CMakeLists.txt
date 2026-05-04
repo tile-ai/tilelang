@@ -169,6 +169,7 @@ set(USE_GTEST OFF)
 
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
+list(APPEND TILE_LANG_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Collect source files
 file(GLOB TILE_LANG_SRCS
@@ -177,6 +178,7 @@ file(GLOB TILE_LANG_SRCS
   src/transform/*.cc
   src/transform/common/*.cc
   src/op/*.cc
+  src/backend/cpu/op/*.cc
   src/target/utils.cc
   src/target/codegen_c_host.cc
   src/target/codegen_c.cc
