@@ -163,6 +163,13 @@ class Gemm(Node, Scriptable):
         6. METAL_SIMDGROUP for Metal target (simdgroup_matrix)
         7. Scalar for CPU target (scalar fallback)
 
+        Special-case: when A and B carry different element dtypes (a chained
+        mixed-precision pattern, e.g. attention's FP32 accumulator feeding
+        back as one operand of a subsequent FP16 GEMM), Metal cannot use
+        simdgroup_matrix_multiply (which requires same-dtype operands),
+        so we force the scalar fallback that casts both operands to
+        accum_dtype independently.
+
         Args:
             thread_nums: Number of threads in the block
             target: Target architecture
@@ -171,8 +178,31 @@ class Gemm(Node, Scriptable):
             GemmInst: The selected GEMM instruction type
         """
         if target_is_metal(target):
+            # GemmMetal (simdgroup) requires A.dtype == B.dtype because it
+            # lowers to simdgroup_matrix_multiply. For chained
+            # mixed-precision patterns we route to the scalar fallback
+            # (GemmMetalScalar) which handles dtype mismatch via per-load
+            # T.cast(..., accum_dtype).
+            if self._has_mixed_input_dtype():
+                return GemmInst.Scalar
             return GemmInst.METAL_SIMDGROUP
         return GemmInst(_ffi_api.GemmGetGemmInst(self, int(thread_nums), target))
+
+    def _has_mixed_input_dtype(self) -> bool:
+        """Return True if A.dtype != B.dtype (mixed-precision chain)."""
+        a = getattr(self, "a", None)
+        b = getattr(self, "b", None)
+        if a is None or b is None:
+            return False
+        # TS variant (A in TMEM) carries accum dtype on A; not a "mixed
+        # input dtype" case for the purposes of MMA selection.
+        try:
+            from tilelang.utils.language import is_tensor_memory
+            if is_tensor_memory(a):
+                return False
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return str(a.dtype) != str(b.dtype)
 
     def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
         """Get the appropriate implementation class for the given GEMM instruction.

@@ -82,11 +82,32 @@ class GemmBase:
 
         For the TS variant, A resides in TMEM with the accumulator dtype, so
         the actual input dtype is derived from B.
+
+        For mixed-precision chains (e.g. attention's S = Q·Kᵀ in FP32
+        followed by O = S·V where V is FP16), A.dtype and
+        B.dtype may differ. This property returns A.dtype in that
+        case; backends that emit a single-typed MMA intrinsic (Metal
+        simdgroup, CUDA MMA, etc.) are responsible for either inserting
+        an explicit cast at the load site or refusing to lower (in which
+        case the dispatcher in Gemm._select_gemm_instruction should
+        steer the call toward a scalar fallback that casts both operands
+        to accum_dtype independently).
         """
         if is_tensor_memory(self.A):
             return self.B.dtype
-        assert self.A.dtype == self.B.dtype, "A and B must have the same dtype"
         return self.A.dtype
+
+    @property
+    def has_mixed_input_dtype(self) -> bool:
+        """True when A and B carry different element dtypes.
+
+        Used by dispatchers to decide whether to route to a scalar
+        fallback that handles mixed precision (cast both to accum_dtype)
+        instead of a strict same-dtype MMA intrinsic.
+        """
+        if is_tensor_memory(self.A):
+            return False
+        return str(self.A.dtype) != str(self.B.dtype)
 
     @property
     def accum_dtype(self) -> str:

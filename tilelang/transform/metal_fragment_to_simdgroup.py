@@ -31,22 +31,76 @@ def _extract_buffer_var_from_region(region_call):
     return None
 
 
-def _collect_fragment_gemm_accum_vars(body: tir.Stmt) -> set:
-    accum_vars: set = set()
+def _extract_buffer_from_region(region_call):
+    """Return the Buffer referenced by a tl.region(BufferLoad, ...) call.
+
+    Used to inspect operand dtypes so we can detect mixed-precision GEMMs
+    (which route to the Metal scalar fallback rather than simdgroup MMA
+    and therefore must NOT have their accumulator scope rewritten to
+    metal.simdgroup).
+    """
+    if not isinstance(region_call, tir.Call):
+        return None
+    if len(region_call.args) < 1:
+        return None
+    buf_load = region_call.args[0]
+    if isinstance(buf_load, tir.BufferLoad):
+        return buf_load.buffer
+    return None
+
+
+def _collect_fragment_gemm_accum_vars(body: tir.Stmt):
+    """Walk the body and return fragment vars safe to rewrite to simdgroup.
+
+    Returns the set of fragment vars used as the C operand of a
+    same-dtype GEMM (the ones that will be lowered through
+    GemmMetal / simdgroup_matrix_multiply). Vars that appear as the C
+    operand of a mixed-dtype GEMM (which will route to the scalar
+    fallback GemmMetalScalar) — or as the A operand of such a GEMM
+    when A is itself a fragment — are excluded so that the scalar
+    fallback can perform its per-element T.cast(..., accum_dtype)
+    arithmetic on them without tripping the Metal codegen's check that
+    metal.simdgroup allocations are scalar 8x8 blocks.
+    """
+    simd_accum_vars: set = set()
+    scalar_accum_vars: set = set()
     gemm_ops = _get_gemm_ops()
 
     def _visitor(stmt):
         if isinstance(stmt, tir.Evaluate) and isinstance(stmt.value, tir.Call):
             call = stmt.value
             if call.op in gemm_ops and len(call.args) >= 3:
-                var = _extract_buffer_var_from_region(call.args[2])
-                if var is not None and hasattr(var, "type_annotation"):
-                    ta = var.type_annotation
-                    if ta is not None and hasattr(ta, "storage_scope") and ta.storage_scope == "local.fragment":
-                        accum_vars.add(var)
+                a_buf = _extract_buffer_from_region(call.args[0])
+                b_buf = _extract_buffer_from_region(call.args[1])
+                c_var = _extract_buffer_var_from_region(call.args[2])
+                if c_var is None or not hasattr(c_var, "type_annotation"):
+                    return
+                ta = c_var.type_annotation
+                if ta is None or not hasattr(ta, "storage_scope") or ta.storage_scope != "local.fragment":
+                    return
+                # Mixed-dtype A/B routes to the scalar fallback on Metal
+                # (see Gemm._select_gemm_instruction in
+                # tilelang/tileop/gemm/__init__.py).
+                mixed = (a_buf is not None and b_buf is not None
+                         and str(a_buf.dtype) != str(b_buf.dtype))
+                if mixed:
+                    scalar_accum_vars.add(c_var)
+                    # If A is itself a fragment in this scalar gemm, the
+                    # scalar fallback reads it scalar — never via
+                    # simdgroup_load. Don't promote it.
+                    if a_buf is not None and hasattr(a_buf.data, "type_annotation"):
+                        a_ta = a_buf.data.type_annotation
+                        if (a_ta is not None and hasattr(a_ta, "storage_scope")
+                                and a_ta.storage_scope == "local.fragment"):
+                            scalar_accum_vars.add(a_buf.data)
+                else:
+                    simd_accum_vars.add(c_var)
 
     tir.stmt_functor.post_order_visit(body, _visitor)
-    return accum_vars
+    # Conservative: if a var appears in BOTH modes (e.g. fp16 Q@Kt
+    # produces S into simdgroup, then mixed-dtype S@V reads S as scalar),
+    # keep the scalar scope so the scalar reads typecheck.
+    return simd_accum_vars - scalar_accum_vars
 
 
 def _remap_buffer(buf, var_map):
