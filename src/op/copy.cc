@@ -1,11 +1,7 @@
 /*!
  * \file tl/op/copy.cc
- * \brief Define copy operator for various memory transfer strategies (Normal,
- *        Bulk/TMA, LDSM/STSM) and lowering logic for GPU code generation.
- *
- * implementing memory copy operations that can target CPUs or GPUs with
- * optimization for different instructions like bulk copy, matrix load/store,
- * and Hopper's new TMA (Tensor Memory Accelerator).
+ * \brief Define the copy operator, backend dispatch, and shared fallback
+ *        lowering helpers.
  */
 
 #include "copy.h"
@@ -34,19 +30,6 @@ using namespace tir;
 
 namespace {
 
-/// Build a TMA leader-thread condition using tl_shuffle_elect.
-/// \param thread_extent The number of threads in the current group
-///        (e.g., full block extent for non-WS, producer_extent for WS).
-///        The elected thread will be the first lane of the first warp in
-///        the group.
-static PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
-  return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
-}
-
-static int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
-  return (elements * dtype.bits() + 7) / 8;
-}
-
 static PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
   PrimExpr elements_i64 = cast(DataType::Int(64), elements);
   int bits = dtype.bits();
@@ -61,21 +44,6 @@ static PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
 static PrimExpr TMABitsFromElements(PrimExpr elements, DataType dtype) {
   return cast(DataType::Int(64), elements) *
          IntImm(DataType::Int(64), dtype.bits());
-}
-
-static int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
-  ICHECK_EQ((bytes * 8) % dtype.bits(), 0)
-      << bytes << " bytes cannot be represented as whole elements of " << dtype;
-  return bytes * 8 / dtype.bits();
-}
-
-PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
-                              const LowerArgs &T) {
-  PrimExpr phase = T.mbar_phase_expr;
-  if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations)) {
-    phase = explicit_phase.value();
-  }
-  return phase;
 }
 
 } // namespace
@@ -276,6 +244,55 @@ Stmt LowerCopyForTarget(const CopyNode &op, const LowerArgs &T,
   return ResolveCopyImpl(T.target).lower(op, T, analyzer);
 }
 
+std::vector<Conv2DIm2ColImpl> &Conv2DIm2ColImplRegistry() {
+  static std::vector<Conv2DIm2ColImpl> registry;
+  return registry;
+}
+
+Stmt DefaultLowerConv2DIm2Col(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
+                              arith::Analyzer *analyzer) {
+  LOG(FATAL) << "Conv2D im2col requires a target-specific implementation, "
+                "but no implementation is registered for "
+             << T.target->ToDebugString();
+  return Stmt();
+}
+
+Conv2DIm2ColImpl MakeDefaultConv2DIm2ColImpl() {
+  return Conv2DIm2ColImpl{
+      "default.Conv2DIm2Col",
+      DefaultMatchTarget,
+      std::numeric_limits<int>::min(),
+      DefaultLowerConv2DIm2Col,
+  };
+}
+
+void EnsureDefaultConv2DIm2ColImplRegistered() {
+  auto &registry = Conv2DIm2ColImplRegistry();
+  if (registry.empty()) {
+    registry.push_back(MakeDefaultConv2DIm2ColImpl());
+  }
+}
+
+const Conv2DIm2ColImpl &ResolveConv2DIm2ColImpl(Target target) {
+  EnsureDefaultConv2DIm2ColImplRegistered();
+  const auto &registry = Conv2DIm2ColImplRegistry();
+  const Conv2DIm2ColImpl *best_impl = nullptr;
+  int best_priority = std::numeric_limits<int>::min();
+  for (const Conv2DIm2ColImpl &impl : registry) {
+    if (impl.match_target(target) && impl.priority >= best_priority) {
+      best_impl = &impl;
+      best_priority = impl.priority;
+    }
+  }
+  ICHECK(best_impl != nullptr);
+  return *best_impl;
+}
+
+Stmt LowerConv2DIm2ColForTarget(const Conv2DIm2ColOpNode &op,
+                                const LowerArgs &T, arith::Analyzer *analyzer) {
+  return ResolveConv2DIm2ColImpl(T.target).lower(op, T, analyzer);
+}
+
 } // namespace
 
 void RegisterCopyImpl(CopyImpl impl) {
@@ -285,6 +302,14 @@ void RegisterCopyImpl(CopyImpl impl) {
   ICHECK(impl.lower != nullptr);
   EnsureDefaultCopyImplRegistered();
   CopyImplRegistry().push_back(impl);
+}
+
+void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  EnsureDefaultConv2DIm2ColImplRegistered();
+  Conv2DIm2ColImplRegistry().push_back(impl);
 }
 
 // Constructs a Copy operator node from call arguments and annotations.
@@ -846,31 +871,6 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return LowerCopyForTarget(*this, T, analyzer);
 }
 
-// Encodes the TMA descriptor into an array of PrimExpr for
-// create_tma_descriptor().
-Array<PrimExpr> TMADesc::EncodeCallArgs() const {
-  Array<PrimExpr> args;
-  args.reserve(rank * 4 + 7);
-
-  args.push_back(data_type);
-  args.push_back(static_cast<int>(rank));
-  args.push_back(global_addr);
-  for (auto e : global_shape)
-    args.push_back(e);
-  for (auto e : global_stride)
-    args.push_back(e);
-  for (auto e : smem_box)
-    args.push_back(e);
-  for (auto e : smem_stride)
-    args.push_back(e);
-  args.push_back(interleave);
-  args.push_back(swizzle);
-  args.push_back(l2_promotion);
-  args.push_back(oob_fill);
-
-  return args;
-}
-
 // Constructs a Conv2DIm2ColOp node from call arguments.
 // args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
 // eviction_policy
@@ -902,232 +902,9 @@ TileOperator Conv2DIm2ColOpNode::Clone() const {
   return Conv2DIm2ColOp(op);
 }
 
-// Lowers Conv2D im2col into a TMA-backed PTX sequence for Hopper.
 Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
-  ICHECK(TargetIsHopper(T.target));
-  ICHECK(IsGlobalBuffer(src_) && IsSharedBuffer(dst_));
-  ICHECK(src_->shape.size() == 4);
-  ICHECK(src_->dtype == dst_->dtype);
-
-  // Use dstRegion_ to derive tile dimensions and shared memory offset.
-  // dstRegion_ always has the correct ranges regardless of whether MVB
-  // added a leading stage dimension to the buffer — the last two ranges
-  // give the tile (pixel, channel) extents and mins.
-  size_t ndim = dstRegion_->region.size();
-  ICHECK(ndim >= 2) << "im2col dstRegion must have at least 2 dims";
-  Layout shared_layout;
-  if (T.layout_map.count(dst_)) {
-    shared_layout = T.layout_map[dst_];
-  }
-
-  TMAIm2ColDesc desc;
-  desc.rank = src_->shape.size();
-  desc.data_type = to_CUtensorMapDataType(src_->dtype);
-  desc.global_addr = src_->data;
-  desc.global_shape = ReverseArray(src_->shape);
-
-  if (!src_->strides.empty()) {
-    desc.global_stride = ReverseArray(src_->strides);
-  } else {
-    // Create stride from shape
-    PrimExpr stride = 1;
-    desc.global_stride.reserve(desc.rank);
-    for (size_t i = 0; i < desc.rank; i++) {
-      desc.global_stride.push_back(stride);
-      stride *= desc.global_shape[i];
-    }
-  }
-  // The first stride element should be 1
-  ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
-  // Make global stride in bytes
-  desc.global_stride = desc.global_stride.Map(
-      [&](PrimExpr e) { return TMABytesFromElements(e, src_->dtype); });
-  desc.elem_stride = {1, stride_, stride_, 1};
-  desc.lower_corner = {-padding_, -padding_};
-  desc.upper_corner = {-padding_, -padding_};
-  desc.smem_box_pixel =
-      Downcast<IntImm>(dstRegion_->region[ndim - 2]->extent)->value;
-  desc.smem_box_channel =
-      Downcast<IntImm>(dstRegion_->region[ndim - 1]->extent)->value;
-  desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
-  desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
-  if (!shared_layout.defined()) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-  } else {
-    ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
-    if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(dst_))) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (StructuralEqual()(shared_layout,
-                                 makeHalfBankSwizzleLayout(dst_))) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (StructuralEqual()(shared_layout,
-                                 makeFullBankSwizzleLayout(dst_))) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
-    } else {
-      LOG(FATAL) << "Cannot detect TMA layout.";
-    }
-  }
-
-  Call create_desc = Call(DataType::Handle(), create_tma_im2col_descriptor(),
-                          desc.EncodeCallArgs());
-
-  Array<PrimExpr> global_coords; // c, w, h, n
-  Array<PrimExpr> image_offset;  // w, h
-  global_coords.reserve(desc.rank);
-
-  ICHECK(analyzer->CanProveEqual(
-      FloorMod(desc.global_shape[0], desc.smem_box_channel), 0))
-      << "Currently can only support divisible channel case";
-
-  global_coords.push_back(
-      FloorMod(c_step_ * desc.smem_box_channel, desc.global_shape[0]));
-  image_offset.push_back(
-      dilation_ *
-      FloorMod(FloorDiv(c_step_ * desc.smem_box_channel, desc.global_shape[0]),
-               kernel_));
-  image_offset.push_back(dilation_ * FloorDiv(c_step_ * desc.smem_box_channel,
-                                              desc.global_shape[0] * kernel_));
-
-  PrimExpr h_dim =
-      FloorDiv(src_->shape[1] + 2 * padding_ - (kernel_ - 1) * dilation_ - 1,
-               stride_) +
-      1;
-  PrimExpr w_dim =
-      FloorDiv(src_->shape[2] + 2 * padding_ - (kernel_ - 1) * dilation_ - 1,
-               stride_) +
-      1;
-  global_coords.push_back(
-      stride_ * FloorMod(nhw_step_ * desc.smem_box_pixel, w_dim) - padding_);
-  global_coords.push_back(
-      stride_ *
-          FloorMod(FloorDiv(nhw_step_ * desc.smem_box_pixel, w_dim), h_dim) -
-      padding_);
-  global_coords.push_back(
-      FloorDiv(nhw_step_ * desc.smem_box_pixel, w_dim * h_dim));
-
-  // Allocate mbarrier(s) for TMA im2col load synchronization,
-  // matching the protocol used by regular TMA loads.
-  // If a barrier was provided by the WS pass (via annotation), use it directly.
-  int barrier_base_id = -1;
-  PrimExpr mbar_handle;
-  if (auto user_barrier = annotations_.Get("barrier")) {
-    // WS pass provided a barrier: use it without allocating a new one.
-    mbar_handle = Downcast<PrimExpr>(user_barrier.value());
-    barrier_base_id = 0;
-  } else if (T.AllocMBarrier) {
-    // Allocate a single barrier slot; pipeline buffer versioning expands it
-    // per stage when needed.
-    barrier_base_id = T.AllocMBarrier(1);
-    PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
-    mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
-  }
-
-  Array<PrimExpr> args;
-  args.reserve(desc.rank * 2 + 2);
-  args.push_back(create_desc);
-  args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
-  auto dst_buffer = T.buffer_remap.count(dst_) ? T.buffer_remap[dst_] : dst_;
-  // Compute flat element offset from dstRegion_ mins and buffer strides.
-  // For a plain 2D buffer this is 0; for a versioned 3D buffer this
-  // resolves to stage_idx * pixel * channel — no special-casing needed.
-  PrimExpr flat_offset = IntImm(DataType::Int(32), 0);
-  {
-    PrimExpr stride = IntImm(DataType::Int(32), 1);
-    for (int i = static_cast<int>(ndim) - 1; i >= 0; --i) {
-      flat_offset = flat_offset + dstRegion_->region[i]->min * stride;
-      stride = stride * dst_->shape[i];
-    }
-  }
-  PrimExpr tile_elems =
-      IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel);
-  PrimExpr shared_addr = dst_buffer.access_ptr(
-      /*access_mask=*/2, /*dtype=*/DataType::Handle(), /*content_lanes=*/1,
-      /*offset=*/flat_offset, /*extent=*/tile_elems);
-  args.push_back(shared_addr);
-  for (auto coord : global_coords)
-    args.push_back(coord);
-  for (auto offset : image_offset)
-    args.push_back(offset);
-  args.push_back(this->eviction_policy_);
-  Stmt tma_copy_stmt =
-      Evaluate(Call(DataType::Handle(), tma_load_im2col(), args));
-
-  if (barrier_base_id >= 0) {
-    bool ws_barrier = annotations_.Get("barrier").has_value();
-    // Total bytes transferred by im2col TMA copy
-    PrimExpr total_bytes = TMABytesFromElements(
-        IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel),
-        dst_->dtype);
-
-    Stmt barrier_before_tma_stmt = Evaluate(Call(
-        DataType::Handle(), mbarrier_expect_tx(), {mbar_handle, total_bytes}));
-
-    if (ws_barrier) {
-      // External barrier (WS pass or InjectSoftwarePipeline).
-      // Build: expect_tx + tma_load [+ arrive if emit_arrive is set].
-      Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy_stmt};
-      if (auto emit_arrive_val = annotations_.Get("emit_arrive")) {
-        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
-          producer_seq.push_back(
-              Evaluate(Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
-                            {mbar_handle})));
-        }
-      }
-      Stmt producer =
-          IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                     SeqStmt(producer_seq));
-      return producer;
-    }
-
-    Stmt barrier_after_tma_stmt = Evaluate(
-        Call(DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
-
-    // Thread-gated block: expect_tx + tma_load_im2col + arrive
-    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                               SeqStmt({barrier_before_tma_stmt, tma_copy_stmt,
-                                        barrier_after_tma_stmt}));
-
-    // Emit producer + wait pair for pipeline/WS passes.
-    Stmt wait_stmt =
-        Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
-                      {mbar_handle, GetCopyMbarPhaseExpr(annotations_, T)}));
-
-    return SeqStmt({producer, wait_stmt});
-  }
-
-  Stmt tma_copy = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
-                             tma_copy_stmt);
-  return tma_copy;
-}
-
-// Encodes the TMA im2col descriptor for create_tma_im2col_descriptor().
-Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
-  Array<PrimExpr> args;
-  args.reserve(rank * 5 + 5);
-
-  args.push_back(data_type);
-  args.push_back(static_cast<int>(rank));
-  args.push_back(global_addr);
-  for (auto e : global_shape)
-    args.push_back(e);
-  for (auto e : global_stride)
-    args.push_back(e);
-  for (auto e : elem_stride)
-    args.push_back(e);
-  for (auto e : lower_corner)
-    args.push_back(e);
-  for (auto e : upper_corner)
-    args.push_back(e);
-  args.push_back(smem_box_pixel);
-  args.push_back(smem_box_channel);
-  args.push_back(interleave);
-  args.push_back(swizzle);
-  args.push_back(l2_promotion);
-  args.push_back(oob_fill);
-
-  return args;
+  return LowerConv2DIm2ColForTarget(*this, T, analyzer);
 }
 
 void CopyNode::CollectFragmentLayouts(const PrimExpr &expr,

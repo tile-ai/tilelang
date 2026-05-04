@@ -108,6 +108,87 @@ const char *CopyInstToString(CopyInst inst) {
   }
 }
 
+struct TMADesc {
+  size_t rank;
+  int data_type;
+  Array<PrimExpr> global_shape;
+  Array<PrimExpr> global_stride;
+  Array<PrimExpr> smem_box;
+  Array<PrimExpr> smem_stride;
+  PrimExpr global_addr;
+  int swizzle;
+  int interleave;
+  int oob_fill;
+  int l2_promotion;
+
+  Array<PrimExpr> EncodeCallArgs() const {
+    Array<PrimExpr> args;
+    args.reserve(rank * 4 + 7);
+
+    args.push_back(data_type);
+    args.push_back(static_cast<int>(rank));
+    args.push_back(global_addr);
+    for (auto e : global_shape)
+      args.push_back(e);
+    for (auto e : global_stride)
+      args.push_back(e);
+    for (auto e : smem_box)
+      args.push_back(e);
+    for (auto e : smem_stride)
+      args.push_back(e);
+    args.push_back(interleave);
+    args.push_back(swizzle);
+    args.push_back(l2_promotion);
+    args.push_back(oob_fill);
+
+    return args;
+  }
+};
+
+struct TMAIm2ColDesc {
+  size_t rank;
+  int data_type;
+  Array<PrimExpr> global_shape;
+  Array<PrimExpr> global_stride;
+  Array<PrimExpr> elem_stride;
+  Array<PrimExpr> lower_corner;
+  Array<PrimExpr> upper_corner;
+  PrimExpr global_addr;
+  int smem_box_pixel;
+  int smem_box_channel;
+  int swizzle;
+  int interleave;
+  int oob_fill;
+  int l2_promotion;
+
+  Array<PrimExpr> EncodeCallArgs() const {
+    Array<PrimExpr> args;
+    args.reserve(rank * 5 + 5);
+
+    args.push_back(data_type);
+    args.push_back(static_cast<int>(rank));
+    args.push_back(global_addr);
+    for (auto e : global_shape)
+      args.push_back(e);
+    for (auto e : global_stride)
+      args.push_back(e);
+    for (auto e : elem_stride)
+      args.push_back(e);
+    for (auto e : lower_corner)
+      args.push_back(e);
+    for (auto e : upper_corner)
+      args.push_back(e);
+    args.push_back(smem_box_pixel);
+    args.push_back(smem_box_channel);
+    args.push_back(interleave);
+    args.push_back(swizzle);
+    args.push_back(l2_promotion);
+    args.push_back(oob_fill);
+
+    return args;
+  }
+};
+
 struct Copy {
   static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                                InferLevel level);
@@ -145,6 +226,11 @@ private:
 
   static Stmt LowerBulk1D(const CopyNode &op, const LowerArgs &T,
                           arith::Analyzer *analyzer, CopyInst copy_inst);
+};
+
+struct Conv2DIm2Col {
+  static Stmt Lower(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
+                    arith::Analyzer *analyzer);
 };
 
 LayoutMap Copy::InferLayout(const CopyNode &op, const LayoutInferArgs &T,
@@ -1287,6 +1373,187 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   return tma_copy;
 }
 
+Stmt Conv2DIm2Col::Lower(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
+                         arith::Analyzer *analyzer) {
+  const BufferRegion &dst_region = op.dstRegion_;
+  const Buffer &src = op.src_;
+  const Buffer &dst = op.dst_;
+
+  ICHECK(TargetIsHopper(T.target));
+  ICHECK(IsGlobalBuffer(src) && IsSharedBuffer(dst));
+  ICHECK(src->shape.size() == 4);
+  ICHECK(src->dtype == dst->dtype);
+
+  size_t ndim = dst_region->region.size();
+  ICHECK(ndim >= 2) << "im2col dstRegion must have at least 2 dims";
+  Layout shared_layout;
+  if (T.layout_map.count(dst)) {
+    shared_layout = T.layout_map[dst];
+  }
+
+  TMAIm2ColDesc desc;
+  desc.rank = src->shape.size();
+  desc.data_type = to_CUtensorMapDataType(src->dtype);
+  desc.global_addr = src->data;
+  desc.global_shape = ReverseArray(src->shape);
+
+  if (!src->strides.empty()) {
+    desc.global_stride = ReverseArray(src->strides);
+  } else {
+    PrimExpr stride = 1;
+    desc.global_stride.reserve(desc.rank);
+    for (size_t i = 0; i < desc.rank; i++) {
+      desc.global_stride.push_back(stride);
+      stride *= desc.global_shape[i];
+    }
+  }
+  ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
+  desc.global_stride = desc.global_stride.Map(
+      [&](PrimExpr e) { return TMABytesFromElements(e, src->dtype); });
+  desc.elem_stride = {1, op.stride_, op.stride_, 1};
+  desc.lower_corner = {-op.padding_, -op.padding_};
+  desc.upper_corner = {-op.padding_, -op.padding_};
+  desc.smem_box_pixel =
+      Downcast<IntImm>(dst_region->region[ndim - 2]->extent)->value;
+  desc.smem_box_channel =
+      Downcast<IntImm>(dst_region->region[ndim - 1]->extent)->value;
+  desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
+  desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
+  if (!shared_layout.defined()) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+  } else {
+    ICHECK(shared_layout->InputDim() >= 2) << "Cannot detect TMA layout.";
+    if (StructuralEqual()(shared_layout, makeQuarterBankSwizzleLayout(dst))) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
+    } else if (StructuralEqual()(shared_layout,
+                                 makeHalfBankSwizzleLayout(dst))) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
+    } else if (StructuralEqual()(shared_layout,
+                                 makeFullBankSwizzleLayout(dst))) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
+    } else {
+      LOG(FATAL) << "Cannot detect TMA layout.";
+    }
+  }
+
+  Call create_desc = Call(DataType::Handle(), create_tma_im2col_descriptor(),
+                          desc.EncodeCallArgs());
+
+  Array<PrimExpr> global_coords;
+  Array<PrimExpr> image_offset;
+  global_coords.reserve(desc.rank);
+
+  ICHECK(analyzer->CanProveEqual(
+      FloorMod(desc.global_shape[0], desc.smem_box_channel), 0))
+      << "Currently can only support divisible channel case";
+
+  global_coords.push_back(
+      FloorMod(op.c_step_ * desc.smem_box_channel, desc.global_shape[0]));
+  image_offset.push_back(op.dilation_ *
+                         FloorMod(FloorDiv(op.c_step_ * desc.smem_box_channel,
+                                           desc.global_shape[0]),
+                                  op.kernel_));
+  image_offset.push_back(op.dilation_ *
+                         FloorDiv(op.c_step_ * desc.smem_box_channel,
+                                  desc.global_shape[0] * op.kernel_));
+
+  PrimExpr h_dim = FloorDiv(src->shape[1] + 2 * op.padding_ -
+                                (op.kernel_ - 1) * op.dilation_ - 1,
+                            op.stride_) +
+                   1;
+  PrimExpr w_dim = FloorDiv(src->shape[2] + 2 * op.padding_ -
+                                (op.kernel_ - 1) * op.dilation_ - 1,
+                            op.stride_) +
+                   1;
+  global_coords.push_back(
+      op.stride_ * FloorMod(op.nhw_step_ * desc.smem_box_pixel, w_dim) -
+      op.padding_);
+  global_coords.push_back(
+      op.stride_ *
+          FloorMod(FloorDiv(op.nhw_step_ * desc.smem_box_pixel, w_dim), h_dim) -
+      op.padding_);
+  global_coords.push_back(
+      FloorDiv(op.nhw_step_ * desc.smem_box_pixel, w_dim * h_dim));
+
+  int barrier_base_id = -1;
+  PrimExpr mbar_handle;
+  if (auto user_barrier = op.annotations_.Get("barrier")) {
+    mbar_handle = Downcast<PrimExpr>(user_barrier.value());
+    barrier_base_id = 0;
+  } else if (T.AllocMBarrier) {
+    barrier_base_id = T.AllocMBarrier(1);
+    PrimExpr mbar_idx = IntImm(DataType::Int(32), barrier_base_id);
+    mbar_handle = BufferLoad(T.mbarrier_buffer->value(), {mbar_idx});
+  }
+
+  Array<PrimExpr> args;
+  args.reserve(desc.rank * 2 + 2);
+  args.push_back(create_desc);
+  args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
+  Buffer dst_buffer = T.buffer_remap.count(dst) ? T.buffer_remap[dst] : dst;
+  PrimExpr flat_offset = IntImm(DataType::Int(32), 0);
+  {
+    PrimExpr stride = IntImm(DataType::Int(32), 1);
+    for (int i = static_cast<int>(ndim) - 1; i >= 0; --i) {
+      flat_offset = flat_offset + dst_region->region[i]->min * stride;
+      stride = stride * dst->shape[i];
+    }
+  }
+  PrimExpr tile_elems =
+      IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel);
+  PrimExpr shared_addr = dst_buffer.access_ptr(
+      /*access_mask=*/2, /*dtype=*/DataType::Handle(), /*content_lanes=*/1,
+      /*offset=*/flat_offset, /*extent=*/tile_elems);
+  args.push_back(shared_addr);
+  for (auto coord : global_coords)
+    args.push_back(coord);
+  for (auto offset : image_offset)
+    args.push_back(offset);
+  args.push_back(op.eviction_policy_);
+  Stmt tma_copy_stmt =
+      Evaluate(Call(DataType::Handle(), tma_load_im2col(), args));
+
+  if (barrier_base_id >= 0) {
+    bool ws_barrier = op.annotations_.Get("barrier").has_value();
+    PrimExpr total_bytes = TMABytesFromElements(
+        IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel),
+        dst->dtype);
+
+    Stmt barrier_before_tma_stmt = Evaluate(Call(
+        DataType::Handle(), mbarrier_expect_tx(), {mbar_handle, total_bytes}));
+
+    if (ws_barrier) {
+      Array<Stmt> producer_seq{barrier_before_tma_stmt, tma_copy_stmt};
+      if (auto emit_arrive_val = op.annotations_.Get("emit_arrive")) {
+        if (Downcast<IntImm>(emit_arrive_val.value())->value != 0) {
+          producer_seq.push_back(
+              Evaluate(Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
+                            {mbar_handle})));
+        }
+      }
+      return IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
+                        SeqStmt(producer_seq));
+    }
+
+    Stmt barrier_after_tma_stmt = Evaluate(
+        Call(DataType::Handle(), builtin::ptx_arrive_barrier(), {mbar_handle}));
+
+    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
+                               SeqStmt({barrier_before_tma_stmt, tma_copy_stmt,
+                                        barrier_after_tma_stmt}));
+
+    Stmt wait_stmt =
+        Evaluate(Call(DataType::Handle(), mbarrier_wait_parity(),
+                      {mbar_handle, GetCopyMbarPhaseExpr(op.annotations_, T)}));
+
+    return SeqStmt({producer, wait_stmt});
+  }
+
+  return IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
+                    tma_copy_stmt);
+}
+
 } // namespace cuda
 
 namespace {
@@ -1307,6 +1574,18 @@ bool RegisterCudaCopy() {
 }
 
 const bool cuda_copy_registered = RegisterCudaCopy();
+
+bool RegisterCudaConv2DIm2Col() {
+  RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl{
+      "cuda.Conv2DIm2Col",
+      MatchCudaCopyTarget,
+      100,
+      cuda::Conv2DIm2Col::Lower,
+  });
+  return true;
+}
+
+const bool cuda_conv2d_im2col_registered = RegisterCudaConv2DIm2Col();
 
 } // namespace
 

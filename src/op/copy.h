@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/copy.h
- * \brief Copy operations and Tensor Memory Access (TMA) descriptors
+ * \brief Copy operations
  */
 
 #ifndef TVM_TL_OP_COPY_H_
@@ -15,54 +15,6 @@
 namespace tvm {
 namespace tl {
 using namespace tir;
-
-/// Descriptor for Tensor Memory Access (TMA) copy operations
-struct TMADesc {
-  size_t rank;                   ///< Tensor rank (number of dimensions)
-  int data_type;                 ///< Data type identifier
-  Array<PrimExpr> global_shape;  ///< Shape in global memory
-  Array<PrimExpr> global_stride; ///< Strides in global memory
-  Array<PrimExpr> smem_box;      ///< Block shape in shared memory
-  Array<PrimExpr> smem_stride;   ///< Strides in shared memory
-  PrimExpr global_addr;          ///< Base address in global memory
-  int swizzle;                   ///< Memory layout swizzle parameter
-  int interleave;                ///< Memory interleave parameter
-  int oob_fill;                  ///< Out-of-bound fill policy
-  int l2_promotion;              ///< L2 cache promotion flag
-
-  /// Encode descriptor fields into runtime call arguments
-  Array<PrimExpr> EncodeCallArgs() const;
-};
-
-/*!
- * \brief Descriptor for TMA-based im2col transformation used in Conv2D.
- *
- * This supports extracting patches from the input image (im2col)
- * for convolution lowering, storing them in shared memory.
- */
-struct TMAIm2ColDesc {
-  size_t rank;                   // Rank of the tensor
-  int data_type;                 // Data type identifier
-  Array<PrimExpr> global_shape;  // Shape of input tensor in global memory
-  Array<PrimExpr> global_stride; // Stride in global memory
-  Array<PrimExpr> elem_stride;   // Stride at element level (per axis)
-  Array<PrimExpr> lower_corner; // Lower bound offsets for the extraction window
-                                // (rank - 2 dims)
-  Array<PrimExpr> upper_corner; // Upper bound offsets for the extraction window
-                                // (rank - 2 dims)
-  PrimExpr global_addr;         // Base address in global memory
-  int smem_box_pixel;           // Pixel dimension of shared memory box
-  int smem_box_channel;         // Channel dimension of shared memory box
-  int swizzle;                  // Memory swizzle setting
-  int interleave;               // Memory interleaving setting
-  int oob_fill;                 // Out-of-bound fill policy
-  int l2_promotion;             // Whether to enable L2 cache promotion
-
-  /*!
-   * \brief Encode descriptor fields into runtime arguments.
-   */
-  Array<PrimExpr> EncodeCallArgs() const;
-};
 
 /*!
  * \brief Get TVM Op handle for Conv2DIm2Col.
@@ -430,6 +382,17 @@ public:
   static const Op &Get();
   TileOperator Clone() const;
 };
+
+struct Conv2DIm2ColImpl {
+  const char *name;
+  CopyTargetPredicate match_target;
+  int priority;
+
+  Stmt (*lower)(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl);
 
 class Conv2DIm2ColOp : public TileOperator {
 public:
