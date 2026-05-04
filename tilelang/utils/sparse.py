@@ -13,8 +13,40 @@ from tilelang import __version__
 # Define paths
 compress_util = os.path.join(env.TILELANG_TEMPLATE_PATH, "tl_templates/cuda/compress_sm90.cu")
 # Cache directory for compiled extensions
-_CACHE_DIR = os.path.join(env.TILELANG_CACHE_DIR, "sparse_compressor", __version__)
+_TORCH_CUDA_VERSION = torch.version.cuda or "cpu"
+_CACHE_DIR = os.path.join(
+    env.TILELANG_CACHE_DIR,
+    "sparse_compressor",
+    __version__,
+    f"torch_cuda_{_TORCH_CUDA_VERSION}",
+)
 os.makedirs(_CACHE_DIR, exist_ok=True)
+
+
+def _torch_cuda_runtime_link_dir() -> str | None:
+    """Return a cache-local lib dir that makes -lcudart resolve to PyTorch's cudart."""
+    cuda_version = torch.version.cuda
+    if not cuda_version:
+        return None
+
+    major = cuda_version.split(".", maxsplit=1)[0]
+    torch_root = os.path.dirname(torch.__file__)
+    runtime_dir = os.path.abspath(os.path.join(torch_root, "..", "nvidia", f"cu{major}", "lib"))
+    runtime_lib = os.path.join(runtime_dir, f"libcudart.so.{major}")
+    if not os.path.exists(runtime_lib):
+        return None
+
+    link_dir = os.path.join(_CACHE_DIR, "cuda_runtime_lib")
+    os.makedirs(link_dir, exist_ok=True)
+    link_path = os.path.join(link_dir, "libcudart.so")
+    if os.path.lexists(link_path):
+        if os.path.realpath(link_path) != os.path.realpath(runtime_lib):
+            os.remove(link_path)
+    try:
+        os.symlink(runtime_lib, link_path)
+    except FileExistsError:
+        pass
+    return link_dir
 
 
 def _get_cached_lib():
@@ -28,6 +60,12 @@ def _get_cached_lib():
 
     # Set TORCH_CUDA_ARCH_LIST
     env._initialize_torch_cuda_arch_flags()
+    extra_ldflags = []
+    runtime_link_dir = _torch_cuda_runtime_link_dir()
+    if runtime_link_dir is not None:
+        extra_ldflags.append(f"-L{runtime_link_dir}")
+        runtime_dir = os.path.dirname(os.path.realpath(os.path.join(runtime_link_dir, "libcudart.so")))
+        extra_ldflags.append(f"-Wl,-rpath,{runtime_dir}")
 
     # Compile if not cached or loading failed
     return load(
@@ -41,6 +79,7 @@ def _get_cached_lib():
             f"-I{env.CUTLASS_INCLUDE_DIR}/../tools/util/include",
             "-arch=sm_90",
         ],
+        extra_ldflags=extra_ldflags,
         build_directory=_CACHE_DIR,
     )
 
