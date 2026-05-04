@@ -17,7 +17,9 @@ namespace cpu {
 struct Copy {
   static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                                InferLevel level) {
-    return CopyLoweringAccess::InferLayoutImpl(op, T, level);
+    CopyInst copy_inst =
+        SelectInst(op, T.target, T.layout_map, T.analyzer, T.buffer_oob);
+    return CopyLoweringAccess::InferLayoutForCopyInst(op, T, level, copy_inst);
   }
 
   static CopyInst SelectInst(const CopyNode &op, Target target,

@@ -602,6 +602,12 @@ LayoutMap CopyNode::InferLayoutImpl(const LayoutInferArgs &T,
     copy_inst = GetCopyInst(target, T.layout_map, T.analyzer, T.buffer_oob);
   }
 
+  return InferLayoutForCopyInst(T, level, copy_inst);
+}
+
+LayoutMap CopyNode::InferLayoutForCopyInst(const LayoutInferArgs &T,
+                                           InferLevel level,
+                                           CopyInst copy_inst) const {
   // If user annotated a loop layout on T.copy, enforce SIMT (normal) copy.
   // Parallel-loop layout only applies to SIMT-style loops we generate here;
   // other copy instructions (TMA/LDSM/STSM/TMem) are incompatible.

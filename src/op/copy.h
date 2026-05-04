@@ -297,9 +297,15 @@ public:
 
 protected:
   /*!
-   * \brief Original layout inference implementation used by copy backends.
+   * \brief Default layout inference implementation used by fallback dispatch.
    */
   LayoutMap InferLayoutImpl(const LayoutInferArgs &T, InferLevel level) const;
+
+  /*!
+   * \brief Infer layout for a backend-selected copy instruction.
+   */
+  LayoutMap InferLayoutForCopyInst(const LayoutInferArgs &T, InferLevel level,
+                                   CopyInst copy_inst) const;
 
   /*!
    * \brief Get the copy instruction type.
@@ -425,6 +431,13 @@ public:
   static LayoutMap InferLayoutImpl(const CopyNode &op, const LayoutInferArgs &T,
                                    InferLevel level) {
     return op.InferLayoutImpl(T, level);
+  }
+
+  static LayoutMap InferLayoutForCopyInst(const CopyNode &op,
+                                          const LayoutInferArgs &T,
+                                          InferLevel level,
+                                          CopyInst copy_inst) {
+    return op.InferLayoutForCopyInst(T, level, copy_inst);
   }
 
   static For MakeSIMTLoop(const CopyNode &op, arith::Analyzer *analyzer) {
