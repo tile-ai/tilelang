@@ -114,6 +114,8 @@ from .builtin import stg128 as stg128  # noqa: F401
 from .builtin import stg256 as stg256  # noqa: F401
 from .builtin import any_sync as any_sync  # noqa: F401
 from .builtin import all_sync as all_sync  # noqa: F401
+from .blockscaled_layout import BlockScaledLayout as BlockScaledLayout  # noqa: F401
+from .blockscaled_layout import e8m0_to_float as e8m0_to_float  # noqa: F401
 from .fp8_op import fp8_scaled_matmul as fp8_scaled_matmul  # noqa: F401
 from .builtin import ballot_sync as ballot_sync  # noqa: F401
 from .builtin import ballot as ballot  # noqa: F401

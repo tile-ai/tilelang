@@ -107,7 +107,15 @@ def fp4_e2m1fn_to_float(bits, nibble_index):
 
 
 def e8m0_to_float(bits):
-    """Decode torch.float8_e8m0fnu-compatible scale byte to fp32."""
+    """Decode an E8M0 scale byte to fp32.
+
+    Path C treats byte 0 and byte 0xFF as sentinels that decode to zero.
+    Normal bytes decode as ``2 ** (byte - 127)``.
+    """
     bits_i = T.Cast("int32", bits)
     value = T.exp2(T.Cast(FP32, bits_i - T.int32(127)))
-    return T.if_then_else(bits_i == T.int32(255), T.float32(0.0), value)
+    return T.if_then_else(
+        bits_i == T.int32(0),
+        T.float32(0.0),
+        T.if_then_else(bits_i == T.int32(255), T.float32(0.0), value),
+    )

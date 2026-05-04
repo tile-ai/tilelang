@@ -104,6 +104,13 @@ from tilelang._typing import BufferLikeType
 from tvm import tir
 from tvm.target import Target
 
+from .blockscaled_layout import (
+    BlockScaledLayout,
+    E8M0_BLOCK_K32,
+    E8M0_BLOCK_SIZE,
+    e8m0_to_float,
+)
+
 __all__ = [
     "fp8_scaled_matmul",
     "FP8_DTYPES",
@@ -146,7 +153,60 @@ def _shape_extent(buffer, axis: int) -> int:
     return -1
 
 
-def _validate_buffers(A_fp8, A_scale, B_fp8, B_scale, C_out, *, transpose_B: bool, accum_dtype: str) -> None:
+def _normalize_block_scale_layout(
+    block_scale_layout: BlockScaledLayout | None,
+    *,
+    scale_format: str | None,
+    scale_block_size: int | None,
+) -> BlockScaledLayout | None:
+    if block_scale_layout is not None:
+        if not isinstance(block_scale_layout, BlockScaledLayout):
+            raise TypeError(
+                "T.fp8_scaled_matmul block_scale_layout must be a "
+                "T.BlockScaledLayout instance"
+            )
+        if scale_format is not None and scale_format != block_scale_layout.scale_format:
+            raise ValueError(
+                "T.fp8_scaled_matmul scale_format conflicts with block_scale_layout"
+            )
+        if scale_block_size is not None and int(scale_block_size) != block_scale_layout.block_size:
+            raise ValueError(
+                "T.fp8_scaled_matmul scale_block_size conflicts with block_scale_layout"
+            )
+        return block_scale_layout
+    if scale_format is None and scale_block_size is None:
+        return None
+    if scale_format != E8M0_BLOCK_K32:
+        raise ValueError(
+            "T.fp8_scaled_matmul e8m0 block-scale metadata requires "
+            "scale_format='e8m0_block_k32'"
+        )
+    if scale_block_size is None or int(scale_block_size) != E8M0_BLOCK_SIZE:
+        raise ValueError(
+            "T.fp8_scaled_matmul e8m0_block_k32 metadata requires scale_block_size=32"
+        )
+    return BlockScaledLayout.e8m0_k32()
+
+
+def _block_scale_value(scale, *, axis: str, col, k):
+    # Path C E8M0 is explicitly contracted-K-block indexed: kb = k // 32.
+    kb = k // 32
+    if axis == "B" and len(getattr(scale, "shape", ())) == 2:
+        return e8m0_to_float(scale[col, kb])
+    return e8m0_to_float(scale[kb])
+
+
+def _validate_buffers(
+    A_fp8,
+    A_scale,
+    B_fp8,
+    B_scale,
+    C_out,
+    *,
+    transpose_B: bool,
+    accum_dtype: str,
+    block_scale_layout: BlockScaledLayout | None = None,
+) -> None:
     """Sanity-check operand dtypes and 2D shape compatibility.
 
     Raises ``TypeError`` / ``ValueError`` early so misuse surfaces at the
@@ -168,13 +228,16 @@ def _validate_buffers(A_fp8, A_scale, B_fp8, B_scale, C_out, *, transpose_B: boo
         raise TypeError(
             f"T.fp8_scaled_matmul: B_fp8 must be FP8 (e4m3 or e5m2), got dtype={B_dtype!r}"
         )
-    if sa_dtype and not (sa_dtype.startswith("float32") or sa_dtype.startswith("float16") or sa_dtype.startswith("bfloat")):
+    scale_prefixes = ("float32", "float16", "bfloat")
+    if block_scale_layout is not None:
+        scale_prefixes = ("uint8",)
+    if sa_dtype and not sa_dtype.startswith(scale_prefixes):
         raise TypeError(
-            f"T.fp8_scaled_matmul: A_scale must be a floating-point scalar buffer, got dtype={sa_dtype!r}"
+            f"T.fp8_scaled_matmul: A_scale must be a {'uint8 E8M0 block-scale' if block_scale_layout is not None else 'floating-point scalar'} buffer, got dtype={sa_dtype!r}"
         )
-    if sb_dtype and not (sb_dtype.startswith("float32") or sb_dtype.startswith("float16") or sb_dtype.startswith("bfloat")):
+    if sb_dtype and not sb_dtype.startswith(scale_prefixes):
         raise TypeError(
-            f"T.fp8_scaled_matmul: B_scale must be a floating-point scalar buffer, got dtype={sb_dtype!r}"
+            f"T.fp8_scaled_matmul: B_scale must be a {'uint8 E8M0 block-scale' if block_scale_layout is not None else 'floating-point scalar'} buffer, got dtype={sb_dtype!r}"
         )
     if C_dtype and not (C_dtype.startswith("float32") or C_dtype.startswith("float16") or C_dtype.startswith("bfloat")):
         raise TypeError(
@@ -219,6 +282,14 @@ def _validate_buffers(A_fp8, A_scale, B_fp8, B_scale, C_out, *, transpose_B: boo
 
     sa_size = _shape_extent(A_scale, 0)
     sb_size = _shape_extent(B_scale, 0)
+    if block_scale_layout is not None:
+        block_scale_layout.validate_scale_shapes(
+            k_extent=K,
+            a_scale_shape=tuple(int(v) for v in A_scale.shape),
+            b_scale_shape=tuple(int(v) for v in B_scale.shape),
+            n_extent=N,
+        )
+        return
     if M > 0 and sa_size > 0 and sa_size != 1 and sa_size != M:
         raise ValueError(
             f"T.fp8_scaled_matmul: A_scale must be per-tensor (size 1) or "
@@ -240,7 +311,7 @@ def _validate_buffers(A_fp8, A_scale, B_fp8, B_scale, C_out, *, transpose_B: boo
 
 
 @T.macro
-def _fp8_scaled_matmul_macro(A_fp8, A_scale, B_fp8, B_scale, C_local):
+def _fp8_scaled_matmul_macro(A_fp8, A_scale, B_fp8, B_scale, C_local, block_scale_layout=None):
     """Hygienic body of ``T.fp8_scaled_matmul``: dequant + per-element scale + FMA.
 
     The body is parsed once at macro-decoration time and re-substituted at
@@ -272,13 +343,17 @@ def _fp8_scaled_matmul_macro(A_fp8, A_scale, B_fp8, B_scale, C_local):
         for k in T.serial(K_dim):
             a_val = T.cast(A_fp8[i, k], "float32")
             b_val = T.cast(B_fp8[k, j], "float32")
-            sa = A_scale[0] if sa_size == 1 else A_scale[i]
-            sb = B_scale[0] if sb_size == 1 else B_scale[j]
+            if block_scale_layout is not None:
+                sa = _block_scale_value(A_scale, axis="A", col=j, k=k)
+                sb = _block_scale_value(B_scale, axis="B", col=j, k=k)
+            else:
+                sa = A_scale[0] if sa_size == 1 else A_scale[i]
+                sb = B_scale[0] if sb_size == 1 else B_scale[j]
             C_local[i, j] = C_local[i, j] + a_val * b_val * sa * sb
 
 
 @T.macro
-def _fp8_scaled_matmul_macro_trans_b(A_fp8, A_scale, B_fp8, B_scale, C_local):
+def _fp8_scaled_matmul_macro_trans_b(A_fp8, A_scale, B_fp8, B_scale, C_local, block_scale_layout=None):
     """``transpose_B=True`` variant: B is (N, K) row-major, indexed B[j, k]."""
     M_dim, K_dim = A_fp8.shape
     N_dim, K_dim_b = B_fp8.shape
@@ -289,8 +364,12 @@ def _fp8_scaled_matmul_macro_trans_b(A_fp8, A_scale, B_fp8, B_scale, C_local):
         for k in T.serial(K_dim):
             a_val = T.cast(A_fp8[i, k], "float32")
             b_val = T.cast(B_fp8[j, k], "float32")
-            sa = A_scale[0] if sa_size == 1 else A_scale[i]
-            sb = B_scale[0] if sb_size == 1 else B_scale[j]
+            if block_scale_layout is not None:
+                sa = _block_scale_value(A_scale, axis="A", col=j, k=k)
+                sb = _block_scale_value(B_scale, axis="B", col=j, k=k)
+            else:
+                sa = A_scale[0] if sa_size == 1 else A_scale[i]
+                sb = B_scale[0] if sb_size == 1 else B_scale[j]
             C_local[i, j] = C_local[i, j] + a_val * b_val * sa * sb
 
 
@@ -304,6 +383,9 @@ def fp8_scaled_matmul(
     transpose_B: bool = False,
     accum_dtype: str = "float32",
     target: Optional[Target] = None,  # accepted for API compat, currently unused
+    scale_format: str | None = None,
+    scale_block_size: int | None = None,
+    block_scale_layout: BlockScaledLayout | None = None,
 ):
     """Scaled FP8 matmul intrinsic — accumulate scaled FP8 product into ``C``.
 
@@ -369,11 +451,16 @@ def fp8_scaled_matmul(
             ``N`` mismatch, or scale shapes that are neither 1 nor
             matching).
     """
+    layout = _normalize_block_scale_layout(
+        block_scale_layout,
+        scale_format=scale_format,
+        scale_block_size=scale_block_size,
+    )
     _validate_buffers(
         A_fp8, A_scale, B_fp8, B_scale, C_out,
-        transpose_B=transpose_B, accum_dtype=accum_dtype,
+        transpose_B=transpose_B, accum_dtype=accum_dtype, block_scale_layout=layout,
     )
 
     if transpose_B:
-        return _fp8_scaled_matmul_macro_trans_b(A_fp8, A_scale, B_fp8, B_scale, C_out)
-    return _fp8_scaled_matmul_macro(A_fp8, A_scale, B_fp8, B_scale, C_out)
+        return _fp8_scaled_matmul_macro_trans_b(A_fp8, A_scale, B_fp8, B_scale, C_out, layout)
+    return _fp8_scaled_matmul_macro(A_fp8, A_scale, B_fp8, B_scale, C_out, layout)
