@@ -10,7 +10,12 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
-from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
+from tilelang.contrib.nvcc import (
+    get_cuda_library_dirs,
+    get_nvcc_compiler,
+    get_target_arch,
+    get_target_compute_version,
+)
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 
@@ -65,6 +70,7 @@ class LibraryGenerator:
             if ptxas_usage_level is not None:
                 ptxas_usage_level = int(ptxas_usage_level)
             verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
+            cuda_library_flags = [f"-L{lib_dir}" for lib_dir in get_cuda_library_dirs()]
 
             command = [
                 get_nvcc_compiler(),
@@ -77,6 +83,7 @@ class LibraryGenerator:
                 "-lineinfo",
                 "--shared",
                 src.name,
+                *cuda_library_flags,
                 "-lcuda",
                 "-gencode",
                 f"arch=compute_{target_arch},code=sm_{target_arch}",

@@ -282,6 +282,36 @@ def find_cuda_path():
     )
 
 
+def get_cuda_library_dirs(cuda_path=None):
+    """Return CUDA library directories that nvcc may need for host linking."""
+    if cuda_path is None:
+        cuda_path = find_cuda_path()
+
+    base_dirs = []
+    targets_dir = os.path.join(cuda_path, "targets")
+    if os.path.isdir(targets_dir):
+        for target_name in sorted(os.listdir(targets_dir)):
+            base_dirs.append(os.path.join(targets_dir, target_name, "lib"))
+
+    base_dirs.extend([
+        os.path.join(cuda_path, "lib64"),
+        os.path.join(cuda_path, "lib"),
+    ])
+
+    candidates = []
+    for lib_dir in base_dirs:
+        candidates.append(lib_dir)
+        candidates.append(os.path.join(lib_dir, "stubs"))
+
+    result = []
+    seen = set()
+    for lib_dir in candidates:
+        if lib_dir not in seen and os.path.isdir(lib_dir):
+            result.append(lib_dir)
+            seen.add(lib_dir)
+    return result
+
+
 def get_cuda_version(cuda_path=None):
     """Utility function to get cuda version
 
