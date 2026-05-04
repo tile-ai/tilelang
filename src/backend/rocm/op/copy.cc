@@ -7,6 +7,8 @@
 
 #include "target/utils.h"
 
+#include <cstdint>
+
 namespace tvm {
 namespace tl {
 
@@ -14,17 +16,21 @@ using namespace tir;
 
 namespace rocm {
 
+enum class CopyInst : uint8_t {
+  kNormal = 0,
+  kCPAsync = 1,
+};
+
 struct Copy {
   static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                                InferLevel level) {
-    CopyInst copy_inst =
-        SelectInst(op, T.target, T.layout_map, T.analyzer, T.buffer_oob);
-    return CopyLoweringAccess::InferLayoutForCopyInst(op, T, level, copy_inst);
+    SelectInst(op, T.target, T.layout_map, T.analyzer);
+    return op.InferSIMTLayout(T, level);
   }
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
-                             arith::Analyzer *analyzer, bool buffer_oob) {
+                             arith::Analyzer *analyzer) {
     if (op.GetIsTmaCopy()) {
       LOG(FATAL) << "T.tma_copy() is not supported on ROCm target "
                  << target->ToDebugString();
@@ -48,8 +54,7 @@ struct Copy {
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer) {
-    auto copy_inst =
-        SelectInst(op, T.target, T.layout_map, analyzer, /*buffer_oob=*/false);
+    auto copy_inst = SelectInst(op, T.target, T.layout_map, analyzer);
     if (copy_inst == CopyInst::kCPAsync) {
       return LowerCPAsyncCopy(op, T, analyzer);
     }
@@ -72,7 +77,6 @@ bool RegisterROCmCopy() {
       MatchROCmCopyTarget,
       100,
       rocm::Copy::InferLayout,
-      rocm::Copy::SelectInst,
       rocm::Copy::Lower,
   });
   return true;

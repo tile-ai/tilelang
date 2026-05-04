@@ -19,6 +19,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/transform.h>
 
+#include <cstdint>
 #include <sstream>
 #include <vector>
 
@@ -67,18 +68,58 @@ PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
 
 namespace cuda {
 
+enum class CopyInst : uint8_t {
+  kNormal = 0,
+  kLDSM = 1,
+  kSTSM = 2,
+  kBulkLoad = 3,
+  kBulkStore = 4,
+  kCPAsync = 5,
+  kBulkLoad1D = 6,
+  kBulkStore1D = 7,
+  kTMemLoad = 8,
+  kTMemStore = 9,
+};
+
+const char *CopyInstToString(CopyInst inst) {
+  switch (inst) {
+  case CopyInst::kNormal:
+    return "Normal";
+  case CopyInst::kLDSM:
+    return "LDSM";
+  case CopyInst::kSTSM:
+    return "STSM";
+  case CopyInst::kBulkLoad:
+    return "BulkLoad";
+  case CopyInst::kBulkStore:
+    return "BulkStore";
+  case CopyInst::kCPAsync:
+    return "CPAsync";
+  case CopyInst::kBulkLoad1D:
+    return "BulkLoad1D";
+  case CopyInst::kBulkStore1D:
+    return "BulkStore1D";
+  case CopyInst::kTMemLoad:
+    return "TMemLoad";
+  case CopyInst::kTMemStore:
+    return "TMemStore";
+  default:
+    return "Unknown";
+  }
+}
+
 struct Copy {
   static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                                InferLevel level);
-
-  static CopyInst SelectInst(const CopyNode &op, Target target,
-                             const LayoutMap &layout_map,
-                             arith::Analyzer *analyzer, bool buffer_oob);
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer);
 
 private:
+  static CopyInst SelectInst(const CopyNode &op, Target target,
+                             const LayoutMap &layout_map,
+                             arith::Analyzer *analyzer, bool buffer_oob);
+
   static void CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst);
 
   static LayoutMap InferTMemLayout(const CopyNode &op, const LayoutInferArgs &T,
@@ -123,7 +164,7 @@ LayoutMap Copy::InferLayout(const CopyNode &op, const LayoutInferArgs &T,
 
   // For normal/cp.async/LDSM/STSM, layout inference follows the generated
   // SIMT loop. CUDA-specific explicit layout cases are handled above.
-  return CopyLoweringAccess::InferSIMTLayout(op, T, level);
+  return op.InferSIMTLayout(T, level);
 }
 
 void Copy::CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst) {
@@ -152,7 +193,7 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op, const LayoutInferArgs &T,
 
   if (!T.layout_map.count(reg_buf) && T.layout_map.count(tmem_buf)) {
     Layout tmem_layout = T.layout_map[tmem_buf];
-    Array<IterVar> logical_coords = CopyLoweringAccess::MakeIterVars(op);
+    Array<IterVar> logical_coords = op.MakeIterVars();
     Array<PrimExpr> logical_coords_var = {logical_coords[0]->var,
                                           logical_coords[1]->var};
     Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_coords_var);
@@ -228,20 +269,16 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
   // Fragment buffers used as TMA indices should be replicated on all threads.
   PrimExpr thread_extent = T.thread_bounds->extent;
   for (const auto &range : op.src_range) {
-    CopyLoweringAccess::CollectFragmentLayouts(
-        op, range->min, T.let_var_to_expr, T.layout_map, thread_extent,
-        T.thread_bounds, result_map);
-    CopyLoweringAccess::CollectFragmentLayouts(
-        op, range->extent, T.let_var_to_expr, T.layout_map, thread_extent,
-        T.thread_bounds, result_map);
+    op.CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
+                              thread_extent, T.thread_bounds, result_map);
+    op.CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
+                              thread_extent, T.thread_bounds, result_map);
   }
   for (const auto &range : op.dst_range) {
-    CopyLoweringAccess::CollectFragmentLayouts(
-        op, range->min, T.let_var_to_expr, T.layout_map, thread_extent,
-        T.thread_bounds, result_map);
-    CopyLoweringAccess::CollectFragmentLayouts(
-        op, range->extent, T.let_var_to_expr, T.layout_map, thread_extent,
-        T.thread_bounds, result_map);
+    op.CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
+                              thread_extent, T.thread_bounds, result_map);
+    op.CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
+                              thread_extent, T.thread_bounds, result_map);
   }
 
   if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
@@ -258,15 +295,13 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
       if (StructuralEqual()(swizzle_layout_2d, makeLinearLayout(Array<PrimExpr>{
                                                    Integer(mat_stride),
                                                    Integer(mat_continuous)}))) {
-        result_map.Set(shared_tensor, CopyLoweringAccess::ComputeLinearLayout(
-                                          op, shared_tensor));
+        result_map.Set(shared_tensor, op.ComputeLinearLayout(shared_tensor));
       } else {
         result_map.Set(shared_tensor, ExpandLayoutToMatchBuffer(
                                           swizzle_layout_2d, shared_tensor));
       }
     } else {
-      result_map.Set(shared_tensor, CopyLoweringAccess::ComputeLinearLayout(
-                                        op, shared_tensor));
+      result_map.Set(shared_tensor, op.ComputeLinearLayout(shared_tensor));
     }
   }
 
@@ -390,16 +425,14 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
       << "Invalid copy inst " << static_cast<int>(copy_inst);
   bool is_ldmatrix = copy_inst == CopyInst::kLDSM;
 
-  Array<IterVar> loop_vars = CopyLoweringAccess::MakeIterVars(op);
+  Array<IterVar> loop_vars = op.MakeIterVars();
   if (loop_vars.size() < 2) {
     return LowerNormal(op, T, analyzer);
   }
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
-  PrimExpr src_predicate =
-      CopyLoweringAccess::MakePredicate(op, analyzer, loop_vars, src->shape, 0);
-  PrimExpr dst_predicate =
-      CopyLoweringAccess::MakePredicate(op, analyzer, loop_vars, dst->shape, 1);
+  PrimExpr src_predicate = op.MakePredicate(analyzer, loop_vars, src->shape, 0);
+  PrimExpr dst_predicate = op.MakePredicate(analyzer, loop_vars, dst->shape, 1);
   if (src_predicate.defined() || dst_predicate.defined()) {
     return LowerNormal(op, T, analyzer);
   }
@@ -420,7 +453,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   }
 
   Array<PrimExpr> local_indices =
-      CopyLoweringAccess::MakeIndices(op, loop_vars, is_ldmatrix ? 1 : 0);
+      op.MakeIndices(loop_vars, is_ldmatrix ? 1 : 0);
   Fragment local_layout = Downcast<Fragment>(T.layout_map[local_tensor]);
   Array<PrimExpr> local_indices_transformed =
       local_layout->Forward(local_indices);
@@ -430,7 +463,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &T,
   }
 
   Array<PrimExpr> shared_indices =
-      CopyLoweringAccess::MakeIndices(op, loop_vars, is_ldmatrix ? 0 : 1);
+      op.MakeIndices(loop_vars, is_ldmatrix ? 0 : 1);
   bool is_transposed;
   IterVar col_var = loop_vars[loop_vars.size() - 1];
   IterVar row_var = loop_vars[loop_vars.size() - 2];
@@ -577,15 +610,13 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   ICHECK(!is_cp)
       << "Copy from shared memory to tensor memory is not supported yet";
 
-  Array<IterVar> loop_vars = CopyLoweringAccess::MakeIterVars(op);
+  Array<IterVar> loop_vars = op.MakeIterVars();
   ICHECK(loop_vars.size() == 2) << "Only support 2D tensor memory copy, got "
                                 << loop_vars.size() << " dimensions";
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
-  PrimExpr src_predicate =
-      CopyLoweringAccess::MakePredicate(op, analyzer, loop_vars, src->shape, 0);
-  PrimExpr dst_predicate =
-      CopyLoweringAccess::MakePredicate(op, analyzer, loop_vars, dst->shape, 1);
+  PrimExpr src_predicate = op.MakePredicate(analyzer, loop_vars, src->shape, 0);
+  PrimExpr dst_predicate = op.MakePredicate(analyzer, loop_vars, dst->shape, 1);
   ICHECK(!src_predicate.defined() && !dst_predicate.defined())
       << "Tensor memory copy does not support predicates, got " << src_predicate
       << " and " << dst_predicate;
@@ -622,8 +653,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   Layout tmem_layout = T.layout_map[tmem_buf];
   Fragment reg_layout = Downcast<Fragment>(T.layout_map[reg_buf]);
 
-  Array<PrimExpr> logical_indices =
-      CopyLoweringAccess::MakeIndices(op, loop_vars, tmem_side);
+  Array<PrimExpr> logical_indices = op.MakeIndices(loop_vars, tmem_side);
   Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_indices);
 
   arith::ConstIntBound phy_row_bounds =
@@ -762,8 +792,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return LowerNormal(op, T, analyzer);
   }
 
-  auto linear_layout =
-      CopyLoweringAccess::ComputeLinearLayout(op, shared_tensor);
+  auto linear_layout = op.ComputeLinearLayout(shared_tensor);
 
   Array<PrimExpr> shared_indices;
   for (auto r : shared_range)
@@ -1272,7 +1301,6 @@ bool RegisterCudaCopy() {
       MatchCudaCopyTarget,
       100,
       cuda::Copy::InferLayout,
-      cuda::Copy::SelectInst,
       cuda::Copy::Lower,
   });
   return true;

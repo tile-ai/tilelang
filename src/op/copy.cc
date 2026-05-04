@@ -83,7 +83,7 @@ PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer) {
   bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
-  auto simt_loop = CopyLoweringAccess::MakeSIMTLoop(op, analyzer);
+  auto simt_loop = op.MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
   For vectorized_thread_loop;
@@ -146,7 +146,7 @@ Stmt LowerCPAsyncCopy(const CopyNode &op, const LowerArgs &T,
     return LowerNormalCopy(op, T, analyzer);
   }
 
-  auto simt_loop = CopyLoweringAccess::MakeSIMTLoop(op, analyzer);
+  auto simt_loop = op.MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
   auto par_op = ParallelOp(fused_loop);
 
@@ -214,23 +214,7 @@ std::vector<CopyImpl> &CopyImplRegistry() {
 
 LayoutMap DefaultInferCopyLayout(const CopyNode &op, const LayoutInferArgs &T,
                                  InferLevel level) {
-  return CopyLoweringAccess::InferLayoutImpl(op, T, level);
-}
-
-CopyInst DefaultSelectCopyInst(const CopyNode &op, Target target,
-                               const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer, bool buffer_oob) {
-  if (op.GetIsTmaCopy()) {
-    LOG(FATAL) << "T.tma_copy() requires a target-specific copy "
-                  "implementation, but no implementation is registered for "
-               << target->ToDebugString();
-  }
-  if (op.GetIsAsyncCopy() || op.GetNoImplicitAsyncCommitWait()) {
-    LOG(FATAL) << "Async copy requires a target-specific copy implementation, "
-                  "but no implementation is registered for "
-               << target->ToDebugString();
-  }
-  return CopyInst::kNormal;
+  return op.InferLayoutImpl(T, level);
 }
 
 bool DefaultMatchTarget(Target target) { return true; }
@@ -256,7 +240,6 @@ CopyImpl MakeDefaultCopyImpl() {
       DefaultMatchTarget,
       std::numeric_limits<int>::min(),
       DefaultInferCopyLayout,
-      DefaultSelectCopyInst,
       DefaultLowerCopy,
   };
 }
@@ -288,13 +271,6 @@ LayoutMap InferCopyLayout(const CopyNode &op, const LayoutInferArgs &T,
   return ResolveCopyImpl(T.target).infer_layout(op, T, level);
 }
 
-CopyInst SelectCopyInstForTarget(const CopyNode &op, Target target,
-                                 const LayoutMap &layout_map,
-                                 arith::Analyzer *analyzer, bool buffer_oob) {
-  return ResolveCopyImpl(target).select_inst(op, target, layout_map, analyzer,
-                                             buffer_oob);
-}
-
 Stmt LowerCopyForTarget(const CopyNode &op, const LowerArgs &T,
                         arith::Analyzer *analyzer) {
   return ResolveCopyImpl(T.target).lower(op, T, analyzer);
@@ -306,7 +282,6 @@ void RegisterCopyImpl(CopyImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
   ICHECK(impl.infer_layout != nullptr);
-  ICHECK(impl.select_inst != nullptr);
   ICHECK(impl.lower != nullptr);
   EnsureDefaultCopyImplRegistered();
   CopyImplRegistry().push_back(impl);
@@ -571,63 +546,29 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   return InferCopyLayout(*this, T, level);
 }
 
-// Infers memory layouts for this Copy operation based on target and copy
-// instruction.
+// Infers memory layouts for the default target-independent copy path.
 LayoutMap CopyNode::InferLayoutImpl(const LayoutInferArgs &T,
                                     InferLevel level) const {
-  auto target = T.target;
-  CopyInst copy_inst;
-  if (GetIsAsyncCopy()) {
-    // Layout inference does not require a full cp.async legality proof (which
-    // depends on final vectorization decisions). Keep the op as CPAsync for
-    // inference, and enforce legality during lowering.
-    if (!TargetHasAsyncCopy(target)) {
-      LOG(FATAL) << "T.async_copy is only supported on targets with cp.async "
-                    "support (SM80+). Got target="
-                 << target;
-    }
-    if (!IsGlobalBuffer(src) || !IsSharedBuffer(dst)) {
-      LOG(FATAL)
-          << "T.async_copy only supports global->shared/shared.dyn copies. "
-          << "Got src=" << src->name << " (scope=" << src.scope()
-          << "), dst=" << dst->name << " (scope=" << dst.scope() << ").";
-    }
-    if (src->dtype != dst->dtype) {
-      LOG(FATAL) << "T.async_copy requires equal byte-addressable dtypes. "
-                 << "Got src dtype=" << src->dtype
-                 << ", dst dtype=" << dst->dtype << ".";
-    }
-    copy_inst = CopyInst::kCPAsync;
-  } else {
-    copy_inst = GetCopyInst(target, T.layout_map, T.analyzer, T.buffer_oob);
+  if (GetIsTmaCopy()) {
+    LOG(FATAL) << "T.tma_copy() requires a target-specific copy "
+                  "implementation, but no implementation is registered for "
+               << T.target->ToDebugString();
   }
-
-  return InferLayoutForCopyInst(T, level, copy_inst);
+  if (GetIsAsyncCopy() || GetNoImplicitAsyncCommitWait()) {
+    LOG(FATAL) << "Async copy requires a target-specific copy implementation, "
+                  "but no implementation is registered for "
+               << T.target->ToDebugString();
+  }
+  return InferSIMTLayout(T, level);
 }
 
-LayoutMap CopyNode::InferLayoutForCopyInst(const LayoutInferArgs &T,
-                                           InferLevel level,
-                                           CopyInst copy_inst) const {
-  // If user annotated a loop layout on T.copy, enforce SIMT (normal) copy.
-  // Parallel-loop layout only applies to SIMT-style loops we generate here;
-  // other copy instructions (TMA/LDSM/STSM/TMem) are incompatible.
-  if (annotations.count(attr::kParallelLoopLayout)) {
-    if (copy_inst != CopyInst::kNormal && copy_inst != CopyInst::kCPAsync) {
-      std::ostringstream oss;
-      oss << "T.copy loop layout annotation requires SIMT copy; got "
-          << CopyInstToString(copy_inst) << " for src=" << src->name
-          << ", dst=" << dst->name
-          << ". Remove loop_layout or change copy pattern.";
-      LOG(FATAL) << oss.str();
-    }
+LayoutMap CopyNode::InferSIMTLayout(const LayoutInferArgs &T,
+                                    InferLevel level) const {
+  if (!par_op_.defined()) {
+    arith::Analyzer analyzer;
+    par_op_ = ParallelOp(MakeSIMTLoop(&analyzer));
   }
-
-  if (copy_inst != CopyInst::kNormal && copy_inst != CopyInst::kCPAsync) {
-    LOG(FATAL) << "Copy layout inference for " << CopyInstToString(copy_inst)
-               << " must be implemented by the selected backend.";
-  }
-
-  return CopyLoweringAccess::InferSIMTLayout(*this, T, level);
+  return par_op_->InferLayout(T, level);
 }
 // Shared stride validation for TMA bulk load/store.
 bool CopyNode::CheckGlobalStrides(const Buffer &buffer,
@@ -899,18 +840,8 @@ bool CopyNode::CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
   return true;
 }
 
-// Selects the most specific copy instruction for the given target and buffers.
-// Priority: BulkLoad1D, BulkStore1D, BulkLoad, BulkStore, LDSM, STSM,
-// TMemLoad, TMemStore, CPAsync, Normal.
-CopyInst CopyNode::GetCopyInst(Target target, const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer,
-                               bool buffer_oob) const {
-  return SelectCopyInstForTarget(*this, target, layout_map, analyzer,
-                                 buffer_oob);
-}
-
-// Lowers the copy operation to PTX code by dispatching to specialized lowering
-// functions.
+// Lowers the copy operation by dispatching to the selected target
+// implementation.
 Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return LowerCopyForTarget(*this, T, analyzer);
 }

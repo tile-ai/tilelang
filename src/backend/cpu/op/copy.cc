@@ -17,14 +17,11 @@ namespace cpu {
 struct Copy {
   static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                                InferLevel level) {
-    CopyInst copy_inst =
-        SelectInst(op, T.target, T.layout_map, T.analyzer, T.buffer_oob);
-    return CopyLoweringAccess::InferLayoutForCopyInst(op, T, level, copy_inst);
+    CheckSupported(op, T.target);
+    return op.InferSIMTLayout(T, level);
   }
 
-  static CopyInst SelectInst(const CopyNode &op, Target target,
-                             const LayoutMap &layout_map,
-                             arith::Analyzer *analyzer, bool buffer_oob) {
+  static void CheckSupported(const CopyNode &op, Target target) {
     if (op.GetIsTmaCopy()) {
       LOG(FATAL) << "T.tma_copy() is not supported on CPU target "
                  << target->ToDebugString();
@@ -33,15 +30,11 @@ struct Copy {
       LOG(FATAL) << "Async copy is not supported on CPU target "
                  << target->ToDebugString();
     }
-    return CopyInst::kNormal;
   }
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer) {
-    auto copy_inst =
-        SelectInst(op, T.target, T.layout_map, analyzer, /*buffer_oob=*/false);
-    ICHECK(copy_inst == CopyInst::kNormal)
-        << "Unsupported CPU copy inst " << static_cast<int>(copy_inst);
+    CheckSupported(op, T.target);
     return LowerNormalCopy(op, T, analyzer);
   }
 };
@@ -58,7 +51,6 @@ bool RegisterCPUCopy() {
       MatchCPUCopyTarget,
       100,
       cpu::Copy::InferLayout,
-      cpu::Copy::SelectInst,
       cpu::Copy::Lower,
   });
   return true;

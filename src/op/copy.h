@@ -16,52 +16,6 @@ namespace tvm {
 namespace tl {
 using namespace tir;
 
-class CopyLoweringAccess;
-
-/// Copy instruction types for different memory access patterns
-enum class CopyInst : uint8_t {
-  kNormal = 0,    // utilize plain buffer copy
-  kLDSM = 1,      // ldmatrix memory copy
-  kSTSM = 2,      // stmatrix memory copy
-  kBulkLoad = 3,  // utilize tma load
-  kBulkStore = 4, // utilize tma store
-  kCPAsync = 5,   // cp.async global->shared copy
-  // we should separate the bulk load and store for 1d and multi-dim
-  // as they have different memory access patterns
-  kBulkLoad1D = 6,  // utilize tma load 1d
-  kBulkStore1D = 7, // utilize tma store 1d
-  kTMemLoad = 8,    // tcgen05.ld (tensor memory -> register)
-  kTMemStore = 9,   // tcgen05.st (register -> tensor memory)
-};
-
-/// Convert CopyInst enum to string for debugging
-inline const char *CopyInstToString(CopyInst inst) {
-  switch (inst) {
-  case CopyInst::kNormal:
-    return "Normal";
-  case CopyInst::kLDSM:
-    return "LDSM";
-  case CopyInst::kSTSM:
-    return "STSM";
-  case CopyInst::kBulkLoad:
-    return "BulkLoad";
-  case CopyInst::kBulkStore:
-    return "BulkStore";
-  case CopyInst::kCPAsync:
-    return "CPAsync";
-  case CopyInst::kBulkLoad1D:
-    return "BulkLoad1D";
-  case CopyInst::kBulkStore1D:
-    return "BulkStore1D";
-  case CopyInst::kTMemLoad:
-    return "TMemLoad";
-  case CopyInst::kTMemStore:
-    return "TMemStore";
-  default:
-    return "Unknown";
-  }
-}
-
 /// Descriptor for Tensor Memory Access (TMA) copy operations
 struct TMADesc {
   size_t rank;                   ///< Tensor rank (number of dimensions)
@@ -121,8 +75,6 @@ struct TMAIm2ColDesc {
  */
 class CopyNode : public TileOperatorNode {
 public:
-  friend class CopyLoweringAccess;
-
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
   Map<String, ObjectRef> annotations; // Annotations for the copy operation
@@ -295,24 +247,15 @@ public:
   bool CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
                         arith::Analyzer *analyzer) const;
 
-protected:
   /*!
    * \brief Default layout inference implementation used by fallback dispatch.
    */
   LayoutMap InferLayoutImpl(const LayoutInferArgs &T, InferLevel level) const;
 
   /*!
-   * \brief Infer layout for a backend-selected copy instruction.
+   * \brief Infer layout through the generated SIMT copy loop.
    */
-  LayoutMap InferLayoutForCopyInst(const LayoutInferArgs &T, InferLevel level,
-                                   CopyInst copy_inst) const;
-
-  /*!
-   * \brief Get the copy instruction type.
-   */
-  CopyInst GetCopyInst(Target target, const LayoutMap &layout_map,
-                       arith::Analyzer *analyzer,
-                       bool buffer_oob = false) const;
+  LayoutMap InferSIMTLayout(const LayoutInferArgs &T, InferLevel level) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
@@ -346,6 +289,21 @@ protected:
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
 
+  /*!
+   * \brief Collect fragment buffers from expression and create fully replicated
+   * layouts.
+   *
+   * Recursively searches the expression for BufferLoad nodes with
+   * "local.fragment" scope, following let bindings. For each found fragment
+   * buffer, creates a fully replicated layout and adds it to result_map.
+   */
+  void CollectFragmentLayouts(const PrimExpr &expr,
+                              const Map<Var, PrimExpr> &let_var_to_expr,
+                              const LayoutMap &existing_layouts,
+                              PrimExpr thread_extent, Range thread_bounds,
+                              Map<Buffer, Layout> &result_map) const;
+
+protected:
   /**
    * \brief Create a deep copy of this operator.
    *
@@ -376,28 +334,6 @@ protected:
    */
   static bool CheckGlobalStrides(const Buffer &buffer,
                                  arith::Analyzer *analyzer);
-
-private:
-  /*!
-   * \brief Collect fragment buffers from expression and create fully replicated
-   * layouts.
-   *
-   * Recursively searches the expression for BufferLoad nodes with
-   * "local.fragment" scope, following let bindings. For each found fragment
-   * buffer, creates a fully replicated layout and adds it to result_map.
-   *
-   * \param expr            Expression to search.
-   * \param let_var_to_expr Map from let variables to their bound expressions.
-   * \param existing_layouts Existing layout map to check for already-inferred
-   * layouts. \param thread_extent   Number of threads for replication. \param
-   * thread_bounds   Thread bounds for binding the layout. \param result_map
-   * Output map to store collected fragment layouts.
-   */
-  void CollectFragmentLayouts(const PrimExpr &expr,
-                              const Map<Var, PrimExpr> &let_var_to_expr,
-                              const LayoutMap &existing_layouts,
-                              PrimExpr thread_extent, Range thread_bounds,
-                              Map<Buffer, Layout> &result_map) const;
 };
 
 using CopyTargetPredicate = bool (*)(Target target);
@@ -410,10 +346,6 @@ struct CopyImpl {
   LayoutMap (*infer_layout)(const CopyNode &op, const LayoutInferArgs &T,
                             InferLevel level);
 
-  CopyInst (*select_inst)(const CopyNode &op, Target target,
-                          const LayoutMap &layout_map,
-                          arith::Analyzer *analyzer, bool buffer_oob);
-
   Stmt (*lower)(const CopyNode &op, const LowerArgs &T,
                 arith::Analyzer *analyzer);
 };
@@ -425,65 +357,6 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
 
 Stmt LowerCPAsyncCopy(const CopyNode &op, const LowerArgs &T,
                       arith::Analyzer *analyzer);
-
-class CopyLoweringAccess {
-public:
-  static LayoutMap InferLayoutImpl(const CopyNode &op, const LayoutInferArgs &T,
-                                   InferLevel level) {
-    return op.InferLayoutImpl(T, level);
-  }
-
-  static LayoutMap InferLayoutForCopyInst(const CopyNode &op,
-                                          const LayoutInferArgs &T,
-                                          InferLevel level,
-                                          CopyInst copy_inst) {
-    return op.InferLayoutForCopyInst(T, level, copy_inst);
-  }
-
-  static LayoutMap InferSIMTLayout(const CopyNode &op, const LayoutInferArgs &T,
-                                   InferLevel level) {
-    if (!op.par_op_.defined()) {
-      arith::Analyzer analyzer;
-      op.par_op_ = ParallelOp(op.MakeSIMTLoop(&analyzer));
-    }
-    return op.par_op_->InferLayout(T, level);
-  }
-
-  static For MakeSIMTLoop(const CopyNode &op, arith::Analyzer *analyzer) {
-    return op.MakeSIMTLoop(analyzer);
-  }
-
-  static Layout ComputeLinearLayout(const CopyNode &op,
-                                    const Buffer &shared_tensor) {
-    return op.ComputeLinearLayout(shared_tensor);
-  }
-
-  static Array<IterVar> MakeIterVars(const CopyNode &op) {
-    return op.MakeIterVars();
-  }
-
-  static Array<PrimExpr> MakeIndices(const CopyNode &op,
-                                     const Array<IterVar> &ivs, int src_dst) {
-    return op.MakeIndices(ivs, src_dst);
-  }
-
-  static PrimExpr MakePredicate(const CopyNode &op, arith::Analyzer *analyzer,
-                                const Array<IterVar> &ivs,
-                                Array<PrimExpr> extents, int src_dst) {
-    return op.MakePredicate(analyzer, ivs, std::move(extents), src_dst);
-  }
-
-  static void CollectFragmentLayouts(const CopyNode &op, const PrimExpr &expr,
-                                     const Map<Var, PrimExpr> &let_var_to_expr,
-                                     const LayoutMap &existing_layouts,
-                                     PrimExpr thread_extent,
-                                     Range thread_bounds,
-                                     Map<Buffer, Layout> &result_map) {
-    op.CollectFragmentLayouts(expr, let_var_to_expr, existing_layouts,
-                              thread_extent, std::move(thread_bounds),
-                              result_map);
-  }
-};
 
 class Copy : public TileOperator {
 public:
