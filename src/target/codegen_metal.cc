@@ -153,8 +153,15 @@ void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
     decl_stream << "};\n\n";
   }
   // Setup the thread group info.
+  // Reserve the CUDA-style alias names so user code or downstream passes
+  // cannot accidentally collide with them, even though the kernel itself
+  // emits Metal builtin names directly (no `blockIdx`/`threadIdx` aliases).
   ICHECK_EQ(name_supply_->FreshName("threadIdx"), "threadIdx");
   ICHECK_EQ(name_supply_->FreshName("blockIdx"), "blockIdx");
+  ICHECK_EQ(name_supply_->FreshName("threadgroup_position_in_grid"),
+            "threadgroup_position_in_grid");
+  ICHECK_EQ(name_supply_->FreshName("thread_position_in_threadgroup"),
+            "thread_position_in_threadgroup");
   int work_dim = 0;
   auto launch_params =
       func->GetAttr<ffi::Array<ffi::String>>(tir::attr::kKernelLaunchParams)
@@ -167,13 +174,22 @@ void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
   }
 
   if (work_dim != 0) {
-    // use ushort by default for now
+    // Emit Metal builtin names directly as the kernel parameter identifiers
+    // rather than using CUDA-style `blockIdx`/`threadIdx` aliases. This means
+    // body references are emitted as e.g. `threadgroup_position_in_grid.x`
+    // instead of `blockIdx.x`, which:
+    //   - matches Apple's MSL convention,
+    //   - eliminates a redundant naming layer that downstream MSL passes had
+    //     to undo with regex-based string substitution (see cppmega.mlx
+    //     `_msl_transform.py::_canonicalize_tilelang_builtin_aliases`),
+    //   - removes intermediate dead-alias declarations that callers had to
+    //     strip manually.
     stream << "  ";
     PrintType(DataType::UInt(thread_index_bits_, work_dim), stream);
-    stream << " blockIdx [[threadgroup_position_in_grid]],\n";
+    stream << " threadgroup_position_in_grid [[threadgroup_position_in_grid]],\n";
     stream << "  ";
     PrintType(DataType::UInt(thread_index_bits_, work_dim), stream);
-    stream << " threadIdx [[thread_position_in_threadgroup]]\n";
+    stream << " thread_position_in_threadgroup [[thread_position_in_threadgroup]]\n";
   }
   thread_work_dim_ = work_dim;
 
@@ -188,11 +204,24 @@ void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
 
 void CodeGenTileLangMetal::BindThreadIndex(const IterVar &iv) {
   ICHECK(!var_idmap_.count(iv->var.get()));
-  // if we only have threadIdx.x
-  // metal will directly print as threadIdx
+  // The thread_tag is the CUDA-style name (e.g. "threadIdx.x", "blockIdx.y").
+  // Translate to the Metal builtin reference so emitted body references
+  // resolve directly against the kernel parameters declared in AddFunction
+  // (which now use the Metal builtin names verbatim instead of the
+  // blockIdx/threadIdx aliases). The .x/.y/.z suffix is preserved.
   std::string vname = iv->thread_tag;
-  if (thread_work_dim_ <= 1) {
-    vname = vname.substr(0, iv->thread_tag.length() - 2);
+  std::string axis;
+  if (vname.length() >= 2 && vname[vname.length() - 2] == '.') {
+    axis = vname.substr(vname.length() - 2);  // ".x" / ".y" / ".z"
+    vname = vname.substr(0, vname.length() - 2);
+  }
+  if (vname == "threadIdx") {
+    vname = "thread_position_in_threadgroup";
+  } else if (vname == "blockIdx") {
+    vname = "threadgroup_position_in_grid";
+  }
+  if (thread_work_dim_ > 1) {
+    vname += axis;
   }
   var_idmap_[iv->var.get()] =
       CastFromTo(vname, DataType::UInt(thread_index_bits_), iv->var.dtype());
