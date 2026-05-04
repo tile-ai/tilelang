@@ -17,6 +17,7 @@
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
+#include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
 #include <cstdint>
@@ -67,6 +68,44 @@ PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
     phase = explicit_phase.value();
   }
   return phase;
+}
+
+bool GetBoolAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+bool GetDisableTMA(const CopyNode &op) {
+  return GetBoolAnnotation(op, "disable_tma");
+}
+
+bool GetIsTmaCopy(const CopyNode &op) {
+  return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+int GetEvictionPolicy(const CopyNode &op) {
+  if (auto val = op.annotations.Get("eviction_policy")) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value;
+    }
+  }
+  return 0; // default: evict_normal
+}
+
+bool GetIsAsyncCopy(const CopyNode &op) {
+  if (GetBoolAnnotation(op, "is_async_copy")) {
+    return true;
+  }
+  // Backward-compatibility with historical annotation key.
+  return GetBoolAnnotation(op, "force_cp_async");
+}
+
+bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
+  return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
 }
 
 } // namespace
@@ -244,6 +283,15 @@ private:
   static bool CheckCPAsyncCopy(const CopyNode &op, Target target,
                                const LayoutMap &layout_map,
                                arith::Analyzer *analyzer);
+
+  static Layout ComputeLinearLayout(const Buffer &shared_tensor);
+
+  static void CollectFragmentLayouts(const PrimExpr &expr,
+                                     const Map<Var, PrimExpr> &let_var_to_expr,
+                                     const LayoutMap &existing_layouts,
+                                     PrimExpr thread_extent,
+                                     Range thread_bounds,
+                                     Map<Buffer, Layout> &result_map);
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
@@ -490,7 +538,7 @@ bool Copy::CheckCPAsyncCopyPreconditions(const CopyNode &op) {
 
 bool Copy::CheckPipelineManagedCPAsyncCopy(const CopyNode &op, Target target,
                                            arith::Analyzer *analyzer) {
-  return !op.GetIsTmaCopy() && !op.GetIsAsyncCopy() &&
+  return !GetIsTmaCopy(op) && !GetIsAsyncCopy(op) &&
          CheckCPAsyncCopy(op, target, LayoutMap(), analyzer);
 }
 
@@ -506,6 +554,46 @@ bool Copy::CheckCPAsyncCopy(const CopyNode &op, Target target,
   // Skip vectorize size checks here because the layout is not stable during
   // layout inference and transform classification.
   return true;
+}
+
+Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) {
+  Array<PrimExpr> input_size = shared_tensor->shape;
+  Array<PrimExpr> forward_vars;
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_vars.push_back(InputPlaceholder(i));
+  }
+
+  Array<PrimExpr> forward_index;
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_index.push_back(FloorDiv(forward_vars[i], 256));
+  }
+  for (size_t i = 0; i < input_size.size(); i++) {
+    forward_index.push_back(FloorMod(forward_vars[i], 256));
+  }
+  return Layout(input_size, forward_index);
+}
+
+void Copy::CollectFragmentLayouts(const PrimExpr &expr,
+                                  const Map<Var, PrimExpr> &let_var_to_expr,
+                                  const LayoutMap &existing_layouts,
+                                  PrimExpr thread_extent, Range thread_bounds,
+                                  Map<Buffer, Layout> &result_map) {
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (auto bl = node.as<BufferLoadNode>()) {
+      if (IsFragmentBuffer(bl->buffer) && !existing_layouts.count(bl->buffer) &&
+          !result_map.count(bl->buffer)) {
+        auto f = Fragment::FullyReplicated(bl->buffer->shape, thread_extent);
+        result_map.Set(bl->buffer, f->BindThreadRange(thread_bounds));
+      }
+    } else if (auto var_node = node.as<VarNode>()) {
+      auto var = tvm::ffi::GetRef<Var>(var_node);
+      if (let_var_to_expr.count(var)) {
+        CollectFragmentLayouts(let_var_to_expr[var], let_var_to_expr,
+                               existing_layouts, thread_extent, thread_bounds,
+                               result_map);
+      }
+    }
+  });
 }
 
 LayoutMap Copy::InferLayout(const CopyNode &op, const LayoutInferArgs &T,
@@ -630,16 +718,16 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
   // Fragment buffers used as TMA indices should be replicated on all threads.
   PrimExpr thread_extent = T.thread_bounds->extent;
   for (const auto &range : op.src_range) {
-    op.CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
-                              thread_extent, T.thread_bounds, result_map);
-    op.CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
-                              thread_extent, T.thread_bounds, result_map);
+    CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
+                           thread_extent, T.thread_bounds, result_map);
+    CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
+                           thread_extent, T.thread_bounds, result_map);
   }
   for (const auto &range : op.dst_range) {
-    op.CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
-                              thread_extent, T.thread_bounds, result_map);
-    op.CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
-                              thread_extent, T.thread_bounds, result_map);
+    CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
+                           thread_extent, T.thread_bounds, result_map);
+    CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
+                           thread_extent, T.thread_bounds, result_map);
   }
 
   if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
@@ -656,13 +744,13 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
       if (StructuralEqual()(swizzle_layout_2d, makeLinearLayout(Array<PrimExpr>{
                                                    Integer(mat_stride),
                                                    Integer(mat_continuous)}))) {
-        result_map.Set(shared_tensor, op.ComputeLinearLayout(shared_tensor));
+        result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
       } else {
         result_map.Set(shared_tensor, ExpandLayoutToMatchBuffer(
                                           swizzle_layout_2d, shared_tensor));
       }
     } else {
-      result_map.Set(shared_tensor, op.ComputeLinearLayout(shared_tensor));
+      result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
     }
   }
 
@@ -672,7 +760,7 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
 CopyInst Copy::SelectInst(const CopyNode &op, Target target,
                           const LayoutMap &layout_map,
                           arith::Analyzer *analyzer, bool buffer_oob) {
-  if (op.GetIsTmaCopy()) {
+  if (GetIsTmaCopy(op)) {
     bool is_cutedsl = TargetIsCuTeDSL(target);
     if (!is_cutedsl && !buffer_oob &&
         CheckBulkLoad1D(op, target, layout_map, analyzer)) {
@@ -692,8 +780,8 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
     }
   }
 
-  bool is_async_copy = op.GetIsAsyncCopy();
-  bool no_implicit_commit_wait = op.GetNoImplicitAsyncCommitWait();
+  bool is_async_copy = GetIsAsyncCopy(op);
+  bool no_implicit_commit_wait = GetNoImplicitAsyncCommitWait(op);
 
   if (is_async_copy || no_implicit_commit_wait) {
     bool cp_async_supported =
@@ -707,7 +795,7 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
     return CopyInst::kCPAsync;
   }
 
-  if (!op.GetDisableTMA() &&
+  if (!GetDisableTMA(op) &&
       !tvm::transform::PassContext::Current()
            ->GetConfig<Bool>(kDisableTMALower, Bool(false))
            .value()) {
@@ -773,9 +861,8 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
   PassContext pass_ctx = PassContext::Current();
   bool enable_async_copy =
       pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-  bool no_implicit_commit_wait = op.GetNoImplicitAsyncCommitWait();
-  bool explicit_async_semantics =
-      no_implicit_commit_wait || op.GetIsAsyncCopy();
+  bool no_implicit_commit_wait = GetNoImplicitAsyncCommitWait(op);
+  bool explicit_async_semantics = no_implicit_commit_wait || GetIsAsyncCopy(op);
   if (!enable_async_copy && !explicit_async_semantics) {
     return LowerNormal(op, T, analyzer);
   }
@@ -804,7 +891,7 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
   auto inject_result =
       InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
                          /*async_without_async_commit_wait=*/
-                         no_implicit_commit_wait || op.GetIsAsyncCopy());
+                         no_implicit_commit_wait || GetIsAsyncCopy(op));
   Stmt cp_async_loop = inject_result.stmt;
   if (!inject_result.injected_ptx_async_copy) {
     LOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
@@ -813,7 +900,7 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
                  << ", dtype=" << op.dst->dtype
                  << "), no_implicit_async_commit_wait="
                  << no_implicit_commit_wait
-                 << ", is_async_copy=" << op.GetIsAsyncCopy();
+                 << ", is_async_copy=" << GetIsAsyncCopy(op);
     if (no_implicit_commit_wait) {
       LOG(WARNING)
           << "Pipeline-managed async copy fallback to normal copy because "
@@ -831,7 +918,7 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
   if (no_implicit_commit_wait) {
     return cp_async_loop;
   }
-  if (op.GetIsAsyncCopy()) {
+  if (GetIsAsyncCopy(op)) {
     Stmt commit_group =
         Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
     return SeqStmt({cp_async_loop, commit_group});
@@ -1222,7 +1309,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return LowerNormal(op, T, analyzer);
   }
 
-  auto linear_layout = op.ComputeLinearLayout(shared_tensor);
+  auto linear_layout = ComputeLinearLayout(shared_tensor);
 
   Array<PrimExpr> shared_indices;
   for (auto r : shared_range)
@@ -1433,7 +1520,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       if (auto bl = mbar_handle.as<BufferLoadNode>()) {
         is_cluster_barrier = bl->buffer.scope() == "shared.cluster_barrier";
       }
-    } else if (op.GetIsTmaCopy()) {
+    } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
@@ -1469,7 +1556,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     int need_reduce = 0;
     if (!is_load)
       args.push_back(need_reduce);
-    args.push_back(op.GetEvictionPolicy());
+    args.push_back(GetEvictionPolicy(op));
     Map<String, ObjectRef> ann_loop;
     if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
       ann_loop.Set("use_2cta", IntImm(DataType::Int(32), 1));
@@ -1485,7 +1572,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     int need_reduce = 0;
     if (!is_load)
       args.push_back(need_reduce);
-    args.push_back(op.GetEvictionPolicy());
+    args.push_back(GetEvictionPolicy(op));
     Map<String, ObjectRef> ann;
     if (TargetIsSm100(T.target) && is_load &&
         (annotations.find("use_2cta") != annotations.end() ||
@@ -1500,7 +1587,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     seq.reserve(3);
     seq.push_back(tma_copy);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    if (!op.GetIsTmaCopy()) {
+    if (!GetIsTmaCopy(op)) {
       seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
                                   {IntImm(DataType::Int(32), 0)})));
     }
@@ -1519,7 +1606,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
     Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
-    if (op.GetIsTmaCopy()) {
+    if (GetIsTmaCopy(op)) {
       if (is_cluster_barrier) {
         PrimExpr cluster_total_bytes =
             total_bytes * IntImm(DataType::Int(32), T.cluster_size);
@@ -1557,7 +1644,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                                SeqStmt(producer_seq));
 
-    if (op.GetIsTmaCopy()) {
+    if (GetIsTmaCopy(op)) {
       return producer;
     }
 
@@ -1642,7 +1729,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     if (auto user_barrier = annotations.Get("barrier")) {
       mbar_handle = Downcast<PrimExpr>(user_barrier.value());
       barrier_base_id = 0;
-    } else if (op.GetIsTmaCopy()) {
+    } else if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() requires a barrier argument. "
                  << "Use T.tma_copy(src, dst, barrier=mbar[idx]).";
     } else if (T.AllocMBarrier) {
@@ -1658,12 +1745,12 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     PrimExpr mbar_arg = barrier_base_id >= 0 ? mbar_handle : PrimExpr(0);
     tma_copy = Evaluate(Call(DataType::Handle(), tma_load(),
                              {shared_addr, global_addr, mbar_arg, total_bytes,
-                              op.GetEvictionPolicy()}));
+                              GetEvictionPolicy(op)}));
   } else {
     int need_reduce = 0;
     tma_copy = Evaluate(Call(DataType::Handle(), tma_store(),
                              {global_addr, shared_addr, total_bytes,
-                              need_reduce, op.GetEvictionPolicy()}));
+                              need_reduce, GetEvictionPolicy(op)}));
   }
 
   if (!is_load) {
@@ -1671,7 +1758,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     seq.reserve(3);
     seq.push_back(tma_copy);
     seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
-    if (!op.GetIsTmaCopy()) {
+    if (!GetIsTmaCopy(op)) {
       seq.push_back(Evaluate(Call(DataType::Handle(), tma_store_wait(),
                                   {IntImm(DataType::Int(32), 0)})));
     }
@@ -1681,7 +1768,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   if (is_load && barrier_base_id >= 0) {
     Stmt barrier_before_tma_stmt;
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
-    if (op.GetIsTmaCopy()) {
+    if (GetIsTmaCopy(op)) {
       barrier_before_tma_stmt =
           Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
                         {mbar_handle, total_bytes}));
@@ -1701,7 +1788,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
                                SeqStmt(producer_seq));
 
-    if (op.GetIsTmaCopy()) {
+    if (GetIsTmaCopy(op)) {
       return producer;
     }
 

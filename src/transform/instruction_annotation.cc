@@ -49,6 +49,29 @@ namespace {
 /// Annotation key written by this pass.
 static constexpr const char *kInstructionKind = "tl_instruction_kind";
 
+static bool GetBoolAnnotation(const CopyNode *copy, const char *key) {
+  if (copy == nullptr) {
+    return false;
+  }
+  if (auto val = copy->annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+static bool GetIsTmaCopy(const CopyNode *copy) {
+  return GetBoolAnnotation(copy, "is_tma_copy");
+}
+
+static bool GetIsAsyncCopy(const CopyNode *copy) {
+  if (GetBoolAnnotation(copy, "is_async_copy")) {
+    return true;
+  }
+  return GetBoolAnnotation(copy, "force_cp_async");
+}
+
 static bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true) {
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
@@ -91,15 +114,15 @@ std::string ClassifyCopy(const CopyNode *copy, Target target,
     return "sync";
   }
 
-  if (copy->GetIsTmaCopy()) {
+  if (GetIsTmaCopy(copy)) {
     return CheckBulkCopyPattern(copy, target) ? "tma" : "sync";
   }
 
-  if (copy->GetIsAsyncCopy()) {
+  if (GetIsAsyncCopy(copy)) {
     return "cp_async";
   }
 
-  if (in_pipeline && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
+  if (in_pipeline && !GetIsTmaCopy(copy) && !GetIsAsyncCopy(copy) &&
       IsAutoAsyncCopyEnabled(target, /*default_enabled=*/false) &&
       CheckCPAsyncCopy(copy, target)) {
     return "cp_async";

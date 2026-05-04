@@ -37,6 +37,26 @@ namespace software_pipeline {
 
 namespace {
 
+bool GetBoolAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+bool GetIsTmaCopy(const CopyNode &op) {
+  return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+bool GetIsAsyncCopy(const CopyNode &op) {
+  if (GetBoolAnnotation(op, "is_async_copy")) {
+    return true;
+  }
+  return GetBoolAnnotation(op, "force_cp_async");
+}
+
 bool CheckTargetIndependentAsyncCopyPreconditions(const CopyNode &op) {
   if (!IsGlobalBuffer(op.src) || !IsSharedBuffer(op.dst)) {
     return false;
@@ -49,7 +69,7 @@ bool CheckTargetIndependentAsyncCopyPreconditions(const CopyNode &op) {
 
 bool CheckPipelineManagedCPAsyncCopy(const CopyNode &op,
                                      Optional<Target> target) {
-  if (op.GetIsTmaCopy() || op.GetIsAsyncCopy() ||
+  if (GetIsTmaCopy(op) || GetIsAsyncCopy(op) ||
       !CheckTargetIndependentAsyncCopyPreconditions(op)) {
     return false;
   }

@@ -29,14 +29,9 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
-  Map<String, ObjectRef> annotations; // Annotations for the copy operation
-  // Supported annotation keys:
-  //   - "coalesced_width": IntImm, width for coalesced memory access
-  //   - "disable_tma": Bool, whether to disable TMA acceleration
-  //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
-  //   2=last)
-  //   - attr::kAsyncCopyNoImplicitCommitWait: IntImm/Bool, suppress implicit
-  //     cp.async commit/wait because an enclosing transform manages them
+  Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
+  // Common SIMT annotation keys:
+  //   - "coalesced_width": IntImm, width for coalesced memory access.
   //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
   //     layout hint applied to the outermost generated parallel loop of this
   //     copy's SIMT loop nest.
@@ -53,58 +48,6 @@ public:
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
         .def_ro("annotations", &CopyNode::annotations);
-  }
-
-  // Helper methods to get annotation values
-  bool GetDisableTMA() const {
-    if (auto val = annotations.Get("disable_tma")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
-  }
-
-  bool GetIsTmaCopy() const {
-    if (auto val = annotations.Get("is_tma_copy")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
-  }
-
-  int GetEvictionPolicy() const {
-    if (auto val = annotations.Get("eviction_policy")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value;
-      }
-    }
-    return 0; // default: evict_normal
-  }
-
-  bool GetIsAsyncCopy() const {
-    if (auto val = annotations.Get("is_async_copy")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    // Backward-compatibility with historical annotation key.
-    if (auto val = annotations.Get("force_cp_async")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
-  }
-
-  bool GetNoImplicitAsyncCommitWait() const {
-    if (auto val = annotations.Get(attr::kAsyncCopyNoImplicitCommitWait)) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
   }
 
   /*!
@@ -138,11 +81,6 @@ public:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
 
   /*!
-   * \brief Compute linear layout for tma copy.
-   */
-  Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
-
-  /*!
    * \brief Create iterator variables for multi-dimensional copy loops.
    */
   Array<IterVar> MakeIterVars() const;
@@ -163,20 +101,6 @@ public:
    */
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
-
-  /*!
-   * \brief Collect fragment buffers from expression and create fully replicated
-   * layouts.
-   *
-   * Recursively searches the expression for BufferLoad nodes with
-   * "local.fragment" scope, following let bindings. For each found fragment
-   * buffer, creates a fully replicated layout and adds it to result_map.
-   */
-  void CollectFragmentLayouts(const PrimExpr &expr,
-                              const Map<Var, PrimExpr> &let_var_to_expr,
-                              const LayoutMap &existing_layouts,
-                              PrimExpr thread_extent, Range thread_bounds,
-                              Map<Buffer, Layout> &result_map) const;
 
 protected:
   /**

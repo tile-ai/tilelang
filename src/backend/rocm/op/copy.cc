@@ -25,6 +25,34 @@ using namespace tir;
 
 namespace rocm {
 
+namespace {
+
+bool GetBoolAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+bool GetIsTmaCopy(const CopyNode &op) {
+  return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+bool GetIsAsyncCopy(const CopyNode &op) {
+  if (GetBoolAnnotation(op, "is_async_copy")) {
+    return true;
+  }
+  return GetBoolAnnotation(op, "force_cp_async");
+}
+
+bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
+  return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+} // namespace
+
 enum class CopyInst : uint8_t {
   kNormal = 0,
   kCPAsync = 1,
@@ -40,12 +68,12 @@ struct Copy {
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
                              arith::Analyzer *analyzer) {
-    if (op.GetIsTmaCopy()) {
+    if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() is not supported on ROCm target "
                  << target->ToDebugString();
     }
 
-    if (op.GetIsAsyncCopy() || op.GetNoImplicitAsyncCommitWait()) {
+    if (GetIsAsyncCopy(op) || GetNoImplicitAsyncCommitWait(op)) {
       bool cp_async_supported =
           CheckCPAsyncCopy(op, target, layout_map, analyzer);
       ICHECK(cp_async_supported)
@@ -81,9 +109,9 @@ private:
     PassContext pass_ctx = PassContext::Current();
     bool enable_async_copy =
         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-    bool no_implicit_commit_wait = op.GetNoImplicitAsyncCommitWait();
+    bool no_implicit_commit_wait = GetNoImplicitAsyncCommitWait(op);
     bool explicit_async_semantics =
-        no_implicit_commit_wait || op.GetIsAsyncCopy();
+        no_implicit_commit_wait || GetIsAsyncCopy(op);
     if (!enable_async_copy && !explicit_async_semantics) {
       return LowerNormalCopy(op, T, analyzer);
     }
@@ -112,7 +140,7 @@ private:
     auto inject_result =
         InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
                            /*async_without_async_commit_wait=*/
-                           no_implicit_commit_wait || op.GetIsAsyncCopy());
+                           no_implicit_commit_wait || GetIsAsyncCopy(op));
     Stmt cp_async_loop = inject_result.stmt;
     if (!inject_result.injected_ptx_async_copy) {
       LOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
@@ -122,7 +150,7 @@ private:
                    << ", dtype=" << op.dst->dtype
                    << "), no_implicit_async_commit_wait="
                    << no_implicit_commit_wait
-                   << ", is_async_copy=" << op.GetIsAsyncCopy();
+                   << ", is_async_copy=" << GetIsAsyncCopy(op);
       if (no_implicit_commit_wait) {
         LOG(WARNING)
             << "Pipeline-managed async copy fallback to normal copy because "
@@ -141,7 +169,7 @@ private:
     if (no_implicit_commit_wait) {
       return cp_async_loop;
     }
-    if (op.GetIsAsyncCopy()) {
+    if (GetIsAsyncCopy(op)) {
       Stmt commit_group =
           Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
       return SeqStmt({cp_async_loop, commit_group});

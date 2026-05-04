@@ -600,6 +600,33 @@ static PrimExpr BitsFromElements(PrimExpr elements, DataType dtype) {
          IntImm(DataType::Int(64), dtype.bits());
 }
 
+static bool GetBoolAnnotation(const CopyNode *copy, const char *key) {
+  if (copy == nullptr) {
+    return false;
+  }
+  if (auto val = copy->annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+static bool GetDisableTMA(const CopyNode *copy) {
+  return GetBoolAnnotation(copy, "disable_tma");
+}
+
+static bool GetIsTmaCopy(const CopyNode *copy) {
+  return GetBoolAnnotation(copy, "is_tma_copy");
+}
+
+static bool GetIsAsyncCopy(const CopyNode *copy) {
+  if (GetBoolAnnotation(copy, "is_async_copy")) {
+    return true;
+  }
+  return GetBoolAnnotation(copy, "force_cp_async");
+}
+
 static bool CheckCPAsyncCopyPreconditions(const CopyNode *copy) {
   return copy != nullptr && IsGlobalBuffer(copy->src) &&
          IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
@@ -607,7 +634,7 @@ static bool CheckCPAsyncCopyPreconditions(const CopyNode *copy) {
 
 static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
                                             Target target) {
-  return copy != nullptr && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
+  return copy != nullptr && !GetIsTmaCopy(copy) && !GetIsAsyncCopy(copy) &&
          TargetHasAsyncCopy(target) && CheckCPAsyncCopyPreconditions(copy);
 }
 
@@ -646,8 +673,8 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
   }
 
   arith::Analyzer analyzer;
-  return CheckCPAsyncCopyPreconditions(copy) && !copy->GetIsTmaCopy() &&
-         !copy->GetIsAsyncCopy() &&
+  return CheckCPAsyncCopyPreconditions(copy) && !GetIsTmaCopy(copy) &&
+         !GetIsAsyncCopy(copy) &&
          !CheckBulkLoadPattern(copy, target, &analyzer,
                                /*check_last_dim=*/true);
 }
@@ -707,7 +734,7 @@ static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
   }
   arith::Analyzer analyzer;
 
-  if (copy->GetIsTmaCopy()) {
+  if (GetIsTmaCopy(copy)) {
     if (CheckBulkLoadPattern(copy, target, &analyzer,
                              /*check_last_dim=*/false)) {
       return TileStmtKind::kTmaProducer;
@@ -715,12 +742,12 @@ static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
     return TileStmtKind::kConsumer;
   }
 
-  if (copy->GetIsAsyncCopy()) {
+  if (GetIsAsyncCopy(copy)) {
     return TileStmtKind::kCpAsyncProducer;
   }
 
-  if (!copy->GetDisableTMA() && CheckBulkLoadPattern(copy, target, &analyzer,
-                                                     /*check_last_dim=*/true)) {
+  if (!GetDisableTMA(copy) && CheckBulkLoadPattern(copy, target, &analyzer,
+                                                   /*check_last_dim=*/true)) {
     return TileStmtKind::kTmaProducer;
   }
 

@@ -25,6 +25,35 @@ namespace tl {
 
 using namespace tir;
 
+namespace {
+
+bool GetBoolAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+bool GetIsTmaCopy(const CopyNode &op) {
+  return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+bool GetIsAsyncCopy(const CopyNode &op) {
+  if (GetBoolAnnotation(op, "is_async_copy")) {
+    return true;
+  }
+  // Backward-compatibility with historical annotation key.
+  return GetBoolAnnotation(op, "force_cp_async");
+}
+
+bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
+  return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+} // namespace
+
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer) {
   bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
@@ -93,12 +122,12 @@ bool DefaultMatchTarget(Target target) { return true; }
 
 Stmt DefaultLowerCopy(const CopyNode &op, const LowerArgs &T,
                       arith::Analyzer *analyzer) {
-  if (op.GetIsTmaCopy()) {
+  if (GetIsTmaCopy(op)) {
     LOG(FATAL) << "T.tma_copy() requires a target-specific copy "
                   "implementation, but no implementation is registered for "
                << T.target->ToDebugString();
   }
-  if (op.GetIsAsyncCopy() || op.GetNoImplicitAsyncCommitWait()) {
+  if (GetIsAsyncCopy(op) || GetNoImplicitAsyncCommitWait(op)) {
     LOG(FATAL) << "Async copy requires a target-specific copy implementation, "
                   "but no implementation is registered for "
                << T.target->ToDebugString();
@@ -218,8 +247,7 @@ void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl) {
 
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
-// annotations: Map containing coalesced_width, disable_tma, eviction_policy,
-// etc.
+// annotations: Map containing common SIMT hints and backend-specific metadata.
 Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
@@ -451,25 +479,6 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   return Downcast<For>(body);
 }
 
-// Computes a linearized shared-memory layout for TMA transfers.
-// Maps [i, j] -> [i // 256, j // 256, i % 256, j % 256]
-Layout CopyNode::ComputeLinearLayout(const Buffer &shared_tensor) const {
-  Array<PrimExpr> input_size = shared_tensor->shape;
-  Array<PrimExpr> forward_vars;
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_vars.push_back(InputPlaceholder(i));
-  }
-  // [i, j] -> [i // 256, j // 256, i % 256, j % 256]
-  Array<PrimExpr> forward_index;
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_index.push_back(FloorDiv(forward_vars[i], 256));
-  }
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_index.push_back(FloorMod(forward_vars[i], 256));
-  }
-  return Layout(input_size, forward_index);
-}
-
 LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
                                 InferLevel level) const {
   return InferCopyLayout(*this, T, level);
@@ -478,12 +487,12 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
 // Infers memory layouts for the default target-independent copy path.
 LayoutMap CopyNode::InferLayoutImpl(const LayoutInferArgs &T,
                                     InferLevel level) const {
-  if (GetIsTmaCopy()) {
+  if (GetIsTmaCopy(*this)) {
     LOG(FATAL) << "T.tma_copy() requires a target-specific copy "
                   "implementation, but no implementation is registered for "
                << T.target->ToDebugString();
   }
-  if (GetIsAsyncCopy() || GetNoImplicitAsyncCommitWait()) {
+  if (GetIsAsyncCopy(*this) || GetNoImplicitAsyncCommitWait(*this)) {
     LOG(FATAL) << "Async copy requires a target-specific copy implementation, "
                   "but no implementation is registered for "
                << T.target->ToDebugString();
@@ -541,34 +550,9 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   return LowerConv2DIm2ColForTarget(*this, T, analyzer);
 }
 
-void CopyNode::CollectFragmentLayouts(const PrimExpr &expr,
-                                      const Map<Var, PrimExpr> &let_var_to_expr,
-                                      const LayoutMap &existing_layouts,
-                                      PrimExpr thread_extent,
-                                      Range thread_bounds,
-                                      Map<Buffer, Layout> &result_map) const {
-  PostOrderVisit(expr, [&](const ObjectRef &node) {
-    if (auto bl = node.as<BufferLoadNode>()) {
-      if (IsFragmentBuffer(bl->buffer) && !existing_layouts.count(bl->buffer) &&
-          !result_map.count(bl->buffer)) {
-        auto f = Fragment::FullyReplicated(bl->buffer->shape, thread_extent);
-        result_map.Set(bl->buffer, f->BindThreadRange(thread_bounds));
-      }
-    } else if (auto var_node = node.as<VarNode>()) {
-      auto var = tvm::ffi::GetRef<Var>(var_node);
-      if (let_var_to_expr.count(var)) {
-        CollectFragmentLayouts(let_var_to_expr[var], let_var_to_expr,
-                               existing_layouts, thread_extent, thread_bounds,
-                               result_map);
-      }
-    }
-  });
-}
-
 // Register the Copy operation with TVM's TIR system
 // This makes the copy operation available for use in TVM programs
-// - Takes 5 inputs: src_buffer, dst_buffer, coalesced_width, disable_tma,
-// eviction_policy
+// - Takes 5 inputs: src_buffer, dst_buffer, and annotation-driven options.
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
     .set_num_inputs(5)
@@ -612,7 +596,8 @@ LayoutMap Conv2DIm2ColOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 // Register the Conv2DIm2Col operation with TVM's TIR system
-// This operation performs im2col transformation for 2D convolutions using TMA
+// This operation performs im2col transformation for 2D convolutions using a
+// target-specific lowering.
 // - Takes 9 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride,
 // dilation, padding, eviction_policy
 // - Marked as opaque since it has side effects (memory writes)

@@ -14,6 +14,34 @@ using namespace tir;
 
 namespace cpu {
 
+namespace {
+
+bool GetBoolAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+bool GetIsTmaCopy(const CopyNode &op) {
+  return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+bool GetIsAsyncCopy(const CopyNode &op) {
+  if (GetBoolAnnotation(op, "is_async_copy")) {
+    return true;
+  }
+  return GetBoolAnnotation(op, "force_cp_async");
+}
+
+bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
+  return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+} // namespace
+
 struct Copy {
   static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                                InferLevel level) {
@@ -22,11 +50,11 @@ struct Copy {
   }
 
   static void CheckSupported(const CopyNode &op, Target target) {
-    if (op.GetIsTmaCopy()) {
+    if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() is not supported on CPU target "
                  << target->ToDebugString();
     }
-    if (op.GetIsAsyncCopy() || op.GetNoImplicitAsyncCommitWait()) {
+    if (GetIsAsyncCopy(op) || GetNoImplicitAsyncCommitWait(op)) {
       LOG(FATAL) << "Async copy is not supported on CPU target "
                  << target->ToDebugString();
     }
