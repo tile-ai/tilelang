@@ -60,15 +60,25 @@ public:
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;    // NOLINT(*)
   void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const CallNode *op, std::ostream &os) final;      // NOLINT(*)
+  void VisitExpr_(const CastNode *op, std::ostream &os) final;      // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;  // NOLINT(*)
+
+  // Override to inject FP8 prelude (storage-only emulation helpers) when
+  // any FP8 dtype was referenced.
+  std::string Finish() final;
 
   // reuse parent's function.
   using CodeGenC::PrintType;
 
 private:
+  // Emit inline MSL helpers for storage-only FP8 (e4m3 / e5m2) emulation.
+  void PrintFP8Prelude(std::ostream &os);
+
   std::unordered_map<const VarNode *, std::string> simdgroup_dtype_;
   int thread_index_bits_{32};
   int thread_work_dim_{0};
+  // Set when an FP8 dtype is referenced; gates emission of FP8 prelude helpers.
+  bool enable_fp8_{false};
   Target target_;
 };
 } // namespace codegen

@@ -57,6 +57,98 @@ CodeGenTileLangMetal::CodeGenTileLangMetal(Target target) : target_(target) {
               << "};\n\n";
 }
 
+// Inline MSL helpers for storage-only FP8 emulation (e4m3 / e5m2).
+// Apple Silicon (M4 Max and earlier; M5 NAX is FP16/INT8 only) has NO native
+// FP8 ALU support, so FP8 is realised as `uchar` storage with explicit
+// dequantize-on-load / quantize-on-store. The helpers mirror the IEEE 754
+// derived encoding from the OFP8 spec (E4M3 with finite-only encoding, E5M2
+// IEEE-style with NaN/Inf).
+void CodeGenTileLangMetal::PrintFP8Prelude(std::ostream &os) {
+  os <<
+      "// FP8 storage-only emulation helpers (MSL has no native float8 type).\n"
+      "// See OCP \"OFP8 Formats for Deep Learning\" v1.0 spec.\n"
+      "inline half __tvm_fp8_e4m3_to_half(uchar x) {\n"
+      "  ushort sign = (ushort)(x & 0x80) << 8;\n"
+      "  ushort mant = (ushort)(x & 0x07);\n"
+      "  ushort exp = (ushort)((x >> 3) & 0x0F);\n"
+      "  ushort h;\n"
+      "  if (exp == 0) {\n"
+      "    if (mant == 0) {\n"
+      "      h = sign;\n"
+      "    } else {\n"
+      "      // subnormal: e4m3 value = mant * 2^-9. After shifting the\n"
+      "      // mantissa so the leading 1 hits bit 2 (0x4), the half\n"
+      "      // biased exponent is (e + 7), not (e + 8).\n"
+      "      ushort m = mant;\n"
+      "      ushort e = 1;\n"
+      "      while ((m & 0x4) == 0) { m <<= 1; e -= 1; }\n"
+      "      m &= 0x3;\n"
+      "      h = (ushort)(sign | ((ushort)(e + 7) << 10) | (ushort)(m << 8));\n"
+      "    }\n"
+      "  } else if (exp == 0x0F && mant == 0x07) {\n"
+      "    h = (ushort)(sign | 0x7E00);\n"
+      "  } else {\n"
+      "    h = (ushort)(sign | ((ushort)(exp + 8) << 10) | (ushort)(mant << 7));\n"
+      "  }\n"
+      "  return as_type<half>(h);\n"
+      "}\n"
+      "inline half __tvm_fp8_e5m2_to_half(uchar x) {\n"
+      "  ushort h = ((ushort)x) << 8;\n"
+      "  return as_type<half>(h);\n"
+      "}\n"
+      "inline uchar __tvm_half_to_fp8_e4m3(half v) {\n"
+      "  ushort h = as_type<ushort>(v);\n"
+      "  ushort sign = (h >> 8) & 0x80;\n"
+      "  short he = (short)((h >> 10) & 0x1F);\n"
+      "  ushort hm = h & 0x3FF;\n"
+      "  if (he == 0x1F) {\n"
+      "    return (uchar)(sign | 0x7F);\n"
+      "  }\n"
+      "  short e = he - 8;\n"
+      "  if (e >= 0x0F) {\n"
+      "    return (uchar)(sign | 0x7E);\n"
+      "  }\n"
+      "  if (e <= 0) {\n"
+      "    if (e < -3) return (uchar)sign;\n"
+      "    ushort m = hm | 0x400;\n"
+      "    ushort shift = (ushort)(7 + 1 - e);\n"
+      "    ushort round_bit = (ushort)1 << (shift - 1);\n"
+      "    ushort sticky = m & (round_bit - 1);\n"
+      "    ushort q = m >> shift;\n"
+      "    ushort rem = m & ((round_bit << 1) - 1);\n"
+      "    if (rem > round_bit || (rem == round_bit && (q & 1))) q += 1;\n"
+      "    (void)sticky;\n"
+      "    return (uchar)(sign | (q & 0x7F));\n"
+      "  }\n"
+      "  ushort q = hm >> 7;\n"
+      "  ushort rem = hm & 0x7F;\n"
+      "  if (rem > 0x40 || (rem == 0x40 && (q & 1))) {\n"
+      "    q += 1;\n"
+      "    if (q == 0x08) { q = 0; e += 1; }\n"
+      "    if (e >= 0x0F) return (uchar)(sign | 0x7E);\n"
+      "  }\n"
+      "  return (uchar)(sign | (ushort)(e << 3) | (q & 0x07));\n"
+      "}\n"
+      "inline uchar __tvm_half_to_fp8_e5m2(half v) {\n"
+      "  ushort h = as_type<ushort>(v);\n"
+      "  ushort sign = h & 0x8000;\n"
+      "  ushort exp = (h >> 10) & 0x1F;\n"
+      "  ushort mant = h & 0x3FF;\n"
+      "  if (exp == 0x1F) {\n"
+      "    if (mant != 0) return (uchar)((sign >> 8) | 0x7E);\n"
+      "    return (uchar)((sign >> 8) | 0x7C);\n"
+      "  }\n"
+      "  ushort q = mant >> 8;\n"
+      "  ushort rem = mant & 0xFF;\n"
+      "  if (rem > 0x80 || (rem == 0x80 && (q & 1))) {\n"
+      "    q += 1;\n"
+      "    if (q == 0x4) { q = 0; exp += 1; }\n"
+      "    if (exp == 0x1F) return (uchar)((sign >> 8) | 0x7C);\n"
+      "  }\n"
+      "  return (uchar)((sign >> 8) | (uchar)(exp << 2) | (uchar)(q & 0x3));\n"
+      "}\n\n";
+}
+
 void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
                                        const PrimFunc &func) {
   // NOTE: There is no inter-function calls among Metal kernels.
@@ -275,6 +367,27 @@ void CodeGenTileLangMetal::PrintType(DataType t,
   } else if (t.is_bfloat16()) {
     os << "bfloat";
     return;
+  } else if (t.is_float8()) {
+    // FP8 is storage-only on Metal: print as `uchar`/`ucharN` and emit explicit
+    // dequantize/quantize helpers via the FP8 prelude. Caller-side casts must
+    // route through __tvm_fp8_*_to_half / __tvm_half_to_fp8_*.
+    enable_fp8_ = true;
+    if (lanes == 1) {
+      os << "uchar";
+      return;
+    }
+    if (lanes >= 2 && lanes <= 4) {
+      os << "uchar" << lanes;
+      return;
+    }
+    if (lanes == 8) {
+      os << "uint2";
+      return;
+    }
+    if (lanes == 16) {
+      os << "uint4";
+      return;
+    }
   }
   LOG(FATAL) << "Cannot convert type " << t << " to Metal type";
 }
@@ -515,6 +628,73 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const CastNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  DataType from_ty = op->value.dtype();
+  DataType target_ty = op->dtype;
+  if (target_ty.is_float8() || from_ty.is_float8()) {
+    enable_fp8_ = true;
+    ICHECK_EQ(target_ty.lanes(), from_ty.lanes())
+        << "FP8 vector cast lanes must match: " << from_ty << " -> "
+        << target_ty;
+    auto fp8_to_half = [&](DataType ft, std::string val) {
+      const char *helper = ft.code() == DataType::kFloat8_e5m2
+                               ? "__tvm_fp8_e5m2_to_half"
+                               : "__tvm_fp8_e4m3_to_half";
+      return std::string(helper) + "(" + val + ")";
+    };
+    auto half_to_fp8 = [&](DataType tt, std::string val) {
+      const char *helper = tt.code() == DataType::kFloat8_e5m2
+                               ? "__tvm_half_to_fp8_e5m2"
+                               : "__tvm_half_to_fp8_e4m3";
+      return std::string(helper) + "(" + val + ")";
+    };
+    if (target_ty.lanes() == 1) {
+      std::string val = PrintExpr(op->value);
+      if (from_ty.is_float8() && !target_ty.is_float8()) {
+        std::string h = fp8_to_half(from_ty, val);
+        if (target_ty == DataType::Float(16)) {
+          os << h;
+        } else {
+          os << "((";
+          PrintType(target_ty, os);
+          os << ")(" << h << "))";
+        }
+      } else if (!from_ty.is_float8() && target_ty.is_float8()) {
+        std::string h = from_ty == DataType::Float(16)
+                            ? val
+                            : "((half)(" + val + "))";
+        os << half_to_fp8(target_ty, h);
+      } else {
+        std::string h = fp8_to_half(from_ty, val);
+        os << half_to_fp8(target_ty, h);
+      }
+      return;
+    }
+    LOG(FATAL) << "Vector FP8 casts (lanes=" << target_ty.lanes()
+               << ") are not yet supported by Metal storage-only FP8 emulation;"
+               << " scalarise the cast or extend codegen_metal.cc.";
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+std::string CodeGenTileLangMetal::Finish() {
+  std::ostringstream prelude;
+  if (enable_fp8_) {
+    PrintFP8Prelude(prelude);
+  }
+  std::string base = CodeGenC::Finish();
+  if (prelude.str().empty())
+    return base;
+  const std::string anchor = "using namespace metal;\n";
+  auto pos = base.find(anchor);
+  if (pos == std::string::npos) {
+    return prelude.str() + base;
+  }
+  pos += anchor.size();
+  return base.substr(0, pos) + "\n" + prelude.str() + base.substr(pos);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
