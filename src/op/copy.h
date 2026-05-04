@@ -24,10 +24,11 @@ enum class CopyInst : uint8_t {
   kCPAsync = 5,   // cp.async global->shared copy
   // we should separate the bulk load and store for 1d and multi-dim
   // as they have different memory access patterns
-  kBulkLoad1D = 6,  // utilize tma load 1d
-  kBulkStore1D = 7, // utilize tma store 1d
-  kTMemLoad = 8,    // tcgen05.ld (tensor memory -> register)
-  kTMemStore = 9,   // tcgen05.st (register -> tensor memory)
+  kBulkLoad1D = 6,      // utilize tma load 1d
+  kBulkStore1D = 7,     // utilize tma store 1d
+  kTMemLoad = 8,        // tcgen05.ld (tensor memory -> register)
+  kTMemStore = 9,       // tcgen05.st (register -> tensor memory)
+  kMetalSIMDGroup = 10, // Metal simdgroup load/store
 };
 
 /// Convert CopyInst enum to string for debugging
@@ -53,6 +54,8 @@ inline const char *CopyInstToString(CopyInst inst) {
     return "TMemLoad";
   case CopyInst::kTMemStore:
     return "TMemStore";
+  case CopyInst::kMetalSIMDGroup:
+    return "MetalSIMDGroup";
   default:
     return "Unknown";
   }
@@ -291,6 +294,11 @@ public:
 
 protected:
   /*!
+   * \brief Check if copy from Metal simdgroup to shared/global is supported.
+   */
+  bool CheckSIMDGroupCopy(Target target) const;
+
+  /*!
    * \brief Get the copy instruction type.
    */
   CopyInst GetCopyInst(Target target, const LayoutMap &layout_map,
@@ -330,6 +338,11 @@ protected:
    * \brief Generate lowering for cp.async global->shared copy.
    */
   Stmt LowerCPAsyncCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Generate lowering for simdgroup store.
+   */
+  Stmt LowerSIMDGroupCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
