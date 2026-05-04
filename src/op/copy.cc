@@ -9,7 +9,6 @@
  */
 
 #include "copy.h"
-#include "../layout/tcgen05_layout.h"
 #include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
@@ -25,6 +24,7 @@
 #include <tvm/tir/transform.h>
 
 #include <limits>
+#include <sstream>
 #include <vector>
 
 namespace tvm {
@@ -622,156 +622,12 @@ LayoutMap CopyNode::InferLayoutForCopyInst(const LayoutInferArgs &T,
     }
   }
 
-  // Handle tensor memory (tmem) layout inference for both load and store
-  if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
-    // TODO (mzw) Add support for tcgen05.cp in CUDA tmem lowering.
-    LayoutMap results;
-    bool is_tmem_load = (copy_inst == CopyInst::kTMemLoad);
-    Buffer tmem_buf = is_tmem_load ? src : dst;
-    Buffer reg_buf = is_tmem_load ? dst : src;
-
-    if (!T.layout_map.count(reg_buf) && T.layout_map.count(tmem_buf)) {
-      Layout tmem_layout = T.layout_map[tmem_buf];
-      Array<IterVar> logical_coords = MakeIterVars();
-      Array<PrimExpr> logical_coords_var = {logical_coords[0]->var,
-                                            logical_coords[1]->var};
-      Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_coords_var);
-
-      // Tmem physical coord range analysis
-      auto analyzer = std::make_shared<arith::Analyzer>();
-      for (const auto &iv : logical_coords)
-        analyzer->Bind(iv->var, iv->dom);
-      arith::ConstIntBound phy_row_bounds =
-          analyzer->const_int_bound(phy_indices[0]);
-      arith::ConstIntBound phy_col_bounds =
-          analyzer->const_int_bound(phy_indices[1]);
-      Range row_dom = Range((int)(phy_row_bounds->min_value),
-                            (int)(phy_row_bounds->max_value + 1));
-      Range col_dom = Range((int)(phy_col_bounds->min_value),
-                            (int)(phy_col_bounds->max_value + 1));
-
-      constexpr int WARP_SIZE = 32;
-      constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
-      ICHECK(is_const_int(T.thread_bounds->extent))
-          << "Tensor memory copy requires thread_bounds->extent (num_threads) "
-             "to be constant integers";
-      int num_threads = *as_const_int(T.thread_bounds->extent);
-      ICHECK(num_threads % WARPGROUP_SIZE == 0)
-          << "Tensor memory copy requires thread bounds to be aligned to "
-             "warpgroups, but found "
-          << "thread range = " << T.thread_bounds;
-
-      for (int num_useful_wgs = num_threads / WARPGROUP_SIZE;
-           num_useful_wgs >= 1; --num_useful_wgs) {
-        int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
-        Tcgen05Meta meta = getTcgen05MetaLd_32dp32b();
-        auto [is_success, tmem_coord2frag, num_chunks_each_wg] =
-            expandTcgen05Layout(
-                meta, phy_col_bounds->max_value - phy_col_bounds->min_value + 1,
-                num_useful_threads, row_dom, col_dom);
-        if (!is_success) {
-          continue;
-        }
-        Fragment logical_coord2frag =
-            Fragment(logical_coords, tmem_coord2frag->Forward(phy_indices),
-                     tmem_coord2frag->ForwardThread(phy_indices, std::nullopt),
-                     make_itervar("rep", 1));
-        results.Set(reg_buf,
-                    logical_coord2frag->BindThreadRange(T.thread_bounds));
-        break;
-      }
-    }
-
-    return results;
+  if (copy_inst != CopyInst::kNormal && copy_inst != CopyInst::kCPAsync) {
+    LOG(FATAL) << "Copy layout inference for " << CopyInstToString(copy_inst)
+               << " must be implemented by the selected backend.";
   }
 
-  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
-      copy_inst == CopyInst::kBulkLoad1D ||
-      copy_inst == CopyInst::kBulkStore1D) {
-    // if can apply swizzling, we skip layout inference
-    // for bulk load/store, we can directly apply the layout of normal copy
-    // This must be a global/shared layout, so we can skip the parallel op
-    // layout inference (parallel layout inference only annotate the loop layout
-    // and the register layout).
-    Map<Buffer, Layout> result_map;
-
-    bool is_tma_1d = copy_inst == CopyInst::kBulkLoad1D ||
-                     copy_inst == CopyInst::kBulkStore1D;
-    bool is_load =
-        copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
-    bool is_store = copy_inst == CopyInst::kBulkStore ||
-                    copy_inst == CopyInst::kBulkStore1D;
-    auto global_tensor = is_load ? src : dst;
-    auto shared_tensor = is_load ? dst : src;
-    auto shared_range = is_load ? dst_range : src_range;
-
-    if (is_tma_1d && shared_range.size() == 1) {
-      // 1D TMA Store with single dimension can not be swizzled
-      // But 1D TMA can also have multiple dimensions when the last
-      // dimension is continuous.
-      return result_map;
-    }
-
-    // Collect fragment buffers from indices and mark them as fully replicated
-    // For Bulk Load/Store, fragment buffers used as indices should be
-    // replicated across all threads
-    PrimExpr thread_extent = T.thread_bounds->extent;
-    for (const auto &range : src_range) {
-      CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
-                             thread_extent, T.thread_bounds, result_map);
-      CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
-                             thread_extent, T.thread_bounds, result_map);
-    }
-    for (const auto &range : dst_range) {
-      CollectFragmentLayouts(range->min, T.let_var_to_expr, T.layout_map,
-                             thread_extent, T.thread_bounds, result_map);
-      CollectFragmentLayouts(range->extent, T.let_var_to_expr, T.layout_map,
-                             thread_extent, T.thread_bounds, result_map);
-    }
-
-    // check shared layout is non-swizzle
-    // skip layout inference if shared layout is already annotated
-    if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
-      if (is_store) {
-        // For BulkStore, we should perform swizzle if possible.
-        // TMA Store is always 1d like, we can directly use the last two
-        // dimensions to analysis swizzling.
-        int dim = shared_tensor->shape.size();
-        const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
-        const int64_t mat_continuous =
-            *as_const_int(shared_tensor->shape[dim - 1]);
-        Layout swizzle_layout_2d = makeGemmABLayoutHopper(
-            mat_stride, mat_continuous, mat_continuous,
-            shared_tensor->dtype.bits(), /*k_inner=*/true);
-        // If makeGemmABLayoutHopper returns a linear layout, fallback to
-        // ComputeLinearLayout which handles arbitrary tensor shapes correctly.
-        if (StructuralEqual()(
-                swizzle_layout_2d,
-                makeLinearLayout(Array<PrimExpr>{Integer(mat_stride),
-                                                 Integer(mat_continuous)}))) {
-          result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
-        } else {
-          result_map.Set(shared_tensor, ExpandLayoutToMatchBuffer(
-                                            swizzle_layout_2d, shared_tensor));
-        }
-      } else if (level == InferLevel::kFree) {
-        // create a new layout map for tma linear layout
-        Layout linear_layout = ComputeLinearLayout(shared_tensor);
-        result_map.Set(shared_tensor, linear_layout);
-      }
-    }
-    return result_map;
-  }
-
-  // for LDSM/STSM, the layout was deduced from register layout
-  // so we can directly apply the layout of normal copy
-  // Use parallel op to infer the layout
-  if (!par_op_.defined()) {
-    arith::Analyzer analyzer;
-    par_op_ = ParallelOp((MakeSIMTLoop(&analyzer)));
-  }
-  auto layout_map = par_op_->InferLayout(T, level);
-  return layout_map;
+  return CopyLoweringAccess::InferSIMTLayout(*this, T, level);
 }
 // Shared stride validation for TMA bulk load/store.
 bool CopyNode::CheckGlobalStrides(const Buffer &buffer,

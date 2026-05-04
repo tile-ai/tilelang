@@ -440,6 +440,15 @@ public:
     return op.InferLayoutForCopyInst(T, level, copy_inst);
   }
 
+  static LayoutMap InferSIMTLayout(const CopyNode &op, const LayoutInferArgs &T,
+                                   InferLevel level) {
+    if (!op.par_op_.defined()) {
+      arith::Analyzer analyzer;
+      op.par_op_ = ParallelOp(op.MakeSIMTLoop(&analyzer));
+    }
+    return op.par_op_->InferLayout(T, level);
+  }
+
   static For MakeSIMTLoop(const CopyNode &op, arith::Analyzer *analyzer) {
     return op.MakeSIMTLoop(analyzer);
   }
@@ -462,6 +471,17 @@ public:
                                 const Array<IterVar> &ivs,
                                 Array<PrimExpr> extents, int src_dst) {
     return op.MakePredicate(analyzer, ivs, std::move(extents), src_dst);
+  }
+
+  static void CollectFragmentLayouts(const CopyNode &op, const PrimExpr &expr,
+                                     const Map<Var, PrimExpr> &let_var_to_expr,
+                                     const LayoutMap &existing_layouts,
+                                     PrimExpr thread_extent,
+                                     Range thread_bounds,
+                                     Map<Buffer, Layout> &result_map) {
+    op.CollectFragmentLayouts(expr, let_var_to_expr, existing_layouts,
+                              thread_extent, std::move(thread_bounds),
+                              result_map);
   }
 };
 

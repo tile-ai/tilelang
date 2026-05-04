@@ -19,6 +19,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/transform.h>
 
+#include <sstream>
 #include <vector>
 
 namespace tvm {
@@ -78,6 +79,14 @@ struct Copy {
                     arith::Analyzer *analyzer);
 
 private:
+  static void CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst);
+
+  static LayoutMap InferTMemLayout(const CopyNode &op, const LayoutInferArgs &T,
+                                   CopyInst copy_inst);
+
+  static LayoutMap InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
+                                   InferLevel level, CopyInst copy_inst);
+
   static Stmt LowerNormal(const CopyNode &op, const LowerArgs &T,
                           arith::Analyzer *analyzer);
 
@@ -101,7 +110,167 @@ LayoutMap Copy::InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                             InferLevel level) {
   CopyInst copy_inst =
       SelectInst(op, T.target, T.layout_map, T.analyzer, T.buffer_oob);
-  return CopyLoweringAccess::InferLayoutForCopyInst(op, T, level, copy_inst);
+  CheckParallelLoopLayout(op, copy_inst);
+
+  if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
+    return InferTMemLayout(op, T, copy_inst);
+  }
+  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore ||
+      copy_inst == CopyInst::kBulkLoad1D ||
+      copy_inst == CopyInst::kBulkStore1D) {
+    return InferBulkLayout(op, T, level, copy_inst);
+  }
+
+  // For normal/cp.async/LDSM/STSM, layout inference follows the generated
+  // SIMT loop. CUDA-specific explicit layout cases are handled above.
+  return CopyLoweringAccess::InferSIMTLayout(op, T, level);
+}
+
+void Copy::CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst) {
+  if (!op.annotations.count(attr::kParallelLoopLayout)) {
+    return;
+  }
+  if (copy_inst == CopyInst::kNormal || copy_inst == CopyInst::kCPAsync) {
+    return;
+  }
+
+  std::ostringstream oss;
+  oss << "T.copy loop layout annotation requires SIMT copy; got "
+      << CopyInstToString(copy_inst) << " for src=" << op.src->name
+      << ", dst=" << op.dst->name
+      << ". Remove loop_layout or change copy pattern.";
+  LOG(FATAL) << oss.str();
+}
+
+LayoutMap Copy::InferTMemLayout(const CopyNode &op, const LayoutInferArgs &T,
+                                CopyInst copy_inst) {
+  // TODO (mzw) Add support for tcgen05.cp in CUDA tmem lowering.
+  LayoutMap results;
+  bool is_tmem_load = copy_inst == CopyInst::kTMemLoad;
+  Buffer tmem_buf = is_tmem_load ? op.src : op.dst;
+  Buffer reg_buf = is_tmem_load ? op.dst : op.src;
+
+  if (!T.layout_map.count(reg_buf) && T.layout_map.count(tmem_buf)) {
+    Layout tmem_layout = T.layout_map[tmem_buf];
+    Array<IterVar> logical_coords = CopyLoweringAccess::MakeIterVars(op);
+    Array<PrimExpr> logical_coords_var = {logical_coords[0]->var,
+                                          logical_coords[1]->var};
+    Array<PrimExpr> phy_indices = tmem_layout->Forward(logical_coords_var);
+
+    arith::Analyzer analyzer;
+    for (const auto &iv : logical_coords) {
+      analyzer.Bind(iv->var, iv->dom);
+    }
+    arith::ConstIntBound phy_row_bounds =
+        analyzer.const_int_bound(phy_indices[0]);
+    arith::ConstIntBound phy_col_bounds =
+        analyzer.const_int_bound(phy_indices[1]);
+    Range row_dom = Range(static_cast<int>(phy_row_bounds->min_value),
+                          static_cast<int>(phy_row_bounds->max_value + 1));
+    Range col_dom = Range(static_cast<int>(phy_col_bounds->min_value),
+                          static_cast<int>(phy_col_bounds->max_value + 1));
+
+    constexpr int WARP_SIZE = 32;
+    constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
+    ICHECK(is_const_int(T.thread_bounds->extent))
+        << "Tensor memory copy requires thread_bounds->extent (num_threads) "
+           "to be constant integers";
+    int num_threads = *as_const_int(T.thread_bounds->extent);
+    ICHECK(num_threads % WARPGROUP_SIZE == 0)
+        << "Tensor memory copy requires thread bounds to be aligned to "
+           "warpgroups, but found "
+        << "thread range = " << T.thread_bounds;
+
+    for (int num_useful_wgs = num_threads / WARPGROUP_SIZE; num_useful_wgs >= 1;
+         --num_useful_wgs) {
+      int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
+      Tcgen05Meta meta = getTcgen05MetaLd_32dp32b();
+      auto [is_success, tmem_coord2frag, num_chunks_each_wg] =
+          expandTcgen05Layout(
+              meta, phy_col_bounds->max_value - phy_col_bounds->min_value + 1,
+              num_useful_threads, row_dom, col_dom);
+      (void)num_chunks_each_wg;
+      if (!is_success) {
+        continue;
+      }
+      Fragment logical_coord2frag =
+          Fragment(logical_coords, tmem_coord2frag->Forward(phy_indices),
+                   tmem_coord2frag->ForwardThread(phy_indices, std::nullopt),
+                   make_itervar("rep", 1));
+      results.Set(reg_buf,
+                  logical_coord2frag->BindThreadRange(T.thread_bounds));
+      break;
+    }
+  }
+
+  return results;
+}
+
+LayoutMap Copy::InferBulkLayout(const CopyNode &op, const LayoutInferArgs &T,
+                                InferLevel level, CopyInst copy_inst) {
+  Map<Buffer, Layout> result_map;
+
+  bool is_tma_1d =
+      copy_inst == CopyInst::kBulkLoad1D || copy_inst == CopyInst::kBulkStore1D;
+  bool is_load =
+      copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkLoad1D;
+  bool is_store =
+      copy_inst == CopyInst::kBulkStore || copy_inst == CopyInst::kBulkStore1D;
+  Buffer shared_tensor = is_load ? op.dst : op.src;
+  Array<Range> shared_range = is_load ? op.dst_range : op.src_range;
+
+  if (is_tma_1d && shared_range.size() == 1) {
+    // 1D TMA Store with single dimension can not be swizzled. 1D TMA can also
+    // have multiple dimensions when the last dimension is continuous.
+    return result_map;
+  }
+
+  // Fragment buffers used as TMA indices should be replicated on all threads.
+  PrimExpr thread_extent = T.thread_bounds->extent;
+  for (const auto &range : op.src_range) {
+    CopyLoweringAccess::CollectFragmentLayouts(
+        op, range->min, T.let_var_to_expr, T.layout_map, thread_extent,
+        T.thread_bounds, result_map);
+    CopyLoweringAccess::CollectFragmentLayouts(
+        op, range->extent, T.let_var_to_expr, T.layout_map, thread_extent,
+        T.thread_bounds, result_map);
+  }
+  for (const auto &range : op.dst_range) {
+    CopyLoweringAccess::CollectFragmentLayouts(
+        op, range->min, T.let_var_to_expr, T.layout_map, thread_extent,
+        T.thread_bounds, result_map);
+    CopyLoweringAccess::CollectFragmentLayouts(
+        op, range->extent, T.let_var_to_expr, T.layout_map, thread_extent,
+        T.thread_bounds, result_map);
+  }
+
+  if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
+    if (is_store) {
+      // For BulkStore, infer a swizzled shared-memory layout when possible.
+      int dim = shared_tensor->shape.size();
+      const int64_t mat_stride = *as_const_int(shared_tensor->shape[dim - 2]);
+      const int64_t mat_continuous =
+          *as_const_int(shared_tensor->shape[dim - 1]);
+      Layout swizzle_layout_2d =
+          makeGemmABLayoutHopper(mat_stride, mat_continuous, mat_continuous,
+                                 shared_tensor->dtype.bits(),
+                                 /*k_inner=*/true);
+      if (StructuralEqual()(swizzle_layout_2d, makeLinearLayout(Array<PrimExpr>{
+                                                   Integer(mat_stride),
+                                                   Integer(mat_continuous)}))) {
+        result_map.Set(shared_tensor, CopyLoweringAccess::ComputeLinearLayout(
+                                          op, shared_tensor));
+      } else {
+        result_map.Set(shared_tensor, ExpandLayoutToMatchBuffer(
+                                          swizzle_layout_2d, shared_tensor));
+      }
+    } else {
+      result_map.Set(shared_tensor, CopyLoweringAccess::ComputeLinearLayout(
+                                        op, shared_tensor));
+    }
+  }
+
+  return result_map;
 }
 
 CopyInst Copy::SelectInst(const CopyNode &op, Target target,
