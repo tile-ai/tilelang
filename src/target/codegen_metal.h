@@ -73,12 +73,19 @@ public:
 private:
   // Emit inline MSL helpers for storage-only FP8 (e4m3 / e5m2) emulation.
   void PrintFP8Prelude(std::ostream &os);
+  // Emit additional inline MSL helpers that operate on vector FP8 (lanes 2-4).
+  // Keeps the IR-level vector type intact when emitting casts so subsequent
+  // passes can preserve their vectorisation. Spliced into the prelude only
+  // when at least one vector FP8 cast is encountered during codegen.
+  void PrintFP8VectorPrelude(std::ostream &os);
 
   std::unordered_map<const VarNode *, std::string> simdgroup_dtype_;
   int thread_index_bits_{32};
   int thread_work_dim_{0};
   // Set when an FP8 dtype is referenced; gates emission of FP8 prelude helpers.
   bool enable_fp8_{false};
+  // Set when a vector FP8 cast is emitted; gates the vector-helper prelude.
+  bool enable_fp8_vector_{false};
   Target target_;
 };
 } // namespace codegen
