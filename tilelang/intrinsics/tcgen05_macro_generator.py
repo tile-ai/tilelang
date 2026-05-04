@@ -124,9 +124,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        if a_dtype.bits == 6:
+        if a_dtype.bits == 6 or str(a_dtype) == "float4_e2m1fn":
             if self.chunk % 32 != 0:
-                raise ValueError(f"TCGEN5MMA FP6 requires chunk to be a multiple of 32, got {self.chunk}")
+                raise ValueError(f"TCGEN5MMA FP{a_dtype.bits} requires chunk to be a multiple of 32, got {self.chunk}")
             self.k_dim = 32
             return
         super()._initialize_k_dim(a_dtype)

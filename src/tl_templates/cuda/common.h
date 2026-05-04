@@ -342,7 +342,8 @@ enum class DataType : int {
   kBit32 = 21,
   kBit64 = 22,
   kFloat6_e2m3fn = 23,
-  kFloat6_e3m2fn = 24
+  kFloat6_e3m2fn = 24,
+  kFloat4_e2m1fn = 25
 };
 
 union GmmaDescriptor {
