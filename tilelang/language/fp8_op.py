@@ -241,7 +241,7 @@ def _validate_buffers(A_fp8, A_scale, B_fp8, B_scale, C_out, *, transpose_B: boo
 
 @T.macro
 def _fp8_scaled_matmul_macro(A_fp8, A_scale, B_fp8, B_scale, C_local):
-    """Hygienic body of ``T.fp8_scaled_matmul``: dequant + per-element scale + FMA.
+    """Hygienic body of ``T.fp8_scaled_matmul``: dequant + fused-scale FMA.
 
     The body is parsed once at macro-decoration time and re-substituted at
     each call. Static integer extents — including ``A_scale.shape[0]`` and
@@ -263,18 +263,22 @@ def _fp8_scaled_matmul_macro(A_fp8, A_scale, B_fp8, B_scale, C_local):
     sa_size = A_scale.shape[0]
     sb_size = B_scale.shape[0]
 
-    # The accumulation matches the audiohacking ``fp8_scaled_matmul_kernel``
-    # algorithm: per-element FP8 dequant, fp32 FMA, scale broadcast through
-    # the multiply. ``T.cast(fp8 -> fp32)`` lowers to ``__tvm_fp8_*_to_half``
-    # on Metal (Agent C's storage-only patch) or ``__nv_fp8_*_to_half`` on
-    # CUDA (TVM's existing FP8 type lowering).
+    # The accumulation keeps scale multiplication in the contracted-K loop:
+    # per-element FP8 dequant, scale the operands, then fp32 FMA. This is
+    # deliberately not a post-loop C *= scale epilogue. ``T.cast(fp8 ->
+    # fp32)`` lowers to ``__tvm_fp8_*_to_half`` on Metal (Agent C's
+    # storage-only patch) or ``__nv_fp8_*_to_half`` on CUDA (TVM's existing
+    # FP8 type lowering).
     for i, j in T.Parallel(M_dim, N_dim):
         for k in T.serial(K_dim):
             a_val = T.cast(A_fp8[i, k], "float32")
             b_val = T.cast(B_fp8[k, j], "float32")
             sa = A_scale[0] if sa_size == 1 else A_scale[i]
             sb = B_scale[0] if sb_size == 1 else B_scale[j]
-            C_local[i, j] = C_local[i, j] + a_val * b_val * sa * sb
+            # Path C prototype: fuse the selected scales before accumulation.
+            a_scaled = a_val * sa
+            b_scaled = b_val * sb
+            C_local[i, j] = C_local[i, j] + a_scaled * b_scaled
 
 
 @T.macro
@@ -285,13 +289,17 @@ def _fp8_scaled_matmul_macro_trans_b(A_fp8, A_scale, B_fp8, B_scale, C_local):
     sa_size = A_scale.shape[0]
     sb_size = B_scale.shape[0]
 
+    # Same fused-scale contract as the non-transposed macro, with B indexed as
+    # (N, K). This is the current real hook for the M == 1 Path C vecmat shape.
     for i, j in T.Parallel(M_dim, N_dim):
         for k in T.serial(K_dim):
             a_val = T.cast(A_fp8[i, k], "float32")
             b_val = T.cast(B_fp8[j, k], "float32")
             sa = A_scale[0] if sa_size == 1 else A_scale[i]
             sb = B_scale[0] if sb_size == 1 else B_scale[j]
-            C_local[i, j] = C_local[i, j] + a_val * b_val * sa * sb
+            a_scaled = a_val * sa
+            b_scaled = b_val * sb
+            C_local[i, j] = C_local[i, j] + a_scaled * b_scaled
 
 
 def fp8_scaled_matmul(
