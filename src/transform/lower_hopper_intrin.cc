@@ -19,6 +19,48 @@ namespace tl {
 using namespace tir;
 
 #if (CUDA_MAJOR_VERSION >= 12)
+namespace {
+
+Stmt MakeSeqOrSingle(const Array<Stmt> &stmts) {
+  ICHECK(!stmts.empty());
+  return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
+}
+
+Stmt InsertAfterLeadingAllocates(const Stmt &body,
+                                 const Array<Stmt> &prologue_stmts) {
+  if (prologue_stmts.empty()) {
+    return body;
+  }
+
+  Stmt prologue = MakeSeqOrSingle(prologue_stmts);
+  if (const auto *allocate = body.as<AllocateNode>()) {
+    Allocate ret = tvm::ffi::GetRef<Allocate>(allocate);
+    ret.CopyOnWrite()->body =
+        InsertAfterLeadingAllocates(allocate->body, prologue_stmts);
+    return ret;
+  }
+
+  if (const auto *seq = body.as<SeqStmtNode>()) {
+    Array<Stmt> new_seq;
+    bool inserted = false;
+    for (const Stmt &stmt : seq->seq) {
+      if (!inserted && !stmt.as<AllocateNode>()) {
+        new_seq.push_back(prologue);
+        inserted = true;
+      }
+      new_seq.push_back(stmt);
+    }
+    if (!inserted) {
+      new_seq.push_back(prologue);
+    }
+    return SeqStmt(new_seq);
+  }
+
+  return SeqStmt({prologue, body});
+}
+
+} // namespace
+
 class LowerHopperIntrin : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
@@ -113,10 +155,7 @@ public:
 
     // Stitch prologue statements before the original body
     if (!prologue_stmts.empty()) {
-      // Chain the Let/Evaluate statements sequentially
-      Stmt seq = prologue_stmts.size() == 1 ? prologue_stmts[0]
-                                            : SeqStmt(prologue_stmts);
-      fptr->body = SeqStmt({seq, fptr->body});
+      fptr->body = InsertAfterLeadingAllocates(fptr->body, prologue_stmts);
     }
     if (!epilogue_stmts.empty()) {
       Stmt seq_end = epilogue_stmts.size() == 1 ? epilogue_stmts[0]
