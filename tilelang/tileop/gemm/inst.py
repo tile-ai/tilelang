@@ -8,7 +8,8 @@ class GemmInst(IntEnum):
     TCGEN5MMA = 2
     MFMA = 3
     Scalar = 4
-    WMMA = 5  # AMD RDNA WMMA (gfx11/gfx12)
+    WMMA = 5
+    METAL_SIMDGROUP = 6
 
     def is_mma(self) -> bool:
         return self == GemmInst.MMA
@@ -27,6 +28,9 @@ class GemmInst(IntEnum):
 
     def is_wmma(self) -> bool:
         return self == GemmInst.WMMA
+
+    def is_metal_simdgroup(self) -> bool:
+        return self == GemmInst.METAL_SIMDGROUP
 
     def __repr__(self) -> str:
         return self.name

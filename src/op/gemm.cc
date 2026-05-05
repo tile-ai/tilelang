@@ -183,6 +183,8 @@ GemmInst GemmNode::getGemmInst(int block_size, Target target) const {
     return GemmInst::kMMA;
   } else if (TargetIsCPU(target)) {
     return GemmInst::kScalar;
+  } else if (TargetIsMetal(target)) {
+    return GemmInst::kMetalSimdgroup;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
     return GemmInst::kMMA;
@@ -199,8 +201,11 @@ std::pair<int, int> GemmWarpPolicyNode::computeWarpPartition(
   }
 
   int m_warp = 1, n_warp = 1;
-  constexpr int kMPerWarp = 16; // Rows processed by a single warp
-  int kNPerWarp = 8;            // Columns processed by a single warp
+  int kMPerWarp = 16; // Rows processed by a single warp
+  if (TargetIsMetal(target)) {
+    kMPerWarp = 8;
+  }
+  int kNPerWarp = 8; // Columns processed by a single warp
   if (TargetIsVolta(target)) {
     kNPerWarp = 16;
   } else if (TargetIsCDNA(target)) {
