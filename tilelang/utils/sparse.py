@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 import os
 import torch
 import warnings
@@ -39,13 +40,10 @@ def _torch_cuda_runtime_link_dir() -> str | None:
     link_dir = os.path.join(_CACHE_DIR, "cuda_runtime_lib")
     os.makedirs(link_dir, exist_ok=True)
     link_path = os.path.join(link_dir, "libcudart.so")
-    if os.path.lexists(link_path):
-        if os.path.realpath(link_path) != os.path.realpath(runtime_lib):
-            os.remove(link_path)
-    try:
+    if os.path.lexists(link_path) and os.path.realpath(link_path) != os.path.realpath(runtime_lib):
+        os.remove(link_path)
+    with contextlib.suppress(FileExistsError):
         os.symlink(runtime_lib, link_path)
-    except FileExistsError:
-        pass
     return link_dir
 
 
