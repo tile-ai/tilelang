@@ -27,6 +27,8 @@ static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
+static constexpr const char *kAutoScheduleSharedMemoryBoundary =
+    "kAutoScheduleSharedMemoryBoundary";
 // Loop annotation key controlling whether PTX async-copy rewriting is enabled
 // in the annotated loop subtree. Value should be Bool (False/True).
 static constexpr const char *kLoopPreferAsync = "parallel_prefer_async";
@@ -103,6 +105,9 @@ static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
+static constexpr const char *kEnableAutoSchedule = "tl.enable_auto_schedule";
+static constexpr const char *kEnableAggressiveAutoSchedule =
+    "tl.enable_aggressive_auto_schedule";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kDisableLoopUnswitching =
     "tl.disable_loop_unswitching";

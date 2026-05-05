@@ -26,6 +26,7 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -270,6 +271,77 @@ public:
     linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
   }
 
+  // Visit kAutoScheduleSharedMemoryBoundary bounded scopes.
+  //
+  // After ReNestLetStmts, the next boundary marker may be nested inside
+  // LetStmt / non-boundary AttrStmt chains rather than sitting as a direct
+  // sibling in a SeqStmt.  We therefore recursively peel through such
+  // wrappers to find the innermost SeqStmt and locate the boundary there.
+  void VisitBoundedNewScopes(const AttrStmtNode *op) {
+    scope_.push_back(StmtEntry());
+    StmtEntry e;
+    e.stmt = op;
+    UpdateStmtAttr(op, scope_level_);
+    int64_t begin_index = static_cast<int64_t>(linear_seq_.size());
+    // before scope.
+    linear_seq_.push_back(e);
+    bool has_tail_stmt = false;
+    const AttrStmtNode *tail_stmt = nullptr;
+
+    // Recursively visit the body, peeling LetStmt / non-boundary AttrStmt
+    // wrappers.  When a SeqStmt is reached, scan its children for the next
+    // boundary marker.  Everything that is not the boundary is visited
+    // normally so that buffer accesses are recorded in this scope.
+    std::function<void(const Stmt &)> VisitBodyFindBoundary =
+        [&](const Stmt &body) {
+          if (const auto *seq = body.as<SeqStmtNode>()) {
+            for (const auto &sub_stmt : seq->seq) {
+              if (const auto *attr = sub_stmt.as<AttrStmtNode>();
+                  attr &&
+                  attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
+                has_tail_stmt = true;
+                tail_stmt = attr;
+              } else {
+                StmtExprVisitor::VisitStmt(sub_stmt);
+              }
+            }
+          } else if (const auto *let = body.as<LetStmtNode>()) {
+            // Record the let-binding variable/value, then recurse into body.
+            StmtExprVisitor::VisitExpr(let->value);
+            VisitBodyFindBoundary(let->body);
+          } else if (const auto *attr = body.as<AttrStmtNode>()) {
+            if (attr->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
+              // The body itself is a boundary — treat it as the tail.
+              has_tail_stmt = true;
+              tail_stmt = attr;
+            } else {
+              // Non-boundary AttrStmt wrapper — visit value and recurse.
+              StmtExprVisitor::VisitExpr(attr->value);
+              VisitBodyFindBoundary(attr->body);
+            }
+          } else {
+            // Any other statement — visit normally.
+            StmtExprVisitor::VisitStmt(body);
+          }
+        };
+
+    VisitBodyFindBoundary(op->body);
+
+    // after scope.
+    e.touched = std::move(scope_.back().touched);
+    scope_.pop_back();
+    int64_t end_index = static_cast<int64_t>(linear_seq_.size());
+    ICHECK_GT(end_index, begin_index);
+    e.scope_pair_offset = begin_index - end_index;
+    linear_seq_.push_back(e);
+    ICHECK_NE(end_index, 0U);
+    linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
+    // visit tail statement (the next boundary scope).
+    if (has_tail_stmt) {
+      StmtExprVisitor::VisitStmt_(tail_stmt);
+    }
+  }
+
   void VisitStmt_(const AttrStmtNode *op) final {
     // Only record the outer most thread extent.
     if (op->attr_key == tir::attr::thread_extent && !in_thread_env_) {
@@ -282,6 +354,8 @@ public:
       VisitNewScope(op);
     } else if (op->attr_key == "kWarpSpecializationScope") {
       VisitWarpSpecializationBody(op->body);
+    } else if (op->attr_key == "kAutoScheduleSharedMemoryBoundary") {
+      VisitBoundedNewScopes(op);
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }
@@ -506,7 +580,98 @@ private:
                         StmtExprMutator::VisitStmt(op->body));
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);
     }
+    if (op->attr_key == attr::kAutoScheduleSharedMemoryBoundary) {
+      // Strip boundary annotations after shared memory merging is done.
+      return StmtExprMutator::VisitStmt(op->body);
+    }
     return StmtMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    // Visit children first (strips boundaries, shared memory allocates, etc.)
+    Stmt visited = StmtExprMutator::VisitStmt_(op);
+    const auto *seq = visited.as<SeqStmtNode>();
+    if (!seq)
+      return visited;
+
+    // Helper: check if stmt is Evaluate(0) (remnant of stripped boundaries)
+    auto is_noop = [](const Stmt &s) -> bool {
+      const auto *e = s.as<EvaluateNode>();
+      return e && is_zero(e->value);
+    };
+
+    // Helper: peel off DeclBuffer layers, returning (buffers, inner stmt)
+    auto unwrap_decl_buffers =
+        [](Stmt s) -> std::pair<std::vector<Buffer>, Stmt> {
+      std::vector<Buffer> bufs;
+      while (const auto *d = s.as<DeclBufferNode>()) {
+        bufs.push_back(d->buffer);
+        s = d->body;
+      }
+      return {bufs, s};
+    };
+
+    // Filter out Evaluate(0) remnants
+    std::vector<Stmt> stmts;
+    for (const auto &s : seq->seq) {
+      if (!is_noop(s)) {
+        stmts.push_back(s);
+      }
+    }
+
+    // Merge consecutive DeclBuffer*(IfThenElse(same_cond, ...)) entries
+    tir::ExprDeepEqual expr_equal;
+    std::vector<Stmt> merged;
+    size_t i = 0;
+    while (i < stmts.size()) {
+      auto [bufs_i, inner_i] = unwrap_decl_buffers(stmts[i]);
+      const auto *ite_i = inner_i.as<IfThenElseNode>();
+      if (!ite_i || !ite_i->else_case.defined()) {
+        merged.push_back(stmts[i]);
+        ++i;
+        continue;
+      }
+
+      // Start a merge group
+      std::vector<Buffer> all_bufs(bufs_i);
+      std::vector<Stmt> then_parts{ite_i->then_case};
+      std::vector<Stmt> else_parts{ite_i->else_case.value()};
+      PrimExpr cond = ite_i->condition;
+
+      size_t j = i + 1;
+      while (j < stmts.size()) {
+        auto [bufs_j, inner_j] = unwrap_decl_buffers(stmts[j]);
+        const auto *ite_j = inner_j.as<IfThenElseNode>();
+        if (!ite_j || !ite_j->else_case.defined())
+          break;
+        if (!expr_equal(cond, ite_j->condition))
+          break;
+        all_bufs.insert(all_bufs.end(), bufs_j.begin(), bufs_j.end());
+        then_parts.push_back(ite_j->then_case);
+        else_parts.push_back(ite_j->else_case.value());
+        ++j;
+      }
+
+      if (j == i + 1) {
+        // No merge possible
+        merged.push_back(stmts[i]);
+        ++i;
+      } else {
+        // Build merged IfThenElse
+        Stmt body = IfThenElse(cond, SeqStmt::Flatten(then_parts),
+                               SeqStmt::Flatten(else_parts));
+        // Wrap with all DeclBuffers (innermost last)
+        for (int k = static_cast<int>(all_bufs.size()) - 1; k >= 0; --k) {
+          body = DeclBuffer(all_bufs[k], body);
+        }
+        merged.push_back(body);
+        i = j;
+      }
+    }
+
+    if (merged.size() == 1)
+      return merged[0];
+    return SeqStmt(merged);
   }
 
   Stmt VisitStmt_(const AllocateNode *op) final {
