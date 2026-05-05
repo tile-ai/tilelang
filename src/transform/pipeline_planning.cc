@@ -6,7 +6,6 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../backend/cuda/op/copy.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/parallel.h"
@@ -284,9 +283,6 @@ private:
     if (const auto *copy = tile_op.as<CopyNode>()) {
       if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
         is_global_copy_pattern_ = true;
-      }
-      if (cuda::IsPipelinePlanningTmaCopy(*copy, target_)) {
-        is_tma_copy_ = true;
       }
     }
     // Conv2D im2col always uses TMA on Hopper.
@@ -770,9 +766,6 @@ private:
         return;
       }
       pinfo->copy_stage = true;
-      if (cuda::IsPipelinePlanningTmaCopy(*copy, target_)) {
-        pinfo->tma_copy = true;
-      }
       return;
     }
 

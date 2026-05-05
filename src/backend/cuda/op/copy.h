@@ -66,7 +66,6 @@ CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
 // Semantic queries used by transform passes that need copy shape/capability
 // information without knowing the CUDA lowering policy knobs.
 bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target);
-bool IsPipelinePlanningTmaCopy(const CopyNode &op, Target target);
 
 } // namespace cuda
 } // namespace tl

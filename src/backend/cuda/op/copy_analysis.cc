@@ -622,19 +622,6 @@ bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target) {
   return facts.can_cp_async;
 }
 
-bool IsPipelinePlanningTmaCopy(const CopyNode &op, Target target) {
-  CopyAnalysisContext ctx;
-  ctx.target = target;
-  CopyFacts facts = AnalyzeCopyFacts(op, ctx);
-  if (!facts.cuda_like_target || !facts.explicit_tma) {
-    return false;
-  }
-  CopyInst inst =
-      SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
-                    /*check_last_dim=*/false);
-  return CopyInstIsTMA(inst);
-}
-
 } // namespace cuda
 } // namespace tl
 } // namespace tvm
