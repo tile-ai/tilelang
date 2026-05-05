@@ -26,6 +26,14 @@ Stmt MakeSeqOrSingle(const Array<Stmt> &stmts) {
   return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
 }
 
+Array<Var> GetPrologueInitialDefs(const PrimFunc &f) {
+  Array<Var> defs = f->params;
+  for (const auto &[_, buffer] : f->buffer_map) {
+    defs.push_back(buffer->data);
+  }
+  return defs;
+}
+
 // Host-side setup emitted by this pass can reference buffers produced by
 // earlier allocation passes. Place it at the first statement where TVM's own
 // undefined-var analysis agrees that all referenced variables are available.
@@ -212,8 +220,8 @@ public:
 
     // Stitch prologue statements before the original body
     if (!prologue_stmts.empty()) {
-      fptr->body =
-          InsertAfterRequiredDefinitions(fptr->body, prologue_stmts, f->params);
+      fptr->body = InsertAfterRequiredDefinitions(fptr->body, prologue_stmts,
+                                                  GetPrologueInitialDefs(f));
     }
     if (!epilogue_stmts.empty()) {
       Stmt seq_end = epilogue_stmts.size() == 1 ? epilogue_stmts[0]
