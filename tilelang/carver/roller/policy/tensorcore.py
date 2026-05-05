@@ -9,6 +9,7 @@ from ..node import PrimFuncNode
 from .common import coalesced_factor, factorize, get_all_factors
 from .default import DefaultPolicy
 from ..rasterization import NoRasterization, Rasterization2DColumn
+from ...arch import is_rdna_arch
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +215,7 @@ class TensorCorePolicy(DefaultPolicy):
 
     def score_block_size(self, n):
         base_score = super().score_block_size(n)
-        if getattr(self.arch, "platform", None) == "RDNA":
+        if is_rdna_arch(self.arch):
             warps = (n + self.arch.warp_size - 1) // self.arch.warp_size
             return (0 if warps == 8 else 1, abs(warps - 8), *base_score)
         return base_score
