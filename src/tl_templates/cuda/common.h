@@ -17,7 +17,6 @@
 
 using cutlass::bfloat16_t;
 using cutlass::half_t;
-using cutlass::tfloat32_t;
 
 using cute::cast_smem_ptr_to_uint;
 
@@ -636,6 +635,19 @@ struct float_e5m2_t : public cute::float_e5m2_t {
       : cute::float_e5m2_t(*reinterpret_cast<cute::float_e5m2_t *>(&x)) {}
 };
 
+struct tfloat32_t : public cute::tfloat32_t {
+  using cute::tfloat32_t::tfloat32_t;
+  CUTLASS_HOST_DEVICE
+  tfloat32_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit tfloat32_t(__nv_bfloat16 x) : tfloat32_t(static_cast<float>(x)) {}
+
+  CUTLASS_HOST_DEVICE
+  tfloat32_t(cutlass::tfloat32_t x)
+      : cute::tfloat32_t(*reinterpret_cast<cute::tfloat32_t *>(&x)) {}
+};
+
 template <typename T> struct to_cute_type {
   using type = T;
 };
@@ -644,6 +656,9 @@ template <> struct to_cute_type<tl::float_e4m3_t> {
 };
 template <> struct to_cute_type<tl::float_e5m2_t> {
   using type = cute::float_e5m2_t;
+};
+template <> struct to_cute_type<tl::tfloat32_t> {
+  using type = cute::tfloat32_t;
 };
 
 // =========================================================================
@@ -852,6 +867,8 @@ TL_DEVICE __half2 abs2(__half2 a) {
 }
 
 } // namespace tl
+
+using tl::tfloat32_t;
 
 namespace cutlass {
 TL_DEVICE

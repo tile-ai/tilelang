@@ -250,9 +250,9 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             dv_fragment = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dv_fragment_2 = T.alloc_fragment((block_S, block_DV), dtype=accum_dtype)
             dO_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
-            dO_shared_t = T.alloc_shared((block_DV, block_S), dtype=T.float32)
+            dO_shared_t = T.alloc_shared((block_DV, block_S), dtype=T.tfloat32)
             dO_fragment = T.alloc_fragment((block_S, block_DV), dtype=T.float32)
-            dO_fragment_t = T.alloc_fragment((block_DV, block_S), dtype=T.float32)
+            dO_fragment_t = T.alloc_fragment((block_DV, block_S), dtype=T.tfloat32)
             K_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
 
             Q_shared = T.alloc_shared((block_S, DK), dtype=input_dtype)
@@ -263,7 +263,7 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
             G_fragment_post = T.alloc_fragment((block_S), dtype=gate_dtype)
             G_fragment_exp = T.alloc_fragment((block_S), dtype=gate_dtype)
             Q_fragment = T.alloc_fragment((block_S, DK), dtype=accum_dtype)
-            Q_fragment_t = T.alloc_fragment((DK, block_S), dtype=accum_dtype)
+            Q_fragment_t = T.alloc_fragment((DK, block_S), dtype=T.tfloat32)
 
             T.use_swizzle(10)
 
