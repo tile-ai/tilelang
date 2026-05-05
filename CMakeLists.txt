@@ -181,6 +181,7 @@ file(GLOB TILE_LANG_SRCS
   src/backend/cpu/op/*.cc
   src/backend/cuda/op/copy_analysis.cc
   src/backend/metal/op/*.cc
+  src/backend/webgpu/op/*.cc
   src/target/utils.cc
   src/target/codegen_c_host.cc
   src/target/codegen_c.cc
