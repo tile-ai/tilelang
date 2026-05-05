@@ -100,3 +100,15 @@ def test_rdna_device_model_rejects_gfx12_before_device_probe():
 
     with pytest.raises(ValueError, match="gfx11 targets only"):
         RDNA(Target("hip -mcpu=gfx1200"))
+
+
+def test_rdna_tensor_instruction_lookup_is_generation_aware():
+    from tilelang.carver.arch.rdna import RDNA
+
+    arch = RDNA.__new__(RDNA)
+    arch.rdna_generation = 11
+    assert arch.get_avaliable_tensorintrin_shapes() == [[16, 16]]
+
+    arch.rdna_generation = 12
+    with pytest.raises(ValueError, match="Unsupported RDNA generation"):
+        arch.get_avaliable_tensorintrin_shapes()

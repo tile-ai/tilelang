@@ -6,6 +6,16 @@ from .cuda import TensorInstruction
 from tilelang.utils.target import target_get_mcpu, target_get_rdna_generation
 
 _RDNA_DEFAULT_LDS_SIZE = 64 * 1024
+_RDNA_TENSOR_INSTRUCTIONS = {
+    11: (TensorInstruction("wmma", [16, 16]),),
+}
+
+
+def _get_tensor_instructions_for_generation(rdna_generation: int) -> tuple[TensorInstruction, ...]:
+    try:
+        return _RDNA_TENSOR_INSTRUCTIONS[rdna_generation]
+    except KeyError as err:
+        raise ValueError(f"Unsupported RDNA generation for tensor instructions: {rdna_generation}") from err
 
 
 def is_rdna_arch(arch: TileDevice) -> bool:
@@ -17,7 +27,8 @@ class RDNA(TileDevice):
         if isinstance(target, str):
             target = tvm.target.Target(target)
         self.target = target
-        if target_get_rdna_generation(target) != 11:
+        self.rdna_generation = target_get_rdna_generation(target)
+        if self.rdna_generation != 11:
             arch = target_get_mcpu(target) or str(target)
             raise ValueError(f"RDNA device model currently supports gfx11 targets only, got {arch}.")
         device = tvm.runtime.rocm(0)
@@ -43,7 +54,7 @@ class RDNA(TileDevice):
         self.available_tensor_instructions: list[TensorInstruction] | None = None
 
     def get_avaliable_tensorintrin_shapes(self):
-        self.available_tensor_instructions = (TensorInstruction("wmma", [16, 16]),)
+        self.available_tensor_instructions = _get_tensor_instructions_for_generation(self.rdna_generation)
         return [t.shape for t in self.available_tensor_instructions]
 
     def __repr__(self):
