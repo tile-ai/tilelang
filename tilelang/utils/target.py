@@ -46,7 +46,7 @@ def rocm_warp_size_for_arch(arch: str | None) -> int | None:
         return None
     if arch.startswith("gfx9"):
         return 64
-    if arch.startswith("gfx"):
+    if arch.startswith(("gfx10", "gfx11", "gfx12")):
         return 32
     return None
 
@@ -60,7 +60,11 @@ def with_rocm_target_attrs(target: Target) -> Target:
 
     target_dict = dict(target.export())
     target_dict.setdefault("mtriple", ROCM_MTRIPLE)
-    target_dict["thread_warp_size"] = rocm_warp_size_for_arch(arch)
+    warp_size = rocm_warp_size_for_arch(arch)
+    if warp_size is not None:
+        target_dict["thread_warp_size"] = warp_size
+    else:
+        target_dict.pop("thread_warp_size", None)
     return Target(target_dict)
 
 
@@ -74,14 +78,15 @@ def _detect_torch_rocm_arch() -> str | None:
 def _rocm_target_from_arch(arch: str | None) -> Target | str:
     if arch is None:
         return "hip"
-    return Target(
-        {
-            "kind": "hip",
-            "mcpu": arch,
-            "mtriple": ROCM_MTRIPLE,
-            "thread_warp_size": rocm_warp_size_for_arch(arch),
-        }
-    )
+    target_dict = {
+        "kind": "hip",
+        "mcpu": arch,
+        "mtriple": ROCM_MTRIPLE,
+    }
+    warp_size = rocm_warp_size_for_arch(arch)
+    if warp_size is not None:
+        target_dict["thread_warp_size"] = warp_size
+    return Target(target_dict)
 
 
 def describe_supported_targets() -> dict[str, str]:

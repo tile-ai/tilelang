@@ -1,3 +1,5 @@
+import pytest
+
 from tilelang import tvm as tvm
 from tvm.target import Target
 
@@ -21,6 +23,7 @@ def test_normalize_rocm_arch_strips_feature_suffix():
     assert normalize_rocm_arch("sm_90") is None
     assert rocm_warp_size_for_arch("gfx1151") == 32
     assert rocm_warp_size_for_arch("gfx1030") == 32
+    assert rocm_warp_size_for_arch("gfx1200") == 32
     assert rocm_warp_size_for_arch("gfx942") == 64
 
 
@@ -32,6 +35,12 @@ def test_target_mcpu_helpers():
 def test_determine_target_adds_rdna_thread_warp_size():
     target = determine_target("hip -mcpu=gfx1151", return_object=True)
     assert target_get_mcpu(target) == "gfx1151"
+    assert int(target.attrs["thread_warp_size"]) == 32
+
+
+def test_determine_target_adds_known_gfx12_thread_warp_size():
+    target = determine_target("hip -mcpu=gfx1200", return_object=True)
+    assert target_get_mcpu(target) == "gfx1200"
     assert int(target.attrs["thread_warp_size"]) == 32
 
 
@@ -72,3 +81,22 @@ def test_carver_routes_rdna_without_instantiating_device(monkeypatch):
     arch = arch_mod.get_arch(Target("hip -mcpu=gfx1151"))
     assert arch[0] == "rdna"
     assert target_get_mcpu(arch[1]) == "gfx1151"
+
+
+def test_carver_leaves_gfx12_on_existing_hip_path(monkeypatch):
+    import tilelang.carver.arch as arch_mod
+
+    def fake_cdna(target):
+        return ("cdna", target)
+
+    monkeypatch.setattr(arch_mod, "CDNA", fake_cdna)
+    arch = arch_mod.get_arch(Target("hip -mcpu=gfx1200"))
+    assert arch[0] == "cdna"
+    assert target_get_mcpu(arch[1]) == "gfx1200"
+
+
+def test_rdna_device_model_rejects_gfx12_before_device_probe():
+    from tilelang.carver.arch.rdna import RDNA
+
+    with pytest.raises(ValueError, match="gfx11 targets only"):
+        RDNA(Target("hip -mcpu=gfx1200"))
