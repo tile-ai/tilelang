@@ -53,5 +53,39 @@ def test_lower_shared_barrier():
     assert "tvm_storage_sync" in body_text
 
 
+@tilelang.testing.requires_cuda
+def test_tma_descriptor_prologue_after_global_allocate():
+    @T.prim_func
+    def before():
+        scratch = T.allocate([1024], "float16", "global")
+        T.evaluate(
+            T.create_tma_descriptor(
+                6,
+                2,
+                scratch,
+                32,
+                32,
+                1,
+                32,
+                32,
+                32,
+                1,
+                1,
+                0,
+                2,
+                2,
+                0,
+            )
+        )
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.LowerHopperIntrin()(mod)
+
+    assert "__tvm_tensormap_create_tiled" in mod["main"].script()
+    undefined = tir.analysis.undefined_vars(mod["main"].body, mod["main"].params)
+    assert len(undefined) == 0
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
