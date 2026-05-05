@@ -87,40 +87,5 @@ def test_tma_descriptor_prologue_after_global_allocate():
     assert len(undefined) == 0
 
 
-@tilelang.testing.requires_cuda
-def test_tma_descriptor_prologue_accepts_buffer_params():
-    @T.prim_func
-    def before(A: T.Tensor((32, 32), "float16")):
-        T.evaluate(
-            T.create_tma_descriptor(
-                6,
-                2,
-                A.data,
-                32,
-                32,
-                1,
-                32,
-                32,
-                32,
-                1,
-                1,
-                0,
-                2,
-                2,
-                0,
-            )
-        )
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.LowerHopperIntrin()(mod)
-
-    assert "__tvm_tensormap_create_tiled" in mod["main"].script()
-    func = mod["main"]
-    entry_defs = list(func.params) + [buffer.data for buffer in func.buffer_map.values()]
-    undefined = tir.analysis.undefined_vars(func.body, entry_defs)
-    assert len(undefined) == 0
-
-
 if __name__ == "__main__":
     tilelang.testing.main()

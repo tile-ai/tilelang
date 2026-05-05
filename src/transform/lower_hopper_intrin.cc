@@ -26,102 +26,37 @@ Stmt MakeSeqOrSingle(const Array<Stmt> &stmts) {
   return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
 }
 
-Array<Var> GetPrologueInitialDefs(const PrimFunc &f) {
-  Array<Var> defs = f->params;
-  for (const auto &[_, buffer] : f->buffer_map) {
-    defs.push_back(buffer->data);
-  }
-  return defs;
-}
-
-// Host-side setup emitted by this pass can reference buffers produced by
-// earlier allocation passes. Place it at the first statement where TVM's own
-// undefined-var analysis agrees that all referenced variables are available.
-class DependencyAwarePrologueInserter : public StmtExprMutator {
-public:
-  DependencyAwarePrologueInserter(Stmt prologue, const Array<Var> &initial_defs)
-      : prologue_(std::move(prologue)),
-        required_vars_(UndefinedVars(prologue_, initial_defs)) {}
-
-  Stmt Insert(const Stmt &body) {
-    if (required_vars_.empty()) {
-      inserted_ = true;
-      return SeqStmt({prologue_, body});
-    }
-
-    Stmt result = VisitStmt(body);
-    ICHECK(inserted_)
-        << "Unable to place Hopper prologue after its variable definitions; "
-        << "remaining undefined vars: " << required_vars_;
-    return result;
-  }
-
-private:
-  bool Ready() const { return required_vars_.empty(); }
-
-  void RemoveRequiredVar(const Var &var) {
-    Array<Var> remaining;
-    bool removed = false;
-    for (const Var &required : required_vars_) {
-      if (!removed && required.same_as(var)) {
-        removed = true;
-        continue;
-      }
-      remaining.push_back(required);
-    }
-    required_vars_ = remaining;
-  }
-
-  Stmt InsertBefore(const Stmt &stmt) {
-    inserted_ = true;
-    return SeqStmt({prologue_, stmt});
-  }
-
-  template <typename VisitScope>
-  Stmt VisitAllocationScope(const Var &var, VisitScope visit_scope) {
-    Array<Var> saved_required_vars = required_vars_;
-    RemoveRequiredVar(var);
-    Stmt result = visit_scope();
-    if (!inserted_) {
-      required_vars_ = saved_required_vars;
-    }
-    return result;
-  }
-
-  Stmt VisitStmt(const Stmt &stmt) final {
-    if (inserted_) {
-      return stmt;
-    }
-    if (Ready()) {
-      return InsertBefore(stmt);
-    }
-    return StmtExprMutator::VisitStmt(stmt);
-  }
-
-  Stmt VisitStmt_(const AllocateNode *op) final {
-    return VisitAllocationScope(
-        op->buffer_var, [&]() { return StmtExprMutator::VisitStmt_(op); });
-  }
-
-  Stmt VisitStmt_(const AllocateConstNode *op) final {
-    return VisitAllocationScope(
-        op->buffer_var, [&]() { return StmtExprMutator::VisitStmt_(op); });
-  }
-
-  Stmt prologue_;
-  Array<Var> required_vars_;
-  bool inserted_ = false;
-};
-
-Stmt InsertAfterRequiredDefinitions(const Stmt &body,
-                                    const Array<Stmt> &prologue_stmts,
-                                    const Array<Var> &initial_defs) {
+Stmt InsertAfterLeadingAllocates(const Stmt &body,
+                                 const Array<Stmt> &prologue_stmts) {
   if (prologue_stmts.empty()) {
     return body;
   }
-  DependencyAwarePrologueInserter inserter(MakeSeqOrSingle(prologue_stmts),
-                                           initial_defs);
-  return inserter.Insert(body);
+
+  Stmt prologue = MakeSeqOrSingle(prologue_stmts);
+  if (const auto *allocate = body.as<AllocateNode>()) {
+    Allocate ret = tvm::ffi::GetRef<Allocate>(allocate);
+    ret.CopyOnWrite()->body =
+        InsertAfterLeadingAllocates(allocate->body, prologue_stmts);
+    return ret;
+  }
+
+  if (const auto *seq = body.as<SeqStmtNode>()) {
+    Array<Stmt> new_seq;
+    bool inserted = false;
+    for (const Stmt &stmt : seq->seq) {
+      if (!inserted && !stmt.as<AllocateNode>()) {
+        new_seq.push_back(prologue);
+        inserted = true;
+      }
+      new_seq.push_back(stmt);
+    }
+    if (!inserted) {
+      new_seq.push_back(prologue);
+    }
+    return SeqStmt(new_seq);
+  }
+
+  return SeqStmt({prologue, body});
 }
 
 } // namespace
@@ -220,8 +155,7 @@ public:
 
     // Stitch prologue statements before the original body
     if (!prologue_stmts.empty()) {
-      fptr->body = InsertAfterRequiredDefinitions(fptr->body, prologue_stmts,
-                                                  GetPrologueInitialDefs(f));
+      fptr->body = InsertAfterLeadingAllocates(fptr->body, prologue_stmts);
     }
     if (!epilogue_stmts.empty()) {
       Stmt seq_end = epilogue_stmts.size() == 1 ? epilogue_stmts[0]
