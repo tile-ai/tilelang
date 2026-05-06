@@ -2,6 +2,7 @@ import torch
 import tilelang
 import tilelang.language as T
 
+
 def fast_log2_ceil(x):
     """Compute ceil(log2(x)) via IEEE 754 bit manipulation. Avoids slow log/ceil intrinsics."""
     bits_x = T.reinterpret(x, "uint32")
@@ -74,9 +75,7 @@ def fp8_quant_kernel(
                 else:
                     s_local[i] = amax_local[i] * fp8_max_inv
             for i, j in T.Parallel(blk_m, group_size):
-                y_local[i, j] = T.clamp(
-                    x_local[i, j] / s_local[i], fp8_min, fp8_max
-                )
+                y_local[i, j] = T.clamp(x_local[i, j] / s_local[i], fp8_min, fp8_max)
 
             for i in T.Parallel(blk_m):
                 scale[bx * blk_m + i, by] = s_local[i]
@@ -151,12 +150,10 @@ def fp4_quant_kernel(
 
             T.reduce_absmax(x_local, amax_local, dim=1)
             for i in T.Parallel(blk_m):
-                amax_local[i] = T.max(amax_local[i], 6 * (2 ** -126))
+                amax_local[i] = T.max(amax_local[i], 6 * (2**-126))
                 s_local[i] = fast_round_scale(amax_local[i], fp4_max_inv)
             for i, j in T.Parallel(blk_m, group_size):
-                y_local[i, j] = T.clamp(
-                    x_local[i, j] / s_local[i], fp4_min, fp4_max
-                )
+                y_local[i, j] = T.clamp(x_local[i, j] / s_local[i], fp4_min, fp4_max)
 
             for i in T.Parallel(blk_m):
                 scale[bx * blk_m + i, by] = s_local[i]
@@ -189,6 +186,7 @@ def fp4_act_quant(x: torch.Tensor, block_size: int = 32):
 # ---------------------------------------------------------------------------
 # PyTorch reference implementations
 # ---------------------------------------------------------------------------
+
 
 def fp8_act_quant_ref(x: torch.Tensor, block_size: int = 128, round_scale: bool = False):
     """PyTorch reference for block-wise FP8 quantization.
@@ -225,7 +223,7 @@ def _nearest_fp4_nibble(x_clamped: torch.Tensor) -> torch.Tensor:
     """
     fp4_vals = _FP4_VALS.to(x_clamped.device)
     x_abs = x_clamped.abs().unsqueeze(-1)  # (..., 1)
-    dists = (x_abs - fp4_vals).abs()       # (..., 8)
+    dists = (x_abs - fp4_vals).abs()  # (..., 8)
     idx = dists.argmin(dim=-1).to(torch.uint8)
     # For negative values, add 8 (set the sign nibble bit)
     idx = torch.where(x_clamped < 0, idx + 8, idx)
@@ -259,7 +257,7 @@ def fp4_act_quant_ref(x: torch.Tensor, block_size: int = 32):
     fp4_max = 6.0
     num_blocks = N // block_size
     x_float = x.float().reshape(M, num_blocks, block_size)
-    amax = x_float.abs().amax(dim=-1).clamp(min=6.0 * (2.0 ** -126))
+    amax = x_float.abs().amax(dim=-1).clamp(min=6.0 * (2.0**-126))
     # Always round scale for FP4/E8M0
     scale = torch.pow(2.0, torch.ceil(torch.log2(amax / fp4_max)))
     x_scaled = x_float / scale.unsqueeze(-1)
@@ -288,9 +286,9 @@ def fp4_dequant_to_float(quant: torch.Tensor, scale: torch.Tensor, N_logical: in
     high = (quant_u8 >> 4) & 0xF
     # Map nibbles to float values
     fp4_val_map = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-         -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
-        dtype=torch.float32, device=quant.device,
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        dtype=torch.float32,
+        device=quant.device,
     )
     vals = torch.stack([fp4_val_map[low.long()], fp4_val_map[high.long()]], dim=-1)
     vals = vals.reshape(M, -1)  # (M, N_logical)
@@ -304,6 +302,7 @@ def fp4_dequant_to_float(quant: torch.Tensor, scale: torch.Tensor, N_logical: in
 # ---------------------------------------------------------------------------
 # Test functions
 # ---------------------------------------------------------------------------
+
 
 def test_fp8_act_quant(M: int = 256, N: int = 1024, block_size: int = 128):
     """Test FP8 act quant: tilelang vs PyTorch reference."""

@@ -8,8 +8,7 @@ NOTE: This impl is simply an illustration and maybe not optimal,
 or comparable to handwrite version
 """
 
-#TODO(wt): Support window size
-
+# TODO(wt): Support window size
 
 import math
 import torch
@@ -87,8 +86,8 @@ def sparse_attn_fwd(
             logsum = T.alloc_fragment([H_per_block], accum_dtype)
             mask = T.alloc_fragment([BI], T.bool)
 
-            T.copy(Q[by, seq_idx, h_start:h_start + H_per_block, :], Q_shared)
-            T.copy(Sinks[h_start:h_start + H_per_block], Sinks_shared)
+            T.copy(Q[by, seq_idx, h_start : h_start + H_per_block, :], Q_shared)
+            T.copy(Sinks[h_start : h_start + H_per_block], Sinks_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -(2**30))  # avoid -inf - inf to cause nan
@@ -106,13 +105,14 @@ def sparse_attn_fwd(
 
                 # Initialize scores with mask
                 for h_i, bi_i in T.Parallel(H_per_block, BI):
-                    acc_s[h_i, bi_i] = T.if_then_else(
-                        mask[bi_i], 0, -T.infinity(acc_s.dtype)
-                    )
+                    acc_s[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_s.dtype))
 
                 # QK^T GEMM: (H_per_block, dim) @ (dim, BI) -> (H_per_block, BI)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True,
+                    Q_shared,
+                    KV_shared,
+                    acc_s,
+                    transpose_B=True,
                     policy=T.GemmWarpPolicy.FullRow,
                 )
 
@@ -122,13 +122,9 @@ def sparse_attn_fwd(
                 for h_i in T.Parallel(H_per_block):
                     scores_max[h_i] = T.max(scores_max[h_i], scores_max_prev[h_i])
                 for h_i in T.Parallel(H_per_block):
-                    scores_scale[h_i] = T.exp2(
-                        scores_max_prev[h_i] * scale - scores_max[h_i] * scale
-                    )
+                    scores_scale[h_i] = T.exp2(scores_max_prev[h_i] * scale - scores_max[h_i] * scale)
                 for h_i, bi_i in T.Parallel(H_per_block, BI):
-                    acc_s[h_i, bi_i] = T.exp2(
-                        acc_s[h_i, bi_i] * scale - scores_max[h_i] * scale
-                    )
+                    acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * scale - scores_max[h_i] * scale)
                 T.reduce_sum(acc_s, scores_sum, dim=1)
 
                 # Rescale acc_o by correction factor
@@ -138,7 +134,9 @@ def sparse_attn_fwd(
                 # Accumulate: P @ V
                 T.copy(acc_s, S_shared)
                 T.gemm(
-                    S_shared, KV_shared, acc_o,
+                    S_shared,
+                    KV_shared,
+                    acc_o,
                     policy=T.GemmWarpPolicy.FullRow,
                 )
 
@@ -148,9 +146,7 @@ def sparse_attn_fwd(
 
             # Attention sink (per-head)
             for h_i in T.Parallel(H_per_block):
-                logsum[h_i] += T.exp2(
-                    Sinks_shared[h_i] * 1.44269504 - scores_max[h_i] * scale
-                )
+                logsum[h_i] += T.exp2(Sinks_shared[h_i] * 1.44269504 - scores_max[h_i] * scale)
 
             # Normalize
             for h_i, d_i in T.Parallel(H_per_block, dim):
@@ -158,14 +154,14 @@ def sparse_attn_fwd(
 
             # Store output
             T.copy(acc_o, acc_o_shared)
-            T.copy(acc_o_shared, Output[by, seq_idx, h_start:h_start + H_per_block, :])
+            T.copy(acc_o_shared, Output[by, seq_idx, h_start : h_start + H_per_block, :])
 
     return main
 
 
 def torch_sparse_attention(
-    q: torch.Tensor,       # [b, s, h, d]
-    kv: torch.Tensor,      # [b, skv, d]
+    q: torch.Tensor,  # [b, s, h, d]
+    kv: torch.Tensor,  # [b, skv, d]
     attn_sink: torch.Tensor,  # [h]
     topk_idxs: torch.Tensor,  # [b, s, topk] int32
     softmax_scale: float,
@@ -211,8 +207,10 @@ def test_correctness(
 
     scale = 1.0 / math.sqrt(D_HEAD)
 
-    # TileLang forward
     kernel = sparse_attn_fwd(BATCH, H, N_CTX, N_KV, D_HEAD, TOPK, dtype=T_dtype)
+    print(kernel.get_kernel_source())
+
+    # TileLang forward
     O_tl = kernel(Q, KV, topk_idxs, attn_sink)
 
     # PyTorch reference

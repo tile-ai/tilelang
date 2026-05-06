@@ -7,10 +7,7 @@ from utils import assert_tensors_similar
 
 @tilelang.jit(
     out_idx=[-2, -1],
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
 def sparse_mla_fwd(
     heads,

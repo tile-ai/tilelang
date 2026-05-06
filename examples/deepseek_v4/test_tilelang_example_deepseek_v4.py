@@ -17,6 +17,5 @@ def test_example_sparse_attn_fwd_sm90():
     sparse_attn_fwd_sm90.test_correctness()
 
 
-
 if __name__ == "__main__":
     tilelang.testing.main()
