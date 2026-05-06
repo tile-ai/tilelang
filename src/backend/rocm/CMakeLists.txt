@@ -68,6 +68,7 @@ endif()
 file(GLOB TILE_LANG_HIP_SRCS
   src/target/codegen_hip.cc
   src/target/rt_mod_hip.cc
+  src/backend/rocm/op/*.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_HIP_SRCS})
 list(APPEND TILE_LANG_INCLUDES ${ROCM_INCLUDE_DIRS})

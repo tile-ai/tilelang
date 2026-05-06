@@ -26,13 +26,13 @@
  * depend on the inferred memory layout.
  */
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../backend/cuda/op/copy.h"
 #include "../op/builtin.h"
 #include "../op/copy.h"
 #include "../op/gemm.h"
@@ -50,22 +50,6 @@ namespace {
 /// Annotation key written by this pass.
 static constexpr const char *kInstructionKind = "tl_instruction_kind";
 
-static bool IsAutoAsyncCopyEnabled(Target target, bool default_enabled = true) {
-  using namespace tvm::transform;
-  PassContext pass_ctx = PassContext::Current();
-  return TargetHasAsyncCopy(target) &&
-         pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
-             .value();
-}
-
-static bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
-                                  arith::Analyzer *analyzer,
-                                  bool default_enabled = true) {
-  return copy != nullptr && !copy->GetIsTmaCopy() && !copy->GetIsAsyncCopy() &&
-         IsAutoAsyncCopyEnabled(target, default_enabled) &&
-         copy->CheckCPAsyncCopy(target, LayoutMap(), analyzer);
-}
-
 // ---------------------------------------------------------------------------
 // Classify copy ops
 // ---------------------------------------------------------------------------
@@ -74,45 +58,16 @@ static bool CanUseAutoCPAsyncCopy(const CopyNode *copy, Target target,
  * \brief Determine the coarse instruction kind for a CopyNode.
  *
  * The classification does **not** depend on layout_map (which is unavailable
- * at this point).  It mirrors the priority order in CopyNode::GetCopyInst but
- * collapses BulkLoad/BulkLoad1D/BulkStore/BulkStore1D into "tma" and skips
- * checks that require layout information.
+ * at this point).  For CUDA targets it mirrors CUDA copy instruction
+ * selection but collapses BulkLoad/BulkLoad1D/BulkStore/BulkStore1D into
+ * "tma" and skips checks that require layout information.
  */
-std::string ClassifyCopy(const CopyNode *copy, Target target, bool in_pipeline,
-                         arith::Analyzer *analyzer) {
-  // Explicit T.tma_copy() — always TMA.
-  if (copy->GetIsTmaCopy()) {
-    // Verify target can do TMA at all.
-    if (copy->CheckBulkLoad(target, analyzer, /*check_last_dim=*/false) ||
-        copy->CheckBulkStore(target, analyzer, /*check_last_dim=*/false)) {
-      return "tma";
-    }
-    // User asked for TMA but target doesn't support it — leave unannotated
-    // so that LowerTileOp can produce a proper error later.
+std::string ClassifyCopy(const CopyNode *copy, Target target,
+                         bool in_pipeline) {
+  if (copy == nullptr) {
     return "sync";
   }
-
-  // Explicit T.async_copy() — always cp.async.
-  if (copy->GetIsAsyncCopy()) {
-    return "cp_async";
-  }
-
-  // Generic T.copy() stays synchronous here. Auto-TMA is only introduced by
-  // warp-specialized rewriting, which rewrites the op to explicit T.tma_copy.
-
-  // LDSM / STSM / TMem — these are synchronous from the WS perspective.
-  if (copy->CheckLDSMCopy(target) || copy->CheckSTSMCopy(target) ||
-      copy->CheckTMemLoad(target) || copy->CheckTMemStore(target)) {
-    return "sync";
-  }
-
-  // Inside a pipelined loop, eligible copies may be lowered to cp.async.
-  if (in_pipeline && CanUseAutoCPAsyncCopy(copy, target, analyzer,
-                                           /*default_enabled=*/false)) {
-    return "cp_async";
-  }
-
-  return "sync";
+  return cuda::ClassifyCopyForInstructionAnnotation(*copy, target, in_pipeline);
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +150,7 @@ private:
     std::string kind;
 
     if (auto *copy_node = tile_op.as<CopyNode>()) {
-      kind = ClassifyCopy(copy_node, target_, in_pipeline_, &analyzer_);
+      kind = ClassifyCopy(copy_node, target_, in_pipeline_);
     } else if (auto *gemm_node = tile_op.as<GemmNode>()) {
       kind = ClassifyGemm(gemm_node, block_size_, target_);
     } else {
@@ -212,7 +167,6 @@ private:
   Target target_;
   bool in_pipeline_{false};
   int block_size_{0};
-  arith::Analyzer analyzer_;
 };
 
 } // namespace

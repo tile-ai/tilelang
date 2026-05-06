@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/copy.h
- * \brief Copy operations and Tensor Memory Access (TMA) descriptors
+ * \brief Copy operations
  */
 
 #ifndef TVM_TL_OP_COPY_H_
@@ -10,101 +10,11 @@
 #include "operator.h"
 #include "parallel.h"
 
+#include <utility>
+
 namespace tvm {
 namespace tl {
 using namespace tir;
-
-/// Copy instruction types for different memory access patterns
-enum class CopyInst : uint8_t {
-  kNormal = 0,    // utilize plain buffer copy
-  kLDSM = 1,      // ldmatrix memory copy
-  kSTSM = 2,      // stmatrix memory copy
-  kBulkLoad = 3,  // utilize tma load
-  kBulkStore = 4, // utilize tma store
-  kCPAsync = 5,   // cp.async global->shared copy
-  // we should separate the bulk load and store for 1d and multi-dim
-  // as they have different memory access patterns
-  kBulkLoad1D = 6,  // utilize tma load 1d
-  kBulkStore1D = 7, // utilize tma store 1d
-  kTMemLoad = 8,    // tcgen05.ld (tensor memory -> register)
-  kTMemStore = 9,   // tcgen05.st (register -> tensor memory)
-};
-
-/// Convert CopyInst enum to string for debugging
-inline const char *CopyInstToString(CopyInst inst) {
-  switch (inst) {
-  case CopyInst::kNormal:
-    return "Normal";
-  case CopyInst::kLDSM:
-    return "LDSM";
-  case CopyInst::kSTSM:
-    return "STSM";
-  case CopyInst::kBulkLoad:
-    return "BulkLoad";
-  case CopyInst::kBulkStore:
-    return "BulkStore";
-  case CopyInst::kCPAsync:
-    return "CPAsync";
-  case CopyInst::kBulkLoad1D:
-    return "BulkLoad1D";
-  case CopyInst::kBulkStore1D:
-    return "BulkStore1D";
-  case CopyInst::kTMemLoad:
-    return "TMemLoad";
-  case CopyInst::kTMemStore:
-    return "TMemStore";
-  default:
-    return "Unknown";
-  }
-}
-
-/// Descriptor for Tensor Memory Access (TMA) copy operations
-struct TMADesc {
-  size_t rank;                   ///< Tensor rank (number of dimensions)
-  int data_type;                 ///< Data type identifier
-  Array<PrimExpr> global_shape;  ///< Shape in global memory
-  Array<PrimExpr> global_stride; ///< Strides in global memory
-  Array<PrimExpr> smem_box;      ///< Block shape in shared memory
-  Array<PrimExpr> smem_stride;   ///< Strides in shared memory
-  PrimExpr global_addr;          ///< Base address in global memory
-  int swizzle;                   ///< Memory layout swizzle parameter
-  int interleave;                ///< Memory interleave parameter
-  int oob_fill;                  ///< Out-of-bound fill policy
-  int l2_promotion;              ///< L2 cache promotion flag
-
-  /// Encode descriptor fields into runtime call arguments
-  Array<PrimExpr> EncodeCallArgs() const;
-};
-
-/*!
- * \brief Descriptor for TMA-based im2col transformation used in Conv2D.
- *
- * This supports extracting patches from the input image (im2col)
- * for convolution lowering, storing them in shared memory.
- */
-struct TMAIm2ColDesc {
-  size_t rank;                   // Rank of the tensor
-  int data_type;                 // Data type identifier
-  Array<PrimExpr> global_shape;  // Shape of input tensor in global memory
-  Array<PrimExpr> global_stride; // Stride in global memory
-  Array<PrimExpr> elem_stride;   // Stride at element level (per axis)
-  Array<PrimExpr> lower_corner; // Lower bound offsets for the extraction window
-                                // (rank - 2 dims)
-  Array<PrimExpr> upper_corner; // Upper bound offsets for the extraction window
-                                // (rank - 2 dims)
-  PrimExpr global_addr;         // Base address in global memory
-  int smem_box_pixel;           // Pixel dimension of shared memory box
-  int smem_box_channel;         // Channel dimension of shared memory box
-  int swizzle;                  // Memory swizzle setting
-  int interleave;               // Memory interleaving setting
-  int oob_fill;                 // Out-of-bound fill policy
-  int l2_promotion;             // Whether to enable L2 cache promotion
-
-  /*!
-   * \brief Encode descriptor fields into runtime arguments.
-   */
-  Array<PrimExpr> EncodeCallArgs() const;
-};
 
 /*!
  * \brief Get TVM Op handle for Conv2DIm2Col.
@@ -119,14 +29,9 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
-  Map<String, ObjectRef> annotations; // Annotations for the copy operation
-  // Supported annotation keys:
-  //   - "coalesced_width": IntImm, width for coalesced memory access
-  //   - "disable_tma": Bool, whether to disable TMA acceleration
-  //   - "eviction_policy": IntImm, cache eviction policy (0=normal, 1=first,
-  //   2=last)
-  //   - attr::kAsyncCopyNoImplicitCommitWait: IntImm/Bool, suppress implicit
-  //     cp.async commit/wait because an enclosing transform manages them
+  Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
+  // Common SIMT annotation keys:
+  //   - "coalesced_width": IntImm, width for coalesced memory access.
   //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
   //     layout hint applied to the outermost generated parallel loop of this
   //     copy's SIMT loop nest.
@@ -145,58 +50,6 @@ public:
         .def_ro("annotations", &CopyNode::annotations);
   }
 
-  // Helper methods to get annotation values
-  bool GetDisableTMA() const {
-    if (auto val = annotations.Get("disable_tma")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
-  }
-
-  bool GetIsTmaCopy() const {
-    if (auto val = annotations.Get("is_tma_copy")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
-  }
-
-  int GetEvictionPolicy() const {
-    if (auto val = annotations.Get("eviction_policy")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value;
-      }
-    }
-    return 0; // default: evict_normal
-  }
-
-  bool GetIsAsyncCopy() const {
-    if (auto val = annotations.Get("is_async_copy")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    // Backward-compatibility with historical annotation key.
-    if (auto val = annotations.Get("force_cp_async")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
-  }
-
-  bool GetNoImplicitAsyncCommitWait() const {
-    if (auto val = annotations.Get(attr::kAsyncCopyNoImplicitCommitWait)) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value != 0;
-      }
-    }
-    return false;
-  }
-
   /*!
    * \brief Lower the copy operator to a TIR statement.
    * \param T        Arguments for lowering.
@@ -213,133 +66,14 @@ public:
                         InferLevel level) const override;
 
   /*!
-   * \brief Check if bulk copy is supported.
+   * \brief Infer layout through the generated SIMT copy loop.
    */
-  bool CheckBulkLoad(Target target, arith::Analyzer *analyzer,
-                     bool check_last_dim = true) const;
-
-  /*!
-   * \brief Check if bulk store is supported.
-   */
-  bool CheckBulkStore(Target target, arith::Analyzer *analyzer,
-                      bool check_last_dim = true) const;
-
-  /*!
-   * \brief Check if bulk copy 1d load is supported.
-   */
-  bool CheckBulkLoad1D(Target target, const LayoutMap &layout_map,
-                       arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Check if bulk copy 1d store is supported.
-   */
-  bool CheckBulkStore1D(Target target, const LayoutMap &layout_map,
-                        arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Check if bulk copy 1d is supported.
-   */
-  bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
-                       const Array<Range> &global_range,
-                       const Array<Range> &shared_range,
-                       const LayoutMap &layout_map,
-                       arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Check if lds memory copy is supported.
-   */
-  bool CheckLDSMCopy(Target target) const;
-
-  /*!
-   * \brief Check if stsm memory copy is supported.
-   */
-  bool CheckSTSMCopy(Target target) const;
-
-  /*!
-   * \brief Check if tensor memory load is supported.
-   */
-  bool CheckTMemLoad(Target target) const;
-
-  /*!
-   * \brief Check if tensor memory store is supported.
-   */
-  bool CheckTMemStore(Target target) const;
-
-  /*!
-   * \brief Check target-independent cp.async prerequisites.
-   */
-  bool CheckCPAsyncCopyPreconditions() const;
-
-  /*!
-   * \brief Check whether this copy can participate in pipeline-managed
-   * cp.async synchronization using only target-independent prerequisites.
-   */
-  bool CheckPipelineManagedCPAsyncCopy() const;
-
-  /*!
-   * \brief Check whether this copy can participate in pipeline-managed
-   * cp.async synchronization for a concrete target.
-   */
-  bool CheckPipelineManagedCPAsyncCopy(Target target,
-                                       arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Check if cp.async copy is supported.
-   */
-  bool CheckCPAsyncCopy(Target target, const LayoutMap &layout_map,
-                        arith::Analyzer *analyzer) const;
-
-protected:
-  /*!
-   * \brief Get the copy instruction type.
-   */
-  CopyInst GetCopyInst(Target target, const LayoutMap &layout_map,
-                       arith::Analyzer *analyzer,
-                       bool buffer_oob = false) const;
-
-  /*!
-   * \brief Generate lowering for bulk/global-to-shared copy.
-   */
-  Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
-                     CopyInst copy_inst) const;
-
-  /*!
-   * \brief Generate lowering for bulk copy 1d.
-   */
-  Stmt LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
-                       CopyInst copy_inst) const;
-
-  /*!
-   * \brief Generate lowering for LDS Memory Copy (shared memory to shared
-   * memory or smem usage).
-   */
-  Stmt LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
-                     CopyInst copy_inst) const;
-
-  /*!
-   * \brief Generate lowering for tensor memory copy (tcgen05.ld/st/cp).
-   */
-  Stmt LowerTmemCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Generate lowering for normal copy.
-   */
-  Stmt LowerNormalCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Generate lowering for cp.async global->shared copy.
-   */
-  Stmt LowerCPAsyncCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
+  LayoutMap InferSIMTLayout(const LayoutInferArgs &T, InferLevel level) const;
 
   /*!
    * \brief Generate SIMT (thread-level) loop for copying.
    */
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
-
-  /*!
-   * \brief Compute linear layout for tma copy.
-   */
-  Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
 
   /*!
    * \brief Create iterator variables for multi-dimensional copy loops.
@@ -363,6 +97,7 @@ protected:
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
 
+protected:
   /**
    * \brief Create a deep copy of this operator.
    *
@@ -382,40 +117,26 @@ protected:
    * @return Reference to the singleton TVM Op representing this operator.
    */
   TileOperator Clone() const;
-
-  /*!
-   * \brief Check that a global buffer's strides satisfy TMA requirements.
-   *
-   * Validates: contiguous innermost stride, 16-byte alignment for outer
-   * strides, and stride < 2^40.
-   *
-   * \return true if all stride checks pass.
-   */
-  static bool CheckGlobalStrides(const Buffer &buffer,
-                                 arith::Analyzer *analyzer);
-
-private:
-  /*!
-   * \brief Collect fragment buffers from expression and create fully replicated
-   * layouts.
-   *
-   * Recursively searches the expression for BufferLoad nodes with
-   * "local.fragment" scope, following let bindings. For each found fragment
-   * buffer, creates a fully replicated layout and adds it to result_map.
-   *
-   * \param expr            Expression to search.
-   * \param let_var_to_expr Map from let variables to their bound expressions.
-   * \param existing_layouts Existing layout map to check for already-inferred
-   * layouts. \param thread_extent   Number of threads for replication. \param
-   * thread_bounds   Thread bounds for binding the layout. \param result_map
-   * Output map to store collected fragment layouts.
-   */
-  void CollectFragmentLayouts(const PrimExpr &expr,
-                              const Map<Var, PrimExpr> &let_var_to_expr,
-                              const LayoutMap &existing_layouts,
-                              PrimExpr thread_extent, Range thread_bounds,
-                              Map<Buffer, Layout> &result_map) const;
 };
+
+using CopyTargetPredicate = bool (*)(Target target);
+
+struct CopyImpl {
+  const char *name;
+  CopyTargetPredicate match_target;
+  int priority;
+
+  LayoutMap (*infer_layout)(const CopyNode &op, const LayoutInferArgs &T,
+                            InferLevel level);
+
+  Stmt (*lower)(const CopyNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterCopyImpl(CopyImpl impl);
+
+Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
+                     arith::Analyzer *analyzer);
 
 class Copy : public TileOperator {
 public:
@@ -489,6 +210,17 @@ public:
   static const Op &Get();
   TileOperator Clone() const;
 };
+
+struct Conv2DIm2ColImpl {
+  const char *name;
+  CopyTargetPredicate match_target;
+  int priority;
+
+  Stmt (*lower)(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl);
 
 class Conv2DIm2ColOp : public TileOperator {
 public:

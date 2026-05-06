@@ -5,12 +5,12 @@
  */
 
 #include "./atomic_add.h"
-#include "./copy.h"
 #include "utils.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
+#include "../backend/cuda/op/copy.h"
 #include "../layout/layout.h"
 #include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
@@ -374,7 +374,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Array<Range> global_range = dst_range;
 
     // Build TMADesc for the global tensor
-    TMADesc desc;
+    cuda::TMADesc desc;
     desc.rank = global_tensor->shape.size();
     ICHECK(desc.rank >= 1 && desc.rank <= 5)
         << "TMA reduce only supports 1-5 dimensions, got " << desc.rank;

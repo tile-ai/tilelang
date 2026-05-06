@@ -109,7 +109,10 @@ file(GLOB TILE_LANG_CUDA_SRCS
   src/target/codegen_cutedsl.cc
   src/target/rt_mod_cuda.cc
   src/target/rt_mod_cutedsl.cc
+  src/backend/cuda/op/*.cc
 )
+list(REMOVE_ITEM TILE_LANG_CUDA_SRCS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/cuda/op/copy_analysis.cc")
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
 
 list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
