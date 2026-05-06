@@ -20,8 +20,10 @@ def get_arch(target: str | Target = "cuda") -> TileDevice:
     elif target.kind.name == "llvm":
         return CPU(target)
     elif target.kind.name == "hip":
-        if target_is_rdna(target) and target_get_rdna_generation(target) == 11:
-            return RDNA(target)
+        if target_is_rdna(target):
+            if target_get_rdna_generation(target) == 11:
+                return RDNA(target)
+            raise ValueError(f"RDNA device model currently supports gfx11 targets only, got {target}.")
         return CDNA(target)
     elif target.kind.name == "metal":
         return METAL(target)

@@ -83,16 +83,15 @@ def test_carver_routes_rdna_without_instantiating_device(monkeypatch):
     assert target_get_mcpu(arch[1]) == "gfx1151"
 
 
-def test_carver_leaves_gfx12_on_existing_hip_path(monkeypatch):
+def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
     import tilelang.carver.arch as arch_mod
 
     def fake_cdna(target):
         return ("cdna", target)
 
     monkeypatch.setattr(arch_mod, "CDNA", fake_cdna)
-    arch = arch_mod.get_arch(Target("hip -mcpu=gfx1200"))
-    assert arch[0] == "cdna"
-    assert target_get_mcpu(arch[1]) == "gfx1200"
+    with pytest.raises(ValueError, match="gfx11 targets only"):
+        arch_mod.get_arch(Target("hip -mcpu=gfx1200"))
 
 
 def test_rdna_device_model_rejects_gfx12_before_device_probe():
