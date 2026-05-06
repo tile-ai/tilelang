@@ -10,12 +10,9 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../layout/tcgen05_layout.h"
-#include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
-#include "builtin.h"
 #include "utils.h"
 
 namespace tvm {

@@ -1,0 +1,67 @@
+/*!
+ * \file tl/backend/metal/op/reduce.cc
+ * \brief Metal implementation for tl.reduce AllReduce lowering.
+ */
+
+#include "op/reduce.h"
+
+#include "target/utils.h"
+
+#include <sstream>
+
+namespace tvm {
+namespace tl {
+
+using namespace tir;
+
+namespace metal {
+
+struct Reduce {
+  static bool SupportsFp16Bf16NanReduce(Target) { return false; }
+
+  static std::string MakeBatchAllReduce(std::string reducer,
+                                        int reducing_threads, int scale,
+                                        PrimExpr thread_offset, PrimExpr,
+                                        int batch, int workspace_stride,
+                                        Target) {
+    std::stringstream ss;
+    ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
+       << scale << ", " << thread_offset << ", tl::SyncThreadsBarrier, "
+       << batch << ", " << workspace_stride << ">::run_batch";
+    return ss.str();
+  }
+
+  static std::string MakeScalarAllReduce(std::string reducer,
+                                         int reducing_threads, int scale,
+                                         PrimExpr thread_offset, PrimExpr,
+                                         Target) {
+    std::stringstream ss;
+    ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
+       << scale << ", " << thread_offset << ">::run";
+    return ss.str();
+  }
+};
+
+} // namespace metal
+
+namespace {
+
+bool MatchMetalReduceTarget(Target target) { return TargetIsMetal(target); }
+
+bool RegisterMetalReduce() {
+  RegisterReduceImpl(ReduceImpl{
+      "metal.Reduce",
+      MatchMetalReduceTarget,
+      metal::Reduce::SupportsFp16Bf16NanReduce,
+      metal::Reduce::MakeBatchAllReduce,
+      metal::Reduce::MakeScalarAllReduce,
+  });
+  return true;
+}
+
+const bool metal_reduce_registered = RegisterMetalReduce();
+
+} // namespace
+
+} // namespace tl
+} // namespace tvm

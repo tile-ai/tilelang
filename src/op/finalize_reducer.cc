@@ -11,13 +11,53 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../target/utils.h"
 #include "utils.h"
+
+#include <array>
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+std::vector<FinalizeReducerImpl> &FinalizeReducerImplRegistry() {
+  static std::vector<FinalizeReducerImpl> registry;
+  return registry;
+}
+
+const FinalizeReducerImpl &ResolveFinalizeReducerImpl(Target target) {
+  const auto &registry = FinalizeReducerImplRegistry();
+  const FinalizeReducerImpl *matched_impl = nullptr;
+  for (const FinalizeReducerImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.finalize_reducer found multiple target-specific "
+             "implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.finalize_reducer requires a target-specific implementation, but "
+         "no finalize_reducer implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.warp_size != nullptr);
+  ICHECK(impl.make_batch_allreduce != nullptr);
+  ICHECK(impl.make_scalar_allreduce != nullptr);
+  FinalizeReducerImplRegistry().push_back(impl);
+}
 
 /**
  * @brief Construct a FinalizeReducerOp from TL operator arguments and a buffer
@@ -60,10 +100,9 @@ FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
  * - Builds index Vars for each output dimension.
  * - Reads the layout's ReplicateExtent and:
  *   - if extent == 1, emits a no-op Evaluate(0);
- *   - otherwise constructs an AllReduce extern call (uses `NamedBarrier` when
- *     the compilation target is Hopper) with an optional workspace (allocated
- * via T.AddWorkspace when reducing_threads >= 32) and stores the result via
- *     BufferStore.
+ *   - otherwise asks the registered backend to build the AllReduce extern call
+ *     name, adds optional workspace (allocated via T.AddWorkspace when
+ *     reducing_threads >= 32), and stores the result via BufferStore.
  * - Wraps the store in parallel outer For loops over each output dimension.
  *
  * @param T Lowering context containing buffer remapping, layout map, thread
@@ -79,6 +118,7 @@ FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
  */
 Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
                                   arith::Analyzer *analyzer) const {
+  const FinalizeReducerImpl &impl = ResolveFinalizeReducerImpl(T.target);
   auto buffer = T.buffer_remap[reducer];
   auto opt_layout = T.layout_map.Get(reducer);
   ICHECK(opt_layout);
@@ -129,49 +169,27 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
         << ")";
   }
 
-  // ROCm wavefronts are 64-wide; only batch when reducing across warps.
-  const int warp_size = TargetIsRocm(T.target) ? 64 : 32;
+  const int warp_size = impl.warp_size(T.target);
   bool use_batch = effective_batch > 1 && reducing_threads > warp_size;
 
   if (use_batch) {
     // Batched AllReduce: single butterfly pass for all output elements.
     int workspace_stride =
         static_cast<int>(*as_const_int(T.thread_bounds->extent));
-    std::stringstream ss;
-    if (TargetHasSMVersionGE(T.target, 90)) {
-      auto all_threads = T.thread_bounds->extent;
-      ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
-         << ", " << thread_offset << ", tl::NamedBarrier<" << all_threads
-         << ">, " << effective_batch << ", " << workspace_stride
-         << ">::run_batch";
-    } else if (TargetIsRocm(T.target)) {
-      // HIP AllReduce has no Barrier type parameter.
-      ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
-         << ", " << thread_offset << ", " << effective_batch << ", "
-         << workspace_stride << ">::run_batch";
-    } else {
-      ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
-         << ", " << thread_offset << ", tl::SyncThreadsBarrier, "
-         << effective_batch << ", " << workspace_stride << ">::run_batch";
-    }
+    std::string allreduce = impl.make_batch_allreduce(
+        op_str, reducing_threads, 1, thread_offset, T.thread_bounds->extent,
+        static_cast<int>(effective_batch), workspace_stride, T.target);
     int ws_size = workspace_stride * static_cast<int>(effective_batch);
     PrimExpr workspace = T.AddWorkspace(ws_size, buffer->dtype);
-    Array<PrimExpr> args = {StringImm(ss.str()), buffer->data, workspace};
+    Array<PrimExpr> args = {StringImm(allreduce), buffer->data, workspace};
     return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
   }
 
   // Scalar AllReduce path (original).
-  std::stringstream ss;
-  if (TargetHasSMVersionGE(T.target, 90)) {
-    auto all_threads = T.thread_bounds->extent;
-    ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
-       << ", " << thread_offset << ", tl::NamedBarrier<" << all_threads
-       << ">>::run";
-  } else {
-    ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
-       << ", " << thread_offset << ">::run";
-  }
-  Array<PrimExpr> thread_reduce_args = {StringImm(ss.str()),
+  std::string allreduce =
+      impl.make_scalar_allreduce(op_str, reducing_threads, 1, thread_offset,
+                                 T.thread_bounds->extent, T.target);
+  Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
                                         BufferLoad(buffer, indices_0)};
   if (reducing_threads >= 32) {
     PrimExpr workspace =

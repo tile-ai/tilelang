@@ -11,7 +11,6 @@
 #include <tvm/tir/op_attr_types.h>
 
 #include "../layout/layout.h"
-#include "../target/utils.h"
 
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
@@ -271,8 +270,6 @@ LayoutMap AtomicOpBaseNode::InferLayout(const LayoutInferArgs &T,
 
 Stmt AtomicOpBaseNode::Lower(const LowerArgs &T,
                              arith::Analyzer *analyzer) const {
-  Target target = T.target;
-
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
   auto par_op = ParallelOp(fused_loop);

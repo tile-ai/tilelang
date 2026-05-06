@@ -12,6 +12,8 @@
 #include "../transform/layout_reducer.h"
 #include "./operator.h"
 
+#include <string>
+
 /**
  * Get the Op singleton for the public FinalizeReducerOp handle.
  *
@@ -47,6 +49,27 @@ public:
   static const Op &Get();
   TileOperator Clone() const;
 };
+
+using FinalizeReducerTargetPredicate = bool (*)(Target target);
+
+struct FinalizeReducerImpl {
+  const char *name;
+  FinalizeReducerTargetPredicate match_target;
+
+  int (*warp_size)(Target target);
+
+  std::string (*make_batch_allreduce)(std::string reducer, int reducing_threads,
+                                      int scale, PrimExpr thread_offset,
+                                      PrimExpr all_threads, int batch,
+                                      int workspace_stride, Target target);
+
+  std::string (*make_scalar_allreduce)(std::string reducer,
+                                       int reducing_threads, int scale,
+                                       PrimExpr thread_offset,
+                                       PrimExpr all_threads, Target target);
+};
+
+void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl);
 
 class FinalizeReducerOp : public TileOperator {
 public:

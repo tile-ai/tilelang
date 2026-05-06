@@ -59,18 +59,31 @@ public:
     return false;
   }
 
-  /// Get vectorization length based on dst dtype and target SM version
-  int GetVectorizeLength(Target target) const;
+  /// Infer layout for the target-independent SIMT atomic add path.
+  LayoutMap InferSIMTLayout(const LayoutInferArgs &T, InferLevel level) const;
+
+  /// Lower through the target-independent SIMT atomic add path.
+  Stmt LowerSIMT(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
 protected:
   /// Override MakeSIMTLoop to handle AtomicAdd-specific logic
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
-
-  /// Return buffer indices and total size
-  std::pair<Array<PrimExpr>, PrimExpr> ReturnIndicesAndSize(int src_dst) const;
-  /// Compute linear layout for shared tensor (used in TMA atomic add)
-  Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
 };
+
+using AtomicAddTargetPredicate = bool (*)(Target target);
+
+struct AtomicAddImpl {
+  const char *name;
+  AtomicAddTargetPredicate match_target;
+
+  LayoutMap (*infer_layout)(const AtomicAddNode &op, const LayoutInferArgs &T,
+                            InferLevel level);
+
+  Stmt (*lower)(const AtomicAddNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterAtomicAddImpl(AtomicAddImpl impl);
 
 /// Wrapper class for atomic addition operations
 class AtomicAdd : public TileOperator {

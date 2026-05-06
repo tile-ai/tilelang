@@ -13,7 +13,6 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/parallel.h"
-#include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"
 #include "tir/transforms/ir_utils.h"
@@ -22,10 +21,50 @@
 #include "tvm/tir/stmt.h"
 #include "utils.h"
 
+#include <sstream>
+#include <vector>
+
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+std::vector<ReduceImpl> &ReduceImplRegistry() {
+  static std::vector<ReduceImpl> registry;
+  return registry;
+}
+
+const ReduceImpl &ResolveReduceImpl(Target target) {
+  const auto &registry = ReduceImplRegistry();
+  const ReduceImpl *matched_impl = nullptr;
+  for (const ReduceImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.reduce found multiple target-specific implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.reduce requires a target-specific implementation, but no reduce "
+         "implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterReduceImpl(ReduceImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.supports_fp16_bf16_nan_reduce != nullptr);
+  ICHECK(impl.make_batch_allreduce != nullptr);
+  ICHECK(impl.make_scalar_allreduce != nullptr);
+  ReduceImplRegistry().push_back(impl);
+}
 
 // NormalizeToBufferRegion moved to src/op/utils.{h,cc}
 
@@ -234,9 +273,8 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  *
  * Lowers a ReduceOpNode operating on fragment-scoped buffers into a sequence of
  * TIR statements implementing: optional initialization, thread-local reduction
- * (unrolled inner loops), inter-thread reduction via a runtime AllReduce call
- * (Hopper targets use `NamedBarrier` instead of the default
- * `SyncThreadsBarrier`), and an optional accumulation or copy back to the
+ * (unrolled inner loops), inter-thread reduction via a backend-provided
+ * runtime AllReduce call, and an optional accumulation or copy back to the
  * destination buffer when a temporary clear buffer is used.
  *
  * Behavior notes:
@@ -266,8 +304,9 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  const ReduceImpl &impl = ResolveReduceImpl(T.target);
   if (nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16()) &&
-      !TargetIsCuda(T.target)) {
+      !impl.supports_fp16_bf16_nan_reduce(T.target)) {
     LOG(FATAL) << "ReduceOp: nan_propagate=True for fp16/bf16 max/min/absmax "
                   "is only supported on CUDA targets (requires "
                   "__hmax_nan/__hmin_nan intrinsics). Target was: "
@@ -496,26 +535,12 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
         int reducing_threads = (*extent) * (*scale);
         auto thread_offset = T.thread_bounds->min;
-        std::stringstream ss;
 
         // Use run_batch (not run) to avoid overload-resolution ambiguity when
         // a pointer is passed as first argument.
-        if (TargetHasSMVersionGE(T.target, 90)) {
-          auto all_threads = T.thread_bounds->extent;
-          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-             << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ", tl::NamedBarrier<" << all_threads << ">, " << batch << ", "
-             << reducing_threads << ">::run_batch";
-        } else if (TargetIsRocm(T.target)) {
-          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-             << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ", " << batch << ", " << reducing_threads << ">::run_batch";
-        } else {
-          ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-             << reducing_threads << ", " << (*scale) << ", " << thread_offset
-             << ", tl::SyncThreadsBarrier, " << batch << ", "
-             << reducing_threads << ">::run_batch";
-        }
+        std::string allreduce = impl.make_batch_allreduce(
+            this->MakeCodegenReducer(), reducing_threads, *scale, thread_offset,
+            T.thread_bounds->extent, batch, reducing_threads, T.target);
 
         // Workspace is only needed for cross-warp reduce (> 32 threads).
         // Allocate once; all chunks share the same workspace buffer.
@@ -553,7 +578,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
                               {BufferLoad(clear_buffer, chunk_indices)});
 
-          Array<PrimExpr> args = {StringImm(ss.str()), ptr};
+          Array<PrimExpr> args = {StringImm(allreduce), ptr};
           if (need_workspace)
             args.push_back(workspace);
           phases.push_back(
@@ -633,21 +658,12 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
             continue;
 
           int reducing_threads = (*extent) * (*scale);
-          std::stringstream ss;
-
           auto thread_offset = T.thread_bounds->min;
-          if (TargetHasSMVersionGE(T.target, 90)) {
-            auto all_threads = T.thread_bounds->extent;
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ", tl::NamedBarrier<" << all_threads << ">>::run";
-          } else {
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ">::run";
-          }
+          std::string allreduce = impl.make_scalar_allreduce(
+              this->MakeCodegenReducer(), reducing_threads, *scale,
+              thread_offset, T.thread_bounds->extent, T.target);
           Array<PrimExpr> thread_reduce_args = {
-              StringImm(ss.str()), BufferLoad(clear_buffer, red_indices)};
+              StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
           if (reducing_threads > 32) {
             int workspace_size =
                 static_cast<int>(*as_const_int(T.thread_bounds->extent));

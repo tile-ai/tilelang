@@ -8,6 +8,8 @@
 
 #include "operator.h"
 
+#include <string>
+
 namespace tvm {
 
 namespace tl {
@@ -134,6 +136,27 @@ private:
   /// Generate codegen reducer string
   std::string MakeCodegenReducer() const;
 };
+
+using ReduceTargetPredicate = bool (*)(Target target);
+
+struct ReduceImpl {
+  const char *name;
+  ReduceTargetPredicate match_target;
+
+  bool (*supports_fp16_bf16_nan_reduce)(Target target);
+
+  std::string (*make_batch_allreduce)(std::string reducer, int reducing_threads,
+                                      int scale, PrimExpr thread_offset,
+                                      PrimExpr all_threads, int batch,
+                                      int workspace_stride, Target target);
+
+  std::string (*make_scalar_allreduce)(std::string reducer,
+                                       int reducing_threads, int scale,
+                                       PrimExpr thread_offset,
+                                       PrimExpr all_threads, Target target);
+};
+
+void RegisterReduceImpl(ReduceImpl impl);
 
 /// Wrapper class for reduction operations
 class ReduceOp : public TileOperator {
