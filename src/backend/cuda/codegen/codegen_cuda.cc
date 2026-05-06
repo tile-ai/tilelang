@@ -3,7 +3,7 @@
  */
 
 #include "codegen_cuda.h"
-#include "codegen_utils.h"
+#include "target/codegen_utils.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/tir/index_map.h>
