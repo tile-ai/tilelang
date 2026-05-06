@@ -54,7 +54,7 @@ class RDNA(TileDevice):
         self.available_tensor_instructions: list[TensorInstruction] | None = None
 
     def get_avaliable_tensorintrin_shapes(self):
-        self.available_tensor_instructions = _get_tensor_instructions_for_generation(self.rdna_generation)
+        self.available_tensor_instructions = list(_get_tensor_instructions_for_generation(self.rdna_generation))
         return [t.shape for t in self.available_tensor_instructions]
 
     def __repr__(self):

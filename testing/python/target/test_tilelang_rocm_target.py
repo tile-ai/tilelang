@@ -108,6 +108,7 @@ def test_rdna_tensor_instruction_lookup_is_generation_aware():
     arch = RDNA.__new__(RDNA)
     arch.rdna_generation = 11
     assert arch.get_avaliable_tensorintrin_shapes() == [[16, 16]]
+    assert isinstance(arch.available_tensor_instructions, list)
 
     arch.rdna_generation = 12
     with pytest.raises(ValueError, match="Unsupported RDNA generation"):
