@@ -61,7 +61,8 @@ TVM_REGISTER_OP("tl.infinity")
                                Integer(CallEffectKind::kPure))
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "infinity")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", infinity_op)
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", infinity_op);
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", infinity_op)
+    .set_attr<FLowerIntrinsic>("metal.FLowerIntrinsic", infinity_op);
 
 } // namespace tl
 } // namespace tvm
