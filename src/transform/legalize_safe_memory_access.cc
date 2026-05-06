@@ -15,7 +15,6 @@
 #include "../op/builtin.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include "common/access_ptr_utils.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"
 
@@ -235,6 +234,35 @@ private:
   SafeMemorysRewriter(arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer) {}
 
+  template <typename VisitExprFn>
+  BufferLoad VisitAccessPtrBase(const PrimExpr &expr,
+                                VisitExprFn &&visit_expr) {
+    const auto *base_load_node = expr.as<BufferLoadNode>();
+    ICHECK(base_load_node) << "tl.access_ptr base must be BufferLoad, but got "
+                           << expr;
+    BufferLoad base_load = tvm::ffi::GetRef<BufferLoad>(base_load_node);
+
+    Array<PrimExpr> indices;
+    bool changed = false;
+    for (const PrimExpr &index : base_load->indices) {
+      PrimExpr new_index = visit_expr(index);
+      changed = changed || !new_index.same_as(index);
+      indices.push_back(new_index);
+    }
+
+    Optional<PrimExpr> predicate = base_load->predicate;
+    if (predicate.defined()) {
+      PrimExpr new_predicate = visit_expr(predicate.value());
+      changed = changed || !new_predicate.same_as(predicate.value());
+      predicate = new_predicate;
+    }
+
+    if (!changed) {
+      return base_load;
+    }
+    return BufferLoad(base_load->buffer, indices, predicate, base_load->span);
+  }
+
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (!op->op.same_as(tl::access_ptr())) {
       return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -246,7 +274,7 @@ private:
       return this->VisitExpr(expr);
     };
     Array<PrimExpr> args{
-        detail::VisitAccessPtrBase(op->args[0], visit_expr),
+        VisitAccessPtrBase(op->args[0], visit_expr),
         VisitExpr(op->args[1]),
         VisitExpr(op->args[2]),
     };

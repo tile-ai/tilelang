@@ -11,7 +11,6 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
-#include "common/access_ptr_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -85,10 +84,7 @@ public:
     ICHECK_EQ(op->args.size(), 3U)
         << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
 
-    auto visit_expr = [this](const PrimExpr &expr) {
-      return this->VisitExpr(expr);
-    };
-    BufferLoad base_load = detail::VisitAccessPtrBase(op->args[0], visit_expr);
+    BufferLoad base_load = VisitAccessPtrBase(op->args[0]);
     Buffer buffer = base_load->buffer;
     ICHECK(buffer.defined());
 
@@ -101,6 +97,33 @@ public:
 
     Array<PrimExpr> args{ptype, data, offset, extent, rw_mask};
     return Call(DataType::Handle(), builtin::tvm_access_ptr(), args);
+  }
+
+private:
+  BufferLoad VisitAccessPtrBase(const PrimExpr &expr) {
+    const auto *base_load_node = expr.as<BufferLoadNode>();
+    ICHECK(base_load_node) << "tl.access_ptr base must be BufferLoad, but got "
+                           << expr;
+    BufferLoad base_load = tvm::ffi::GetRef<BufferLoad>(base_load_node);
+
+    Array<PrimExpr> indices;
+    bool changed = false;
+    for (const PrimExpr &index : base_load->indices) {
+      PrimExpr new_index = VisitExpr(index);
+      changed = changed || !new_index.same_as(index);
+      indices.push_back(new_index);
+    }
+    Optional<PrimExpr> predicate = base_load->predicate;
+    if (predicate.defined()) {
+      PrimExpr new_predicate = VisitExpr(predicate.value());
+      changed = changed || !new_predicate.same_as(predicate.value());
+      predicate = new_predicate;
+    }
+
+    if (!changed) {
+      return base_load;
+    }
+    return BufferLoad(base_load->buffer, indices, predicate, base_load->span);
   }
 };
 
