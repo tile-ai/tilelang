@@ -40,6 +40,32 @@ static PrimExpr MakeTmaLeaderCondition(PrimExpr thread_extent) {
   return Call(DataType::Bool(), tl_shuffle_elect(), {std::move(thread_extent)});
 }
 
+static int64_t TMABytesFromElements(int64_t elements, DataType dtype) {
+  return (elements * dtype.bits() + 7) / 8;
+}
+
+static PrimExpr TMABytesFromElements(PrimExpr elements, DataType dtype) {
+  PrimExpr elements_i64 = cast(DataType::Int(64), elements);
+  int bits = dtype.bits();
+  if (bits % 8 == 0) {
+    return elements_i64 * IntImm(DataType::Int(64), bits / 8);
+  }
+  return FloorDiv(elements_i64 * IntImm(DataType::Int(64), bits) +
+                      IntImm(DataType::Int(64), 7),
+                  IntImm(DataType::Int(64), 8));
+}
+
+static PrimExpr TMABitsFromElements(PrimExpr elements, DataType dtype) {
+  return cast(DataType::Int(64), elements) *
+         IntImm(DataType::Int(64), dtype.bits());
+}
+
+static int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
+  ICHECK_EQ((bytes * 8) % dtype.bits(), 0)
+      << bytes << " bytes cannot be represented as whole elements of " << dtype;
+  return bytes * 8 / dtype.bits();
+}
+
 PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
                               const LowerArgs &T) {
   PrimExpr phase = T.mbar_phase_expr;
@@ -457,6 +483,13 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
                              thread_extent, T.thread_bounds, result_map);
     }
 
+    if (is_tma_1d) {
+      // 1D TMA requires contiguous shared memory. Do not infer a swizzled
+      // shared layout here, otherwise the final instruction selection may fall
+      // back to descriptor-based multidimensional TMA.
+      return result_map;
+    }
+
     // check shared layout is non-swizzle
     // skip layout inference if shared layout is already annotated
     if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
@@ -525,8 +558,7 @@ bool CopyNode::CheckGlobalStrides(const Buffer &buffer,
   }
 
   for (size_t i = 0; i + 1 < strides.size(); ++i) {
-    PrimExpr stride_bytes =
-        cast(DataType::Int(64), strides[i]) * buffer->dtype.bytes();
+    PrimExpr stride_bytes = TMABytesFromElements(strides[i], buffer->dtype);
     if (analyzer->CanProve(
             FloorMod(stride_bytes, IntImm(DataType::Int(64), 16)) != 0,
             arith::ProofStrength::kSymbolicBound)) {
@@ -565,13 +597,14 @@ bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
   // now we check src (gmem) as tma box dim is deduced from src
   if (check_last_dim &&
       analyzer->CanProve(
-          FloorMod(src_range[src_range.size() - 1]->extent * src->dtype.bytes(),
-                   16) != 0,
+          FloorMod(TMABitsFromElements(src_range[src_range.size() - 1]->extent,
+                                       src->dtype),
+                   IntImm(DataType::Int(64), 128)) != 0,
           arith::ProofStrength::kSymbolicBound)) {
     LOG(WARNING)
         << "src range must have last dim multiple of 16 for tma bulk load "
         << src->name << " range " << src_range[src_range.size() - 1]->extent
-        << " * " << src->dtype.bytes() << " % 16 != 0";
+        << " * " << src->dtype.bits() << " bits % 128 != 0";
     return false;
   }
 
@@ -679,13 +712,14 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
   // now we check dst (gmem) as tma box dim is deduced from dst
   if (check_last_dim &&
       analyzer->CanProve(
-          FloorMod(dst_range[dst_range.size() - 1]->extent * dst->dtype.bytes(),
-                   16) != 0,
+          FloorMod(TMABitsFromElements(dst_range[dst_range.size() - 1]->extent,
+                                       dst->dtype),
+                   IntImm(DataType::Int(64), 128)) != 0,
           arith::ProofStrength::kSymbolicBound)) {
     LOG(WARNING)
         << "dst range must have last dim multiple of 16 for tma bulk store "
         << dst->name << " range " << dst_range[dst_range.size() - 1]->extent
-        << " * " << dst->dtype.bytes() << " % 16 != 0";
+        << " * " << dst->dtype.bits() << " bits % 128 != 0";
     return false;
   }
   // 4. src and dst must have the same dtype
@@ -1242,6 +1276,10 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
   }
   // Currently tcgen05.cp is not supported
   // TODO (mzw) Support tcgen05.cp
+
+  // NOTE(wt): For copying scaling factor from SMEM to TMEM,
+  // please use `T.tcgen05_cp_warpx4` instead,
+  // as blockscaled GEMM on SM100 requires 4 duplicated 32-row sf.
   ICHECK(!is_cp)
       << "Copy from shared memory to tensor memory is not supported yet";
   // Extract loop variables and ranges
@@ -1519,7 +1557,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   // Make global stride in bytes
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return cast(DataType::Int(64), e) * global_tensor->dtype.bytes();
+    return TMABytesFromElements(e, global_tensor->dtype);
   });
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
     auto stride = desc.global_stride[i].as<IntImmNode>();
@@ -1636,9 +1674,9 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   }
   int instruction_dim = *inner_box_dim;
   if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
-    instruction_dim = 64 / src->dtype.bytes();
+    instruction_dim = TMAElementsForBytes(64, src->dtype);
   } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
-    instruction_dim = 128 / src->dtype.bytes();
+    instruction_dim = TMAElementsForBytes(128, src->dtype);
   }
   if (instruction_dim > 256) {
     // smem_box dim must be in [0, 256]
@@ -1652,7 +1690,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       << " is not divisible by instruction_dim: " << instruction_dim;
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
-  int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
+  int inner_box_dim_ =
+      TMABytesFromElements(instruction_dim, shared_tensor->dtype);
 
   // Check inner_box_dim_ for each swizzle type in a cleaner way
   struct SwizzleCheck {
@@ -1783,9 +1822,10 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     PrimExpr total_bytes;
     if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
-      total_bytes = total_elements * loop_extent * shared_tensor->dtype.bytes();
+      total_bytes = TMABytesFromElements(total_elements * loop_extent,
+                                         shared_tensor->dtype);
     } else {
-      total_bytes = total_elements * shared_tensor->dtype.bytes();
+      total_bytes = TMABytesFromElements(total_elements, shared_tensor->dtype);
     }
 
     Stmt barrier_before_tma_stmt;
@@ -1943,7 +1983,7 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
   }
 
   Stmt tma_copy;
-  PrimExpr total_bytes = elements * shared_tensor->dtype.bytes();
+  PrimExpr total_bytes = TMABytesFromElements(elements, shared_tensor->dtype);
   if (is_load) {
     // 1D TMA load: args = {shared_addr, global_addr, mbarrier, bytes, eviction}
     PrimExpr mbar_arg = barrier_base_id >= 0 ? mbar_handle : PrimExpr(0);
@@ -2116,9 +2156,8 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   // The first stride element should be 1
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   // Make global stride in bytes
-  desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
-    return cast(DataType::Int(64), e) * src_->dtype.bytes();
-  });
+  desc.global_stride = desc.global_stride.Map(
+      [&](PrimExpr e) { return TMABytesFromElements(e, src_->dtype); });
   desc.elem_stride = {1, stride_, stride_, 1};
   desc.lower_corner = {-padding_, -padding_};
   desc.upper_corner = {-padding_, -padding_};
@@ -2233,9 +2272,9 @@ Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
   if (barrier_base_id >= 0) {
     bool ws_barrier = annotations_.Get("barrier").has_value();
     // Total bytes transferred by im2col TMA copy
-    PrimExpr total_bytes =
-        IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel *
-                                      dst_->dtype.bytes());
+    PrimExpr total_bytes = TMABytesFromElements(
+        IntImm(DataType::Int(32), desc.smem_box_pixel * desc.smem_box_channel),
+        dst_->dtype);
 
     Stmt barrier_before_tma_stmt = Evaluate(Call(
         DataType::Handle(), mbarrier_expect_tx(), {mbar_handle, total_bytes}));

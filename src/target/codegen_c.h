@@ -18,11 +18,11 @@
  */
 
 /*!
- * \file codegen_c_host.h
- * \brief Generate C host code.
+ * \file codegen_c.h
+ * \brief Generate C code when target is c (CPU).
  */
-#ifndef TVM_TARGET_SOURCE_CODEGEN_C_HOST_H_
-#define TVM_TARGET_SOURCE_CODEGEN_C_HOST_H_
+#ifndef TVM_TL_CODEGEN_C_H_
+#define TVM_TL_CODEGEN_C_H_
 
 #include <string>
 #include <unordered_map>
@@ -37,9 +37,9 @@
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangCPP : public CodeGenC {
+class CodeGenTileLangC : public CodeGenC {
 public:
-  CodeGenTileLangCPP();
+  CodeGenTileLangC();
   void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,
             std::string target_str,
             const std::unordered_set<std::string> &devices);
@@ -122,4 +122,4 @@ private:
 } // namespace codegen
 } // namespace tvm
 
-#endif // TVM_TARGET_SOURCE_CODEGEN_C_HOST_H_
+#endif // TVM_TL_CODEGEN_C_H_

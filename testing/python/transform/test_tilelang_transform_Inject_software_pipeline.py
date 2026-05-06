@@ -390,15 +390,15 @@ def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():
     assert annotated == 0
 
 
-def test_async_pipeline_relaxes_loop_wait_and_splits_trailing_drain():
+def test_async_pipeline_relaxes_loop_wait_and_descends_trailing_drain():
     @T.prim_func
-    def before(A: T.Tensor((32,), T.uint8), B: T.Tensor((32,), T.uint8)):
+    def before(A: T.Tensor((40,), T.uint8), B: T.Tensor((40,), T.uint8)):
         S = T.alloc_buffer((4,), dtype=T.uint8, scope="shared")
         for i in T.serial(
             0,
-            4,
+            5,
             annotations={
-                "software_pipeline_stage": [0, 2],
+                "software_pipeline_stage": [0, 3],
                 "software_pipeline_order": [0, 1],
                 "software_pipeline_async_stages": [0],
                 "software_pipeline_async_producers": [1, 0],
@@ -424,8 +424,8 @@ def test_async_pipeline_relaxes_loop_wait_and_splits_trailing_drain():
     loop_waits = _collect_wait_args(loop.body)
     all_waits = _collect_wait_args(func)
 
-    assert loop_waits == [2], f"Expected relaxed loop wait to keep two groups in flight, got {loop_waits}"
-    assert all_waits == [2, 2, 0], f"Expected trailing waits to split into retain+drain, got {all_waits}"
+    assert loop_waits == [3], f"Expected relaxed loop wait to keep three groups in flight, got {loop_waits}"
+    assert all_waits == [3, 2, 1, 0], f"Expected trailing waits to descend through the drain suffix, got {all_waits}"
 
 
 def test_degenerate_pipeline_with_single_stage_is_not_expanded():

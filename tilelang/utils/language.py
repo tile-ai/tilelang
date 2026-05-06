@@ -335,6 +335,43 @@ def retrieve_ptr(
     raise ValueError(f"Unsupported retrieve_ptr argument type: {type(obj)} for object {obj}")
 
 
+def retrieve_buffer_and_offset(obj: BufferLikeType) -> tuple[Buffer, PrimExpr | int]:
+    """
+    Retrieve the underlying buffer together with its logical element offset.
+
+    - Buffer -> (buffer, 0)
+    - BufferRegion -> (buffer, offset from region minima)
+    - BufferLoad -> (buffer, offset from indices or derived region minima)
+
+    This is useful when callers need to build custom access patterns from a
+    common buffer base rather than materializing a full `access_ptr` directly.
+    """
+    if isinstance(obj, tir.Buffer):
+        return obj, 0
+
+    if isinstance(obj, tir.BufferRegion):
+        buffer, region = obj.buffer, obj.region
+        strides = retrieve_stride(obj)
+        offset = 0
+        for i, r in enumerate(region):
+            offset += r.min * strides[i]
+        return buffer, offset
+
+    if isinstance(obj, tir.BufferLoad):
+        region = get_buffer_region_from_load(obj)
+        if region is not None:
+            return retrieve_buffer_and_offset(region)
+
+        buffer = obj.buffer
+        strides = retrieve_stride(obj)
+        offset = 0
+        for i, idx in enumerate(obj.indices):
+            offset += idx * strides[i]
+        return buffer, offset
+
+    raise ValueError(f"Unsupported retrieve_buffer_and_offset argument type: {type(obj)} for object {obj}")
+
+
 def retrieve_offset(obj: BufferLikeType) -> list:
     """
     Retrieve per-dimension minima offsets.
