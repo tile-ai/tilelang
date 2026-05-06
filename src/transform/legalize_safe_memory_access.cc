@@ -15,6 +15,7 @@
 #include "../op/builtin.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "common/access_ptr_utils.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"
 
@@ -233,7 +234,24 @@ private:
   // Constructor initializing the base class with the analyzer
   SafeMemorysRewriter(arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer) {}
-  // Constructor initializing the base class with the analyzer
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (!op->op.same_as(tl::access_ptr())) {
+      return IRMutatorWithAnalyzer::VisitExpr_(op);
+    }
+
+    ICHECK_EQ(op->args.size(), 3U)
+        << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+    auto visit_expr = [this](const PrimExpr &expr) {
+      return this->VisitExpr(expr);
+    };
+    Array<PrimExpr> args{
+        detail::VisitAccessPtrBase(op->args[0], visit_expr),
+        VisitExpr(op->args[1]),
+        VisitExpr(op->args[2]),
+    };
+    return Call(op->dtype, op->op, args, op->annotations, op->span);
+  }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
