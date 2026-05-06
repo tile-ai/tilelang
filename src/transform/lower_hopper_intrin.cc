@@ -1,7 +1,7 @@
 /*!
- * \file lower hopper intrin.cc
- * \brief Lower Hopper intrinsics cuda GPU(sm90+)
- */
+* \file lower hopper intrin.cc
+* \brief Lower Hopper intrinsics cuda GPU(sm90+)
+*/
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
@@ -9,6 +9,9 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+
+#include <unordered_map>
+#include <vector>
 
 #include "../op/builtin.h"
 #include "../runtime/runtime.h"
@@ -19,81 +22,22 @@ namespace tl {
 using namespace tir;
 
 #if (CUDA_MAJOR_VERSION >= 12)
-namespace {
-
-Stmt MakeSeqOrSingle(const Array<Stmt> &stmts) {
-  ICHECK(!stmts.empty());
-  return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
-}
-
-Stmt InsertAfterLeadingAllocates(const Stmt &body,
-                                 const Array<Stmt> &prologue_stmts) {
-  if (prologue_stmts.empty()) {
-    return body;
-  }
-
-  Stmt prologue = MakeSeqOrSingle(prologue_stmts);
-  if (const auto *allocate = body.as<AllocateNode>()) {
-    Allocate ret = tvm::ffi::GetRef<Allocate>(allocate);
-    ret.CopyOnWrite()->body =
-        InsertAfterLeadingAllocates(allocate->body, prologue_stmts);
-    return ret;
-  }
-
-  if (const auto *seq = body.as<SeqStmtNode>()) {
-    Array<Stmt> new_seq;
-    bool inserted = false;
-    for (const Stmt &stmt : seq->seq) {
-      if (!inserted && !stmt.as<AllocateNode>()) {
-        new_seq.push_back(prologue);
-        inserted = true;
-      }
-      new_seq.push_back(stmt);
-    }
-    if (!inserted) {
-      new_seq.push_back(prologue);
-    }
-    return SeqStmt(new_seq);
-  }
-
-  return SeqStmt({prologue, body});
-}
-
-} // namespace
-
 class LowerHopperIntrin : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
     PrimFuncNode *fptr = f.CopyOnWrite();
     LowerHopperIntrin substituter(disable_shuffle_elect);
     fptr->body = substituter.VisitStmt(f->body);
-    Map<Var, Array<PrimExpr>> init_desc_arg_map;
     // Collect prologue/epilogue statements for host-side setup/teardown
     Array<Stmt> prologue_stmts;
     Array<Stmt> epilogue_stmts;
-    for (const auto &[call, var] : substituter.desc_map_) {
-      // Should allocate 128 bytes for TensorMap on stack
-      Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
-                             {StringImm("tvm_ffi_any"), 16});
-      Array<PrimExpr> init_desc_args;
-      if (call->op.same_as(create_tma_descriptor())) {
-        init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
-      } else if (call->op.same_as(create_tma_im2col_descriptor())) {
-        init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
-      } else {
-        CHECK(0) << call->op;
+    for (const auto &desc_init : substituter.desc_inits_) {
+      if (!desc_init.emitted) {
+        prologue_stmts.push_back(desc_init.stmt);
       }
-      init_desc_args.push_back(var);
-      init_desc_args.insert(init_desc_args.end(), call->args.begin(),
-                            call->args.end());
-      // add to function attribute
-      Call init_desc =
-          Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
-      // Accumulate TMA descriptor init into prologue
-      prologue_stmts.push_back(LetStmt(var, alloc_desc, Evaluate(init_desc)));
-      init_desc_arg_map.Set(var, init_desc_args);
     }
-    f = WithAttr(std::move(f), "tma_descriptor_args", init_desc_arg_map);
+    f = WithAttr(std::move(f), "tma_descriptor_args",
+                substituter.init_desc_arg_map_);
 
     // Additionally, if L2 persistent cache annotations were lowered earlier,
     // materialize TVM FFI calls to set the stream access policy window.
@@ -129,7 +73,7 @@ public:
                 IntImm(buf->elem_offset.dtype(), buf->dtype.bytes());
             base_ptr =
                 Call(DataType::Handle(), builtin::handle_add_byte_offset(),
-                     {base_ptr, byte_offset});
+                    {base_ptr, byte_offset});
           }
           // Args packed: func_name, base_ptr, num_bytes, hit_ratio
           Array<PrimExpr> packed_args;
@@ -155,7 +99,10 @@ public:
 
     // Stitch prologue statements before the original body
     if (!prologue_stmts.empty()) {
-      fptr->body = InsertAfterLeadingAllocates(fptr->body, prologue_stmts);
+      // Chain the Let/Evaluate statements sequentially
+      Stmt seq = prologue_stmts.size() == 1 ? prologue_stmts[0]
+                                            : SeqStmt(prologue_stmts);
+      fptr->body = SeqStmt({seq, fptr->body});
     }
     if (!epilogue_stmts.empty()) {
       Stmt seq_end = epilogue_stmts.size() == 1 ? epilogue_stmts[0]
@@ -163,6 +110,31 @@ public:
       fptr->body = SeqStmt({fptr->body, seq_end});
     }
     return f;
+  }
+
+  Stmt VisitStmt_(const AllocateNode *op) final {
+    Stmt stmt = StmtExprMutator::VisitStmt_(op);
+    Array<Stmt> init_stmts;
+    for (auto &desc_init : desc_inits_) {
+      if (!desc_init.emitted && desc_init.base_var == op->buffer_var.get()) {
+        init_stmts.push_back(desc_init.stmt);
+        desc_init.emitted = true;
+      }
+    }
+    if (init_stmts.empty()) {
+      return stmt;
+    }
+
+    auto *alloc = stmt.as<AllocateNode>();
+    ICHECK(alloc != nullptr);
+    Array<Stmt> seq;
+    for (const auto &init_stmt : init_stmts) {
+      seq.push_back(init_stmt);
+    }
+    seq.push_back(alloc->body);
+    auto n = CopyOnWrite(alloc);
+    n->body = SeqStmt(seq);
+    return Stmt(n);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -205,7 +177,12 @@ public:
         String name = call->args[2].as<Var>().value()->name_hint;
         var = Var(name + "_desc",
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
-        desc_map_[tvm::ffi::GetRef<Call>(call)] = var;
+        Call call_ref = tvm::ffi::GetRef<Call>(call);
+        desc_map_[call_ref] = var;
+        Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
+        init_desc_arg_map_.Set(var, init_desc_args);
+        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
+                              MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
@@ -217,8 +194,41 @@ public:
   }
 
 private:
+  struct DescInit {
+    const VarNode *base_var;
+    Stmt stmt;
+    bool emitted;
+  };
+
+  static Array<PrimExpr> MakeInitDescArgs(const Call &call, const Var &var) {
+    Array<PrimExpr> init_desc_args;
+    if (call->op.same_as(create_tma_descriptor())) {
+      init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
+    } else if (call->op.same_as(create_tma_im2col_descriptor())) {
+      init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
+    } else {
+      CHECK(0) << call->op;
+    }
+    init_desc_args.push_back(var);
+    init_desc_args.insert(init_desc_args.end(), call->args.begin(),
+                          call->args.end());
+    return init_desc_args;
+  }
+
+  static Stmt MakeInitDescStmt(const Var &var,
+                              const Array<PrimExpr> &init_desc_args) {
+    // Should allocate 128 bytes for TensorMap on stack.
+    Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
+                          {StringImm("tvm_ffi_any"), 16});
+    Call init_desc =
+        Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
+    return LetStmt(var, alloc_desc, Evaluate(init_desc));
+  }
+
   Array<Stmt> prefetch_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
+  std::vector<DescInit> desc_inits_;
+  Map<Var, Array<PrimExpr>> init_desc_arg_map_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
