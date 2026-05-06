@@ -3,6 +3,7 @@ import ctypes
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -60,9 +61,10 @@ class LibraryGenerator:
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
 
+            _lib_ext = ".dll" if sys.platform == "win32" else ".so"
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             target_arch = get_target_arch(get_target_compute_version(target))
-            libpath = src.name.replace(".cu", ".so")
+            libpath = src.name.replace(".cu", _lib_ext)
 
             enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 
@@ -74,12 +76,13 @@ class LibraryGenerator:
 
             command = [
                 get_nvcc_compiler(),
-                "-std=c++17",
-                "-w",  # Disable all warning messages
+                # tl_templates/cuda/reduce.h uses explicit lambda template
+                # parameters (`[&]<typename T>(T) { ... }`) which are a C++20
+                # feature.
+                "-std=c++20",
+                "-w",
                 "-Xcudafe",
                 "--diag_suppress=177",
-                "--compiler-options",
-                "-fPIC",
                 "-lineinfo",
                 "--shared",
                 src.name,
@@ -88,6 +91,16 @@ class LibraryGenerator:
                 "-gencode",
                 f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
+            if sys.platform == "win32":
+                # /Zc:__cplusplus forces MSVC to report the actual C++ standard
+                # via __cplusplus. Without it cuda.h's `alignas(128)` on
+                # CUtensorMap is dropped (it is gated on
+                # ``__cplusplus >= 201103L``), so NVCC emits a kernel param
+                # with .align 8 and cuLaunchKernel later fails with
+                # CUDA_ERROR_MISALIGNED_ADDRESS.
+                command += ["-Xcompiler", "/Zc:preprocessor /Zc:__cplusplus"]
+            else:
+                command += ["--compiler-options", "-fPIC"]
             if enable_fast_math:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
@@ -140,16 +153,35 @@ class LibraryGenerator:
 
         src.write(self.lib_code)
         src.flush()
+        if sys.platform == "win32":
+            src.close()
+
+        # On Windows, two concerns matter for parallel autotune:
+        # 1. nvcc needs MSVC's host compiler env (cl.exe, INCLUDE, LIB).
+        # 2. Concurrent subprocesses sharing the parent's console handle can
+        #    deadlock when their output interleaves with tqdm progress bars.
+        # Pipe stdio + isolate stdin to make the launch self-contained.
+        run_kwargs: dict[str, Any] = {"timeout": timeout}
+        if sys.platform == "win32":
+            from tilelang.contrib.nvcc import get_nvcc_subprocess_env
+
+            run_kwargs.update(
+                env=get_nvcc_subprocess_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
 
         try:
             if verbose:
                 print(f"compile_lib compilation command: {' '.join(command)}")
-            ret = subprocess.run(command, timeout=timeout)
+            ret = subprocess.run(command, **run_kwargs)
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
-            raise RuntimeError(f"Compilation Failed! {command}\n {self.lib_code}")
+            captured = ret.stdout.decode("utf-8", errors="replace") if ret.stdout else ""
+            raise RuntimeError(f"Compilation Failed! {command}\n{captured}\n{self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath

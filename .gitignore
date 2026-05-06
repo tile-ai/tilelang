@@ -124,3 +124,6 @@ maint/host_checks/logs/*
 
 # agent skills folder
 .humanize*
+
+# uv Lockfile
+uv.lock

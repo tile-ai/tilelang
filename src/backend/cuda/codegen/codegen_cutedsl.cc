@@ -292,7 +292,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
       // For CuTeDSL, use Python's float.fromhex() with hexfloat for full
       // precision
       PrintType(op->dtype, temp);
-      temp << "(float.fromhex('" << std::hexfloat << op->value << "'))";
+      temp << "(float.fromhex('" << FlexibleHexFormat(op->value) << "'))";
     }
     MarkConst(temp.str());
     os << temp.str();

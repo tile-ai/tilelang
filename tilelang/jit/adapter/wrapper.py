@@ -58,14 +58,20 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
 """
 
 PREDEF_INIT_FUNC = """
+#ifdef _WIN32
+#define TL_EXPORT __declspec(dllexport)
+#else
+#define TL_EXPORT
+#endif
+
 #define ERROR_BUF_SIZE 1024
 static char error_buf[ERROR_BUF_SIZE];
 
-extern "C" const char* get_last_error() {{
+extern "C" TL_EXPORT const char* get_last_error() {{
     return error_buf;
 }}
 
-extern "C" int init() {{
+extern "C" TL_EXPORT int init() {{
     error_buf[0] = '\\0';
     {0}
     return 0;
@@ -73,7 +79,7 @@ extern "C" int init() {{
 """
 
 PREDEF_HOST_FUNC = """
-extern "C" int call({}) {{
+extern "C" TL_EXPORT int call({}) {{
 {}
 \treturn 0;
 }}
@@ -120,9 +126,7 @@ TMA_DESC_INIT_FUNC = """
     &{0}, {0}_type, {0}_tensorRank, {0}_globalAddress, {0}_globalDim, {0}_globalStride + 1, {0}_boxDim, {0}_elementStrides, {0}_interleave, {0}_swizzle, {0}_l2Promotion, {0}_oobFill);
 
 \tif ({0}_result != CUDA_SUCCESS) {{
-\t\tstd::stringstream ss;
-\t\tss << "Error: Failed to initialize the TMA descriptor {0}";
-\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
+\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "Error: Failed to initialize the TMA descriptor {0}");
 \t\treturn -1;
 \t}}
 """
@@ -149,9 +153,7 @@ TMA_IM2COL_DESC_INIT_FUNC = """
     {0}_lowerCorner, {0}_upperCorner, {0}_channelsPerPixel, {0}_pixelsPerColumn, {0}_elementStrides, {0}_interleave, {0}_swizzle, {0}_l2Promotion, {0}_oobFill);
 
 \tif ({0}_result != CUDA_SUCCESS) {{
-\t\tstd::stringstream ss;
-\t\tss << "Error: Failed to initialize the TMA descriptor {0}";
-\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
+\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "Error: Failed to initialize the TMA descriptor {0}");
 \t\treturn -1;
 \t}}
 """
