@@ -5,7 +5,6 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_ACCESS_PTR_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_ACCESS_PTR_UTILS_H_
 
-#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/expr.h>
 
 namespace tvm {
@@ -14,23 +13,24 @@ namespace tl {
 namespace detail {
 
 template <typename VisitExprFn>
-BufferLoad VisitAccessPtrBase(const PrimExpr &expr, VisitExprFn &&visit_expr) {
-  const auto *base_load_node = expr.as<BufferLoadNode>();
+tir::BufferLoad VisitAccessPtrBase(const tvm::PrimExpr &expr,
+                                   VisitExprFn &&visit_expr) {
+  const auto *base_load_node = expr.as<tir::BufferLoadNode>();
   ICHECK(base_load_node) << "tl.access_ptr base must be BufferLoad, but got "
                          << expr;
-  BufferLoad base_load = tvm::ffi::GetRef<BufferLoad>(base_load_node);
+  tir::BufferLoad base_load = tvm::ffi::GetRef<tir::BufferLoad>(base_load_node);
 
-  Array<PrimExpr> indices;
+  tvm::Array<tvm::PrimExpr> indices;
   bool changed = false;
-  for (const PrimExpr &index : base_load->indices) {
-    PrimExpr new_index = visit_expr(index);
+  for (const tvm::PrimExpr &index : base_load->indices) {
+    tvm::PrimExpr new_index = visit_expr(index);
     changed = changed || !new_index.same_as(index);
     indices.push_back(new_index);
   }
 
-  Optional<PrimExpr> predicate = base_load->predicate;
+  tvm::Optional<tvm::PrimExpr> predicate = base_load->predicate;
   if (predicate.defined()) {
-    PrimExpr new_predicate = visit_expr(predicate.value());
+    tvm::PrimExpr new_predicate = visit_expr(predicate.value());
     changed = changed || !new_predicate.same_as(predicate.value());
     predicate = new_predicate;
   }
@@ -38,7 +38,8 @@ BufferLoad VisitAccessPtrBase(const PrimExpr &expr, VisitExprFn &&visit_expr) {
   if (!changed) {
     return base_load;
   }
-  return BufferLoad(base_load->buffer, indices, predicate, base_load->span);
+  return tir::BufferLoad(base_load->buffer, indices, predicate,
+                         base_load->span);
 }
 
 } // namespace detail
