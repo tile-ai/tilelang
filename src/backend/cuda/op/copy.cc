@@ -196,6 +196,9 @@ private:
   static Stmt LowerBulk(const CopyNode &op, const LowerArgs &T,
                         arith::Analyzer *analyzer, CopyInst copy_inst);
 
+  static Stmt LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
+                               arith::Analyzer *analyzer, CopyInst copy_inst);
+
   static Stmt LowerBulk1D(const CopyNode &op, const LowerArgs &T,
                           arith::Analyzer *analyzer, CopyInst copy_inst);
 };
@@ -444,6 +447,11 @@ Stmt Copy::Lower(const CopyNode &op, const LowerArgs &T,
              copy_inst == CopyInst::kBulkStore) {
     auto bulk_copy = LowerBulk(op, T, analyzer, copy_inst);
     ICHECK(bulk_copy.defined()) << "Failed to lower bulk load/store";
+    return bulk_copy;
+  } else if (copy_inst == CopyInst::kBulkLoadGather4 ||
+             copy_inst == CopyInst::kBulkStoreScatter4) {
+    auto bulk_copy = LowerBulkGather4(op, T, analyzer, copy_inst);
+    ICHECK(bulk_copy.defined()) << "Failed to lower tma gather4/scatter4";
     return bulk_copy;
   } else if (copy_inst == CopyInst::kLDSM || copy_inst == CopyInst::kSTSM) {
     auto ldsm_copy = LowerLDSM(op, T, analyzer, copy_inst);
@@ -1265,6 +1273,158 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
 
   return tma_copy;
+}
+
+namespace {
+
+Array<PrimExpr> GetGather4Rows(const CopyNode &op) {
+  if (auto val = op.annotations.Get("gather4_rows")) {
+    return Downcast<Array<PrimExpr>>(val.value());
+  }
+  return {};
+}
+
+PrimExpr GetGather4Col(const CopyNode &op) {
+  if (auto val = op.annotations.Get("gather4_col")) {
+    return Downcast<PrimExpr>(val.value());
+  }
+  return PrimExpr();
+}
+
+} // namespace
+
+Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &T,
+                            arith::Analyzer *analyzer, CopyInst copy_inst) {
+  ICHECK(copy_inst == CopyInst::kBulkLoadGather4 ||
+         copy_inst == CopyInst::kBulkStoreScatter4);
+  bool is_load = copy_inst == CopyInst::kBulkLoadGather4;
+
+  Buffer global_tensor = is_load ? op.src : op.dst;
+  Buffer shared_tensor = is_load ? op.dst : op.src;
+  Buffer shared_tensor_unmapped = shared_tensor;
+
+  ICHECK_EQ(global_tensor->shape.size(), 2u);
+  ICHECK_EQ(shared_tensor->shape.size(), 2u);
+  auto shared_lead = as_const_int(shared_tensor->shape[0]);
+  ICHECK(shared_lead != nullptr && *shared_lead == 4)
+      << "tma_gather4/scatter4 shared tile leading dim must be 4, got "
+      << shared_tensor->shape[0];
+  ICHECK_EQ(global_tensor->dtype, shared_tensor->dtype);
+
+  Array<PrimExpr> rows = GetGather4Rows(op);
+  PrimExpr col = GetGather4Col(op);
+  ICHECK_EQ(rows.size(), 4u);
+  ICHECK(col.defined());
+
+  TMADesc desc;
+  desc.rank = 2;
+  desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
+  desc.global_addr = global_tensor->data;
+  desc.global_shape = ReverseArray(global_tensor->shape);
+
+  if (!global_tensor->strides.empty()) {
+    desc.global_stride = ReverseArray(global_tensor->strides);
+  } else {
+    PrimExpr stride = 1;
+    desc.global_stride.reserve(2);
+    for (size_t i = 0; i < global_tensor->shape.size(); ++i) {
+      desc.global_stride.push_back(stride);
+      stride *= global_tensor->shape[global_tensor->shape.size() - 1 - i];
+    }
+  }
+  ICHECK(is_one(desc.global_stride[0]))
+      << "tma_gather4/scatter4 requires unit innermost global stride, got "
+      << desc.global_stride;
+  desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
+    return TMABytesFromElements(e, global_tensor->dtype);
+  });
+  for (size_t i = 1; i < desc.global_stride.size(); ++i) {
+    if (auto stride = desc.global_stride[i].as<IntImmNode>()) {
+      ICHECK(stride->value % 16 == 0 && stride->value < (1LL << 40))
+          << "tma_gather4/scatter4 global stride[" << i
+          << "] = " << stride->value
+          << " bytes must be 16-byte aligned and < 2^40";
+    }
+  }
+
+  // The descriptor's row box-dim must be 1, not 4. The four-row pack is
+  // implicit in the cp.async.bulk.tensor.tile::gather4 PTX, which takes 4
+  // row coordinates and materializes them into 4 logical rows of the shared
+  // tile. Setting box[1]=4 here would describe a contiguous 4-row strip; the
+  // gather4 unrolling would then read OOB → CUDA_ERROR_ILLEGAL_INSTRUCTION.
+  PrimExpr K_box = shared_tensor->shape[1];
+  if (auto k = as_const_int(K_box)) {
+    int64_t k_bytes = TMABytesFromElements(*k, shared_tensor->dtype);
+    ICHECK(k_bytes % 16 == 0)
+        << "tma_gather4/scatter4 K_box * dtype.bytes() = " << k_bytes
+        << " must be 16-byte aligned";
+  }
+  desc.smem_box = {K_box, IntImm(DataType::Int(32), 1)};
+  desc.smem_stride = {IntImm(DataType::Int(32), 1),
+                      IntImm(DataType::Int(32), 1)};
+  desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
+  desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
+  desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+
+  Layout shared_layout;
+  if (T.layout_map.count(shared_tensor)) {
+    shared_layout = T.layout_map.at(shared_tensor);
+    ICHECK(T.buffer_remap.count(shared_tensor));
+    shared_tensor = T.buffer_remap.at(shared_tensor);
+  }
+  desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+  if (shared_layout.defined() && shared_layout->InputDim() >= 2) {
+    SwizzleMode mode = DetectSwizzleMode(shared_layout, shared_tensor_unmapped);
+    if (mode == SwizzleMode::kQuarter) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
+    } else if (mode == SwizzleMode::kHalf) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
+    } else if (mode == SwizzleMode::kFull) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
+    }
+  }
+  if (auto k = as_const_int(K_box)) {
+    int64_t k_bytes = TMABytesFromElements(*k, shared_tensor->dtype);
+    int max_bytes = 0;
+    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B))
+      max_bytes = 32;
+    else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B))
+      max_bytes = 64;
+    else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B))
+      max_bytes = 128;
+    if (max_bytes > 0) {
+      ICHECK(k_bytes <= max_bytes)
+          << "tma_gather4/scatter4 K_box * dtype.bytes() = " << k_bytes
+          << " exceeds " << max_bytes << "B swizzle limit";
+    }
+  }
+
+  Call create_descriptor =
+      Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
+
+  PrimExpr total_elements = 4 * K_box;
+  PrimExpr smem_addr =
+      shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
+                               IntImm(DataType::Int(32), 0), total_elements);
+
+  Array<PrimExpr> args;
+  args.push_back(create_descriptor);
+  if (is_load) {
+    auto user_barrier = op.annotations.Get("barrier");
+    ICHECK(user_barrier.has_value())
+        << "tma_gather4 requires a 'barrier' annotation";
+    args.push_back(Downcast<PrimExpr>(user_barrier.value()));
+  }
+  args.push_back(smem_addr);
+  args.push_back(col);
+  for (auto r : rows)
+    args.push_back(r);
+  args.push_back(IntImm(DataType::Int(32), GetEvictionPolicy(op)));
+
+  // Fire-and-forget: caller manages mbarrier_expect_tx / wait (loads) and
+  // tma_store_arrive / wait (stores), and the leader-thread guard.
+  auto tl_op = is_load ? tma_load_gather4() : tma_store_scatter4();
+  return Evaluate(Call(DataType::Handle(), tl_op, args));
 }
 
 Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,

@@ -230,41 +230,20 @@ def tma_copy(
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
 
 
-# Mirrors src/op/utils.cc::to_CUtensorMapDataType so descriptor args round-trip
-# through the host-side tvm_tensormap_create_tiled call.
-_CU_TENSOR_MAP_DATA_TYPE = {
-    "uint8": 0,
-    "uint16": 1,
-    "uint32": 2,
-    "int32": 3,
-    "uint64": 4,
-    "int64": 5,
-    "float16": 6,
-    "float32": 7,
-    "float64": 8,
-    "bfloat16": 9,
-}
-_CU_TENSOR_MAP_INTERLEAVE_NONE = 0
-_CU_TENSOR_MAP_SWIZZLE_NONE = 0
-_CU_TENSOR_MAP_SWIZZLE_32B = 1
-_CU_TENSOR_MAP_SWIZZLE_64B = 2
-_CU_TENSOR_MAP_SWIZZLE_128B = 3
-_CU_TENSOR_MAP_L2_PROMOTION_L2_128B = 2
-_CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE = 0
-
-
-def _swizzle_str_to_int(s):
-    # cuTensorMapEncodeTiled accepts non-None swizzle modes for gather4/scatter4
-    # descriptors, but the shared tile layout the user allocates via
-    # T.alloc_shared has to match — otherwise the gather4 rows land in a
-    # swizzled pattern that subsequent reads (gemm, etc.) see as row-major.
-    # That plumbing isn't wired yet, so reject non-None to fail fast instead
-    # of silently corrupting data.
-    if s in (None, "none", 0):
-        return _CU_TENSOR_MAP_SWIZZLE_NONE
-    raise NotImplementedError(
-        f"swizzle={s!r} is not supported yet for tma_gather4/scatter4; shared-tile swizzle plumbing is a follow-up. Pass swizzle=None."
-    )
+_TMA_SUPPORTED_DTYPES = frozenset(
+    {
+        "uint8",
+        "uint16",
+        "uint32",
+        "int32",
+        "uint64",
+        "int64",
+        "float16",
+        "float32",
+        "float64",
+        "bfloat16",
+    }
+)
 
 
 def tma_gather4(
@@ -277,26 +256,18 @@ def tma_gather4(
     swizzle=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
 ):
-    """Issue a TMA tile::gather4 load (sm_90+).
+    """Issue a TMA tile::gather4 load (sm_100a, Blackwell).
 
     Loads four arbitrary rows of a 2D global tensor ``src`` into a 2D shared
-    tile ``dst`` of shape ``(4, K_box)``.
+    tile ``dst`` of shape ``(4, K_box)``. The CUtensorMap descriptor (dtype +
+    swizzle) is built by the compiler from buffer + layout info.
 
-    The caller is responsible for issuing ``T.mbarrier_expect_tx`` (use
-    :func:`tma_gather4_bytes`) before this call, and for ``barrier_arrive`` /
-    ``mbarrier_wait_parity`` after. The call must also be inside a
-    leader-thread guard such as ``if T.shuffle_elect(num_threads):``.
+    Caller must wrap this with ``T.shuffle_elect`` and pair it with
+    ``T.mbarrier_expect_tx`` (use :func:`tma_gather4_bytes`) before, and
+    ``barrier_arrive`` / ``mbarrier_wait_parity`` after.
 
-    Args:
-        src: Global memory buffer (rank-2). Innermost stride must be 1.
-        dst: Shared memory buffer of shape ``(4, K_box)``.
-        col: Scalar i32 column origin.
-        rows: Sequence of 4 i32 row indices.
-        barrier: Mbarrier handle.
-        swizzle: Only ``None`` is currently supported. Non-None modes will be
-            rejected with NotImplementedError until the matching shared-tile
-            layout plumbing lands.
-        eviction_policy: Cache eviction policy.
+    The ``swizzle`` kwarg is deprecated; mark the shared tile via
+    ``T.annotate_layout`` for non-default swizzle.
     """
     if not isinstance(src, tir.Buffer):
         raise TypeError("tma_gather4 src must be a tir.Buffer (global)")
@@ -321,63 +292,49 @@ def tma_gather4(
     rows = list(rows)
     if len(rows) != 4:
         raise ValueError(f"tma_gather4 expects exactly 4 row indices, got {len(rows)}")
+    if swizzle not in (None, "none", 0):
+        import warnings
 
-    from .builtin import (
-        create_tma_descriptor,
-        tma_load_gather4 as _tma_load_gather4,
-        _mbar_to_buffer_load,
-    )
+        warnings.warn(
+            f"tma_gather4 swizzle={swizzle!r} is deprecated; use T.annotate_layout.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
-    dtype_name = src.dtype
-    if dtype_name not in _CU_TENSOR_MAP_DATA_TYPE:
-        raise ValueError(f"Unsupported dtype for TMA gather4: {dtype_name}")
-    dtype_int = _CU_TENSOR_MAP_DATA_TYPE[dtype_name]
+    from .builtin import _mbar_to_buffer_load
 
-    g_shape_rev = [src.shape[1], src.shape[0]]
-    elem_bits = tvm.DataType(dtype_name).bits
-    elem_bytes = elem_bits // 8
-    if not src.strides:
-        g_stride_rev = [1, src.shape[1]]
-    else:
-        g_stride_rev = [src.strides[1], src.strides[0]]
-    g_stride_bytes = [g_stride_rev[0] * elem_bytes, g_stride_rev[1] * elem_bytes]
-
-    K_box = dst.shape[1]
-    box_rev = [K_box, 1]
-    smem_stride = [1, 1]
-
-    rank = 2
-    swizzle_int = _swizzle_str_to_int(swizzle)
-
-    desc_args = [
-        dtype_int,
-        rank,
-        src.data,
-        *g_shape_rev,
-        *g_stride_bytes,
-        *box_rev,
-        *smem_stride,
-        _CU_TENSOR_MAP_INTERLEAVE_NONE,
-        swizzle_int,
-        _CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
-        _CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
-    ]
-    desc = create_tma_descriptor(*desc_args)
-
-    smem_addr = dst.access_ptr("w")
     bar_load = _mbar_to_buffer_load(barrier)
 
     eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
     ep = 0 if eviction_policy is None else eviction_policy_map[eviction_policy]
 
-    return _tma_load_gather4(desc, bar_load, smem_addr, col, rows[0], rows[1], rows[2], rows[3], ep)
+    # Matching (4, K_box) extents satisfy CopyNode's shape check; the actual
+    # access pattern lives in the gather4_rows / gather4_col annotations.
+    K_box = dst.shape[1]
+    src_region = to_buffer_region(src, access_type="r", extents=[4, K_box])
+    dst_region = to_buffer_region(dst, access_type="w", extents=[4, K_box])
+
+    ann = {
+        "is_gather4": True,
+        "gather4_rows": rows,
+        "gather4_col": col,
+        "barrier": bar_load,
+        "eviction_policy": ep,
+    }
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.copy"),
+        src_region,
+        dst_region,
+        annotations=ann,
+    )
 
 
 def tma_gather4_bytes(K_box, dtype: str) -> int:
     """Transaction byte count for a 4-row gather4 of width ``K_box``. Pass
     to ``T.mbarrier_expect_tx`` immediately before ``T.tma_gather4``.
     """
-    if dtype not in _CU_TENSOR_MAP_DATA_TYPE:
+    if dtype not in _TMA_SUPPORTED_DTYPES:
         raise ValueError(f"Unsupported dtype: {dtype}")
     elem_bytes = tvm.DataType(dtype).bits // 8
     return 4 * K_box * elem_bytes
@@ -392,15 +349,12 @@ def tma_scatter4(
     swizzle=None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
 ):
-    """Issue a TMA tile::scatter4 store (sm_90+).
+    """Issue a TMA tile::scatter4 store (sm_100a, Blackwell).
 
-    Stores a 2D shared tile of shape ``(4, K_box)`` to four arbitrary rows
-    of a 2D global tensor ``dst``.
-
-    The caller is responsible for ``tma_store_arrive`` / ``tma_store_wait``,
-    and the call must be inside a leader-thread guard.
-
-    Only ``swizzle=None`` is currently supported (see :func:`tma_gather4`).
+    Stores a 2D shared tile of shape ``(4, K_box)`` to four arbitrary rows of
+    a 2D global tensor ``dst``. Caller is responsible for ``tma_store_arrive``
+    / ``tma_store_wait`` and the ``T.shuffle_elect`` guard. See
+    :func:`tma_gather4` for descriptor / swizzle inference details.
     """
     if not isinstance(src, tir.Buffer):
         raise TypeError("tma_scatter4 src must be a tir.Buffer (shared)")
@@ -425,54 +379,35 @@ def tma_scatter4(
     rows = list(rows)
     if len(rows) != 4:
         raise ValueError(f"tma_scatter4 expects exactly 4 row indices, got {len(rows)}")
+    if swizzle not in (None, "none", 0):
+        import warnings
 
-    from .builtin import (
-        create_tma_descriptor,
-        tma_store_scatter4 as _tma_store_scatter4,
-    )
-
-    dtype_name = dst.dtype
-    if dtype_name not in _CU_TENSOR_MAP_DATA_TYPE:
-        raise ValueError(f"Unsupported dtype for TMA scatter4: {dtype_name}")
-    dtype_int = _CU_TENSOR_MAP_DATA_TYPE[dtype_name]
-
-    g_shape_rev = [dst.shape[1], dst.shape[0]]
-    elem_bits = tvm.DataType(dtype_name).bits
-    elem_bytes = elem_bits // 8
-    if not dst.strides:
-        g_stride_rev = [1, dst.shape[1]]
-    else:
-        g_stride_rev = [dst.strides[1], dst.strides[0]]
-    g_stride_bytes = [g_stride_rev[0] * elem_bytes, g_stride_rev[1] * elem_bytes]
-
-    K_box = src.shape[1]
-    box_rev = [K_box, 1]
-    smem_stride = [1, 1]
-
-    rank = 2
-    swizzle_int = _swizzle_str_to_int(swizzle)
-
-    desc_args = [
-        dtype_int,
-        rank,
-        dst.data,
-        *g_shape_rev,
-        *g_stride_bytes,
-        *box_rev,
-        *smem_stride,
-        _CU_TENSOR_MAP_INTERLEAVE_NONE,
-        swizzle_int,
-        _CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
-        _CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
-    ]
-    desc = create_tma_descriptor(*desc_args)
-
-    smem_addr = src.access_ptr("r")
+        warnings.warn(
+            f"tma_scatter4 swizzle={swizzle!r} is deprecated; use T.annotate_layout.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
     ep = 0 if eviction_policy is None else eviction_policy_map[eviction_policy]
 
-    return _tma_store_scatter4(desc, smem_addr, col, rows[0], rows[1], rows[2], rows[3], ep)
+    K_box = src.shape[1]
+    src_region = to_buffer_region(src, access_type="r", extents=[4, K_box])
+    dst_region = to_buffer_region(dst, access_type="w", extents=[4, K_box])
+
+    ann = {
+        "is_scatter4": True,
+        "gather4_rows": rows,
+        "gather4_col": col,
+        "eviction_policy": ep,
+    }
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.copy"),
+        src_region,
+        dst_region,
+        annotations=ann,
+    )
 
 
 def transpose(

@@ -323,37 +323,6 @@ def tma_load_2sm(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args, annotations={"use_2cta": 1})
 
 
-def tma_load_gather4(*args):
-    """Issue a TMA tile::gather4 load (sm_90+).
-
-    Loads four arbitrary rows of a 2D tiled global tensor into shared memory.
-    The descriptor must have rank=2 and box dim along axis 1 = 1; the four-row
-    pack is implicit in the gather4 PTX mode.
-
-        tma_load_gather4(descriptor, mbarrier, smem_addr,
-                         col, r0, r1, r2, r3, eviction_policy)
-
-    Returns:
-        tir.Call: A handle to the gather4 load operation.
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load_gather4"), *args)
-
-
-def tma_store_scatter4(*args):
-    """Issue a TMA tile::scatter4 store (sm_90+).
-
-    Stores four shared-memory rows back to four arbitrary rows of a 2D tiled
-    global tensor.
-
-        tma_store_scatter4(descriptor, smem_addr,
-                           col, r0, r1, r2, r3, eviction_policy)
-
-    Returns:
-        tir.Call: A handle to the scatter4 store operation.
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_scatter4"), *args)
-
-
 def fence_proxy_async():
     """Issue a shared memory fence for asynchronous proxy operations.
 
