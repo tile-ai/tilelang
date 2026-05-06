@@ -203,6 +203,16 @@ class JITKernel(Generic[_P, _T]):
         Any
             The result of the function execution.
         """
+        if self.torch_function is None:
+            from tilelang.utils.target import is_hexagon_target
+
+            if is_hexagon_target(self.target):
+                raise RuntimeError(
+                    "Hexagon kernels cannot be executed directly on the host machine. "
+                    "To run this kernel, please use the Hexagon SDK Simulator or "
+                    "the HexagonLauncher on a supported Qualcomm device."
+                )
+
         return self.torch_function(*args, **kwds)
 
     def _compile_and_create_adapter(self, tilelang_func: PrimFunc, out_idx: list[int]) -> BaseKernelAdapter:

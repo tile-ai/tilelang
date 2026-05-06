@@ -49,6 +49,7 @@ __all__ = [
     "has_mma_support",
     "is_cdna_arch",
     "is_metal_arch",
+    "is_hexagon_target",
     "CUDA",
     "CDNA",
     "METAL",

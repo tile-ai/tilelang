@@ -149,6 +149,23 @@ option(TILELANG_USE_HIP_STUBS
 unset(_TILELANG_USE_HIP_STUBS_DEFAULT)
 # Configs end
 
+# --- LLVM Detection for Hexagon/CPU Backend ---
+if(NOT DEFINED USE_LLVM)
+  set(USE_LLVM OFF CACHE STRING "Build with LLVM support (required for Hexagon)")
+endif()
+
+if(USE_LLVM STREQUAL "ON")
+  find_program(LLVM_CONFIG_PATH NAMES llvm-config-18 llvm-config-17 llvm-config)
+  if(LLVM_CONFIG_PATH)
+    set(USE_LLVM ${LLVM_CONFIG_PATH} CACHE STRING "Path to llvm-config" FORCE)
+  else()
+    message(WARNING "USE_LLVM is ON but llvm-config was not found in PATH.")
+  endif()
+endif()
+
+set(_TILELANG_USE_LLVM_SAVED ${USE_LLVM})
+
+# Load TVM sources and base configs
 include(cmake/load_tvm.cmake)
 
 if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
@@ -156,6 +173,19 @@ if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
 else()
   message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
 endif()
+
+# Restore USE_LLVM — TVM's config.cmake may have reset it
+if(_TILELANG_USE_LLVM_SAVED AND NOT _TILELANG_USE_LLVM_SAVED STREQUAL "OFF")
+  set(USE_LLVM ${_TILELANG_USE_LLVM_SAVED} CACHE STRING "LLVM config path" FORCE)
+  message(STATUS "TileLang: restored USE_LLVM=${USE_LLVM}")
+endif()
+unset(_TILELANG_USE_LLVM_SAVED)
+
+if(USE_LLVM AND NOT USE_LLVM STREQUAL "OFF")
+  message(STATUS "TileLang Build with LLVM: ${USE_LLVM}")
+  add_definitions(-DTILELANG_HEXAGON_ENABLED)
+endif()
+
 # Re-apply TileLang's preferred backend settings after TVM's config may have
 # overridden the USE_* cache entries.
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -169,6 +199,11 @@ set(USE_GTEST OFF)
 
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
+
+# Include TVM 'src' directory to resolve "tvm/runtime/hexagon/hexagon_htp.h"
+list(APPEND TILE_LANG_INCLUDES
+  ${TVM_SOURCE}/src
+)
 
 # Collect source files
 file(GLOB TILE_LANG_SRCS
@@ -188,6 +223,7 @@ file(GLOB TILE_LANG_SRCS
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
+  src/runtime/hexagon_runtime.cc
 )
 
 set(TILELANG_OUTPUT_TARGETS tilelang tvm)

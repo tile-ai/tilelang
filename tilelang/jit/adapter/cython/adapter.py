@@ -131,6 +131,16 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
 
+        from tilelang.utils.target import is_hexagon_target
+
+        if is_hexagon_target(self.target):
+            # For Hexagon, we are cross-compiling.
+            # We cannot load symbols or execute this on the host machine.
+            # Returning early allows the JIT object to exist so we can
+            # inspect kernel.kernel_source.
+            self._compiled_func = None
+            return
+
         self.lib.get_last_error.restype = ctypes.c_char_p
         result = self.lib.init()
         if result != 0:
@@ -324,6 +334,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             device = torch.device("cpu")
         elif is_metal_target(self.target):
             device = torch.device("mps")
+        elif "hexagon" in self.target.keys or "hexagon" in str(self.target):
+            device = torch.device("cpu")
         else:
             raise ValueError(f"Unsupported target: {self.target}")
 

@@ -4,6 +4,7 @@ from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma, have_pdl
+import tvm
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -242,6 +243,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
+    _lower_hex = tvm.get_global_func("tilelang.transform.LowerHexagonIntrinsics", True)
+    if _lower_hex is not None:
+        mod = _lower_hex()(mod)
+
     mod = tilelang.transform.FlattenBuffer()(mod)
     # ConfigIndexBitwidth must be applied after FlattenBuffer
     # as it will flatten index computing
