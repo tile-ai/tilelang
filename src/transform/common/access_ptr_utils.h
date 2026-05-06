@@ -13,8 +13,8 @@ namespace detail {
 template <typename VisitExprFn>
 BufferLoad VisitAccessPtrBase(const PrimExpr &expr, VisitExprFn &&visit_expr) {
   const auto *base_load_node = expr.as<BufferLoadNode>();
-  ICHECK(base_load_node)
-      << "tl.access_ptr base must be BufferLoad, but got " << expr;
+  ICHECK(base_load_node) << "tl.access_ptr base must be BufferLoad, but got "
+                         << expr;
   BufferLoad base_load = tvm::ffi::GetRef<BufferLoad>(base_load_node);
 
   Array<PrimExpr> indices;
@@ -38,8 +38,8 @@ BufferLoad VisitAccessPtrBase(const PrimExpr &expr, VisitExprFn &&visit_expr) {
   return BufferLoad(base_load->buffer, indices, predicate, base_load->span);
 }
 
-}  // namespace detail
-}  // namespace tl
-}  // namespace tvm
+} // namespace detail
+} // namespace tl
+} // namespace tvm
 
-#endif  // TILELANG_TRANSFORM_COMMON_ACCESS_PTR_UTILS_H_
+#endif // TILELANG_TRANSFORM_COMMON_ACCESS_PTR_UTILS_H_
