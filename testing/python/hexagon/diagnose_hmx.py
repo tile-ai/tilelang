@@ -24,7 +24,7 @@ def build_hmx_matmul(M, N, K):
     ):
         A_vtcm = T.alloc_fragment((M, K), "int8", scope="global.vtcm")
         B_vtcm = T.alloc_fragment((K, N), "int8", scope="global.vtcm")
-        C_acc  = T.alloc_fragment((M, N), "int32", scope="global.hmx.acc")
+        C_acc = T.alloc_fragment((M, N), "int32", scope="global.hmx.acc")
 
         for i, k in T.grid(M, K):
             A_vtcm[i, k] = A_host[i, k]
@@ -65,10 +65,10 @@ def test_000_environment():
 def test_001_ir_dump():
     """Dump the full kernel_source so we can see what was actually generated."""
     M, N, K = 32, 32, 32
-    func   = build_hmx_matmul(M, N, K)
+    func = build_hmx_matmul(M, N, K)
     target = tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
     kernel = tl.compile(func, target=target)
-    ir     = kernel.kernel_source
+    ir = kernel.kernel_source
 
     print("\n")
     print("=" * 60)
@@ -79,49 +79,46 @@ def test_001_ir_dump():
 
     # Report which assertions would pass/fail without actually asserting
     checks = {
-        'target triple = "hexagon"'  : 'target triple',
-        "A_vtcm"                     : 'VTCM alloc A',
-        "B_vtcm"                     : 'VTCM alloc B',
-        "C_acc"                      : 'HMX accumulator',
-        "hmx_mma_placeholder"        : 'placeholder NOT lowered (bad)',
-        "HexKL_mma_i8acc32"          : 'HexKL intrinsic (good)',
-        "HexKL_mma_i8i32"            : 'HexKL alt spelling',
-        "call_extern"                : 'any call_extern',
-        "llvm.hexagon"               : 'LLVM hexagon intrinsic',
+        'target triple = "hexagon"': "target triple",
+        "A_vtcm": "VTCM alloc A",
+        "B_vtcm": "VTCM alloc B",
+        "C_acc": "HMX accumulator",
+        "hmx_mma_placeholder": "placeholder NOT lowered (bad)",
+        "HexKL_mma_i8acc32": "HexKL intrinsic (good)",
+        "HexKL_mma_i8i32": "HexKL alt spelling",
+        "call_extern": "any call_extern",
+        "llvm.hexagon": "LLVM hexagon intrinsic",
     }
 
     print("\nASSERTION PROBE RESULTS:")
-    all_good = True
     for needle, label in checks.items():
         found = needle in ir
         status = "✓ FOUND  " if found else "✗ MISSING"
         print(f"  {status}  [{label}]  '{needle}'")
-        if label == 'placeholder NOT lowered (bad)' and found:
-            all_good = False
-        if label in ('HexKL intrinsic (good)', 'HexKL alt spelling') and found:
-            pass  # at least one should be present
 
     print()
     # Only hard-assert on things we're sure about
-    assert 'target triple = "hexagon"' in ir, \
-        "Not even targeting Hexagon — target string is wrong or codegen didn't run"
+    assert 'target triple = "hexagon"' in ir, "Not even targeting Hexagon — target string is wrong or codegen didn't run"
 
 
-@pytest.mark.skipif(not has_hexagon_codegen(), reason="Hexagon LLVM not available")  
+@pytest.mark.skipif(not has_hexagon_codegen(), reason="Hexagon LLVM not available")
 def test_002_hmx_lowering_status():
     """Specifically check whether HMX intrinsics were lowered or are still placeholders."""
     M, N, K = 32, 32, 32
-    func   = build_hmx_matmul(M, N, K)
+    func = build_hmx_matmul(M, N, K)
     target = tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
     kernel = tl.compile(func, target=target)
-    ir     = kernel.kernel_source
+    ir = kernel.kernel_source
 
     placeholder_present = "hmx_mma_placeholder" in ir
-    hexkl_present       = any(s in ir for s in [
-        "HexKL_mma_i8acc32",
-        "HexKL_mma_i8i32",
-        "HexKL_mma",
-    ])
+    hexkl_present = any(
+        s in ir
+        for s in [
+            "HexKL_mma_i8acc32",
+            "HexKL_mma_i8i32",
+            "HexKL_mma",
+        ]
+    )
     llvm_intrin_present = "llvm.hexagon" in ir
 
     print(f"\n  placeholder still in IR : {placeholder_present}")
