@@ -46,13 +46,18 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
     def get_tensor(param: KernelParam) -> torch.Tensor:
         # Convert tvm.DataType to torch.dtype for tensor creation
         dtype: torch.dtype = param.torch_dtype()
-        device = get_current_device()
 
+        # Scalar value parameter (empty shape), e.g. `s: T.float32` in the
+        # kernel signature. Return a Python scalar of the matching dtype
+        # family so the autotuner can invoke kernels with scalar arguments
+        # without crashing. Users that need a specific scalar value can
+        # still pass it explicitly via `supply_prog`. See #2081.
         if hasattr(param, "shape") and not param.shape:
-            raise ValueError(
-                f"TensorType must have a shape, but got {type(param)}, "
-                "likely you are trying to generate a random tensor with a dynamic symbolic shape."
-            )
+            if hasattr(param, "is_boolean") and param.is_boolean():
+                return False
+            return 0.0 if dtype.is_floating_point else 0
+
+        device = get_current_device()
 
         # Check if with dynamic symbolic shape
         for shape in param.shape:
