@@ -5,6 +5,7 @@ import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.engine.phase import LowerAndLegalize
+from tilelang.transform import LowerAccessPtr
 
 
 def issue_2123_atomic_load_repro(num_tiles, threads=32):
@@ -37,26 +38,35 @@ def _has_op_call(func, op_name):
 
     def _visit(node):
         nonlocal found
-        if (
-            isinstance(node, tvm.tir.Call)
-            and isinstance(node.op, tvm.ir.Op)
-            and node.op.name == op_name
-        ):
+        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name:
             found = True
 
     tvm.tir.stmt_functor.post_order_visit(func.body, _visit)
     return found
 
 
-def test_issue_2123_atomic_load_lower_access_ptr():
+def _assert_access_ptr_lowered(mod):
+    assert _has_op_call(mod["main"], "tir.tvm_access_ptr")
+    assert not _has_op_call(mod["main"], "tl.access_ptr")
+
+
+def test_issue_2123_atomic_load_lower_access_ptr_direct():
+    func = issue_2123_atomic_load_repro(4).with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+
+    lowered = LowerAccessPtr()(mod)
+
+    _assert_access_ptr_lowered(lowered)
+
+
+def test_issue_2123_atomic_load_lower_access_ptr_pipeline():
     target = tvm.target.Target("cuda", host="llvm")
     func = issue_2123_atomic_load_repro(4).with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
 
     lowered = LowerAndLegalize(mod, target)
 
-    assert _has_op_call(lowered["main"], "tir.tvm_access_ptr")
-    assert not _has_op_call(lowered["main"], "tl.access_ptr")
+    _assert_access_ptr_lowered(lowered)
 
 
 if __name__ == "__main__":
