@@ -53,9 +53,7 @@ const FinalizeReducerImpl &ResolveFinalizeReducerImpl(Target target) {
 void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
-  ICHECK(impl.warp_size != nullptr);
-  ICHECK(impl.make_batch_allreduce != nullptr);
-  ICHECK(impl.make_scalar_allreduce != nullptr);
+  ICHECK(impl.lower != nullptr);
   FinalizeReducerImplRegistry().push_back(impl);
 }
 
@@ -118,7 +116,15 @@ FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
  */
 Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
                                   arith::Analyzer *analyzer) const {
-  const FinalizeReducerImpl &impl = ResolveFinalizeReducerImpl(T.target);
+  return ResolveFinalizeReducerImpl(T.target).lower(*this, T, analyzer);
+}
+
+Stmt FinalizeReducerOpNode::LowerWithAllReduce(
+    const LowerArgs &T, arith::Analyzer *analyzer, int warp_size,
+    FinalizeReducerBatchAllReduceMaker make_batch_allreduce,
+    FinalizeReducerScalarAllReduceMaker make_scalar_allreduce) const {
+  ICHECK(make_batch_allreduce != nullptr);
+  ICHECK(make_scalar_allreduce != nullptr);
   auto buffer = T.buffer_remap[reducer];
   auto opt_layout = T.layout_map.Get(reducer);
   ICHECK(opt_layout);
@@ -169,14 +175,13 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
         << ")";
   }
 
-  const int warp_size = impl.warp_size(T.target);
   bool use_batch = effective_batch > 1 && reducing_threads > warp_size;
 
   if (use_batch) {
     // Batched AllReduce: single butterfly pass for all output elements.
     int workspace_stride =
         static_cast<int>(*as_const_int(T.thread_bounds->extent));
-    std::string allreduce = impl.make_batch_allreduce(
+    std::string allreduce = make_batch_allreduce(
         op_str, reducing_threads, 1, thread_offset, T.thread_bounds->extent,
         static_cast<int>(effective_batch), workspace_stride, T.target);
     int ws_size = workspace_stride * static_cast<int>(effective_batch);
@@ -187,8 +192,8 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
 
   // Scalar AllReduce path (original).
   std::string allreduce =
-      impl.make_scalar_allreduce(op_str, reducing_threads, 1, thread_offset,
-                                 T.thread_bounds->extent, T.target);
+      make_scalar_allreduce(op_str, reducing_threads, 1, thread_offset,
+                            T.thread_bounds->extent, T.target);
   Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
                                         BufferLoad(buffer, indices_0)};
   if (reducing_threads >= 32) {

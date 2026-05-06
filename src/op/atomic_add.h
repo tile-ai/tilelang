@@ -62,10 +62,6 @@ public:
   /// Infer layout for the target-independent SIMT atomic add path.
   LayoutMap InferSIMTLayout(const LayoutInferArgs &T, InferLevel level) const;
 
-  /// Lower through the target-independent SIMT atomic add path.
-  Stmt LowerSIMT(const LowerArgs &T, arith::Analyzer *analyzer) const;
-
-protected:
   /// Override MakeSIMTLoop to handle AtomicAdd-specific logic
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
 };

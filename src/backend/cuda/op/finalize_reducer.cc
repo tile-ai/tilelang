@@ -19,6 +19,12 @@ namespace cuda {
 struct FinalizeReducer {
   static int WarpSize(Target target) { return TargetGetWarpSize(target); }
 
+  static Stmt Lower(const FinalizeReducerOpNode &op, const LowerArgs &T,
+                    arith::Analyzer *analyzer) {
+    return op.LowerWithAllReduce(T, analyzer, WarpSize(T.target),
+                                 MakeBatchAllReduce, MakeScalarAllReduce);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset,
@@ -63,9 +69,7 @@ bool RegisterCudaFinalizeReducer() {
   RegisterFinalizeReducerImpl(FinalizeReducerImpl{
       "cuda.FinalizeReducer",
       MatchCudaFinalizeReducerTarget,
-      cuda::FinalizeReducer::WarpSize,
-      cuda::FinalizeReducer::MakeBatchAllReduce,
-      cuda::FinalizeReducer::MakeScalarAllReduce,
+      cuda::FinalizeReducer::Lower,
   });
   return true;
 }

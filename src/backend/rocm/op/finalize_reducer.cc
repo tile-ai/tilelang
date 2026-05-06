@@ -19,6 +19,12 @@ namespace rocm {
 struct FinalizeReducer {
   static int WarpSize(Target) { return 64; }
 
+  static Stmt Lower(const FinalizeReducerOpNode &op, const LowerArgs &T,
+                    arith::Analyzer *analyzer) {
+    return op.LowerWithAllReduce(T, analyzer, WarpSize(T.target),
+                                 MakeBatchAllReduce, MakeScalarAllReduce);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset, PrimExpr,
@@ -54,9 +60,7 @@ bool RegisterROCmFinalizeReducer() {
   RegisterFinalizeReducerImpl(FinalizeReducerImpl{
       "rocm.FinalizeReducer",
       MatchROCmFinalizeReducerTarget,
-      rocm::FinalizeReducer::WarpSize,
-      rocm::FinalizeReducer::MakeBatchAllReduce,
-      rocm::FinalizeReducer::MakeScalarAllReduce,
+      rocm::FinalizeReducer::Lower,
   });
   return true;
 }

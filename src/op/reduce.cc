@@ -36,6 +36,11 @@ std::vector<ReduceImpl> &ReduceImplRegistry() {
   return registry;
 }
 
+std::vector<CumSumImpl> &CumSumImplRegistry() {
+  static std::vector<CumSumImpl> registry;
+  return registry;
+}
+
 const ReduceImpl &ResolveReduceImpl(Target target) {
   const auto &registry = ReduceImplRegistry();
   const ReduceImpl *matched_impl = nullptr;
@@ -55,6 +60,25 @@ const ReduceImpl &ResolveReduceImpl(Target target) {
   return *matched_impl;
 }
 
+const CumSumImpl &ResolveCumSumImpl(Target target) {
+  const auto &registry = CumSumImplRegistry();
+  const CumSumImpl *matched_impl = nullptr;
+  for (const CumSumImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.cumsum found multiple target-specific implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.cumsum requires a target-specific implementation, but no cumsum "
+         "implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
 } // namespace
 
 void RegisterReduceImpl(ReduceImpl impl) {
@@ -62,6 +86,13 @@ void RegisterReduceImpl(ReduceImpl impl) {
   ICHECK(impl.match_target != nullptr);
   ICHECK(impl.lower != nullptr);
   ReduceImplRegistry().push_back(impl);
+}
+
+void RegisterCumSumImpl(CumSumImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  CumSumImplRegistry().push_back(impl);
 }
 
 // NormalizeToBufferRegion moved to src/op/utils.{h,cc}
@@ -836,48 +867,7 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
 }
 
 Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (IsFragmentBuffer(this->src) && IsFragmentBuffer(this->dst)) {
-    LOG(FATAL) << "CumSum for fragment not implemented, please raise an issue "
-                  "if you need this feature.";
-  } else if (IsSharedBuffer(this->src)) {
-    ICHECK(IsSharedBuffer(this->dst));
-    std::stringstream ss;
-    auto threads = T.thread_bounds->extent;
-    Array<PrimExpr> args;
-
-    // Build access pointers from regions locally
-    PrimExpr srcPtr = MakeAccessPtrFromRegion(srcRegion_, 1);
-    PrimExpr dstPtr = MakeAccessPtrFromRegion(dstRegion_, 2);
-
-    // Use region extents instead of buffer shape for correct slice handling
-    Array<PrimExpr> src_extents;
-    for (const auto &range : srcRegion_->region) {
-      src_extents.push_back(range->extent);
-    }
-    int ndim = static_cast<int>(src_extents.size());
-
-    if (ndim == 1) {
-      ICHECK_EQ(dim, 0) << "Cumulative sum over a 1D buffer only supports dim "
-                           "= 0.";
-      ss << "tl::CumSum1D<" << threads << ", " << (reverse ? "true" : "false")
-         << ">::run";
-      args = {StringImm(ss.str()), srcPtr, dstPtr, src_extents[0]};
-    } else if (ndim == 2) {
-      ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
-         << (reverse ? "true" : "false") << ">::run";
-      args = {StringImm(ss.str()), srcPtr, dstPtr, src_extents[0],
-              src_extents[1]};
-    } else {
-      LOG(FATAL) << "CumSum currently supports only 1D or 2D buffers, got "
-                 << ndim << "D.";
-    }
-    return Evaluate(Call(dst->dtype, builtin::call_extern(), args));
-  } else {
-    ICHECK(false) << "Cannot lower cumsum for " << this->src.scope() << " and "
-                  << this->dst.scope();
-  }
-
-  return Stmt();
+  return ResolveCumSumImpl(T.target).lower(*this, T, analyzer);
 }
 
 LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &T,

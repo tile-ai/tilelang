@@ -17,6 +17,12 @@ namespace webgpu {
 struct FinalizeReducer {
   static int WarpSize(Target) { return 32; }
 
+  static Stmt Lower(const FinalizeReducerOpNode &op, const LowerArgs &T,
+                    arith::Analyzer *analyzer) {
+    return op.LowerWithAllReduce(T, analyzer, WarpSize(T.target),
+                                 MakeBatchAllReduce, MakeScalarAllReduce);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset, PrimExpr,
@@ -53,9 +59,7 @@ bool RegisterWebGPUFinalizeReducer() {
   RegisterFinalizeReducerImpl(FinalizeReducerImpl{
       "webgpu.FinalizeReducer",
       MatchWebGPUFinalizeReducerTarget,
-      webgpu::FinalizeReducer::WarpSize,
-      webgpu::FinalizeReducer::MakeBatchAllReduce,
-      webgpu::FinalizeReducer::MakeScalarAllReduce,
+      webgpu::FinalizeReducer::Lower,
   });
   return true;
 }

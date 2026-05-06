@@ -12,14 +12,50 @@
 
 #include "../layout/layout.h"
 
-#include "../transform/common/loop_fusion_utils.h"
-#include "../transform/loop_partition.h"
 #include "builtin.h"
+
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+std::vector<AtomicReduceImpl> &AtomicReduceImplRegistry() {
+  static std::vector<AtomicReduceImpl> registry;
+  return registry;
+}
+
+const AtomicReduceImpl &ResolveAtomicReduceImpl(Target target) {
+  const auto &registry = AtomicReduceImplRegistry();
+  const AtomicReduceImpl *matched_impl = nullptr;
+  for (const AtomicReduceImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.atomic_reduce found multiple target-specific "
+             "implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.atomic_reduce requires a target-specific implementation, but no "
+         "atomic_reduce implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterAtomicReduceImpl(AtomicReduceImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  AtomicReduceImplRegistry().push_back(impl);
+}
 
 // ============================================================================
 // AtomicMax Implementation
@@ -270,26 +306,7 @@ LayoutMap AtomicOpBaseNode::InferLayout(const LayoutInferArgs &T,
 
 Stmt AtomicOpBaseNode::Lower(const LowerArgs &T,
                              arith::Analyzer *analyzer) const {
-  auto simt_loop = MakeSIMTLoop(analyzer);
-  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  auto par_op = ParallelOp(fused_loop);
-  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                    InferLevel::kFree};
-  for (auto level : levels) {
-    par_op->InferLayout({T.target,
-                         T.thread_bounds,
-                         T.layout_map,
-                         analyzer,
-                         false,
-                         T.buffer_remap,
-                         {}},
-                        level);
-  }
-  auto loop_layout = par_op->GetLoopLayout();
-  auto lowered_loop =
-      LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
-                        T.layout_map, par_op->GetPredicate(T.thread_var));
-  return lowered_loop;
+  return ResolveAtomicReduceImpl(T.target).lower(*this, T, analyzer);
 }
 
 // ============================================================================

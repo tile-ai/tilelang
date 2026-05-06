@@ -10,6 +10,8 @@
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "target/utils.h"
+#include "transform/common/loop_fusion_utils.h"
+#include "transform/loop_partition.h"
 
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -44,6 +46,28 @@ Layout ComputeLinearLayout(const Buffer &shared_tensor) {
 } // namespace
 
 struct AtomicAdd {
+  static Stmt LowerSIMT(const AtomicAddNode &op, const LowerArgs &T,
+                        arith::Analyzer *analyzer) {
+    auto simt_loop = op.MakeSIMTLoop(analyzer);
+    auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+    auto par_op = ParallelOp(fused_loop);
+    std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                      InferLevel::kFree};
+    for (auto level : levels) {
+      par_op->InferLayout({T.target,
+                           T.thread_bounds,
+                           T.layout_map,
+                           analyzer,
+                           false,
+                           T.buffer_remap,
+                           {}},
+                          level);
+    }
+    auto loop_layout = par_op->GetLoopLayout();
+    return LowerParallelLoop(fused_loop, loop_layout, T.thread_var, analyzer,
+                             T.layout_map, par_op->GetPredicate(T.thread_var));
+  }
+
   static LayoutMap InferLayout(const AtomicAddNode &op,
                                const LayoutInferArgs &T, InferLevel level) {
     if (!op.GetUseTMA()) {
@@ -82,7 +106,7 @@ struct AtomicAdd {
   static Stmt Lower(const AtomicAddNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer) {
     if (!op.GetUseTMA()) {
-      return op.LowerSIMT(T, analyzer);
+      return LowerSIMT(op, T, analyzer);
     }
 
     // For AtomicAdd with TMA: src is shared memory, dst is global memory.
