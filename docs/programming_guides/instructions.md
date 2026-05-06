@@ -33,7 +33,7 @@ Semantics
 - Safety: the LegalizeSafeMemoryAccess pass inserts boundary guards when an
   access may be out‑of‑bounds and drops them when proven safe.
 
-### Lowering to `T.copy` to variants of copy machanisms
+### Lowering `T.copy` to variants of copy machanisms
 
 TileLang supports both synchronous and explicitly-asynchronous copies.
 
