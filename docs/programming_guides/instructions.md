@@ -4,7 +4,7 @@ This page summarizes the core TileLang “instructions” available at the DSL
 level, how they map to hardware concepts, and how to use them correctly.
 
 ## Quick Categories
-- Data movement: `T.copy`, `T.async_copy`, `T.c2d_im2col`, staging Global ↔ Shared ↔ Fragment
+- Data movement: `T.copy`, `T.async_copy`, `T.tma_copy`, `T.c2d_im2col`, staging Global ↔ Shared ↔ Fragment
 - Compute primitives: `T.gemm`/`T.gemm_sp`, elementwise math (`T.exp`, `T.max`),
   reductions (`T.reduce_sum`, `T.cumsum`, warp reducers)
 - Control helpers: `T.clear`/`T.fill`, `T.reshape`/`T.view`
@@ -33,14 +33,14 @@ Semantics
 - Safety: the LegalizeSafeMemoryAccess pass inserts boundary guards when an
   access may be out‑of‑bounds and drops them when proven safe.
 
-### `T.copy` vs `T.async_copy`
+### Lowering to `T.copy` to variants of copy machanisms
 
 TileLang supports both synchronous and explicitly-asynchronous copies.
 
 `T.copy(src, dst, ...)` (synchronous semantics)
 - Intended default for most TileLang programs.
 - The compiler is free to lower it to different mechanisms (SIMT copy, `ldmatrix`,
-  TMA, `cp.async`, etc.) depending on target/hints, but the observable semantics
+  TMA `cp.async.bulk`, `cp.async`, etc.) depending on target/hints, but the observable semantics
   are *synchronous*: after the statement, it is safe to use `dst`.
 - If `T.copy` lowers to `cp.async`, TileLang will still preserve synchronous
   semantics by emitting the required `commit`/`wait` (and any required
