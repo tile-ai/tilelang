@@ -10,6 +10,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
+#include "../backend/cuda/op/copy.h"
 #include "../layout/layout.h"
 #include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
@@ -20,47 +21,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-namespace {
-
-struct TMADesc {
-  size_t rank;
-  int data_type;
-  Array<PrimExpr> global_shape;
-  Array<PrimExpr> global_stride;
-  Array<PrimExpr> smem_box;
-  Array<PrimExpr> smem_stride;
-  PrimExpr global_addr;
-  int swizzle;
-  int interleave;
-  int oob_fill;
-  int l2_promotion;
-
-  Array<PrimExpr> EncodeCallArgs() const {
-    Array<PrimExpr> args;
-    args.reserve(rank * 4 + 7);
-
-    args.push_back(data_type);
-    args.push_back(static_cast<int>(rank));
-    args.push_back(global_addr);
-    for (auto e : global_shape)
-      args.push_back(e);
-    for (auto e : global_stride)
-      args.push_back(e);
-    for (auto e : smem_box)
-      args.push_back(e);
-    for (auto e : smem_stride)
-      args.push_back(e);
-    args.push_back(interleave);
-    args.push_back(swizzle);
-    args.push_back(l2_promotion);
-    args.push_back(oob_fill);
-
-    return args;
-  }
-};
-
-} // namespace
 
 /**
  * @brief Construct an AtomicAdd operator from call arguments and annotations.
@@ -414,7 +374,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Array<Range> global_range = dst_range;
 
     // Build TMADesc for the global tensor
-    TMADesc desc;
+    cuda::TMADesc desc;
     desc.rank = global_tensor->shape.size();
     ICHECK(desc.rank >= 1 && desc.rank <= 5)
         << "TMA reduce only supports 1-5 dimensions, got " << desc.rank;

@@ -8,6 +8,7 @@
 
 #include "op/copy.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -34,6 +35,43 @@ enum class CopyInst : uint8_t {
 const char *CopyInstToString(CopyInst inst);
 bool CopyInstIsTMA(CopyInst inst);
 bool CopyInstIsCPAsync(CopyInst inst);
+
+struct TMADesc {
+  size_t rank;
+  int data_type;
+  Array<PrimExpr> global_shape;
+  Array<PrimExpr> global_stride;
+  Array<PrimExpr> smem_box;
+  Array<PrimExpr> smem_stride;
+  PrimExpr global_addr;
+  int swizzle;
+  int interleave;
+  int oob_fill;
+  int l2_promotion;
+
+  Array<PrimExpr> EncodeCallArgs() const {
+    Array<PrimExpr> args;
+    args.reserve(rank * 4 + 7);
+
+    args.push_back(data_type);
+    args.push_back(static_cast<int>(rank));
+    args.push_back(global_addr);
+    for (auto e : global_shape)
+      args.push_back(e);
+    for (auto e : global_stride)
+      args.push_back(e);
+    for (auto e : smem_box)
+      args.push_back(e);
+    for (auto e : smem_stride)
+      args.push_back(e);
+    args.push_back(interleave);
+    args.push_back(swizzle);
+    args.push_back(l2_promotion);
+    args.push_back(oob_fill);
+
+    return args;
+  }
+};
 
 struct CopyAnalysisContext {
   Target target;
