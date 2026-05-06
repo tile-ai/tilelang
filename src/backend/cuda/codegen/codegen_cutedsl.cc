@@ -3,8 +3,8 @@
  */
 
 #include "codegen_cutedsl.h"
-#include "codegen_utils.h"
-#include "ptx.h"
+#include "backend/cuda/codegen/ptx.h"
+#include "target/codegen_utils.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ir/transform.h>
@@ -19,8 +19,8 @@
 #include <utility>
 #include <vector>
 
-#include "../op/builtin.h"
 #include "arith/pattern_match.h"
+#include "op/builtin.h"
 
 namespace tvm {
 namespace codegen {
