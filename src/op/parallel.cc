@@ -359,7 +359,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           info && info.value()->rep == ReducerRepType::ALL)
         continue;
 
-      auto frag = T.layout_map[buffer].as<Fragment>().value();
       bool is_fully_replicated =
           IsBufferCompletelyReplicated(buffer, T.layout_map);
 
@@ -379,7 +378,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         // If the buffer is not replicated and shape is equal to the
         // source_buffer, use it as source_buffer because the layout inference
         // is more accurate
-        if (is_one(frag->ReplicateExtent()) && !source_buffer.defined()) {
+        auto frag = T.layout_map[buffer].as<Fragment>();
+        if (frag.has_value() && is_one(frag.value()->ReplicateExtent()) &&
+            !source_buffer.defined()) {
           source_buffer = buffer;
         }
       }
