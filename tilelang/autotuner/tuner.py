@@ -288,6 +288,28 @@ class AutoTuner:
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
+    def _validate_input_supply_requirements(self, prim_func: PrimFunc, out_idx: list[int] | int | None):
+        if self.profile_args.supply_prog is not None:
+            return
+
+        if out_idx is None:
+            result_idx = []
+        elif isinstance(out_idx, int):
+            result_idx = [len(prim_func.params) + out_idx if out_idx < 0 else out_idx]
+        else:
+            result_idx = [len(prim_func.params) + idx if idx < 0 else idx for idx in out_idx]
+
+        for i, param in enumerate(prim_func.params):
+            if i in result_idx:
+                continue
+            if param not in prim_func.buffer_map:
+                kernel_name = get_prim_func_name(prim_func, "<unknown>")
+                raise ValueError(
+                    f"Auto-tuning kernel '{kernel_name}' does not support auto-generated scalar inputs. "
+                    f"Found scalar input parameter '{param.name}'. "
+                    "Please provide concrete inputs with `with set_autotune_inputs(...)`."
+                )
+
     def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process."""
 
@@ -522,6 +544,12 @@ class AutoTuner:
                 autotuner_result = AutotuneResult(libcode=jit_kernel.get_kernel_source(), func=jit_kernel.prim_func, kernel=jit_kernel)
                 self._memory_cache[key] = autotuner_result
                 return autotuner_result
+
+        # After confirming tuning will actually run, validate that scalar
+        # inputs can be supplied (either via supply_prog or set_autotune_inputs).
+        if hasattr(self, "_prim_func_for_validation"):
+            self._validate_input_supply_requirements(self._prim_func_for_validation, self.compile_args.out_idx)
+
         # get the cpu count
         available_cpu_count = get_available_cpu_count()
         cpu_utilizations = float(env.TILELANG_AUTO_TUNING_CPU_UTILITIES)
@@ -667,6 +695,7 @@ class AutoTuneImpl(Generic[_P, _T]):
     skip_check: bool = False
     manual_check_prog: Callable = None
     cache_input_tensors: bool = False
+    do_not_specialize: tuple[str, ...] | list[str] | None = None
 
     def __post_init__(self):
         self._tuner_cache = {}
@@ -701,9 +730,24 @@ class AutoTuneImpl(Generic[_P, _T]):
         return_kernel = kwargs.pop("__return_kernel", False)
 
         mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
+        autotuner = self.get_tunner()
+        # Defer scalar-input validation to run(), after we know whether
+        # tuning will actually execute or be skipped because all tunable
+        # parameters are already provided by the caller.
+        autotuner._prim_func_for_validation = self.jit_impl.get_tir(*args, **kwargs)
 
-        norm_args = _normalize_value(args, sort_dict_items=True)
-        norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
+        # Compute the cache key, excluding do_not_specialize parameters
+        # so that changing them does not trigger re-autotuning.
+        if self.do_not_specialize:
+            # Bind all args to kwargs so positional vs keyword doesn't affect key
+            bound = self.jit_impl.signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            filtered_kwargs = {k: v for k, v in bound.arguments.items() if k not in self.do_not_specialize}
+            norm_args = ()
+            norm_kwargs = _normalize_value(filtered_kwargs, sort_dict_items=True)
+        else:
+            norm_args = _normalize_value(args, sort_dict_items=True)
+            norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
         key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache:
             if mode == "lazy":
@@ -711,7 +755,6 @@ class AutoTuneImpl(Generic[_P, _T]):
                 def jit_compile(**config_arg):
                     return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
 
-                autotuner = self.get_tunner()
                 autotuner.jit_compile = jit_compile
                 autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
             else:
@@ -721,7 +764,6 @@ class AutoTuneImpl(Generic[_P, _T]):
                     merged.update(config_arg)
                     return self.jit_impl.compile(*args, **merged)
 
-                autotuner = self.get_tunner()
                 autotuner.jit_compile = jit_compile
                 autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
 
@@ -763,6 +805,7 @@ def autotune(  # This is the new public interface
     skip_check: bool = False,
     manual_check_prog: Callable = None,
     cache_input_tensors: bool = False,
+    do_not_specialize: tuple[str, ...] | list[str] | None = None,
 ):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
@@ -838,6 +881,7 @@ def autotune(  # This is the new public interface
                 skip_check=skip_check,
                 manual_check_prog=manual_check_prog,
                 cache_input_tensors=cache_input_tensors,
+                do_not_specialize=do_not_specialize,
             )
 
         return decorator
