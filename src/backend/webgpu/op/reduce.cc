@@ -17,6 +17,13 @@ namespace webgpu {
 struct Reduce {
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
 
+  static Stmt Lower(const ReduceOpNode &op, const LowerArgs &T,
+                    arith::Analyzer *analyzer) {
+    return op.LowerWithAllReduce(T, analyzer,
+                                 SupportsFp16Bf16NanReduce(T.target),
+                                 MakeBatchAllReduce, MakeScalarAllReduce);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset, PrimExpr,
@@ -53,9 +60,7 @@ bool RegisterWebGPUReduce() {
   RegisterReduceImpl(ReduceImpl{
       "webgpu.Reduce",
       MatchWebGPUReduceTarget,
-      webgpu::Reduce::SupportsFp16Bf16NanReduce,
-      webgpu::Reduce::MakeBatchAllReduce,
-      webgpu::Reduce::MakeScalarAllReduce,
+      webgpu::Reduce::Lower,
   });
   return true;
 }

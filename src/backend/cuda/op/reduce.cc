@@ -21,6 +21,13 @@ struct Reduce {
     return TargetIsCuda(target);
   }
 
+  static Stmt Lower(const ReduceOpNode &op, const LowerArgs &T,
+                    arith::Analyzer *analyzer) {
+    return op.LowerWithAllReduce(T, analyzer,
+                                 SupportsFp16Bf16NanReduce(T.target),
+                                 MakeBatchAllReduce, MakeScalarAllReduce);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset,
@@ -65,9 +72,7 @@ bool RegisterCudaReduce() {
   RegisterReduceImpl(ReduceImpl{
       "cuda.Reduce",
       MatchCudaReduceTarget,
-      cuda::Reduce::SupportsFp16Bf16NanReduce,
-      cuda::Reduce::MakeBatchAllReduce,
-      cuda::Reduce::MakeScalarAllReduce,
+      cuda::Reduce::Lower,
   });
   return true;
 }

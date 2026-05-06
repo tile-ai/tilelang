@@ -60,9 +60,7 @@ const ReduceImpl &ResolveReduceImpl(Target target) {
 void RegisterReduceImpl(ReduceImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
-  ICHECK(impl.supports_fp16_bf16_nan_reduce != nullptr);
-  ICHECK(impl.make_batch_allreduce != nullptr);
-  ICHECK(impl.make_scalar_allreduce != nullptr);
+  ICHECK(impl.lower != nullptr);
   ReduceImplRegistry().push_back(impl);
 }
 
@@ -304,9 +302,18 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  const ReduceImpl &impl = ResolveReduceImpl(T.target);
+  return ResolveReduceImpl(T.target).lower(*this, T, analyzer);
+}
+
+Stmt ReduceOpNode::LowerWithAllReduce(
+    const LowerArgs &T, arith::Analyzer *analyzer,
+    bool supports_fp16_bf16_nan_reduce,
+    ReduceBatchAllReduceMaker make_batch_allreduce,
+    ReduceScalarAllReduceMaker make_scalar_allreduce) const {
+  ICHECK(make_batch_allreduce != nullptr);
+  ICHECK(make_scalar_allreduce != nullptr);
   if (nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16()) &&
-      !impl.supports_fp16_bf16_nan_reduce(T.target)) {
+      !supports_fp16_bf16_nan_reduce) {
     LOG(FATAL) << "ReduceOp: nan_propagate=True for fp16/bf16 max/min/absmax "
                   "is only supported on CUDA targets (requires "
                   "__hmax_nan/__hmin_nan intrinsics). Target was: "
@@ -538,7 +545,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
         // Use run_batch (not run) to avoid overload-resolution ambiguity when
         // a pointer is passed as first argument.
-        std::string allreduce = impl.make_batch_allreduce(
+        std::string allreduce = make_batch_allreduce(
             this->MakeCodegenReducer(), reducing_threads, *scale, thread_offset,
             T.thread_bounds->extent, batch, reducing_threads, T.target);
 
@@ -659,7 +666,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
           int reducing_threads = (*extent) * (*scale);
           auto thread_offset = T.thread_bounds->min;
-          std::string allreduce = impl.make_scalar_allreduce(
+          std::string allreduce = make_scalar_allreduce(
               this->MakeCodegenReducer(), reducing_threads, *scale,
               thread_offset, T.thread_bounds->extent, T.target);
           Array<PrimExpr> thread_reduce_args = {

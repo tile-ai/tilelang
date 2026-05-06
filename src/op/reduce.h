@@ -16,6 +16,15 @@ namespace tl {
 
 using namespace tir;
 
+using ReduceBatchAllReduceMaker =
+    std::string (*)(std::string reducer, int reducing_threads, int scale,
+                    PrimExpr thread_offset, PrimExpr all_threads, int batch,
+                    int workspace_stride, Target target);
+
+using ReduceScalarAllReduceMaker = std::string (*)(
+    std::string reducer, int reducing_threads, int scale,
+    PrimExpr thread_offset, PrimExpr all_threads, Target target);
+
 /// Supported reduction operation types
 enum class ReduceTypeEnum : uint8_t {
   kSum,    ///< Sum reduction
@@ -121,6 +130,11 @@ public:
 
   /// Lower the operator to TIR statements
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  Stmt
+  LowerWithAllReduce(const LowerArgs &T, arith::Analyzer *analyzer,
+                     bool supports_fp16_bf16_nan_reduce,
+                     ReduceBatchAllReduceMaker make_batch_allreduce,
+                     ReduceScalarAllReduceMaker make_scalar_allreduce) const;
   /// Infer memory layout for buffers
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
@@ -143,17 +157,8 @@ struct ReduceImpl {
   const char *name;
   ReduceTargetPredicate match_target;
 
-  bool (*supports_fp16_bf16_nan_reduce)(Target target);
-
-  std::string (*make_batch_allreduce)(std::string reducer, int reducing_threads,
-                                      int scale, PrimExpr thread_offset,
-                                      PrimExpr all_threads, int batch,
-                                      int workspace_stride, Target target);
-
-  std::string (*make_scalar_allreduce)(std::string reducer,
-                                       int reducing_threads, int scale,
-                                       PrimExpr thread_offset,
-                                       PrimExpr all_threads, Target target);
+  Stmt (*lower)(const ReduceOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
 };
 
 void RegisterReduceImpl(ReduceImpl impl);

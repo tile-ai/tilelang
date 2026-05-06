@@ -19,6 +19,13 @@ namespace metal {
 struct Reduce {
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
 
+  static Stmt Lower(const ReduceOpNode &op, const LowerArgs &T,
+                    arith::Analyzer *analyzer) {
+    return op.LowerWithAllReduce(T, analyzer,
+                                 SupportsFp16Bf16NanReduce(T.target),
+                                 MakeBatchAllReduce, MakeScalarAllReduce);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset, PrimExpr,
@@ -52,9 +59,7 @@ bool RegisterMetalReduce() {
   RegisterReduceImpl(ReduceImpl{
       "metal.Reduce",
       MatchMetalReduceTarget,
-      metal::Reduce::SupportsFp16Bf16NanReduce,
-      metal::Reduce::MakeBatchAllReduce,
-      metal::Reduce::MakeScalarAllReduce,
+      metal::Reduce::Lower,
   });
   return true;
 }
