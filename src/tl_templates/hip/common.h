@@ -128,9 +128,9 @@ TL_DEVICE int tl_dp4a_fallback(const int a, const int b, int c) {
 
 #if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) ||       \
     defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) ||       \
-    defined(__gfx950__) || defined(__gfx1010__) || defined(__gfx1011__) ||     \
-    defined(__gfx1012__) || defined(__gfx1030__) || defined(__gfx1031__) ||    \
-    defined(__gfx1032__) || defined(__gfx1034__) || defined(__gfx1035__) ||    \
+    defined(__gfx950__) || defined(__gfx1011__) || defined(__gfx1012__) ||     \
+    defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) ||    \
+    defined(__gfx1034__) || defined(__gfx1035__) ||                            \
     defined(TL_AMDGPU_HAS_SUDOT4)
 #define TL_AMDGPU_HAS_SDOT4 1
 #endif
