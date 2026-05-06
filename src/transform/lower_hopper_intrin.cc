@@ -37,7 +37,7 @@ public:
       }
     }
     f = WithAttr(std::move(f), "tma_descriptor_args",
-                substituter.init_desc_arg_map_);
+                 substituter.init_desc_arg_map_);
 
     // Additionally, if L2 persistent cache annotations were lowered earlier,
     // materialize TVM FFI calls to set the stream access policy window.
@@ -182,7 +182,7 @@ public:
         Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
         init_desc_arg_map_.Set(var, init_desc_args);
         desc_inits_.push_back({call->args[2].as<Var>().value().get(),
-                              MakeInitDescStmt(var, init_desc_args), false});
+                               MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
@@ -216,10 +216,10 @@ private:
   }
 
   static Stmt MakeInitDescStmt(const Var &var,
-                              const Array<PrimExpr> &init_desc_args) {
+                               const Array<PrimExpr> &init_desc_args) {
     // Should allocate 128 bytes for TensorMap on stack.
     Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
-                          {StringImm("tvm_ffi_any"), 16});
+                           {StringImm("tvm_ffi_any"), 16});
     Call init_desc =
         Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
     return LetStmt(var, alloc_desc, Evaluate(init_desc));
