@@ -193,6 +193,30 @@ public:
     }
   }
 
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    Stmt new_stmt = StmtExprMutator::VisitStmt_(op);
+    if (const auto *if_node = new_stmt.as<IfThenElseNode>()) {
+      if (IsNoOp(if_node->then_case) && (!if_node->else_case.defined() ||
+                                         IsNoOp(if_node->else_case.value()))) {
+        return Evaluate(0);
+      }
+    }
+    return new_stmt;
+  }
+
+  bool IsNoOp(const Stmt &stmt) {
+    if (const auto *eval = stmt.as<EvaluateNode>()) {
+      return is_const_int(eval->value, 0);
+    } else if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const auto &s : seq->seq) {
+        if (!IsNoOp(s))
+          return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
 private:
   struct DescInit {
     const VarNode *base_var;

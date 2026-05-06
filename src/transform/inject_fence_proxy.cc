@@ -95,8 +95,8 @@ bool IsAsyncIntrinsic(const CallNode *call) {
 
   // TileLang async intrinsics
   if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-      call->op.same_as(tma_store()) || call->op.same_as(ptx_wgmma_ss()) ||
-      call->op.same_as(ptx_wgmma_rs()) ||
+      call->op.same_as(tma_load_multicast()) || call->op.same_as(tma_store()) ||
+      call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs()) ||
       call->op.same_as(ptx_tcgen05_mma_ss()) ||
       call->op.same_as(ptx_tcgen05_mma_ts())) {
     return true;

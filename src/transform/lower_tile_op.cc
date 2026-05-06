@@ -346,6 +346,36 @@ private:
       }
       workspace_stack_.pop_back();
     }
+
+    // Apply any barrier arrive-count overrides registered by LowerClusterCopy
+    // during the multi-TMA decomposition path.  We update the barrier_init
+    // annotation here (before LowerSharedBarrier consumes it) so that the
+    // mbarrier is initialised with arrive_count = N (number of TMA rows).
+    if (!barrier_arrive_updates_.empty() &&
+        block->annotations.count("barrier_init")) {
+      auto barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+          block->annotations.Get("barrier_init").value());
+      bool updated = false;
+      for (auto it = barrier_arrive_updates_.begin();
+           it != barrier_arrive_updates_.end();) {
+        if (barrier_init_map.count(it->first)) {
+          auto old_counts = barrier_init_map.at(it->first);
+          Array<PrimExpr> new_counts;
+          for (size_t i = 0; i < old_counts.size(); i++) {
+            new_counts.push_back(it->second);
+          }
+          barrier_init_map.Set(it->first, new_counts);
+          updated = true;
+          it = barrier_arrive_updates_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      if (updated) {
+        block_ptr->annotations.Set("barrier_init", barrier_init_map);
+      }
+    }
+
     return block;
   }
 
@@ -720,6 +750,7 @@ private:
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_load_multicast()) ||
         op->op.same_as(tl::tma_store())) {
       // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
@@ -727,6 +758,12 @@ private:
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       in_tma_context_ = false;
       return call;
+    }
+    if (op->op.same_as(tl::tma_store_cluster())) {
+      // SM-to-SM bulk async copy does not use a tensor-map descriptor, so
+      // shared-memory swizzle must still be reflected in pointer/index
+      // remapping.
+      return Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
 
     if (is_ptx_) {
@@ -1068,15 +1105,20 @@ private:
       return id;
     };
 
-    auto lowered =
-        tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_->var,
-                                 callback, mbarrier_callback, layout_map_,
-                                 buffer_remap_, let_var_to_expr,
-                                 loop_mbar_phase_stack_.empty()
-                                     ? PrimExpr(IntImm(DataType::Int(32), 0))
-                                     : loop_mbar_phase_stack_.back(),
-                                 &mbarrier_buffer_, cluster_size_},
-                       analyzer_);
+    UpdateBarrierArriveCallback barrier_arrive_callback = [this](Var data_var,
+                                                                 PrimExpr n) {
+      barrier_arrive_updates_[data_var] = n;
+    };
+
+    auto lowered = tile_op->Lower(
+        LowerArgs{target_, thread_bounds, thread_var_->var, callback,
+                  mbarrier_callback, barrier_arrive_callback, layout_map_,
+                  buffer_remap_, let_var_to_expr,
+                  loop_mbar_phase_stack_.empty()
+                      ? PrimExpr(IntImm(DataType::Int(32), 0))
+                      : loop_mbar_phase_stack_.back(),
+                  &mbarrier_buffer_, cluster_size_},
+        analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
@@ -1380,6 +1422,13 @@ private:
   // without recomputing indices, since swizzle is encoded in TMA descriptor
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
+  // Pending barrier arrive-count overrides from multi-TMA cluster-copy
+  // decomposition.  Maps barrier buffer data Var → new arrive count N.
+  // Populated by LowerClusterCopy via UpdateBarrierArriveCallback and
+  // consumed (then cleared) in VisitStmt_(BlockNode) before LowerSharedBarrier
+  // processes the barrier_init annotation.
+  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+      barrier_arrive_updates_;
 };
 
 namespace transform {

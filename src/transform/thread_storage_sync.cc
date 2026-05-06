@@ -1082,7 +1082,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       if (auto opt = op->op.as<Op>()) {
         const Op &call_op = opt.value();
         return call_op.same_as(tl::tma_load()) ||
-               call_op.same_as(tl::tma_load_im2col());
+               call_op.same_as(tl::tma_load_im2col()) ||
+               call_op.same_as(tl::tma_load_multicast());
       }
       return false;
     }();

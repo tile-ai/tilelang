@@ -307,6 +307,18 @@ TVM_DLL const Op &tma_load();
 TVM_DLL const Op &tma_load_im2col();
 
 /*!
+ * \brief tvm intrinsics for multicasting data from global tensor descriptor to
+ * shared memory of multiple CTAs in a cluster simultaneously
+ *
+ * tma_load_multicast(descriptor, mbarrier, smem_data, multicast_mask,
+ *                    coord_0, coord_1, ..., eviction_policy)
+ *
+ * Only the CTA with the minimum rank in the multicast_mask initiates the
+ * transfer; other CTAs in the mask receive data via the multicast mechanism.
+ */
+TVM_DLL const Op &tma_load_multicast();
+
+/*!
  * \brief tvm intrinsics for storing data from shared memory to global tensor
  * descriptor
  *
@@ -543,6 +555,14 @@ TVM_DLL const Op &warpgroup_wait();
  *
  */
 TVM_DLL const Op &warpgroup_fence_operand();
+
+/*!
+ * \brief Return the number of blocks in the cluster.
+ *
+ * get_cluster_block_nums()
+ *
+ */
+TVM_DLL const Op &get_cluster_block_nums();
 
 /*!
  * \brief Return the canonical lane index for the calling thread.
@@ -1223,6 +1243,29 @@ TVM_DLL const Op &stg128();
  *    T.stg256(y, i, value)
  */
 TVM_DLL const Op &stg256();
+
+/*!
+ * \brief tilelang intrinsic for cluster store.
+ *
+ *  This op is used to represent a cluster store operation in tilelang.
+ */
+TVM_DLL const Op &ptx_cluster_store();
+
+/*!
+ * \brief tilelang intrinsic for bulk SM-to-SM async cluster store.
+ *
+ *  Uses cp.async.bulk.shared::cluster to bulk-copy a contiguous region of
+ *  shared memory to another CTA in the same cluster, signalling the
+ *  destination CTA's mbarrier on completion.
+ *
+ *  Args: [dst_ptr, src_ptr, dst_cta, size_bytes, bar_ref]
+ *   - dst_ptr   (handle): address_of(dst_buf[dst_offset]) – destination pointer
+ *   - src_ptr   (handle): address_of(src_buf[src_offset]) – source pointer
+ *   - dst_cta   (int32):  destination CTA rank in the cluster
+ *   - size_bytes(uint32): number of bytes to transfer
+ *   - bar_ref   (uint64): mbarrier element (passed by reference to the callee)
+ */
+TVM_DLL const Op &tma_store_cluster();
 
 } // namespace tl
 } // namespace tvm
