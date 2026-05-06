@@ -13,8 +13,9 @@ from .gemm_tcgen05 import GemmTCGEN5
 from .gemm_mfma import GemmMFMA
 from .gemm_wmma import GemmWMMA
 from .gemm_scalar import GemmScalar
+from .gemm_metal import GemmMetal
 from tilelang import _ffi_api
-from tilelang.utils.target import target_is_volta
+from tilelang.utils.target import target_is_volta, target_is_metal
 
 
 @tvm_ffi.register_global_func("tl.gemm.infer_layout")
@@ -157,8 +158,10 @@ class Gemm(Node, Scriptable):
         1. TCGEN5MMA for Blackwell architecture
         2. WGMMA for Hopper architecture with sufficient matrix size and warp count
         3. MFMA for CDNA (AMD) architecture
-        4. MMA for CUDA architecture
-        5. Scalar for CPU target (scalar fallback)
+        4. WMMA for RDNA (AMD) architecture
+        5. MMA for CUDA architecture
+        6. METAL_SIMDGROUP for Metal target (simdgroup_matrix)
+        7. Scalar for CPU target (scalar fallback)
 
         Args:
             thread_nums: Number of threads in the block
@@ -167,6 +170,8 @@ class Gemm(Node, Scriptable):
         Returns:
             GemmInst: The selected GEMM instruction type
         """
+        if target_is_metal(target):
+            return GemmInst.METAL_SIMDGROUP
         return GemmInst(_ffi_api.GemmGetGemmInst(self, int(thread_nums), target))
 
     def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
@@ -197,5 +202,7 @@ class Gemm(Node, Scriptable):
             return GemmWMMA
         elif gemm_inst.is_scalar():
             return GemmScalar
+        elif gemm_inst.is_metal_simdgroup():
+            return GemmMetal
         else:
             raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")
