@@ -1,7 +1,7 @@
 /*!
-* \file lower hopper intrin.cc
-* \brief Lower Hopper intrinsics cuda GPU(sm90+)
-*/
+ * \file lower hopper intrin.cc
+ * \brief Lower Hopper intrinsics cuda GPU(sm90+)
+ */
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
@@ -73,7 +73,7 @@ public:
                 IntImm(buf->elem_offset.dtype(), buf->dtype.bytes());
             base_ptr =
                 Call(DataType::Handle(), builtin::handle_add_byte_offset(),
-                    {base_ptr, byte_offset});
+                     {base_ptr, byte_offset});
           }
           // Args packed: func_name, base_ptr, num_bytes, hit_ratio
           Array<PrimExpr> packed_args;
