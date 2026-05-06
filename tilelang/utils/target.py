@@ -21,6 +21,7 @@ SUPPORTED_TARGETS: dict[str, str] = {
     "cuda": "CUDA GPU target. Use dict options such as {'kind': 'cuda', 'arch': 'sm_90'}.",
     "hip": "ROCm HIP target. Use dict options such as {'kind': 'hip', 'mcpu': 'gfx942'}.",
     "metal": "Apple Metal target for arm64 Macs.",
+    "hexagon": "Qualcomm Hexagon DSP target.",
     "llvm": "LLVM CPU target. Use dict options such as {'kind': 'llvm', 'mcpu': 'native'}.",
     "webgpu": "WebGPU target for browser/WebGPU runtimes.",
     "c": "C source backend.",
@@ -134,6 +135,19 @@ def check_metal_availability() -> bool:
     return arch == "arm64"
 
 
+def check_hexagon_availability() -> bool:
+    """
+    Check if Hexagon support is available in the TVM build.
+    Returns:
+        bool: True if Hexagon is available, False otherwise.
+    """
+    try:
+        # Check if Hexagon runtime is enabled in TVM
+        return tvm.runtime.enabled("hexagon")
+    except Exception:
+        return False
+
+
 def determine_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> str:
     """
     Select the correct FP8 dtype string for the current platform.
@@ -202,22 +216,38 @@ def normalize_cutedsl_target(target: TargetLike) -> Target | None:
     return None
 
 
+def is_hexagon_target(target) -> bool:
+    """Return True for LLVM targets cross-compiled to Hexagon."""
+    if target is None:
+        return False
+    # Check if it's a TVM Target object
+    if hasattr(target, "kind"):
+        if target.kind.name == "hexagon":
+            return True
+        if target.kind.name == "llvm":
+            return "hexagon" in str(target.attrs.get("mtriple", "")).lower()
+    # Check if it's a string
+    return "hexagon" in str(target).lower()
+
+
 def determine_target(target: TargetLike | Literal["auto"] = "auto", return_object: bool = False) -> str | TargetConfig | Target:
     """
-    Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
+    Determine the appropriate target for compilation (CUDA, HIP, Hexagon, or manual selection).
 
     Args:
         target (Union[str, dict, Target, Literal["auto"]]): User-specified target.
-            - If "auto", the system will automatically detect whether CUDA or HIP is available.
+            - If "auto", the system will automatically detect available accelerators.
             - If a string, dict, or Target, it is directly validated.
 
     Returns:
         Union[str, dict, Target]: The selected target ("cuda", "hip", a config dict, or a Target object).
 
     Raises:
-        ValueError: If no CUDA or HIP is available and the target is "auto".
+        ValueError: If no compatible accelerator is found and the target is "auto".
         AssertionError: If the target is invalid.
     """
+
+    return_var: str | TargetConfig | Target = target
 
     return_var: str | TargetConfig | Target = target
 
@@ -245,60 +275,65 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
                 return_var = _rocm_target_from_arch(_detect_torch_rocm_arch())
             elif check_metal_availability():
                 return_var = "metal"
+            elif check_hexagon_availability():
+                return_var = "llvm -mtriple=hexagon -mcpu=hexagonv73"
             else:
-                raise ValueError("No CUDA or HIP or MPS available on this system.")
-
+                raise ValueError("No CUDA, HIP, MPS, or Hexagon available on this system.")
     else:
-        possible_cutedsl_target = normalize_cutedsl_target(target)
-        if possible_cutedsl_target is not None:
+        return_var = target
+
+    # Handle Backend-Specific Normalization (Shorthands)
+    if isinstance(return_var, str) and "hexagon" in return_var.lower():
+        s = return_var.strip()
+        if s.lower() == "hexagon":
+            s = "llvm"
+        if "-mtriple" not in s:
+            s += " -mtriple=hexagon"
+        if "-mcpu" not in s:
+            s += " -mcpu=hexagonv73"
+        return_var = s.strip()
+
+    # Handle CuTeDSL special case
+    possible_cutedsl_target = normalize_cutedsl_target(return_var)
+    if possible_cutedsl_target is not None:
+        return_var = possible_cutedsl_target
+    else:
+        # Validate the target if it's not "auto"
+        if isinstance(target, Target):
+            return_var = with_rocm_target_attrs(target)
+        elif isinstance(target, dict):
             try:
-                from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available  # lazy
-
-                check_cutedsl_available()
-            except ImportError as e:
-                raise AssertionError(f"CuTeDSL backend is not available. Please install tilelang-cutedsl package. {str(e)}") from e
-
-            return_var = possible_cutedsl_target
-        else:
-            # Validate the target if it's not "auto"
-            if isinstance(target, Target):
-                return_var = with_rocm_target_attrs(target)
-            elif isinstance(target, dict):
-                try:
-                    parsed_target = Target(target)
-                except Exception as err:
-                    raise AssertionError(
-                        f"Target {target} is not supported. Pass a valid target config dict, e.g. `{{'kind': 'cuda', 'arch': 'sm_80'}}`."
-                    ) from err
-                if parsed_target.kind.name == "hip" and target_get_mcpu(parsed_target) is not None:
-                    return_var = with_rocm_target_attrs(parsed_target)
-                else:
-                    return_var = target
-            elif isinstance(target, str):
-                normalized_target = target.strip()
-                if not normalized_target:
-                    raise AssertionError(f"Target {target} is not supported")
-                try:
-                    parsed_target = Target(normalized_target)
-                except Exception as err:
-                    examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
-                    raise AssertionError(
-                        f"Target {target} is not supported. Supported targets include: {examples}. "
-                        "Pass target options as a dict, e.g. `{'kind': 'cuda', 'arch': 'sm_80'}`."
-                    ) from err
-                if parsed_target.kind.name == "hip" and target_get_mcpu(parsed_target) is not None:
-                    return_var = with_rocm_target_attrs(parsed_target)
-                else:
-                    return_var = normalized_target
+                parsed_target = Target(target)
+            except Exception as err:
+                raise AssertionError(
+                    f"Target {target} is not supported. Pass a valid target config dict, e.g. `{{'kind': 'cuda', 'arch': 'sm_80'}}`."
+                ) from err
+            if parsed_target.kind.name == "hip" and target_get_mcpu(parsed_target) is not None:
+                return_var = with_rocm_target_attrs(parsed_target)
             else:
+                return_var = target
+        elif isinstance(target, str):
+            normalized_target = target.strip()
+            if not normalized_target:
                 raise AssertionError(f"Target {target} is not supported")
+            try:
+                parsed_target = Target(normalized_target)
+            except Exception as err:
+                examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
+                raise AssertionError(
+                    f"Target {target} is not supported. Supported targets include: {examples}. "
+                    "Pass target options as a dict, e.g. `{'kind': 'cuda', 'arch': 'sm_80'}`."
+                ) from err
+            if parsed_target.kind.name == "hip" and target_get_mcpu(parsed_target) is not None:
+                return_var = with_rocm_target_attrs(parsed_target)
+            else:
+                return_var = normalized_target
+        else:
+            raise AssertionError(f"Target {target} is not supported")
 
-    if isinstance(return_var, Target):
-        return return_var
+    # Final Validation and conversion to object if requested
     if return_object:
-        if isinstance(return_var, Target):
-            return return_var
-        return Target(return_var)
+        return return_var if isinstance(return_var, Target) else Target(return_var)
     return return_var
 
 

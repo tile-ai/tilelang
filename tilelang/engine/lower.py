@@ -21,6 +21,7 @@ from tilelang.engine.phase import (
     LowerAndLegalize,
     OptimizeForTarget,
 )
+from tilelang.utils.target import is_hexagon_target
 
 
 def is_cpu_device_backend(target: Target):
@@ -248,9 +249,19 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
 
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+    _is_hex = is_hexagon_target(target)
+
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tirx.transform.Simplify()(device_mod)
-    device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
+
+    if not _is_hex:
+        device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
+
+    if _is_hex:
+        # Use SkipAssert (plural) and LowerTVMBuiltin to clean the IR for LLVM
+        device_mod = tvm.tir.transform.SkipAssert()(device_mod)
+        device_mod = tvm.tir.transform.LowerTVMBuiltin()(device_mod)
+        device_mod = tvm.tir.transform.Simplify()(device_mod)
 
     if target.kind.name == "cuda":
         global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda") + "_without_compile"
@@ -279,6 +290,11 @@ def lower_to_host_device_ir(
 ) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
     """Lower input TIR to split host/device IRModules without backend codegen."""
 
+    if isinstance(target, str):
+        target = determine_target(target)
+
+    _is_hex = is_hexagon_target(target)
+
     mod = func_or_mod
     params = None
     if isinstance(func_or_mod, tirx.PrimFunc):
@@ -300,14 +316,20 @@ def lower_to_host_device_ir(
     # Before lowering, do semantic check
     PreLowerSemanticCheck(mod)
 
-    # Phase 1: Lower and legalize the IR
-    mod = LowerAndLegalize(mod, target)
+    with target:
+        # Phase 1: Lower and legalize the IR
+        mod = LowerAndLegalize(mod, target)
 
-    # Phase 2: Optimize the IR for the target
-    mod = OptimizeForTarget(mod, target)
+        # Phase 2: Optimize the IR for the target
+        mod = OptimizeForTarget(mod, target)
 
     host_mod = tirx.transform.Filter(_is_host_call)(mod)
     device_mod = tirx.transform.Filter(_is_device_call)(mod)
+
+    if _is_hex and len(device_mod.functions) == 0:
+        # In LLVM/Hexagon, functions aren't always tagged as 'device_kernel'
+        # so treat the whole module as the device module.
+        device_mod = mod
 
     return host_mod, device_mod, params, target, target_host
 
@@ -335,6 +357,7 @@ def lower(
     )
 
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
+
     kernel_source = codegen_mod.inspect_source()
 
     if enable_host_codegen:
@@ -343,3 +366,32 @@ def lower(
         return CompiledArtifact(host_mod, device_mod, params, kernel_source, rt_mod=host_mod)
 
     return CompiledArtifact(host_mod, device_mod, params, kernel_source)
+
+
+def _lower_hexagon_intrinsics(mod: tvm.IRModule) -> tvm.IRModule:
+    _lower_hmx = tvm.get_global_func(
+        "tilelang.hexagon.transform.LowerHMXIntrinsics",  # one consistent name
+        allow_missing=True,
+    )
+
+    if _lower_hmx is None:
+        import warnings
+
+        warnings.warn(
+            "tilelang.hexagon.transform.LowerHMXIntrinsics not found. "
+            "hmx_mma_placeholder calls will NOT be lowered. "
+            "Did you build with TILELANG_HEXAGON_ENABLED?",
+            stacklevel=3,
+        )
+        return mod
+
+    # Apply per-function; no ApplyPassToFunction API exists in TVM
+    new_funcs = {}
+    for gv, func in mod.functions.items():
+        name = gv.name_hint
+        if name.endswith("_kernel") or name.endswith("_device"):
+            new_funcs[gv] = _lower_hmx(func)
+        else:
+            new_funcs[gv] = func
+
+    return tvm.IRModule(new_funcs)
