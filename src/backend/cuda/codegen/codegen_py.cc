@@ -2,7 +2,7 @@
  * \file codegen_py.cc
  */
 #include "codegen_py.h"
-#include "codegen_utils.h"
+#include "target/codegen_utils.h"
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/name_supply.h>

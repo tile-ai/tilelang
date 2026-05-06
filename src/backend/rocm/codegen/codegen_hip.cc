@@ -15,9 +15,9 @@
 #include <utility>
 #include <vector>
 
-#include "../op/builtin.h"
+#include "op/builtin.h"
 #include "target/source/ptx.h"
-#include "utils.h"
+#include "target/utils.h"
 
 namespace tvm {
 namespace codegen {

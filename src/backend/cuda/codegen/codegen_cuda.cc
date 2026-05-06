@@ -15,11 +15,11 @@
 #include <utility>
 #include <vector>
 
-#include "../op/builtin.h"
-#include "../transform/common/attr.h"
-#include "./ptx.h"
-#include "./utils.h"
 #include "arith/pattern_match.h"
+#include "backend/cuda/codegen/ptx.h"
+#include "op/builtin.h"
+#include "target/utils.h"
+#include "transform/common/attr.h"
 
 namespace tvm {
 namespace codegen {

@@ -169,7 +169,9 @@ set(USE_GTEST OFF)
 
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
-list(APPEND TILE_LANG_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Add TileLang's own src/ to include path so cross-directory includes
+# can use paths relative to src/ (e.g. "target/utils.h", "op/builtin.h").
+list(INSERT TILE_LANG_INCLUDES 0 "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # Collect source files
 file(GLOB TILE_LANG_SRCS
@@ -186,8 +188,9 @@ file(GLOB TILE_LANG_SRCS
   src/target/codegen_c_host.cc
   src/target/codegen_c.cc
   src/target/rt_mod_c.cc
-  # intrin_rule doesn't have system dependency
-  src/target/intrin_rule*.cc
+  # intrin_rule doesn't have system dependency; always compiled regardless of backend
+  src/backend/cuda/codegen/intrin_rule_cuda.cc
+  src/backend/rocm/codegen/intrin_rule_hip.cc
 )
 
 # Always include CPU-safe runtime helpers

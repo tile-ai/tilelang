@@ -6,7 +6,7 @@
 
 #include "runtime.h"
 
-#include "../target/stubs/cuda.h"
+#include "backend/cuda/codegen/stubs/cuda.h"
 #include <cstdint>
 #include <sstream>
 #include <tvm/ffi/function.h>
