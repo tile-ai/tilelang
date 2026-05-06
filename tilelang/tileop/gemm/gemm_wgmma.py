@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from .gemm_base import GemmBase
-from .inst import GemmInst
 from tilelang.layout import (
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
@@ -20,6 +19,9 @@ from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from typing import Callable
+
+
+GEMM_INST_WGMMA = "cuda.wgmma"
 
 
 class GemmWGMMA(GemmBase):
@@ -47,7 +49,7 @@ class GemmWGMMA(GemmBase):
             return make_linear_layout
 
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WGMMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -91,7 +93,7 @@ class GemmWGMMA(GemmBase):
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WGMMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(

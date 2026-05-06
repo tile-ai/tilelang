@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from .gemm_base import GemmBase
-from .inst import GemmInst
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,
@@ -15,9 +14,12 @@ from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
 
+GEMM_INST_MMA = "cuda.mma"
+
+
 class GemmMMA(GemmBase):
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tir.Var | None = None):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         emitter = TensorCoreIntrinEmitter(

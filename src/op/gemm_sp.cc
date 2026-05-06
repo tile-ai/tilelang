@@ -19,13 +19,21 @@
 namespace tvm {
 namespace tl {
 
-std::pair<int, int>
-GemmSPWarpPolicyNode::computeWarpPartition(int M, int N, int block_size,
-                                           Target target, GemmInst gemm_inst,
-                                           int bits) const {
+namespace {
+
+constexpr const char *kCudaMMA = "cuda.mma";
+constexpr const char *kCudaWGMMA = "cuda.wgmma";
+
+} // namespace
+
+std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
+                                                               int block_size,
+                                                               Target target,
+                                                               String gemm_inst,
+                                                               int bits) const {
   int num_warps = block_size / TargetGetWarpSize(target);
 
-  ICHECK(gemm_inst == GemmInst::kMMA || gemm_inst == GemmInst::kWGMMA)
+  ICHECK(gemm_inst == kCudaMMA || gemm_inst == kCudaWGMMA)
       << "GemmSP currently only supports MMA and WGMMA";
   auto [m_warp, n_warp] = GemmWarpPolicyNode::computeWarpPartition(
       M, N, block_size, target, gemm_inst);
@@ -168,7 +176,7 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   bool maybe_wgmma = TargetIsHopper(T.target) && (this->m_ >= 64) &&
                      (block_size / warp_size % 4 == 0);
-  auto gemm_inst = maybe_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA;
+  auto gemm_inst = maybe_wgmma ? String(kCudaWGMMA) : String(kCudaMMA);
   auto [warp_m, warp_n] = policy_->computeWarpPartition(
       m_, n_, block_size, T.target, gemm_inst, a_->dtype.bits());
 
@@ -250,7 +258,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     constexpr int wgmma_m = 16 * 4;
     bool maybe_wgmma =
         (this->m_ >= wgmma_m) && (block_size / warp_size % 4 == 0);
-    auto gemm_inst = maybe_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA;
+    auto gemm_inst = maybe_wgmma ? String(kCudaWGMMA) : String(kCudaMMA);
     auto [warp_m, warp_n] = policy_->computeWarpPartition(
         m_, n_, block_size, T.target, gemm_inst, a_->dtype.bits());
     auto fragment = maybe_wgmma
@@ -286,7 +294,7 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     }
   } else if (TargetIsAmpere(T.target)) {
     auto [warp_m, warp_n] = policy_->computeWarpPartition(
-        m_, n_, block_size, T.target, GemmInst::kMMA, a_->dtype.bits());
+        m_, n_, block_size, T.target, String(kCudaMMA), a_->dtype.bits());
     auto fragment = makeGemmSparseFragmentC(m_, n_, m_ / warp_m, n_ / warp_n,
                                             c_->dtype.bits());
     results.Set(c_, fragment->BindThreadRange(thread_range));
@@ -343,7 +351,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def(
       "tl.GemmSPWarpPolicyComputeWarpPartition",
       [](GemmSPWarpPolicy policy, int M, int N, int block_size, Target target,
-         GemmInst gemm_inst, int bits) {
+         String gemm_inst, int bits) {
         policy->computeWarpPartition(M, N, block_size, target, gemm_inst, bits);
         return;
       });

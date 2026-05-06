@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from .gemm_base import GemmBase
-from .inst import GemmInst
 from tilelang.layout import (
     Layout,
     make_full_bank_swizzled_layout,
@@ -30,6 +29,9 @@ _FLOAT8_DTYPES = {
     "float8_e5m2fn",
     "float8_e5m2fnuz",
 }
+
+
+GEMM_INST_TCGEN05 = "cuda.tcgen05"
 
 
 class GemmTCGEN5(GemmBase):
@@ -64,7 +66,7 @@ class GemmTCGEN5(GemmBase):
         if self.is_blockscaled:
             m_warp, n_warp = 1, 1
         else:
-            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
+            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_TCGEN05)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -119,7 +121,7 @@ class GemmTCGEN5(GemmBase):
         if self.is_blockscaled:
             m_warp, n_warp = 1, 1
         else:
-            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.TCGEN5MMA)
+            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_TCGEN05)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(

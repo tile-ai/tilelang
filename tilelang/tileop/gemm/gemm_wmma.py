@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from .gemm_base import GemmBase
-from .inst import GemmInst
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.wmma_macro_generator import WMMAIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
@@ -15,11 +14,14 @@ from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
 
+GEMM_INST_WMMA = "rocm.wmma"
+
+
 class GemmWMMA(GemmBase):
     """GEMM using AMD RDNA WMMA instructions (16×16×16, warp-size=32)."""
 
     def _make_emitter(self, target: Target, thread_nums: int, thread_var=None) -> WMMAIntrinEmitter:
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WMMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         return WMMAIntrinEmitter(
