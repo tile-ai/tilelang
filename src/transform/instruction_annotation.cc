@@ -75,21 +75,7 @@ std::string ClassifyCopy(const CopyNode *copy, Target target,
 // ---------------------------------------------------------------------------
 
 std::string ClassifyGemm(const GemmNode *gemm, int block_size, Target target) {
-  GemmInst inst = gemm->getGemmInst(block_size, target);
-  switch (inst) {
-  case GemmInst::kWGMMA:
-    return "wgmma";
-  case GemmInst::kTCGEN5MMA:
-    return "tcgen5mma";
-  case GemmInst::kMMA:
-    return "mma";
-  case GemmInst::kMFMA:
-    return "mfma";
-  case GemmInst::kScalar:
-    return "scalar";
-  default:
-    return "unknown";
-  }
+  return gemm->getGemmInstructionKind(block_size, target);
 }
 
 // ---------------------------------------------------------------------------

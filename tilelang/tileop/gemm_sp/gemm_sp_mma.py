@@ -1,5 +1,4 @@
 from .gemm_sp_base import GemmSPBase
-from tilelang.tileop.gemm.inst import GemmInst
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
@@ -10,10 +9,13 @@ from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
 
+GEMM_SP_INST_MMA = "cuda.mma"
+
+
 class GemmSPMMA(GemmSPBase):
     def infer_layout(self, target: Target, thread_nums: int):
         # NOTE(wt): Actually gemm_sp v2 currently use GemmWarpPolicy
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
@@ -59,7 +61,7 @@ class GemmSPMMA(GemmSPBase):
 
     def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
         # NOTE(wt): Actually gemm_sp v2 currently use GemmWarpPolicy
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
