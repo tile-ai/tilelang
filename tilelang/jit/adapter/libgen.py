@@ -18,6 +18,7 @@ from tilelang.contrib.nvcc import (
 )
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
+from tilelang.utils.target import target_get_mcpu
 
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
@@ -104,7 +105,7 @@ class LibraryGenerator:
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
-            arch = get_rocm_arch(rocm_path)
+            arch = target_get_mcpu(target) or get_rocm_arch(rocm_path)
             command = [
                 "hipcc",
                 "-std=c++17",

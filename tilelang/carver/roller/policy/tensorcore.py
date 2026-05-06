@@ -9,6 +9,7 @@ from ..node import PrimFuncNode
 from .common import coalesced_factor, factorize, get_all_factors
 from .default import DefaultPolicy
 from ..rasterization import NoRasterization, Rasterization2DColumn
+from ...arch import is_rdna_arch
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,13 @@ class TensorCorePolicy(DefaultPolicy):
                     return False
         return super().check_tile_shape_isvalid(td)
 
+    def score_block_size(self, n):
+        base_score = super().score_block_size(n)
+        if is_rdna_arch(self.arch):
+            warps = (n + self.arch.warp_size - 1) // self.arch.warp_size
+            return (0 if warps == 8 else 1, abs(warps - 8), *base_score)
+        return base_score
+
     def _can_implement_layout(self, node: PrimFuncNode, td: TileDict):
         # Not implemented yet
         # This function is used to check whether we can implement swizzling
@@ -256,8 +264,11 @@ class TensorCorePolicy(DefaultPolicy):
         if tile[ax_m] < wmma_tile[ax_m] or tile[ax_n] < wmma_tile[ax_n]:
             # allow pad, otherwise, we can not get a valid tile shape
             return None
+        space_prod = int(np.prod(space))
+        if space_prod < warps or space_prod % warps != 0:
+            return None
 
-        factors = factorize(np.prod(space) // warps)
+        factors = factorize(space_prod // warps)
 
         def _score(node, warp_tile):  # small is better
             score = 0

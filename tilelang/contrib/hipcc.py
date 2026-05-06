@@ -94,5 +94,7 @@ def compile_hip(code, target_format="hsaco", arch=None, options=None, path_targe
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
     """use hipcc to generate fatbin code for better optimization"""
-    hsaco = compile_hip(code, target_format="hsaco")
+    from tilelang.utils.target import target_get_mcpu
+
+    hsaco = compile_hip(code, target_format="hsaco", arch=target_get_mcpu(target))
     return hsaco
