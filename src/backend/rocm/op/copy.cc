@@ -133,16 +133,16 @@ private:
                            no_implicit_commit_wait || GetIsAsyncCopy(op));
     Stmt cp_async_loop = inject_result.stmt;
     if (!inject_result.injected_ptx_async_copy) {
-      LOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
-                   << " (scope=" << op.src.scope()
-                   << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
-                   << " (scope=" << op.dst.scope()
-                   << ", dtype=" << op.dst->dtype
-                   << "), no_implicit_async_commit_wait="
-                   << no_implicit_commit_wait
-                   << ", is_async_copy=" << GetIsAsyncCopy(op);
+      DLOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
+                    << " (scope=" << op.src.scope()
+                    << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
+                    << " (scope=" << op.dst.scope()
+                    << ", dtype=" << op.dst->dtype
+                    << "), no_implicit_async_commit_wait="
+                    << no_implicit_commit_wait
+                    << ", is_async_copy=" << GetIsAsyncCopy(op);
       if (no_implicit_commit_wait) {
-        LOG(WARNING)
+        DLOG(WARNING)
             << "Pipeline-managed async copy fallback to normal copy because "
                "cp.async rewrite found no eligible global->shared store.";
         return lowered_loop;
@@ -152,8 +152,8 @@ private:
             << "Explicit async copy semantics require cp.async lowering, "
                "but no eligible global->shared store was rewritten.";
       }
-      LOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
-                      "no eligible global->shared store.";
+      DLOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
+                       "no eligible global->shared store.";
       return LowerNormalCopy(op, T, analyzer);
     }
     if (no_implicit_commit_wait) {

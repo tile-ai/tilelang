@@ -500,15 +500,15 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
                          no_implicit_commit_wait || GetIsAsyncCopy(op));
   Stmt cp_async_loop = inject_result.stmt;
   if (!inject_result.injected_ptx_async_copy) {
-    LOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
-                 << " (scope=" << op.src.scope() << ", dtype=" << op.src->dtype
-                 << "), dst=" << op.dst->name << " (scope=" << op.dst.scope()
-                 << ", dtype=" << op.dst->dtype
-                 << "), no_implicit_async_commit_wait="
-                 << no_implicit_commit_wait
-                 << ", is_async_copy=" << GetIsAsyncCopy(op);
+    DLOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name
+                  << " (scope=" << op.src.scope() << ", dtype=" << op.src->dtype
+                  << "), dst=" << op.dst->name << " (scope=" << op.dst.scope()
+                  << ", dtype=" << op.dst->dtype
+                  << "), no_implicit_async_commit_wait="
+                  << no_implicit_commit_wait
+                  << ", is_async_copy=" << GetIsAsyncCopy(op);
     if (no_implicit_commit_wait) {
-      LOG(WARNING)
+      DLOG(WARNING)
           << "Pipeline-managed async copy fallback to normal copy because "
              "cp.async rewrite found no eligible global->shared store.";
       return lowered_loop;
@@ -517,8 +517,8 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &T,
       LOG(FATAL) << "Explicit async copy semantics require cp.async lowering, "
                     "but no eligible global->shared store was rewritten.";
     }
-    LOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
-                    "no eligible global->shared store.";
+    DLOG(WARNING) << "Fallback to normal copy because cp.async rewrite found "
+                     "no eligible global->shared store.";
     return LowerNormal(op, T, analyzer);
   }
   if (no_implicit_commit_wait) {
@@ -910,8 +910,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   Array<Range> shared_range = is_load ? dst_range : src_range;
 
   if (T.layout_map.count(global_tensor)) {
-    LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
-                    "layout, fallback to normal copy.";
+    DLOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
+                     "layout, fallback to normal copy.";
     return LowerNormal(op, T, analyzer);
   }
 
@@ -984,8 +984,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     auto stride = desc.global_stride[i].as<IntImmNode>();
     if (stride != nullptr) {
       if (stride->value % 16 != 0 || stride->value >= (1ULL << 40)) {
-        LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
-                     << desc.global_stride[i] << ", fallback to normal copy.";
+        DLOG(WARNING) << "TMA bulk copy cannot support a global stride of "
+                      << desc.global_stride[i] << ", fallback to normal copy.";
         return LowerNormal(op, T, analyzer);
       }
     }
@@ -1036,9 +1036,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
     if (shared_layout->InputDim() < 2) {
-      LOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
-                   << "dimension " << shared_layout->InputDim()
-                   << ", fallback to normal copy.";
+      DLOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
+                    << "dimension " << shared_layout->InputDim()
+                    << ", fallback to normal copy.";
       return LowerNormal(op, T, analyzer);
     }
     const int ndim = static_cast<int>(shared_layout->InputDim());
@@ -1057,23 +1057,23 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
                    shared_layout,
                    makeGemmABLayoutPadded(*stride, *continuous,
                                           shared_tensor->dtype.bits()))) {
-      LOG(WARNING) << "Bulk copy cannot support a padded layout for src: "
-                   << src->name << ", dst: " << dst->name
-                   << ", fallback to normal copy";
+      DLOG(WARNING) << "Bulk copy cannot support a padded layout for src: "
+                    << src->name << ", dst: " << dst->name
+                    << ", fallback to normal copy";
       return LowerNormal(op, T, analyzer);
     } else {
-      LOG(WARNING) << "Came across unsupported swizzle layout for src: "
-                   << src->name << ", dst: " << dst->name
-                   << ", fallback to normal copy";
+      DLOG(WARNING) << "Came across unsupported swizzle layout for src: "
+                    << src->name << ", dst: " << dst->name
+                    << ", fallback to normal copy";
       return LowerNormal(op, T, analyzer);
     }
   }
 
   auto inner_box_dim = as_const_int(desc.smem_box[0]);
   if (inner_box_dim == nullptr) {
-    LOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
-                 << " can only be a constant integer for TMA bulk copy, "
-                    "fallback to normal copy";
+    DLOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
+                  << " can only be a constant integer for TMA bulk copy, "
+                     "fallback to normal copy";
     return LowerNormal(op, T, analyzer);
   }
   int instruction_dim = *inner_box_dim;
@@ -1106,9 +1106,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   };
   for (const auto &check : swizzle_checks) {
     if (desc.swizzle == check.swizzle && inner_box_dim_ > check.max_dim) {
-      LOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
-                      "with inner_box_dim_ > "
-                   << check.max_dim << ", will be fallback to normal copy";
+      DLOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
+                       "with inner_box_dim_ > "
+                    << check.max_dim << ", will be fallback to normal copy";
       return LowerNormal(op, T, analyzer);
     }
   }

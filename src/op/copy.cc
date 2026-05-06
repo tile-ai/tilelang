@@ -49,9 +49,9 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
         }
       }
       if (!dst_depends_on_thread) {
-        LOG(WARNING) << "Copy from local buffer `" << op.src->name << "` to "
-                     << op.dst.scope() << " buffer `" << op.dst->name
-                     << "` may cause conflicted write.";
+        DLOG(WARNING) << "Copy from local buffer `" << op.src->name << "` to "
+                      << op.dst.scope() << " buffer `" << op.dst->name
+                      << "` may cause conflicted write.";
       }
     }
     vectorized_thread_loop = VectorizeLoop(fused_loop, T.layout_map);
