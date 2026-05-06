@@ -39,8 +39,7 @@ TileLang supports both synchronous and explicitly-asynchronous copies.
 
 `T.copy(src, dst, ...)` (synchronous semantics)
 - Intended default for most TileLang programs.
-- The compiler is free to lower it to different mechanisms (SIMT copy, `ldmatrix`,
-  TMA `cp.async.bulk`, `cp.async`, etc.) depending on target/hints, but the observable semantics
+- The compiler is free to lower it to different mechanisms (synchronous SIMT copy `ld.global`, warp-level copy `ldmatrix`, async copy via TMA `cp.async.bulk`, old async copy `cp.async`, etc.) depending on target/hints, but the observable semantics
   are *synchronous*: after the statement, it is safe to use `dst`.
 - If `T.copy` lowers to `cp.async`, TileLang will still preserve synchronous
   semantics by emitting the required `commit`/`wait` (and any required
