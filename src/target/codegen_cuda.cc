@@ -8,6 +8,7 @@
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -17,6 +18,7 @@
 
 #include "../op/builtin.h"
 #include "../transform/common/attr.h"
+#include "../transform/common/pipeline_utils.h"
 #include "./ptx.h"
 #include "./utils.h"
 #include "arith/pattern_match.h"
@@ -30,6 +32,21 @@ namespace {
 
 bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
+}
+
+int64_t GetStorageBits(DataType dtype) {
+  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+}
+
+PrimExpr GetStorageBitsExpr(DataType dtype, DataType out_dtype) {
+  return make_const(out_dtype, GetStorageBits(dtype));
+}
+
+PrimExpr BytesToLogicalElementOffset(PrimExpr byte_offset, DataType dtype) {
+  DataType out_dtype = byte_offset.dtype();
+  return arith::Analyzer().Simplify(
+      indexdiv(byte_offset * make_const(out_dtype, 8),
+               GetStorageBitsExpr(dtype, out_dtype)));
 }
 
 std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
@@ -90,6 +107,9 @@ int GetTileLangCPAsyncTransferBytes(const CallNode *op) {
       << total_bytes;
   return static_cast<int>(total_bytes);
 }
+
+static constexpr const char *kDynSharedMemoryAliasMetadata =
+    "tl.dyn_shared_memory_alias_metadata";
 
 bool CanEmitPackedX2Math(DataType t) {
   int lanes = t.lanes();
@@ -301,6 +321,113 @@ CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
   vid_global_barrier_expect_ = name_supply_->FreshName("__barrier_expect");
   ICHECK_EQ(vid_global_barrier_state_,
             runtime::symbol::tvm_global_barrier_state);
+}
+
+std::optional<CodeGenTileLangCUDA::DynSharedAliasAccess>
+CodeGenTileLangCUDA::TryMatchDynSharedAliasAccess(const BufferNode *buffer,
+                                                  PrimExpr index) const {
+  if (!emit_named_smem_pointers_) {
+    return std::nullopt;
+  }
+  std::string scope;
+  if (alloc_storage_scope_.count(buffer->data.get())) {
+    scope = alloc_storage_scope_.at(buffer->data.get());
+  }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+  if (scope != "shared.dyn") {
+    return std::nullopt;
+  }
+  int64_t elem_bits = GetStorageBits(buffer->dtype);
+  if (elem_bits <= 0) {
+    return std::nullopt;
+  }
+  arith::Analyzer analyzer;
+  for (const auto &kv : dyn_shared_alias_var_ranges_) {
+    analyzer.Bind(GetRef<Var>(kv.first), kv.second);
+  }
+  auto try_match = [&](const DynSharedAliasInfo &info,
+                       bool require_range_check) {
+    if (info.dtype != buffer->dtype) {
+      return std::optional<DynSharedAliasAccess>();
+    }
+    PrimExpr base_offset = analyzer.Simplify(
+        BytesToLogicalElementOffset(info.byte_offset, buffer->dtype));
+    PrimExpr shifted = analyzer.Simplify(index - base_offset);
+    PrimExpr zero = make_const(shifted.dtype(), 0);
+    if (require_range_check && !is_zero(info.total_byte_size) &&
+        (!analyzer.CanProve(shifted >= zero) ||
+         !analyzer.CanProve(shifted <
+                            analyzer.Simplify(BytesToLogicalElementOffset(
+                                info.total_byte_size, buffer->dtype))))) {
+      return std::optional<DynSharedAliasAccess>();
+    }
+    DynSharedAliasAccess access;
+    access.info = &info;
+    if (is_zero(info.stage_stride_bytes)) {
+      access.element_index = shifted;
+      return std::optional<DynSharedAliasAccess>(std::move(access));
+    }
+    PrimExpr stage_stride = analyzer.Simplify(
+        BytesToLogicalElementOffset(info.stage_stride_bytes, buffer->dtype));
+    if (!dyn_shared_stage_expr_stack_.empty()) {
+      PrimExpr stage_index = dyn_shared_stage_expr_stack_.back();
+      PrimExpr stage_shifted =
+          analyzer.Simplify(shifted - stage_index * stage_stride);
+      if (analyzer.CanProve(stage_shifted >= zero) &&
+          analyzer.CanProve(stage_shifted < stage_stride)) {
+        access.stage_index = stage_index;
+        access.element_index = stage_shifted;
+        return std::optional<DynSharedAliasAccess>(std::move(access));
+      }
+    }
+    access.stage_index = analyzer.Simplify(indexdiv(shifted, stage_stride));
+    access.element_index = analyzer.Simplify(indexmod(shifted, stage_stride));
+    return std::optional<DynSharedAliasAccess>(std::move(access));
+  };
+
+  auto it = dyn_shared_aliases_.find(buffer->name);
+  if (it != dyn_shared_aliases_.end()) {
+    if (auto access = try_match(it->second, false)) {
+      return access;
+    }
+  }
+  for (const auto &buffer_name : dyn_shared_alias_order_) {
+    const auto &info = dyn_shared_aliases_.at(buffer_name);
+    if (auto access = try_match(info, true)) {
+      return access;
+    }
+  }
+  return std::nullopt;
+}
+
+std::string CodeGenTileLangCUDA::GetDynSharedAliasBufferExpr(
+    const DynSharedAliasAccess &access) {
+  if (access.stage_index.has_value()) {
+    return access.info->alias_name + "[" +
+           PrintExpr(access.stage_index.value()) + "]";
+  }
+  return access.info->alias_name;
+}
+
+std::string CodeGenTileLangCUDA::GetDynSharedAliasAddressExpr(
+    const DynSharedAliasAccess &access, PrimExpr element_index) {
+  PrimExpr simplified = arith::Analyzer().Simplify(element_index);
+  std::string buffer_expr = GetDynSharedAliasBufferExpr(access);
+  if (is_zero(simplified)) {
+    return buffer_expr;
+  }
+  return "(&(" + buffer_expr + "[" + PrintExpr(simplified) + "]))";
+}
+
+void CodeGenTileLangCUDA::BindDynSharedAliasVarRange(const Var &var,
+                                                     Range range) {
+  dyn_shared_alias_var_ranges_[var.get()] = std::move(range);
+}
+
+void CodeGenTileLangCUDA::UnbindDynSharedAliasVarRange(const Var &var) {
+  dyn_shared_alias_var_ranges_.erase(var.get());
 }
 
 void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
@@ -638,6 +765,8 @@ std::string CodeGenTileLangCUDA::Finish() {
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
+  BindDynSharedAliasVarRange(op->loop_var,
+                             Range::FromMinExtent(op->min, op->extent));
   if (op->kind == tir::ForKind::kUnrolled) {
     PrintIndent();
     if (unroll_factor.count(op->loop_var.get())) {
@@ -661,6 +790,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
   this->EndScope(for_scope);
   PrintIndent();
   stream << "}\n";
+  UnbindDynSharedAliasVarRange(op->loop_var);
 }
 
 void CodeGenTileLangCUDA::BindThreadIndex(const IterVar &iv) {
@@ -1882,9 +2012,16 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   };
 
   DataType buffer_element_dtype = buffer->dtype;
+  auto dyn_shared_access = TryMatchDynSharedAliasAccess(buffer, index);
+  if (dyn_shared_access.has_value()) {
+    index = dyn_shared_access->element_index;
+  }
 
-  std::string buffer_str = vid;
-  if (!HandleTypeMatch(buffer_var, buffer_element_dtype) || is_vol) {
+  std::string buffer_str = dyn_shared_access.has_value()
+                               ? GetDynSharedAliasBufferExpr(*dyn_shared_access)
+                               : vid;
+  if (!dyn_shared_access.has_value() &&
+      (!HandleTypeMatch(buffer_var, buffer_element_dtype) || is_vol)) {
     std::stringstream temp;
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();
@@ -1906,10 +2043,17 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     if (t.lanes() == 1) {
       div_factor = (t.bits() == 4) ? 2 : (32 / t.bits());
     }
-    index_str =
-        PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
-    os << "*((" << ptr_cast(t) << vid << ")"
-       << " + " << index_str << ")";
+    PrimExpr scaled_index =
+        arith::Analyzer().Simplify(truncdiv(index, div_factor));
+    index_str = PrintExpr(scaled_index);
+    if (dyn_shared_access.has_value()) {
+      os << "*(" << ptr_cast(t)
+         << GetDynSharedAliasAddressExpr(*dyn_shared_access, scaled_index)
+         << ")";
+    } else {
+      os << "*((" << ptr_cast(t) << vid << ")"
+         << " + " << index_str << ")";
+    }
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
     if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
@@ -1925,9 +2069,17 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1) {
       div_factor = 2;
     }
-    index_str =
-        PrintExpr(arith::Analyzer().Simplify(truncdiv(index, div_factor)));
-    os << "*" << ptr_cast(t) << "(" << buffer_str << " + " << index_str << ")";
+    PrimExpr scaled_index =
+        arith::Analyzer().Simplify(truncdiv(index, div_factor));
+    index_str = PrintExpr(scaled_index);
+    if (dyn_shared_access.has_value()) {
+      os << "*(" << ptr_cast(t)
+         << GetDynSharedAliasAddressExpr(*dyn_shared_access, scaled_index)
+         << ")";
+    } else {
+      os << "*" << ptr_cast(t) << "(" << buffer_str << " + " << index_str
+         << ")";
+    }
   }
 
   return os.str();
@@ -2052,6 +2204,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << fallback << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
     return;
+  }
+  if (op->op.same_as(builtin::address_of())) {
+    const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
+    ICHECK(op->args.size() == 1 && load);
+    ICHECK_EQ(load->indices.size(), 1)
+        << "CodeGenCUDA only supports flat memory allocations.";
+    if (auto dyn_shared_access = TryMatchDynSharedAliasAccess(
+            load->buffer.get(), load->indices[0])) {
+      os << GetDynSharedAliasAddressExpr(*dyn_shared_access,
+                                         dyn_shared_access->element_index);
+      return;
+    }
   }
   if (op->op.same_as(builtin::ptx_cp_async())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
@@ -3930,7 +4094,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tl::attr::kLexicalAllocScope) {
+  if (op->attr_key == tir::attr::thread_extent) {
+    IterVar iv = Downcast<IterVar>(op->node);
+    BindDynSharedAliasVarRange(
+        iv->var, Range::FromMinExtent(make_zero(iv->var.dtype()), op->value));
+    CodeGenC::VisitStmt_(op);
+    UnbindDynSharedAliasVarRange(iv->var);
+    return;
+  } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
     PrintIndent();
     stream << "{\n";
     int scope = BeginScope();
@@ -3978,6 +4149,15 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
       this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
                    << panel_size << ">();\n";
     }
+    this->VisitStmt(op->body);
+    return;
+  } else if (op->attr_key == tl::kPipelineMVBStageExpr) {
+    dyn_shared_stage_expr_stack_.push_back(op->value);
+    this->VisitStmt(op->body);
+    dyn_shared_stage_expr_stack_.pop_back();
+    return;
+  } else if (op->attr_key == tl::kPipelineMVBParityExpr ||
+             op->attr_key == tl::kPipelineMVBContextNumStages) {
     this->VisitStmt(op->body);
     return;
   } else if (op->attr_key == "pragma_unroll_factor") {
@@ -4032,6 +4212,27 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
 
   if (scope == "shared.dyn") {
     stream << ' ' << vid << "[];\n";
+    if (emit_named_smem_pointers_) {
+      for (const auto &buffer_name : dyn_shared_alias_order_) {
+        const auto &alias = dyn_shared_aliases_.at(buffer_name);
+        PrintIndent();
+        if (is_zero(alias.stage_stride_bytes)) {
+          PrintType(alias.dtype, stream);
+          stream << "* " << alias.alias_name << " = reinterpret_cast<";
+          PrintType(alias.dtype, stream);
+          stream << "*>(" << vid << " + " << PrintExpr(alias.byte_offset)
+                 << ");\n";
+        } else {
+          stream << "auto " << alias.alias_name
+                 << " = tl::PatternVisitor([&](const int i) { return "
+                    "reinterpret_cast<";
+          PrintType(alias.dtype, stream);
+          stream << "*>(" << vid << " + " << PrintExpr(alias.byte_offset)
+                 << " + (i * " << PrintExpr(alias.stage_stride_bytes)
+                 << ")); });\n";
+        }
+      }
+    }
   } else {
     size_t constant_size = op->ConstantAllocationSize();
     ICHECK_GT(constant_size, 0)
@@ -4187,9 +4388,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     // reading that byte only returns the low nibble — the odd-indexed element
     // is lost).
     if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+      auto dyn_shared_access =
+          TryMatchDynSharedAliasAccess(op->buffer.get(), index);
+      if (dyn_shared_access.has_value()) {
+        index = dyn_shared_access->element_index;
+      }
       std::string idx_str = PrintExpr(index);
-      std::string vid = GetVarID(buffer_var.get());
-      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
+      std::string buffer_expr =
+          dyn_shared_access.has_value()
+              ? GetDynSharedAliasBufferExpr(*dyn_shared_access)
+              : GetVarID(buffer_var.get());
+      os << "tl_fp4_packed_load((fp4_e2_2_t*)" << buffer_expr << ", " << idx_str
+         << ")";
     } else {
       std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
       HandleVolatileLoads(ref, op, os);
@@ -4215,12 +4425,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
       HandleVolatileLoads(ref, op, os);
     } else {
       std::ostringstream svalue_expr;
+      auto dyn_shared_access =
+          TryMatchDynSharedAliasAccess(op->buffer.get(), index);
+      if (dyn_shared_access.has_value()) {
+        index = dyn_shared_access->element_index;
+      }
       std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
       std::string vid = GetVarID(buffer_var.get());
       DataType elem_type = op->dtype.element_of();
       for (int i = 0; i < lanes; ++i) {
         std::ostringstream value_temp;
-        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+        if (dyn_shared_access.has_value()) {
+          value_temp << GetDynSharedAliasBufferExpr(*dyn_shared_access);
+        } else if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
           value_temp << "((";
           if (buffer_var.get()->dtype.is_handle()) {
             auto it = alloc_storage_scope_.find(buffer_var.get());
@@ -4286,12 +4503,20 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     // consecutive fp4 elements to the same byte, and a plain assignment
     // overwrites the entire byte — destroying the neighboring nibble.
     if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+      auto dyn_shared_access =
+          TryMatchDynSharedAliasAccess(op->buffer.get(), index_expr);
+      if (dyn_shared_access.has_value()) {
+        index_expr = dyn_shared_access->element_index;
+      }
       std::string idx_str = PrintExpr(index_expr);
       std::string value = this->PrintExpr(op->value);
-      std::string vid = GetVarID(buffer_var.get());
+      std::string buffer_expr =
+          dyn_shared_access.has_value()
+              ? GetDynSharedAliasBufferExpr(*dyn_shared_access)
+              : GetVarID(buffer_var.get());
       this->PrintIndent();
-      stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << vid << ", " << idx_str
-             << ", " << value << ");\n";
+      stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << buffer_expr << ", "
+             << idx_str << ", " << value << ");\n";
     } else {
       std::string value = this->PrintExpr(op->value);
       std::string ref =
@@ -4311,13 +4536,20 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       int vec_scope = BeginScope();
 
       // store elements separately
+      auto dyn_shared_access =
+          TryMatchDynSharedAliasAccess(op->buffer.get(), index_expr);
+      if (dyn_shared_access.has_value()) {
+        index_expr = dyn_shared_access->element_index;
+      }
       std::string index = SSAGetID(PrintExpr(index_expr), index_expr.dtype());
       std::string value = SSAGetID(PrintExpr(op->value), op->value.dtype());
       std::string vid = GetVarID(buffer_var.get());
       for (int i = 0; i < value_dtype.lanes(); ++i) {
         this->PrintIndent();
         DataType elem_type = value_dtype.element_of();
-        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+        if (dyn_shared_access.has_value()) {
+          stream << GetDynSharedAliasBufferExpr(*dyn_shared_access);
+        } else if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
           stream << "((";
           if (buffer_var.get()->dtype.is_handle()) {
             auto it = alloc_storage_scope_.find(buffer_var.get());
@@ -4915,6 +5147,59 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
     for (const auto &idx : opt.value()) {
       ro_param_indices.insert(static_cast<int>(Downcast<Integer>(idx)->value));
     }
+  }
+
+  emit_named_smem_pointers_ =
+      tvm::transform::PassContext::Current()
+          ->GetConfig<Bool>(tl::kEmitNamedSmemPointers, Bool(false))
+          .value_or(Bool(false));
+  dyn_shared_aliases_.clear();
+  dyn_shared_alias_order_.clear();
+  dyn_shared_stage_expr_stack_.clear();
+  dyn_shared_alias_var_ranges_.clear();
+  if (emit_named_smem_pointers_) {
+    if (auto opt = f->GetAttr<Map<String, Array<PrimExpr>>>(
+            kDynSharedMemoryAliasMetadata)) {
+      std::vector<std::pair<std::string, DynSharedAliasInfo>> aliases;
+      for (const auto &kv : opt.value()) {
+        const Array<PrimExpr> &metadata = kv.second;
+        if (metadata.size() != 4 && metadata.size() != 6) {
+          continue;
+        }
+        size_t dtype_metadata_offset = metadata.size() == 6 ? 3 : 1;
+        auto code = metadata[dtype_metadata_offset].as<IntImmNode>();
+        auto bits = metadata[dtype_metadata_offset + 1].as<IntImmNode>();
+        auto lanes = metadata[dtype_metadata_offset + 2].as<IntImmNode>();
+        if (code == nullptr || bits == nullptr || lanes == nullptr) {
+          continue;
+        }
+        DynSharedAliasInfo info;
+        info.byte_offset = metadata[0];
+        PrimExpr zero = make_const(metadata[0].dtype(), 0);
+        info.total_byte_size = metadata.size() == 6 ? metadata[1] : zero;
+        info.stage_stride_bytes = metadata.size() == 6 ? metadata[2] : zero;
+        info.dtype = DataType(static_cast<uint8_t>(code->value), bits->value,
+                              lanes->value);
+        aliases.emplace_back(std::string(kv.first), std::move(info));
+      }
+      std::sort(
+          aliases.begin(), aliases.end(), [](const auto &lhs, const auto &rhs) {
+            auto lhs_offset = lhs.second.byte_offset.template as<IntImmNode>();
+            auto rhs_offset = rhs.second.byte_offset.template as<IntImmNode>();
+            if (lhs_offset != nullptr && rhs_offset != nullptr &&
+                lhs_offset->dtype == rhs_offset->dtype &&
+                lhs_offset->value != rhs_offset->value) {
+              return lhs_offset->value < rhs_offset->value;
+            }
+            return lhs.first < rhs.first;
+          });
+      for (auto &entry : aliases) {
+        entry.second.alias_name = name_supply_->FreshName(entry.first);
+        dyn_shared_alias_order_.push_back(entry.first);
+        dyn_shared_aliases_.emplace(entry.first, std::move(entry.second));
+      }
+    }
+    emit_named_smem_pointers_ = !dyn_shared_aliases_.empty();
   }
 
   this->PrintFuncPrefix(stream);

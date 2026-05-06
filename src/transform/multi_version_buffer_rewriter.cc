@@ -29,6 +29,9 @@ using namespace tir;
 
 namespace {
 
+static constexpr const char *kDynSharedMemoryMultiVersionMetadata =
+    "tl.dyn_shared_memory_multiversion_metadata";
+
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
                  arith::Analyzer *analyzer) {
   if (lhs.size() != rhs.size()) {
@@ -226,11 +229,51 @@ public:
       rewriter.buffer_data_to_buffer_.Set(buffer_var, buffer);
     }
     f.CopyOnWrite()->body = rewriter(f->body);
+    Map<String, Array<PrimExpr>> multi_version_metadata =
+        rewriter.ExportMultiVersionMetadata();
+    if (!multi_version_metadata.empty()) {
+      Map<String, Any> attrs;
+      if (f->attrs.defined()) {
+        for (const auto &kv : f->attrs->dict) {
+          attrs.Set(kv.first, kv.second);
+        }
+      }
+      attrs.Set(String(kDynSharedMemoryMultiVersionMetadata),
+                multi_version_metadata);
+      f = WithAttrs(std::move(f), attrs);
+    }
     return f;
   }
 
 private:
   explicit MultiVersionBufferRewriter() = default;
+
+  Map<String, Array<PrimExpr>> ExportMultiVersionMetadata() const {
+    Map<String, Array<PrimExpr>> metadata;
+    auto product = [](const Array<PrimExpr> &input) {
+      return foldl(
+          [](PrimExpr a, PrimExpr b, Span span) {
+            return mul(std::move(a), std::move(b), std::move(span));
+          },
+          make_const(DataType::Int(32), 1), input);
+    };
+
+    for (const auto &kv : buffer_remap_) {
+      Buffer old_buffer = kv.first;
+      Buffer new_buffer = kv.second;
+      if (old_buffer.scope() == "shared.barrier") {
+        continue;
+      }
+      String buffer_name = old_buffer->name.size() != 0
+                               ? old_buffer->name
+                               : String(old_buffer->data->name_hint);
+      PrimExpr stage_stride = new_buffer->strides.empty()
+                                  ? product(old_buffer->shape)
+                                  : new_buffer->strides[0];
+      metadata.Set(buffer_name, {stage_stride});
+    }
+    return metadata;
+  }
 
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {

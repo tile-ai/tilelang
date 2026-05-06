@@ -13,6 +13,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "target/source/codegen_c.h"
 
@@ -76,9 +77,30 @@ protected:
                        std::ostream &os) final; // NOLINT(*)
 
 private:
+  struct DynSharedAliasInfo {
+    PrimExpr byte_offset;
+    PrimExpr total_byte_size;
+    PrimExpr stage_stride_bytes;
+    DataType dtype;
+    std::string alias_name;
+  };
+
+  struct DynSharedAliasAccess {
+    const DynSharedAliasInfo *info{nullptr};
+    PrimExpr element_index;
+    std::optional<PrimExpr> stage_index;
+  };
+
   // Handle volatile loads
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
+  std::optional<DynSharedAliasAccess>
+  TryMatchDynSharedAliasAccess(const BufferNode *buffer, PrimExpr index) const;
+  std::string GetDynSharedAliasBufferExpr(const DynSharedAliasAccess &access);
+  std::string GetDynSharedAliasAddressExpr(const DynSharedAliasAccess &access,
+                                           PrimExpr element_index);
+  void BindDynSharedAliasVarRange(const Var &var, Range range);
+  void UnbindDynSharedAliasVarRange(const Var &var);
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
@@ -155,6 +177,11 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
+  bool emit_named_smem_pointers_{false};
+  std::unordered_map<std::string, DynSharedAliasInfo> dyn_shared_aliases_;
+  std::vector<std::string> dyn_shared_alias_order_;
+  std::vector<PrimExpr> dyn_shared_stage_expr_stack_;
+  std::unordered_map<const VarNode *, Range> dyn_shared_alias_var_ranges_;
   // Map from VarNode to packed buffer variable name for fp4 packed storage
   std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
