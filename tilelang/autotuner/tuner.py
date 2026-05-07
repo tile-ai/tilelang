@@ -589,21 +589,66 @@ class AutoTuner:
                 logger.debug("Error: %s", traceback.format_exc())
 
         start_event.wait()
+        queue_poll_timeout_s = 0.1
         while True:
-            item = worker_queue.get()
+            try:
+                item = worker_queue.get(timeout=queue_poll_timeout_s)
+            except queue.Empty:
+                continue
             if item is None:
                 break
             jit_kernel, config, idx = item
             try:
-                started = time.perf_counter()
-                latency, worker_ref_latency = benchmark_target(
-                    jit_kernel=jit_kernel,
-                    benchmark_state=worker_state,
-                )
-                elapsed = time.perf_counter() - started
-                if timeout > 0 and elapsed > timeout:
-                    raise TimeoutException("Benchmark timed out")
-                result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
+                if timeout > 0:
+                    call_result_queue: queue.SimpleQueue = queue.SimpleQueue()
+
+                    def _run_benchmark_target():
+                        try:
+                            latency, worker_ref_latency = benchmark_target(
+                                jit_kernel=jit_kernel,
+                                benchmark_state=worker_state,
+                            )
+                            call_result_queue.put(("ok", latency, worker_ref_latency, ""))
+                        except TimeoutException:
+                            call_result_queue.put(("timeout", None, None, ""))
+                        except Exception:
+                            call_result_queue.put(("error", None, None, traceback.format_exc()))
+
+                    benchmark_call_thread = threading.Thread(target=_run_benchmark_target, daemon=True)
+                    benchmark_call_thread.start()
+                    benchmark_call_thread.join(timeout=timeout)
+                    if benchmark_call_thread.is_alive():
+                        result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
+                        continue
+
+                    try:
+                        status, latency, worker_ref_latency, error_text = call_result_queue.get_nowait()
+                    except queue.Empty:
+                        result_queue.put(
+                            (
+                                idx,
+                                config,
+                                jit_kernel,
+                                None,
+                                None,
+                                "error",
+                                "Benchmark call thread exited without returning a result.",
+                            )
+                        )
+                        continue
+
+                    if status == "ok":
+                        result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
+                    elif status == "timeout":
+                        result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
+                    else:
+                        result_queue.put((idx, config, jit_kernel, None, None, "error", error_text))
+                else:
+                    latency, worker_ref_latency = benchmark_target(
+                        jit_kernel=jit_kernel,
+                        benchmark_state=worker_state,
+                    )
+                    result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
             except TimeoutException:
                 result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
             except Exception:
@@ -947,8 +992,8 @@ class AutoTuner:
 
         if timeout > 0:
             logger.warning(
-                "Benchmark timeout uses elapsed-time checks in benchmark workers "
-                "because signal-based timeouts are only available on the main thread."
+                "Benchmark timeout is enforced in benchmark workers by running each benchmark call "
+                "in a daemon sub-thread and waiting up to the configured timeout."
             )
         benchmark_target = partial(
             self._benchmark_target,
@@ -1008,7 +1053,7 @@ class AutoTuner:
                     timeout,
                     worker_state,
                 ),
-                daemon=False,
+                daemon=True,
             )
             worker_thread.start()
             benchmark_threads.append(worker_thread)
@@ -1060,7 +1105,9 @@ class AutoTuner:
             for worker_queue in benchmark_task_queues:
                 worker_queue.put(None)
             for worker_thread in benchmark_threads:
-                worker_thread.join()
+                worker_thread.join(timeout=1.0)
+                if worker_thread.is_alive():
+                    logger.warning("Benchmark worker thread did not exit cleanly before shutdown.")
             compile_progress.close()
             progress_bar.close()
             pool.shutdown()
