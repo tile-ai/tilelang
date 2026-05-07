@@ -1330,6 +1330,52 @@ private:
       ++access_group_idx;
     }
 
+    // --- Adjust wait positions for SIMT/cp.async producers ---
+    // SIMT producers (global→shared via cp.async) tie their completion to ALL
+    // forward barriers.  The consumer must therefore wait on a forward barrier
+    // BEFORE it reads any SIMT-produced shared buffer.  If the current
+    // wait_insert_pos is too late (i.e. the consumer reads the SIMT-produced
+    // buffer before the earliest TMA wait), we must pull ALL waits earlier.
+    if (has_simt_producer || has_cp_async_producer) {
+      int earliest_simt_read = static_cast<int>(consumer_compute_stmts.size());
+      for (size_t i = 0; i < flat_stmts.size(); ++i) {
+        if (kinds[i] != TileStmtKind::kSimtProducer &&
+            kinds[i] != TileStmtKind::kCpAsyncProducer) {
+          continue;
+        }
+        // Collect shared buffers written by this SIMT/cp.async producer.
+        std::unordered_set<const VarNode *> written_vars;
+        PostOrderVisit(flat_stmts[i], [&](const ObjectRef &obj) {
+          if (const auto *store = obj.as<BufferStoreNode>()) {
+            if (IsSharedBuffer(store->buffer)) {
+              written_vars.insert(store->buffer->data.get());
+            }
+          }
+        });
+        // Find first consumer read of any of these buffers.
+        for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
+          bool found = false;
+          PostOrderVisit(consumer_compute_stmts[ci], [&](const ObjectRef &obj) {
+            if (found) return;
+            if (const auto *load = obj.as<BufferLoadNode>()) {
+              if (written_vars.count(load->buffer->data.get())) {
+                found = true;
+              }
+            }
+          });
+          if (found) {
+            earliest_simt_read =
+                std::min(earliest_simt_read, static_cast<int>(ci));
+            break;
+          }
+        }
+      }
+      // Pull all wait positions earlier if needed.
+      for (int g = 0; g < num_producer_groups; ++g) {
+        wait_insert_pos[g] = std::min(wait_insert_pos[g], earliest_simt_read);
+      }
+    }
+
     // --- Determine if TMA barriers can be merged ---
     // When all pure-TMA producers wait at the same consumer position and
     // release at the same position, forward and back-pressure barriers can
