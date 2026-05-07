@@ -1,5 +1,6 @@
 from __future__ import annotations
 import tilelang.language as T
+from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
@@ -22,6 +23,30 @@ from tilelang.intrinsics.mma_layout import (
 )
 
 lift = convert
+
+
+@dataclass(frozen=True)
+class WGMMADescriptorParams:
+    """Pre-computed parameters for WGMMA descriptor initialization and atom offset computation.
+
+    Returned by ``compute_wgmma_*_desc_params()`` and consumed by
+    ``init_wgmma_*_desc()`` and ``wgmma_*_atom()`` methods.
+    """
+
+    swizzle_mode: int
+    """SwizzleMode enum value (passed directly to ``T.initialize_wgmma_descriptor``)."""
+    leading_byte_offset: int
+    """LBO >> 4, ready to pass to ``T.initialize_wgmma_descriptor``."""
+    stride_byte_offset: int
+    """SBO >> 4, ready to pass to ``T.initialize_wgmma_descriptor``."""
+    swizzle_atom_elems: int
+    """Number of elements per swizzle atom along the non-K dimension."""
+    k_atom_size: int
+    """``max(swizzle_atom_elems // micro_size_k, 1)``."""
+    elems_in_bytes: int
+    """Byte width of a single element: ``DataType(dtype).bits // 8``."""
+    is_k_major: bool
+    """Whether the matrix is stored in K-major order (affects offset formula branching)."""
 
 
 class SwizzleMode(IntEnum):
@@ -181,276 +206,514 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         if is_fragment(A_region):
             return self.wgmma_rs(A_region, B_region, C_region, clear_accum, wg_wait)
 
-        local_size_out = self.local_size_out
-        a_dtype_abbrv = self.a_dtype_abbrv
-        b_dtype_abbrv = self.b_dtype_abbrv
-        accum_dtype = self.accum_dtype
-        accum_dtype_abbrv = self.accum_dtype_abbrv
-        m_dim = self.block_row_warps * self.warp_row_tiles
-        warp_cols = self.warp_cols
+        k_dim = self.chunk
         micro_size_k = self.micro_size_k
-        k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
-        wgmma_prefix = self.wgmma_prefix
-        scale_in_a = 1
-        scale_in_b = 1
-
         assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
 
-        a_is_k_major = not self.a_transposed
+        assert is_full_region(C_region), "Fragment output C must be a full region"
+        C_buf = C_region.buffer
+
+        num_inst_m = self.wgmma_num_inst_m
+        num_inst_n = self.wgmma_num_inst_n
+        num_k_atoms = self.wgmma_num_k_atoms
+        a_params = self.compute_wgmma_a_desc_params(A_region)
+        b_params = self.compute_wgmma_b_desc_params(B_region)
+
+        @T.macro
+        def _warp_mma(C_buf):
+            desc_a = T.alloc_wgmma_desc()
+            desc_b = T.alloc_wgmma_desc()
+            self.init_wgmma_a_desc(desc_a, A_region, a_params)
+            self.init_wgmma_b_desc(desc_b, B_region, b_params)
+            self.wgmma_fence_c(C_buf)
+            self.wgmma_arrive()
+
+            for j in T.unroll(num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(num_k_atoms):
+                        self.wgmma_ss_atom(desc_a, desc_b, C_buf, i, j, ki, a_params, b_params, clear_accum)
+
+            self.wgmma_commit()
+            if wg_wait >= 0:
+                self.wgmma_wait(wg_wait)
+            self.wgmma_fence_c(C_buf)
+
+        return _warp_mma(C_buf)
+
+    def wgmma_rs(
+        self, A_region: BufferRegion, B_region: BufferRegion, C_region: BufferRegion, clear_accum: PrimExpr = False, wg_wait: int = 0
+    ):
+        k_dim = self.chunk
+        micro_size_k = self.micro_size_k
+        assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
+
+        assert is_full_region(A_region), "Fragment input A must be a full region"
+        assert is_full_region(C_region), "Fragment output C must be a full region"
+        A_buf = A_region.buffer
+        C_buf = C_region.buffer
+
+        num_inst_m = self.wgmma_num_inst_m
+        num_inst_n = self.wgmma_num_inst_n
+        num_k_atoms = self.wgmma_num_k_atoms
+        b_params = self.compute_wgmma_b_desc_params(B_region)
+
+        @T.macro
+        def _warp_mma(A_buf, C_buf):
+            desc_b = T.alloc_wgmma_desc()
+            self.init_wgmma_b_desc(desc_b, B_region, b_params)
+            self.wgmma_fence_a(A_buf)
+            self.wgmma_fence_c(C_buf)
+            self.wgmma_arrive()
+
+            for j in T.unroll(0, num_inst_n):
+                for i in T.unroll(num_inst_m):
+                    for ki in T.unroll(0, num_k_atoms):
+                        self.wgmma_rs_atom(A_buf, desc_b, C_buf, i, j, ki, b_params, clear_accum)
+
+            self.wgmma_commit()
+            if wg_wait >= 0:
+                self.wgmma_wait(wg_wait)
+            self.wgmma_fence_c(C_buf)
+            self.wgmma_fence_a(A_buf)
+
+        return _warp_mma(A_buf, C_buf)
+
+    # ---- Atom-level interface ----
+
+    @property
+    def wgmma_num_inst_m(self) -> int:
+        """Number of WGMMA instruction atoms along the M dimension."""
+        return 4 * self.warp_row_tiles // self.wgmma_inst_m
+
+    @property
+    def wgmma_num_inst_n(self) -> int:
+        """Number of WGMMA instruction atoms along the N dimension."""
+        return self.warp_col_tiles // self.wgmma_inst_n
+
+    @property
+    def wgmma_num_k_atoms(self) -> int:
+        """Number of K-dimension micro-steps (``chunk // micro_size_k``)."""
+        return self.chunk // self.micro_size_k
+
+    @property
+    def wgmma_a_regs(self) -> int:
+        """Number of 32-bit registers occupied by the A fragment (RS variant)."""
+        a_bits = DataType(self.a_dtype).bits
+        k_dim = self.chunk
+        micro_size_k = self.micro_size_k
+        return ((self.warp_rows * self.local_size_a * (k_dim // micro_size_k)) * a_bits + 31) // 32
+
+    @property
+    def wgmma_accum_regs(self) -> int:
+        """Number of 32-bit registers occupied by the accumulator fragment."""
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        accum_bits = DataType(self.accum_dtype).bits
+        return ((m_dim // 64) * self.warp_cols * self.local_size_out * accum_bits + 31) // 32
+
+    # -- Descriptor parameter computation (pure Python, no TIR) --
+
+    def compute_wgmma_b_desc_params(self, B_region: BufferRegion) -> WGMMADescriptorParams:
+        """Compute B descriptor parameters from the B shared buffer region.
+
+        This is a pure-Python helper -- no TIR code is emitted.
+        The returned ``WGMMADescriptorParams`` is passed to
+        ``init_wgmma_b_desc()`` and ``wgmma_*_atom()`` methods.
+        """
+        n_dim = self.block_col_warps * self.warp_col_tiles
+        k_dim = self.chunk
+        micro_size_k = self.micro_size_k
+        elems_in_bytes = DataType(self.a_dtype).bits // 8
         b_is_k_major = self.b_transposed
 
-        a_swizzle_mode = self._determinate_swizzle_mode(A_region, self.a_shared_layout)
         b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
-
-        elems_in_bits = DataType(self.a_dtype).bits
-        elems_in_bytes = elems_in_bits // 8
-
-        a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        accum_bits = DataType(accum_dtype).bits
-        accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
 
-        # by default, we utilize non-swizzle layout offset
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
+        if not b_swizzle_mode.is_none():
+            if b_is_k_major:
+                b_leading_byte_offset = 16
+                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
+            else:
+                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
+                if b_n_axis_atoms <= 1:
+                    b_leading_byte_offset = 0
+                else:
+                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
+                if b_n_axis_atoms <= 1:
+                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
+                else:
+                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
+
+        return WGMMADescriptorParams(
+            swizzle_mode=int(b_swizzle_mode),
+            leading_byte_offset=int(b_leading_byte_offset >> 4),
+            stride_byte_offset=int(b_stride_byte_offset >> 4),
+            swizzle_atom_elems=b_swizzle_atom_elems,
+            k_atom_size=max(b_swizzle_atom_elems // micro_size_k, 1),
+            elems_in_bytes=elems_in_bytes,
+            is_k_major=b_is_k_major,
+        )
+
+    def compute_wgmma_a_desc_params(self, A_region: BufferRegion) -> WGMMADescriptorParams:
+        """Compute A descriptor parameters from the A shared buffer region (SS variant).
+
+        This is a pure-Python helper -- no TIR code is emitted.
+        The returned ``WGMMADescriptorParams`` is passed to
+        ``init_wgmma_a_desc()`` and ``wgmma_ss_atom()`` methods.
+        """
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        k_dim = self.chunk
+        micro_size_k = self.micro_size_k
+        elems_in_bytes = DataType(self.a_dtype).bits // 8
+        a_is_k_major = not self.a_transposed
+
+        a_swizzle_mode = self._determinate_swizzle_mode(A_region, self.a_shared_layout)
+        a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
         a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
-
         if not a_swizzle_mode.is_none():
-            # swizzle mode doesn't require LBO/SBO to be 1
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
             if a_is_k_major:
                 a_leading_byte_offset = 16
                 a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
             else:
-                # MN Major
-                # LBO represents the distance between two atoms along the M dimension
-                # SBO represents the distance between two atoms along the K dimension
                 a_m_axis_atoms = m_dim // a_swizzle_atom_elems
                 if a_m_axis_atoms <= 1:
                     a_leading_byte_offset = 0
                 else:
                     a_leading_byte_offset = 8 * a_swizzle_mode.swizzle_atom_size() * (a_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
-
                 if a_m_axis_atoms <= 1:
                     a_stride_byte_offset = 8 * elems_in_bytes * m_dim
                 else:
                     a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
 
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
-        if not b_swizzle_mode.is_none():
-            # swizzle mode doesn't require LBO/SBO to be 1
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                # MN Major, K * N
-                # LBO represents the distance between two atoms along the N dimension
-                # SBO represents the distance between two atoms along the K dimension
-                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
-                if b_n_axis_atoms <= 1:
-                    b_leading_byte_offset = 0
-                else:
-                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
-                if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
-                else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
+        return WGMMADescriptorParams(
+            swizzle_mode=int(a_swizzle_mode),
+            leading_byte_offset=int(a_leading_byte_offset >> 4),
+            stride_byte_offset=int(a_stride_byte_offset >> 4),
+            swizzle_atom_elems=a_swizzle_atom_elems,
+            k_atom_size=max(a_swizzle_atom_elems // micro_size_k, 1),
+            elems_in_bytes=elems_in_bytes,
+            is_k_major=a_is_k_major,
+        )
 
-        # for example, if [n, k] where k is 128, we should split it into 2 atoms
-        # where max specially handles the case when n_dim is 8.
-        ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
-        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
-        wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
-        num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
-        num_inst_n = self.warp_col_tiles // wgmma_inst_n
+    # -- Descriptor initialization (emit TIR) --
 
-        thread_binding = self.get_thread_binding()
+    def init_wgmma_b_desc(
+        self,
+        desc_b: Buffer,
+        B_region: BufferRegion,
+        b_params: WGMMADescriptorParams,
+    ):
+        """Emit TIR to initialize a pre-allocated WGMMA B descriptor.
 
-        A_ptr = retrive_ptr_from_buffer_region(A_region)
+        Parameters
+        ----------
+        desc_b : Buffer
+            A descriptor buffer allocated via ``T.alloc_wgmma_desc()``.
+        B_region : BufferRegion
+            The B operand shared memory region.
+        b_params : WGMMADescriptorParams
+            Pre-computed parameters from ``compute_wgmma_b_desc_params()``.
+        """
         B_ptr = retrive_ptr_from_buffer_region(B_region)
-        assert is_full_region(C_region), "Fragment output C must be a full region"
-
-        C_buf = C_region.buffer
+        swizzle_mode = b_params.swizzle_mode
+        lbo = b_params.leading_byte_offset
+        sbo = b_params.stride_byte_offset
 
         @T.macro
-        def _warp_mma(A_ptr, B_ptr, C_buf):
-            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+        def _init_b_desc(desc_b, B_ptr):
+            T.initialize_wgmma_descriptor(desc_b, B_ptr, swizzle_mode, lbo, sbo)
 
-            desc_a = T.alloc_wgmma_desc()
-            desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_a, A_ptr, a_swizzle_mode, int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
-            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+        return _init_b_desc(desc_b, B_ptr)
+
+    def init_wgmma_a_desc(
+        self,
+        desc_a: Buffer,
+        A_region: BufferRegion,
+        a_params: WGMMADescriptorParams,
+    ):
+        """Emit TIR to initialize a pre-allocated WGMMA A descriptor (SS variant).
+
+        Parameters
+        ----------
+        desc_a : Buffer
+            A descriptor buffer allocated via ``T.alloc_wgmma_desc()``.
+        A_region : BufferRegion
+            The A operand shared memory region.
+        a_params : WGMMADescriptorParams
+            Pre-computed parameters from ``compute_wgmma_a_desc_params()``.
+        """
+        A_ptr = retrive_ptr_from_buffer_region(A_region)
+        swizzle_mode = a_params.swizzle_mode
+        lbo = a_params.leading_byte_offset
+        sbo = a_params.stride_byte_offset
+
+        @T.macro
+        def _init_a_desc(desc_a, A_ptr):
+            T.initialize_wgmma_descriptor(desc_a, A_ptr, swizzle_mode, lbo, sbo)
+
+        return _init_a_desc(desc_a, A_ptr)
+
+    # -- Fence / Arrive / Commit / Wait primitives --
+
+    def wgmma_fence_a(self, A_buf: Buffer):
+        """Emit ``warpgroup_fence_operand`` for the A fragment buffer."""
+        a_regs = self.wgmma_a_regs
+
+        @T.macro
+        def _fence_a(A_buf):
+            T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
+
+        return _fence_a(A_buf)
+
+    def wgmma_fence_c(self, C_buf: Buffer):
+        """Emit ``warpgroup_fence_operand`` for the accumulator buffer."""
+        accum_regs = self.wgmma_accum_regs
+
+        @T.macro
+        def _fence_c(C_buf):
             T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
+
+        return _fence_c(C_buf)
+
+    def wgmma_arrive(self):
+        """Emit ``warpgroup_arrive()``."""
+
+        @T.macro
+        def _arrive():
             T.warpgroup_arrive()
 
-            for j in T.unroll(num_inst_n):
-                for i in T.unroll(num_inst_m):
-                    for ki in T.unroll(k_dim // micro_size_k):
-                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
-                        warp_i = (warp_m // 4) * num_inst_m + i
-                        warp_j = warp_n * num_inst_n + j
-                        A_offset = (
-                            (ki % ak_atom_size) * micro_size_k
-                            + warp_i * 64 * a_swizzle_atom_elems
-                            + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
-                            if a_is_k_major
-                            else warp_i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
-                        )
-                        B_offset = (
-                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
-                            + (ki % bk_atom_size) * micro_size_k
-                            + warp_j * wgmma_inst_n * b_swizzle_atom_elems
-                            if b_is_k_major
-                            else (
-                                ki * b_swizzle_atom_elems * micro_size_k
-                                + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
-                            )
-                        )
-                        C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n  # 4 warps as an unit
-                        T.ptx_wgmma_ss(
-                            accum_dtype,
-                            wgmma_prefix,
-                            a_is_k_major,
-                            b_is_k_major,
-                            a_dtype_abbrv,
-                            b_dtype_abbrv,
-                            accum_dtype_abbrv,
-                            desc_a.data,
-                            (A_offset * elems_in_bytes) >> 4,
-                            desc_b.data,
-                            (B_offset * elems_in_bytes) >> 4,
-                            C_buf.data,
-                            C_offset,
-                            scale_out,
-                            scale_in_a,
-                            scale_in_b,
-                        )
+        return _arrive()
 
+    def wgmma_commit(self):
+        """Emit ``warpgroup_commit_batch()``."""
+
+        @T.macro
+        def _commit():
             T.warpgroup_commit_batch()
-            if wg_wait >= 0:
-                T.warpgroup_wait(wg_wait)
-            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
 
-        return _warp_mma(A_ptr, B_ptr, C_buf)
+        return _commit()
 
-    def wgmma_rs(
-        self, A_region: BufferRegion, B_region: BufferRegion, C_region: BufferRegion, clear_accum: PrimExpr = False, wg_wait: int = 0
+    def wgmma_wait(self, n: int = 0):
+        """Emit ``warpgroup_wait(n)``."""
+
+        @T.macro
+        def _wait():
+            T.warpgroup_wait(n)
+
+        return _wait()
+
+    # -- Atom emission --
+
+    def wgmma_rs_atom(
+        self,
+        A_buf: Buffer,
+        desc_b: Buffer,
+        C_buf: Buffer,
+        inst_m_idx: int,
+        inst_n_idx: int,
+        ki: int,
+        b_params: WGMMADescriptorParams,
+        clear_accum: PrimExpr = False,
     ):
+        """Emit a single WGMMA RS instruction for atom ``(inst_m_idx, inst_n_idx, ki)``.
+
+        Must be called between a ``wgmma_fence_a``/``wgmma_fence_c``/``wgmma_arrive``
+        sequence and a ``wgmma_commit``/``wgmma_wait`` sequence.
+
+        Calling this for every ``(j, i, ki)`` in
+        ``T.grid(wgmma_num_inst_n, wgmma_num_inst_m, wgmma_num_k_atoms)``
+        produces identical TIR to ``wgmma_rs()``.
+
+        Parameters
+        ----------
+        A_buf : Buffer
+            Fragment buffer for operand A (in registers).
+        desc_b : Buffer
+            Initialized B descriptor (from ``init_wgmma_b_desc``).
+        C_buf : Buffer
+            Accumulator fragment buffer.
+        inst_m_idx : int
+            M-dimension atom index (0 .. wgmma_num_inst_m - 1).
+        inst_n_idx : int
+            N-dimension atom index (0 .. wgmma_num_inst_n - 1).
+        ki : int
+            K-dimension atom index (0 .. wgmma_num_k_atoms - 1).
+        b_params : WGMMADescriptorParams
+            Pre-computed B descriptor parameters.
+        clear_accum : PrimExpr
+            Whether to zero the accumulator on the first K atom.
+        """
         local_size_a = self.local_size_a
         local_size_out = self.local_size_out
+        warp_rows = self.warp_rows
+        warp_cols = self.warp_cols
+        micro_size_k = self.micro_size_k
+        n_dim = self.block_col_warps * self.warp_col_tiles
+        k_dim = self.chunk
+        wgmma_inst_n = self.wgmma_inst_n
+        num_inst_n = self.wgmma_num_inst_n
         a_dtype_abbrv = self.a_dtype_abbrv
         b_dtype_abbrv = self.b_dtype_abbrv
         accum_dtype = self.accum_dtype
         accum_dtype_abbrv = self.accum_dtype_abbrv
-        m_dim = self.block_row_warps * self.warp_row_tiles
-        warp_rows, warp_cols = self.warp_rows, self.warp_cols
-        micro_size_k = self.micro_size_k
-        k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
         wgmma_prefix = self.wgmma_prefix
-        scale_in_a = 1
-        scale_in_b = 1
-
-        assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
-
-        elems_in_bytes = DataType(self.a_dtype).bits // 8
-        a_bits = DataType(self.a_dtype).bits
-        accum_bits = DataType(accum_dtype).bits
-        a_regs = ((warp_rows * local_size_a * (k_dim // micro_size_k)) * a_bits + 31) // 32
-        accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
-        b_is_k_major = self.b_transposed
-
-        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
-        if not b_swizzle_mode.is_none():
-            # swizzle mode doesn't require LBO/SBO to be 1
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                # MN Major
-                # LBO represents the distance between two atoms along the N dimension
-                # SBO represents the distance between two atoms along the K dimension
-                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
-                if b_n_axis_atoms <= 1:
-                    b_leading_byte_offset = 0
-                else:
-                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
-                if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
-                else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
-
-        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
-        wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
-        num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
-        num_inst_n = self.warp_col_tiles // wgmma_inst_n
+        b_transposed = self.b_transposed
+        elems_in_bytes = b_params.elems_in_bytes
+        bk_atom_size = b_params.k_atom_size
+        b_swizzle_atom_elems = b_params.swizzle_atom_elems
 
         thread_binding = self.get_thread_binding()
 
-        assert is_full_region(A_region), "Fragment input A must be a full region"
-        assert is_full_region(C_region), "Fragment output C must be a full region"
-        A_buf = A_region.buffer
-        B_ptr = retrive_ptr_from_buffer_region(B_region)
-        C_buf = C_region.buffer
+        A_offset = ki * warp_rows * local_size_a + inst_m_idx * local_size_a
+        C_offset = inst_m_idx * warp_cols * local_size_out + inst_n_idx * warp_cols * local_size_out // num_inst_n
 
         @T.macro
-        def _warp_mma(A_buf, B_ptr, C_buf):
+        def _rs_atom(A_buf, desc_b, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+            warp_j = warp_n * num_inst_n + inst_n_idx
+            scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
 
-            desc_b = T.alloc_wgmma_desc()
-            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
-            T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
-            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
-            T.warpgroup_arrive()
+            B_offset = (
+                (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                + warp_j * wgmma_inst_n * b_swizzle_atom_elems
+                + (ki % bk_atom_size) * micro_size_k
+                if b_params.is_k_major
+                else (
+                    ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                )
+            )
 
-            for j in T.unroll(0, num_inst_n):
-                for i in T.unroll(num_inst_m):
-                    for ki in T.unroll(0, (k_dim // micro_size_k)):
-                        warp_j = warp_n * num_inst_n + j
-                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+            T.ptx_wgmma_rs(
+                accum_dtype,
+                wgmma_prefix,
+                b_transposed,
+                a_dtype_abbrv,
+                b_dtype_abbrv,
+                accum_dtype_abbrv,
+                A_buf.data,
+                A_offset,
+                desc_b.data,
+                (B_offset * elems_in_bytes) >> 4,
+                C_buf.data,
+                C_offset,
+                scale_out,
+                1,
+                1,
+            )
 
-                        A_offset = ki * warp_rows * local_size_a + i * local_size_a
-                        B_offset = (
-                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
-                            + warp_j * wgmma_inst_n * b_swizzle_atom_elems
-                            + (ki % bk_atom_size) * micro_size_k
-                            if b_is_k_major
-                            else (
-                                ki * b_swizzle_atom_elems * micro_size_k
-                                + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
-                            )
-                        )
-                        C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n  # 4 warps as an unit
-                        T.ptx_wgmma_rs(
-                            accum_dtype,
-                            wgmma_prefix,
-                            self.b_transposed,
-                            a_dtype_abbrv,
-                            b_dtype_abbrv,
-                            accum_dtype_abbrv,
-                            A_buf.data,
-                            A_offset,
-                            desc_b.data,
-                            (B_offset * elems_in_bytes) >> 4,
-                            C_buf.data,
-                            C_offset,
-                            scale_out,
-                            scale_in_a,
-                            scale_in_b,
-                        )
+        return _rs_atom(A_buf, desc_b, C_buf)
 
-            T.warpgroup_commit_batch()
-            if wg_wait >= 0:
-                T.warpgroup_wait(wg_wait)
-            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
-            T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
+    def wgmma_ss_atom(
+        self,
+        desc_a: Buffer,
+        desc_b: Buffer,
+        C_buf: Buffer,
+        inst_m_idx: int,
+        inst_n_idx: int,
+        ki: int,
+        a_params: WGMMADescriptorParams,
+        b_params: WGMMADescriptorParams,
+        clear_accum: PrimExpr = False,
+    ):
+        """Emit a single WGMMA SS instruction for atom ``(inst_m_idx, inst_n_idx, ki)``.
 
-        return _warp_mma(A_buf, B_ptr, C_buf)
+        Must be called between fence/arrive and commit/wait sequences.
+
+        Parameters
+        ----------
+        desc_a : Buffer
+            Initialized A descriptor (from ``init_wgmma_a_desc``).
+        desc_b : Buffer
+            Initialized B descriptor (from ``init_wgmma_b_desc``).
+        C_buf : Buffer
+            Accumulator fragment buffer.
+        inst_m_idx : int
+            M-dimension atom index (0 .. wgmma_num_inst_m - 1).
+        inst_n_idx : int
+            N-dimension atom index (0 .. wgmma_num_inst_n - 1).
+        ki : int
+            K-dimension atom index (0 .. wgmma_num_k_atoms - 1).
+        a_params : WGMMADescriptorParams
+            Pre-computed A descriptor parameters.
+        b_params : WGMMADescriptorParams
+            Pre-computed B descriptor parameters.
+        clear_accum : PrimExpr
+            Whether to zero the accumulator on the first K atom.
+        """
+        local_size_out = self.local_size_out
+        warp_cols = self.warp_cols
+        micro_size_k = self.micro_size_k
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        n_dim = self.block_col_warps * self.warp_col_tiles
+        k_dim = self.chunk
+        wgmma_inst_n = self.wgmma_inst_n
+        num_inst_m = self.wgmma_num_inst_m
+        num_inst_n = self.wgmma_num_inst_n
+        a_dtype_abbrv = self.a_dtype_abbrv
+        b_dtype_abbrv = self.b_dtype_abbrv
+        accum_dtype = self.accum_dtype
+        accum_dtype_abbrv = self.accum_dtype_abbrv
+        wgmma_prefix = self.wgmma_prefix
+        a_is_k_major = not self.a_transposed
+        b_is_k_major = self.b_transposed
+        a_elems_in_bytes = a_params.elems_in_bytes
+        b_elems_in_bytes = b_params.elems_in_bytes
+        ak_atom_size = a_params.k_atom_size
+        bk_atom_size = b_params.k_atom_size
+        a_swizzle_atom_elems = a_params.swizzle_atom_elems
+        b_swizzle_atom_elems = b_params.swizzle_atom_elems
+
+        thread_binding = self.get_thread_binding()
+
+        C_offset = inst_m_idx * warp_cols * local_size_out + inst_n_idx * warp_cols * local_size_out // num_inst_n
+
+        @T.macro
+        def _ss_atom(desc_a, desc_b, C_buf):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+            scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+            warp_i = (warp_m // 4) * num_inst_m + inst_m_idx
+            warp_j = warp_n * num_inst_n + inst_n_idx
+
+            A_offset = (
+                (ki % ak_atom_size) * micro_size_k
+                + warp_i * 64 * a_swizzle_atom_elems
+                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                if a_is_k_major
+                else warp_i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+            )
+            B_offset = (
+                (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                + (ki % bk_atom_size) * micro_size_k
+                + warp_j * wgmma_inst_n * b_swizzle_atom_elems
+                if b_is_k_major
+                else (
+                    ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                )
+            )
+
+            T.ptx_wgmma_ss(
+                accum_dtype,
+                wgmma_prefix,
+                a_is_k_major,
+                b_is_k_major,
+                a_dtype_abbrv,
+                b_dtype_abbrv,
+                accum_dtype_abbrv,
+                desc_a.data,
+                (A_offset * a_elems_in_bytes) >> 4,
+                desc_b.data,
+                (B_offset * b_elems_in_bytes) >> 4,
+                C_buf.data,
+                C_offset,
+                scale_out,
+                1,
+                1,
+            )
+
+        return _ss_atom(desc_a, desc_b, C_buf)
 
     def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         """
