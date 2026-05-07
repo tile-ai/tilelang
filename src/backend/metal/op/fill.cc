@@ -5,19 +5,50 @@
 
 #include "op/fill.h"
 
+#include "backend/metal/op/utils.h"
 #include "op/utils.h"
 #include "target/utils.h"
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
 
+#include <tvm/tir/builtin.h>
+
 namespace tvm {
 namespace tl {
+
+using namespace tir;
 
 namespace metal {
 
 struct Fill {
   static Stmt Lower(const FillNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer) {
+    if (IsSIMDGroupBuffer(op.dst)) {
+      int region_elements = 1;
+      for (auto r : op.region) {
+        auto imm = r->extent.as<IntImmNode>();
+        ICHECK(imm) << "simdgroup fill region must have constant extents";
+        region_elements *= imm->value;
+      }
+      ICHECK(region_elements % 64 == 0)
+          << "simdgroup buffer size must be multiple of 64 (8x8), got "
+          << region_elements;
+
+      int num_matrices = region_elements / 64;
+      PrimExpr fill_value = Cast(op.dst->dtype, op.value);
+      Array<Stmt> stmts;
+      for (int i = 0; i < num_matrices; i++) {
+        stmts.push_back(Evaluate(Call(
+            DataType::Handle(), builtin::make_filled_simdgroup_matrix(),
+            {op.dst->data, IntImm(DataType::Int(32), i), fill_value,
+             IntImm(DataType::Int(32), 8), IntImm(DataType::Int(32), 8)})));
+      }
+      if (stmts.size() == 1) {
+        return stmts[0];
+      }
+      return SeqStmt(stmts);
+    }
+
     if (IsFragmentBuffer(op.dst)) {
       auto par_op = ParallelOp(op.MakeSIMTLoop(analyzer));
       par_op->InferLayout({T.target,
