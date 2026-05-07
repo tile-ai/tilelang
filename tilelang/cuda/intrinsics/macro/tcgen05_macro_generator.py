@@ -314,7 +314,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
         a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
-        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
 
         elems_in_bytes = (DataType(self.a_dtype).bits + 7) // 8
 
@@ -327,10 +326,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             )
         atom_m, atom_n, _, _, enable_2cta = self.tcgen05_meta_unpacked
         atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
-        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
 
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
         # Block-scaled A LBO/SBO differ from regular SS (uses atom_m_per_cta instead of m_dim)
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * atom_m_per_cta * elems_in_bytes)
@@ -358,7 +355,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params = self.compute_tcgen05_b_desc_params(B_buf)
 
         base_instr_desc = self.get_tcgen5_blockscaled_instr_desc(
-            atom_m, atom_n, a_is_k_major, b_is_k_major, 1, 1, 0, 0,
+            atom_m,
+            atom_n,
+            a_is_k_major,
+            b_is_k_major,
+            1,
+            1,
+            0,
+            0,
         )
 
         num_inst_m = m_dim // atom_m_per_cta
@@ -393,8 +397,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, num_k_atoms):
                         self.tcgen05_blockscaled_atom(
-                            desc_a, desc_b, C_local_buf, sfa_data, sfb_data,
-                            i, j, ki, a_params, b_params, runtime_instr_desc, clear_accum,
+                            desc_a,
+                            desc_b,
+                            C_local_buf,
+                            sfa_data,
+                            sfb_data,
+                            i,
+                            j,
+                            ki,
+                            a_params,
+                            b_params,
+                            runtime_instr_desc,
+                            clear_accum,
                         )
             self.tcgen05_atom_arrive(mbar)
 
@@ -618,14 +632,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-        b_swizzle_atom_elems = (
-            n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        )
+        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
         b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
-        b_stride_byte_offset = (
-            (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
-        )
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
         if not b_swizzle_mode.is_none():
             if b_is_k_major:
                 b_leading_byte_offset = 16
@@ -661,8 +671,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         A_buf : Buffer or BufferRegion
             The A operand in shared memory.
         """
-        atom_m, _, _, _, enable_2cta = self.tcgen05_meta_unpacked
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
         m_dim = self.block_row_warps * self.warp_row_tiles
         k_dim = self.chunk
         micro_size_k = self.micro_size_k
@@ -847,9 +855,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
-            B_elem_offset = (
-                ki * b_swizzle_atom_elems * micro_size_k
-                + inst_n_idx * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+            B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (
+                k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1
             )
 
         A_byte_offset = A_elem_offset * a_elems_in_bytes
@@ -945,9 +952,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
-            B_elem_offset = (
-                ki * b_swizzle_atom_elems * micro_size_k
-                + inst_n_idx * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+            B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (
+                k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1
             )
         B_byte_offset = B_elem_offset * b_elems_in_bytes
 
@@ -1041,9 +1047,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
-            B_elem_offset = (
-                ki * b_swizzle_atom_elems * micro_size_k
-                + inst_n_idx * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+            B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (
+                k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1
             )
 
         A_byte_offset = A_elem_offset * a_elems_in_bytes
