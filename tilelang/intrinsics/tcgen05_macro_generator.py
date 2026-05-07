@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import dataclass
 from enum import IntEnum
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
@@ -17,6 +18,30 @@ from tilelang.layout import (
 from tvm.runtime import convert
 
 lift = convert
+
+
+@dataclass(frozen=True)
+class TCGEN05DescriptorParams:
+    """Pre-computed parameters for TCGEN05 descriptor initialization and atom offset computation.
+
+    Returned by ``compute_tcgen05_*_desc_params()`` and consumed by
+    ``init_tcgen05_*_desc()`` and ``tcgen05_*_atom()`` methods.
+    """
+
+    swizzle_mode: int
+    """SwizzleMode enum value (passed directly to ``T.initialize_tcgen05_descriptor``)."""
+    leading_byte_offset: int
+    """LBO >> 4, ready to pass to ``T.initialize_tcgen05_descriptor``."""
+    stride_byte_offset: int
+    """SBO >> 4, ready to pass to ``T.initialize_tcgen05_descriptor``."""
+    swizzle_atom_elems: int
+    """Number of elements per swizzle atom along the non-K dimension."""
+    k_atom_size: int
+    """``max(swizzle_atom_elems // micro_size_k, 1)``."""
+    elems_in_bytes: int
+    """Byte width of a single element: ``(DataType(dtype).bits + 7) // 8``."""
+    is_k_major: bool
+    """Whether the matrix is stored in K-major order (affects offset formula branching)."""
 
 
 class SwizzleMode(IntEnum):
@@ -185,207 +210,29 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         clear_accum : PrimExpr
             Whether to zero the accumulator before the first MMA.
         """
-        accum_dtype = self.accum_dtype
-        m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
-        k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
-        meta = self.meta
-        if len(meta) != 5:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
-                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
-        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
-        scale_in_a = 1
-        scale_in_b = 1
-
+        k_dim = self.chunk
         assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
 
-        a_is_k_major = not self.a_transposed
-        b_is_k_major = self.b_transposed
-        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
-        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-
-        elems_in_bits = DataType(self.a_dtype).bits
-        elems_in_bytes = (elems_in_bits + 7) // 8
-        a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        accum_dtype_in_bits = DataType(accum_dtype).bits
-
-        # by default, we utilize non-swizzle layout offset
-        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
-        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
-
-        if not a_swizzle_mode.is_none():
-            # swizzle mode doesn't require LBO/SBO to be 1
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
-            if a_is_k_major:
-                a_leading_byte_offset = 16
-                a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
-            else:
-                # MN Major
-                # LBO represents the distance between two atoms along the M dimension
-                # SBO represents the distance between two atoms along the K dimension
-                a_m_axis_atoms = m_dim // a_swizzle_atom_elems
-                if a_m_axis_atoms <= 1:
-                    a_leading_byte_offset = 0
-                else:
-                    a_leading_byte_offset = k_dim * a_swizzle_mode.swizzle_byte_size()
-
-                if a_m_axis_atoms <= 1:
-                    a_stride_byte_offset = 8 * elems_in_bytes * m_dim
-                else:
-                    a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
-
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
-        if not b_swizzle_mode.is_none():
-            # swizzle mode doesn't require LBO/SBO to be 1
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                # MN Major, K * N
-                # LBO represents the distance between two atoms along the N dimension
-                # SBO represents the distance between two atoms along the K dimension
-                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
-                if b_n_axis_atoms <= 1:
-                    b_leading_byte_offset = 0
-                else:
-                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
-                if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim_per_cta
-                else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
-
-        # for example, if [n, k] where k is 128, we should split it into 2 atoms
-        # where max specially handles the case when n_dim_per_cta is 8.
-        ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
-        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
-
-        instr_desc = self.get_tcgen5_instr_desc(
-            atom_m,
-            atom_n,
-            atom_k,
-            a_is_k_major,
-            b_is_k_major,
-            scale_in_a,
-            scale_in_b,
-        )
-        # Allocate an instruction descriptor wrapper and initialize it
-        a_dtype_abbrv = self.a_dtype_abbrv
-        mask_zero = T.cast(0, T.int32)
-        mask0 = mask1 = mask2 = mask3 = mask_zero
-
-        # TCGEN05 only has one warp group
-        num_inst_m = self.block_row_warps * self.warp_row_tiles // atom_m_per_cta
-        num_inst_n = self.block_col_warps * self.warp_col_tiles // atom_n
-
-        # Helper to allow BufferRegion/BufferLoad as inputs
-        def access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
-            if isinstance(buffer_or_load_or_region, Buffer):
-                return buffer_or_load_or_region.access_ptr(access_type)
-            elif isinstance(buffer_or_load_or_region, BufferLoad):
-                buffer_load = buffer_or_load_or_region
-                offset, stride = 0, 1
-                buffer = buffer_load.buffer
-                for i, shape in enumerate(reversed(buffer.shape)):
-                    indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, tvm.tir.Ramp):
-                        offset += indice.base * stride
-                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
-                        offset += indice * stride
-                    else:
-                        raise ValueError(f"Unsupported index type: {type(indice)}")
-                    stride *= shape
-                return buffer.access_ptr(access_type, offset=offset)
-            elif isinstance(buffer_or_load_or_region, BufferRegion):
-                buffer_region = buffer_or_load_or_region
-                buffer = buffer_region.buffer
-                offset, stride = 0, 1
-                for i, shape in enumerate(reversed(buffer.shape)):
-                    offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
-                    stride *= shape
-                return buffer.access_ptr(access_type, offset=offset)
-            else:
-                raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+        num_inst_m = self.tcgen05_num_inst_m
+        num_inst_n = self.tcgen05_num_inst_n
+        num_k_atoms = self.tcgen05_num_k_atoms
+        a_params = self.compute_tcgen05_a_desc_params(A_buf)
+        b_params = self.compute_tcgen05_b_desc_params(B_buf)
+        instr_desc = self.compute_tcgen05_instr_desc()
 
         @T.macro
         def _warp_mma_ss(A_buf, B_buf, C_local_buf, mbar):
-            # Allocate SMEM descriptors for A and B
             desc_a = T.alloc_tcgen05_smem_desc()
             desc_b = T.alloc_tcgen05_smem_desc()
-            A_ptr = access_ptr_from(A_buf, "r")
-            B_ptr = access_ptr_from(B_buf, "r")
+            self.init_tcgen05_a_desc(desc_a, A_buf, a_params)
+            self.init_tcgen05_b_desc(desc_b, B_buf, b_params)
 
-            T.initialize_tcgen05_descriptor(
-                desc_a,
-                A_ptr,
-                int(a_leading_byte_offset >> 4),
-                int(a_stride_byte_offset >> 4),
-                0,
-                False,
-                int(a_swizzle_mode),
-            )
-            T.initialize_tcgen05_descriptor(
-                desc_b,
-                B_ptr,
-                int(b_leading_byte_offset >> 4),
-                int(b_stride_byte_offset >> 4),
-                0,
-                False,
-                int(b_swizzle_mode),
-            )
-
-            tmem_col_step = atom_n // (128 // atom_m_per_cta)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
-                    for ki in T.unroll(0, (k_dim // micro_size_k)):
-                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
-                        A_elem_offset = (
-                            (ki % ak_atom_size) * micro_size_k
-                            + i * atom_m_per_cta * a_swizzle_atom_elems
-                            + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
-                            if a_is_k_major
-                            else i * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
-                        )
-
-                        B_elem_offset = (
-                            (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                            + (ki % bk_atom_size) * micro_size_k
-                            + j * atom_n * b_swizzle_atom_elems
-                            if b_is_k_major
-                            else (
-                                ki * b_swizzle_atom_elems * micro_size_k
-                                + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
-                            )
-                        )
-
-                        A_byte_offset = A_elem_offset * elems_in_bytes
-                        B_byte_offset = B_elem_offset * elems_in_bytes
-                        C_offset = (i * n_dim + j * tmem_col_step) * accum_dtype_in_bits // 32  # 32 bits per tmem bank
-
-                        T.ptx_tcgen05_mma_ss(
-                            a_dtype_abbrv,
-                            desc_a.data,
-                            A_byte_offset,
-                            desc_b.data,
-                            B_byte_offset,
-                            C_local_buf.data,
-                            C_offset,
-                            instr_desc,
-                            scale_out,
-                            mask0,
-                            mask1,
-                            mask2,
-                            mask3,
-                            enable_ws,
-                            enable_2cta,
-                        )
-            T.tcgen05_mma_arrive(mbar, arrive_2cta=enable_2cta)
+                    for ki in T.unroll(0, num_k_atoms):
+                        self.tcgen05_ss_atom(desc_a, desc_b, C_local_buf, i, j, ki, a_params, b_params, instr_desc, clear_accum)
+            self.tcgen05_atom_arrive(mbar)
 
         return _warp_mma_ss(A_buf, B_buf, C_local_buf, mbar)
 
@@ -410,103 +257,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         clear_accum : PrimExpr
             Whether to zero the accumulator before the first MMA.
         """
-        accum_dtype = self.accum_dtype
-        m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
-        k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
-        meta = self.meta
-        if len(meta) != 5:
-            raise ValueError(
-                f"Unsupported TCGEN5MMA configuration for desc generation: M={m_dim}, N={n_dim}, "
-                f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
-            )
-        atom_m, atom_n, atom_k, enable_ws, enable_2cta = (int(x) for x in meta)
-        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
-        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
-        scale_in_a = 1
-        scale_in_b = 1
-
+        k_dim = self.chunk
         assert k_dim >= micro_size_k, f"k_dim must be >= {micro_size_k}, got {k_dim}"
 
-        b_is_k_major = self.b_transposed
-        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-
-        a_dtype_in_bits = DataType(self.a_dtype).bits
-        elems_in_bits = a_dtype_in_bits
-        elems_in_bytes = (elems_in_bits + 7) // 8
-        b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        accum_dtype_in_bits = DataType(accum_dtype).bits
-
-        # B descriptor parameters (same as SS)
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
-        if not b_swizzle_mode.is_none():
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
-                if b_n_axis_atoms <= 1:
-                    b_leading_byte_offset = 0
-                else:
-                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
-                if b_n_axis_atoms <= 1:
-                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim_per_cta
-                else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
-
-        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
-
-        a_is_k_major = not self.a_transposed
-        instr_desc = self.get_tcgen5_instr_desc(
-            atom_m,
-            atom_n,
-            atom_k,
-            a_is_k_major,
-            b_is_k_major,
-            scale_in_a,
-            scale_in_b,
-        )
-        a_dtype_abbrv = self.a_dtype_abbrv
-        mask_zero = T.cast(0, T.int32)
-        mask0 = mask1 = mask2 = mask3 = mask_zero
-
-        num_inst_m = m_dim // atom_m_per_cta
-        num_inst_n = n_dim // atom_n
-
-        # TMEM column geometry for A operand
-        # Each TMEM column is 32 bits; row interleaving factor = 128 / atom_m
-        interleave = max(128 // atom_m, 1)
-        a_tmem_cols_per_k_atom = atom_k * a_dtype_in_bits // 32 // interleave
-        a_tmem_k_stride = k_dim * a_dtype_in_bits // 32 // interleave
-
-        def access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
-            if isinstance(buffer_or_load_or_region, Buffer):
-                return buffer_or_load_or_region.access_ptr(access_type)
-            elif isinstance(buffer_or_load_or_region, BufferLoad):
-                buffer_load = buffer_or_load_or_region
-                offset, stride = 0, 1
-                buffer = buffer_load.buffer
-                for i, shape in enumerate(reversed(buffer.shape)):
-                    indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, tvm.tir.Ramp):
-                        offset += indice.base * stride
-                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
-                        offset += indice * stride
-                    else:
-                        raise ValueError(f"Unsupported index type: {type(indice)}")
-                    stride *= shape
-                return buffer.access_ptr(access_type, offset=offset)
-            elif isinstance(buffer_or_load_or_region, BufferRegion):
-                buffer_region = buffer_or_load_or_region
-                buffer = buffer_region.buffer
-                offset, stride = 0, 1
-                for i, shape in enumerate(reversed(buffer.shape)):
-                    offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
-                    stride *= shape
-                return buffer.access_ptr(access_type, offset=offset)
-            else:
-                raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+        num_inst_m = self.tcgen05_num_inst_m
+        num_inst_n = self.tcgen05_num_inst_n
+        num_k_atoms = self.tcgen05_num_k_atoms
+        b_params = self.compute_tcgen05_b_desc_params(B_buf)
+        instr_desc = self.compute_tcgen05_instr_desc()
 
         # Resolve the TMEM data pointer for A
         if isinstance(A_buf, BufferRegion):
@@ -519,59 +278,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         @T.macro
         def _warp_mma_ts(a_data, B_buf, C_local_buf, mbar):
             desc_b = T.alloc_tcgen05_smem_desc()
-            B_ptr = access_ptr_from(B_buf, "r")
+            self.init_tcgen05_b_desc(desc_b, B_buf, b_params)
 
-            T.initialize_tcgen05_descriptor(
-                desc_b,
-                B_ptr,
-                int(b_leading_byte_offset >> 4),
-                int(b_stride_byte_offset >> 4),
-                0,
-                False,
-                int(b_swizzle_mode),
-            )
-
-            tmem_col_step = atom_n // (128 // atom_m_per_cta)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
-                    for ki in T.unroll(0, (k_dim // micro_size_k)):
-                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
-
-                        # A: TMEM column offset
-                        A_tmem_offset = i * a_tmem_k_stride + ki * a_tmem_cols_per_k_atom
-
-                        # B: SMEM byte offset (same as SS)
-                        B_elem_offset = (
-                            (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                            + (ki % bk_atom_size) * micro_size_k
-                            + j * atom_n * b_swizzle_atom_elems
-                            if b_is_k_major
-                            else (
-                                ki * b_swizzle_atom_elems * micro_size_k
-                                + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
-                            )
-                        )
-                        B_byte_offset = B_elem_offset * elems_in_bytes
-
-                        # C: TMEM column offset (same as SS)
-                        C_offset = (i * n_dim + j * tmem_col_step) * accum_dtype_in_bits // 32
-
-                        T.ptx_tcgen05_mma_ts(
-                            a_dtype_abbrv,
-                            a_data,
-                            A_tmem_offset,
-                            desc_b.data,
-                            B_byte_offset,
-                            C_local_buf.data,
-                            C_offset,
-                            instr_desc,
-                            scale_out,
-                            mask0,
-                            mask1,
-                            mask2,
-                            mask3,
-                        )
-            T.tcgen05_mma_arrive(mbar, arrive_2cta=enable_2cta)
+                    for ki in T.unroll(0, num_k_atoms):
+                        self.tcgen05_ts_atom(a_data, desc_b, C_local_buf, i, j, ki, b_params, instr_desc, clear_accum)
+            self.tcgen05_atom_arrive(mbar)
 
         return _warp_mma_ts(a_tmem_data, B_buf, C_local_buf, mbar)
 
@@ -592,12 +305,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         Uses ``tcgen05.mma.cta_group::1|2.kind::mxf8f6f4.block_scale`` PTX instruction.
         Scale factors must already reside in tensor memory.
         """
-        accum_dtype = self.accum_dtype
         m_dim = self.block_row_warps * self.warp_row_tiles
         micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
-        scale_in_a = 1
-        scale_in_b = 1
 
         assert k_dim >= micro_size_k
 
@@ -606,9 +316,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
 
-        elems_in_bits = DataType(self.a_dtype).bits
-        elems_in_bytes = (elems_in_bits + 7) // 8
-        accum_dtype_in_bits = DataType(accum_dtype).bits
+        elems_in_bytes = (DataType(self.a_dtype).bits + 7) // 8
 
         if len(self.meta) != 5:
             self.get_tcgen5_mma_meta(m_dim, n_dim, k_dim, disable_2cta=False)
@@ -617,14 +325,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 f"Unsupported TCGEN5MMA configuration for block-scaled: M={m_dim}, N={n_dim}, "
                 f"K={k_dim}, A dtype={self.a_dtype}, accum dtype={self.accum_dtype}"
             )
-        atom_m, atom_n, atom_k, _enable_ws, enable_2cta = (int(x) for x in self.meta)
-        enable_ws = 0
+        atom_m, atom_n, _, _, enable_2cta = self.tcgen05_meta_unpacked
         atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
         n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
 
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
         b_swizzle_atom_elems = n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
+        # Block-scaled A LBO/SBO differ from regular SS (uses atom_m_per_cta instead of m_dim)
         a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * atom_m_per_cta * elems_in_bytes)
         a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
         if not a_swizzle_mode.is_none():
@@ -638,64 +346,24 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     8 * elems_in_bytes * a_swizzle_atom_elems if a_m_axis_atoms > 1 else 8 * elems_in_bytes * atom_m_per_cta
                 )
 
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
-        if not b_swizzle_mode.is_none():
-            if b_is_k_major:
-                b_leading_byte_offset = 16
-                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
-            else:
-                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
-                b_leading_byte_offset = b_swizzle_mode.swizzle_byte_size() * k_dim if b_n_axis_atoms > 1 else 0
-                b_stride_byte_offset = (
-                    8 * elems_in_bytes * b_swizzle_atom_elems if b_n_axis_atoms > 1 else 8 * elems_in_bytes * n_dim_per_cta
-                )
-
-        ak_atom_size = max(a_swizzle_atom_elems // micro_size_k, 1)
-        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
+        a_params = TCGEN05DescriptorParams(
+            swizzle_mode=int(a_swizzle_mode),
+            leading_byte_offset=int(a_leading_byte_offset >> 4),
+            stride_byte_offset=int(a_stride_byte_offset >> 4),
+            swizzle_atom_elems=a_swizzle_atom_elems,
+            k_atom_size=max(a_swizzle_atom_elems // micro_size_k, 1),
+            elems_in_bytes=elems_in_bytes,
+            is_k_major=a_is_k_major,
+        )
+        b_params = self.compute_tcgen05_b_desc_params(B_buf)
 
         base_instr_desc = self.get_tcgen5_blockscaled_instr_desc(
-            atom_m,
-            atom_n,
-            a_is_k_major,
-            b_is_k_major,
-            scale_in_a,
-            scale_in_b,
-            0,
-            0,
+            atom_m, atom_n, a_is_k_major, b_is_k_major, 1, 1, 0, 0,
         )
 
-        a_dtype_abbrv = self.a_dtype_abbrv
         num_inst_m = m_dim // atom_m_per_cta
         num_inst_n = n_dim // atom_n
-
-        def access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
-            if isinstance(buffer_or_load_or_region, Buffer):
-                return buffer_or_load_or_region.access_ptr(access_type)
-            elif isinstance(buffer_or_load_or_region, BufferLoad):
-                buffer_load = buffer_or_load_or_region
-                offset, stride = 0, 1
-                buffer = buffer_load.buffer
-                for i, shape in enumerate(reversed(buffer.shape)):
-                    indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, tvm.tir.Ramp):
-                        offset += indice.base * stride
-                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
-                        offset += indice * stride
-                    else:
-                        raise ValueError(f"Unsupported index type: {type(indice)}")
-                    stride *= shape
-                return buffer.access_ptr(access_type, offset=offset)
-            elif isinstance(buffer_or_load_or_region, BufferRegion):
-                buffer_region = buffer_or_load_or_region
-                buffer = buffer_region.buffer
-                offset, stride = 0, 1
-                for i, shape in enumerate(reversed(buffer.shape)):
-                    offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
-                    stride *= shape
-                return buffer.access_ptr(access_type, offset=offset)
-            else:
-                raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+        num_k_atoms = self.tcgen05_num_k_atoms
 
         if isinstance(SFA_tmem, BufferRegion):
             sfa_data = SFA_tmem.buffer.data
@@ -715,78 +383,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         def _warp_mma_blockscaled(A_buf, B_buf, C_local_buf, sfa_data, sfb_data, mbar):
             desc_a = T.alloc_tcgen05_smem_desc()
             desc_b = T.alloc_tcgen05_smem_desc()
-            A_ptr = access_ptr_from(A_buf, "r")
-            B_ptr = access_ptr_from(B_buf, "r")
+            self.init_tcgen05_a_desc(desc_a, A_buf, a_params)
+            self.init_tcgen05_b_desc(desc_b, B_buf, b_params)
 
-            T.initialize_tcgen05_descriptor(
-                desc_a,
-                A_ptr,
-                int(a_leading_byte_offset >> 4),
-                int(a_stride_byte_offset >> 4),
-                0,
-                False,
-                int(a_swizzle_mode),
-            )
-            T.initialize_tcgen05_descriptor(
-                desc_b,
-                B_ptr,
-                int(b_leading_byte_offset >> 4),
-                int(b_stride_byte_offset >> 4),
-                0,
-                False,
-                int(b_swizzle_mode),
-            )
-
-            tmem_col_step = atom_n // (128 // atom_m_per_cta)
             _sf_a = tvm.tir.const(sf_a_id, "int32") if isinstance(sf_a_id, int) else sf_a_id
             _sf_b = tvm.tir.const(sf_b_id, "int32") if isinstance(sf_b_id, int) else sf_b_id
             runtime_instr_desc = base_instr_desc | (_sf_a << 29) | (_sf_b << 4)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
-                    for ki in T.unroll(0, (k_dim // micro_size_k)):
-                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
-                        A_elem_offset = (
-                            (ki % ak_atom_size) * micro_size_k
-                            + i * atom_m_per_cta * a_swizzle_atom_elems
-                            + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
-                            if a_is_k_major
-                            else i * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                    for ki in T.unroll(0, num_k_atoms):
+                        self.tcgen05_blockscaled_atom(
+                            desc_a, desc_b, C_local_buf, sfa_data, sfb_data,
+                            i, j, ki, a_params, b_params, runtime_instr_desc, clear_accum,
                         )
-                        B_elem_offset = (
-                            (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                            + (ki % bk_atom_size) * micro_size_k
-                            + j * atom_n * b_swizzle_atom_elems
-                            if b_is_k_major
-                            else (
-                                ki * b_swizzle_atom_elems * micro_size_k
-                                + j * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
-                            )
-                        )
-
-                        A_byte_offset = A_elem_offset * elems_in_bytes
-                        B_byte_offset = B_elem_offset * elems_in_bytes
-                        C_offset = (i * n_dim + j * tmem_col_step) * accum_dtype_in_bits // 32
-
-                        T.ptx_tcgen05_mma_blockscaled_ss(
-                            a_dtype_abbrv,
-                            desc_a.data,
-                            A_byte_offset,
-                            desc_b.data,
-                            B_byte_offset,
-                            C_local_buf.data,
-                            C_offset,
-                            runtime_instr_desc,
-                            scale_out,
-                            sfa_data,
-                            0,
-                            sfb_data,
-                            0,
-                            0,
-                            0,
-                            enable_ws,
-                            enable_2cta,
-                        )
-            T.tcgen05_mma_arrive(mbar, arrive_2cta=enable_2cta)
+            self.tcgen05_atom_arrive(mbar)
 
         return _warp_mma_blockscaled(A_buf, B_buf, C_local_buf, sfa_data, sfb_data, mbar)
 
@@ -925,3 +535,543 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             scale_in_b,
         )
         return lift(desc)
+
+    # ---- Atom-level interface ----
+
+    @property
+    def tcgen05_meta_unpacked(self) -> tuple:
+        """Return ``(atom_m, atom_n, atom_k, enable_ws, enable_2cta)`` as ints.
+
+        Requires ``self.meta`` to have been set via ``get_tcgen5_mma_meta()``.
+        """
+        assert len(self.meta) == 5, "TCGEN05 meta not initialized; call get_tcgen5_mma_meta() first"
+        return tuple(int(x) for x in self.meta)
+
+    @property
+    def tcgen05_num_inst_m(self) -> int:
+        """Number of TCGEN05MMA instruction atoms along M (SS variant)."""
+        atom_m, _, _, _, enable_2cta = self.tcgen05_meta_unpacked
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        return self.block_row_warps * self.warp_row_tiles // atom_m_per_cta
+
+    @property
+    def tcgen05_num_inst_n(self) -> int:
+        """Number of TCGEN05MMA instruction atoms along N."""
+        _, atom_n, _, _, _ = self.tcgen05_meta_unpacked
+        return self.block_col_warps * self.warp_col_tiles // atom_n
+
+    @property
+    def tcgen05_num_k_atoms(self) -> int:
+        """Number of K-dimension micro-steps (``chunk // micro_size_k``)."""
+        return self.chunk // self.micro_size_k
+
+    @staticmethod
+    def _access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
+        """Resolve an access pointer from a Buffer, BufferLoad, or BufferRegion."""
+        if isinstance(buffer_or_load_or_region, Buffer):
+            return buffer_or_load_or_region.access_ptr(access_type)
+        elif isinstance(buffer_or_load_or_region, BufferLoad):
+            buffer_load = buffer_or_load_or_region
+            offset, stride = 0, 1
+            buffer = buffer_load.buffer
+            for i, shape in enumerate(reversed(buffer.shape)):
+                indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
+                if isinstance(indice, tvm.tir.Ramp):
+                    offset += indice.base * stride
+                elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                    offset += indice * stride
+                else:
+                    raise ValueError(f"Unsupported index type: {type(indice)}")
+                stride *= shape
+            return buffer.access_ptr(access_type, offset=offset)
+        elif isinstance(buffer_or_load_or_region, BufferRegion):
+            buffer_region = buffer_or_load_or_region
+            buffer = buffer_region.buffer
+            offset, stride = 0, 1
+            for i, shape in enumerate(reversed(buffer.shape)):
+                offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
+                stride *= shape
+            return buffer.access_ptr(access_type, offset=offset)
+        else:
+            raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+
+    # -- Descriptor parameter computation (pure Python, no TIR) --
+
+    def compute_tcgen05_b_desc_params(self, B_buf) -> TCGEN05DescriptorParams:
+        """Compute B descriptor parameters from the B shared buffer.
+
+        This is a pure-Python helper -- no TIR code is emitted.
+        The returned ``TCGEN05DescriptorParams`` is passed to
+        ``init_tcgen05_b_desc()`` and ``tcgen05_*_atom()`` methods.
+
+        Parameters
+        ----------
+        B_buf : Buffer or BufferRegion
+            The B operand in shared memory.
+        """
+        atom_m, atom_n, _, _, enable_2cta = self.tcgen05_meta_unpacked
+        n_dim = self.block_col_warps * self.warp_col_tiles
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        k_dim = self.chunk
+        micro_size_k = self.micro_size_k
+        elems_in_bytes = (DataType(self.a_dtype).bits + 7) // 8
+        b_is_k_major = self.b_transposed
+
+        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        b_swizzle_atom_elems = (
+            n_dim_per_cta if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        )
+
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim_per_cta * elems_in_bytes)
+        b_stride_byte_offset = (
+            (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim_per_cta == 8 else (8 * 8 * elems_in_bytes))
+        )
+        if not b_swizzle_mode.is_none():
+            if b_is_k_major:
+                b_leading_byte_offset = 16
+                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
+            else:
+                b_n_axis_atoms = n_dim_per_cta // b_swizzle_atom_elems
+                if b_n_axis_atoms <= 1:
+                    b_leading_byte_offset = 0
+                else:
+                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
+                if b_n_axis_atoms <= 1:
+                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim_per_cta
+                else:
+                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
+
+        return TCGEN05DescriptorParams(
+            swizzle_mode=int(b_swizzle_mode),
+            leading_byte_offset=int(b_leading_byte_offset >> 4),
+            stride_byte_offset=int(b_stride_byte_offset >> 4),
+            swizzle_atom_elems=b_swizzle_atom_elems,
+            k_atom_size=max(b_swizzle_atom_elems // micro_size_k, 1),
+            elems_in_bytes=elems_in_bytes,
+            is_k_major=b_is_k_major,
+        )
+
+    def compute_tcgen05_a_desc_params(self, A_buf) -> TCGEN05DescriptorParams:
+        """Compute A descriptor parameters from the A shared buffer (SS variant).
+
+        This is a pure-Python helper -- no TIR code is emitted.
+
+        Parameters
+        ----------
+        A_buf : Buffer or BufferRegion
+            The A operand in shared memory.
+        """
+        atom_m, _, _, _, enable_2cta = self.tcgen05_meta_unpacked
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        k_dim = self.chunk
+        micro_size_k = self.micro_size_k
+        elems_in_bytes = (DataType(self.a_dtype).bits + 7) // 8
+        a_is_k_major = not self.a_transposed
+
+        a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
+        a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+
+        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
+        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
+        if not a_swizzle_mode.is_none():
+            if a_is_k_major:
+                a_leading_byte_offset = 16
+                a_stride_byte_offset = 8 * a_swizzle_mode.swizzle_byte_size()
+            else:
+                a_m_axis_atoms = m_dim // a_swizzle_atom_elems
+                if a_m_axis_atoms <= 1:
+                    a_leading_byte_offset = 0
+                else:
+                    a_leading_byte_offset = k_dim * a_swizzle_mode.swizzle_byte_size()
+                if a_m_axis_atoms <= 1:
+                    a_stride_byte_offset = 8 * elems_in_bytes * m_dim
+                else:
+                    a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
+
+        return TCGEN05DescriptorParams(
+            swizzle_mode=int(a_swizzle_mode),
+            leading_byte_offset=int(a_leading_byte_offset >> 4),
+            stride_byte_offset=int(a_stride_byte_offset >> 4),
+            swizzle_atom_elems=a_swizzle_atom_elems,
+            k_atom_size=max(a_swizzle_atom_elems // micro_size_k, 1),
+            elems_in_bytes=elems_in_bytes,
+            is_k_major=a_is_k_major,
+        )
+
+    # -- Descriptor initialization (emit TIR) --
+
+    def init_tcgen05_b_desc(self, desc_b, B_buf, b_params: TCGEN05DescriptorParams):
+        """Emit TIR to initialize a pre-allocated TCGEN05 B descriptor.
+
+        Parameters
+        ----------
+        desc_b : Buffer
+            A descriptor buffer allocated via ``T.alloc_tcgen05_smem_desc()``.
+        B_buf : Buffer or BufferRegion
+            The B operand in shared memory.
+        b_params : TCGEN05DescriptorParams
+            Pre-computed parameters from ``compute_tcgen05_b_desc_params()``.
+        """
+        access_ptr_from = self._access_ptr_from
+        lbo = b_params.leading_byte_offset
+        sbo = b_params.stride_byte_offset
+        swizzle_mode = b_params.swizzle_mode
+        B_ptr = access_ptr_from(B_buf, "r")
+
+        @T.macro
+        def _init_b(desc_b, B_ptr):
+            T.initialize_tcgen05_descriptor(desc_b, B_ptr, lbo, sbo, 0, False, swizzle_mode)
+
+        return _init_b(desc_b, B_ptr)
+
+    def init_tcgen05_a_desc(self, desc_a, A_buf, a_params: TCGEN05DescriptorParams):
+        """Emit TIR to initialize a pre-allocated TCGEN05 A descriptor (SS variant).
+
+        Parameters
+        ----------
+        desc_a : Buffer
+            A descriptor buffer allocated via ``T.alloc_tcgen05_smem_desc()``.
+        A_buf : Buffer or BufferRegion
+            The A operand in shared memory.
+        a_params : TCGEN05DescriptorParams
+            Pre-computed parameters from ``compute_tcgen05_a_desc_params()``.
+        """
+        access_ptr_from = self._access_ptr_from
+        lbo = a_params.leading_byte_offset
+        sbo = a_params.stride_byte_offset
+        swizzle_mode = a_params.swizzle_mode
+        A_ptr = access_ptr_from(A_buf, "r")
+
+        @T.macro
+        def _init_a(desc_a, A_ptr):
+            T.initialize_tcgen05_descriptor(desc_a, A_ptr, lbo, sbo, 0, False, swizzle_mode)
+
+        return _init_a(desc_a, A_ptr)
+
+    # -- Instruction descriptor computation --
+
+    def compute_tcgen05_instr_desc(self) -> PrimExpr:
+        """Compute the 64-bit instruction descriptor using current meta.
+
+        Requires ``self.meta`` to have been set via ``get_tcgen5_mma_meta()``.
+        """
+        atom_m, atom_n, atom_k, _, _ = self.tcgen05_meta_unpacked
+        a_is_k_major = not self.a_transposed
+        b_is_k_major = self.b_transposed
+        return self.get_tcgen5_instr_desc(atom_m, atom_n, atom_k, a_is_k_major, b_is_k_major, 1, 1)
+
+    # -- Arrive --
+
+    def tcgen05_atom_arrive(self, mbar):
+        """Emit ``tcgen05_mma_arrive(mbar)``."""
+        _, _, _, _, enable_2cta = self.tcgen05_meta_unpacked
+
+        @T.macro
+        def _arrive(mbar):
+            T.tcgen05_mma_arrive(mbar, arrive_2cta=bool(enable_2cta))
+
+        return _arrive(mbar)
+
+    # -- Atom emission --
+
+    def tcgen05_ss_atom(
+        self,
+        desc_a,
+        desc_b,
+        C_local_buf: Buffer,
+        inst_m_idx: int,
+        inst_n_idx: int,
+        ki: int,
+        a_params: TCGEN05DescriptorParams,
+        b_params: TCGEN05DescriptorParams,
+        instr_desc: PrimExpr,
+        clear_accum: PrimExpr = False,
+    ):
+        """Emit a single TCGEN05MMA SS instruction for atom ``(inst_m_idx, inst_n_idx, ki)``.
+
+        Must be called after descriptor initialization and before ``tcgen05_atom_arrive()``.
+
+        Parameters
+        ----------
+        desc_a, desc_b : Buffer
+            Initialized A and B descriptors.
+        C_local_buf : Buffer
+            Accumulator buffer in tensor memory.
+        inst_m_idx : int
+            M-dimension atom index (0 .. tcgen05_num_inst_m - 1).
+        inst_n_idx : int
+            N-dimension atom index (0 .. tcgen05_num_inst_n - 1).
+        ki : int
+            K-dimension atom index (0 .. tcgen05_num_k_atoms - 1).
+        a_params : TCGEN05DescriptorParams
+            Pre-computed A descriptor parameters.
+        b_params : TCGEN05DescriptorParams
+            Pre-computed B descriptor parameters.
+        instr_desc : PrimExpr
+            Instruction descriptor from ``compute_tcgen05_instr_desc()``.
+        clear_accum : PrimExpr
+            Whether to zero the accumulator on the first K atom.
+        """
+        atom_m, atom_n, _, enable_ws, enable_2cta = self.tcgen05_meta_unpacked
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        n_dim = self.block_col_warps * self.warp_col_tiles
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        micro_size_k = self.micro_size_k
+        k_dim = self.chunk
+        accum_dtype_in_bits = DataType(self.accum_dtype).bits
+        a_dtype_abbrv = self.a_dtype_abbrv
+        a_elems_in_bytes = a_params.elems_in_bytes
+        b_elems_in_bytes = b_params.elems_in_bytes
+        ak_atom_size = a_params.k_atom_size
+        bk_atom_size = b_params.k_atom_size
+        a_swizzle_atom_elems = a_params.swizzle_atom_elems
+        b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        mask_zero = T.cast(0, T.int32)
+
+        # Pre-compute offsets
+        if a_params.is_k_major:
+            A_elem_offset = (
+                (ki % ak_atom_size) * micro_size_k
+                + inst_m_idx * atom_m_per_cta * a_swizzle_atom_elems
+                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+            )
+        else:
+            A_elem_offset = inst_m_idx * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+
+        if b_params.is_k_major:
+            B_elem_offset = (
+                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
+                + (ki % bk_atom_size) * micro_size_k
+                + inst_n_idx * atom_n * b_swizzle_atom_elems
+            )
+        else:
+            B_elem_offset = (
+                ki * b_swizzle_atom_elems * micro_size_k
+                + inst_n_idx * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+            )
+
+        A_byte_offset = A_elem_offset * a_elems_in_bytes
+        B_byte_offset = B_elem_offset * b_elems_in_bytes
+        tmem_col_step = atom_n // (128 // atom_m_per_cta)
+        C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+
+        @T.macro
+        def _ss_atom(desc_a, desc_b, C_local_buf):
+            scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+            T.ptx_tcgen05_mma_ss(
+                a_dtype_abbrv,
+                desc_a.data,
+                A_byte_offset,
+                desc_b.data,
+                B_byte_offset,
+                C_local_buf.data,
+                C_offset,
+                instr_desc,
+                scale_out,
+                mask_zero,
+                mask_zero,
+                mask_zero,
+                mask_zero,
+                enable_ws,
+                enable_2cta,
+            )
+
+        return _ss_atom(desc_a, desc_b, C_local_buf)
+
+    def tcgen05_ts_atom(
+        self,
+        a_tmem_data,
+        desc_b,
+        C_local_buf: Buffer,
+        inst_m_idx: int,
+        inst_n_idx: int,
+        ki: int,
+        b_params: TCGEN05DescriptorParams,
+        instr_desc: PrimExpr,
+        clear_accum: PrimExpr = False,
+    ):
+        """Emit a single TCGEN05MMA TS instruction for atom ``(inst_m_idx, inst_n_idx, ki)``.
+
+        A resides in tensor memory; B in shared memory.
+
+        Parameters
+        ----------
+        a_tmem_data : Var
+            Data pointer for the A operand in tensor memory (e.g., ``A_buf.data``).
+        desc_b : Buffer
+            Initialized B descriptor.
+        C_local_buf : Buffer
+            Accumulator buffer in tensor memory.
+        inst_m_idx : int
+            M-dimension atom index.
+        inst_n_idx : int
+            N-dimension atom index.
+        ki : int
+            K-dimension atom index.
+        b_params : TCGEN05DescriptorParams
+            Pre-computed B descriptor parameters.
+        instr_desc : PrimExpr
+            Instruction descriptor from ``compute_tcgen05_instr_desc()``.
+        clear_accum : PrimExpr
+            Whether to zero the accumulator on the first K atom.
+        """
+        atom_m, atom_n, atom_k, _, enable_2cta = self.tcgen05_meta_unpacked
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        n_dim = self.block_col_warps * self.warp_col_tiles
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        micro_size_k = self.micro_size_k
+        k_dim = self.chunk
+        a_dtype_in_bits = DataType(self.a_dtype).bits
+        accum_dtype_in_bits = DataType(self.accum_dtype).bits
+        a_dtype_abbrv = self.a_dtype_abbrv
+        b_elems_in_bytes = b_params.elems_in_bytes
+        bk_atom_size = b_params.k_atom_size
+        b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        mask_zero = T.cast(0, T.int32)
+
+        # TMEM column geometry for A
+        interleave = max(128 // atom_m, 1)
+        a_tmem_cols_per_k_atom = atom_k * a_dtype_in_bits // 32 // interleave
+        a_tmem_k_stride = k_dim * a_dtype_in_bits // 32 // interleave
+
+        A_tmem_offset = inst_m_idx * a_tmem_k_stride + ki * a_tmem_cols_per_k_atom
+
+        if b_params.is_k_major:
+            B_elem_offset = (
+                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
+                + (ki % bk_atom_size) * micro_size_k
+                + inst_n_idx * atom_n * b_swizzle_atom_elems
+            )
+        else:
+            B_elem_offset = (
+                ki * b_swizzle_atom_elems * micro_size_k
+                + inst_n_idx * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+            )
+        B_byte_offset = B_elem_offset * b_elems_in_bytes
+
+        tmem_col_step = atom_n // (128 // atom_m_per_cta)
+        C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+
+        @T.macro
+        def _ts_atom(a_data, desc_b, C_local_buf):
+            scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+            T.ptx_tcgen05_mma_ts(
+                a_dtype_abbrv,
+                a_data,
+                A_tmem_offset,
+                desc_b.data,
+                B_byte_offset,
+                C_local_buf.data,
+                C_offset,
+                instr_desc,
+                scale_out,
+                mask_zero,
+                mask_zero,
+                mask_zero,
+                mask_zero,
+            )
+
+        return _ts_atom(a_tmem_data, desc_b, C_local_buf)
+
+    def tcgen05_blockscaled_atom(
+        self,
+        desc_a,
+        desc_b,
+        C_local_buf: Buffer,
+        sfa_data,
+        sfb_data,
+        inst_m_idx: int,
+        inst_n_idx: int,
+        ki: int,
+        a_params: TCGEN05DescriptorParams,
+        b_params: TCGEN05DescriptorParams,
+        instr_desc: PrimExpr,
+        clear_accum: PrimExpr = False,
+    ):
+        """Emit a single TCGEN05MMA block-scaled SS instruction.
+
+        Parameters
+        ----------
+        desc_a, desc_b : Buffer
+            Initialized A and B descriptors.
+        C_local_buf : Buffer
+            Accumulator buffer in tensor memory.
+        sfa_data, sfb_data : Var
+            Scale factor data pointers in tensor memory.
+        inst_m_idx, inst_n_idx, ki : int
+            Atom indices.
+        a_params, b_params : TCGEN05DescriptorParams
+            Pre-computed descriptor parameters.
+        instr_desc : PrimExpr
+            Block-scaled instruction descriptor (with SF IDs already encoded).
+        clear_accum : PrimExpr
+            Whether to zero the accumulator on the first K atom.
+        """
+        atom_m, atom_n, _, enable_ws, enable_2cta = self.tcgen05_meta_unpacked
+        atom_m_per_cta = atom_m // 2 if enable_2cta else atom_m
+        n_dim = self.block_col_warps * self.warp_col_tiles
+        n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        micro_size_k = self.micro_size_k
+        k_dim = self.chunk
+        accum_dtype_in_bits = DataType(self.accum_dtype).bits
+        a_dtype_abbrv = self.a_dtype_abbrv
+        a_elems_in_bytes = a_params.elems_in_bytes
+        b_elems_in_bytes = b_params.elems_in_bytes
+        ak_atom_size = a_params.k_atom_size
+        bk_atom_size = b_params.k_atom_size
+        a_swizzle_atom_elems = a_params.swizzle_atom_elems
+        b_swizzle_atom_elems = b_params.swizzle_atom_elems
+
+        if a_params.is_k_major:
+            A_elem_offset = (
+                (ki % ak_atom_size) * micro_size_k
+                + inst_m_idx * atom_m_per_cta * a_swizzle_atom_elems
+                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+            )
+        else:
+            A_elem_offset = inst_m_idx * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+
+        if b_params.is_k_major:
+            B_elem_offset = (
+                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
+                + (ki % bk_atom_size) * micro_size_k
+                + inst_n_idx * atom_n * b_swizzle_atom_elems
+            )
+        else:
+            B_elem_offset = (
+                ki * b_swizzle_atom_elems * micro_size_k
+                + inst_n_idx * atom_n * (k_dim if n_dim_per_cta // b_swizzle_atom_elems > 1 else 1)
+            )
+
+        A_byte_offset = A_elem_offset * a_elems_in_bytes
+        B_byte_offset = B_elem_offset * b_elems_in_bytes
+        tmem_col_step = atom_n // (128 // atom_m_per_cta)
+        C_offset = (inst_m_idx * n_dim + inst_n_idx * tmem_col_step) * accum_dtype_in_bits // 32
+
+        @T.macro
+        def _bs_atom(desc_a, desc_b, C_local_buf, sfa_data, sfb_data):
+            scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+            T.ptx_tcgen05_mma_blockscaled_ss(
+                a_dtype_abbrv,
+                desc_a.data,
+                A_byte_offset,
+                desc_b.data,
+                B_byte_offset,
+                C_local_buf.data,
+                C_offset,
+                instr_desc,
+                scale_out,
+                sfa_data,
+                0,
+                sfb_data,
+                0,
+                0,
+                0,
+                enable_ws,
+                enable_2cta,
+            )
+
+        return _bs_atom(desc_a, desc_b, C_local_buf, sfa_data, sfb_data)
