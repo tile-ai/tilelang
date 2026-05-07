@@ -23,7 +23,7 @@ if(TILELANG_USE_HIP_STUBS)
   # It also provides minimal HSA wrappers (hsa_init / hsa_shut_down) to avoid a
   # hard DT_NEEDED dependency on libhsa-runtime64 in ROCm-enabled wheels.
   # ============================================================================
-  add_library(hip_stub SHARED src/backend/rocm/codegen/stubs/hip.cc)
+  add_library(hip_stub SHARED src/backend/rocm/stubs/hip.cc)
   target_include_directories(hip_stub PRIVATE ${ROCM_INCLUDE_DIRS})
   target_compile_definitions(hip_stub PRIVATE TILELANG_HIP_STUB_EXPORTS)
   target_link_libraries(hip_stub PRIVATE ${CMAKE_DL_LIBS})
@@ -40,7 +40,7 @@ if(TILELANG_USE_HIP_STUBS)
   # This library provides a minimal HIPRTC API surface and lazily loads
   # libhiprtc.so at runtime.
   # ============================================================================
-  add_library(hiprtc_stub SHARED src/backend/rocm/codegen/stubs/hiprtc.cc)
+  add_library(hiprtc_stub SHARED src/backend/rocm/stubs/hiprtc.cc)
   target_include_directories(hiprtc_stub PRIVATE ${ROCM_INCLUDE_DIRS})
   target_compile_definitions(hiprtc_stub PRIVATE TILELANG_HIPRTC_STUB_EXPORTS)
   target_link_libraries(hiprtc_stub PRIVATE ${CMAKE_DL_LIBS})

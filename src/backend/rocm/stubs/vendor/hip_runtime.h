@@ -1,18 +1,18 @@
 // Minimal HIP runtime/driver API declarations for TileLang's HIP stub library.
 //
-// This file exists to allow building the stub (src/target/stubs/hip.cc) without
+// This file exists to allow building the stub (src/backend/rocm/stubs/hip.cc) without
 // requiring a full ROCm SDK at build time. When ROCm headers are available,
-// target/stubs/hip.h prefers including <hip/hip_runtime_api.h>.
+// backend/rocm/stubs/hip.h prefers including <hip/hip_runtime_api.h>.
 //
 // IMPORTANT:
 // - This header is NOT a complete HIP API.
 // - Types that are passed by pointer are kept opaque/incomplete on purpose.
-// - Do not include this file directly; include target/stubs/hip.h instead.
+// - Do not include this file directly; include backend/rocm/stubs/hip.h instead.
 
 // Guard to ensure this header is only included by the stub wrapper header.
 #ifndef _TILELANG_HIP_STUB_INCLUDE_GUARD
-#error "vendor/hip_runtime.h should only be included by target/stubs/hip.h. "     \
-    "Do not include this file directly; include target/stubs/hip.h instead."
+#error "vendor/hip_runtime.h should only be included by backend/rocm/stubs/hip.h. " \
+    "Do not include this file directly; include backend/rocm/stubs/hip.h instead."
 #endif
 
 #pragma once

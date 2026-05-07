@@ -2,7 +2,7 @@
  * \file hip.h
  * \brief Stub library header for lazy loading ROCm/HIP libraries at runtime.
  *
- * This mirrors the existing CUDA stubs in src/target/stubs/:
+ * This mirrors the existing CUDA stubs in src/backend/cuda/stubs/:
  * - Instead of linking against libamdhip64.so at build time, TileLang can link
  *   against a small stub library (libhip_stub.so) that resolves HIP symbols via
  *   dlopen()/dlsym() on first use.
@@ -13,7 +13,7 @@
  * 3. Building a single wheel that can run across environments.
  *
  * Usage:
- *   #include "target/stubs/hip.h"
+ *   #include "backend/rocm/stubs/hip.h"
  *   hipError_t e = hipSetDevice(0);
  */
 
