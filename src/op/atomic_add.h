@@ -43,27 +43,6 @@ public:
         .def_ro("dst_range", &AtomicAddNode::dst_range)
         .def_ro("annotations", &AtomicAddNode::annotations);
   }
-
-  /// Check if TMA should be used
-  bool GetUseTMA() const {
-    if (auto val = annotations.Get("use_tma")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        if (int_val->value != 0) {
-          ICHECK(!src_value.defined())
-              << "TMA is not supported when using TiledAtomicAdd with PrimExpr "
-                 "as value.";
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  /// Infer layout for the target-independent SIMT atomic add path.
-  LayoutMap InferSIMTLayout(const LayoutInferArgs &T, InferLevel level) const;
-
-  /// Override MakeSIMTLoop to handle AtomicAdd-specific logic
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
 };
 
 using AtomicAddTargetPredicate = bool (*)(Target target);
