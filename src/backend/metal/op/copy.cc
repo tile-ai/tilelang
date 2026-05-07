@@ -5,6 +5,7 @@
 
 #include "op/copy.h"
 
+#include "backend/metal/op/utils.h"
 #include "op/utils.h"
 #include "target/utils.h"
 
