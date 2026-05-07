@@ -326,14 +326,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
-        b_swizzle_atom_elems = (
-            n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        )
+        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
         b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (
-            (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
-        )
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
         if not b_swizzle_mode.is_none():
             if b_is_k_major:
                 b_leading_byte_offset = 16
@@ -386,9 +382,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 if a_m_axis_atoms <= 1:
                     a_leading_byte_offset = 0
                 else:
-                    a_leading_byte_offset = (
-                        8 * a_swizzle_mode.swizzle_atom_size() * (a_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
-                    )
+                    a_leading_byte_offset = 8 * a_swizzle_mode.swizzle_atom_size() * (a_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
                 if a_m_axis_atoms <= 1:
                     a_stride_byte_offset = 8 * elems_in_bytes * m_dim
                 else:
@@ -588,8 +582,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 + (ki % bk_atom_size) * micro_size_k
                 if b_params.is_k_major
                 else (
-                    ki * b_swizzle_atom_elems * micro_size_k
-                    + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                    ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
                 )
             )
 
@@ -697,8 +690,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 + warp_j * wgmma_inst_n * b_swizzle_atom_elems
                 if b_is_k_major
                 else (
-                    ki * b_swizzle_atom_elems * micro_size_k
-                    + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                    ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
                 )
             )
 
