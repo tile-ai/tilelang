@@ -11,6 +11,14 @@
 
 #include "layout.h"
 
+#if defined(_MSC_VER)
+#define TILELANG_COMPILER_UNREACHABLE() __assume(0)
+#elif defined(__GNUC__) || defined(__clang__)
+#define TILELANG_COMPILER_UNREACHABLE() __builtin_unreachable()
+#else
+#define TILELANG_COMPILER_UNREACHABLE() ((void)0)
+#endif
+
 namespace tvm {
 namespace tl {
 
@@ -859,7 +867,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
-  __builtin_unreachable(); // to prevent compiler warning
+  TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
 Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
@@ -888,7 +896,7 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
     ICHECK(0) << "Unsupported layout for sm100 with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
-  __builtin_unreachable(); // to prevent compiler warning
+  TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,

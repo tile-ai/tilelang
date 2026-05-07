@@ -19,6 +19,8 @@
 #include <tvm/tir/op_attr_types.h>
 
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <sstream>
 #include <tuple>
 #include <vector>
@@ -64,6 +66,27 @@ Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
       ->BindThreadRange(src_layout->ThreadRange());
 }
 
+int64_t SignedMin(int bits) {
+  if (bits >= 64) {
+    return std::numeric_limits<int64_t>::min();
+  }
+  return -(static_cast<int64_t>(1) << (bits - 1));
+}
+
+int64_t SignedMax(int bits) {
+  if (bits >= 64) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  return (static_cast<int64_t>(1) << (bits - 1)) - 1;
+}
+
+uint64_t UnsignedMax(int bits) {
+  if (bits >= 64) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return (static_cast<uint64_t>(1) << bits) - 1;
+}
+
 PrimExpr MakeInitValue(const ReduceOpNode &op) {
   auto dst_dtype = op.dst->dtype;
   auto is_int = dst_dtype.is_int();
@@ -74,7 +97,7 @@ PrimExpr MakeInitValue(const ReduceOpNode &op) {
     return make_zero(op.dst->dtype);
   } else if (op.type->isMax()) {
     if (is_int) {
-      return make_const(op.dst->dtype, -(1 << (bits - 1)));
+      return make_const(op.dst->dtype, SignedMin(bits));
     } else if (is_uint) {
       return make_const(op.dst->dtype, 0);
     } else {
@@ -82,9 +105,9 @@ PrimExpr MakeInitValue(const ReduceOpNode &op) {
     }
   } else if (op.type->isMin()) {
     if (is_int) {
-      return make_const(op.dst->dtype, (1 << (bits - 1)) - 1);
+      return make_const(op.dst->dtype, SignedMax(bits));
     } else if (is_uint) {
-      return make_const(op.dst->dtype, (1 << bits) - 1);
+      return make_const(op.dst->dtype, UnsignedMax(bits));
     } else {
       return make_const(op.dst->dtype, INFINITY);
     }
@@ -94,7 +117,7 @@ PrimExpr MakeInitValue(const ReduceOpNode &op) {
     if (is_int) {
       return make_const(op.dst->dtype, -1);
     } else if (is_uint) {
-      return make_const(op.dst->dtype, (1 << bits) - 1);
+      return make_const(op.dst->dtype, UnsignedMax(bits));
     } else {
       return make_const(op.dst->dtype, -INFINITY);
     }

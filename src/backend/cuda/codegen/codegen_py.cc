@@ -225,14 +225,14 @@ void CodeGenTileLangPY::VisitExpr_(const FloatImmNode *op,
   case 64:
   case 32: {
     std::ostringstream temp;
-    temp << "float.fromhex('" << std::hexfloat << op->value << "')";
+    temp << "float.fromhex('" << FlexibleHexFormat(op->value) << "')";
     MarkConst(temp.str());
     os << temp.str();
     break;
   }
   case 16: {
     PrintType(op->dtype, os);
-    os << "(float.fromhex('" << std::hexfloat << op->value << "'))";
+    os << "(float.fromhex('" << FlexibleHexFormat(op->value) << "'))";
     break;
   }
   default:

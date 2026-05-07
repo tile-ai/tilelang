@@ -128,9 +128,13 @@ private:
     auto result = IRMutatorWithAnalyzer::VisitStmt_(op).as<Block>().value();
     // After iterating over the body, set all layout_map to block
     auto p_result = result.CopyOnWrite();
-    auto layout_map = p_result->annotations.Get(attr::kLayoutMap)
-                          ->as<Map<Var, Layout>>()
-                          .value_or(Map<Var, Layout>());
+    Map<Var, Layout> layout_map;
+    if (auto layout_map_ref = p_result->annotations.Get(attr::kLayoutMap)) {
+      if (auto maybe_layout_map =
+              layout_map_ref.value().as<Map<Var, Layout>>()) {
+        layout_map = maybe_layout_map.value();
+      }
+    }
     for (auto &&[k, v] : new_layout_map_)
       layout_map.Set(k, v);
     if (!layout_map.empty())

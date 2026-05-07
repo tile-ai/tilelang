@@ -6,6 +6,18 @@
 #include <cuda_runtime.h>
 #endif
 
+// TVM's `PrintMMAAssembly` and several `cp.async.*` codegen paths emit
+// GCC-style `__asm__ __volatile__(...)` (see
+// 3rdparty/tvm/src/target/source/ptx.cc and codegen_cuda.cc). NVCC's EDG
+// frontend on Windows and MSVC do not recognize those keywords, so map them
+// to the portable CUDA spellings on non-GCC/Clang toolchains. TileLang's own
+// template headers already use `asm volatile`, so this only affects
+// generated kernel bodies.
+#if !defined(__GNUC__) && !defined(__clang__)
+#define __asm__ asm
+#define __volatile__ volatile
+#endif
+
 #include "atomic.h"
 #include <cute/arch/util.hpp>
 #include <cutlass/fast_math.h>

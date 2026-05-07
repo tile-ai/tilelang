@@ -8,7 +8,140 @@ cmake_minimum_required(VERSION 3.26)
 # Must be included before project() so CMAKE_CUDA_COMPILER is set.
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
 
+# Capture this CMakeLists.txt's directory once so `function()` bodies below
+# can reference files shipped with the project. CMake 4.x resolves
+# CMAKE_CURRENT_LIST_DIR inside a function() to the caller's listfile, which
+# breaks resource paths when helpers are invoked from included Find modules
+# (e.g. cmake/pypi-z3/FindZ3.cmake).
+set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
 project(TILE_LANG C CXX)
+
+# MSVC-specific build configuration. Must run after project() so MSVC is
+# defined, but before add_subdirectory(${TVM_SOURCE}) below so subprojects
+# inherit these settings. CMake also sets MSVC=1 when the compiler is
+# clang-cl (it simulates MSVC), so the same block applies to both toolchains.
+if(MSVC)
+  # Force CMP0141 NEW for every subdirectory regardless of its own
+  # cmake_minimum_required. The bundled TVM declares 3.18; without this,
+  # CMake injects /Zi into the legacy CMAKE_*_FLAGS_DEBUG default there
+  # rather than via the generator expression, polluting cached flags and
+  # also overriding the Embedded format we set just below.
+  set(CMAKE_POLICY_DEFAULT_CMP0141 NEW)
+
+  # Use /Z7 (Embedded) so debug info lives inside each .obj instead of a
+  # side-channel vc140.pdb -- eliminates the parallel-write race (MSVC C1041)
+  # and gives compiler caches a single artifact to hash. /Zi + /FS would
+  # normally serialize PDB writes via mspdbsrv, but sccache wraps each cl.exe
+  # in its own subprocess and observably breaks that coordination -- the build
+  # still hits C1041 even with /FS on the command line. /FS is kept here as a
+  # best-effort fallback for any consumer that re-enables /Zi locally; sccache
+  # in front of cl.exe may neutralize it. clang-cl recognizes /FS as a no-op,
+  # so it is safe to keep in the shared MSVC-compatible flag block.
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "Embedded"
+      CACHE STRING "MSVC debug info format" FORCE)
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/FS>)
+
+  # Exceptions: cl.exe enables C++ exceptions by default (with a C4530
+  # warning), but clang-cl disables them unless /EHsc is passed explicitly.
+  # The bundled TVM adds /EHsc inside its own subdirectory, but TileLang's
+  # native targets (tilelang_objs, cuda_stub, ...) live above that scope and
+  # never inherited the flag, so clang-cl rejected `throw` in those TUs.
+  # Apply /EHsc and /bigobj globally so every MSVC-compatible target picks
+  # them up regardless of subdirectory layering.
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/bigobj>)
+
+  # clang-cl-specific compatibility shims. clang-cl is invoked with
+  # MSVC-like flags but needs a couple of extra knobs to compile TVM/TileLang
+  # cleanly:
+  #   * -Wno-unused-command-line-argument: silence noise from MSVC-only
+  #     flags injected by CMake/TVM (e.g. /FS, /Zc:preprocessor, /MP).
+  #   * -fdelayed-template-parsing: TVM headers declare std::vector<T>
+  #     members where T is only forward-declared at that point (e.g.
+  #     std::vector<tvm::tir::Stmt> in src/transform/arg_binder.h). cl.exe
+  #     defers template parsing by default so the late stmt.h include in
+  #     the .cc file resolves T before instantiation; modern clang parses
+  #     templates eagerly and emits "incomplete type" errors. Re-enabling
+  #     delayed parsing matches MSVC semantics without touching the headers.
+  #   * -Wno-unknown-attributes: TVM's tvm-ffi headers spam
+  #     [[msvc::forceinline]] which clang-cl recognizes only in some
+  #     contexts; the warning floods build logs without changing codegen.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-command-line-argument>
+      $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unknown-attributes>
+      $<$<COMPILE_LANGUAGE:CXX>:-fdelayed-template-parsing>)
+  endif()
+endif()
+
+function(tilelang_get_python_interpreter OUTPUT_VAR)
+  if(DEFINED Python_EXECUTABLE AND NOT "${Python_EXECUTABLE}" STREQUAL "" AND EXISTS "${Python_EXECUTABLE}")
+    set(${OUTPUT_VAR} "${Python_EXECUTABLE}" PARENT_SCOPE)
+    return()
+  endif()
+
+  if(DEFINED Python3_EXECUTABLE AND NOT "${Python3_EXECUTABLE}" STREQUAL "" AND EXISTS "${Python3_EXECUTABLE}")
+    set(${OUTPUT_VAR} "${Python3_EXECUTABLE}" PARENT_SCOPE)
+    return()
+  endif()
+
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  set(${OUTPUT_VAR} "${Python3_EXECUTABLE}" PARENT_SCOPE)
+endfunction()
+
+function(tilelang_generate_windows_import_library DLL_PATH OUTPUT_VAR STEM)
+  if(NOT WIN32)
+    set(${OUTPUT_VAR} "${DLL_PATH}" PARENT_SCOPE)
+    return()
+  endif()
+
+  if(NOT EXISTS "${DLL_PATH}")
+    message(FATAL_ERROR "Cannot generate an import library from missing DLL: ${DLL_PATH}")
+  endif()
+
+  get_filename_component(_tilelang_dll_name "${DLL_PATH}" NAME_WE)
+  set(_tilelang_import_dir "${CMAKE_BINARY_DIR}/windows-import-libs/${STEM}/${_tilelang_dll_name}")
+  file(MAKE_DIRECTORY "${_tilelang_import_dir}")
+  set(_tilelang_import_lib "${_tilelang_import_dir}/${STEM}.lib")
+  if(NOT EXISTS "${_tilelang_import_lib}")
+    tilelang_get_python_interpreter(_tilelang_python)
+    find_program(_tilelang_dumpbin NAMES dumpbin dumpbin.exe)
+    find_program(_tilelang_libexe NAMES lib lib.exe)
+    if(NOT _tilelang_python OR NOT _tilelang_dumpbin OR NOT _tilelang_libexe)
+      message(FATAL_ERROR "Could not find Python/dumpbin/lib.exe to generate an import library for ${DLL_PATH}")
+    endif()
+
+    set(_tilelang_def_file "${_tilelang_import_dir}/${STEM}.def")
+    execute_process(
+      COMMAND "${_tilelang_python}" "${TILELANG_CMAKELISTS_DIR}/cmake/generate_windows_import_lib.py"
+              --dumpbin "${_tilelang_dumpbin}"
+              --dll "${DLL_PATH}"
+              --def "${_tilelang_def_file}"
+      RESULT_VARIABLE _tilelang_def_result
+    )
+    if(NOT _tilelang_def_result EQUAL 0 OR NOT EXISTS "${_tilelang_def_file}")
+      message(FATAL_ERROR "Failed to extract exports from ${DLL_PATH}")
+    endif()
+
+    set(_tilelang_machine "X64")
+    if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
+      set(_tilelang_machine "X86")
+    elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+      set(_tilelang_machine "ARM64")
+    endif()
+    execute_process(
+      COMMAND "${_tilelang_libexe}" "/def:${_tilelang_def_file}" "/machine:${_tilelang_machine}" "/out:${_tilelang_import_lib}"
+      RESULT_VARIABLE _tilelang_lib_result
+    )
+    if(NOT _tilelang_lib_result EQUAL 0 OR NOT EXISTS "${_tilelang_import_lib}")
+      message(FATAL_ERROR "Failed to generate import library ${_tilelang_import_lib} from ${DLL_PATH}")
+    endif()
+  endif()
+
+  set(${OUTPUT_VAR} "${_tilelang_import_lib}" PARENT_SCOPE)
+endfunction()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -48,14 +181,60 @@ endif()
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
   message(STATUS "Using ccache: ${CCACHE_PROGRAM} with base_dir=${CMAKE_SOURCE_DIR}")
-  if(APPLE)
+  if(APPLE OR WIN32)
     # Passing configs like `ccache base_dir=/xxx cc ...` is supported
     # (likely) since ccache 4.x, which has been provided by homebrew.
     # Our Linux builder image (manylinux2014 & manylinux_2_28) still
     # provides ccache 3.x and do not support this form.
     # `cibuildwheel` uses fixed folder on Linux (`/project`) as working directory,
     # so cache would work without setting `base_dir`.
-    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};base_dir=${CMAKE_SOURCE_DIR}")
+    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};base_dir=${CMAKE_SOURCE_DIR};hash_dir=false")
+  endif()
+
+  # Make ccache hits survive uv's PEP 517 build isolation on Windows.
+  #
+  # uv materializes each build into a freshly-named tempdir under
+  #   %LOCALAPPDATA%\Temp\.tmpXXXXXXXX\builds-v0\.tmpYYYYYYYY
+  # The path appears (a) as `-external:I` flags pointing at NVIDIA cu13 / z3
+  # and (b) inside cl.exe's preprocessed `#line` directives. Both feed into
+  # ccache's hash, so 3rdparty targets miss on every rebuild.
+  #
+  # ccache `-I*` / `-D*` options are already excluded from preprocessor-mode
+  # hashing because they reflect in the preprocessed output. But `-external:I`
+  # is an MSVC-specific extension ccache treats as opaque, so we tell it
+  # explicitly to ignore that whole class of flags. Combined with
+  # `prefix_command_cpp` below to rewrite #line paths in the preprocessed
+  # text, the resulting result-key is stable across .tmpXXX rotations.
+  if(WIN32)
+    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};ignore_options=-external:I*")
+  endif()
+
+  # Plug a wrapper around cl.exe -P so .tmpXXX path components in the
+  # preprocessor output are normalized before ccache hashes them. Pick a
+  # stable Python interpreter: the wrapper script's path is itself baked
+  # into ccache's hashed config, so a path containing .tmpXXX would defeat
+  # caching. Prefer the project's persistent .venv; skip the wrapper if no
+  # stable interpreter is available (caching still works for tilelang_objs
+  # but 3rdparty cross-rebuild hits will be reduced).
+  if(WIN32)
+    set(_tilelang_pep517_python "")
+    foreach(_candidate
+        "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe"
+        "${CMAKE_SOURCE_DIR}/venv/Scripts/python.exe")
+      if(EXISTS "${_candidate}")
+        set(_tilelang_pep517_python "${_candidate}")
+        break()
+      endif()
+    endforeach()
+    if(_tilelang_pep517_python)
+      set(_tilelang_pep517_wrapper
+          "${_tilelang_pep517_python} ${CMAKE_SOURCE_DIR}/cmake/ccache_strip_pep517.py")
+      set(CCACHE_PROGRAM
+          "${CCACHE_PROGRAM};prefix_command_cpp=${_tilelang_pep517_wrapper}")
+      message(STATUS "  ccache: stripping PEP 517 .tmpXXX paths via ${_tilelang_pep517_wrapper}")
+    else()
+      message(STATUS "  ccache: no stable .venv python found; PEP 517 .tmpXXX preprocessor leakage may reduce hits")
+    endif()
   endif()
   set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C compiler launcher")
   set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "CXX compiler launcher")
@@ -119,16 +298,11 @@ set(PREBUILD_CYTHON ON)
 
 # CUDA stub libraries (cuda/cudart/nvrtc) are used to build wheels that can run
 # across different CUDA Toolkit major versions and/or on CPU-only machines by
-# avoiding hard DT_NEEDED dependencies on versioned CUDA SONAMEs.
-#
-# These stubs are currently POSIX-only (dlopen/dlsym via <dlfcn.h>).
-if(WIN32 AND NOT CYGWIN)
-  set(_TILELANG_USE_CUDA_STUBS_DEFAULT OFF)
-else()
-  set(_TILELANG_USE_CUDA_STUBS_DEFAULT ON)
-endif()
+# lazy-loading the real libraries at runtime (dlopen/dlsym on POSIX,
+# LoadLibrary/GetProcAddress on Windows).
+set(_TILELANG_USE_CUDA_STUBS_DEFAULT ON)
 option(TILELANG_USE_CUDA_STUBS
-       "Use POSIX dlopen-based CUDA stub libraries (cuda/cudart/nvrtc) for portable wheels"
+       "Use stub libraries (cuda/cudart/nvrtc) for portable wheels"
        ${_TILELANG_USE_CUDA_STUBS_DEFAULT})
 unset(_TILELANG_USE_CUDA_STUBS_DEFAULT)
 
@@ -225,9 +399,12 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
     elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
       # Build CPU-only when we explicitly disable CUDA
       set(USE_CUDA OFF)
-    else()
+    elseif(TILELANG_CUDA_TOOLKIT_AVAILABLE)
       message(STATUS "Enable CUDA support by default.")
       set(USE_CUDA ON)
+    else()
+      message(STATUS "CUDA toolkit not found; building without CUDA support by default.")
+      set(USE_CUDA OFF)
     endif()
   endif()
 endif()
@@ -263,6 +440,25 @@ option(TILELANG_RELEASE_BUILD "Strip source paths from log messages (for wheel r
 # Include tvm after configs have been populated
 add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
 
+# Strip the hardcoded /Zi PRIVATE option that tvm-ffi attaches in its
+# tvm_ffi_add_msvc_flags() helper. It overrides our Embedded debug info
+# format and forces a side-channel vc140.pdb that races under parallel
+# builds (C1041) and breaks compiler caches. Done via target property
+# rewrite so 3rdparty/tvm-ffi remains pristine.
+if(MSVC)
+  foreach(_tilelang_ffi_tgt IN ITEMS
+      tvm_ffi_objs tvm_ffi_shared tvm_ffi_static tvm_ffi_testing)
+    if(TARGET ${_tilelang_ffi_tgt})
+      get_target_property(_tilelang_ffi_opts ${_tilelang_ffi_tgt} COMPILE_OPTIONS)
+      if(_tilelang_ffi_opts)
+        list(REMOVE_ITEM _tilelang_ffi_opts "/Zi" "-Zi")
+        set_target_properties(${_tilelang_ffi_tgt}
+          PROPERTIES COMPILE_OPTIONS "${_tilelang_ffi_opts}")
+      endif()
+    endif()
+  endforeach()
+endif()
+
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
 # since TVM_LOG_CUSTOMIZE=1 requires them to be supplied by the user.
 target_sources(tvm_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
@@ -274,6 +470,11 @@ endif()
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
 
 add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
+if(MSVC)
+  # Keep the wider project on its current baseline, but let TileLang's C++
+  # sources use C++20 so designated initializers compile under MSVC.
+  target_compile_features(tilelang_objs PRIVATE cxx_std_20)
+endif()
 
 # Set debug mode compile definitions
 # Enable the TVM debug option, i.e., TVM_LOG_DEBUG
@@ -284,19 +485,52 @@ endif()
 
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 target_compile_definitions(tilelang_objs PRIVATE TVM_LOG_CUSTOMIZE=1)
+if(WIN32)
+  # Some TVM headers define inline/template members behind TVM_DLL. MSVC
+  # rejects those definitions when TVM_DLL expands to dllimport in TileLang's
+  # consumer translation units, so consume them as ordinary declarations here.
+  target_compile_definitions(tilelang_objs PRIVATE TVM_DLL=)
+endif()
 if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
-add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-target_link_libraries(tilelang PUBLIC tvm)
+set(TILELANG_OUTPUT_TARGETS tvm)
+if(WIN32)
+  # On Windows, TileLang subclasses a large number of non-exported TVM C++
+  # classes. Building those objects into tvm.dll avoids an otherwise fragile
+  # cross-DLL ABI boundary while keeping Python-side registration semantics.
+  #
+  # MSVC can still discard translation-unit-local static init triggers from
+  # object-library inputs when those TUs are otherwise only referenced for
+  # side effects (for example TVM_FFI_STATIC_INIT_BLOCK() registrations).
+  # Archive the TileLang objects first, then force-include that archive into
+  # tvm.dll so tl.* object/global registrations survive the final link.
+  add_library(tilelang_archive STATIC $<TARGET_OBJECTS:tilelang_objs>)
+  set_target_properties(tilelang_archive PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    LINKER_LANGUAGE CXX
+  )
+  target_link_libraries(tvm PRIVATE tilelang_archive)
+  target_link_options(tvm PRIVATE
+    "/WHOLEARCHIVE:$<TARGET_FILE:tilelang_archive>"
+  )
+  # TVM is added with EXCLUDE_FROM_ALL above, but on Windows we install
+  # tvm.dll as the only native artifact that ships TileLang symbols, so make
+  # sure `ninja` (and `cmake --build`) actually builds it by default.
+  set_property(TARGET tvm PROPERTY EXCLUDE_FROM_ALL FALSE)
+else()
+  add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
+  target_link_libraries(tilelang PUBLIC tvm)
 
-# Place dev build outputs under build/lib for consistency
-set_target_properties(tilelang PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
+  # Place dev build outputs under build/lib for consistency
+  set_target_properties(tilelang PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  )
+  list(PREPEND TILELANG_OUTPUT_TARGETS tilelang)
+endif()
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
@@ -316,6 +550,16 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
+if(WIN32)
+  # Python headers on Windows auto-link pythonXY_d.lib in Debug builds, but
+  # some managed CPython distributions only ship the stable import library we
+  # already link below.
+  target_compile_definitions(tilelang_cython_wrapper PRIVATE Py_NO_LINK_LIB=1)
+  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+    target_link_options(tilelang_cython_wrapper PRIVATE
+      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+  endif()
+endif()
 
 # Disable Cython's PEP-489 multi-phase init for the wrapper. The generated
 # C++ depends on CPython's private `_xxsubinterpreters` module at import

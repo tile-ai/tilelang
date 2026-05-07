@@ -14,56 +14,115 @@
  * call, and symbols are resolved via dlsym().
  */
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
+#include "dynlib.h"
 #include <nvrtc.h>
 
-#if defined(_WIN32) && !defined(__CYGWIN__)
-#error "nvrtc_stub is currently POSIX-only (requires <dlfcn.h> / dlopen). "        \
-    "On Windows, build TileLang from source with -DTILELANG_USE_CUDA_STUBS=OFF " \
-    "to link against the real CUDA libraries."
-#endif
-
-#include <dlfcn.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-// Export symbols with default visibility for the shared stub library.
+#include <string>
+
+#if defined(_WIN32) || defined(__CYGWIN__)
+#define TILELANG_NVRTC_STUB_API
+#else
 #define TILELANG_NVRTC_STUB_API __attribute__((visibility("default")))
+#endif
 
 namespace {
 
-void *TryLoadLibNvrtc() {
-  // First, check if the symbols are already available globally.
-  // This handles cases where PyTorch or another library has already loaded
-  // libnvrtc.
-  // We use a representative symbol like nvrtcVersion.
-  void *sym = dlsym(RTLD_DEFAULT, "nvrtcVersion");
-  if (sym != nullptr && sym != reinterpret_cast<void *>(&nvrtcVersion)) {
-    return RTLD_DEFAULT;
+#ifndef TILELANG_CUDA_TOOLKIT_VERSION_MAJOR
+#error "TILELANG_CUDA_TOOLKIT_VERSION_MAJOR is not defined by the build system."
+#endif
+#ifndef TILELANG_CUDA_TOOLKIT_VERSION_MINOR
+#error "TILELANG_CUDA_TOOLKIT_VERSION_MINOR is not defined by the build system."
+#endif
+
+constexpr int kCudaToolkitMajor = TILELANG_CUDA_TOOLKIT_VERSION_MAJOR;
+constexpr int kCudaToolkitMinor = TILELANG_CUDA_TOOLKIT_VERSION_MINOR;
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+std::string CurrentNvrtcLibraryName() {
+  constexpr int major = kCudaToolkitMajor;
+  constexpr int minor = kCudaToolkitMinor;
+  if constexpr (major > 11) {
+    return "nvrtc64_" + std::to_string(major) + "0_0.dll";
+  } else if constexpr (major == 11) {
+    constexpr int abi_minor = minor >= 3 ? 2 : minor;
+    return "nvrtc64_11" + std::to_string(abi_minor) + "_0.dll";
   }
-  sym = dlsym(RTLD_NEXT, "nvrtcVersion");
-  if (sym != nullptr) {
-    return RTLD_NEXT;
+  return std::string();
+}
+#else
+std::string CurrentNvrtcLibraryName() {
+  constexpr int major = kCudaToolkitMajor;
+  constexpr int minor = kCudaToolkitMinor;
+  if constexpr (major > 11) {
+    return "libnvrtc.so." + std::to_string(major);
+  } else if constexpr (major == 11) {
+    constexpr int abi_minor = minor >= 3 ? 2 : minor;
+    return "libnvrtc.so.11." + std::to_string(abi_minor);
+  }
+  return std::string();
+}
+#endif
+
+void *TryLoadLibNvrtc() {
+  void *handle = nullptr;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  handle = tvm::tl::stubs::dynlib_find_loaded_by_basename_prefix(
+      "nvrtc64_", "nvrtcVersion", reinterpret_cast<void *>(&nvrtcVersion));
+  if (handle != nullptr) {
+    return handle;
   }
 
+  handle = tvm::tl::stubs::dynlib_open_first({CurrentNvrtcLibraryName()},
+                                             "nvrtcVersion");
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle =
+      tvm::tl::stubs::dynlib_open_matching("nvrtc64_*.dll", "nvrtcVersion");
+  if (handle != nullptr) {
+    return handle;
+  }
+#else
+  handle = tvm::tl::stubs::dynlib_find_loaded_by_basename_prefix(
+      "libnvrtc.so", "nvrtcVersion", reinterpret_cast<void *>(&nvrtcVersion));
+  if (handle != nullptr) {
+    return handle;
+  }
+#endif
+
+  // Check if symbols are already available (e.g. loaded by PyTorch).
+  handle = tvm::tl::stubs::dynlib_find_loaded(
+      "nvrtcVersion", reinterpret_cast<void *>(&nvrtcVersion));
+  if (handle != nullptr) {
+    return handle;
+  }
+
+#if !defined(_WIN32) || defined(__CYGWIN__)
+  handle = tvm::tl::stubs::dynlib_open_first(
+      {CurrentNvrtcLibraryName(), "libnvrtc.so"}, "nvrtcVersion");
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle = tvm::tl::stubs::dynlib_open_matching("libnvrtc.so*", "nvrtcVersion");
+  if (handle != nullptr) {
+    return handle;
+  }
+#endif
+
   fprintf(stderr,
-          "TileLang Error: libnvrtc symbols not found globally. "
+          "TileLang Error: nvrtc symbols not found. "
           "Make sure PyTorch with CUDA is installed before using TileLang.\n");
   abort();
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
-  (void)dlerror();
-  void *sym = dlsym(handle, name);
-  const char *error = dlerror();
-  if (error != nullptr) {
-    return nullptr;
-  }
-  return reinterpret_cast<T>(sym);
+  return reinterpret_cast<T>(tvm::tl::stubs::dynlib_sym(handle, name));
 }
 
 struct NVRTCAPI {

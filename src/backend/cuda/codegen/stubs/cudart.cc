@@ -15,23 +15,15 @@
  * API call, and symbols are resolved via dlsym().
  */
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
+#include "dynlib.h"
 #include <cuda_runtime_api.h>
 
-#if defined(_WIN32) && !defined(__CYGWIN__)
-#error "cudart_stub is currently POSIX-only (requires <dlfcn.h> / dlopen). "       \
-    "On Windows, build TileLang from source with -DTILELANG_USE_CUDA_STUBS=OFF " \
-    "to link against the real CUDA libraries."
-#endif
-
-#include <dlfcn.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <string>
 
 // This stub supports CUDA 11+.
 //
@@ -45,22 +37,51 @@
 #error                                                                         \
     "CUDART_VERSION is not defined. Ensure CUDA runtime headers are available."
 #endif
+#ifndef TILELANG_CUDA_TOOLKIT_VERSION_MAJOR
+#error "TILELANG_CUDA_TOOLKIT_VERSION_MAJOR is not defined by the build system."
+#endif
+#ifndef TILELANG_CUDA_TOOLKIT_VERSION_MINOR
+#error "TILELANG_CUDA_TOOLKIT_VERSION_MINOR is not defined by the build system."
+#endif
 static_assert(CUDART_VERSION >= 11000,
               "cudart_stub requires CUDA Toolkit headers >= 11.0 "
               "(CUDART_VERSION >= 11000).");
+static_assert(CUDART_VERSION / 1000 == TILELANG_CUDA_TOOLKIT_VERSION_MAJOR,
+              "CUDA runtime headers do not match CMake's CUDAToolkit major "
+              "version.");
+static_assert((CUDART_VERSION % 1000) / 10 ==
+                  TILELANG_CUDA_TOOLKIT_VERSION_MINOR,
+              "CUDA runtime headers do not match CMake's CUDAToolkit minor "
+              "version.");
 
-// Export symbols with default visibility for the shared stub library.
+#if defined(_WIN32) || defined(__CYGWIN__)
+// On Windows, symbols are exported via WINDOWS_EXPORT_ALL_SYMBOLS in CMake.
+// Using __declspec(dllexport) here would conflict with the plain declarations
+// in <cuda_runtime_api.h>.
+#define TILELANG_CUDART_STUB_API
+#else
 #define TILELANG_CUDART_STUB_API __attribute__((visibility("default")))
+#endif
 
 namespace {
 
-constexpr const char *kLibCudartPaths[] = {
-    "libcudart.so",
-    // Some distros ship a versioned SONAME as well; try a few common ones.
-    "libcudart.so.13",
-    "libcudart.so.12",
-    "libcudart.so.11",
-};
+#if defined(_WIN32) && !defined(__CYGWIN__)
+std::string CurrentCudartLibraryName() {
+  const int major = TILELANG_CUDA_TOOLKIT_VERSION_MAJOR;
+  if (major >= 12) {
+    return "cudart64_" + std::to_string(major) + ".dll";
+  }
+  return "cudart64_110.dll";
+}
+#else
+std::string CurrentCudartLibraryName() {
+  const int major = TILELANG_CUDA_TOOLKIT_VERSION_MAJOR;
+  if (major >= 12) {
+    return "libcudart.so." + std::to_string(major);
+  }
+  return "libcudart.so.11.0";
+}
+#endif
 
 using CudaGraphInstantiateLegacy = cudaError_t (*)(cudaGraphExec_t *pGraphExec,
                                                    cudaGraph_t graph,
@@ -71,43 +92,67 @@ using CudaGraphInstantiateWithFlags = cudaError_t (*)(
     cudaGraphExec_t *pGraphExec, cudaGraph_t graph, unsigned long long flags);
 
 void *TryLoadLibCudart() {
-  // First, check if the symbols are already available globally.
-  // This handles cases where PyTorch or another library has already loaded
-  // libcudart, making its symbols available in the global namespace.
-  // We use a representative symbol like cudaGetErrorString.
-  // dlsym with RTLD_DEFAULT searches the global scope.
-  void *sym = dlsym(RTLD_DEFAULT, "cudaGetErrorString");
-  if (sym != nullptr && sym != reinterpret_cast<void *>(&cudaGetErrorString)) {
-    return RTLD_DEFAULT;
-  }
-  sym = dlsym(RTLD_NEXT, "cudaGetErrorString");
-  if (sym != nullptr) {
-    return RTLD_NEXT;
+  void *handle = nullptr;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // Prefer a real CUDA runtime DLL on Windows. Some already-loaded modules may
+  // re-export a subset of cudart symbols, which is not enough for TVM.
+  handle = tvm::tl::stubs::dynlib_find_loaded_by_basename_prefix(
+      "cudart64_", "cudaGetErrorString",
+      reinterpret_cast<void *>(&cudaGetErrorString));
+  if (handle != nullptr) {
+    return handle;
   }
 
-  // Otherwise, attempt to dlopen the library directly.
-  void *handle = nullptr;
-  for (const char *path : kLibCudartPaths) {
-    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
-    if (handle != nullptr) {
-      return handle;
-    }
+  handle = tvm::tl::stubs::dynlib_open_first({CurrentCudartLibraryName()},
+                                             "cudaGetErrorString");
+  if (handle != nullptr) {
+    return handle;
   }
+
+  handle = tvm::tl::stubs::dynlib_open_matching("cudart64_*.dll",
+                                                "cudaGetErrorString");
+  if (handle != nullptr) {
+    return handle;
+  }
+#else
+  handle = tvm::tl::stubs::dynlib_find_loaded_by_basename_prefix(
+      "libcudart.so", "cudaGetErrorString",
+      reinterpret_cast<void *>(&cudaGetErrorString));
+  if (handle != nullptr) {
+    return handle;
+  }
+#endif
+
+  // Check if symbols are already available (e.g. loaded by PyTorch).
+  handle = tvm::tl::stubs::dynlib_find_loaded(
+      "cudaGetErrorString", reinterpret_cast<void *>(&cudaGetErrorString));
+  if (handle != nullptr) {
+    return handle;
+  }
+
+#if !defined(_WIN32) || defined(__CYGWIN__)
+  // Otherwise, attempt to load the library directly.
+  handle = tvm::tl::stubs::dynlib_open_first(
+      {CurrentCudartLibraryName(), "libcudart.so"}, "cudaGetErrorString");
+  if (handle != nullptr) {
+    return handle;
+  }
+
+  handle = tvm::tl::stubs::dynlib_open_matching("libcudart.so*",
+                                                "cudaGetErrorString");
+  if (handle != nullptr) {
+    return handle;
+  }
+#endif
 
   fprintf(stderr,
-          "TileLang Error: libcudart symbols not found. "
+          "TileLang Error: cudart symbols not found. "
           "Make sure PyTorch with CUDA is installed before using TileLang.\n");
   abort();
 }
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
-  (void)dlerror();
-  void *sym = dlsym(handle, name);
-  const char *error = dlerror();
-  if (error != nullptr) {
-    return nullptr;
-  }
-  return reinterpret_cast<T>(sym);
+  return reinterpret_cast<T>(tvm::tl::stubs::dynlib_sym(handle, name));
 }
 
 struct CUDARuntimeAPI {
