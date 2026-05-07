@@ -16,63 +16,51 @@ namespace tl {
 
 using namespace tir;
 
-class GemmSPWarpPolicyNode : public GemmWarpPolicyNode {
+class GemmSPNode : public TileOperatorNode {
 public:
-  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
-                                           Target target, String gemm_inst,
-                                           int bits) const;
-  TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmSPWarpPolicy", GemmSPWarpPolicyNode,
-                              GemmWarpPolicyNode);
+  tir::Buffer A, E, B, C;
+  BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
+  bool trans_A, trans_B, trans_E;
+  int M, N, K;
+  int stride_A, stride_B;
+  int offset_A, offset_B;
+  PrimExpr clear_accum = const_false();
+  int kPack = 1;
+  int wg_wait = 0;
+
+  // Sparse GEMM follows the Python lowering path and uses the generic GEMM
+  // warp policy object for backend-specific partition selection.
+  mutable GemmWarpPolicy policy;
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmSP", GemmSPNode, TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<GemmSPWarpPolicyNode>()
-        .def_ro("policy_type", &GemmSPWarpPolicyNode::policy_type)
-        .def_ro("m_warp", &GemmSPWarpPolicyNode::m_warp)
-        .def_ro("n_warp", &GemmSPWarpPolicyNode::n_warp);
+    refl::ObjectDef<GemmSPNode>()
+        .def_ro("A", &GemmSPNode::A)
+        .def_ro("E", &GemmSPNode::E)
+        .def_ro("B", &GemmSPNode::B)
+        .def_ro("C", &GemmSPNode::C)
+        .def_ro("aRegion", &GemmSPNode::aRegion_)
+        .def_ro("eRegion", &GemmSPNode::eRegion_)
+        .def_ro("bRegion", &GemmSPNode::bRegion_)
+        .def_ro("cRegion", &GemmSPNode::cRegion_)
+        .def_ro("trans_A", &GemmSPNode::trans_A)
+        .def_ro("trans_B", &GemmSPNode::trans_B)
+        .def_ro("trans_E", &GemmSPNode::trans_E)
+        .def_ro("M", &GemmSPNode::M)
+        .def_ro("N", &GemmSPNode::N)
+        .def_ro("K", &GemmSPNode::K)
+        .def_ro("stride_A", &GemmSPNode::stride_A)
+        .def_ro("stride_B", &GemmSPNode::stride_B)
+        .def_ro("offset_A", &GemmSPNode::offset_A)
+        .def_ro("offset_B", &GemmSPNode::offset_B)
+        .def_ro("clear_accum", &GemmSPNode::clear_accum)
+        .def_ro("kPack", &GemmSPNode::kPack)
+        .def_ro("wg_wait", &GemmSPNode::wg_wait)
+        .def_ro("policy", &GemmSPNode::policy);
   }
-};
 
-class GemmSPWarpPolicy : public ObjectRef {
-public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSPWarpPolicy, ObjectRef,
-                                             GemmSPWarpPolicyNode);
-
-  explicit GemmSPWarpPolicy(GemmWarpPolicyType policy_type) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
-    node->policy_type = (int)policy_type;
-    data_ = std::move(node);
-  }
-
-  explicit GemmSPWarpPolicy(int policy_type) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
-    node->policy_type = policy_type;
-    data_ = std::move(node);
-  }
-
-  explicit GemmSPWarpPolicy(int m_warp, int n_warp) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
-    node->m_warp = m_warp;
-    node->n_warp = n_warp;
-    node->policy_type = (int)GemmWarpPolicyType::kFree;
-    data_ = std::move(node);
-  }
-};
-
-class GemmSPNode : public TileOperatorNode {
-public:
-  BufferRegion aRegion_, bRegion_, cRegion_, eRegion_;
-  tir::Buffer a_, b_, c_, e_;
-  bool transA_, transB_;
-  int m_, n_, k_;
-  bool clearAccum_ = false;
-  // Backend-specific K packing parameter.
-  int kPack_ = 1;
-  int wgWait_ = 0;
-
-  mutable GemmSPWarpPolicy policy_;
-
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmSP", GemmSPNode, TileOperatorNode);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
@@ -80,56 +68,16 @@ public:
 
   TileOperator Clone() const;
 
-  static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<GemmSPNode>()
-        .def_ro("policy", &GemmSPNode::policy_)
-        .def_ro("aRegion", &GemmSPNode::aRegion_)
-        .def_ro("bRegion", &GemmSPNode::bRegion_)
-        .def_ro("cRegion", &GemmSPNode::cRegion_)
-        .def_ro("eRegion", &GemmSPNode::eRegion_)
-        .def_ro("a", &GemmSPNode::a_)
-        .def_ro("b", &GemmSPNode::b_)
-        .def_ro("c", &GemmSPNode::c_)
-        .def_ro("e", &GemmSPNode::e_)
-        .def_ro("transA", &GemmSPNode::transA_)
-        .def_ro("transB", &GemmSPNode::transB_)
-        .def_ro("m", &GemmSPNode::m_)
-        .def_ro("n", &GemmSPNode::n_)
-        .def_ro("k", &GemmSPNode::k_)
-        .def_ro("clearAccum", &GemmSPNode::clearAccum_)
-        .def_ro("kPack", &GemmSPNode::kPack_)
-        .def_ro("wgWait", &GemmSPNode::wgWait_);
-  }
-
 private:
   mutable bool completed_ = false;
 };
 
-using GemmSPTargetPredicate = bool (*)(Target target);
-
-struct GemmSPImpl {
-  const char *name;
-  GemmSPTargetPredicate match_target;
-
-  std::pair<int, int> (*compute_warp_partition)(
-      const GemmSPWarpPolicyNode &policy, int M, int N, int block_size,
-      Target target, String gemm_inst, int bits);
-
-  Stmt (*lower)(const GemmSPNode &op, const LowerArgs &T,
-                arith::Analyzer *analyzer);
-
-  LayoutMap (*infer_layout)(const GemmSPNode &op, const LayoutInferArgs &T,
-                            InferLevel level);
-};
-
-void RegisterGemmSPImpl(GemmSPImpl impl);
-
 class GemmSP : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSP, TileOperator, GemmSPNode);
-  TVM_DLL GemmSP(Array<PrimExpr> args,
-                 Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_DLL
+  GemmSP(Array<PrimExpr> args,
+         Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

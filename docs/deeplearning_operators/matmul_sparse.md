@@ -49,15 +49,9 @@ Here, `A_sparse` contains all the non-zero elements of `A`, while `E` stores the
 
 > NOTE: When using CUTLASS compressor, there is no naive position correspondence between the positions in `A_sparse`/`A` and `E`. (i.e. the 4-element group at [n, k] doesn't match the 4-bit metadata at [n, k] if you consider metadata as int4 tensor)
 The metadata is reordered internally to optimize memory access patterns (e.g., for ldsm instructions and vectorized loads).
-For more information, see **A note on `gemm_sp` and `gemm_sp_v2`**.
+For more information, see **A note on sparse GEMM metadata layout**.
 
 ## `T.gemm_sp` with CUTLASS's compressor
-
-:::{warning}
-
-It is strongly recommended to use T.gemm_sp_v2 due to its greater flexibility and faster compilation time.
-
-:::
 
 A 2:4 sparse GEMM kernel is similar to its dense counterpart, except that it also requires handling the associated metadata.
 
@@ -125,13 +119,11 @@ def matmul_sp_sm80(
     return main
 ```
 
-Under the hood, `gemm_sp` invokes templates adapted from `CUTLASS`, and a compatible metadata layout must be specified using `T.annotate_layout`.
+`T.gemm_sp` lowers directly to sparse MMA PTX and can consume CUTLASS-compatible metadata when the metadata layout is annotated.
 
-## `T.gemm_sp_v2` with a custom compressor
+## `T.gemm_sp` with a custom compressor
 
-To migrate to `gemm_sp_v2`, simply replace occurrences of `gemm_sp`.
-
-Unlike `gemm_sp`, `gemm_sp_v2` can operate without `T.annotate_layout`, and it also supports user-defined layouts and compressors.
+`T.gemm_sp` can operate without `T.annotate_layout`, and it also supports user-defined layouts and compressors. `T.gemm_sp_v2` remains available as a compatibility alias for the same implementation.
 
 The metadata is stored in a `(u)int8`/`(u)int16`/`(u)int32` tensor, where **each 4-bit chunk represents two 2-bit indices** of non-zero elements within four consecutive elements. Here, we start with an `int16` example, which is the **default dtype** for `bf16` and `fp16` on Ampere GPUs.
 
@@ -172,7 +164,7 @@ def decode_metadata(meta: torch.Tensor) -> torch.Tensor:
 
 The compressor can be implement at either `PyTorch`/`NumPy` level or kernel level.
 
-For example, `PyTorch` provides an Ampere compressor [here](https://github.com/pytorch/pytorch/blob/267d0197bfca0232488d51dd1ff735d619adc2cf/torch/sparse/_semi_structured_conversions.py#L47-L179). Note that in this implementation, a [permutation](https://github.com/pytorch/pytorch/blob/267d0197bfca0232488d51dd1ff735d619adc2cf/torch/sparse/_semi_structured_conversions.py#L173-L175) is applied to match CUTLASS’s metadata layout. If you do not annotate a metadata layout when using `gemm_sp_v2`, your compressor should replicate the same behavior as the PyTorch example—but without using the `_calculate_meta_reordering_scatter_offsets` function.
+For example, `PyTorch` provides an Ampere compressor [here](https://github.com/pytorch/pytorch/blob/267d0197bfca0232488d51dd1ff735d619adc2cf/torch/sparse/_semi_structured_conversions.py#L47-L179). Note that in this implementation, a [permutation](https://github.com/pytorch/pytorch/blob/267d0197bfca0232488d51dd1ff735d619adc2cf/torch/sparse/_semi_structured_conversions.py#L173-L175) is applied to match CUTLASS's metadata layout. If you do not annotate a metadata layout when using `gemm_sp`, your compressor should replicate the same behavior as the PyTorch example, but without using the `_calculate_meta_reordering_scatter_offsets` function.
 
 If you want to use a custom metadata layout in your kernel, one approach is to define the layout in `TileLang` and then apply the same layout to both your compressor kernel and the matmul_sp kernel.
 
@@ -246,9 +238,9 @@ def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
     return kernel
 ```
 
-## A note on `gemm_sp` and `gemm_sp_v2`
+## A note on sparse GEMM metadata layout
 
-Initially, `T.gemm_sp` followed the same design as `T.gemm`, lowering to a `CUTLASS` template. This inherently requires metadata to be reordered offline following a predetermined layout.
+The previous `T.gemm_sp` implementation followed the old template-based sparse GEMM path, lowering to a `CUTLASS` template. This inherently required metadata to be reordered offline following a predetermined layout.
 
 However, fixing a specific layout introduces several potential issues:
 
@@ -258,4 +250,4 @@ However, fixing a specific layout introduces several potential issues:
 
 3. Alignment requirements: `CUTLASS` enforces strict alignment checks, and many hyperparameter configurations can lead to compilation errors. (For reference, sm8x was implemented in `CUTLASS 2`.)
 
-`T.gemm_sp_v2` was designed to address these limitations, following the approach of `T.gemm`. It lowers directly to PTX, removing the need for a fixed metadata layout.
+The current `T.gemm_sp` implementation uses that direct sparse MMA PTX path, removing the need for a fixed metadata layout. `T.gemm_sp_v2` is kept as a compatibility alias.

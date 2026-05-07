@@ -120,7 +120,7 @@ class GemmSPBase:
 
     @property
     def k_pack(self) -> int:
-        return self.gemm_sp_node.k_pack
+        return getattr(self.gemm_sp_node, "kPack", getattr(self.gemm_sp_node, "k_pack", 1))
 
     @property
     def wg_wait(self) -> int:
