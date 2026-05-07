@@ -22,6 +22,8 @@ import re
 import logging
 import textwrap
 from tvm.tir.stmt_functor import post_order_visit
+from tilelang.utils.target import is_hexagon_target
+
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
@@ -452,7 +454,8 @@ class TLCUDASourceWrapper:
                 device_mod, host_mod = get_annotated_mod(self.mod, self.target)
             self.device_mod = device_mod
             self.host_mod = host_mod
-        assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
+        if not is_hexagon_target(self.target):
+            assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
         assert len(self.host_mod.functions) == 1, "Only support one function in host module."
 
         block_info_map = {}
@@ -950,6 +953,18 @@ class TLWrapper(BaseWrapper):
         self.target = target
         self.lib = None
 
+    @property
+    def arch(self):
+        if "_arch" in self.__dict__:
+            return self.__dict__["_arch"]
+        if is_hexagon_target(self.target):
+            from tilelang.carver.arch.hexagon import get_hexagon_arch
+
+            arch = get_hexagon_arch(self.target)
+            self.__dict__["_arch"] = arch
+            return arch
+        return None
+
     def assign_optimized_module(self, scheduled_ir_module: IRModule):
         self.scheduled_ir_module = scheduled_ir_module
 
@@ -965,16 +980,19 @@ class TLWrapper(BaseWrapper):
     # Get Scheduled Rt Module and return source to be compiled
     def wrap(self, c_source: str):
         assert self.scheduled_ir_module is not None, "Please assign optimized module first."
+
         if is_cuda_target(self.target):
             wrapper_class = TLCUDASourceWrapper
         elif is_hip_target(self.target):
             wrapper_class = TLHIPSourceWrapper
-        elif is_cpu_target(self.target):
-            wrapper_class = TLCPUSourceWrapper
         elif is_metal_target(self.target):
             wrapper_class = TLMetalSourceWrapper
+        elif is_cpu_target(self.target) or is_hexagon_target(self.target):
+            wrapper_class = TLCPUSourceWrapper
         else:
-            raise ValueError(f"Unsupported platform: {self.arch.platform}")
+            arch_name = self.arch.platform if self.arch else "unknown"
+            raise ValueError(f"Unsupported platform: {arch_name}")
+
         wrapper = wrapper_class(
             scheduled_ir_module=self.scheduled_ir_module,
             source=c_source,

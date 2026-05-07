@@ -84,6 +84,16 @@ class BaseKernelAdapter(ABC):
         return lambda: torch.device("cpu")
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
+        if self.func is None:
+            from tilelang.utils.target import is_hexagon_target
+
+            if is_hexagon_target(self.target):
+                raise RuntimeError(
+                    "Hexagon kernels cannot be executed directly on the host machine. "
+                    "To run this kernel, please use the Hexagon SDK Simulator or "
+                    "the HexagonLauncher on a supported Qualcomm device."
+                )
+            raise RuntimeError("The compiled function is not initialized.")
         return self.func(*args, **kwds)
 
     def get_kernel_source(self, kernel_only: bool = True) -> str:

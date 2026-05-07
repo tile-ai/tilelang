@@ -459,7 +459,10 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
+            _is_ir_only = getattr(kernel.adapter, "libpath", None) is None
             missing_files = self._get_missing_complete_cache_files(staging_path)
+            if _is_ir_only:
+                missing_files = [f for f in missing_files if not f.endswith(self.kernel_lib_path)]
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
                 raise RuntimeError(f"Incomplete cache staging directory is missing required file(s): {missing_names}")
@@ -577,6 +580,10 @@ class KernelCache:
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
         src_lib_path = kernel.adapter.libpath
+        if src_lib_path is None:
+            # Hexagon and other IR-only targets have no .so — skip binary cache
+            self.logger.debug("Skipping binary cache save: adapter.libpath is None (IR-only target)")
+            return
         if verbose:
             self.logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
         KernelCache._safe_write_file(kernel_lib_path, "wb", lambda file: file.write(KernelCache._load_binary(src_lib_path)))

@@ -86,12 +86,22 @@ def extract_python_func_declaration(source: str, func_name: str) -> str:
 
 
 def match_declare_kernel_cpu(source: str, annotation: str = "int32_t") -> int:
-    pattern = r"int32_t\s+\w+"
+    # C-style signature
+    pattern_c = r"int32_t\s+\w+"
+    # LLVM-style signature
+    pattern_llvm = r"define\s+.*@(?!llvm\.)\w+"
+
     for line in source.split("\n"):
-        if annotation in line:
-            matched = re.findall(pattern, line)
-            if len(matched) >= 1:
-                return source.index(matched[0] + "(")
+        # C pattern
+        matched = re.findall(pattern_c, line)
+        if matched:
+            return source.index(matched[0])
+        # LLVM pattern
+        matched = re.findall(pattern_llvm, line)
+        if matched:
+            # Match the start of the 'define'
+            return source.index(matched[0])
+
     raise ValueError("No global kernel found in the source code")
 
 

@@ -17,6 +17,7 @@ SUPPORTED_TARGETS: dict[str, str] = {
     "cuda": "CUDA GPU target (supports options such as `cuda -arch=sm_80`).",
     "hip": "ROCm HIP target (supports options like `hip -mcpu=gfx90a`).",
     "metal": "Apple Metal target for arm64 Macs.",
+    "hexagon": "Qualcomm Hexagon DSP target.",
     "llvm": "LLVM CPU target (accepts standard TVM LLVM options).",
     "webgpu": "WebGPU target for browser/WebGPU runtimes.",
     "c": "C source backend.",
@@ -63,6 +64,19 @@ def check_metal_availability() -> bool:
         return False
     # todo: check torch version?
     return arch == "arm64"
+
+
+def check_hexagon_availability() -> bool:
+    """
+    Check if Hexagon support is available in the TVM build.
+    Returns:
+        bool: True if Hexagon is available, False otherwise.
+    """
+    try:
+        # Check if Hexagon runtime is enabled in TVM
+        return tvm.runtime.enabled("hexagon")
+    except Exception:
+        return False
 
 
 def determine_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> str:
@@ -118,83 +132,72 @@ def normalize_cutedsl_target(target: str | Target) -> Target | None:
     return None
 
 
+def is_hexagon_target(target) -> bool:
+    """Return True for LLVM targets cross-compiled to Hexagon."""
+    if target is None:
+        return False
+    # Check if it's a TVM Target object
+    if hasattr(target, "kind"):
+        if target.kind.name == "hexagon":
+            return True
+        if target.kind.name == "llvm":
+            return "hexagon" in str(target.attrs.get("mtriple", "")).lower()
+    # Check if it's a string
+    return "hexagon" in str(target).lower()
+
+
 def determine_target(target: str | Target | Literal["auto"] = "auto", return_object: bool = False) -> str | Target:
     """
-    Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
+    Determine the appropriate target for compilation (CUDA, HIP, Hexagon, or manual selection).
 
     Args:
         target (Union[str, Target, Literal["auto"]]): User-specified target.
-            - If "auto", the system will automatically detect whether CUDA or HIP is available.
+            - If "auto", the system will automatically detect available accelerators.
             - If a string or Target, it is directly validated.
 
     Returns:
-        Union[str, Target]: The selected target ("cuda", "hip", or a valid Target object).
+        Union[str, Target]: The selected target string or Target object.
 
     Raises:
-        ValueError: If no CUDA or HIP is available and the target is "auto".
+        ValueError: If no compatible accelerator is found and the target is "auto".
         AssertionError: If the target is invalid.
     """
-
     return_var: str | Target = target
 
     if target == "auto":
-        target = tvm.target.Target.current(allow_none=True)
-        if target is not None:
-            return target
-        # Check for CUDA and HIP availability
-        is_cuda_available = check_cuda_availability()
-        is_hip_available = check_hip_availability()
+        curr = tvm.target.Target.current(allow_none=True)
+        if curr is not None:
+            return curr
 
-        # Determine the target based on availability
-        if is_cuda_available:
+        # Check for accelerator availability in order of preference
+        if check_cuda_availability():
             if torch.cuda.is_available() and (cap := torch.cuda.get_device_capability(0)):
                 return_var = Target({"kind": "cuda", "arch": f"sm_{nvcc.get_target_arch(cap)}"})
             else:
                 return_var = "cuda"
-        elif is_hip_available:
+        elif check_hip_availability():
             return_var = "hip"
         elif check_metal_availability():
             return_var = "metal"
+        elif check_hexagon_availability():
+            return_var = "llvm -mtriple=hexagon -mcpu=hexagonv73"
         else:
-            raise ValueError("No CUDA or HIP or MPS available on this system.")
-
+            raise ValueError("No compatible accelerator found (CUDA/HIP/Metal/Hexagon).")
     else:
-        possible_cutedsl_target = normalize_cutedsl_target(target)
-        if possible_cutedsl_target is not None:
-            try:
-                from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available  # lazy
+        return_var = target
 
-                check_cutedsl_available()
-            except ImportError as e:
-                raise AssertionError(f"CuTeDSL backend is not available. Please install tilelang-cutedsl package. {str(e)}") from e
+    # Handle Backend-Specific Normalization (Shorthands)
+    if isinstance(return_var, str) and "hexagon" in return_var.lower() and "-mtriple" not in return_var:
+        return_var = "llvm -mtriple=hexagon -mcpu=hexagonv73"
 
-            return_var = possible_cutedsl_target
-        else:
-            # Validate the target if it's not "auto"
-            if isinstance(target, Target):
-                return_var = target
-            elif isinstance(target, str):
-                normalized_target = target.strip()
-                if not normalized_target:
-                    raise AssertionError(f"Target {target} is not supported")
-                try:
-                    Target(normalized_target)
-                except Exception as err:
-                    examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
-                    raise AssertionError(
-                        f"Target {target} is not supported. Supported targets include: {examples}. "
-                        "Pass additional options after the base name, e.g. `cuda -arch=sm_80`."
-                    ) from err
-                return_var = normalized_target
-            else:
-                raise AssertionError(f"Target {target} is not supported")
+    # Handle CuTeDSL special case
+    possible_cutedsl = normalize_cutedsl_target(return_var)
+    if possible_cutedsl is not None:
+        return_var = possible_cutedsl
 
-    if isinstance(return_var, Target):
-        return return_var
+    # Final Validation and conversion to object if requested
     if return_object:
-        if isinstance(return_var, Target):
-            return return_var
-        return Target(return_var)
+        return return_var if isinstance(return_var, Target) else Target(return_var)
     return return_var
 
 

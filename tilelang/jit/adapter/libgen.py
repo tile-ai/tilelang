@@ -57,6 +57,15 @@ class LibraryGenerator:
 
     def compile_lib(self, timeout: float = None):
         target = self.target
+
+        from tilelang.utils.target import is_hexagon_target
+
+        if is_hexagon_target(self.target):
+            # We are cross-compiling for Hexagon.
+            # We cannot link or load this on the host machine.
+            self.lib = None
+            return
+
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
