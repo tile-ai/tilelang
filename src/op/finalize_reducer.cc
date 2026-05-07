@@ -13,7 +13,6 @@
 
 #include "utils.h"
 
-#include <array>
 #include <vector>
 
 namespace tvm {
@@ -88,129 +87,9 @@ FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
   data_ = std::move(node);
 }
 
-/**
- * @brief Lower the finalize_reducer TL operator to a TIR statement.
- *
- * Lowers the operator that finalizes a reducer by performing a thread-wide
- * AllReduce across the reducer's output elements and writing the reduced value
- * back into the reducer buffer. The function:
- * - Fetches the reducer buffer and expects its layout to be a Fragment.
- * - Builds index Vars for each output dimension.
- * - Reads the layout's ReplicateExtent and:
- *   - if extent == 1, emits a no-op Evaluate(0);
- *   - otherwise asks the registered backend to build the AllReduce extern call
- *     name, adds optional workspace (allocated via T.AddWorkspace when
- *     reducing_threads >= 32), and stores the result via BufferStore.
- * - Wraps the store in parallel outer For loops over each output dimension.
- *
- * @param T Lowering context containing buffer remapping, layout map, thread
- * bounds, target, and helper methods (e.g., AddWorkspace).
- * @param analyzer Arithmetic analyzer (unused by this implementation but
- * provided for consistency with lowering API).
- * @return Stmt The lowered TIR statement representing the AllReduce and
- * surrounding loops.
- *
- * @note The function ICHECKs that the reducer layout is present and a Fragment,
- *       and that ReplicateExtent is either 1 or equal to the thread block
- * extent; violations cause a fatal check failure.
- */
 Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
                                   arith::Analyzer *analyzer) const {
   return ResolveFinalizeReducerImpl(T.target).lower(*this, T, analyzer);
-}
-
-Stmt FinalizeReducerOpNode::LowerWithAllReduce(
-    const LowerArgs &T, arith::Analyzer *analyzer, int warp_size,
-    FinalizeReducerBatchAllReduceMaker make_batch_allreduce,
-    FinalizeReducerScalarAllReduceMaker make_scalar_allreduce) const {
-  ICHECK(make_batch_allreduce != nullptr);
-  ICHECK(make_scalar_allreduce != nullptr);
-  auto buffer = T.buffer_remap[reducer];
-  auto opt_layout = T.layout_map.Get(reducer);
-  ICHECK(opt_layout);
-  ICHECK(opt_layout->as<Fragment>());
-  auto layout = opt_layout->as<Fragment>().value();
-  Array<PrimExpr> indices_0;
-  indices_0.reserve(layout->OutputDim());
-  for (int i = 0; i < layout->OutputDim(); ++i)
-    indices_0.push_back(Var("__finred_" + std::to_string(i)));
-
-  const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
-  ICHECK(p_extent);
-  int extent = *p_extent, scale = 1;
-  ICHECK(extent == 1 || extent == *as_const_int(T.thread_bounds->extent))
-      << "Illegal finalize_reducer: extent=" << extent
-      << "; T.thread_bounds=" << T.thread_bounds;
-
-  if (extent == 1)
-    return Evaluate(0);
-
-  std::array op_names{"tl::SumOp", "tl::MaxOp", "tl::MinOp"};
-  auto op_str = op_names[(int)op];
-
-  // adopted from ReduceOp
-  int reducing_threads = extent;
-  auto thread_offset = T.thread_bounds->min;
-
-  // Validate batch against the layout's total output element count.
-  int64_t layout_batch_size = 1;
-  for (int i = 0; i < layout->OutputDim(); ++i) {
-    const int64_t *p = as_const_int(layout->OutputShape()[i]);
-    if (p == nullptr) {
-      layout_batch_size = -1;
-      break;
-    }
-    layout_batch_size *= *p;
-  }
-
-  int64_t effective_batch = static_cast<int64_t>(this->batch);
-
-  if (effective_batch > 1 && layout_batch_size > 0) {
-    CHECK_LE(effective_batch, layout_batch_size)
-        << "finalize_reducer: batch (" << effective_batch
-        << ") exceeds total output elements (" << layout_batch_size << ")";
-    CHECK_EQ(layout_batch_size % effective_batch, 0)
-        << "finalize_reducer: batch (" << effective_batch
-        << ") must evenly divide total output elements (" << layout_batch_size
-        << ")";
-  }
-
-  bool use_batch = effective_batch > 1 && reducing_threads > warp_size;
-
-  if (use_batch) {
-    // Batched AllReduce: single butterfly pass for all output elements.
-    int workspace_stride =
-        static_cast<int>(*as_const_int(T.thread_bounds->extent));
-    std::string allreduce = make_batch_allreduce(
-        op_str, reducing_threads, 1, thread_offset, T.thread_bounds->extent,
-        static_cast<int>(effective_batch), workspace_stride, T.target);
-    int ws_size = workspace_stride * static_cast<int>(effective_batch);
-    PrimExpr workspace = T.AddWorkspace(ws_size, buffer->dtype);
-    Array<PrimExpr> args = {StringImm(allreduce), buffer->data, workspace};
-    return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
-  }
-
-  // Scalar AllReduce path (original).
-  std::string allreduce =
-      make_scalar_allreduce(op_str, reducing_threads, 1, thread_offset,
-                            T.thread_bounds->extent, T.target);
-  Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
-                                        BufferLoad(buffer, indices_0)};
-  if (reducing_threads >= 32) {
-    PrimExpr workspace =
-        T.AddWorkspace(*as_const_int(T.thread_bounds->extent), buffer->dtype);
-    thread_reduce_args.push_back(workspace);
-  }
-  auto call = Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);
-  Stmt body = BufferStore(buffer, call, indices_0);
-
-  // make the outer spatial loop
-  for (int i = layout->OutputDim() - 1; i >= 0; i--) {
-    body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-               ForKind::kParallel, body);
-  }
-
-  return body;
 }
 
 /**

@@ -8,22 +8,11 @@
 
 #include "operator.h"
 
-#include <string>
-
 namespace tvm {
 
 namespace tl {
 
 using namespace tir;
-
-using ReduceBatchAllReduceMaker =
-    std::string (*)(std::string reducer, int reducing_threads, int scale,
-                    PrimExpr thread_offset, PrimExpr all_threads, int batch,
-                    int workspace_stride, Target target);
-
-using ReduceScalarAllReduceMaker = std::string (*)(
-    std::string reducer, int reducing_threads, int scale,
-    PrimExpr thread_offset, PrimExpr all_threads, Target target);
 
 /// Supported reduction operation types
 enum class ReduceTypeEnum : uint8_t {
@@ -130,25 +119,12 @@ public:
 
   /// Lower the operator to TIR statements
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  Stmt
-  LowerWithAllReduce(const LowerArgs &T, arith::Analyzer *analyzer,
-                     bool supports_fp16_bf16_nan_reduce,
-                     ReduceBatchAllReduceMaker make_batch_allreduce,
-                     ReduceScalarAllReduceMaker make_scalar_allreduce) const;
   /// Infer memory layout for buffers
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
   static const Op &Get();
   TileOperator Clone() const;
-
-private:
-  /// Generate initial value for reduction
-  PrimExpr MakeInitValue() const;
-  /// Generate reduction expression
-  PrimExpr MakeReduce(const PrimExpr &acc, const PrimExpr &b) const;
-  /// Generate codegen reducer string
-  std::string MakeCodegenReducer() const;
 };
 
 using ReduceTargetPredicate = bool (*)(Target target);

@@ -12,8 +12,6 @@
 #include "../transform/layout_reducer.h"
 #include "./operator.h"
 
-#include <string>
-
 /**
  * Get the Op singleton for the public FinalizeReducerOp handle.
  *
@@ -23,15 +21,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-using FinalizeReducerBatchAllReduceMaker =
-    std::string (*)(std::string reducer, int reducing_threads, int scale,
-                    PrimExpr thread_offset, PrimExpr all_threads, int batch,
-                    int workspace_stride, Target target);
-
-using FinalizeReducerScalarAllReduceMaker = std::string (*)(
-    std::string reducer, int reducing_threads, int scale,
-    PrimExpr thread_offset, PrimExpr all_threads, Target target);
 
 class FinalizeReducerOpNode : public TileOperatorNode {
 public:
@@ -53,10 +42,6 @@ public:
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  Stmt LowerWithAllReduce(
-      const LowerArgs &T, arith::Analyzer *analyzer, int warp_size,
-      FinalizeReducerBatchAllReduceMaker make_batch_allreduce,
-      FinalizeReducerScalarAllReduceMaker make_scalar_allreduce) const;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
   static const Op &Get();
