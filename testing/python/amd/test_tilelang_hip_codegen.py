@@ -611,8 +611,10 @@ def test_sync_warp_inside_conditional():
 
 
 # ---------------------------------------------------------------------------
-# Fix 5 — src/target/codegen_hip.cc, src/target/rt_mod_hip.cc,
-#          src/target/stubs/hip.cc, src/target/stubs/hip.h
+# Fix 5 — src/backend/rocm/codegen/codegen_hip.cc,
+#          src/backend/rocm/codegen/rt_mod_hip.cc,
+#          src/backend/rocm/stubs/hip.cc,
+#          src/backend/rocm/stubs/hip.h
 #   T.sync_grid() → cooperative_groups::this_grid().sync()
 #
 # Symptom: tl::sync_grid() had no handler → same assertion / link failure.

@@ -7,7 +7,7 @@
 #define TVM_TL_OP_UTILS_H_
 
 #include "./operator.h"
-#include "backend/cuda/codegen/stubs/cuda.h"
+#include "backend/cuda/stubs/cuda.h"
 #include "region.h"
 #include "tvm/runtime/base.h"
 #include <tvm/tir/buffer.h>

@@ -2,8 +2,9 @@
  * \file hiprtc.cc
  * \brief HIPRTC stub library for lazy loading libhiprtc.so at runtime.
  *
- * Similar to src/target/stubs/nvrtc.cc, this stub exports a minimal subset of
- * the HIPRTC C API and resolves the real implementation with dlopen()/dlsym().
+ * Similar to src/backend/cuda/stubs/nvrtc.cc, this stub exports a minimal
+ * subset of the HIPRTC C API and resolves the real implementation with
+ * dlopen()/dlsym().
  *
  * This allows a ROCm-enabled TileLang build to be imported on machines without
  * ROCm installed, and avoids hard DT_NEEDED dependencies on libhiprtc.
