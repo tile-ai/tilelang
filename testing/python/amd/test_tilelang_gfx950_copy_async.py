@@ -13,21 +13,7 @@ import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _is_gfx950() -> bool:
-    try:
-        from tilelang import tvm
-
-        mcpu = str(tvm.target.Target("rocm").attrs.get("mcpu", ""))
-        return "gfx950" in mcpu
-    except Exception:
-        return False
+from tilelang.testing import _check_is_gfx950 as _is_gfx950
 
 
 def _matmul_kernel(
@@ -86,10 +72,62 @@ def _matmul_kernel(
 # ---------------------------------------------------------------------------
 
 
-@tilelang.testing.requires_rocm
+def _matmul_kernel_async(
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    trans_A,
+    trans_B,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    coalesced_width=4,
+    threads=128,
+):
+    """Return a prim_func using T.async_copy (explicit async, no pipeline) for codegen tests."""
+    A_shape = (K, M) if trans_A else (M, K)
+    B_shape = (N, K) if trans_B else (K, N)
+    A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
+    B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            T.clear(C_local)
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
+                if trans_A:
+                    T.async_copy(A[k * block_K, by * block_M], A_shared, coalesced_width=coalesced_width)
+                else:
+                    T.async_copy(A[by * block_M, k * block_K], A_shared, coalesced_width=coalesced_width)
+                if trans_B:
+                    T.async_copy(B[bx * block_N, k * block_K], B_shared, coalesced_width=coalesced_width)
+                else:
+                    T.async_copy(B[k * block_K, bx * block_N], B_shared, coalesced_width=coalesced_width)
+                T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_gfx950
 def test_gfx950_cp_async_gs_16_in_codegen():
-    """coalesced_width=8 (16 bytes) must emit cp_async_gs<16> in generated HIP source."""
-    prog = _matmul_kernel(
+    """coalesced_width=8 (16 bytes) must emit cp_async_gs<16> in generated HIP source.
+
+    Uses T.async_copy (explicit async semantics) so that the 16-byte path is
+    emitted verbatim without relying on the software pipeline planner.
+    Pipelining correctness is covered separately by test_gfx950_copy_async_gemm_pipelined.
+    """
+    prog = _matmul_kernel_async(
         256,
         256,
         256,
@@ -101,7 +139,6 @@ def test_gfx950_cp_async_gs_16_in_codegen():
         T.float16,
         T.float32,
         T.float32,
-        num_stages=2,
         coalesced_width=8,  # 8 fp16 = 16 bytes → cp_async_gs<16>
     )
     kernel = tl.compile(prog, out_idx=[2])
@@ -147,7 +184,7 @@ def test_gfx950_smem_cap_160kb():
         (True, False, 1),
     ],
 )
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_gfx950
 def test_gfx950_copy_async_gemm_pipelined(trans_A, trans_B, k_pack):
     """Pipelined GEMM (num_stages=2) with gfx950 copy.async must be numerically correct."""
     prog = _matmul_kernel(

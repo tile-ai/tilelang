@@ -117,7 +117,9 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
 
     options = [
-        "-std=c++17",
+        # tl_templates/cuda/reduce.h uses explicit lambda template parameters
+        # (`[&]<typename T>(T) { ... }`) which require C++20.
+        "-std=c++20",
         "-I" + TILELANG_TEMPLATE_PATH,
         "-I" + CUTLASS_INCLUDE_DIR,
     ]

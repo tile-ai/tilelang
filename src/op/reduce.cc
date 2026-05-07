@@ -13,7 +13,6 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/parallel.h"
-#include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"
 #include "tir/transforms/ir_utils.h"
@@ -22,10 +21,79 @@
 #include "tvm/tir/stmt.h"
 #include "utils.h"
 
+#include <sstream>
+#include <vector>
+
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+std::vector<ReduceImpl> &ReduceImplRegistry() {
+  static std::vector<ReduceImpl> registry;
+  return registry;
+}
+
+std::vector<CumSumImpl> &CumSumImplRegistry() {
+  static std::vector<CumSumImpl> registry;
+  return registry;
+}
+
+const ReduceImpl &ResolveReduceImpl(Target target) {
+  const auto &registry = ReduceImplRegistry();
+  const ReduceImpl *matched_impl = nullptr;
+  for (const ReduceImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.reduce found multiple target-specific implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.reduce requires a target-specific implementation, but no reduce "
+         "implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+const CumSumImpl &ResolveCumSumImpl(Target target) {
+  const auto &registry = CumSumImplRegistry();
+  const CumSumImpl *matched_impl = nullptr;
+  for (const CumSumImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.cumsum found multiple target-specific implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.cumsum requires a target-specific implementation, but no cumsum "
+         "implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterReduceImpl(ReduceImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  ReduceImplRegistry().push_back(impl);
+}
+
+void RegisterCumSumImpl(CumSumImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  CumSumImplRegistry().push_back(impl);
+}
 
 // NormalizeToBufferRegion moved to src/op/utils.{h,cc}
 
@@ -85,141 +153,6 @@ TileOperator CumSumOpNode::Clone() const {
   return CumSumOp(op);
 }
 
-PrimExpr ReduceOpNode::MakeInitValue(int vsize) const {
-  auto dst_dtype = dst->dtype;
-  auto is_int = dst_dtype.is_int();
-  bool is_uint = dst_dtype.is_uint();
-  auto bits = dst_dtype.bits();
-
-  PrimExpr scalar;
-  if (type->isSum() || type->isAbsSum()) {
-    scalar = make_zero(dst->dtype);
-  } else if (type->isMax()) {
-    if (is_int)
-      scalar = make_const(dst->dtype, -(1 << (bits - 1)));
-    else if (is_uint)
-      scalar = make_const(dst->dtype, 0);
-    else
-      scalar = make_const(dst->dtype, -INFINITY);
-  } else if (type->isMin()) {
-    if (is_int)
-      scalar = make_const(dst->dtype, (1 << (bits - 1)) - 1);
-    else if (is_uint)
-      scalar = make_const(dst->dtype, (1 << bits) - 1);
-    else
-      scalar = make_const(dst->dtype, INFINITY);
-  } else if (type->isAbsMax()) {
-    scalar = make_const(dst->dtype, 0);
-  } else if (type->isBitAnd()) {
-    if (is_int)
-      scalar = make_const(dst->dtype, -1);
-    else if (is_uint)
-      scalar = make_const(dst->dtype, (1 << bits) - 1);
-    else
-      scalar = make_const(dst->dtype, -INFINITY);
-  } else if (type->isBitOr() || type->isBitXor()) {
-    scalar = make_zero(dst->dtype);
-  } else {
-    LOG(FATAL) << "Unsupported reduce type: " << type->type;
-    scalar = PrimExpr();
-  }
-
-  if (vsize <= 1)
-    return scalar;
-  return Broadcast(scalar, vsize);
-}
-
-std::optional<PrimExpr> ReduceOpNode::MakeReduce(int vsize, const PrimExpr &acc,
-                                                 const PrimExpr &b) const {
-  if (vsize == 1) {
-
-    PrimExpr rhs = b;
-    if (acc->dtype != rhs->dtype) {
-      rhs = Cast(acc->dtype, rhs);
-    }
-    const bool use_nan_op = nan_propagate && (acc.dtype().is_float16() ||
-                                              acc.dtype().is_bfloat16());
-    if (type->isSum()) {
-      return acc + rhs;
-    } else if (type->isAbsSum()) {
-      return acc + Max(rhs, -rhs);
-    } else if (type->isMax()) {
-      return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, rhs})
-                        : PrimExpr(Max(acc, rhs));
-    } else if (type->isMin()) {
-      return use_nan_op ? Call(acc.dtype(), tl::min_nan(), {acc, rhs})
-                        : PrimExpr(Min(acc, rhs));
-    } else if (type->isAbsMax()) {
-      auto abs_rhs = Max(rhs, -rhs);
-      return use_nan_op ? Call(acc.dtype(), tl::max_nan(), {acc, abs_rhs})
-                        : PrimExpr(Max(acc, abs_rhs));
-    } else if (type->isBitAnd()) {
-      return acc & rhs;
-    } else if (type->isBitOr()) {
-      return acc | rhs;
-    } else if (type->isBitXor()) {
-      return acc ^ rhs;
-    }
-    LOG(FATAL) << "Unsupported reduce type: " << type->type;
-    return std::nullopt;
-  }
-
-  if (vsize != 2)
-    return std::nullopt;
-
-  if (type->isSum()) {
-    return Call(acc.dtype(), tl::add2(), {acc, b});
-  } else if (type->isAbsSum()) {
-    return Call(acc.dtype(), tl::add2(),
-                {acc, Call(acc.dtype(), tl::abs2(), {b})});
-  } else if (type->isMax()) {
-    return Call(acc.dtype(), nan_propagate ? tl::max2_nan() : tl::max2(),
-                {acc, b});
-  } else if (type->isMin()) {
-    return Call(acc.dtype(), nan_propagate ? tl::min2_nan() : tl::min2(),
-                {acc, b});
-  } else if (type->isAbsMax()) {
-    return Call(acc.dtype(), nan_propagate ? tl::max2_nan() : tl::max2(),
-                {acc, Call(acc.dtype(), tl::abs2(), {b})});
-  }
-  return std::nullopt;
-}
-
-std::optional<std::string> ReduceOpNode::MakeCodegenReducer(int vsize) const {
-  const bool use_nan_op =
-      nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16());
-
-  auto base = [&]() -> std::string {
-    if (type->isSum() || type->isAbsSum())
-      return "tl::SumOp";
-    if (type->isMax())
-      return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (type->isMin())
-      return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
-    if (type->isAbsMax())
-      return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (type->isBitAnd())
-      return "tl::BitAndOp";
-    if (type->isBitOr())
-      return "tl::BitOrOp";
-    if (type->isBitXor())
-      return "tl::BitXorOp";
-    LOG(FATAL) << "Unsupported reduce type: " << type->type;
-    return "";
-  }();
-
-  if (vsize <= 1)
-    return base;
-
-  if (vsize == 2) {
-    if (dst->dtype.is_bfloat16())
-      return base + "_bf16x2";
-    if (dst->dtype.is_float16())
-      return base + "_fp16x2";
-  }
-  return std::nullopt;
-}
-
 static Array<PrimExpr> InputPlaceholders(size_t n) {
   Array<PrimExpr> result;
   result.reserve(n);
@@ -259,9 +192,8 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  *
  * Lowers a ReduceOpNode operating on fragment-scoped buffers into a sequence of
  * TIR statements implementing: optional initialization, thread-local reduction
- * (unrolled inner loops), inter-thread reduction via a runtime AllReduce call
- * (Hopper targets use `NamedBarrier` instead of the default
- * `SyncThreadsBarrier`), and an optional accumulation or copy back to the
+ * (unrolled inner loops), inter-thread reduction via a backend-provided
+ * runtime AllReduce call, and an optional accumulation or copy back to the
  * destination buffer when a temporary clear buffer is used.
  *
  * Behavior notes:
@@ -290,661 +222,8 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
  * normalization.
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
-
-static int GetPreferedVectorizedSize(DataType dt, Target target) {
-  if (!TargetIsCuda(target))
-    return 1;
-  if (dt.is_bfloat16() || dt.is_float16())
-    return 2;
-  return 1;
-}
-
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (nan_propagate && (dst->dtype.is_float16() || dst->dtype.is_bfloat16()) &&
-      !TargetIsCuda(T.target)) {
-    LOG(FATAL) << "ReduceOp: nan_propagate=True for fp16/bf16 max/min/absmax "
-                  "is only supported on CUDA targets (requires "
-                  "__hmax_nan/__hmin_nan intrinsics). Target was: "
-               << T.target->str();
-  }
-  auto get_buffer = [&](const Buffer &buf) {
-    if (T.buffer_remap.count(buf))
-      return T.buffer_remap[buf];
-    return buf;
-  };
-
-  auto src_scope = this->src.scope();
-  auto dst_scope = this->dst.scope();
-
-  if (src_scope == "local.fragment" && dst_scope == "local.fragment") {
-
-    auto src_buffer = get_buffer(this->src);
-    auto dst_buffer = get_buffer(this->dst);
-    auto src_layout = T.layout_map[this->src].as<Fragment>().value();
-    auto dst_layout = T.layout_map[this->dst].as<Fragment>().value();
-    auto red_layout = ComputeReducerLayout(src_layout, dim);
-    auto src_dim = src_layout->InputDim();
-    auto dst_dim = dst_layout->InputDim();
-
-    auto is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
-
-    if (is_1d_reduce) {
-      ICHECK(is_one(dst_layout->OutputShape().back()))
-          << "Reduce for scalar not implemented.";
-    } else {
-      ICHECK_EQ(src_dim, dst_dim + 1) << "Reduce dimension mismatch.";
-    }
-
-    Array<IterVar> dst_vars;
-    for (size_t i = 0; i < dst_dim; ++i) {
-      Var var = Var(std::string{char('i' + i)});
-      dst_vars.push_back(IterVar(Range(0, dst_layout->InputShape()[i]), var,
-                                 IterVarType::kDataPar));
-    }
-
-    Array<IterVar> src_vars;
-    if (!is_1d_reduce) {
-      src_vars = dst_vars;
-    }
-    Range reduce_dom(0, src_layout->InputShape()[this->dim]);
-    IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
-    src_vars.insert(src_vars.begin() + this->dim, reduce_iv);
-
-    auto src_indices = src_layout->Forward(
-        src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-    auto dst_indices = dst_layout->Forward(
-        dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-    auto red_indices = red_layout->Forward(
-        dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-
-    Array<Stmt> stmts;
-
-    auto require_init = this->clear;
-    if (this->type->isSum() || this->type->isAbsSum() ||
-        this->type->isBitAnd() || this->type->isBitOr() ||
-        this->type->isBitXor()) {
-      require_init = true;
-    }
-
-    auto clear_buffer = dst_buffer;
-    auto need_duplicate = false;
-    auto need_update = false;
-    if ((this->type->isSum() || this->type->isAbsSum()) && !this->clear) {
-      need_duplicate = true;
-      need_update = true;
-    } else if (this->type->isBitAnd() && !this->clear) {
-      need_duplicate = true;
-      need_update = true;
-    } else if ((this->type->isBitOr() || this->type->isBitXor()) &&
-               !this->clear) {
-      need_duplicate = true;
-      need_update = true;
-    } else if ((this->type->isMax() || this->type->isMin() ||
-                this->type->isAbsMax()) &&
-               !this->clear) {
-      need_duplicate = true;
-      need_update = true;
-    }
-
-    // red_layout should always contain dst_layout
-    // if we can prove they are the same, no need to duplicate buffer
-    // otherwise, red_layout contains more replicated dimensions than dst_layout
-    if (!analyzer->CanProve(dst_layout->ReplicateExtent() ==
-                            red_layout->ReplicateExtent())) {
-      need_duplicate = true;
-    }
-    ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
-                               red_layout->ReplicateExtent()))
-        << "Inconsistent layouts between src and dst in ReduceOp: "
-        << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
-
-    if (need_duplicate) {
-      // Create a new buffer with same shape and dtype as dst_buffer
-      clear_buffer = decl_buffer(red_layout->OutputShape(), dst_buffer->dtype,
-                                 dst_buffer->name + "_clear",
-                                 GetPtrStorageScope(dst_buffer->data));
-    }
-    // make reduce-init stmt
-    // For max/min/absmax with clear=false and need_duplicate, we still need to
-    // initialize the temporary buffer with identity values since the original
-    // dst values will be combined later via need_update
-
-    // make thread-local reduce
-    Array<PrimExpr> src_indice_compressed;
-    Array<IterVar> src_var_compressed;
-    for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
-      auto [expr, var] = CompressIterator(src_indices[i], src_vars,
-                                          src_vars[this->dim]->var, analyzer);
-      src_indice_compressed.push_back(expr);
-      src_var_compressed.push_back(var);
-    }
-
-    bool can_pack = false;
-    bool need_pack_buffer = false;
-    bool need_batch_pack_buffer = false;
-    Buffer clear_buffer_packed;
-    Buffer clear_batch_pack_buffer;
-    {
-      int vsize = GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
-      if (vsize > 1 && !src_var_compressed.empty()) {
-        auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
-        if (ext && ext->value >= vsize && ext->value % vsize == 0) {
-          can_pack = true;
-          DataType vec_dtype = clear_buffer->dtype.with_lanes(vsize);
-          clear_buffer_packed =
-              decl_buffer(red_layout->OutputShape(), vec_dtype,
-                          clear_buffer->name + "_pack",
-                          GetPtrStorageScope(clear_buffer->data));
-          need_pack_buffer = true;
-
-          Array<Stmt> local_body;
-
-          if (require_init ||
-              (need_duplicate && (this->type->isMax() || this->type->isMin() ||
-                                  this->type->isAbsMax()))) {
-            local_body.push_back(BufferStore(
-                clear_buffer_packed, this->MakeInitValue(vsize), red_indices));
-          }
-
-          const auto *ext_int =
-              as_const_int(src_var_compressed.back()->dom->extent);
-          int64_t inner_extent = *ext_int;
-          PrimExpr halved_extent = Integer(inner_extent / vsize);
-
-          auto &inner_var = src_var_compressed.back();
-
-          PrimExpr ramp_base =
-              Substitute(src_indice_compressed.back(),
-                         {{inner_var->var, inner_var->var * Integer(2)}});
-          src_indice_compressed.Set(
-              src_indice_compressed.size() - 1,
-              Ramp(ramp_base, IntImm(DataType::Int(32), 1), vsize));
-
-          auto src_load = BufferLoad(src_buffer, src_indice_compressed);
-          auto *src_writer = src_load.CopyOnWrite();
-          src_writer->dtype = vec_dtype;
-
-          Stmt reduce_local = BufferStore(
-              clear_buffer_packed,
-              this->MakeReduce(vsize,
-                               BufferLoad(clear_buffer_packed, red_indices),
-                               src_load)
-                  .value(),
-              red_indices);
-
-          reduce_local =
-              For(inner_var->var, 0, halved_extent, ForKind::kUnrolled,
-                  reduce_local, std::nullopt,
-                  {{tir::attr::pragma_unroll_explicit, Bool(false)}});
-
-          for (int i = static_cast<int>(src_layout->OutputDim()) - 2; i >= 0;
-               --i) {
-            reduce_local =
-                For(src_var_compressed[i]->var, 0,
-                    src_var_compressed[i]->dom->extent, ForKind::kUnrolled,
-                    reduce_local, std::nullopt,
-                    {{tir::attr::pragma_unroll_explicit, Bool(false)}});
-          }
-          local_body.push_back(reduce_local);
-
-          auto acc_vec = BufferLoad(clear_buffer_packed, red_indices);
-          auto lane0 = Shuffle::ExtractElement(acc_vec, 0);
-          auto lane1 = Shuffle::ExtractElement(acc_vec, 1);
-          auto scalar_result = this->MakeReduce(1, lane0, lane1).value();
-          local_body.push_back(
-              BufferStore(clear_buffer, scalar_result, red_indices));
-
-          stmts.push_back(SeqStmt(local_body));
-        }
-      }
-    }
-
-    if (!can_pack) {
-      if (require_init ||
-          (need_duplicate && (this->type->isMax() || this->type->isMin() ||
-                              this->type->isAbsMax()))) {
-        stmts.push_back(
-            BufferStore(clear_buffer, this->MakeInitValue(), red_indices));
-      }
-
-      Stmt reduce_local = BufferStore(
-          clear_buffer,
-          this->MakeReduce(1, BufferLoad(clear_buffer, red_indices),
-                           BufferLoad(src_buffer, src_indice_compressed))
-              .value(),
-          red_indices);
-
-      for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0; --i) {
-        reduce_local = For(src_var_compressed[i]->var, 0,
-                           src_var_compressed[i]->dom->extent,
-                           ForKind::kUnrolled, reduce_local, std::nullopt,
-                           {{tir::attr::pragma_unroll_explicit, Bool(false)}});
-      }
-      stmts.push_back(reduce_local);
-    }
-
-    auto src_thread = src_layout->ForwardThread(
-        src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
-    auto iter_sum =
-        arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
-
-    // batch is set by the user via the "batch" annotation (default 1 = scalar).
-    // When batch > 1 the compiler phases the reduction:
-    //   1. init + local reduce loop
-    //   2. ceil(N/batch) batched AllReduce calls, each sharing one barrier pair
-    //   3. copy-back loop (only when need_duplicate)
-    const int batch = this->batch;
-
-    // Validate batch against the actual per-thread element count N.
-    if (batch > 1) {
-      int64_t N_total = 1;
-      for (const auto &s : clear_buffer->shape) {
-        const int64_t *p = as_const_int(s);
-        ICHECK(p != nullptr) << "ReduceOp: batch > 1 requires compile-time "
-                                "constant output shape";
-        N_total *= *p;
-      }
-      CHECK_LE(batch, N_total)
-          << "ReduceOp: batch=" << batch
-          << " exceeds per-thread output element count N=" << N_total;
-      CHECK_EQ(N_total % batch, 0)
-          << "ReduceOp: batch=" << batch << " must evenly divide N=" << N_total;
-    }
-
-    bool use_batch = batch > 1;
-
-    // Helper: wrap a body in the dst_vars loops with partitioning & unrolling.
-    auto make_dst_loop = [&](Stmt body, const Array<IterVar> &vars) -> Stmt {
-      for (int i = static_cast<int>(vars.size()) - 1; i >= 0; --i) {
-        body = For(vars[i]->var, 0, vars[i]->dom->extent, ForKind::kParallel,
-                   body);
-      }
-      body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
-                           red_layout);
-      body = PragmaUnrollLoop(Downcast<For>(body));
-      return body;
-    };
-
-    // Helper: create fresh dst loop variables (needed so that pre/post loops
-    // do not reuse the same Var objects).
-    auto make_fresh_dst_vars = [&](const std::string &suffix)
-        -> std::tuple<Array<IterVar>, Array<PrimExpr>, Array<PrimExpr>> {
-      Array<IterVar> vars;
-      for (size_t i = 0; i < dst_dim; ++i) {
-        Var v(std::string{char('i' + i)} + suffix);
-        vars.push_back(IterVar(Range(0, dst_layout->InputShape()[i]), v,
-                               IterVarType::kDataPar));
-      }
-      auto d_idx = dst_layout->Forward(
-          vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-      auto r_idx = red_layout->Forward(
-          vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-      return {vars, d_idx, r_idx};
-    };
-
-    if (use_batch) {
-      // ================================================================
-      // Batched AllReduce path — three phases:
-      //   1. Loop: init + thread-local reduce
-      //   2. Flat: batched AllReduce (single butterfly pass for all values)
-      //   3. Loop: copy-back (only when need_duplicate)
-      // ================================================================
-
-      // Phase 1: pre-reduce loop
-      Stmt pre_body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
-      pre_body = make_dst_loop(pre_body, dst_vars);
-
-      Array<Stmt> phases;
-      phases.push_back(pre_body);
-
-      // Phase 2: batched AllReduce call(s).
-      // workspace_stride = reducing_threads (SoA layout in smem:
-      //   slot for batch item b, thread t = red_buf[b * reducing_threads + t])
-      for (const auto &iter_split : iter_sum->args) {
-        auto mark = iter_split->source->source.as<Var>();
-        if (!mark)
-          continue;
-        if (!mark.value().same_as(src_vars[this->dim]->var))
-          continue;
-        auto scale = as_const_int(iter_split->scale);
-        auto extent = as_const_int(iter_split->extent);
-        ICHECK(scale != nullptr && extent != nullptr);
-        if (*extent == 1)
-          continue;
-
-        int reducing_threads = (*extent) * (*scale);
-        auto thread_offset = T.thread_bounds->min;
-        std::stringstream ss;
-
-        // Use run_batch (not run) to avoid overload-resolution ambiguity when
-        // a pointer is passed as first argument.
-        int vsize = GetPreferedVectorizedSize(clear_buffer->dtype, T.target);
-        bool can_batch_pack = vsize > 1 && batch >= vsize && batch % vsize == 0;
-        int eff_batch = can_batch_pack ? (batch / vsize) : batch;
-
-        std::string reducer =
-            this->MakeCodegenReducer(can_batch_pack ? vsize : 1).value();
-
-        if (TargetHasSMVersionGE(T.target, 90)) {
-          auto all_threads = T.thread_bounds->extent;
-          ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
-             << (*scale) << ", " << thread_offset << ", tl::NamedBarrier<"
-             << all_threads << ">, " << eff_batch << ", " << reducing_threads
-             << ">::run_batch";
-        } else if (TargetIsRocm(T.target)) {
-          ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
-             << (*scale) << ", " << thread_offset << ", " << eff_batch << ", "
-             << reducing_threads << ">::run_batch";
-        } else {
-          ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
-             << (*scale) << ", " << thread_offset
-             << ", tl::SyncThreadsBarrier, " << eff_batch << ", "
-             << reducing_threads << ">::run_batch";
-        }
-
-        // Workspace is only needed for cross-warp reduce (> 32 threads).
-        // Allocate once; all chunks share the same workspace buffer.
-        DataType ws_dtype = can_batch_pack
-                                ? clear_buffer->dtype.with_lanes(vsize)
-                                : clear_buffer->dtype;
-        PrimExpr workspace;
-        bool need_workspace = reducing_threads > 32;
-        if (need_workspace) {
-          int ws_size = reducing_threads * eff_batch;
-          workspace = T.AddWorkspace(ws_size, ws_dtype);
-        }
-
-        // Compute N_total and num_chunks for this buffer.
-        int64_t N_total = 1;
-        for (const auto &s : clear_buffer->shape)
-          N_total *= *as_const_int(s);
-        int num_chunks = static_cast<int>(N_total / batch);
-
-        // Compute strides for reverse-linearisation of clear_buffer->shape.
-        int buf_ndim = static_cast<int>(clear_buffer->shape.size());
-        std::vector<int64_t> buf_shape_vals;
-        for (const auto &s : clear_buffer->shape)
-          buf_shape_vals.push_back(*as_const_int(s));
-        std::vector<int64_t> buf_strides(buf_ndim, 1);
-        for (int d = buf_ndim - 2; d >= 0; d--)
-          buf_strides[d] = buf_strides[d + 1] * buf_shape_vals[d + 1];
-
-        std::string template_str = ss.str();
-
-        if (can_batch_pack) {
-          int K = vsize;
-          int packed_batch = batch / K;
-
-          Buffer pack_buf = decl_buffer({Integer(packed_batch)},
-                                        clear_buffer->dtype.with_lanes(K),
-                                        clear_buffer->name + "_pack",
-                                        GetPtrStorageScope(clear_buffer->data));
-
-          need_batch_pack_buffer = true;
-          clear_batch_pack_buffer = pack_buf;
-
-          for (int chunk = 0; chunk < num_chunks; chunk++) {
-            int64_t flat_offset = (int64_t)chunk * batch;
-
-            // --- Pack loop ---
-            Var pack_j("pack_j");
-            PrimExpr base = Integer(flat_offset);
-            PrimExpr scaled = pack_j * K;
-
-            Array<PrimExpr> idx_a, idx_b;
-            PrimExpr fa = base + scaled;
-            PrimExpr fb = base + scaled + Integer(1);
-            for (int d = 0; d < buf_ndim; d++) {
-              idx_a.push_back(FloorMod(FloorDiv(fa, Integer(buf_strides[d])),
-                                       Integer(buf_shape_vals[d])));
-              idx_b.push_back(FloorMod(FloorDiv(fb, Integer(buf_strides[d])),
-                                       Integer(buf_shape_vals[d])));
-            }
-            auto a_load = BufferLoad(clear_buffer, idx_a);
-            auto b_load = BufferLoad(clear_buffer, idx_b);
-            Stmt pack_body = BufferStore(
-                pack_buf, Shuffle({a_load, b_load}, {0, 1}), {pack_j});
-            Stmt pack_loop =
-                For(pack_j, 0, packed_batch, ForKind::kUnrolled, pack_body);
-            phases.push_back(pack_loop);
-
-            // --- AllReduce on packed buffer ---
-            PrimExpr packed_ptr =
-                Call(DataType::Handle(), builtin::address_of(),
-                     {BufferLoad(pack_buf, {Integer(0)})});
-            Array<PrimExpr> args = {StringImm(template_str), packed_ptr};
-            if (need_workspace)
-              args.push_back(workspace);
-            phases.push_back(Evaluate(
-                Call(DataType::Handle(), builtin::call_extern(), args)));
-
-            // --- Unpack loop ---
-            Var unpack_j("unpack_j");
-            PrimExpr ubase = Integer(flat_offset);
-            PrimExpr uscaled = unpack_j * K;
-            Array<PrimExpr> uidx_a, uidx_b;
-            PrimExpr ufa = ubase + uscaled;
-            PrimExpr ufb = ubase + uscaled + Integer(1);
-            for (int d = 0; d < buf_ndim; d++) {
-              uidx_a.push_back(FloorMod(FloorDiv(ufa, Integer(buf_strides[d])),
-                                        Integer(buf_shape_vals[d])));
-              uidx_b.push_back(FloorMod(FloorDiv(ufb, Integer(buf_strides[d])),
-                                        Integer(buf_shape_vals[d])));
-            }
-            auto packed_val = BufferLoad(pack_buf, {unpack_j});
-            Stmt unpack_body = SeqStmt({
-                BufferStore(clear_buffer,
-                            Shuffle::ExtractElement(packed_val, 0), uidx_a),
-                BufferStore(clear_buffer,
-                            Shuffle::ExtractElement(packed_val, 1), uidx_b),
-            });
-            Stmt unpack_loop =
-                For(unpack_j, 0, packed_batch, ForKind::kUnrolled, unpack_body);
-            phases.push_back(unpack_loop);
-          }
-        } else {
-          for (int chunk = 0; chunk < num_chunks; chunk++) {
-            int64_t flat_offset = (int64_t)chunk * batch;
-            // Map flat_offset to multi-dim indices in clear_buffer.
-            Array<PrimExpr> chunk_indices;
-            for (int d = 0; d < buf_ndim; d++) {
-              int64_t idx = (flat_offset / buf_strides[d]) % buf_shape_vals[d];
-              chunk_indices.push_back(Integer(idx));
-            }
-            // Pointer to the start of this chunk's elements in clear_buffer.
-            PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
-                                {BufferLoad(clear_buffer, chunk_indices)});
-
-            Array<PrimExpr> args = {StringImm(template_str), ptr};
-            if (need_workspace)
-              args.push_back(workspace);
-            phases.push_back(Evaluate(
-                Call(DataType::Handle(), builtin::call_extern(), args)));
-          }
-        }
-      }
-
-      // Phase 3: copy-back (only when a temp buffer was used)
-      if (need_duplicate) {
-        auto [post_vars, post_dst_idx, post_red_idx] =
-            make_fresh_dst_vars("_p");
-
-        // Recompute predicate with post_vars.
-        PrimExpr predicate = Bool(true);
-        {
-          auto dst_th = post_dst_idx;
-          dst_th.push_back(T.thread_var);
-          auto inv = dst_layout->Inverse()->Forward(dst_th);
-          inv.pop_back();
-          for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++)
-            predicate = predicate && (inv[i] == post_vars[i]->var);
-          predicate = analyzer->Simplify(predicate);
-        }
-
-        PrimExpr update;
-        if (need_update) {
-          auto src_val = BufferLoad(clear_buffer, post_red_idx);
-          auto dst_val = BufferLoad(dst_buffer, post_dst_idx);
-          if (this->type->isSum() || this->type->isAbsSum()) {
-            update = dst_val + src_val;
-          } else if (this->type->isBitAnd()) {
-            update = this->clear ? src_val : bitwise_and(dst_val, src_val);
-          } else if (this->type->isBitOr()) {
-            update = bitwise_or(dst_val, src_val);
-          } else if (this->type->isBitXor()) {
-            update = bitwise_xor(dst_val, src_val);
-          } else if (this->type->isMax() || this->type->isAbsMax()) {
-            update = Max(dst_val, src_val);
-          } else if (this->type->isMin()) {
-            update = Min(dst_val, src_val);
-          } else {
-            LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
-          }
-        } else {
-          update = BufferLoad(clear_buffer, post_red_idx);
-        }
-        auto store = BufferStore(dst_buffer, update, post_dst_idx);
-        Stmt post_body;
-        if (analyzer->CanProve(predicate)) {
-          post_body = store;
-        } else {
-          post_body = IfThenElse(predicate, store);
-        }
-        phases.push_back(make_dst_loop(post_body, post_vars));
-      }
-
-      Stmt body = phases.size() > 1 ? SeqStmt(phases) : phases[0];
-      if (need_duplicate) {
-        body = Allocate(clear_buffer->data, clear_buffer->dtype,
-                        clear_buffer->shape, const_true(), body);
-      }
-      if (need_pack_buffer) {
-        body = Allocate(clear_buffer_packed->data, clear_buffer_packed->dtype,
-                        clear_buffer_packed->shape, const_true(), body);
-      }
-      if (need_batch_pack_buffer) {
-        body = Allocate(clear_batch_pack_buffer->data,
-                        clear_batch_pack_buffer->dtype,
-                        clear_batch_pack_buffer->shape, const_true(), body);
-      }
-      return body;
-
-    } else {
-      // ================================================================
-      // Original scalar AllReduce path (unchanged).
-      // ================================================================
-      for (const auto &iter_split : iter_sum->args) {
-        auto mark = iter_split->source->source.as<Var>();
-        if (!mark)
-          continue;
-        if (mark.value().same_as(src_vars[this->dim]->var)) {
-          auto scale = as_const_int(iter_split->scale);
-          auto extent = as_const_int(iter_split->extent);
-          ICHECK(scale != nullptr && extent != nullptr);
-          if (*extent == 1)
-            continue;
-
-          int reducing_threads = (*extent) * (*scale);
-          std::stringstream ss;
-
-          auto thread_offset = T.thread_bounds->min;
-          if (TargetHasSMVersionGE(T.target, 90)) {
-            auto all_threads = T.thread_bounds->extent;
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer().value() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ", tl::NamedBarrier<" << all_threads << ">>::run";
-          } else {
-            ss << "tl::AllReduce<" << this->MakeCodegenReducer().value() << ", "
-               << reducing_threads << ", " << (*scale) << ", " << thread_offset
-               << ">::run";
-          }
-          Array<PrimExpr> thread_reduce_args = {
-              StringImm(ss.str()), BufferLoad(clear_buffer, red_indices)};
-          if (reducing_threads > 32) {
-            int workspace_size =
-                static_cast<int>(*as_const_int(T.thread_bounds->extent));
-            PrimExpr workspace =
-                T.AddWorkspace(workspace_size, clear_buffer->dtype);
-            thread_reduce_args.push_back(workspace);
-          }
-          auto call = Call(clear_buffer->dtype, builtin::call_extern(),
-                           thread_reduce_args);
-          stmts.push_back(BufferStore(clear_buffer, call, red_indices));
-        }
-      }
-
-      PrimExpr predicate = Bool(true);
-      {
-        auto dst_th_indices = dst_indices;
-        dst_th_indices.push_back(T.thread_var);
-        auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
-        inv.pop_back();
-        for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
-          predicate = predicate && (inv[i] == dst_vars[i]->var);
-        }
-        predicate = analyzer->Simplify(predicate);
-      }
-      if (need_duplicate) {
-        PrimExpr update;
-        if (need_update) {
-          auto src_val = BufferLoad(clear_buffer, red_indices);
-          auto dst_val = BufferLoad(dst_buffer, dst_indices);
-          if (this->type->isSum() || this->type->isAbsSum()) {
-            update = dst_val + src_val;
-          } else if (this->type->isBitAnd()) {
-            update = this->clear ? src_val : bitwise_and(dst_val, src_val);
-          } else if (this->type->isBitOr()) {
-            update = bitwise_or(dst_val, src_val);
-          } else if (this->type->isBitXor()) {
-            update = bitwise_xor(dst_val, src_val);
-          } else if (this->type->isMax() || this->type->isAbsMax()) {
-            update = Max(dst_val, src_val);
-          } else if (this->type->isMin()) {
-            update = Min(dst_val, src_val);
-          } else {
-            LOG(FATAL) << "Unsupported reduce type: " << this->type->type;
-          }
-        } else {
-          update = BufferLoad(clear_buffer, red_indices);
-        }
-        auto store = BufferStore(dst_buffer, update, dst_indices);
-        if (analyzer->CanProve(predicate)) {
-          stmts.push_back(store);
-        } else {
-          stmts.push_back(IfThenElse(predicate, store));
-        }
-      }
-
-      auto body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
-      for (int i = static_cast<int>(dst_layout->InputDim()) - 1; i >= 0; --i) {
-        body = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
-                   ForKind::kParallel, body);
-      }
-
-      if (dst_layout->InputDim() > 0) {
-        body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer,
-                             red_layout);
-        body = PragmaUnrollLoop(Downcast<For>(body));
-      } else {
-        auto guard = (T.thread_var == T.thread_bounds->min);
-        body = IfThenElse(guard, body);
-      }
-
-      if (need_duplicate) {
-        body = Allocate(clear_buffer->data, clear_buffer->dtype,
-                        clear_buffer->shape, const_true(), body);
-      }
-      if (need_pack_buffer) {
-        body = Allocate(clear_buffer_packed->data, clear_buffer_packed->dtype,
-                        clear_buffer_packed->shape, const_true(), body);
-      }
-      return body;
-    }
-  }
-
-  LOG(FATAL) << "Reduce for buffers in scope (" << src_scope << ", "
-             << dst_scope << ") is not implemented.";
-  return Stmt();
+  return ResolveReduceImpl(T.target).lower(*this, T, analyzer);
 }
 
 LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
@@ -1029,48 +308,7 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
 }
 
 Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (IsFragmentBuffer(this->src) && IsFragmentBuffer(this->dst)) {
-    LOG(FATAL) << "CumSum for fragment not implemented, please raise an issue "
-                  "if you need this feature.";
-  } else if (IsSharedBuffer(this->src)) {
-    ICHECK(IsSharedBuffer(this->dst));
-    std::stringstream ss;
-    auto threads = T.thread_bounds->extent;
-    Array<PrimExpr> args;
-
-    // Build access pointers from regions locally
-    PrimExpr srcPtr = MakeAccessPtrFromRegion(srcRegion_, 1);
-    PrimExpr dstPtr = MakeAccessPtrFromRegion(dstRegion_, 2);
-
-    // Use region extents instead of buffer shape for correct slice handling
-    Array<PrimExpr> src_extents;
-    for (const auto &range : srcRegion_->region) {
-      src_extents.push_back(range->extent);
-    }
-    int ndim = static_cast<int>(src_extents.size());
-
-    if (ndim == 1) {
-      ICHECK_EQ(dim, 0) << "Cumulative sum over a 1D buffer only supports dim "
-                           "= 0.";
-      ss << "tl::CumSum1D<" << threads << ", " << (reverse ? "true" : "false")
-         << ">::run";
-      args = {StringImm(ss.str()), srcPtr, dstPtr, src_extents[0]};
-    } else if (ndim == 2) {
-      ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
-         << (reverse ? "true" : "false") << ">::run";
-      args = {StringImm(ss.str()), srcPtr, dstPtr, src_extents[0],
-              src_extents[1]};
-    } else {
-      LOG(FATAL) << "CumSum currently supports only 1D or 2D buffers, got "
-                 << ndim << "D.";
-    }
-    return Evaluate(Call(dst->dtype, builtin::call_extern(), args));
-  } else {
-    ICHECK(false) << "Cannot lower cumsum for " << this->src.scope() << " and "
-                  << this->dst.scope();
-  }
-
-  return Stmt();
+  return ResolveCumSumImpl(T.target).lower(*this, T, analyzer);
 }
 
 LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &T,

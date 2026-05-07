@@ -519,9 +519,9 @@ class MatrixCoreIntrinEmitter:
         assert C_buf_dims in {2, 4}, "C_buf should be 2D or 4D"
 
         if M_DIM == 32:
-            from .mfma_layout import thread_id_shared_access_64x16_to_32x32_layout_C_n_m
+            from .mfma_layout import thread_id_shared_access_64x16_to_32x32_layout_C_m_n
 
-            _store_map = thread_id_shared_access_64x16_to_32x32_layout_C_n_m
+            _store_map = thread_id_shared_access_64x16_to_32x32_layout_C_m_n
         else:
             _store_map = mfma_store_index_map
 

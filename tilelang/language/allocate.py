@@ -229,7 +229,7 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
 
-    TMEM is a dedicated on-chip memory introduced in Hopper GPUs, designed to reduce register pressure and enable asynchronous, single-threaded MMA operations. It is organized as a 2D array of 512 columns by 128 rows (lanes), with each cell being 32 bits. Allocation is performed in units of columns, and every lane of a column is allocated together.
+    TMEM is a dedicated on-chip memory introduced in Blackwell GPUs, designed to reduce register pressure and enable asynchronous, single-threaded MMA operations. It is organized as a 2D array of 512 columns by 128 rows (lanes), with each cell being 32 bits. Allocation is performed in units of columns, and every lane of a column is allocated together.
 
     Key properties and requirements:
         - The number of columns allocated must be a power of 2 and at least 32.
@@ -248,7 +248,7 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
         T.Buffer: A TVM buffer object allocated in TMEM scope, suitable for use as an accumulator or operand in TCGEN5.MMA operations.
 
     Note:
-        - TMEM is only available on supported architectures (e.g., Hopper and later).
+        - TMEM is only available on supported architectures (e.g., Blackwell and later).
         - The buffer returned should be used according to TMEM access restrictions.
           Use ``T.deallocate_tmem`` only when you need an earlier, explicit release.
     """

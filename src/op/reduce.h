@@ -125,18 +125,19 @@ public:
   AccessRegions GetAccessRegions() const override;
   static const Op &Get();
   TileOperator Clone() const;
-
-private:
-  /// Generate initial value for reduction, broadcast to vsize lanes.
-  PrimExpr MakeInitValue(int vsize = 1) const;
-  /// Generate reduction expression. Returns nullopt if vsize is not supported
-  /// (e.g. bitwise ops cannot be packed).
-  std::optional<PrimExpr> MakeReduce(int vsize, const PrimExpr &acc,
-                                     const PrimExpr &b) const;
-  /// Generate codegen reducer name, with packed suffix when vsize > 1.
-  /// Returns nullopt if vsize is not supported for this reducer type.
-  std::optional<std::string> MakeCodegenReducer(int vsize = 1) const;
 };
+
+using ReduceTargetPredicate = bool (*)(Target target);
+
+struct ReduceImpl {
+  const char *name;
+  ReduceTargetPredicate match_target;
+
+  Stmt (*lower)(const ReduceOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterReduceImpl(ReduceImpl impl);
 
 /// Wrapper class for reduction operations
 class ReduceOp : public TileOperator {
@@ -177,6 +178,18 @@ public:
   static const Op &Get();
   TileOperator Clone() const;
 };
+
+using CumSumTargetPredicate = bool (*)(Target target);
+
+struct CumSumImpl {
+  const char *name;
+  CumSumTargetPredicate match_target;
+
+  Stmt (*lower)(const CumSumOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterCumSumImpl(CumSumImpl impl);
 
 /// Wrapper class for cumulative sum operations
 class CumSumOp : public TileOperator {

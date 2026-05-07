@@ -280,10 +280,6 @@ private:
     AccessRegions access = tile_op->GetAccessRegions();
     reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
     writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
-    // Detect explicit TMA-like producer ops for pipeline planning.
-    // Plain T.copy no longer auto-upgrades to TMA in the generic pipeline
-    // path; only warp-specialized rewriting may turn it into
-    // tl.tileop.tma_copy.
     if (const auto *copy = tile_op.as<CopyNode>()) {
       if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
         is_global_copy_pattern_ = true;
@@ -1074,22 +1070,28 @@ private:
     if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno->as<IntImmNode>()->value;
-    // On HIP/ROCM, skip software pipelining for multi-stage loops.
-    // Double-buffering (num_stages > 1) doubles the LDS allocation for every
-    // shared buffer declared inside the loop body, which easily exhausts the
-    // per-workgroup LDS limit and causes hipModuleLaunchKernel to return
-    // HIPERRORINVALIDVALUE.  LDS limits by generation:
-    //   gfx942 (CDNA3 / MI300X): 64 KB per workgroup
-    //   gfx950 (CDNA4 / MI350):  160 KB per workgroup (see PR #2058)
-    // Even with the larger gfx950 budget, double-buffering a pair of large
-    // shared tiles (e.g. bM×bK + bK×bN in bf16) can exceed 160 KB, and the
-    // HIP async-copy infrastructure used by the CUDA pipeline planner has no
-    // equivalent on ROCM today.  Setting num_stages = 1 inside the planner
-    // generates incorrect copy loops, so the safest fallback is a plain
-    // sequential loop where T.copy executes synchronously without any
-    // async-copy or double-buffering infrastructure.
-    if (TargetIsRocm(target_) && num_stages > 1) {
-      return StmtExprMutator::VisitStmt_(loop);
+    // Skip software pipelining on ROCm targets where async-copy pipelining
+    // has not been validated.  Currently only gfx950 (CDNA4 / MI350) supports
+    // the full HIP async-copy pipeline path.  gfx942 (CDNA3 / MI300X) has
+    // async-copy hardware but the software pipeline for that target has not
+    // been validated yet, so it falls back to a plain sequential loop as well.
+    // RDNA targets have no async-copy support at all and also fall back.
+    if (TargetIsRocm(target_) && !TargetIsGfx950(target_) && num_stages >= 1) {
+      // Strip the "num_stages" annotation before recursing so that downstream
+      // passes (InjectSoftwarePipeline, MultiVersionBufferRewriter, etc.) do
+      // not treat this loop as pipelined.  Leaving the annotation in place
+      // would cause those passes to multi-version shared buffers and inject
+      // cp.async / barrier code that is incompatible with the plain sequential
+      // execution path chosen here.
+      auto stripped = tvm::ffi::GetRef<For>(loop);
+      Map<String, Any> annotations;
+      for (const auto &[key, value] : loop->annotations) {
+        if (key != "num_stages") {
+          annotations.Set(key, value);
+        }
+      }
+      stripped.CopyOnWrite()->annotations = annotations;
+      return StmtExprMutator::VisitStmt_(stripped.get());
     }
     Stmt pipeline_body_root{nullptr};
     if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
