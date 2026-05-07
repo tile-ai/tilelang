@@ -601,17 +601,21 @@ class AutoTuner:
                 if timeout > 0:
                     call_result_queue: queue.SimpleQueue = queue.SimpleQueue()
 
-                    def _run_benchmark_target():
+                    def _run_benchmark_target(
+                        _jit_kernel: tilelang.JITKernel = jit_kernel,
+                        _worker_state: _BenchmarkWorkerState = worker_state,
+                        _call_result_queue: queue.SimpleQueue = call_result_queue,
+                    ):
                         try:
                             latency, worker_ref_latency = benchmark_target(
-                                jit_kernel=jit_kernel,
-                                benchmark_state=worker_state,
+                                jit_kernel=_jit_kernel,
+                                benchmark_state=_worker_state,
                             )
-                            call_result_queue.put(("ok", latency, worker_ref_latency, ""))
+                            _call_result_queue.put(("ok", latency, worker_ref_latency, ""))
                         except TimeoutException:
-                            call_result_queue.put(("timeout", None, None, ""))
+                            _call_result_queue.put(("timeout", None, None, ""))
                         except Exception:
-                            call_result_queue.put(("error", None, None, traceback.format_exc()))
+                            _call_result_queue.put(("error", None, None, traceback.format_exc()))
 
                     benchmark_call_thread = threading.Thread(target=_run_benchmark_target, daemon=True)
                     benchmark_call_thread.start()
