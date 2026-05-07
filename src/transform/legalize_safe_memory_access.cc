@@ -39,7 +39,7 @@ struct SafeMemChecker : public StmtExprVisitor {
     disableOOBWarning =
         tvm::transform::PassContext::Current()
             ->GetConfig(kDisableOutOfBoundWarning, Optional<Bool>())
-            .value_or(false);
+            .value_or(true);
   }
   void VisitExpr_(const BufferLoadNode *op) final {
     // If the buffer is in global scope, we will check its indices and add
@@ -147,7 +147,8 @@ struct SafeMemChecker : public StmtExprVisitor {
           LOG(WARNING) << "Index access may exceed buffer bounds: " << index
                        << " >= " << shape_dim
                        << "; Buffer name: " << buffer->name;
-        } else {
+        }
+        if (IsGlobalBuffer(buffer)) {
           _conditions.push_back(upper_bound_cond);
         }
       }
@@ -173,7 +174,8 @@ struct SafeMemChecker : public StmtExprVisitor {
         if (throw_warning) {
           LOG(WARNING) << "Index access may be negative: " << index << " < 0"
                        << "; Buffer name: " << buffer->name;
-        } else {
+        }
+        if (IsGlobalBuffer(buffer)) {
           _conditions.push_back(lower_bound_cond);
         }
       }

@@ -5,28 +5,19 @@ from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
-from .inst import GemmInst
-from .gemm_mma import GemmMMA
-from .gemm_mma_sm70 import GemmMMASm70
-from .gemm_wgmma import GemmWGMMA
-from .gemm_tcgen05 import GemmTCGEN5
-from .gemm_mfma import GemmMFMA
-from .gemm_wmma import GemmWMMA
-from .gemm_scalar import GemmScalar
-from .gemm_metal import GemmMetal
+from tilelang.backend.gemm import resolve_gemm_impl
 from tilelang import _ffi_api
-from tilelang.utils.target import target_is_volta, target_is_metal
 
 
 @tvm_ffi.register_global_func("tl.gemm.infer_layout")
-def gemm_infer_layout(gemm: GemmMMA, target: Target, thread_bounds: Range):
+def gemm_infer_layout(gemm, target: Target, thread_bounds: Range):
     thread_nums = thread_bounds.extent
     return gemm.infer_layout(target, thread_nums)
 
 
 @tvm_ffi.register_global_func("tl.gemm.lower")
 def gemm_lower(
-    gemm: GemmMMA,
+    gemm,
     layout_map,
     target: Target,
     thread_bounds: Range,
@@ -151,58 +142,37 @@ class Gemm(Node, Scriptable):
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
 
-    def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
-        """Select the appropriate GEMM instruction based on target and thread configuration.
+    def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
+        """Select the appropriate GEMM instruction key based on target and thread configuration.
 
-        The selection logic follows this priority:
+        The selection logic chooses:
         1. TCGEN5MMA for Blackwell architecture
         2. WGMMA for Hopper architecture with sufficient matrix size and warp count
         3. MFMA for CDNA (AMD) architecture
-        4. WMMA for RDNA (AMD) architecture
-        5. MMA for CUDA architecture
-        6. METAL_SIMDGROUP for Metal target (simdgroup_matrix)
-        7. Scalar for CPU target (scalar fallback)
+        4. MMA for CUDA architecture
+        5. Scalar for CPU target (scalar fallback)
 
         Args:
             thread_nums: Number of threads in the block
             target: Target architecture
 
         Returns:
-            GemmInst: The selected GEMM instruction type
+            The selected backend-specific GEMM instruction key.
         """
-        if target_is_metal(target):
-            return GemmInst.METAL_SIMDGROUP
-        return GemmInst(_ffi_api.GemmGetGemmInst(self, int(thread_nums), target))
+        return str(_ffi_api.GemmGetGemmInstructionKey(self, int(thread_nums), target))
 
-    def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
-        """Get the appropriate implementation class for the given GEMM instruction.
+    def _get_implementation_class(self, gemm_inst: str, target: Target):
+        """Get the appropriate implementation class for the given GEMM instruction key.
 
         Args:
-            gemm_inst: The selected GEMM instruction type
+            gemm_inst: The selected backend-specific GEMM instruction key
             target: Target architecture
 
         Returns:
-            The implementation class for the instruction type
+            The implementation class for the instruction key
 
         Raises:
-            NotImplementedError: If the instruction type is not supported
-            ValueError: If the instruction type is unknown
+            NotImplementedError: If the instruction key is not supported
+            ValueError: If the instruction key is unknown
         """
-        if gemm_inst.is_mma():
-            if target_is_volta(target):
-                return GemmMMASm70
-            return GemmMMA
-        elif gemm_inst.is_wgmma():
-            return GemmWGMMA
-        elif gemm_inst.is_tcgen5mma():
-            return GemmTCGEN5
-        elif gemm_inst.is_mfma():
-            return GemmMFMA
-        elif gemm_inst.is_wmma():
-            return GemmWMMA
-        elif gemm_inst.is_scalar():
-            return GemmScalar
-        elif gemm_inst.is_metal_simdgroup():
-            return GemmMetal
-        else:
-            raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")
+        return resolve_gemm_impl(gemm_inst, target)

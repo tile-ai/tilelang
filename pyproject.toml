@@ -10,6 +10,7 @@ keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: GPU",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: C++",
@@ -56,8 +57,24 @@ fp4 = ["ml-dtypes>=0.5.1"]
 vis = ["matplotlib"]
 # if you want to build with CUDA NVCC support
 nvcc = [
+    "torch",
     "nvidia-cuda-nvcc>=13.0.48",
     "nvidia-cuda-cccl>=13.0.50",
+    # On Windows, ship nvrtc through the runtime deps so `pip install tilelang`
+    # works without a host CUDA install (TileLang JITs CUDA kernels via nvrtc).
+    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
+    # cuRAND is required when kernels use tilelang.language.random
+    "nvidia-curand>=10.4; platform_system == 'Windows'",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32'", extra = "nvcc" },
 ]
 
 [build-system]
@@ -68,6 +85,15 @@ requires = [
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.
     "patchelf>=0.17.2; platform_system == 'Linux'",
+    # Under PEP 517 build isolation on Windows, provide nvcc and CUDA headers so
+    # CMake's find_package(CUDAToolkit) succeeds without a host CUDA install.
+    "nvidia-cuda-nvcc>=13; platform_system == 'Windows'",
+    "nvidia-cuda-cccl>=13; platform_system == 'Windows'",
+    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
+    # CMake's MSVC helpers in FindPipCUDAToolkit.cmake only activate under the
+    # Ninja generator; require ninja on Windows so scikit-build-core can pick
+    # it up (paired with the override below that passes -G Ninja).
+    "ninja>=1.11; platform_system == 'Windows'",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -75,6 +101,13 @@ build-backend = "scikit_build_core.build"
 wheel.py-api = "cp38"
 cmake.version = ">=3.26.1"
 build-dir = "build"
+
+# On Windows, force the Ninja generator so the project's MSVC environment
+# activation path runs (it is guarded on `CMAKE_GENERATOR MATCHES "Ninja"`).
+# Linux and macOS keep the scikit-build-core default (Makefiles).
+[[tool.scikit-build.overrides]]
+if.platform-system = "win32"
+cmake.args = ["-G", "Ninja"]
 
 # editable.rebuild = true
 
@@ -238,7 +271,7 @@ environment-pass = [
 before-build = "env -0 | sort -z | tr '\\0' '\\n'"
 windows.before-build = "set"
 test-command = [
-    "python -c 'import tilelang; print(tilelang.__version__)'",
+    'python -c "import tilelang; print(tilelang.__version__)"',
 ]
 
 [tool.cibuildwheel.linux]

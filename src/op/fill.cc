@@ -10,18 +10,49 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../layout/tcgen05_layout.h"
-#include "../target/utils.h"
-#include "../transform/common/loop_fusion_utils.h"
-#include "../transform/loop_partition.h"
-#include "../transform/loop_vectorize.h"
-#include "builtin.h"
 #include "utils.h"
+
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+std::vector<FillImpl> &FillImplRegistry() {
+  static std::vector<FillImpl> registry;
+  return registry;
+}
+
+const FillImpl &ResolveFillImpl(Target target) {
+  const auto &registry = FillImplRegistry();
+  const FillImpl *matched_impl = nullptr;
+  for (const FillImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.fill found multiple target-specific implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.fill requires a target-specific implementation, but no fill "
+         "implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterFillImpl(FillImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  FillImplRegistry().push_back(impl);
+}
 
 /**
  * @brief Construct a Fill operator node from call arguments and a buffer map.
@@ -156,77 +187,7 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (IsSIMDGroupBuffer(dst)) {
-    int region_elements = 1;
-    for (auto r : region) {
-      auto imm = r->extent.as<IntImmNode>();
-      ICHECK(imm) << "simdgroup fill region must have constant extents";
-      region_elements *= imm->value;
-    }
-    int total_elements = region_elements;
-    ICHECK(total_elements % 64 == 0)
-        << "simdgroup buffer size must be multiple of 64 (8x8), got "
-        << total_elements;
-    int num_matrices = total_elements / 64;
-    PrimExpr fill_value = Cast(dst->dtype, value);
-    Array<Stmt> stmts;
-    for (int i = 0; i < num_matrices; i++) {
-      stmts.push_back(Evaluate(
-          Call(DataType::Handle(), builtin::make_filled_simdgroup_matrix(),
-               {dst->data, IntImm(DataType::Int(32), i), fill_value,
-                IntImm(DataType::Int(32), 8), IntImm(DataType::Int(32), 8)})));
-    }
-    if (stmts.size() == 1)
-      return stmts[0];
-    return SeqStmt(stmts);
-  } else if (IsFragmentBuffer(dst)) {
-    auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target,
-                         T.thread_bounds,
-                         T.layout_map,
-                         analyzer,
-                         false,
-                         T.buffer_remap,
-                         {}},
-                        InferLevel::kFree);
-    auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
-                                     par_op->GetLoopLayout());
-    auto vectorized_loop = VectorizeLoop(thread_loop, analyzer, T.layout_map);
-    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-
-    if (par_op->GetPredicate(T.thread_var).defined()) {
-      return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                        unrolled_loop);
-    }
-    return unrolled_loop;
-  } else if (IsLocalBuffer(dst) || IsLocalVarBuffer(dst)) {
-    auto init_loop = MakeSIMTLoop(analyzer);
-    auto vectorized_loop = VectorizeLoop(init_loop, analyzer, T.layout_map);
-    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-    return unrolled_loop;
-  } else if (IsSharedBuffer(dst) || IsGlobalBuffer(dst)) {
-    auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target,
-                         T.thread_bounds,
-                         T.layout_map,
-                         analyzer,
-                         false,
-                         T.buffer_remap,
-                         {}},
-                        InferLevel::kFree);
-    auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
-                                     par_op->GetLoopLayout());
-    auto vectorized_loop = VectorizeLoop(thread_loop, analyzer, T.layout_map);
-    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-    if (par_op->GetPredicate(T.thread_var).defined()) {
-      return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                        unrolled_loop);
-    }
-    return unrolled_loop;
-  } else {
-    LOG(FATAL) << "Unsupported scope " << dst.scope();
-    return Stmt();
-  }
+  return ResolveFillImpl(T.target).lower(*this, T, analyzer);
 }
 
 /**

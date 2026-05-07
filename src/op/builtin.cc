@@ -10,8 +10,8 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../target/stubs/cuda.h"
-#include "../target/utils.h"
+#include "backend/cuda/codegen/stubs/cuda.h"
+#include "target/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -298,6 +298,16 @@ TIR_DEFINE_TL_BUILTIN(tma_store_wait)
                                Integer(CallEffectKind::kOpaque));
 TIR_DEFINE_TL_BUILTIN(set_max_nreg)
     .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(annotate_producer_reg_dealloc)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(annotate_consumer_reg_alloc)
+    .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

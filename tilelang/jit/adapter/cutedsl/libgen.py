@@ -11,6 +11,7 @@ import subprocess
 
 from tvm.target import Target
 
+from tilelang.contrib.nvcc import get_cuda_library_dirs, get_nvcc_compiler
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cutedsl_target
 
@@ -94,9 +95,10 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
 
                 # Compile with nvcc (need CUDA driver API)
                 compile_cmd = [
-                    "nvcc",
+                    get_nvcc_compiler(),
                     "-shared",
                     "-Xcompiler=-fPIC",
+                    *[f"-L{lib_dir}" for lib_dir in get_cuda_library_dirs()],
                     "-lcuda",
                     *tvm_cxxflags,
                     *tvm_ldflags,

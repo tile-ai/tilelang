@@ -19,7 +19,7 @@ using namespace tir;
 class GemmSPWarpPolicyNode : public GemmWarpPolicyNode {
 public:
   std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
-                                           Target target, GemmInst gemm_inst,
+                                           Target target, String gemm_inst,
                                            int bits) const;
   TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmSPWarpPolicy", GemmSPWarpPolicyNode,
                               GemmWarpPolicyNode);
@@ -66,8 +66,7 @@ public:
   bool transA_, transB_;
   int m_, n_, k_;
   bool clearAccum_ = false;
-  // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
-  // only will be enabled under cdna mfma instructions
+  // Backend-specific K packing parameter.
   int kPack_ = 1;
   int wgWait_ = 0;
 
@@ -106,6 +105,25 @@ public:
 private:
   mutable bool completed_ = false;
 };
+
+using GemmSPTargetPredicate = bool (*)(Target target);
+
+struct GemmSPImpl {
+  const char *name;
+  GemmSPTargetPredicate match_target;
+
+  std::pair<int, int> (*compute_warp_partition)(
+      const GemmSPWarpPolicyNode &policy, int M, int N, int block_size,
+      Target target, String gemm_inst, int bits);
+
+  Stmt (*lower)(const GemmSPNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+
+  LayoutMap (*infer_layout)(const GemmSPNode &op, const LayoutInferArgs &T,
+                            InferLevel level);
+};
+
+void RegisterGemmSPImpl(GemmSPImpl impl);
 
 class GemmSP : public TileOperator {
 public:

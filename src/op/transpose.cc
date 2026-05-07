@@ -5,20 +5,54 @@
 
 #include "transpose.h"
 
+#include <dlpack/dlpack.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../target/utils.h"
-#include "../transform/common/loop_fusion_utils.h"
-#include "../transform/loop_partition.h"
-#include "../transform/loop_vectorize.h"
 #include "utils.h"
+
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+std::vector<TransposeImpl> &TransposeImplRegistry() {
+  static std::vector<TransposeImpl> registry;
+  return registry;
+}
+
+const TransposeImpl &ResolveTransposeImpl(Target target) {
+  const auto &registry = TransposeImplRegistry();
+  const TransposeImpl *matched_impl = nullptr;
+  for (const TransposeImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.transpose found multiple target-specific implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.transpose requires a target-specific implementation, but no "
+         "transpose implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterTransposeImpl(TransposeImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  TransposeImplRegistry().push_back(impl);
+}
 
 Transpose::Transpose(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<TransposeNode> node = tvm::ffi::make_object<TransposeNode>();
@@ -168,33 +202,7 @@ For TransposeNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 }
 
 Stmt TransposeNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  // Transpose always uses normal SIMT lowering (no TMA/LDSM/etc.).
-  bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
-  auto simt_loop = MakeSIMTLoop(analyzer);
-  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-
-  if (is_cpu_target || IsLocalBuffer(src) || IsLocalBuffer(dst)) {
-    auto vectorized_loop = VectorizeLoop(fused_loop, T.layout_map);
-    return vectorized_loop;
-  } else {
-    auto par_op = ParallelOp(fused_loop);
-    std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                      InferLevel::kFree};
-    for (auto level : levels) {
-      par_op->InferLayout({T.target,
-                           T.thread_bounds,
-                           T.layout_map,
-                           analyzer,
-                           false,
-                           T.buffer_remap,
-                           {}},
-                          level);
-    }
-    auto loop_layout = par_op->GetLoopLayout();
-    return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
-                             analyzer, T.layout_map,
-                             par_op->GetPredicate(T.thread_var));
-  }
+  return ResolveTransposeImpl(T.target).lower(*this, T, analyzer);
 }
 
 LayoutMap TransposeNode::InferLayout(const LayoutInferArgs &T,

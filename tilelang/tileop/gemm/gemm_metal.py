@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from .gemm_base import GemmBase
-from .inst import GemmInst
 from tilelang.utils.language import is_shared, is_full_region, is_metal_simdgroup, is_fragment
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -9,6 +8,9 @@ from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
+
+
+GEMM_INST_METAL = "metal.simdgroup"
 
 
 class GemmMetal(GemmBase):
@@ -22,7 +24,9 @@ class GemmMetal(GemmBase):
         self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var, mbar_phase_expr: tir.PrimExpr | None = None
     ):
         thread_nums = thread_bounds.extent
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.METAL_SIMDGROUP)
+        m_warp, n_warp = self.policy.compute_warp_partition(
+            self.M, self.N, thread_nums, target, GEMM_INST_METAL
+        )
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
 

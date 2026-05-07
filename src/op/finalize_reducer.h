@@ -48,6 +48,18 @@ public:
   TileOperator Clone() const;
 };
 
+using FinalizeReducerTargetPredicate = bool (*)(Target target);
+
+struct FinalizeReducerImpl {
+  const char *name;
+  FinalizeReducerTargetPredicate match_target;
+
+  Stmt (*lower)(const FinalizeReducerOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl);
+
 class FinalizeReducerOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerOp, TileOperator,

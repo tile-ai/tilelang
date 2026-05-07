@@ -7,6 +7,9 @@ from tvm.ir import Range
 from tvm import tir
 
 
+GEMM_INST_SCALAR = "cpu.scalar"
+
+
 class GemmScalar(GemmBase):
     """CPU scalar fallback: triple nested loop gemm."""
 
