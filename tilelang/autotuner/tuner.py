@@ -35,7 +35,6 @@ import hashlib
 import signal
 import threading
 import traceback
-import time
 from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
