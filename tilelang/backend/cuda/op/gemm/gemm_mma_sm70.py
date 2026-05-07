@@ -1,55 +1,26 @@
 from __future__ import annotations
 
-from .gemm_base import GemmBase
-from tilelang.layout import (
-    make_full_bank_swizzled_layout,
-    make_half_bank_swizzled_layout,
-    make_quarter_bank_swizzled_layout,
-    make_linear_layout,
-    Layout,
-)
-from tilelang.intrinsics.wgmma_macro_generator import (
+# for Volta GPUs, which use legacy MMA instructions
+from tilelang.tileop.gemm.gemm_base import GemmBase
+from tilelang.layout import make_volta_swizzled_layout
+from tilelang.intrinsics.mma_sm70_macro_generator import (
     TensorCoreIntrinEmitter,
 )
-from tilelang.utils.language import is_shared, is_fragment
+from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
-from typing import Callable
 
 
-GEMM_INST_WGMMA = "cuda.wgmma"
+GEMM_INST_MMA = "cuda.mma"
 
 
-class GemmWGMMA(GemmBase):
-    def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
-        """Infer the swizzle layout for shared memory based on continuity.
-
-        WGMMA can directly use shared memory as input, so the swizzle layout must
-        match the tensor core's access pattern. The swizzle granularity is determined
-        by the continuous dimension size:
-          - 128B swizzle (Full):    continuity % (vectorized_size * 8) == 0
-          - 64B swizzle (Half):     continuity % (vectorized_size * 4) == 0
-          - 32B swizzle (Quarter):  continuity % (vectorized_size * 2) == 0
-          - Linear (no swizzle):    otherwise
-
-        See: https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html
-        """
-        vectorized_size = 128 // self.in_dtype.bits
-        if continuity % (vectorized_size * 8) == 0:
-            return make_full_bank_swizzled_layout
-        elif continuity % (vectorized_size * 4) == 0:
-            return make_half_bank_swizzled_layout
-        elif continuity % (vectorized_size * 2) == 0:
-            return make_quarter_bank_swizzled_layout
-        else:
-            return make_linear_layout
-
+class GemmMMASm70(GemmBase):
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WGMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -66,23 +37,20 @@ class GemmWGMMA(GemmBase):
         )
         a_is_k_major = not self.trans_A
         b_is_k_major = self.trans_B
-        a_continuity = self.K if a_is_k_major else mma_emitter.wgmma_inst_m
-        b_continuity = self.K if b_is_k_major else mma_emitter.wgmma_inst_n
         if self.is_gemm_ss():
             return {
-                # WGMMA does not support padding
-                self.A: self.infer_shared_layout(a_continuity)(self.A),
-                self.B: self.infer_shared_layout(b_continuity)(self.B),
+                self.A: make_volta_swizzled_layout(self.A, is_a=True, k_inner=a_is_k_major),
+                self.B: make_volta_swizzled_layout(self.B, is_a=False, k_inner=b_is_k_major),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rs():
             return {
                 self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
-                self.B: self.infer_shared_layout(b_continuity)(self.B),
+                self.B: make_volta_swizzled_layout(self.B, is_a=False, k_inner=b_is_k_major),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         else:
-            raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def lower(
         self,
@@ -93,7 +61,7 @@ class GemmWGMMA(GemmBase):
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WGMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -110,29 +78,28 @@ class GemmWGMMA(GemmBase):
             thread_var=thread_var,
         )
 
-        if self.A in layout_map:
-            mma_emitter._assign_a_shared_layout(layout_map[self.A])
-        if self.B in layout_map:
-            mma_emitter._assign_b_shared_layout(layout_map[self.B])
-
-        # Get base offsets from regions
-        # All dimensions may have offsets, including the matrix dimensions
-        # However, for WGMMA, we pass the Buffer directly and handle offsets
-        # through proper indexing in the access_ptr call or buffer slicing
-
-        # We use region for memory input to support strided gemm
-        # T.gemm(A_shared[0:128, :], B_shared, C_local)
+        in_dtype = self.in_dtype
+        warp_rows = mma_emitter.warp_rows
+        warp_cols = mma_emitter.warp_cols
+        local_size_a = mma_emitter.local_size_a
+        local_size_b = mma_emitter.local_size_b
+        block_K = mma_emitter.chunk
+        micro_size_k = mma_emitter.micro_size_k
+        # Use region for shared-memory operands when applicable
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
 
+        A_buf = A_region.buffer
+        C_buf = C_region.buffer
+
         clear_accum = self.clear_accum
-        wg_wait = self.wg_wait
+
+        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+
+        assert is_full_region(C_region), "Fragment output C must be a full region"
 
         if self.is_gemm_ss():
-            # For WGMMA, we need to handle buffer region offsets
-            # If there are offsets, we create a BufferLoad inside the prim_func
-            # to properly generate offset access
 
             @T.prim_func
             def _gemm_ssr() -> None:
@@ -141,13 +108,35 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                # Perform Matrix Multiplication with offset consideration
-                mma_emitter.wgmma(A_region, B_region, C_region, clear_accum, wg_wait)
+                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+
+                if clear_accum:
+                    T.clear(C_buf)
+
+                for ki in T.serial(0, (block_K // micro_size_k)):
+                    # Load A into fragment
+                    mma_emitter.ldmatrix_a(
+                        A_local,
+                        A_region,
+                        ki,
+                    )
+
+                    # Load B into fragment
+                    mma_emitter.ldmatrix_b(
+                        B_local,
+                        B_region,
+                        ki,
+                    )
+
+                    # Perform Matrix Multiplication
+                    mma_emitter.mma(A_local, B_local, C_buf, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_ssr, inline_let=True)
         elif self.is_gemm_rs():
+            assert is_full_region(B_region), "Fragment input B must be a full region"
 
             @T.prim_func
             def _gemm_rsr() -> None:
@@ -156,12 +145,27 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                mma_emitter.wgmma(A_region, B_region, C_region, clear_accum, wg_wait)
+                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+
+                if clear_accum:
+                    T.clear(C_buf)
+
+                for ki in T.serial(0, (block_K // micro_size_k)):
+                    # Load B into fragment
+                    mma_emitter.ldmatrix_b(
+                        B_local,
+                        B_region,
+                        ki,
+                    )
+
+                    # Perform Matrix Multiplication
+                    mma_emitter.mma(A_buf, B_local, C_buf, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
-        raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+        else:
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from tilelang.backend.gemm import register_gemm_impl
-from tilelang.tileop.gemm.gemm_mfma import GEMM_INST_MFMA, GemmMFMA
-from tilelang.tileop.gemm.gemm_wmma import GEMM_INST_WMMA, GemmWMMA
+from tilelang.tileop.gemm.registry import register_gemm_impl
+from .gemm_mfma import GEMM_INST_MFMA, GemmMFMA
+from .gemm_wmma import GEMM_INST_WMMA, GemmWMMA
 from tilelang.utils.target import target_is_hip
 
 

@@ -137,7 +137,7 @@ if(TILELANG_USE_CUDA_STUBS)
 endif()
 
 file(GLOB TILE_LANG_CUDA_SRCS
-  src/runtime/runtime.cc
+  src/backend/cuda/runtime.cc
   src/backend/cuda/codegen/ptx.cc
   src/backend/cuda/codegen/codegen_cuda.cc
   src/backend/cuda/codegen/codegen_py.cc
@@ -146,6 +146,7 @@ file(GLOB TILE_LANG_CUDA_SRCS
   src/backend/cuda/codegen/rt_mod_cuda.cc
   src/backend/cuda/codegen/rt_mod_cutedsl.cc
   src/backend/cuda/op/*.cc
+  src/backend/cuda/transform/*.cc
 )
 list(REMOVE_ITEM TILE_LANG_CUDA_SRCS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/cuda/op/copy_analysis.cc")

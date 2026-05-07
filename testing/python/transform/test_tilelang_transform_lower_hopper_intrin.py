@@ -1,5 +1,6 @@
 from tilelang import tvm as tvm
 import tilelang as tl
+from tilelang.backend.cuda import transform as cuda_transform
 from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
@@ -12,7 +13,7 @@ def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.LowerHopperIntrin()(mod)
+    mod = cuda_transform.LowerHopperIntrin()(mod)
     mod = tir.transform.LowerOpaqueBlock()(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
     transformed = tvm.tir.transform.BindTarget(auto_target)(transformed)
@@ -90,7 +91,7 @@ def test_tma_descriptor_init_after_alloc_global():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tir.transform.BindTarget(auto_target)(mod)
-    mod = tl.transform.LowerHopperIntrin()(mod)
+    mod = cuda_transform.LowerHopperIntrin()(mod)
     func = mod["main"]
 
     assert not tvm.tir.analysis.undefined_vars(func.body, func.params)

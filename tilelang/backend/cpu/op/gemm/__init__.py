@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tilelang.backend.gemm import register_gemm_impl
-from tilelang.tileop.gemm.gemm_scalar import GEMM_INST_SCALAR, GemmScalar
+from tilelang.tileop.gemm.registry import register_gemm_impl
+from .gemm_scalar import GEMM_INST_SCALAR, GemmScalar
 
 
 def _match_scalar(target) -> bool:

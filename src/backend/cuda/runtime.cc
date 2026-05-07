@@ -1,5 +1,5 @@
 /*!
- * \file tl/runtime/runtime.h
+ * \file tl/backend/cuda/runtime.cc
  * \brief Runtime functions.
  *
  */

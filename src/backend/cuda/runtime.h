@@ -1,11 +1,11 @@
 /*!
- * \file tl/runtime/runtime.h
+ * \file tl/backend/cuda/runtime.h
  * \brief Runtime functions.
  *
  */
 
-#ifndef TVM_TL_RUNTIME_RUNTIME_H_
-#define TVM_TL_RUNTIME_RUNTIME_H_
+#ifndef TVM_TL_BACKEND_CUDA_RUNTIME_H_
+#define TVM_TL_BACKEND_CUDA_RUNTIME_H_
 
 namespace tvm {
 namespace tl {
@@ -25,4 +25,4 @@ constexpr const char *tvm_cuda_stream_reset_access_policy_window =
 } // namespace tl
 } // namespace tvm
 
-#endif //  TVM_TL_RUNTIME_RUNTIME_H_
+#endif // TVM_TL_BACKEND_CUDA_RUNTIME_H_

@@ -1,6 +1,6 @@
 /*!
- * \file lower_l2_persistent_annotation.cc
- * \brief Lower L2 persistent annotation
+ * \file tl/backend/cuda/transform/persist_threadblock.cc
+ * \brief Persist thread blocks with cooperative groups.
  */
 
 #include <tvm/ffi/reflection/registry.h>
@@ -9,8 +9,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../op/builtin.h"
-#include "../runtime/runtime.h"
+#include "backend/cuda/runtime.h"
+#include "op/builtin.h"
 
 namespace tvm {
 namespace tl {

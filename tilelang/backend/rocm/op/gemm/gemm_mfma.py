@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .gemm_base import GemmBase
+from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mfma_macro_generator import (
     MatrixCoreIntrinEmitter,

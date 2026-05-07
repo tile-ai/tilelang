@@ -1,5 +1,5 @@
-from .gemm import register_gemm_impl, resolve_gemm_impl  # noqa: F401
-from .gemm_sp import register_gemm_sp_impl, resolve_gemm_sp_impl  # noqa: F401
+from tilelang.tileop.gemm.registry import register_gemm_impl, resolve_gemm_impl  # noqa: F401
+from tilelang.tileop.gemm_sp.registry import register_gemm_sp_impl, resolve_gemm_sp_impl  # noqa: F401
 
 # Import built-in backend packages so their implementations register.
 from . import cpu as _cpu  # noqa: F401,E402

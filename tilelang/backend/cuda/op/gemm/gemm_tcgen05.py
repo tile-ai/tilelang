@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .gemm_base import GemmBase
+from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import (
     Layout,
     make_full_bank_swizzled_layout,
