@@ -319,6 +319,10 @@ const char *CopyInstToString(CopyInst inst) {
     return "TMemLoad";
   case CopyInst::kTMemStore:
     return "TMemStore";
+  case CopyInst::kBulkLoadGather4:
+    return "BulkLoadGather4";
+  case CopyInst::kBulkStoreScatter4:
+    return "BulkStoreScatter4";
   case CopyInst::kInvalid:
     return "Invalid";
   default:
@@ -520,6 +524,16 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx) {
+  // tile::gather4 / scatter4 markers take precedence over generic TMA paths.
+  // The IR carries explicit row indices via annotations and must always be
+  // lowered through LowerBulkCopyGather4 (no fallback path makes sense).
+  if (GetBoolAnnotation(op, "is_gather4")) {
+    return Supported(CopyInst::kBulkLoadGather4);
+  }
+  if (GetBoolAnnotation(op, "is_scatter4")) {
+    return Supported(CopyInst::kBulkStoreScatter4);
+  }
+
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (facts.explicit_tma) {
     CopyInst inst =

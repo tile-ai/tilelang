@@ -8,6 +8,7 @@ from tilelang.utils.language import (
     legalize_pairwise_extents,
 )
 from tilelang.language.utils import get_extent
+import tvm
 from tvm import ir, tir
 
 
@@ -227,6 +228,186 @@ def tma_copy(
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
 
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
+
+
+_TMA_SUPPORTED_DTYPES = frozenset(
+    {
+        "uint8",
+        "uint16",
+        "uint32",
+        "int32",
+        "uint64",
+        "int64",
+        "float16",
+        "float32",
+        "float64",
+        "bfloat16",
+    }
+)
+
+
+def tma_gather4(
+    src: tir.Buffer,
+    dst: tir.Buffer,
+    col: tir.PrimExpr,
+    rows,
+    *,
+    barrier,
+    swizzle=None,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+):
+    """Issue a TMA tile::gather4 load (sm_100a, Blackwell).
+
+    Loads four arbitrary rows of a 2D global tensor ``src`` into a 2D shared
+    tile ``dst`` of shape ``(4, K_box)``. The CUtensorMap descriptor (dtype +
+    swizzle) is built by the compiler from buffer + layout info.
+
+    Caller must wrap this with ``T.shuffle_elect`` and pair it with
+    ``T.mbarrier_expect_tx`` (use :func:`tma_gather4_bytes`) before, and
+    ``barrier_arrive`` / ``mbarrier_wait_parity`` after.
+
+    The ``swizzle`` kwarg is deprecated; mark the shared tile via
+    ``T.annotate_layout`` for non-default swizzle.
+    """
+    if not isinstance(src, tir.Buffer):
+        raise TypeError("tma_gather4 src must be a tir.Buffer (global)")
+    if not isinstance(dst, tir.Buffer):
+        raise TypeError("tma_gather4 dst must be a tir.Buffer (shared)")
+    if src.scope() != "global":
+        raise ValueError(f"tma_gather4 src must be a global buffer, got scope={src.scope()}")
+    if dst.scope() not in ("shared", "shared.dyn"):
+        raise ValueError(f"tma_gather4 dst must be a shared buffer, got scope={dst.scope()}")
+    if len(src.shape) != 2:
+        raise ValueError(f"tma_gather4 expects rank-2 global buffer, got {len(src.shape)}")
+    if len(dst.shape) != 2:
+        raise ValueError(f"tma_gather4 expects rank-2 shared buffer (4 x K_box), got {len(dst.shape)}")
+    if src.dtype != dst.dtype:
+        raise ValueError(f"tma_gather4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
+    if not (isinstance(dst.shape[0], int) and dst.shape[0] == 4) and not (hasattr(dst.shape[0], "value") and int(dst.shape[0].value) == 4):
+        raise ValueError(f"tma_gather4 shared tile leading dim must be 4, got {dst.shape[0]}")
+    if src.strides:
+        inner = src.strides[1]
+        if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
+            raise ValueError(f"tma_gather4 requires unit innermost global stride, got {inner}")
+    rows = list(rows)
+    if len(rows) != 4:
+        raise ValueError(f"tma_gather4 expects exactly 4 row indices, got {len(rows)}")
+    if swizzle not in (None, "none", 0):
+        import warnings
+
+        warnings.warn(
+            f"tma_gather4 swizzle={swizzle!r} is deprecated; use T.annotate_layout.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+    from .builtin import _mbar_to_buffer_load
+
+    bar_load = _mbar_to_buffer_load(barrier)
+
+    eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+    ep = 0 if eviction_policy is None else eviction_policy_map[eviction_policy]
+
+    # Matching (4, K_box) extents satisfy CopyNode's shape check; the actual
+    # access pattern lives in the gather4_rows / gather4_col annotations.
+    K_box = dst.shape[1]
+    src_region = to_buffer_region(src, access_type="r", extents=[4, K_box])
+    dst_region = to_buffer_region(dst, access_type="w", extents=[4, K_box])
+
+    ann = {
+        "is_gather4": True,
+        "gather4_rows": rows,
+        "gather4_col": col,
+        "barrier": bar_load,
+        "eviction_policy": ep,
+    }
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.copy"),
+        src_region,
+        dst_region,
+        annotations=ann,
+    )
+
+
+def tma_gather4_bytes(K_box, dtype: str) -> int:
+    """Transaction byte count for a 4-row gather4 of width ``K_box``. Pass
+    to ``T.mbarrier_expect_tx`` immediately before ``T.tma_gather4``.
+    """
+    if dtype not in _TMA_SUPPORTED_DTYPES:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    elem_bytes = tvm.DataType(dtype).bits // 8
+    return 4 * K_box * elem_bytes
+
+
+def tma_scatter4(
+    src: tir.Buffer,
+    dst: tir.Buffer,
+    col: tir.PrimExpr,
+    rows,
+    *,
+    swizzle=None,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+):
+    """Issue a TMA tile::scatter4 store (sm_100a, Blackwell).
+
+    Stores a 2D shared tile of shape ``(4, K_box)`` to four arbitrary rows of
+    a 2D global tensor ``dst``. Caller is responsible for ``tma_store_arrive``
+    / ``tma_store_wait`` and the ``T.shuffle_elect`` guard. See
+    :func:`tma_gather4` for descriptor / swizzle inference details.
+    """
+    if not isinstance(src, tir.Buffer):
+        raise TypeError("tma_scatter4 src must be a tir.Buffer (shared)")
+    if not isinstance(dst, tir.Buffer):
+        raise TypeError("tma_scatter4 dst must be a tir.Buffer (global)")
+    if src.scope() not in ("shared", "shared.dyn"):
+        raise ValueError(f"tma_scatter4 src must be a shared buffer, got scope={src.scope()}")
+    if dst.scope() != "global":
+        raise ValueError(f"tma_scatter4 dst must be a global buffer, got scope={dst.scope()}")
+    if len(src.shape) != 2:
+        raise ValueError(f"tma_scatter4 expects rank-2 shared buffer (4 x K_box), got {len(src.shape)}")
+    if len(dst.shape) != 2:
+        raise ValueError(f"tma_scatter4 expects rank-2 global buffer, got {len(dst.shape)}")
+    if src.dtype != dst.dtype:
+        raise ValueError(f"tma_scatter4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
+    if not (isinstance(src.shape[0], int) and src.shape[0] == 4) and not (hasattr(src.shape[0], "value") and int(src.shape[0].value) == 4):
+        raise ValueError(f"tma_scatter4 shared tile leading dim must be 4, got {src.shape[0]}")
+    if dst.strides:
+        inner = dst.strides[1]
+        if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
+            raise ValueError(f"tma_scatter4 requires unit innermost global stride, got {inner}")
+    rows = list(rows)
+    if len(rows) != 4:
+        raise ValueError(f"tma_scatter4 expects exactly 4 row indices, got {len(rows)}")
+    if swizzle not in (None, "none", 0):
+        import warnings
+
+        warnings.warn(
+            f"tma_scatter4 swizzle={swizzle!r} is deprecated; use T.annotate_layout.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+    eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+    ep = 0 if eviction_policy is None else eviction_policy_map[eviction_policy]
+
+    K_box = src.shape[1]
+    src_region = to_buffer_region(src, access_type="r", extents=[4, K_box])
+    dst_region = to_buffer_region(dst, access_type="w", extents=[4, K_box])
+
+    ann = {
+        "is_scatter4": True,
+        "gather4_rows": rows,
+        "gather4_col": col,
+        "eviction_policy": ep,
+    }
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.tileop.copy"),
+        src_region,
+        dst_region,
+        annotations=ann,
+    )
 
 
 def transpose(

@@ -2267,6 +2267,38 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       ss << "tl::tma_store";
     }
     print_extern_call_stmt(ss.str(), 0, 2);
+  } else if (op->op.same_as(tl::tma_load_gather4())) {
+    std::ostringstream ss;
+    ICHECK_EQ(op->args.size(), 9u)
+        << "tma_load_gather4 expects 9 args (desc, mbar, smem, col, "
+           "r0..r3, eviction_policy), got "
+        << op->args.size();
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_load_gather4<tl::CacheHintSm90::" << eviction_policy
+         << ">";
+    } else {
+      ss << "tl::tma_load_gather4";
+    }
+    print_extern_call_stmt(ss.str(), 0, 1);
+  } else if (op->op.same_as(tl::tma_store_scatter4())) {
+    std::ostringstream ss;
+    ICHECK_EQ(op->args.size(), 8u)
+        << "tma_store_scatter4 expects 8 args (desc, smem, col, r0..r3, "
+           "eviction_policy), got "
+        << op->args.size();
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_store_scatter4<tl::CacheHintSm90::" << eviction_policy
+         << ">";
+    } else {
+      ss << "tl::tma_store_scatter4";
+    }
+    print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
