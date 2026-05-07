@@ -62,6 +62,7 @@ class CompileArgs:
         return tilelang.compile(
             program,
             out_idx=self.out_idx,
+            execution_backend=self.execution_backend,
             target=self.target,
             target_host=self.target_host,
             verbose=self.verbose,

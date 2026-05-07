@@ -113,6 +113,53 @@ def get_best_config(
     K,
     with_roller: bool = False,
     profile_backend: str = "event",
+    execution_backend: str = "auto",
+    warmup: int = 3,
+    rep: int = 20,
+    timeout: int = 30,
+    skip_check: bool = False,
+    cache_input_tensors: bool = False,
+    topk: int = 20,
+    use_pipeline: bool = False,
+    enable_grouped_compile: bool = False,
+    group_compile_size: int = 2,
+    benchmark_multi_gpu: bool = False,
+    benchmark_devices: list[int] | None = None,
+):
+    autotuner, _, _ = _build_autotuner(
+        M=M,
+        N=N,
+        K=K,
+        with_roller=with_roller,
+        profile_backend=profile_backend,
+        execution_backend=execution_backend,
+        skip_check=skip_check,
+        cache_input_tensors=cache_input_tensors,
+        topk=topk,
+    )
+    autotuner_result = autotuner.run(
+        warmup=warmup,
+        rep=rep,
+        timeout=timeout,
+        use_pipeline=use_pipeline,
+        enable_grouped_compile=enable_grouped_compile,
+        group_compile_size=group_compile_size,
+        benchmark_multi_gpu=benchmark_multi_gpu,
+        benchmark_devices=benchmark_devices,
+    )
+    return autotuner_result
+
+
+def _build_autotuner(
+    M: int,
+    N: int,
+    K: int,
+    with_roller: bool,
+    profile_backend: str,
+    execution_backend: str,
+    skip_check: bool,
+    cache_input_tensors: bool,
+    topk: int,
 ):
     def kernel(
         block_M=None,
@@ -152,20 +199,23 @@ def get_best_config(
 
         return main
 
+    configs = get_configs(M, N, K, with_roller, topk=topk)
     autotuner = (
-        AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller))
+        AutoTuner.from_kernel(kernel=kernel, configs=configs)
         .set_compile_args(
             out_idx=[-1],
             target="auto",
+            execution_backend=execution_backend,
         )
         .set_profile_args(
             supply_type=tl.TensorSupplyType.Integer,
-            ref_prog=ref_program,
-            skip_check=False,
+            ref_prog=None if skip_check else ref_program,
+            skip_check=skip_check,
+            cache_input_tensors=cache_input_tensors,
             backend=profile_backend,
         )
     )
-    return autotuner.run(warmup=3, rep=20)
+    return autotuner, configs, kernel
 
 
 def get_heuristic_config() -> dict:
