@@ -657,7 +657,9 @@ class AutoTuner:
                         continue
 
                     def shape_equal(a, b):
-                        return all(a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape))
+                        return all(
+                            a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape)
+                        )
 
                     if p.dtype != c.dtype or not shape_equal(p, c):
                         logger.warning(
@@ -931,6 +933,7 @@ class AutoTuner:
 
             progress_bar.set_postfix({"best_latency": best_latency})
             tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
+
         benchmark_worker_devices = benchmark_device_list if benchmark_multi_gpu_active else [benchmark_device_list[0]]
         benchmark_task_queues = [queue.SimpleQueue() for _ in benchmark_worker_devices]
         benchmark_result_queue: queue.SimpleQueue = queue.SimpleQueue()
@@ -1166,6 +1169,7 @@ class AutoTuneImpl(Generic[_P, _T]):
         norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
         key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache:
+
             def jit_elaborate(**config_arg):
                 merged = dict(kwargs)
                 merged.update(config_arg)

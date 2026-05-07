@@ -278,7 +278,6 @@ def lower_to_host_device_ir(
 ) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
     """Lower input TIR to split host/device IRModules without backend codegen."""
 
-
     mod = func_or_mod
     params = None
     if isinstance(func_or_mod, tir.PrimFunc):

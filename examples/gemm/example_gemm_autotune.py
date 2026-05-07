@@ -330,19 +330,31 @@ if __name__ == "__main__":
     parser.add_argument("--with_roller", action="store_true", default=False, help="Whether to enable BitBLAS roller for search space")
     parser.add_argument("--profile_backend", type=str, default="event", help="Profiler backend")
     pipeline_group = parser.add_mutually_exclusive_group()
-    pipeline_group.add_argument("--pipeline", dest="use_pipeline", action="store_true", help="Enable compile/benchmark pipeline in autotune")
-    pipeline_group.add_argument("--no-pipeline", dest="use_pipeline", action="store_false", help="Disable compile/benchmark pipeline in autotune")
+    pipeline_group.add_argument(
+        "--pipeline", dest="use_pipeline", action="store_true", help="Enable compile/benchmark pipeline in autotune"
+    )
+    pipeline_group.add_argument(
+        "--no-pipeline", dest="use_pipeline", action="store_false", help="Disable compile/benchmark pipeline in autotune"
+    )
     parser.set_defaults(use_pipeline=False)
 
     grouped_compile_group = parser.add_mutually_exclusive_group()
-    grouped_compile_group.add_argument("--grouped-compile", dest="enable_grouped_compile", action="store_true", help="Enable grouped compilation in autotune")
-    grouped_compile_group.add_argument("--no-grouped-compile", dest="enable_grouped_compile", action="store_false", help="Disable grouped compilation in autotune")
+    grouped_compile_group.add_argument(
+        "--grouped-compile", dest="enable_grouped_compile", action="store_true", help="Enable grouped compilation in autotune"
+    )
+    grouped_compile_group.add_argument(
+        "--no-grouped-compile", dest="enable_grouped_compile", action="store_false", help="Disable grouped compilation in autotune"
+    )
     parser.set_defaults(enable_grouped_compile=False)
     parser.add_argument("--group-compile-size", type=int, default=2, help="Number of configs per grouped compile unit")
 
     benchmark_multi_gpu_group = parser.add_mutually_exclusive_group()
-    benchmark_multi_gpu_group.add_argument("--benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_true", help="Benchmark autotune configs across multiple GPUs")
-    benchmark_multi_gpu_group.add_argument("--no-benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_false", help="Benchmark autotune configs on a single GPU")
+    benchmark_multi_gpu_group.add_argument(
+        "--benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_true", help="Benchmark autotune configs across multiple GPUs"
+    )
+    benchmark_multi_gpu_group.add_argument(
+        "--no-benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_false", help="Benchmark autotune configs on a single GPU"
+    )
     parser.set_defaults(benchmark_multi_gpu=False)
     parser.add_argument(
         "--benchmark-devices",

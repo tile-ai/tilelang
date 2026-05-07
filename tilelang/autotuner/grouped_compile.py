@@ -89,8 +89,7 @@ def compile_grouped_unit_tvm_ffi(
                 name_hint = getattr(global_var, "name_hint", str(global_var))
                 if name_hint in merged_names:
                     raise RuntimeError(
-                        f"Duplicate device global symbol '{name_hint}' during grouped compilation "
-                        f"(config index={item['idx']})."
+                        f"Duplicate device global symbol '{name_hint}' during grouped compilation (config index={item['idx']})."
                     )
                 merged_names.add(name_hint)
                 merged_funcs[global_var] = func
