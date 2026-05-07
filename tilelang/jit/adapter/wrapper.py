@@ -1,6 +1,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from tilelang import tvm as tvm
+from tilelang import env
 from typing import Any
 from tvm import IRModule
 from tvm.target import Target
@@ -74,6 +75,28 @@ extern "C" TL_EXPORT const char* get_last_error() {{
 extern "C" TL_EXPORT int init() {{
     error_buf[0] = '\\0';
     {0}
+    return 0;
+}}
+"""
+
+PREDEF_INIT_TABLE_FUNC = """
+extern "C" TL_EXPORT int init_table(const void* host_table, size_t n, cudaStream_t stream) {{
+    if (error_buf) error_buf[0] = '\\0';
+
+    if (host_table == nullptr) {{
+        if (error_buf) std::snprintf(error_buf, 256, "host_table is null");
+        return -1;
+    }}
+    if (n == 0) {{
+        return 0;
+    }}
+
+    size_t bytes = n * sizeof(uint64_t);
+    cudaError_t err = cudaMemcpyToSymbolAsync(meta_data, host_table, bytes, 0, cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess) {{
+        if (error_buf) std::snprintf(error_buf, 256, "cudaMemcpyToSymbolAsync failed: %s", cudaGetErrorString(err));
+        return static_cast<int>(err);
+    }}
     return 0;
 }}
 """
@@ -253,6 +276,7 @@ class TLCUDASourceWrapper:
         self.block_info: list[int] | dict = [1, 1, 1]
         self.grid_info: list[int] | dict = [1, 1, 1]
         self.tma_descriptor_args: dict | None = None
+        self.use_distributed = env.USE_DISTRIBUTED
         self.l2_persistent_map: dict[str, dict] | None = {}
         self.pdl_sync_map: dict[str, int] | None = {}
         self.parse_source_information()
@@ -567,6 +591,8 @@ class TLCUDASourceWrapper:
                 call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(function_name, dynamic_smem_buf)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
+        if self.use_distributed:
+            init_funcs += PREDEF_INIT_TABLE_FUNC
         return init_funcs
 
     def update_lib_code(self, code: str):

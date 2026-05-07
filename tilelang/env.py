@@ -322,6 +322,14 @@ class Environment:
     )  # cleanup temporary compiler files/dirs after compilation (set to 0 to keep for debugging)
     TILELANG_HIP_SAVE_TEMP_FILES = EnvVar("TILELANG_HIP_SAVE_TEMP_FILES", "0")  # save temporary files for HIP compilation
 
+    # Distributed settings
+    TILELANG_USE_DISTRIBUTED = EnvVar("TILELANG_USE_DISTRIBUTED", "0")
+
+    @property
+    def USE_DISTRIBUTED(self) -> bool:
+        """Return True if distributed mode is enabled."""
+        return str(self.TILELANG_USE_DISTRIBUTED).lower() in ("1", "true", "on")
+
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used

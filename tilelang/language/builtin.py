@@ -5,7 +5,7 @@ from __future__ import annotations
 import tvm.tirx.script.parser as T
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
-from tilelang.language import ptx_arrive_barrier, evaluate
+from tilelang.language import ptx_arrive_barrier, evaluate, address_of
 from tilelang.language.eager.builder import macro
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
@@ -1162,6 +1162,124 @@ def sync_global():
 def sync_grid():
     """Synchronize all threads in a grid."""
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.sync_grid"))
+
+
+def fence_cta():
+    """Issue a memory fence at CTA (block) scope."""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_cta"))
+
+
+def fence_gpu():
+    """Issue a memory fence at GPU (device) scope."""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_gpu"))
+
+
+def fence_sys():
+    """Issue a memory fence at system scope (visible across GPUs in a node)."""
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_sys"))
+
+
+def ld(
+    src: PrimExpr,
+    value: PrimExpr,
+    scope: str = "gpu",
+    sem: str = "weak",
+    na: bool = False,
+    nc: bool = False,
+    src_pe: tir.PrimExpr | tir.IntImm | None = -1,
+):
+    """Load a value from an address with explicit PTX scope and semantic."""
+    assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
+    assert sem in ["weak", "volatile", "acquire", "relaxed"], (
+        "Semantic must be one of 'weak', 'volatile', 'acquire', or 'relaxed'."
+    )
+    scope_id = {"cta": 0, "gpu": 1, "sys": 2}[scope]
+    sem_id = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
+    return tir.call_intrin(
+        "handle", tir.op.Op.get("tl.tileop.ld"), address_of(src), value, sem_id, scope_id, int(na), int(nc), src_pe
+    )
+
+
+def st(
+    dst: PrimExpr,
+    value: PrimExpr,
+    scope: str = "gpu",
+    sem: str = "weak",
+    na: bool = False,
+    dst_pe: tir.PrimExpr | tir.IntImm | None = -1,
+):
+    """Store a value to an address with explicit PTX scope and semantic."""
+    assert scope in ["cta", "gpu", "sys"], "Scope must be one of 'cta', 'gpu', or 'sys'."
+    assert sem in ["weak", "volatile", "release", "relaxed"], (
+        "Semantic must be one of 'weak', 'volatile', 'release', or 'relaxed'."
+    )
+    scope_id = {"cta": 0, "gpu": 1, "sys": 2}[scope]
+    sem_id = {"weak": 0, "volatile": 1, "acquire": 2, "release": 3, "relaxed": 4}[sem]
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.st"), address_of(dst), value, sem_id, scope_id, int(na), dst_pe)
+
+
+def init_barrier_gpu(barrier: PrimExpr, expected: int):
+    """Initialize a barrier for GPU-level synchronization.
+
+    Args:
+        barrier: The barrier to initialize.
+        expected: The number of threads that need to arrive at the barrier.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.init_barrier_gpu"), address_of(barrier), expected)
+
+
+def arrive_barrier_gpu(barrier: PrimExpr):
+    """Arrive at a barrier for GPU-level synchronization.
+
+    Args:
+        barrier: The barrier to arrive at.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.arrive_barrier_gpu"), address_of(barrier))
+
+
+def wait_barrier_gpu(barrier: PrimExpr):
+    """Wait at a barrier for GPU-level synchronization.
+
+    Args:
+        barrier: The barrier to wait at.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_barrier_gpu"), address_of(barrier))
+
+
+def sync_barrier_gpu(barrier: PrimExpr):
+    """Synchronize at a GPU barrier (arrive + wait).
+
+    Args:
+        barrier: The barrier to synchronize at.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_barrier_gpu"), address_of(barrier))
+
+
+def barrier_blocks(barrier: PrimExpr):
+    """Barrier all blocks at a system-level barrier with fence.
+
+    Args:
+        barrier: The barrier tensor of shape [num_ranks] of int32.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.barrier_blocks"), address_of(barrier), 1)
+
+
+def sync_blocks(barrier: PrimExpr):
+    """Synchronize all blocks at a system-level barrier without fence.
+
+    Args:
+        barrier: The barrier tensor of shape [num_ranks] of int32.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.barrier_blocks"), address_of(barrier), 0)
+
+
+def atom_add(target: PrimExpr, value: PrimExpr, scope: str = "gpu", sem: str = "relaxed"):
+    """Perform a scoped uint32 atomic add and return the previous value."""
+    assert scope in ["gpu", "sys"], "Scope must be one of 'gpu', or 'sys'."
+    assert sem in ["relaxed", "acquire", "release", "acq_rel"], (
+        "Semantic must be one of 'relaxed', 'acquire', 'release', or 'acq_rel'."
+    )
+    return tir.call_intrin("uint32", tir.op.Op.get("tl.atom_add"), address_of(target), value, sem, scope)
 
 
 def initialize_wgmma_descriptor(

@@ -26,11 +26,14 @@ from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
 import logging
 import os
+import ctypes
 
 logger = logging.getLogger(__name__)
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+
+from tilelang.utils.allocator import BaseAllocator
 
 
 class JITKernel(Generic[_P, _T]):
@@ -140,6 +143,7 @@ class JITKernel(Generic[_P, _T]):
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter
         self.torch_function = adapter.func
+        self.allocator = None
 
     @classmethod
     def from_database(
@@ -465,6 +469,34 @@ class JITKernel(Generic[_P, _T]):
             return self.adapter.get_host_source()
         assert self.artifact.host_mod is not None, "host_mod is not available"
         return str(self.artifact.host_mod)
+
+    def initialize(
+        self,
+        allocator: BaseAllocator,
+        stream: int | None = None,
+    ):
+        """Initialize base addr table for distributed kernels."""
+        assert isinstance(allocator, BaseAllocator) and allocator.initialized(), "Allocator must be an initialized BaseAllocator"
+
+        stream_val = stream if stream is not None else 0
+
+        if self.execution_backend == "tvm_ffi":
+            result = self.adapter.init_table(
+                allocator.table.data_ptr(),
+                allocator.table_size,
+                stream_val,
+            )
+            if result != 0:
+                raise RuntimeError("Initialization failed for TVM FFI adapter")
+        else:
+            result = self.adapter.lib.init_table(
+                ctypes.c_void_p(allocator.table.data_ptr()),
+                allocator.table_size,
+                ctypes.c_void_p(stream_val),
+            )
+            if result != 0:
+                error_msg = self.adapter.lib.get_last_error().decode("utf-8")
+                raise RuntimeError(f"Initialization failed: {error_msg}")
 
     def run_once(self, func: Callable | None = None) -> None:
         return self.get_profiler().run_once(func)

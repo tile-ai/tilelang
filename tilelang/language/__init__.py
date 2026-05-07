@@ -175,6 +175,9 @@ from .cluster import (
 )
 
 
+from .distributed import *  # noqa: F401
+
+
 def import_source(source: str | None = None):
     # source is the source code to be imported
     from tvm.tirx.script.builder.ir import sblock_attr

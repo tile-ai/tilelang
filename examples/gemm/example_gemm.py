@@ -1,6 +1,8 @@
 import tilelang
 import tilelang.language as T
 
+tilelang.disable_cache()
+
 
 @tilelang.jit
 def matmul(A, B, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):

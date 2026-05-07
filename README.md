@@ -1,254 +1,262 @@
-<img src=./images/logo-row.svg />
+# TileScale V0: Light-weighted TileLang Extension for Efficient Distributed Programming
 
-<div align="center">
+<div align="center">    <img src="./images/tilescale_v0_logo.png" alt="TileScale V0" width=80% /> </div>
 
-# Tile Language
-[![PyPI version](https://badge.fury.io/py/tilelang.svg)](https://badge.fury.io/py/tilelang)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/tile-ai/tilelang)
-[![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/TUrHyJnKPG)
-[![Puzzles](https://img.shields.io/badge/🧩_Learn-TileLang_Puzzles-blueviolet)](https://github.com/tile-ai/tilelang-puzzles)
-</div>
-
-Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
-
-<img src=./images/MatmulExample.png />
-
-## Latest News
-- 02/02/2026 🧩: Check out [TileLang Puzzles](https://github.com/tile-ai/tilelang-puzzles), a fun and interactive way to learn TileLang programming with 10 progressively harder puzzles!
-- 12/18/2025 🚀: Added [CuTeDSL backend](https://github.com/tile-ai/tilelang/pull/1421) support, enabling compilation to NVIDIA CUTLASS CuTe DSL! Join us in building and optimizing this exciting new backend: [Issue #1454](https://github.com/tile-ai/tilelang/issues/1454).
-- 12/17/2025 🔬: Integrated [Z3 theorem prover](https://github.com/tile-ai/tilelang/pull/1367) into TVM Arith Analyzer, bringing SMT-based symbolic reasoning for enhanced optimizations and automatic correctness verification!
-- 10/31/2025 🔧: Migrated to [apache-tvm-ffi](https://github.com/tile-ai/tilelang/pull/1108), significantly reducing CPU overhead!
-- 10/30/2025 📦: We have released v0.1.6.post2, which is the last version compatible with Python 3.8.
-- 10/07/2025 🍎: Added Apple Metal Device support, check out [Pull Request #799](https://github.com/tile-ai/tilelang/pull/799) for details.
-- 09/29/2025  🎉: Thrilled to announce that ​​AscendC​​ and ​Ascend​NPU IR​​ backends targeting Huawei Ascend chips are now supported!
-Check out the preview here:
-🔗 [link](https://github.com/tile-ai/tilelang-ascend).
-This includes implementations across two branches:
-[ascendc_pto](https://github.com/tile-ai/tilelang-ascend) and
-[npuir](https://github.com/tile-ai/tilelang-ascend/tree/npuir).
-Feel free to explore and share your feedback!
-- 07/04/2025 🚀: Introduced `T.gemm_sp` for 2:4 sparse tensor core support, check out [Pull Request #526](https://github.com/tile-ai/tilelang/pull/526) for details.
-- 06/05/2025 ✨: Added [NVRTC Backend](https://github.com/tile-ai/tilelang/pull/461) to significantly reduce compilation time for cute templates!
-- 04/14/2025 🚀: Added high-performance FlashMLA implementation for AMD MI300X, achieving performance parity with hand-optimized assembly kernels of Aiter! See [example_mla_amd](./examples/deepseek_mla/amd/README.md) for details.
-- 03/03/2025 🚀: Added high-performance MLA Decoding support using only 80 lines of Python code, achieving performance on par with FlashMLA on H100 (see [example_mla_decode.py](./examples/deepseek_mla/example_mla_decode.py))! We also provide [documentation](./examples/deepseek_mla/README.md) explaining how TileLang achieves this.
-- 02/15/2025 ✨: Added WebGPU Codegen support, see [Pull Request #86](https://github.com/tile-ai/tilelang/pull/86)!
-- 02/12/2025 ✨: Excited to announce the release of [v0.1.0](https://github.com/tile-ai/tilelang/releases/tag/v0.1.0)!
-- 02/10/2025 🚀: Added debug tools for TileLang—`T.print` for printing variables/buffers ([docs](https://tilelang.com/tutorials/debug_tools_for_tilelang.html)) and a memory layout plotter ([examples/plot_layout](./examples/plot_layout)).
-- 01/20/2025 ✨: We are excited to announce that tile-lang, a dsl for high performance AI workloads, is now open source and available to the public!
-
-## Tested Devices
-Although tile-lang aims to be portable across a range of Devices, it has been specifically tested and validated on the following devices: for NVIDIA GPUs, this includes the H100 (with Auto TMA/WGMMA support), A100, V100, RTX 4090, RTX 3090, and RTX A6000; for AMD GPUs, it includes the MI250 (with Auto MatrixCore support) and the MI300X (with Async Copy support).
-
-## OP Implementation Examples
-**tile-lang** provides the building blocks to implement a wide variety of operators. Some examples include:
-
-- [Matrix Multiplication](./examples/gemm/)
-- [Dequantization GEMM](./examples/dequantize_gemm/)
-- [Flash Attention](./examples/flash_attention/)
-- [Flash Linear Attention](./examples/linear_attention/)
-- [Flash MLA Decoding](./examples/deepseek_mla/)
-- [Native Sparse Attention](./examples/deepseek_nsa/)
-
-Within the `examples` directory, you will also find additional complex kernels—such as convolutions, forward/backward passes for FlashAttention, more operators will continuously be added.
-
-## Benchmark Summary
-
-TileLang achieves exceptional performance across a variety of computational patterns. Comprehensive benchmark scripts and settings are available at [tilelang-benchmark](https://github.com/tile-ai/tilelang-benchmark). Below are selected results showcasing its capabilities:
-
-- MLA Decoding Performance on H100
-
-  <div style="display: flex; gap: 10px; justify-content: center;">
-    <div style="flex: 1;">
-      <img src="./examples/deepseek_mla/figures/bs64_float16.png" alt="mla decode performance bs64 on H100" width="100%" />
-    </div>
-    <div style="flex: 1;">
-      <img src="./examples/deepseek_mla/figures/bs128_float16.png" alt="mla decode performance bs128 on H100" width="100%" />
-    </div>
-  </div>
-
-- Flash Attention Performance on H100
-
-  <div align="center">    <img src="./images/mha_performance_h100.png" alt="operator performance on H100" width=80% />
-  </div>
-
-- Matmul Performance on GPUs (RTX 4090, A100, H100, MI300X)
-
-  <div>
-    <img src="./images/op_benchmark_consistent_gemm_fp16.png" alt="gemm fp16 performance on Gpus" />
-  </div>
-
-- Dequantize Matmul Performance on A100
-
-  <div>
-    <img src="./images/op_benchmark_a100_wq_gemv.png" alt="dequantize gemv performance on A100" />
-  </div>
+TileScale v0 aims to be a concise distributed extension of [TileLang](https://github.com/tile-ai/tilelang). Rather than attempting to build a full multi-level distributed abstraction like in [TileScale](https://github.com/tile-ai/tilescale), v0 takes a pragmatic approach: it extends TileLang's tile-level interface with distributed communication primitives to cover common, popular distributed patterns and achieve first-class performance.
 
 ## Installation
-### Method 1: Install with Pip
-
-The quickest way to get started is to install the latest release from PyPI:
-
-```bash
-pip install tilelang
+```python
+pip install .  # for usage
+```
+```python
+pip install -e . -v --no-build-isolation  # for development
 ```
 
-Alternatively, you can install directly from the GitHub repository:
-
+## Useful Env Args
 ```bash
-pip install git+https://github.com/tile-ai/tilelang
+export TILELANG_USE_DISTRIBUTED=1  # enable distributed features
+export TILESCALE_USE_VMM=1  # use VMM and multimem instructions
+export NCCL_IB_DISABLE=1  # disable annoying IB-related logging from NCCL
+export TILESCALE_MASTER_PORT=12345  # optional, set the master port
 ```
 
-Or install locally:
+# TileScale: Tile-based AI Compute at All Scales
 
-```bash
-# install required system dependencies
-sudo apt-get update
-sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
+TileScale is a distributed extension of TileLang. It expands TileLang's tile-level programming to multi-GPU, multi-node, and even distributed chip architecture scopes, with some new feature designs like tile-level communication and hierarchical programming introduced.
 
-pip install -e . -v # remove -e option if you don't want to install in editable mode, -v for verbose output
+TileScale is a distributed-native domain-specific language (DSL) and compiler stack designed for deep learning on next-generation distributed architectures.
+As AI model entering the "scaling-law" era, modern AI infrastructure is also scaling the computation across both intra-chip and inter-chip scopes. On one side, current large AI models are already executing on multiple GPUs or even multiple nodes connected by the high-performance links like NVLink or InfiniBand. On the other side, a bunch of next-gen AI accelerators are embracing new chip architectures—such as 3D IC, near/in-memory computing, wafer-scale accelerators, etc., which are all in distributed form inner the chip for better scalability. Together, these trends are shaping modern AI compute systems into a hybrid, multi-level of "distributed architecture".
+
+TileScale is the first programming and compiler stack to unify these intra-chip and inter-chip compute resources into a unified, hierarchical, distributed architecture, which virtualizes the whole distributed system as a unified "mega-device" to users. To facilitate programming, TileScale provides a set of consistent tile-level primitives across all hardware layers for compute, memory, and communication. Thus, users can just write tile-level computing logic or flow at certain layers of interest, then TileScale automatically compiles and optimizes the scheduling of computation, communication, memory access, and their overlap. The goal of TileScale is to define an open, streamlined programming model for future distributed architectures and systems, addressing the emerging needs of modern AI computation, such as fine-grained computation and communication overlap, flexible parallel mechanisms, dataflow computation, NUMA programming, etc.
+
+## The full technical white-paper is coming soon.
+
+## Hierarchical Distributed Architecture (HDA)
+Unlike traditional GPU SIMT programming, which assumes thread-level computation on a single device, TileScale is designed to manage compute, memory, and communication across all hierarchical scales, from threads and PEs to dies, chips, and nodes. It introduces a unified virtual device architecture, called Hierarchical Distributed Architecture (HDA), to abstract these distributed systems.
+![](./images/arch.png "Hierarchical Distributed Architecture(HDA)")
+
+HDA is built upon three fundamental resources: *compute units, memory, and network*.
+Those resources can be logically organized into hierarchical groups, which provide different scales of computation capability. For example, on a GPU, the smallest granularity is a thread-scale. Threads can be grouped into a warp (e.g., 32 threads), which executes warp-scale operations. These warp-scale compute units (e.g., tensor cores) and thread-scale units (e.g., CUDA cores) are further organized into an SM-scale unit, capable of executing thread block tasks. The number of scale levels and naming of each scale are hardware-defined and can vary across architectures.
+
+HDA contains multiple memory layers. Each layer can be either shared or distributed to individual compute unit. For example, the L1 cache or shared memory is accessible to all threads within a thread-block, while register memory can only be accessed by individual threads. Note that a compute unit at a certain scale can access different layer of memory.
+
+<!-- For instance, on GPUs, the L1 cache or shared memory is accessible to all threads within a block (SM-level scope), whereas DSMEM (distributed shared memory) is accessible across SMs within a cluster-level scope. A compute unit at a given scope has control over all memory layers within that scope. For example, an SM-level task can access both thread registers and shared memory. -->
+
+Parallel units at the same level scale can be interconnected via a network. For example, in NVIDIA Hopper GPUs, SMs within a CTA cluster are interconnected via a NoC (Network-on-Chip), enabling peer SM memory access. Similarly, multiple GPUs within a node can be connected using NVLink to support inter-GPU communication.
+
+This hierarchical structure of compute, memory, and network forms the backbone of HDA, enabling scalable and programmable execution across complex, distributed AI systems.
+
+<!-- In HDA, each top-level compute unit is associated with an L0 memory (e.g., a CUDA core with few registers). A group of such units then forms a higher-level compute unit with L1 memory—for example, a Streaming Multiprocessor (SM) containing multiple CUDA cores with shared memory. This hierarchical composition can be extended to form SM clusters, GPUs, nodes, super-nodes, and beyond, each with its corresponding level of memory.
+
+At each layer, the associated memory may be shared among all units or distributed to individual units. Compute units or groups of units at the same level can be interconnected via a dedicated network. For instance, in Hopper GPUs, SM clusters are connected via a Network-on-Chip (NoC), enabling DSMem programming capabilities. Similarly, GPUs within a single node are interconnected using an NVLink switch. -->
+
+## Tile-based Programming Interface
+Following the hierarchical hardware architecture, TileScale exposes a hierarchical programming interface. The fundamental unit of computation in TileScale is at the *tile* granularity. TileScale provides consistent tile-level compute, memory, and communication operators corresponding to each hardware scales.
+<div align="center">    <img src="./images/interface.png" alt="TileScale Programming Interface" width=80% />
+</div>
+
+- *Compute*: A compute primitive takes input tensor tiles at certain memory layer and produces output tensor tiles. The same compute primitive can be used at different scale level, which will be translated to different implementations. A primitive at a high-level scale can be implemented by the lower-level-scale primitives. For example, a block-scale operator can be implemented by a group of warp-scale or thread-scale primitives.
+
+- *Memory*: The memory primitives are used to copy data tiles at certain memory layer, as well as to copy data tile between different memory layers.
+
+- *Communicate*: The communication primitives are used to transfer data tiles between compute units over the network, as well as to manage the synchronization. TileScale provides both basic peer-to-peer communication primitives as well as the collective communication primitives like AllReduce, All2All, etc., at a specific scale level.
+
+A primitive for a certain scale level may have multiple implementations. For example, a copy primitive could be implemented using TMA or LSU, while a remote copy across GPUs might be implemented using copy engines, TMA, or LSU. TileScale provides default implementations for each primitive, along with a compilation process to tune the best implementation. Users can also specify particular implementations through arguments in the tile primitives.
+With this hierarchical interface, user can easily customize the computation at certain scale level. For example, we can leverage the DSMEM feature to implement a general cluster-scale GEMM primitive.
+
+## System Overview and Design
+<div align="center">    <img src="./images/overview.png" alt="TileScale system overview" width=50% />
+</div>
+The frontend of TileScale provides all the tile primitives, Python bindings, and related programming syntax. The middle layer consists of three modules: compiler, tile kernels, and cost model. The compiler module lowers the frontend program into an intermediate representation (IR), applies optimization passes, and lowers tile primitives to lower-level primitives. For example, a block-scale GEMM primitive can be either directly mapped to a pre-implemented kernel or lowered to low-level code.
+The tile-kernel module is a library that contains all the implementations of tile primitives.
+The cost model builds a performance database and provides lightweight performance feedback for specific optimization plans. This feedback is used by the compiler module to optimize the program.
+Finally, the backend module defines a configurable hardware architecture following the HDA abstraction. Unlike existing compilers that target few specific hardware, TileScale can compile a program to any user-defined architecture.
+
+### Memory management
+
+A tensor tile can be allocated at a specified memory layer for a certain scale compute. For example, the above example allocates a block-scale tile that physically resides in L0 (i.e., register) memory. This means the tile will be partitioned into each individual thread's registers, similar to the concept of a fragment in CUDA.
+To use the tile at different levels of scale, we can use the T.view primitive to reference the specific partition of the tile within the corresponding scale. In the above example, it could be viewed as a warpgroup-, warp-, or thread-scale tile.
+The layout and partition dimensions are either automatically inferred through a layout inference pass or specified by the user.
+<div align="center">    <img src="./images/view.png" alt="T.alloc and T.view" width=50% />
+</div>
+
+### Parallel task scheduling
+TileScale introduces a *T.Scale* primitive to control which hardware scale the current computations are conducted on.
+It follows the SPMD (Single Program Multiple Data) programming model that scale the specified computation to all parallel units at this level.
+For example, the following *T.gemm* represents a warp GEMM, which executes on all warps in parallel.
+```python
+# warp-level compute example
+with T.Scale("warp"):
+    T.gemm(A, B, C)
 ```
-
-### Method 2: Build from Source
-We currently provide three ways to install **tile-lang** from source:
-- [Install from Source (using your own TVM installation)](./docs/get_started/Installation.md#method-1-install-from-source-using-your-own-tvm-installation)
-- [Install from Source (using the bundled TVM submodule)](./docs/get_started/Installation.md#method-2-install-from-source-using-the-bundled-tvm-submodule)
-- [Install Using the Provided Script](./docs/get_started/Installation.md#method-3-install-using-the-provided-script)
-
-### Method 3: Install with Nightly Version
-
-For users who want access to the latest features and improvements before official releases, we provide nightly builds of **tile-lang**.
-
-```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
+#### UTCMMA
+For NVIDIA latest CTA cluster level GEMM, e.g., UTCMMA, it is fundamentally a distributed GEMM running on two SMs. This can be easily expressed in TileScale. For example,
+```python
+# cluster-level GEMM example
+with T.Kernel(
+    cta_cluster=(2),
+    block=(block_M, block_N),
+    threads=256
+):
+    with T.Scale("cta_cluster"):
+        T.gemm(A, B, C)
 ```
-
-> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
-
-## Quick Start
-
-In this section, you'll learn how to write and execute a straightforward GEMM (matrix multiplication) kernel using tile-lang, followed by techniques for layout optimizations, pipelining, and L2-cache–friendly swizzling.
-
-### GEMM Example with Annotations (Layout, L2 Cache Swizzling, and Pipelining, etc.)
-
-Below is an example that demonstrates more advanced features: layout annotation, parallelized copy, and swizzle for improved L2 cache locality. This snippet shows how to adapt your kernel to maximize performance on complex hardware.
+#### Task(warp) specialization
+Additionally, the T.Scale primitive can also return the rank and the total number of ranks of the current scale level. This allows you to easily leverage the rank index for task specialization, such as warp specialization or any other scale-level specialization.
 
 ```python
-# @tilelang.jit(target="cuda")
-# target currently can be "cuda" or "hip" or "cpu".
-# if not specified, it will be inferred from the input tensors during compile time
-@tilelang.jit
-def matmul_relu(
-    A, B,
-    block_M: int = 64,
-    block_N: int = 64,
-    block_K: int = 64,
-    dtype: T.dtype = T.float16,
-    accum_dtype: T.dtype = T.float32,
-):
-    # declare compilation shape constant
-    M, N, K = T.const('M, N, K')
-
-    # annotate input tensor shape
-    A: T.Tensor[[M, K], dtype]
-    B: T.Tensor[[K, N], dtype]
-
-    # allocate output tensor
-    C = T.empty([M, N], dtype)
-
-    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-        A_shared = T.alloc_shared((block_M, block_K), dtype)
-        B_shared = T.alloc_shared((block_K, block_N), dtype)
-        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-
-        # Enable rasterization for better L2 cache locality (Optional)
-        # T.use_swizzle(panel_size=10, enable=True)
-
-        # Clear local accumulation
-        T.clear(C_local)
-
-        for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-            # Copy tile of A
-            # This is a sugar syntax for parallelized copy
-            T.copy(A[by * block_M, ko * block_K], A_shared)
-
-            # Copy tile of B
-            T.copy(B[ko * block_K, bx * block_N], B_shared)
-
-            # Perform a tile-level GEMM on the shared buffers
-            # Currently we dispatch to the cute/hip on Nvidia/AMD GPUs
-            T.gemm(A_shared, B_shared, C_local)
-
-        # relu
-        for i, j in T.Parallel(block_M, block_N):
-            C_local[i, j] = T.max(C_local[i, j], 0)
-
-        # Copy result back to global memory
-        T.copy(C_local, C[by * block_M, bx * block_N])
-
-    # You can write multiple cuda kernel in one function, they execute sequentially
-    # with T.Kernel(...) as ...
-
-    # Return the tensor, you can also return multiple tensors
-    return C
-
-
-M, N, K = 1024, 1024, 1024
-
-a = torch.randn(M, K, device="cuda", dtype=torch.float16)
-b = torch.randn(K, N, device="cuda", dtype=torch.float16)
-c_ref = torch.relu(a @ b)
-
-# Call the kernel
-c = matmul_relu(a, b)
-torch.testing.assert_close(c, c_ref, rtol=1e-2, atol=1e-2)
-
-# Call the kernel with overwritten compilation constants
-c = matmul_relu(a, b, block_M=128, block_N=128, block_K=64)
-torch.testing.assert_close(c, c_ref, rtol=1e-2, atol=1e-2)
-
-# Retrieve the compiled kernel
-kernel = matmul_relu.compile(a, b) # use torch.Tensor
-kernel = matmul_relu.compile(      # use T.Tensor as placeholder
-  T.Tensor((M, K), T.float16),
-  T.Tensor((K, N), T.float16)
-)
-kernel = matmul_relu.compile(      # directly specify the shape constants
-  M=M, N=N, K=K,
-  block_M=128, block_N=128, block_K=64
-)
-print(kernel.get_kernel_source())
-c = kernel(a, b)
-
-# 5.Profile latency with kernel
-profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
-latency = profiler.do_bench()
-print(f"Latency: {latency} ms")
+# warp specialize example
+with T.Scale("warpgroup") as wg_id, wg_num:
+    if wg_id == 0:
+        # do something
+    else:
+        # do other thing
+```
+#### MPI-style programming
+Combined with the communication primitives, you can also implement MPI-like programs if a communication channel exists across those ranks. For those compute units without hardware links, TileScale can also implement software channels by passing data through lower-level memory.
+```python
+# communication example: send data to neighbor GPU
+with T.Scale("device") as dev_id, dev_num:
+    T.copy(remote_B, local_A, dst=(dev_id + 1) % dev_num)
+    T.barrier()
 ```
 
-### Dive Deep into TileLang Beyond GEMM
+## Example:
+```python
+# Example of GEMM
+# 4-GPU Tensor Parallelism, using L2 to communicate
+# 2-warpgroups split along K dimension and reduce, using L1 to communicate
+def gemm(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+):
+    with T.Kernel( # launch config
+        device=(4),
+        block=(T.ceildiv(N, block_N), T.ceildiv(M, block_M)),
+        threads=256
+    ):
+        with T.Scale("device"):
+            A_global = T.view(A, layout=T.FullCol)
+            B_global = T.view(B, layout=T.FullRow)
+            C_global = T.view(C, layout=T.Replica)
 
-In addition to GEMM, we provide a variety of examples to showcase the versatility and power of TileLang, including:
+        with T.Scale("block"):
+            A_local = T.alloc((block_M, block_K), dtype, level="l0")
+            B_local = T.alloc((block_K, block_N), dtype, level="l0")
+            C_local = T.alloc((block_M, block_N), accum_dtype, level="l0")
+            T.clear(C_local)
 
-- [Dequantize GEMM](./examples/dequantize_gemm/): Achieve high-performance dequantization by **fine-grained control over per-thread operations**, with many features now adopted as default behaviors in [BitBLAS](https://github.com/microsoft/BitBLAS), which utilizing magic layout transformation and intrins to accelerate dequantize gemm.
-- [FlashAttention](./examples/flash_attention/): Enable cross-operator fusion with simple and intuitive syntax, and we also provide an example of auto tuning.
-- [LinearAttention](./examples/linear_attention/): Examples include RetNet and Mamba implementations.
-- [Convolution](./examples/convolution/): Implementations of Convolution with IM2Col.
+            for k in T.Pipelined(T.ceildiv(A_global.shape[1], block_K), num_stages=3):
+                with T.Scale("warpgroup") as wg_id, wg_num:
+                    A_local_wg = T.view(A_local, layout=T.FullCol)
+                    B_local_wg = T.view(B_local, layout=T.FullRow)
+                    C_local_wg = T.view(C_local, layout=T.Replica)
+                    T.copy(A_local_wg, A_global[by * block_M, k * block_K])
+                    T.copy(B_local_wg, B_global[k * block_K, bx * block_N])
+                    T.gemm(A_local_wg, B_local_wg, C_local_wg)
 
-## Upcoming Features
+                    # Allreduce C_local_wg through software-defined channel on L1
+                    T.allreduce(C_local_wg)
+            T.copy(C_global[by * block_M, bx * block_N], C_local)
 
-Check our [tilelang v0.2.0 release plan](https://github.com/tile-ai/tilelang/issues/79) for upcoming features.
+        with T.Scale("device") as dev_id, dev_num:
+            # Allreduce C on L2
+            T.allreduce(C_global)
 
----
+```
+```python
+# Example of FlashMLA
+# 4-GPU Context Parallelism, using L2 to communicate
+# 2-warpgroups split acc_S and all-gather, using L1 to communicate
+def flash_mla(
+        Q: T.Tensor([batch, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+        Output: T.Tensor([batch, heads, dim], dtype),
+):
+    with T.Kernel(
+        device=(4),
+        block=(batch, heads // min(block_H, kv_group_num),
+        threads=256)
+    ):
+        with T.Scale("device"):
+            Q_global = T.view(Q, layout=T.Replica)
+            Q_pe_global = T.view(Q_pe, layout=T.Replica)
+            KV_global = T.view(KV, layout=lambda i, j, k, l: j // (seqlen_kv // 4))
+            K_pe_global = T.view(K_pe, layout=lambda i, j, k, l: j // (seqlen_kv // 4))
+            output_global = T.view(Output, layout=T.Replica)
+            logsum_global = T.alloc([batch, heads], accum_dtype, level="l2")
 
-TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS) and [AttentionEngine](https://github.com/microsoft/AttentionEngine).
+        with T.Scale("block"):
+            Q_shared = T.alloc([block_H, dim], dtype, level="l1")
+            Q_pe_shared = T.alloc([block_H, pe_dim], dtype, level="l1")
+            KV_shared = T.alloc([block_N, dim], dtype, level="l1")
+            K_pe_shared = T.alloc([block_N, pe_dim], dtype, level="l1")
 
-## Join the Discussion
+            acc_s = T.alloc([block_H, block_N], accum_dtype, level="l0")
+            acc_s_cast = T.alloc([block_H, block_N], dtype, level="l0")
+            acc_o = T.alloc([block_H, dim], accum_dtype, level="l0")
+            scores_max = T.alloc([block_H], accum_dtype, level="l0")
+            scores_max_prev = T.alloc([block_H], accum_dtype, level="l0")
+            scores_scale = T.alloc([block_H], accum_dtype, level="l0")
+            scores_sum = T.alloc([block_H], accum_dtype, level="l0")
+            logsum = T.alloc([block_H], accum_dtype, level="l0")
 
-Welcome to join our Discord community for discussions, support, and collaboration!
+            cur_kv_head = by // (kv_group_num // block_H)
 
-[![Join our Discord](https://img.shields.io/badge/Discord-Join%20Us-blue?logo=discord&style=for-the-badge)](https://discord.gg/TUrHyJnKPG)
+            T.copy(Q_shared, Q_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
+            T.copy(Q_pe_shared, Q_pe_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
+            T.fill(acc_o, 0)
+            T.fill(logsum, 0)
+            T.fill(scores_max, -T.infinity(accum_dtype))
 
-## Acknowledgments
+            loop_range = T.ceildiv(KV_global.shape[1], block_N)
+            for k in T.Pipelined(loop_range, num_stages=2):
+                T.copy(KV_shared, KV_global[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :])
+                T.copy(K_pe_shared, K_pe_global[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :])
+                T.clear(acc_s)
 
-We would like to express our gratitude to the [TVM](https://github.com/apache/tvm) community for their invaluable contributions. The initial version of this project was mainly developed by [LeiWang1999](https://github.com/LeiWang1999), [chengyupku](https://github.com/chengyupku) and [nox-410](https://github.com/nox-410) with supervision from Prof. [Zhi Yang](https://yangzhihome.github.io) at Peking University. Part of this work was carried out during an internship at Microsoft Research, where Dr. Lingxiao Ma, Dr. Yuqing Xia, Dr. Jilong Xue, and Dr. Fan Yang offered valuable advice and support. We deeply appreciate their mentorship and contributions.
+                T.gemm(Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+
+                T.copy(scores_max_prev, scores_max)
+                T.fill(scores_max, -T.infinity(accum_dtype))
+                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                for i in T.Parallel(block_H):
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                for i, j in T.Parallel(block_H, block_N):
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                T.reduce_sum(acc_s, scores_sum, dim=1)
+
+                with T.Scale("warpgroup") as wg_id, wg_num:
+                    acc_s_local = T.view(acc_s, layout=T.FullCol)
+                    acc_s_cast_local = T.view(acc_s_cast, layout=T.Replica)
+                    T.copy(acc_s_cast_local[:, 0:block_N // 2], acc_s_local)
+                    # transfer on l0 using l1
+                    T.copy(acc_s_cast_local[:, block_N // 2:block_N], acc_s_local, dst=(wg_id + 1) % wg_num)
+                    # Or, you can use high level cooperative primitive
+                    # T.allgather(acc_s_local), and Cast ...
+
+                for i in T.Parallel(block_H):
+                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                for i, j in T.Parallel(block_H, dim):
+                    acc_o[i, j] *= scores_scale[i]
+                T.gemm(acc_s_cast, KV_shared, acc_o)
+            for i, j in T.Parallel(block_H, dim):
+                acc_o[i, j] /= logsum[i]
+            T.copy(output_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], acc_o)
+            T.copy(logsum_global[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H], logsum)
+
+        with T.Scale("device"):
+            # AllReduce on L2
+            T.allreduce(output_global, logsum_global, fn=...)
+            # Or, you can write copy output_global to peers and reduce by hand
+```
+
+## Installation
+For detailed instructions, please refer to the [Installation Guide](docs/get_started/Installation.md).
+
+## Call for Contribution!!
+TileScale is in its early experimental stage and driven by the open-source community. We're looking for passionate contributors to help shape the future of distributed programming together! If you're excited about designing and developing the next-generation programming paradigm, please contact us: tile-ai@outlook.com. For more information, please check out our [roadmap](https://github.com/tile-ai/tilescale/issues/4).

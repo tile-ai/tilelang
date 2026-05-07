@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <utility>
@@ -23,6 +24,8 @@
 #include "backend/common/target_utils.h"
 #include "cuda/codegen/ptx.h"
 #include "op/builtin.h"
+#include "op/distributed.h"
+#include "op/sync.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -655,6 +658,19 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
+
+  if (use_distributed_) {
+    decl_stream << "#include <tl_templates/cuda/distributed/distributed.h>\n";
+    decl_stream << "#include <tl_templates/cuda/distributed/sync.h>\n";
+    decl_stream << "#include <tl_templates/cuda/distributed/atomic.h>\n";
+    decl_stream << "#include <tl_templates/cuda/distributed/ldst.h>\n";
+    decl_stream << "#include <tl_templates/cuda/distributed/copy.h>\n";
+    decl_stream << "extern \"C\" __constant__ uint64_t meta_data[1024];\n";
+  }
+  if (need_multimem_h_) {
+    decl_stream << "#include <tl_templates/cuda/distributed/multimem.h>\n";
+  }
+
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
   decl_stream << "#endif\n";
@@ -1963,6 +1979,14 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
                                           const Array<PrimExpr> &args,
                                           bool skip_first_arg,
                                           std::ostream &os) { // NOLINT(*)
+  static constexpr char kMultimemPrefix[] = "tl::multimem::";
+  static constexpr size_t kMultimemPrefixLen =
+      sizeof(kMultimemPrefix) - 1;
+  if (global_symbol.size() >= static_cast<size_t>(kMultimemPrefixLen) &&
+      std::strncmp(global_symbol.data(), kMultimemPrefix, kMultimemPrefixLen) ==
+          0) {
+    need_multimem_h_ = true;
+  }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   if (ret_dtype.is_fixed_length_vector()) {
     //
@@ -2563,6 +2587,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::__named_barrier_arrive("
                  << this->PrintExpr(op->args[0]) << ", "
                  << this->PrintExpr(op->args[1]) << ");\n";
+  } else if (op->op.same_as(tl::init_barrier_gpu())) {
+    this->use_distributed_ = true;
+    this->PrintIndent();
+    this->stream << "tl::init_barrier_gpu<" << this->PrintExpr(op->args[1])
+                 << ">(" << this->PrintExpr(op->args[0]) << ");\n";
+  } else if (op->op.same_as(tl::arrive_barrier_gpu())) {
+    this->use_distributed_ = true;
+    print_extern_call_stmt("tl::arrive_barrier_gpu");
+  } else if (op->op.same_as(tl::wait_barrier_gpu())) {
+    this->use_distributed_ = true;
+    print_extern_call_stmt("tl::wait_barrier_gpu");
+  } else if (op->op.same_as(tl::sync_barrier_gpu())) {
+    this->use_distributed_ = true;
+    print_extern_call_stmt("tl::sync_barrier_gpu");
   } else if (op->op.same_as(tl::pdl_trigger())) {
     this->PrintIndent();
     this->stream << "cudaTriggerProgrammaticLaunchCompletion();\n";
@@ -2593,8 +2631,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::clc_try_cancel");
   } else if (op->op.same_as(tl::clc_try_cancel_multicast())) {
     need_cluster_h_ = true;
-    print_extern_call_stmt("tl::clc_try_cancel_multicast");
   } else if (op->op.same_as(tl::clc_is_canceled())) {
+    print_extern_call_stmt("tl::clc_try_cancel_multicast");
     need_cluster_h_ = true;
     os << "tl::clc_is_canceled(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::clc_get_first_ctaid_x())) {
@@ -2606,9 +2644,39 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::clc_get_first_ctaid_z())) {
     need_cluster_h_ = true;
     os << "tl::clc_get_first_ctaid_z(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::atom_add())) {
+    this->use_distributed_ = true;
+    ICHECK_EQ(op->args.size(), 4);
+    const auto *sem = op->args[2].as<StringImmNode>();
+    const auto *scope = op->args[3].as<StringImmNode>();
+    ICHECK(sem && scope) << "tl.atom_add expects literal sem and scope";
+    os << "tl::ptx_atom_add_" << sem->value << "_" << scope->value << "("
+       << this->PrintExpr(op->args[0]) << ", " << this->PrintExpr(op->args[1])
+       << ")";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
+  } else if (op->op.same_as(tl::fence_cta())) {
+    this->use_distributed_ = true;
+    os << "tl::memory_fence_cta()";
+  } else if (op->op.same_as(tl::fence_gpu())) {
+    this->use_distributed_ = true;
+    os << "tl::memory_fence_gpu()";
+  } else if (op->op.same_as(tl::fence_sys())) {
+    this->use_distributed_ = true;
+    os << "tl::memory_fence_sys()";
+  } else if (op->op.same_as(tl::get_rank())) {
+    this->use_distributed_ = true;
+    os << "tl::get_rank()";
+  } else if (op->op.same_as(tl::get_num_ranks())) {
+    this->use_distributed_ = true;
+    os << "tl::get_num_ranks()";
+  } else if (op->op.same_as(tl::get_remote_base_ptr())) {
+    this->use_distributed_ = true;
+    os << "tl::get_remote_base_ptr(" << this->PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::get_uintptr_t())) {
+    this->use_distributed_ = true;
+    os << "tl::get_uintptr_t(" << this->PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);

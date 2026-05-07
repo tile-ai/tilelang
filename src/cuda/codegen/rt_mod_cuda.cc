@@ -1,8 +1,8 @@
 #include "codegen_cuda.h"
+#include "runtime/tilescale_cuda_module.h"
 #include "runtime/pack_args.h"
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
-#include "target/cuda/cuda_fallback_module.h"
 #include "transform/common/attr.h"
 #include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
@@ -130,11 +130,8 @@ Module BuildTileLangCUDA(IRModule mod, Target target) {
   } else {
     ICHECK(0);
   }
-  Map<String, String> source_map;
-  source_map.Set("cuda", code);
-  return target::CUDAModuleCreateWithFallback(Bytes(ptx.data(), ptx.size()),
-                                              String(fmt), ExtractFuncInfo(mod),
-                                              source_map);
+  return runtime::TileScaleCUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod),
+                                            code);
 }
 
 Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
@@ -161,15 +158,8 @@ Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   if (const auto f = Function::GetGlobal("tilelang_callback_cuda_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
-  Map<String, String> source_map;
-  source_map.Set("cuda", code);
-  // The no-compile path still needs a code payload and format for the CUDA
-  // module container.  Keep a tiny dummy PTX payload; the generated CUDA source
-  // is preserved in source_map for InspectSource/get_source.
-  static constexpr const char kDummyPtx[] = "ptx";
-  return target::CUDAModuleCreateWithFallback(
-      Bytes(kDummyPtx, sizeof(kDummyPtx) - 1), String("ptx"),
-      ExtractFuncInfo(mod), source_map);
+  return runtime::TileScaleCUDAModuleCreate("ptx", "ptx", ExtractFuncInfo(mod),
+                                            code);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

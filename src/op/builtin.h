@@ -1082,6 +1082,14 @@ TVM_DLL const Op &tcgen05_after_thread_sync();
 TVM_DLL const Op &increase_descriptor_offset();
 
 /*!
+ * \brief tilelang intrinsic for scoped uint32 atomic add with return value.
+ *
+ *  This op represents an inline PTX atom.add operation with explicit memory
+ * semantic and scope.
+ */
+TVM_DLL const Op &atom_add();
+
+/*!
  * \brief tilelang intrinsic for element-wise atomic addition.
  *
  *  This op is used to represent an element-wise atomic add operation in

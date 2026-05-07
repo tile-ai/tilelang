@@ -333,6 +333,23 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             return device_source + "\n\n" + host_source
         return device_source or host_source
 
+    def init_table(self, host_table_ptr: int, table_size: int, stream: int = 0) -> int:
+        """Initialize distributed meta_data table on device."""
+        if self.executable is None:
+            if self.rt_mod is None:
+                raise RuntimeError("rt_mod is not available for init_table")
+            self.executable = runtime.Executable(self.rt_mod)
+
+        if isinstance(self.executable, runtime.Executable):
+            jitted_mod = self.executable.jit()
+        else:
+            jitted_mod = self.executable
+
+        init_table_func = jitted_mod.get_function("__tilescale_init_table", query_imports=True)
+        if init_table_func is None:
+            raise RuntimeError("__tilescale_init_table function not found in module")
+        return init_table_func(host_table_ptr, table_size, stream)
+
     @property
     def prim_func(self) -> tirx.PrimFunc:
         """Returns the primary TIR function from the IR module."""

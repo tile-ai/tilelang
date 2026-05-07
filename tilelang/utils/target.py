@@ -382,3 +382,25 @@ def target_get_warp_size(target: Target) -> int:
 
 def target_get_rdna_generation(target: Target) -> int:
     return _ffi_api.TargetGetRDNAGeneration(target)
+
+
+def parse_device(device=None) -> int:
+    """Parse a device specification and return the device index."""
+    import torch
+
+    if device is None:
+        return torch.cuda.current_device() if torch.cuda.is_available() else 0
+    if isinstance(device, int):
+        return device
+    if isinstance(device, torch.device):
+        if device.type != "cuda":
+            raise ValueError(f"Only CUDA devices are supported, got {device.type}")
+        return device.index if device.index is not None else 0
+    if isinstance(device, str):
+        device = device.strip().lower()
+        if device in ("cuda", "gpu"):
+            return torch.cuda.current_device() if torch.cuda.is_available() else 0
+        if device.startswith("cuda:"):
+            return int(device[5:])
+        return int(device)
+    raise ValueError(f"Invalid device type: {type(device)}")

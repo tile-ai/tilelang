@@ -291,3 +291,47 @@ def torch_assert_close(
         )
     else:
         return True
+
+
+# --- Distributed tensor allocation ---
+
+
+def tensor(
+    shape,
+    dtype,
+    device=None,
+    allocator=None,
+    return_peers=None,
+):
+    """Allocate a tensor, optionally using a distributed allocator.
+
+    Args:
+        shape: The shape of the tensor.
+        dtype: The data type (torch.dtype).
+        device: Device specification (ignored when allocator is provided).
+        allocator: Optional BaseAllocator for distributed memory.
+        return_peers: If True, return peer tensors for distributed allocation.
+
+    Returns:
+        A torch.Tensor or list of torch.Tensors (if return_peers is True).
+    """
+
+    # Normalize T.dtype / tilelang dtype objects to torch.dtype
+    if not isinstance(dtype, torch.dtype):
+        try:
+            dtype = dtype.as_torch()
+        except AttributeError:
+            pass
+
+    if allocator is not None:
+        from tilelang.utils.allocator import BaseAllocator
+        from tilelang.utils.target import parse_device
+
+        assert isinstance(allocator, BaseAllocator) and allocator.initialized(), "Allocator must be an initialized BaseAllocator"
+        if device is not None:
+            device_idx = parse_device(device)
+            assert allocator.device == device_idx, f"Allocator device mismatch: {allocator.device} != {device_idx}"
+        return allocator._allocate_tensor(shape, dtype, return_peers)
+    else:
+        assert return_peers is None, "return_peers must be None when allocator is not provided"
+        return torch.empty(shape, dtype=dtype, device=device)

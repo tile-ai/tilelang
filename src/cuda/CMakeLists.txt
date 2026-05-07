@@ -148,6 +148,8 @@ file(GLOB TILE_LANG_CUDA_SRCS
   src/cuda/codegen/rt_mod_cutedsl.cc
   src/cuda/op/*.cc
   src/cuda/transform/*.cc
+  src/runtime/tilescale_cuda_module.cc
+  src/shared_memory/shared_memory.cc
 )
 list(REMOVE_ITEM TILE_LANG_CUDA_SRCS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/op/copy_analysis.cc")

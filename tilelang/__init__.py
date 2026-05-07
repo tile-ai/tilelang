@@ -214,4 +214,8 @@ if not env.is_light_import():
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401
 
+    # Distributed extensions (optional)
+    from .utils.tensor import tensor  # noqa: F401
+    from .utils.allocator import get_allocator  # noqa: F401
+
 del _lazy_load_lib
