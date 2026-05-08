@@ -6,13 +6,13 @@ from tvm import DataType, tir
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.ir import Range
 from tvm.runtime import convert
-from .utils import (
+from ..layout.utils import (
     mma_store_index_map,
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
 
-from tilelang.intrinsics.mma_sp_layout import (
+from tilelang.cuda.intrinsics.layout.mma_sp_layout import (
     shared_16x16_to_mma_sp_layout_sr_a,
     shared_16x16_to_mma_sp_layout_sr_b,
     shared_16x32_to_mma_sp_layout_sr_a,

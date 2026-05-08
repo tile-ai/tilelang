@@ -15,7 +15,7 @@ from tilelang.layout import (
     make_linear_layout,
 )
 from tvm.runtime import convert
-from tilelang.intrinsics.mma_layout import (
+from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
     shared_16x16_to_mma_32x8_layout_sr_a,
     shared_16x32_to_mma_32x16_layout_sr_a,

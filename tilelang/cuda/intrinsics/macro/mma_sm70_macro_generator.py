@@ -8,7 +8,7 @@ from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tilelang import tvm as tvm
 from tvm.runtime import convert
 from tilelang.utils import is_fragment, get_buffer_region_from_load
-from tilelang.intrinsics.mma_sm70_layout import (
+from tilelang.cuda.intrinsics.layout.mma_sm70_layout import (
     shared_16x4_to_mma_a_32x4_layout,
     shared_4x16_to_mma_b_32x4_layout,
     shared_16x4_to_mma_b_32x4_layout_trans,

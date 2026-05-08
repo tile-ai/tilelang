@@ -8,12 +8,12 @@ from tvm.ir import Range
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tilelang import tvm as tvm
 from tvm.runtime import convert
-from .utils import (
+from ..layout.utils import (
     mma_store_index_map,
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
-from tilelang.intrinsics.mma_layout import (
+from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
     shared_16x8_to_mma_32x4_layout_sr_b,
     shared_16x16_to_mma_32x8_layout_sr_a,
@@ -206,7 +206,7 @@ class TensorCoreIntrinEmitter:
             return self.thread_var
 
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
-        from .utils import mma_store_index_map, mma_store_index_map_fp64
+        from ..layout.utils import mma_store_index_map, mma_store_index_map_fp64
 
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
         if DataType(self.accum_dtype).bits == 64:

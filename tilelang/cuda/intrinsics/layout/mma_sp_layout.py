@@ -1,7 +1,7 @@
 from tvm import DataType
 from typing import Literal
 
-from tilelang.intrinsics.mma_layout import (
+from tilelang.cuda.intrinsics.layout.mma_layout import (
     mma_load_a_32x4_to_shared_16x8_layout,
     mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_a_32x8_to_shared_16x16_layout,

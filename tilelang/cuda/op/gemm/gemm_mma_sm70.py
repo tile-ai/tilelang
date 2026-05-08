@@ -3,7 +3,7 @@ from __future__ import annotations
 # for Volta GPUs, which use legacy MMA instructions
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_volta_swizzled_layout
-from tilelang.intrinsics.mma_sm70_macro_generator import (
+from tilelang.cuda.intrinsics.macro.mma_sm70_macro_generator import (
     TensorCoreIntrinEmitter,
 )
 from tilelang.utils.language import is_shared, is_fragment, is_full_region

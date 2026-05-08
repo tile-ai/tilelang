@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
-from tilelang.intrinsics.wmma_macro_generator import WMMAIntrinEmitter
+from tilelang.rocm.intrinsics.wmma_macro_generator import WMMAIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target

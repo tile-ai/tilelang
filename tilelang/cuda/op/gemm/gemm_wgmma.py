@@ -8,7 +8,7 @@ from tilelang.layout import (
     make_linear_layout,
     Layout,
 )
-from tilelang.intrinsics.wgmma_macro_generator import (
+from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
     TensorCoreIntrinEmitter,
 )
 from tilelang.utils.language import is_shared, is_fragment

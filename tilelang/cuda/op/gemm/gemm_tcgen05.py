@@ -8,7 +8,7 @@ from tilelang.layout import (
     make_quarter_bank_swizzled_layout,
     make_linear_layout,
 )
-from tilelang.intrinsics.tcgen05_macro_generator import (
+from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
     TensorCoreIntrinEmitter,
 )
 from tilelang import language as T

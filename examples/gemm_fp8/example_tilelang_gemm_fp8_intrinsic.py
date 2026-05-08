@@ -3,9 +3,9 @@ from tilelang import tvm as tvm
 import tilelang.testing
 from tvm import DataType
 import tilelang.language as T
-from tilelang.intrinsics import get_swizzle_layout
-from tilelang.intrinsics.mma_macro_generator import TensorCoreIntrinEmitter
-from tilelang.intrinsics.mfma_macro_generator import MatrixCoreIntrinEmitter
+from tilelang.cuda.intrinsics import get_swizzle_layout
+from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter
+from tilelang.rocm.intrinsics.mfma_macro_generator import MatrixCoreIntrinEmitter
 from tilelang.utils import determine_fp8_type
 
 tilelang.testing.set_random_seed(0)

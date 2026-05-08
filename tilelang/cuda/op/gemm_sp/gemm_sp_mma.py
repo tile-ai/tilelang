@@ -1,6 +1,6 @@
 from tilelang.tileop.gemm_sp.gemm_sp_base import GemmSPBase
 from tilelang.layout import make_swizzled_layout
-from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
+from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import tvm as tvm
 from tvm.target import Target
