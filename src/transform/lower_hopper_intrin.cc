@@ -1,5 +1,5 @@
 /*!
- * \file tl/backend/cuda/transform/lower_hopper_intrin.cc
+ * \file tl/transform/lower_hopper_intrin.cc
  * \brief Lower Hopper intrinsics cuda GPU(sm90+)
  */
 

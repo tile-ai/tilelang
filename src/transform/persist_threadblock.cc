@@ -1,5 +1,5 @@
 /*!
- * \file tl/backend/cuda/transform/persist_threadblock.cc
+ * \file tl/transform/persist_threadblock.cc
  * \brief Persist thread blocks with cooperative groups.
  */
 
@@ -9,7 +9,6 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "backend/cuda/runtime.h"
 #include "op/builtin.h"
 
 namespace tvm {
