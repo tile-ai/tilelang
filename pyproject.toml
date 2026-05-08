@@ -101,6 +101,11 @@ wheel.py-api = "cp38"
 cmake.version = ">=3.26.1"
 build-dir = "build"
 
+# Include backend and git info in version
+metadata.version.provider = "version_provider"
+metadata.version.provider-path = "."
+experimental = true
+
 # On Windows, force the Ninja generator so the project's MSVC environment
 # activation path runs (it is guarded on `CMAKE_GENERATOR MATCHES "Ninja"`).
 # Linux and macOS keep the scikit-build-core default (Makefiles).
@@ -109,11 +114,6 @@ if.platform-system = "win32"
 cmake.args = ["-G", "Ninja"]
 
 # editable.rebuild = true
-
-# Include backend and git info in version
-metadata.version.provider = "version_provider"
-metadata.version.provider-path = "."
-experimental = true
 
 # build.verbose = true
 # logging.level = "DEBUG"
