@@ -6,7 +6,7 @@
  * wrapper functions that serve as drop-in replacements for the HIP runtime /
  * module APIs used by TVM/TileLang.
  *
- * The implementation mirrors src/target/stubs/cuda.cc:
+ * The implementation mirrors src/backend/cuda/stubs/cuda.cc:
  * - Resolve symbols via dlopen/dlsym on first use.
  * - Prefer RTLD_DEFAULT/RTLD_NEXT when HIP is already loaded by another
  *   framework (e.g. PyTorch ROCm).

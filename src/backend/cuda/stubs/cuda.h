@@ -25,7 +25,7 @@
  *    exported global functions with C linkage:
  *
  *    ```cpp
- *    #include "target/stubs/cuda.h"
+ *    #include "backend/cuda/stubs/cuda.h"
  *    CUresult result = cuModuleLoadData(&mod, image);
  *    ```
  *
