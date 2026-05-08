@@ -95,6 +95,83 @@ def test_thread_sync_handles_int64_tvm_access_ptr_offset():
 
 
 @tilelang.testing.requires_cuda
+def test_explicit_shared_sync_is_not_duplicated_by_planner():
+    """Existing explicit shared sync should satisfy the planner as-is."""
+
+    @T.prim_func(private=True)
+    def func():
+        temp_shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        temp_shared[tx] = T.float32(tx)
+        T.tvm_storage_sync("shared")
+        result_local[0] = temp_shared[(tx + 127) % 128]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod)
+    assert s.count('T.tvm_storage_sync("shared")') == 1, (
+        f"Explicit shared sync should not be duplicated:\n{s}"
+    )
+
+
+@tilelang.testing.requires_cuda
+def test_shared_dyn_buffers_are_coalesced_for_dependency_planning():
+    """Different shared.dyn buffers should still synchronize when they alias one arena."""
+
+    @T.prim_func(private=True)
+    def func():
+        X = T.allocate([128], "float32", "shared.dyn")
+        Y = T.allocate([128], "float32", "shared.dyn")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        Xb = T.Buffer((128,), "float32", data=X, scope="shared.dyn")
+        Yb = T.Buffer((128,), "float32", data=Y, scope="shared.dyn")
+        Xb[tx] = T.float32(tx)
+        result_local[0] = Yb[(tx + 127) % 128]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod)
+    assert 'T.tvm_storage_sync("shared.dyn")' in s, (
+        f"Expected sync when coalesced shared.dyn buffers create a dependency:\n{s}"
+    )
+
+
+@tilelang.testing.requires_cuda
+def test_explicit_shared_dyn_sync_is_not_duplicated_after_coalescing():
+    """Explicit shared.dyn sync should remain single even with coalesced buffers."""
+
+    @T.prim_func(private=True)
+    def func():
+        X = T.allocate([128], "float32", "shared.dyn")
+        Y = T.allocate([128], "float32", "shared.dyn")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        Xb = T.Buffer((128,), "float32", data=X, scope="shared.dyn")
+        Yb = T.Buffer((128,), "float32", data=Y, scope="shared.dyn")
+        Xb[tx] = T.float32(tx)
+        T.tvm_storage_sync("shared.dyn")
+        result_local[0] = Yb[(tx + 127) % 128]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod)
+    assert s.count('T.tvm_storage_sync("shared.dyn")') == 1, (
+        f"Explicit shared.dyn sync should not be duplicated:\n{s}"
+    )
+
+
+@tilelang.testing.requires_cuda
 def test_sync_if_with_same_index():
     @T.prim_func(check_well_formed=False)
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
