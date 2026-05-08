@@ -29,9 +29,9 @@ import concurrent.futures
 import torch
 import os
 import sys
-import signal
 import json
 import hashlib
+import signal
 import threading
 import traceback
 from pathlib import Path
@@ -47,20 +47,123 @@ class TimeoutException(Exception):
     pass
 
 
-def timeout_handler(signum, frame):
+def _timeout_handler(signum, frame):  # pragma: no cover - signal handler
     raise TimeoutException("Operation timed out")
 
 
-def run_with_timeout(func, timeout, *args, **kwargs):
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(timeout)
+def _run_with_sigalrm(func, timeout, *args, **kwargs):
+    """POSIX path: ``SIGALRM`` interrupts ``func`` synchronously inside the
+    same thread. The runaway call actually stops, releasing CPU/GPU resources
+    held by e.g. a stuck CUDA benchmark.
+    """
+    prev_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(int(timeout))
     try:
-        result = func(*args, **kwargs)
-    except Exception as e:
-        raise e
+        return func(*args, **kwargs)
     finally:
         signal.alarm(0)
-    return result
+        signal.signal(signal.SIGALRM, prev_handler)
+
+
+def _async_raise_in_thread(tid: int, exc_type: type) -> bool:
+    """Asynchronously raise ``exc_type`` in the thread identified by ``tid``.
+
+    Uses CPython's :c:func:`PyThreadState_SetAsyncExc` — the same primitive the
+    interpreter itself uses to deliver ``KeyboardInterrupt`` to the main thread,
+    and the Python-level analogue of POSIX ``SIGALRM``. This is the strongest
+    cross-thread cancellation available without breaking process invariants:
+
+    * ``TerminateThread`` (WINAPI) is rejected on purpose — Microsoft's own
+      documentation labels it dangerous because it leaves CRT locks, DLL
+      thread-detach callbacks, and (relevant here) CUDA driver state in an
+      inconsistent state, which can corrupt subsequent kernels.
+    * ``PyThreadState_SetAsyncExc`` only fires at Python bytecode boundaries,
+      so a thread stuck in a C call (e.g. ``cudaStreamSynchronize``) won't
+      respond until it returns to Python. POSIX ``SIGALRM`` has the same
+      practical limitation.
+
+    Returns ``True`` when the exception was queued, ``False`` otherwise.
+    """
+    import ctypes
+
+    set_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+    set_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
+    set_exc.restype = ctypes.c_int
+
+    affected = set_exc(ctypes.c_ulong(tid), ctypes.py_object(exc_type))
+    if affected == 0:
+        return False
+    if affected > 1:
+        # If more than one thread was affected (should not happen with a
+        # single tid), undo the side-effect to avoid leaving threads with a
+        # pending async exception.
+        set_exc(ctypes.c_ulong(tid), None)
+        return False
+    return True
+
+
+def _run_with_thread(func, timeout, *args, **kwargs):
+    """Cross-platform fallback when ``SIGALRM`` is unavailable (Windows) or
+    when called outside the main thread (``signal.signal`` is restricted to
+    the main thread on POSIX).
+
+    Mirrors POSIX ``SIGALRM`` semantics as closely as Python allows by running
+    ``func`` **on the current thread** while a daemon watchdog thread sleeps
+    until the deadline. On timeout the watchdog uses
+    ``PyThreadState_SetAsyncExc`` to inject :class:`TimeoutException` back into
+    the caller, which surfaces at the next Python bytecode boundary.
+
+    Crucially, this preserves ``threading.local()``-backed state (e.g.
+    ``set_autotune_inputs``'s capture stack) — moving ``func`` onto a worker
+    thread would silently zero out that state and break callers that read it.
+    """
+    target_tid = threading.get_ident()
+    cancel = threading.Event()
+    fired = threading.Event()
+
+    def _watchdog():
+        if cancel.wait(timeout):
+            # ``func`` finished before the deadline — nothing to do.
+            return
+        if _async_raise_in_thread(target_tid, TimeoutException):
+            fired.set()
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True, name="tl-tuner-watchdog")
+    watchdog.start()
+    try:
+        return func(*args, **kwargs)
+    except TimeoutException:
+        # Re-raise with the standard message regardless of whether the async
+        # exception we injected won the race against an in-flight Python
+        # exception in ``func``.
+        raise TimeoutException(f"Operation timed out after {timeout}s") from None
+    finally:
+        # Stop the watchdog. If we got here without timing out the watchdog is
+        # blocked in ``cancel.wait`` and will exit immediately. If the watchdog
+        # already fired, ``func`` raised TimeoutException above (caught and
+        # re-raised) — but a stray async exception may still be queued, so
+        # clear it defensively before the caller continues running Python code.
+        cancel.set()
+        if fired.is_set():
+            import ctypes
+
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(target_tid), ctypes.py_object(0))
+
+
+def run_with_timeout(func, timeout, *args, **kwargs):
+    """Run ``func`` under a deadline, raising :class:`TimeoutException` if exceeded.
+
+    Picks the strongest available primitive:
+
+    * **POSIX, main thread**: ``SIGALRM``. The deadline truly interrupts
+      ``func`` mid-execution and frees its resources.
+    * **Otherwise** (Windows, or POSIX off the main thread): a daemon
+      ``ThreadPoolExecutor``. The deadline only unblocks the caller; the
+      runaway worker keeps running until it returns on its own.
+    """
+    if hasattr(signal, "SIGALRM") and threading.current_thread() is threading.main_thread():
+        return _run_with_sigalrm(func, timeout, *args, **kwargs)
+    return _run_with_thread(func, timeout, *args, **kwargs)
 
 
 # Configure logging for the autotuner module
@@ -99,6 +202,21 @@ def get_available_cpu_count() -> int:
     return cpu_count or 1
 
 
+def _normalize_value(value, sort_dict_items: bool = False):
+    if isinstance(value, torch.Tensor):
+        return ("tensor", str(value.dtype), tuple(value.shape), value.stride())
+    if isinstance(value, Var):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_value(v, sort_dict_items=sort_dict_items) for v in value)
+    if isinstance(value, dict):
+        items = ((str(k), _normalize_value(v, sort_dict_items=sort_dict_items)) for k, v in value.items())
+        if sort_dict_items:
+            return tuple(sorted(items))
+        return {k: v for k, v in items}
+    return value
+
+
 class AutoTuner:
     """Auto-tuner for tilelang programs.
 
@@ -113,11 +231,10 @@ class AutoTuner:
     compile_args = CompileArgs()
     profile_args = ProfileArgs()
 
-    _kernel_parameters: tuple[str, ...] | None = None
+    _kernel_parameters: tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]] | None = None
     _function_parameters: dict[str, Any] | None = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
-    cache_dir: Path = Path(env.TILELANG_CACHE_DIR) / "autotuner"
 
     def __init__(self, fn: Callable, configs):
         self.fn = fn
@@ -126,6 +243,16 @@ class AutoTuner:
         self.jit_input_tensors = None
         self.ref_input_tensors = None
         self.jit_compile = None
+
+    @classmethod
+    def _get_cache_dir(cls) -> Path:
+        from tilelang.cache.kernel_cache import KernelCache
+
+        return Path(KernelCache._get_namespace_root()) / "autotuner"
+
+    @property
+    def cache_dir(self) -> Path:
+        return self._get_cache_dir()
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
@@ -208,6 +335,7 @@ class AutoTuner:
         skip_check: bool = False,
         manual_check_prog: Callable = None,
         cache_input_tensors: bool = False,
+        backend: Literal["event", "cupti", "cudagraph"] = "event",
     ):
         """Set profiling arguments for the auto-tuner.
 
@@ -224,7 +352,7 @@ class AutoTuner:
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
-
+            backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
         Returns:
             AutoTuner: Self for method chaining.
         """
@@ -248,6 +376,7 @@ class AutoTuner:
             warmup=warmup,
             rep=rep,
             timeout=timeout,
+            backend=backend,
         )
 
         # If a custom `supply_prog` is provided, the profiler's `supply_type` setting
@@ -257,22 +386,13 @@ class AutoTuner:
 
         return self
 
-    def set_kernel_parameters(self, k_parameters: tuple[str, ...], f_parameters: dict[str, Any]):
+    def set_kernel_parameters(self, k_parameters: tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]], f_parameters: dict[str, Any]):
         # for cache key generation
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
     def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> AutotuneResult | None:
         """Generate a cache key for the auto-tuning process."""
-
-        def _normalize_param(value):
-            if isinstance(value, Var):
-                return str(value)
-            if isinstance(value, (list, tuple)):
-                return [_normalize_param(v) for v in value]
-            if isinstance(value, dict):
-                return {str(k): _normalize_param(v) for k, v in value.items()}
-            return value
 
         # extract parameters from the function signature
         op_parameters = []
@@ -281,7 +401,7 @@ class AutoTuner:
                 op_parameters.append(default_value.default)
 
         if self._kernel_parameters is not None:
-            op_parameters += _normalize_param(self._kernel_parameters)
+            op_parameters += _normalize_value(self._kernel_parameters)
 
         func_source = inspect.getsource(self.fn)
         key_data = {
@@ -340,7 +460,9 @@ class AutoTuner:
                 extra_parameters[var_name] = cell.cell_contents
 
         if isinstance(self.configs, Callable):
-            self.configs = self.configs(*self._kernel_parameters)
+            kernel_args, kernel_kwargs = self._kernel_parameters
+            kernel_kwargs = dict(kernel_kwargs)
+            self.configs = self.configs(*kernel_args, **kernel_kwargs)
 
         key = self.generate_cache_key(parameters, extra_parameters)
 
@@ -388,6 +510,7 @@ class AutoTuner:
             rtol = profile_args.rtol
             atol = profile_args.atol
             max_mismatched_ratio = profile_args.max_mismatched_ratio
+            backend = profile_args.backend
 
             profiler = jit_kernel.get_profiler(tensor_supply_type=supply_type)
 
@@ -448,11 +571,17 @@ class AutoTuner:
                     profiler.assert_allclose(
                         ref_prog, input_tensors=self.jit_input_tensors, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
                     )
-            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors)
+            latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors, backend=backend)
 
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = ref_input_tensors_supply()
-                self.ref_latency_cache = profiler.do_bench(ref_prog, n_warmup=warmup, n_repeat=rep, input_tensors=self.ref_input_tensors)
+                self.ref_latency_cache = profiler.do_bench(
+                    ref_prog,
+                    n_warmup=warmup,
+                    n_repeat=rep,
+                    input_tensors=self.ref_input_tensors,
+                    backend=backend,
+                )
 
             return latency, self.ref_latency_cache
 
@@ -671,21 +800,52 @@ class AutoTuneImpl(Generic[_P, _T]):
         autotuner.run = partial(autotuner.run, self.warmup, self.rep, self.timeout)
         return autotuner
 
-    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
-        key_args_tuple = args
-        key_kwargs_tuple = tuple(sorted(kwargs.items()))
-        key = (key_args_tuple, key_kwargs_tuple)
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel | _T:
+        return_kernel = kwargs.pop("__return_kernel", False)
+
+        mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
+
+        norm_args = _normalize_value(args, sort_dict_items=True)
+        norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
+        key = (norm_args, norm_kwargs)
         if key not in self._tuner_cache:
+            if mode == "lazy":
 
-            def jit_compile(**config_arg):
-                return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
+                def jit_compile(**config_arg):
+                    return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
 
-            autotuner = self.get_tunner()
-            autotuner.jit_compile = jit_compile
-            autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+                autotuner = self.get_tunner()
+                autotuner.jit_compile = jit_compile
+                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+            else:
+
+                def jit_compile(**config_arg):
+                    merged = dict(kwargs)
+                    merged.update(config_arg)
+                    return self.jit_impl.compile(*args, **merged)
+
+                autotuner = self.get_tunner()
+                autotuner.jit_compile = jit_compile
+                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+
             artifact = autotuner.run()
-            self._tuner_cache[key] = artifact.kernel
-        return self._tuner_cache[key]
+            self._tuner_cache[key] = artifact.kernel, artifact.config
+
+        best_kernel, best_config = self._tuner_cache[key]
+
+        if mode == "lazy":
+            return best_kernel
+        else:
+            if return_kernel:
+                return best_kernel
+            exec_kwargs = dict(kwargs)
+            if best_config is not None:
+                exec_kwargs.update(best_config)
+            _, kernel_args = self.jit_impl.func.parse_args(*args, **exec_kwargs)
+            return best_kernel(*kernel_args.values())
+
+    def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
+        return self(*args, **kwargs, __return_kernel=True)
 
 
 def autotune(  # This is the new public interface

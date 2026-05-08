@@ -1,9 +1,10 @@
 """Fast math operations exposed on the TileLang language surface."""
 
 from tvm import tir
+from tvm.tir import PrimExpr
 
 
-def __log(x):
+def __log(x: PrimExpr) -> PrimExpr:
     """Calculate log(x) with fast math
 
     Parameters
@@ -20,7 +21,7 @@ def __log(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log"), x)
 
 
-def __log2(x):
+def __log2(x: PrimExpr) -> PrimExpr:
     """Calculate log2(x) with fast math
 
     Parameters
@@ -37,7 +38,7 @@ def __log2(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log2"), x)
 
 
-def __log10(x):
+def __log10(x: PrimExpr) -> PrimExpr:
     """Calculate log10(x) with fast math
 
     Parameters
@@ -54,7 +55,7 @@ def __log10(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log10"), x)
 
 
-def __tan(x):
+def __tan(x: PrimExpr) -> PrimExpr:
     """Calculate tan(x) with fast math
 
     Parameters
@@ -71,7 +72,7 @@ def __tan(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__tan"), x)
 
 
-def __cos(x):
+def __cos(x: PrimExpr) -> PrimExpr:
     """Calculate cos(x) with fast math
 
     Parameters
@@ -88,7 +89,7 @@ def __cos(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__cos"), x)
 
 
-def __sin(x):
+def __sin(x: PrimExpr) -> PrimExpr:
     """Calculate sin(x) with fast math
 
     Parameters
@@ -105,7 +106,7 @@ def __sin(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__sin"), x)
 
 
-def __exp10(x):
+def __exp10(x: PrimExpr) -> PrimExpr:
     """Calculate 10**x with fast math
 
     Parameters
@@ -122,7 +123,7 @@ def __exp10(x):
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp10"), x)
 
 
-def __exp(x):
+def __exp(x: PrimExpr) -> PrimExpr:
     """Calculate 2**x with fast math
 
     Parameters

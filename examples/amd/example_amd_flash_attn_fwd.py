@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -8,7 +9,15 @@ import argparse
 from functools import partial
 
 
-# Custom supply function to ensure tensors are created on GPU
+def IsRDNA():
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name().strip()
+        return "Radeon" in gpu_name
+    else:
+        print("Error: GPU Device is not detected")
+        sys.exit(1)
+
+
 def supply_tensors_gpu(params):
     """Supply function that creates tensors on GPU for ROCm/HIP."""
     tensors = []
@@ -16,7 +25,9 @@ def supply_tensors_gpu(params):
         if hasattr(param, "shape") and hasattr(param, "dtype"):
             # Force creation on GPU device
             shape = [int(s) for s in param.shape]
-            tensor = torch.randn(shape, dtype=param.dtype, device="cuda")
+            # Convert TileLang dtype to PyTorch dtype
+            torch_dtype = param.dtype.as_torch()
+            tensor = torch.randn(shape, dtype=torch_dtype, device="cuda")
             tensors.append(tensor)
         else:
             tensors.append(param)
@@ -42,14 +53,31 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 
 def get_configs():
-    """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [32, 64, 128, 256]
-    block_N = [32, 64, 128, 256]
-    threads = [128, 256, 512]
-    num_split_q = [64, 128, 256]
-    num_stages = [0, 1]
+    """Generates configurations for the autotuner.
+
+    For RDNA (gfx11xx/gfx12xx) GPUs using WMMA instructions, block sizes
+    are limited to 32x32 due to a layout mismatch between WMMA D output and A input
+    registers when block_M > 16 * num_warps_per_32_threads. Larger blocks cause
+    incorrect results in the shared memory transpose used to convert softmax scores
+    to the GEMM 2 A-matrix layout.
+    """
+    if IsRDNA():
+        block_M = [16, 32]
+        block_N = [16, 32]
+        threads = [32, 64]
+        num_split_q = [16, 32, 64]
+        num_stages = [0]
+        # k_pack=2 is broken for RDNA WMMA (incorrect K-dimension loading for multi-k_pack).
+        # Use k_pack=1 only until fixed.
+        k_pack = [1]
+    else:
+        block_M = [64, 128, 256]
+        block_N = [64, 128, 256]
+        threads = [128, 256]
+        num_split_q = [64, 128, 256]
+        num_stages = [0, 1]
+        k_pack = [2]
     enable_rasterization = [True]
-    k_pack = [2]
     panel_size = [7, 8]
     qk_coalesced_width = [8]
     v_coalesced_width = [4]
@@ -138,6 +166,13 @@ def fast_flashattn(
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
+                # P_shared is used to bridge the WMMA D-layout (acc_s output) to
+                # A-layout (acc_s_cast input for GEMM 2). On RDNA GPUs with WMMA,
+                # D and A have different register layouts, so a direct fragment-to-
+                # fragment copy would cause a layout conflict. Routing through shared
+                # memory correctly transposes the softmax values.
+                if IsRDNA():
+                    P_shared = T.alloc_shared([block_M, block_N], dtype)
                 # Use register fragment for P instead of shared memory to reduce LDS usage
                 acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
 
@@ -184,6 +219,7 @@ def fast_flashattn(
                     for i, j in T.Parallel(block_M, dim):
                         acc_o[i, j] *= scale_factor[i]
 
+                    # Compute softmax values
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.exp(acc_s[i, j] * scale - m_i[i] * scale)
 
@@ -191,8 +227,20 @@ def fast_flashattn(
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
 
-                    # Cast acc_s (accum_dtype) to dtype in registers and directly GEMM with V
-                    T.copy(acc_s, acc_s_cast)
+                    if IsRDNA():
+                        # Cast softmax values from f32 (acc_s, D-layout) to f16 (acc_s_cast, A-layout).
+                        # On RDNA with WMMA, D and A have different register layouts.
+                        # Route through shared memory (P_shared) to correctly bridge them:
+                        # 1) T.Parallel writes acc_s values to P_shared at D-layout coordinates.
+                        # 2) T.copy reads P_shared into acc_s_cast at A-layout coordinates.
+                        # This shared-memory transpose is only correct when block_M / threads
+                        # gives at most 2 warps (block_M=32 with 64 threads, or block_M=16 with 32 threads).
+                        for i, j in T.Parallel(block_M, block_N):
+                            P_shared[i, j] = T.cast(acc_s[i, j], dtype)
+                        T.copy(P_shared, acc_s_cast)
+                    else:
+                        # This avoids layout conflict between acc_s and acc_s_cast
+                        T.copy(acc_s, acc_s_cast)
 
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
 

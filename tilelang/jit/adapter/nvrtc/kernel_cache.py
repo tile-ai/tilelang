@@ -8,6 +8,9 @@ class NVRTCKernelCache(KernelCache):
     kernel_lib_path = "kernel.cubin"
     kernel_py_path = "kernel.py"
 
+    def _get_required_files(self, cache_path: str) -> list[str]:
+        return super()._get_required_files(cache_path) + [os.path.join(cache_path, self.kernel_py_path)]
+
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         src_lib_path = kernel.adapter.libpath
         kernel_py_path = os.path.join(cache_path, self.kernel_py_path)

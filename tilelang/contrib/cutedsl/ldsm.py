@@ -6,6 +6,21 @@ These functions provide wrappers around PTX ldmatrix/stmatrix instructions
 for loading/storing 8x8 matrix fragments between shared memory and registers.
 """
 
+__all__ = [
+    "ptx_ldmatrix_x1",
+    "ptx_ldmatrix_x2",
+    "ptx_ldmatrix_x4",
+    "ptx_ldmatrix_x1_trans",
+    "ptx_ldmatrix_x2_trans",
+    "ptx_ldmatrix_x4_trans",
+    "ptx_stmatrix_x1",
+    "ptx_stmatrix_x2",
+    "ptx_stmatrix_x4",
+    "ptx_stmatrix_x1_trans",
+    "ptx_stmatrix_x2_trans",
+    "ptx_stmatrix_x4_trans",
+]
+
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass._mlir.dialects import nvvm, llvm
 from cutlass._mlir import ir  # noqa: F401

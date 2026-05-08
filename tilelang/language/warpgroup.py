@@ -14,7 +14,7 @@ class WarpSpecializeFrame(TIRFrame):
     """
 
 
-def WarpSpecialize(*warp_group_idx):
+def WarpSpecialize(*warp_group_idx) -> WarpSpecializeFrame:
     """Tools to construct a warp group frame.
 
     Parameters

@@ -5,6 +5,7 @@
  */
 
 #include "common/assume.h"
+#include "common/attr.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ffi/optional.h"
 #include "tvm/ir/expr.h"
@@ -70,6 +71,46 @@ private:
       }
     }
 
+    // --- Stride divisibility for sub-byte dtypes ---
+    struct StrideDivisibilityItem {
+      PrimExpr stride;
+      int pack_factor;
+      std::vector<Buffer> buffers;
+    };
+    std::vector<StrideDivisibilityItem> stride_div_items;
+    std::unordered_map<size_t, std::vector<size_t>> stride_div_buckets;
+
+    void addStrideExpr(PrimExpr stride, int pack_factor, Buffer buffer) {
+      size_t h = sh(stride);
+      auto &bucket = stride_div_buckets[h];
+      auto it = std::find_if(bucket.begin(), bucket.end(), [&](size_t y) {
+        return se(stride, stride_div_items[y].stride, true);
+      });
+      if (it == bucket.end()) {
+        auto index = stride_div_items.size();
+        stride_div_items.push_back({stride, pack_factor, {buffer}});
+        bucket.push_back(index);
+      } else {
+        auto &item = stride_div_items[*it];
+        item.buffers.push_back(buffer);
+        // Use the largest pack_factor (strongest constraint)
+        item.pack_factor = std::max(item.pack_factor, pack_factor);
+      }
+    }
+
+    void addBufferStrides(Buffer buf) {
+      int element_bits = buf->dtype.bits() * buf->dtype.lanes();
+      if (element_bits >= 8 || buf->strides.empty())
+        return;
+      int pack_factor = 8 / element_bits;
+      for (size_t k = 0; k + 1 < buf->strides.size(); ++k) {
+        auto stride = buf->strides[k];
+        if (stride->IsInstance<IntImmNode>())
+          continue;
+        addStrideExpr(stride, pack_factor, buf);
+      }
+    }
+
     Stmt build(Stmt body) {
       auto analyzer = arith::Analyzer{};
       for (const auto &e : items) {
@@ -86,6 +127,23 @@ private:
         body = AttrStmt(simplified, tir::attr::tilelang_assume,
                         StringImm(ss.str()), body);
       }
+      // Inject stride divisibility assumes for sub-byte dtypes.
+      // E.g. for fp4 (pack_factor=2), non-last-dim strides must be even.
+      for (const auto &e : stride_div_items) {
+        auto cond =
+            EQ(floormod(e.stride, make_const(e.stride.dtype(), e.pack_factor)),
+               make_zero(e.stride.dtype()));
+        std::stringstream ss;
+        ss << "Sub-byte buffer stride must be divisible by " << e.pack_factor
+           << ": stride `" << e.stride << "` from buffer ";
+        for (size_t i = 0; i < e.buffers.size(); i++) {
+          if (i)
+            ss << ", ";
+          ss << "`" << e.buffers[i]->name << "`";
+        }
+        body = AttrStmt(cond, tir::attr::tilelang_assume, StringImm(ss.str()),
+                        body);
+      }
       return body;
     }
   };
@@ -94,6 +152,7 @@ private:
     auto body = VisitStmt(op->body);
     AssumeCreator c;
     c.addBuffer(op->buffer);
+    c.addBufferStrides(op->buffer);
     return DeclBuffer(op->buffer, c.build(body), op->span);
   }
 
@@ -149,16 +208,19 @@ private:
 
     // NOTE(chaofan): We only inject assumes from function arguments in the
     // root block.
-    if (op->name_hint == "root") {
+    if (IsHostMainBlock(op)) {
       for (auto item : f->buffer_map) {
         c.addBuffer(item.second);
+        c.addBufferStrides(item.second);
       }
     }
     for (auto item : op->alloc_buffers) {
       c.addBuffer(item);
+      c.addBufferStrides(item);
     }
     for (auto item : op->match_buffers) {
       c.addBuffer(item->buffer);
+      c.addBufferStrides(item->buffer);
     }
 
     return Block(op->iter_vars, op->reads, op->writes, op->name_hint,

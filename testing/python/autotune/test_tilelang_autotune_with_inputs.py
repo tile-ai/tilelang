@@ -16,14 +16,14 @@ def ref_program(A, B):
 
     Parameters
     ----------
-    A : numpy.ndarray
+    A : torch.Tensor
         The matrix with shape (M, K).
-    B : numpy.ndarray
+    B : torch.Tensor
         The matrix with shape (N, K).
 
     Returns
     -------
-    np.ndarray
+    torch.Tensor
         The result of A @ B.T, shape (M, N).
     """
     return A @ B.T
@@ -131,7 +131,7 @@ def test_autotune_matmul():
     Run the autotuning validation for the matmul kernel on a 1024x1024x1024 problem.
 
     This test constructs random CUDA tensors, autotunes the JIT-compiled block-level matrix-multiplication kernel,
-    executes it, and asserts the result matches a reference CPU implementation within tolerances.
+    executes it, and asserts the result matches a reference PyTorch implementation within tolerances.
     """
     run_autotune(1024, 1024, 1024)
 

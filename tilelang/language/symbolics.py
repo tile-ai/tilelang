@@ -4,12 +4,13 @@ from __future__ import annotations
 import re
 from tvm import tir
 
+from tilelang._typing import DType
 from tilelang.utils import deprecated
 
 __all__ = ["dynamic", "symbolic"]
 
 
-def dynamic(name: str, dtype: str = "int32") -> tuple[tir.Var, ...] | tir.Var:
+def dynamic(name: str, dtype: DType = "int32") -> tuple[tir.Var, ...] | tir.Var:
     """
     Create a TIR dynamic symbolic variable.
 
@@ -30,6 +31,6 @@ def dynamic(name: str, dtype: str = "int32") -> tuple[tir.Var, ...] | tir.Var:
 
 
 @deprecated("T.symbolic(...)", "T.dynamic(...)", "v0.1.9")
-def symbolic(name: str, dtype: str = "int32"):
+def symbolic(name: str, dtype: DType = "int32") -> tuple[tir.Var, ...] | tir.Var:
     """Deprecated alias for `T.dynamic`."""
     return dynamic(name, dtype)

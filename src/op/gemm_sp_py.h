@@ -4,7 +4,7 @@
  *
  */
 
-// TODO: @botbw: remove redundant code with gemm_py.h
+// TODO: @botbw: remove redundant code with gemm.h
 
 #ifndef TVM_TL_OP_GEMM_SP_PY_H_
 #define TVM_TL_OP_GEMM_SP_PY_H_
@@ -20,7 +20,6 @@ using namespace tir;
 
 class GemmSPPyNode : public TileOperatorNode {
 public:
-  bool CheckWGMMA() const;
   tir::Buffer A, E, B, C;
   // pointer to the A, E, B, C
   BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
@@ -29,8 +28,7 @@ public:
   int stride_A, stride_B;
   int offset_A, offset_B;
   PrimExpr clear_accum = const_false();
-  // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
-  // only will be enabled under cdna mfma instructions
+  // Backend-specific K packing parameter.
   int kPack = 1;
   int wg_wait = 0;
 
@@ -70,13 +68,11 @@ public:
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
+  AccessRegions GetAccessRegions() const override;
 
   TileOperator Clone() const;
 
 private:
-  // Target GEMM instruction
-  GemmInst GetGemmInst(int block_size, Target target) const;
-
   mutable bool completed_ = false;
 };
 

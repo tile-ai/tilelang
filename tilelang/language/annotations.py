@@ -5,7 +5,7 @@ from typing import Callable
 from tilelang.layout import Fragment, Layout
 from tilelang.utils.language import is_fragment
 from tvm.script.parser.tir import attr, block_attr
-from tvm.tir import FloatImm
+from tvm.tir import FloatImm, tvm_tuple
 
 __all__ = [
     "use_swizzle",
@@ -13,6 +13,7 @@ __all__ = [
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
     "annotate_restrict_buffers",
+    "annotate_min_blocks_per_sm",
 ]
 
 
@@ -21,7 +22,7 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     device_func = "rasterization2DRow" if order == "row" else "rasterization2DColumn"
     if not enable:
         return None
-    return attr(None, "threadblock_swizzle_pattern", f"tl::{device_func}<{panel_size}>")
+    return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
 
 
 def annotate_layout(layout_map: dict):
@@ -55,6 +56,28 @@ def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
         assert buffer.scope() == "global", "persistent L2 can only be applied to global buffers"
         _l2_hit_ratio_map[buffer.data] = FloatImm("float32", float(hit_ratio))
     return block_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
+
+
+def annotate_min_blocks_per_sm(n: int):
+    """Annotate the minimum number of thread blocks per SM (multiprocessor).
+
+    When set, this value is passed as the second argument of
+    ``__launch_bounds__(maxThreadsPerBlock, minBlocksPerMultiprocessor)`` in
+    the generated CUDA kernel.  A larger value hints the compiler to limit
+    register usage so that more blocks can reside on each SM simultaneously,
+    which can improve occupancy at the cost of potentially more register
+    spilling.
+
+    Example
+    -------
+    >>> @T.prim_func
+    ... def my_kernel(...):
+    ...     with T.Kernel(...):
+                T.annotate_min_blocks_per_sm(2)
+    ...         ...
+    """
+    assert isinstance(n, int) and n > 0, "n must be a positive integer"
+    return attr(None, "tl.min_blocks_per_sm", n)
 
 
 def annotate_restrict_buffers(*buffers):

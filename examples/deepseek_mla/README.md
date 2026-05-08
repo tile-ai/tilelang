@@ -44,7 +44,7 @@ for i in range(loop_range):
     scores_scale = exp(scores_max_prev - scores_max)
     acc_o *= scores_scale
     acc_s = exp(acc_s - scores_max)
-    acc_o = acc_s @ V[i]
+    acc_o += acc_s @ V[i]
     ...
 ```
 

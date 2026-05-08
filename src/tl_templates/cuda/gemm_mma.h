@@ -2,6 +2,7 @@
 
 #include <cute/algorithm/clear.hpp>
 #include <cute/arch/mma_sm120.hpp>
+#include <cute/arch/mma_sm75.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
 #include <cute/atom/mma_atom.hpp>
@@ -103,6 +104,8 @@ TL_DISPATCH_MMA(float, float, float, SM80_16x8x8_F32TF32TF32F32_TN)
 TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
 TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 750
+#include <cute/arch/mma_sm75.hpp>
+TL_DISPATCH_MMA(half_t, half_t, half_t, SM75_16x8x8_F16F16F16F16_TN)
 TL_DISPATCH_MMA(half_t, half_t, float, SM75_16x8x8_F32F16F16F32_TN)
 #endif
 #endif

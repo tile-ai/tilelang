@@ -41,7 +41,7 @@ def get_configs():
 )
 @tilelang.jit(
     out_idx=[-1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def matmul(
     M,
@@ -180,8 +180,8 @@ def matmul(
                 # Then, dequant.
                 T.call_extern(
                     func_name,
-                    T.address_of(B_local_thread[0]),
-                    T.address_of(B_dequantize_local_thread[0]),
+                    T.access_ptr(B_local_thread, "r"),
+                    T.access_ptr(B_dequantize_local_thread, "w"),
                     1,
                     dtype=out_dtype,
                 )

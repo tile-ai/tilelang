@@ -169,12 +169,28 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         params = func.params
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
+        # Secondary index by variable name for fallback lookup when tir.Var
+        # object identity differs (e.g. params created from a different
+        # PrimFunc instance than the one stored in ir_module).
+        self._dynamic_symbolic_name_map: dict[str, tuple[int, int]] = {}
         for i, param in enumerate(params):
             buffer = buffer_map[param]
             for j, shape in enumerate(buffer.shape):
                 if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
                     dynamic_symbolic_map[shape] = (i, j)
+                    self._dynamic_symbolic_name_map[shape.name] = (i, j)
         return dynamic_symbolic_map
+
+    def _lookup_dynamic_symbolic(self, v: tir.Var) -> tuple[int, int]:
+        """Look up a tir.Var in the dynamic symbolic map.
+
+        Falls back to name-based lookup when object identity doesn't match.
+        """
+        if v in self.dynamic_symbolic_map:
+            return self.dynamic_symbolic_map[v]
+        if v.name in self._dynamic_symbolic_name_map:
+            return self._dynamic_symbolic_name_map[v.name]
+        raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
     def get_kernel_source(self, kernel_only: bool = True) -> str | None:
         """Get the CUDA kernel source code.
@@ -224,7 +240,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
                     if isinstance(s, tir.Var):
-                        ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[s]
+                        ref_tensor_idx, ref_shape_idx = self._lookup_dynamic_symbolic(s)
                         shape.append(ins[ref_tensor_idx].shape[ref_shape_idx])
                     else:  # Already converted to Python int during initialization
                         shape.append(s)

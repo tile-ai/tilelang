@@ -20,6 +20,50 @@ import os
 import traceback
 
 
+class _FreezeSentinel:
+    """No-op context manager and identity function used to mark frozen regions for autodd.
+
+    Usage in the target script::
+
+        from tilelang.autodd import __freeze__
+
+        # Protect a statement block:
+        with __freeze__:
+            critical_call(args)
+
+        # Protect a single expression:
+        result = __freeze__(critical_expr)
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def __call__(self, x=None):
+        return x
+
+
+__freeze__ = _FreezeSentinel()
+
+
+def _is_freeze_with(node: ast.AST) -> bool:
+    """Detect ``with __freeze__: body`` (no ``as`` clause)."""
+    return (
+        isinstance(node, ast.With)
+        and len(node.items) == 1
+        and node.items[0].optional_vars is None
+        and isinstance(node.items[0].context_expr, ast.Name)
+        and node.items[0].context_expr.id == "__freeze__"
+    )
+
+
+def _is_freeze_call(node: ast.AST) -> bool:
+    """Detect ``__freeze__(expr)``."""
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "__freeze__"
+
+
 def ast_replace(node: ast.AST, **changes) -> ast.AST:
     node = copy(node)
     for field, value in changes.items():
@@ -374,6 +418,14 @@ class RewriteAttacher(ASTMutator):
         self.uid_counter = 0
         self.rewrite_counter = 0
         self.rewrite_names = Counter()
+        # Freeze propagation state:
+        #   _frozen       – True when we are currently inside a frozen subtree
+        #   _stmt_stack   – stack of enclosing ast.stmt nodes; used so that a
+        #                   __freeze__(expr) child can retroactively freeze its
+        #                   ancestor statement (preventing e.g. assign_rhs_1 from
+        #                   replacing the whole RHS and destroying the frozen expr).
+        self._frozen: bool = False
+        self._stmt_stack: list[ast.AST] = []
 
     @override
     def visit(self, node: ast.AST, parent: "ast.AST | None", field: "str | None", inside_list: bool):
@@ -381,13 +433,46 @@ class RewriteAttacher(ASTMutator):
         node._dd_uid = self.uid_counter
         self.uid_counter += 1
         node._dd_rewrites = []
-        for r in self.rewrites:
-            if r.match(node, parent, field, inside_list):
-                lr = LabeledRewrite(self.rewrite_counter, r)
-                self.rewrite_counter += 1
-                self.rewrite_names[lr.rewrite.get_name()] += 1
-                node._dd_rewrites.append(lr)
+
+        # A node is a freeze boundary if it is ``with __freeze__:`` or
+        # ``__freeze__(expr)``.  Once we cross a boundary, every descendant
+        # is also frozen.
+        is_boundary = _is_freeze_with(node) or _is_freeze_call(node)
+        is_frozen = self._frozen or is_boundary
+
+        # If this node is a freeze boundary, retroactively mark *all*
+        # enclosing statements as frozen.  Marking only the directly
+        # enclosing statement is not enough: a parent ``if``/``for``/``while``
+        # could be removed by stmt-remover, which would take the frozen
+        # subtree with it.
+        if is_boundary:
+            for stmt in self._stmt_stack:
+                stmt._dd_ancestor_frozen = True
+
+        if not is_frozen:
+            for r in self.rewrites:
+                if r.match(node, parent, field, inside_list):
+                    lr = LabeledRewrite(self.rewrite_counter, r)
+                    self.rewrite_counter += 1
+                    self.rewrite_names[lr.rewrite.get_name()] += 1
+                    node._dd_rewrites.append(lr)
+
+        is_stmt = isinstance(node, ast.stmt)
+        if is_stmt:
+            self._stmt_stack.append(node)
+
+        old_frozen = self._frozen
+        self._frozen = is_frozen
         res = self.generic_visit(node)
+        self._frozen = old_frozen
+
+        if is_stmt:
+            self._stmt_stack.pop()
+            # If a child __freeze__() call flagged this statement, wipe any
+            # rewrites that were attached before we discovered the frozen child.
+            if getattr(node, "_dd_ancestor_frozen", False):
+                node._dd_rewrites = []
+
         return res
 
 
@@ -594,7 +679,10 @@ class LinePDD(TaskManager, PDD):
     def __init__(self, source: str, init_proba: float = 0.93):
         lines = [line for line in source.splitlines() if line.strip() != ""]
         self.lines = lines
-        all_labels = [i for i in range(len(lines))]
+        # Frozen lines are never candidates for removal: exclude them from
+        # all_labels entirely so PDD never generates tasks that delete them.
+        frozen = _find_frozen_line_set(source, lines)
+        all_labels = [i for i in range(len(lines)) if i not in frozen]
         super().__init__(all_labels, init_proba)
 
     @override
@@ -878,6 +966,161 @@ def clean_empty_pass(code: str) -> str:
     return ast.unparse(new_tree)
 
 
+def _has_freeze_import(source: str) -> bool:
+    """Return True if *source* already contains ``from tilelang.autodd import __freeze__``
+    as an actual import statement (not inside a comment or string literal).
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "tilelang.autodd"
+            and any(alias.name == "__freeze__" for alias in node.names)
+        ):
+            return True
+    return False
+
+
+def _preprocess_freeze_comments(source: str) -> str:
+    """Convert ``# autodd: freeze`` comment annotations to ``with __freeze__:`` blocks.
+
+    Supports two forms:
+
+    **Block form** – wrap a group of statements::
+
+        # autodd: freeze-start
+        stmt1
+        stmt2
+        # autodd: end-freeze
+
+    **Single-statement form** – end-of-line comment on any non-comment line::
+
+        stmt  # autodd: freeze
+
+    Both forms are converted in-place to ``with __freeze__:`` blocks so that
+    the freeze information survives ``ast.unparse`` round-trips.
+
+    .. note::
+        The single-statement form only works for *physically single-line* statements.
+        Placing ``# autodd: freeze`` on the last line of a multi-line expression (e.g.
+        the closing ``)`` of a parenthesised call) will produce a ``SyntaxError``
+        because only that one line is wrapped.  Use the block form instead.
+
+        The block form prepends exactly 4 spaces to every non-empty line inside the
+        annotated region.  This is correct for regular statements, but it will corrupt
+        **multi-line string literals** whose continuation lines start at column 0: those
+        lines will gain unintended leading spaces (or cause a ``SyntaxError`` if the
+        closing ``\"\"\"`` is shifted).  Avoid using the block form around triple-quoted
+        string literals.
+
+    If any substitution is made and ``from tilelang.autodd import __freeze__`` is not
+    already present in *source*, the import is automatically prepended so that the
+    generated ``with __freeze__:`` blocks remain valid Python when executed.
+    """
+    lines = source.splitlines()
+    result: list[str] = []
+    substituted = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        indent = line[: len(line) - len(line.lstrip())]
+
+        # Block form: standalone comment line "# autodd: freeze-start"
+        if stripped == "# autodd: freeze-start":
+            substituted = True
+            i += 1
+            block: list[str] = []
+            found_end = False
+            while i < len(lines):
+                if lines[i].strip() == "# autodd: end-freeze":
+                    i += 1
+                    found_end = True
+                    break
+                block.append(lines[i])
+                i += 1
+            if not found_end:
+                print(
+                    "autodd WARNING: '# autodd: freeze-start' has no matching "
+                    "'# autodd: end-freeze' — all remaining source is treated as frozen."
+                )
+            result.append(f"{indent}with __freeze__:")
+            for bl in block:
+                # Prepend 4 spaces to preserve relative indentation inside the with block.
+                result.append(f"    {bl}" if bl.strip() else bl)
+
+        # Single-statement form: end-of-line "# autodd: freeze" on a non-comment line.
+        # Extract the comment text and verify it is exactly "# autodd: freeze" so that
+        # "# autodd: freeze-start" used as an inline comment is not misidentified here.
+        elif "# autodd: freeze" in line and not stripped.startswith("#"):
+            marker_idx = line.index("# autodd: freeze")
+            comment_text = line[marker_idx:].strip()
+            if comment_text != "# autodd: freeze":
+                # e.g. "# autodd: freeze-start" or "# autodd: freeze-end" as inline comment
+                result.append(line)
+                i += 1
+            else:
+                substituted = True
+                code_part = line[:marker_idx].rstrip()
+                result.append(f"{indent}with __freeze__:")
+                result.append(f"{indent}    {code_part.lstrip()}")
+                i += 1
+
+        else:
+            result.append(line)
+            i += 1
+
+    body = "\n".join(result)
+
+    # If we made substitutions, ensure __freeze__ is importable in the generated code.
+    # Users who used only comment annotations may not have the explicit import in their
+    # script; without it every exec() call would raise NameError.
+    # We use an AST-level check rather than a plain substring search so that a
+    # commented-out import (e.g. "# from tilelang.autodd import __freeze__") is not
+    # mistaken for an active one.
+    if substituted and not _has_freeze_import(body):
+        body = "from tilelang.autodd import __freeze__\n" + body
+
+    return body
+
+
+def _find_frozen_line_set(source: str, nonempty_lines: list[str]) -> set[int]:
+    """Return the set of indices into *nonempty_lines* that belong to frozen regions.
+
+    A line is considered frozen if it falls within the source span of a
+    ``with __freeze__:`` block or a ``__freeze__(expr)`` call.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+
+    # Collect 1-indexed source line numbers that are inside frozen regions.
+    frozen_linenos: set[int] = set()
+    for node in ast.walk(tree):
+        if _is_freeze_with(node) or _is_freeze_call(node):
+            start = getattr(node, "lineno", None)
+            end = getattr(node, "end_lineno", None)
+            if start is not None and end is not None:
+                frozen_linenos.update(range(start, end + 1))
+
+    if not frozen_linenos:
+        return set()
+
+    # Map 1-indexed source line numbers → indices in nonempty_lines.
+    frozen_indices: set[int] = set()
+    nonempty_idx = 0
+    for lineno_0, line in enumerate(source.splitlines()):
+        if line.strip():  # non-empty → has an entry in nonempty_lines
+            if (lineno_0 + 1) in frozen_linenos:
+                frozen_indices.add(nonempty_idx)
+            nonempty_idx += 1
+    return frozen_indices
+
+
 JobBackend = Literal["subproc", "runner"]
 
 
@@ -1119,6 +1362,10 @@ async def main(args: Args):
     ] + fast_reducers
 
     await manager.start_workers()
+    # One-time preprocessing: convert # autodd: freeze comments to
+    # ``with __freeze__:`` blocks so that freeze annotations survive
+    # ast.unparse round-trips throughout the reduction loop.
+    manager.text = _preprocess_freeze_comments(manager.text)
     manager.text = manager.post_proc(manager.text)
     try:
         while True:

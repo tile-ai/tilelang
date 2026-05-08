@@ -11,13 +11,50 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../target/utils.h"
 #include "utils.h"
+
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+std::vector<FinalizeReducerImpl> &FinalizeReducerImplRegistry() {
+  static std::vector<FinalizeReducerImpl> registry;
+  return registry;
+}
+
+const FinalizeReducerImpl &ResolveFinalizeReducerImpl(Target target) {
+  const auto &registry = FinalizeReducerImplRegistry();
+  const FinalizeReducerImpl *matched_impl = nullptr;
+  for (const FinalizeReducerImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.finalize_reducer found multiple target-specific "
+             "implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.finalize_reducer requires a target-specific implementation, but "
+         "no finalize_reducer implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  FinalizeReducerImplRegistry().push_back(impl);
+}
 
 /**
  * @brief Construct a FinalizeReducerOp from TL operator arguments and a buffer
@@ -34,97 +71,25 @@ using namespace tir;
 FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args,
                                      Map<String, ObjectRef> annotations) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
-  // Normalize any supported region expression
-  // (BufferRegion/BufferLoad/tl.region) to a BufferRegion, then take the
-  // underlying Buffer as reducer.
-  auto region = NormalizeToBufferRegion(args[0]);
-  node->reducer = region->buffer;
+  auto reducer_access = NormalizeToAccessRegion(args[0], kAccessReadWrite);
+  reducer_access.region =
+      BufferRegion::FullRegion(reducer_access.region->buffer);
+  reducer_access.access_mask = kAccessReadWrite;
+  node->reducer = reducer_access.region->buffer;
+  node->SetAccessRegions({reducer_access});
   node->op = (ReducerOpType)*as_const_int(args[1]);
+  // Read explicit batch size from annotations (0 means auto-detect).
+  if (annotations.count("batch")) {
+    node->batch = (int)*as_const_int(Downcast<PrimExpr>(annotations["batch"]));
+    CHECK_GE(node->batch, 1)
+        << "finalize_reducer: batch must be >= 1, got " << node->batch;
+  }
   data_ = std::move(node);
 }
 
-/**
- * @brief Lower the finalize_reducer TL operator to a TIR statement.
- *
- * Lowers the operator that finalizes a reducer by performing a thread-wide
- * AllReduce across the reducer's output elements and writing the reduced value
- * back into the reducer buffer. The function:
- * - Fetches the reducer buffer and expects its layout to be a Fragment.
- * - Builds index Vars for each output dimension.
- * - Reads the layout's ReplicateExtent and:
- *   - if extent == 1, emits a no-op Evaluate(0);
- *   - otherwise constructs an AllReduce extern call (uses `run_hopper` when the
- *     compilation target is Hopper) with an optional workspace (allocated via
- *     T.AddWorkspace when reducing_threads >= 32) and stores the result via
- *     BufferStore.
- * - Wraps the store in parallel outer For loops over each output dimension.
- *
- * @param T Lowering context containing buffer remapping, layout map, thread
- * bounds, target, and helper methods (e.g., AddWorkspace).
- * @param analyzer Arithmetic analyzer (unused by this implementation but
- * provided for consistency with lowering API).
- * @return Stmt The lowered TIR statement representing the AllReduce and
- * surrounding loops.
- *
- * @note The function ICHECKs that the reducer layout is present and a Fragment,
- *       and that ReplicateExtent is either 1 or equal to the thread block
- * extent; violations cause a fatal check failure.
- */
 Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
                                   arith::Analyzer *analyzer) const {
-  auto buffer = T.buffer_remap[reducer];
-  auto opt_layout = T.layout_map.Get(reducer);
-  ICHECK(opt_layout);
-  ICHECK(opt_layout->as<Fragment>());
-  auto layout = opt_layout->as<Fragment>().value();
-  Array<PrimExpr> indices_0;
-  indices_0.reserve(layout->OutputDim());
-  for (int i = 0; i < layout->OutputDim(); ++i)
-    indices_0.push_back(Var("__finred_" + std::to_string(i)));
-
-  const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
-  ICHECK(p_extent);
-  int extent = *p_extent, scale = 1;
-  ICHECK(extent == 1 || extent == *as_const_int(T.thread_bounds->extent))
-      << "Illegal finalize_reducer: extent=" << extent
-      << "; T.thread_bounds=" << T.thread_bounds;
-
-  if (extent == 1)
-    return Evaluate(0);
-
-  std::array op_names{"tl::SumOp", "tl::MaxOp", "tl::MinOp"};
-  auto op_str = op_names[(int)op];
-
-  // adopted from ReduceOp
-  int reducing_threads = extent;
-  std::stringstream ss;
-  auto thread_offset = T.thread_bounds->min;
-  if (TargetIsHopper(T.target) || TargetIsSm100(T.target) ||
-      TargetIsSM120(T.target)) {
-    auto all_threads = T.thread_bounds->extent;
-    ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
-       << ", " << thread_offset << ", " << all_threads << ">::run_hopper";
-  } else {
-    ss << "tl::AllReduce<" << op_str << ", " << reducing_threads << ", " << 1
-       << ", " << thread_offset << ">::run";
-  }
-  Array<PrimExpr> thread_reduce_args = {StringImm(ss.str()),
-                                        BufferLoad(buffer, indices_0)};
-  if (reducing_threads >= 32) {
-    PrimExpr workspace =
-        T.AddWorkspace(*as_const_int(T.thread_bounds->extent), buffer->dtype);
-    thread_reduce_args.push_back(workspace);
-  }
-  auto call = Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);
-  Stmt body = BufferStore(buffer, call, indices_0);
-
-  // make the outer spatial loop
-  for (int i = layout->OutputDim() - 1; i >= 0; i--) {
-    body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-               ForKind::kParallel, body);
-  }
-
-  return body;
+  return ResolveFinalizeReducerImpl(T.target).lower(*this, T, analyzer);
 }
 
 /**

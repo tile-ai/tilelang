@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import re
 from typing import Callable
-import sys
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -56,6 +56,50 @@ def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
     return lambda func: not get_device_call(is_device_c)(func)
 
 
+_CUDA_GLOBAL_KERNEL_PATTERN = re.compile(r'(?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+)')
+
+
+def _collect_external_cuda_kernel_names(source: str) -> list[str]:
+    kernel_names: list[str] = []
+    seen_names: set[str] = set()
+    for match in _CUDA_GLOBAL_KERNEL_PATTERN.finditer(source):
+        kernel_name = match.group(1)
+        if kernel_name not in seen_names:
+            kernel_names.append(kernel_name)
+            seen_names.add(kernel_name)
+    return kernel_names
+
+
+@tvm_ffi.register_global_func("tilelang_callback_cuda_validate", override=True)
+def tilelang_callback_cuda_validate(device_mod):
+    for _, base_func in device_mod.functions.items():
+        if not isinstance(base_func, tir.PrimFunc) or not base_func.attrs:
+            continue
+
+        code_block_source = base_func.attrs.get("code_block_source")
+        if code_block_source is None:
+            continue
+
+        global_symbol = base_func.attrs.get("global_symbol")
+        if global_symbol is None:
+            raise ValueError("CodeGenTileLangCUDA expects source-kernel PrimFunc to have the global_symbol attribute")
+
+        expected_name = str(global_symbol)
+        code_block_entry_name = base_func.attrs.get("code_block_entry_name")
+        if code_block_entry_name is not None and str(code_block_entry_name) != expected_name:
+            raise ValueError("T.CUDASourceCodeKernel expects the lowered device global_symbol to match entry_name")
+
+        kernel_names = _collect_external_cuda_kernel_names(str(code_block_source))
+        if not kernel_names:
+            raise ValueError("T.CUDASourceCodeKernel expects external CUDA source to declare at least one __global__ kernel")
+        if expected_name not in kernel_names:
+            raise ValueError(
+                "T.CUDASourceCodeKernel expected device global_symbol "
+                f"`{expected_name}` to match a __global__ kernel in the provided CUDA source. "
+                f"Available entries: {', '.join(kernel_names)}"
+            )
+
+
 @tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
     target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
@@ -68,10 +112,14 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
 
     ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+    if ptxas_usage_level is not None:
+        ptxas_usage_level = int(ptxas_usage_level)
     verbose_ptxas_output = bool(cfg.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False))
 
     options = [
-        "-std=c++17",
+        # tl_templates/cuda/reduce.h uses explicit lambda template parameters
+        # (`[&]<typename T>(T) { ... }`) which require C++20.
+        "-std=c++20",
         "-I" + TILELANG_TEMPLATE_PATH,
         "-I" + CUTLASS_INCLUDE_DIR,
     ]
@@ -145,7 +193,20 @@ def canon_target_host(target: str | Target, target_host: str | Target | None):
     return target_host
 
 
-def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
+def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | None = None) -> tvm.IRModule:
+    """Generate host-side code from the lowered IR module.
+
+    Parameters
+    ----------
+    host_mod : tvm.IRModule
+        The host-side IR module to compile.
+    target_host : Target
+        The host compilation target (e.g. "llvm" or "c").
+    target : Target, optional
+        The device target.  When the device target is Metal, the pass
+        MarkHostMetalContext is applied so that the generated host code
+        contains the Metal/MPS synchronisation logic.
+    """
     host_mod = tir.transform.BindTarget(target_host)(host_mod)
     host_mod = tir.transform.FP8StorageLegalize()(host_mod)
     host_mod = tir.transform.BF16StorageLegalize()(host_mod)
@@ -154,12 +215,12 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     host_mod = tilelang.transform.LowerIntrin()(host_mod)
     host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
-    if sys.platform == "darwin":
+    if target is not None and target.kind.name == "metal":
         host_mod = MarkHostMetalContext()(host_mod)
     if target_host.kind.name == "llvm":
         host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
-        host_mod = tvm.ffi.get_global_func("target.build.tilelang_c")(host_mod, target_host)
+        host_mod = tvm.ffi.get_global_func("target.build.tilelang_c_host")(host_mod, target_host)
     else:
         raise ValueError(f"Target host {target_host.kind.name} is not supported")
     return host_mod
@@ -196,7 +257,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     elif target.kind.name == "hip":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(device_mod, target)
     elif target.kind.name == "c":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_c")(device_mod, target)
     elif target.kind.name == "llvm":
         device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
     elif target.kind.name == "webgpu":
@@ -253,12 +314,12 @@ def lower(
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
-
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
+    kernel_source = codegen_mod.inspect_source()
 
     if enable_host_codegen:
-        host_mod = host_codegen(host_mod, target_host)
+        host_mod = host_codegen(host_mod, target_host, target=target)
         host_mod.import_module(codegen_mod)
-        return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source(), rt_mod=host_mod)
+        return CompiledArtifact(host_mod, device_mod, params, kernel_source, rt_mod=host_mod)
 
-    return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source())
+    return CompiledArtifact(host_mod, device_mod, params, kernel_source)

@@ -1,5 +1,5 @@
 /*!
- * \file lower hopper intrin.cc
+ * \file tl/transform/lower_hopper_intrin.cc
  * \brief Lower Hopper intrinsics cuda GPU(sm90+)
  */
 
@@ -10,9 +10,11 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../op/builtin.h"
-#include "../runtime/runtime.h"
-#include "./common/mbarrier.h"
+#include <unordered_map>
+#include <vector>
+
+#include "backend/cuda/runtime.h"
+#include "op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -26,33 +28,16 @@ public:
     PrimFuncNode *fptr = f.CopyOnWrite();
     LowerHopperIntrin substituter(disable_shuffle_elect);
     fptr->body = substituter.VisitStmt(f->body);
-    Map<Var, Array<PrimExpr>> init_desc_arg_map;
     // Collect prologue/epilogue statements for host-side setup/teardown
     Array<Stmt> prologue_stmts;
     Array<Stmt> epilogue_stmts;
-    for (const auto &[call, var] : substituter.desc_map_) {
-      // Should allocate 128 bytes for TensorMap on stack
-      Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
-                             {StringImm("tvm_ffi_any"), 16});
-      Array<PrimExpr> init_desc_args;
-      if (call->op.same_as(create_tma_descriptor())) {
-        init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
-      } else if (call->op.same_as(create_tma_im2col_descriptor())) {
-        init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
-      } else {
-        CHECK(0) << call->op;
+    for (const auto &desc_init : substituter.desc_inits_) {
+      if (!desc_init.emitted) {
+        prologue_stmts.push_back(desc_init.stmt);
       }
-      init_desc_args.push_back(var);
-      init_desc_args.insert(init_desc_args.end(), call->args.begin(),
-                            call->args.end());
-      // add to function attribute
-      Call init_desc =
-          Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
-      // Accumulate TMA descriptor init into prologue
-      prologue_stmts.push_back(LetStmt(var, alloc_desc, Evaluate(init_desc)));
-      init_desc_arg_map.Set(var, init_desc_args);
     }
-    f = WithAttr(std::move(f), "tma_descriptor_args", init_desc_arg_map);
+    f = WithAttr(std::move(f), "tma_descriptor_args",
+                 substituter.init_desc_arg_map_);
 
     // Additionally, if L2 persistent cache annotations were lowered earlier,
     // materialize TVM FFI calls to set the stream access policy window.
@@ -72,8 +57,24 @@ public:
             continue;
           }
           const Buffer &buf = name2buf.at(buf_name);
-          // Build base pointer expression (read access)
-          PrimExpr base_ptr = buf.access_ptr(1);
+          // Build base pointer expression.
+          //
+          // We only need the base address for CUDA stream access policy window
+          // configuration. Using `Buffer::access_ptr` would materialize a
+          // typed pointer cast based on `buf->dtype` (e.g. float16 -> `half*`)
+          // in the generated C host stubs, which then requires a `half`
+          // definition during host compilation. Since the runtime API treats
+          // the pointer as opaque, keep it as `void*`/handle and adjust by
+          // `elem_offset` in bytes when needed.
+          PrimExpr base_ptr = buf->data;
+          if (buf->elem_offset.defined() && !is_zero(buf->elem_offset)) {
+            PrimExpr byte_offset =
+                buf->elem_offset *
+                IntImm(buf->elem_offset.dtype(), buf->dtype.bytes());
+            base_ptr =
+                Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+                     {base_ptr, byte_offset});
+          }
           // Args packed: func_name, base_ptr, num_bytes, hit_ratio
           Array<PrimExpr> packed_args;
           packed_args.push_back(
@@ -111,60 +112,53 @@ public:
     return f;
   }
 
+  Stmt VisitStmt_(const AllocateNode *op) final {
+    Stmt stmt = StmtExprMutator::VisitStmt_(op);
+    Array<Stmt> init_stmts;
+    for (auto &desc_init : desc_inits_) {
+      if (!desc_init.emitted && desc_init.base_var == op->buffer_var.get()) {
+        init_stmts.push_back(desc_init.stmt);
+        desc_init.emitted = true;
+      }
+    }
+    if (init_stmts.empty()) {
+      return stmt;
+    }
+
+    auto *alloc = stmt.as<AllocateNode>();
+    ICHECK(alloc != nullptr);
+    Array<Stmt> seq;
+    for (const auto &init_stmt : init_stmts) {
+      seq.push_back(init_stmt);
+    }
+    seq.push_back(alloc->body);
+    auto n = CopyOnWrite(alloc);
+    n->body = SeqStmt(seq);
+    return Stmt(n);
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    // Insert the prefetch TMA descriptor statement TO the beginning of the
-    // kernel
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         auto body = StmtExprMutator::VisitStmt(op->body);
-        if (prefetch_calls_.empty() && init_mbarrier_calls_.empty()) {
+        if (prefetch_calls_.empty()) {
           return AttrStmt(op->node, op->attr_key, op->value, body);
         } else {
           Array<Stmt> stmt_seq;
-
-          auto stmts = prefetch_calls_;
-          stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
-                       init_mbarrier_calls_.end());
           PrimExpr condition;
           if (!disable_shuffle_elect_) {
             condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
           } else {
             condition = EQ(iv->var, 0);
           }
+          auto stmts = prefetch_calls_;
           auto stmt_ = IfThenElse(condition,
                                   stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
           stmt_seq.push_back(stmt_);
-          if (!init_mbarrier_calls_.empty()) {
-            // Note from FlashAttention:
-            // Helps with visibility of barrier init operations across warps /
-            // cta / cluster Available as a separate function so as to batch
-            // inits across barriers and fence once Note : It must be composed
-            // with an appropriate sync instruction with the right scope to
-            // ensure visibility eg. __syncthreads() or a cluster_arrive() +
-            // cluster_wait()
-            Stmt mem_fence = Evaluate(Call(
-                DataType::Handle(), tvm::tl::ptx_fence_barrier_init(), {}));
-            stmt_seq.push_back(mem_fence);
-            Stmt mem_sync =
-                Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
-                              {StringImm("shared")}));
-            stmt_seq.push_back(mem_sync);
-          }
           stmt_seq.push_back(body);
-
           Stmt result = SeqStmt(stmt_seq);
-
-          if (!init_mbarrier_calls_.empty()) {
-            mbarrier_buffer_ = CreateMBarrierBuffer(
-                injected_mbarrier_name_, init_mbarrier_calls_.size());
-            result = DeclBuffer(mbarrier_buffer_, result);
-            result = Allocate(mbarrier_buffer_->data, mbarrier_buffer_->dtype,
-                              mbarrier_buffer_->shape, const_true(), result);
-          }
-
           prefetch_calls_.clear();
-          init_mbarrier_calls_.clear();
           return AttrStmt(op->node, op->attr_key, op->value, result);
         }
       }
@@ -183,35 +177,61 @@ public:
         String name = call->args[2].as<Var>().value()->name_hint;
         var = Var(name + "_desc",
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
-        desc_map_[tvm::ffi::GetRef<Call>(call)] = var;
+        Call call_ref = tvm::ffi::GetRef<Call>(call);
+        desc_map_[call_ref] = var;
+        Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
+        init_desc_arg_map_.Set(var, init_desc_args);
+        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
+                               MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
       }
       return var;
-    } else if (call->op.same_as(create_list_of_mbarrier())) {
-      ICHECK(init_mbarrier_calls_.empty());
-      int num_barriers = static_cast<int>(call->args.size());
-      for (int i = 0; i < num_barriers; i++) {
-        PrimExpr mbarrier = Call(DataType::Handle(), get_mbarrier(), {i});
-        init_mbarrier_calls_.push_back(Evaluate(
-            Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
-                 {mbarrier, call->args[i]})));
-      }
-      return 0;
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }
   }
 
 private:
+  struct DescInit {
+    const VarNode *base_var;
+    Stmt stmt;
+    bool emitted;
+  };
+
+  static Array<PrimExpr> MakeInitDescArgs(const Call &call, const Var &var) {
+    Array<PrimExpr> init_desc_args;
+    if (call->op.same_as(create_tma_descriptor())) {
+      init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
+    } else if (call->op.same_as(create_tma_im2col_descriptor())) {
+      init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
+    } else {
+      CHECK(0) << call->op;
+    }
+    init_desc_args.push_back(var);
+    init_desc_args.insert(init_desc_args.end(), call->args.begin(),
+                          call->args.end());
+    return init_desc_args;
+  }
+
+  static Stmt MakeInitDescStmt(const Var &var,
+                               const Array<PrimExpr> &init_desc_args) {
+    // Should allocate 128 bytes for TensorMap on stack.
+    Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
+                           {StringImm("tvm_ffi_any"), 16});
+    Call init_desc =
+        Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
+    return LetStmt(var, alloc_desc, Evaluate(init_desc));
+  }
+
   Array<Stmt> prefetch_calls_;
-  Array<Stmt> init_mbarrier_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
+  std::vector<DescInit> desc_inits_;
+  Map<Var, Array<PrimExpr>> init_desc_arg_map_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
-  Buffer mbarrier_buffer_;
 };
 
 using namespace tir::transform;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import errno
 import os
 import shutil
 import threading
@@ -22,6 +23,7 @@ from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang import __version__
+import platform
 
 
 class KernelCache:
@@ -37,15 +39,24 @@ class KernelCache:
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
+    _staging_cleanup_lock = threading.Lock()
+    _last_cleaned_staging_root: str | None = None
     execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi"
     device_kernel_path = "device_kernel.cu"
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
+    cache_root_dir = "kernels"
+    staging_root_dir = ".staging"
 
     @staticmethod
     @functools.cache
     def _get_compile_args() -> dict:
+        if sys.platform == "win32":
+            from tilelang.contrib.msvc import create_shared as msvc_create_shared
+
+            return {"fcompile": msvc_create_shared}
+
         if sys.platform != "darwin":
             return {}
 
@@ -55,13 +66,81 @@ class KernelCache:
 
     @staticmethod
     @functools.cache
+    def _get_tilelang_lib_stamp() -> str | None:
+        """Return a content-based build-stamp for the TileLang runtime library.
+
+        The kernel cache key historically only depended on `tilelang.__version__`
+        and the TIR script. During development, C++ pass changes can change the
+        generated kernel *without* changing the input TIR, leading to stale cache
+        hits. Including a library stamp avoids this class of bugs.
+
+        We use a SHA-256 content hash of the library file instead of mtime so that
+        the cache key is stable across machines and fresh installs — two identical
+        builds of libtilelang.so will produce the same stamp regardless of when or
+        where they were installed.
+        """
+        import importlib
+
+        lib_dirs: list[str] = []
+        try:
+            env_mod = importlib.import_module("tilelang.env")
+            lib_dirs.extend(getattr(env_mod, "TL_LIBS", []) or [])
+        except Exception:
+            pass
+
+        if sys.platform == "win32":
+            lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
+        elif sys.platform == "darwin":
+            lib_names = ["libtilelang.dylib", "libtilelang.so"]
+        else:
+            lib_names = ["libtilelang.so"]
+
+        for lib_dir in lib_dirs:
+            for name in lib_names:
+                path = os.path.join(lib_dir, name)
+                if os.path.exists(path):
+                    file_hash = sha256()
+                    with open(path, "rb") as f:
+                        for chunk in iter(lambda: f.read(1 << 20), b""):
+                            file_hash.update(chunk)
+                    return f"{name}:{file_hash.hexdigest()}"
+        return None
+
+    @staticmethod
+    @functools.cache
     def _get_base_key() -> dict:
-        base = {"version": __version__}
+        base = {"version": __version__, "platform": platform.machine()}
+        lib_stamp = KernelCache._get_tilelang_lib_stamp()
+        if lib_stamp:
+            base["tilelang_lib"] = lib_stamp
         if sys.platform == "darwin":
             import torch
 
             base["torch"] = torch.__version__
         return base
+
+    @staticmethod
+    def _sanitize_path_component(component: str) -> str:
+        sanitized = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in component)
+        sanitized = sanitized.strip("._-")
+        return sanitized or "unknown"
+
+    @staticmethod
+    def _format_version_namespace(version: str) -> str:
+        public, sep, local = version.partition("+")
+        public = KernelCache._sanitize_path_component(public)
+        if not sep:
+            return public
+        local = "".join(ch if ch.isalnum() else "_" for ch in local).strip("_")
+        return f"{public}_{local}" if local else public
+
+    @staticmethod
+    @functools.cache
+    def _get_cache_namespace() -> str:
+        base_key = KernelCache._get_base_key()
+        version = KernelCache._format_version_namespace(str(base_key.get("version", "unknown")))
+        platform_name = KernelCache._sanitize_path_component(str(base_key.get("platform", "unknown")))
+        return f"{version}-{platform_name}"
 
     def __new__(cls):
         """
@@ -85,6 +164,51 @@ class KernelCache:
     def _create_dirs():
         os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
         os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
+        os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
+        os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
+        os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
+
+        staging_root = KernelCache._get_staging_root()
+        with KernelCache._staging_cleanup_lock:
+            if KernelCache._last_cleaned_staging_root != staging_root:
+                KernelCache._cleanup_stale_staging_dirs()
+                KernelCache._last_cleaned_staging_root = staging_root
+
+    @staticmethod
+    def _get_namespace_root() -> str:
+        return os.path.join(env.TILELANG_CACHE_DIR, KernelCache._get_cache_namespace())
+
+    @staticmethod
+    def _get_cache_root() -> str:
+        return os.path.join(KernelCache._get_namespace_root(), KernelCache.cache_root_dir)
+
+    @staticmethod
+    def _get_staging_root() -> str:
+        return os.path.join(KernelCache._get_namespace_root(), KernelCache.staging_root_dir)
+
+    @staticmethod
+    def _cleanup_stale_staging_dirs(max_age_seconds: int = 3600):
+        """Remove stale entries from the dedicated staging root.
+
+        These are left behind when a process crashes mid-save.
+        """
+        import time
+
+        try:
+            now = time.time()
+            staging_root = KernelCache._get_staging_root()
+            if not os.path.isdir(staging_root):
+                return
+
+            for entry in os.scandir(staging_root):
+                if entry.is_dir(follow_symlinks=False):
+                    try:
+                        if now - entry.stat().st_mtime > max_age_seconds:
+                            shutil.rmtree(entry.path, ignore_errors=True)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 
     def _generate_key(
         self,
@@ -262,7 +386,7 @@ class KernelCache:
         Returns:
             str: Absolute path to the cache directory for this kernel.
         """
-        return os.path.join(env.TILELANG_CACHE_DIR, key)
+        return os.path.join(self._get_cache_root(), key)
 
     @staticmethod
     def _load_binary(path: str):
@@ -288,52 +412,72 @@ class KernelCache:
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):
         """
-        Persists a compiled kernel to disk cache.
+        Persists a compiled kernel to disk cache using atomic directory rename.
+
+        All files are first written into a temporary staging directory under the
+        namespace staging root. Once every file is in place, the staging directory
+        is atomically renamed to the final cache path so that other processes never
+        observe an incomplete cache entry.
 
         Args:
             key (str): The hash key identifying the kernel.
             kernel (JITKernel): The compiled kernel to be saved.
             func (Callable, optional): The original function.
             verbose (bool): Enable verbose log messages.
-
-        Note:
-            Saves the following files:
-            - kernel.cu: The compiled kernel source code
-            - wrapped_kernel.cu: The wrapped kernel source code
-            - kernel_lib.so: The compiled kernel library
-            - params.pkl: The serialized kernel parameters
         """
+        # Env-backed cache roots may change across tests or at runtime; recreate the
+        # namespace-specific directories lazily here so direct save helpers keep working
+        # even when the singleton instance is reused.
+        KernelCache._create_dirs()
         cache_path = self._get_cache_path(key)
-        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
 
-        # Save kernel source code
+        # Another process already wrote a complete entry — nothing to do.
+        if self._is_complete_cache_dir(cache_path):
+            return
+
+        # Staging dir lives under CACHE_DIR/<namespace>/.staging (same filesystem) so
+        # os.rename works without scanning the full cache root during stale cleanup.
+        staging_path = os.path.join(
+            self._get_staging_root(),
+            f"{key}_{os.getpid()}_{uuid.uuid4().hex[:8]}",
+        )
+        os.makedirs(staging_path)
+
         try:
-            self._save_kernel_source_code_to_disk(kernel, cache_path, verbose)
-        except Exception:
-            self.logger.exception("Error saving kernel source code to disk")
+            # Save kernel source code
+            self._save_kernel_source_code_to_disk(kernel, staging_path, verbose)
 
-        # Save wrapped kernel source code
-        try:
-            self._save_wrapper_kernel_code_to_disk(kernel, cache_path, verbose)
-        except Exception:
-            self.logger.exception("Error saving host kernel source code to disk")
+            # Save wrapped kernel source code
+            self._save_wrapper_kernel_code_to_disk(kernel, staging_path, verbose)
 
-        # Save the kernel library
-        try:
-            # Save CUBIN or SO file
-            self._save_so_cubin_to_disk(kernel, cache_path, verbose)
+            # Save the kernel library
+            self._save_so_cubin_to_disk(kernel, staging_path, verbose)
 
-        except Exception:
-            self.logger.exception("Error saving kernel library to disk")
-
-        # Save kernel parameters
-        try:
-            params_path = os.path.join(cache_path, self.params_path)
+            # Save kernel parameters
+            params_path = os.path.join(staging_path, self.params_path)
             if verbose:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
+
+            missing_files = self._get_missing_complete_cache_files(staging_path)
+            if missing_files:
+                missing_names = ", ".join(os.path.basename(path) for path in missing_files)
+                raise RuntimeError(f"Incomplete cache staging directory is missing required file(s): {missing_names}")
+
+            # Repair stale/incomplete entries before making the new directory visible.
+            self._remove_incomplete_cache_dir(cache_path)
+
+            # Atomic rename — makes the complete directory visible in one step.
+            try:
+                os.rename(staging_path, cache_path)
+            except OSError as exc:
+                if not self._is_rename_collision(exc):
+                    raise
+                # Another process won the race with a complete cache entry.
+                shutil.rmtree(staging_path, ignore_errors=True)
         except Exception:
-            self.logger.exception("Error saving kernel parameters to disk")
+            shutil.rmtree(staging_path, ignore_errors=True)
+            self.logger.exception("Error during atomic cache save")
 
     def _load_kernel_from_disk(
         self,
@@ -406,14 +550,13 @@ class KernelCache:
         Removes all cached kernels from disk.
 
         Note:
-            This operation will delete the entire cache directory and recreate it empty.
+            This operation will delete the current kernel-cache namespace and recreate it empty.
             Use with caution as this operation cannot be undone.
         """
         try:
-            # Delete the entire cache directory
-            shutil.rmtree(env.TILELANG_CACHE_DIR)
+            shutil.rmtree(self._get_cache_root(), ignore_errors=True)
+            shutil.rmtree(self._get_staging_root(), ignore_errors=True)
 
-            # Re-create the cache directory
             KernelCache._create_dirs()
         except Exception:
             self.logger.exception("Error clearing disk cache")
@@ -442,6 +585,33 @@ class KernelCache:
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
         params_path = os.path.join(cache_path, self.params_path)
         return [kernel_lib_path, params_path]
+
+    def _get_complete_cache_files(self, cache_path: str) -> list[str]:
+        return list(
+            dict.fromkeys(
+                [
+                    os.path.join(cache_path, self.device_kernel_path),
+                    os.path.join(cache_path, self.host_kernel_path),
+                    *self._get_required_files(cache_path),
+                ]
+            )
+        )
+
+    def _get_missing_complete_cache_files(self, cache_path: str) -> list[str]:
+        return [file for file in self._get_complete_cache_files(cache_path) if not os.path.exists(file)]
+
+    def _is_complete_cache_dir(self, cache_path: str) -> bool:
+        return os.path.isdir(cache_path) and not self._get_missing_complete_cache_files(cache_path)
+
+    def _remove_incomplete_cache_dir(self, cache_path: str) -> bool:
+        if not os.path.isdir(cache_path) or self._is_complete_cache_dir(cache_path):
+            return False
+        shutil.rmtree(cache_path)
+        return True
+
+    @staticmethod
+    def _is_rename_collision(exc: OSError) -> bool:
+        return exc.errno in {errno.EEXIST, errno.ENOTEMPTY}
 
     def _load_kernel_source(self, device_kernel_path: str, host_kernel_path: str, verbose: bool = False) -> tuple[str | None, str | None]:
         try:

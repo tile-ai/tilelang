@@ -4,6 +4,7 @@
  */
 
 #include "utils.h"
+#include "tvm/tir/expr.h"
 
 #include <tvm/tir/builtin.h>
 
@@ -11,6 +12,16 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+bool IsBufferLikeExpr(const PrimExpr &expr) {
+  if (expr.as<BufferLoadNode>() || expr.as<BufferRegionNode>()) {
+    return true;
+  }
+  if (const auto *call = expr.as<CallNode>()) {
+    return (call->op.same_as(RegionOp::Get()));
+  }
+  return false;
+}
 
 BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
   // Case 1: Already a BufferRegion
@@ -50,6 +61,18 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
 
   LOG(FATAL) << "Unsupported argument for BufferRegion: " << arg;
   throw; // Unreachable
+}
+
+AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
+                                     int default_access_mask) {
+  if (const auto *call = arg.as<CallNode>()) {
+    if (call->op.same_as(RegionOp::Get())) {
+      RegionOp region(call->args);
+      return {BufferRegion(region->GetBuffer(), region->GetRanges()),
+              region->GetAccessMask()};
+    }
+  }
+  return {NormalizeToBufferRegion(arg), default_access_mask};
 }
 
 PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
@@ -92,8 +115,45 @@ PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
+PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
+  Buffer buf = load->buffer;
+  int ndim = static_cast<int>(buf->shape.size());
+
+  // Compute offset using row-major layout (iterate in reverse)
+  PrimExpr offset = 0;
+  PrimExpr stride = 1;
+
+  for (int i = ndim - 1; i >= 0; --i) {
+    const PrimExpr &index = load->indices[i];
+    if (const auto *ramp = index.as<RampNode>()) {
+      // For Ramp, use the base
+      offset = offset + ramp->base * stride;
+    } else {
+      // For scalar index (IntImm or other PrimExpr)
+      offset = offset + index * stride;
+    }
+    stride = stride * buf->shape[i];
+  }
+
+  // Extent is 1 element for a single BufferLoad access
+  PrimExpr extent = make_const(DataType::Int(32), 1);
+
+  // Build access_ptr
+  PrimExpr ptype = tir::TypeAnnotation(buf->dtype);
+  Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
+                           IntImm(DataType::Int(32), rw_mask)};
+  return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
+}
+
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 int to_CUtensorMapDataType(DataType dtype) {
+  // CUDA 13 adds packed U4 TensorMap formats. The vendored CUDA stub may lag
+  // the installed toolkit, so keep the enum value by CUDA's documented order.
+  constexpr int kTensorMapDataType16U4Align8B = 13;
+  if (dtype.is_float4_e2m1fn()) {
+    return kTensorMapDataType16U4Align8B;
+  }
+
   CUtensorMapDataType tp;
   if (dtype.is_float()) {
     switch (dtype.bits()) {

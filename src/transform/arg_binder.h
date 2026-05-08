@@ -27,9 +27,15 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/expr.h>
+// std::vector<Stmt> below requires Stmt to be a complete type when the
+// class layout is computed: clang-cl + MSVC's STL eagerly probes T's
+// is_trivially_destructible / sizeof / alignof during vector instantiation,
+// which fails if Stmt is only forward-declared via expr.h.
+#include <tvm/tir/stmt.h>
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace tvm {
@@ -109,7 +115,8 @@ public:
   BindDLTensors(const std::vector<std::pair<Var, Buffer>> &buffer_def,
                 const PrimExpr &device_type, const PrimExpr &device_id,
                 const std::string &func_name,
-                const std::unordered_set<const VarNode *> &used_param_buffers);
+                const std::unordered_set<const VarNode *> &used_param_buffers,
+                const std::unordered_set<const VarNode *> &used_shape_vars);
 
   /*! \return The defs generated in binding. */
   const std::vector<Var> &defs() const { return defs_; }
@@ -161,6 +168,11 @@ public:
   bool BindNullable(const PrimExpr &arg, const PrimExpr &value,
                     const std::string &arg_name, bool with_lets,
                     const PrimExpr &nullable_guard);
+
+  void RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
+                          const PrimExpr &logical_stride_val,
+                          const PrimExpr &dim_shape, const PrimExpr &is_null,
+                          const std::string &stride_element_name);
 
 private:
   std::vector<Var> getUndefVars(const std::vector<PrimExpr> &arg);

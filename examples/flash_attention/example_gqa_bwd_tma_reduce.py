@@ -47,13 +47,13 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             T.fill(logsum, 0)
             # Warning: in causal/varlen/unaligned seqlen scenarios, the -inf will cause undefined behavior in exp ops
             # We should set it to negative large number instead
-            T.fill(scores_max, T.Cast(accum_dtype, -1e30))
+            T.fill(scores_max, T.cast(-1e30, accum_dtype))
             loop_range = T.ceildiv((bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared)
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, T.Cast(accum_dtype, -1e30))
+                        acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, T.cast(-1e30, accum_dtype))
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)

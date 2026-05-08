@@ -72,9 +72,32 @@ CK_TILE_DEVICE void async_buffer_load_dword_v(void *smem, int32x4_t rsrc,
                : "memory");
 }
 
+// gfx950 (CDNA4 / MI350): 128-bit direct-to-LDS async load.
+// buffer_load_dwordx4 ... lds bypasses VGPRs entirely, giving 4x the
+// bandwidth of the 32-bit path and overlapping with MFMA computation.
+#if defined(__gfx950__)
+CK_TILE_DEVICE void async_buffer_load_dwordx4_v(void *smem, int32x4_t rsrc,
+                                                index_t voffset) {
+  auto const lds_ptr_sgpr =
+      __builtin_amdgcn_readfirstlane((reinterpret_cast<uintptr_t>(smem)));
+  asm volatile(
+      "s_mov_b32 m0, %0; \n\t"
+      "buffer_load_dwordx4 %1, %2, 0 offen lds;\n\t" ::"s"(lds_ptr_sgpr),
+      "v"(voffset), "s"(rsrc)
+      : "memory");
+}
+#endif // __gfx950__
+
 template <int N>
 TL_DEVICE void cp_async_gs(void *lds_base_ptr, void const *global_base_ptr) {
   if constexpr (N == 16) {
+    // NOTE: the gfx950 buffer_load_dwordx4 ... lds path requires the per-thread
+    // LDS destination address to be exactly base + threadIdx.x * 16 bytes
+    // (i.e. no swizzling).  The pipeline-planning pass generates swizzled LDS
+    // layouts that violate this constraint, so we always use the synchronous
+    // uint4 store here.  The T.async_copy path (called with a known-linear LDS
+    // layout) may still use the fast async path via async_buffer_load_dwordx4_v
+    // directly.
     *(uint4 *)lds_base_ptr = *(const uint4 *)global_base_ptr;
   } else if constexpr (N == 8) {
     *(uint2 *)lds_base_ptr = *(const uint2 *)global_base_ptr;
@@ -91,6 +114,12 @@ template <int N>
 TL_DEVICE void cp_async_gs_conditional(void *lds_base_ptr,
                                        void const *global_base_ptr, bool cond) {
   if constexpr (N == 16) {
+    // NOTE: same reasoning as cp_async_gs above — the pipeline-planning pass
+    // generates swizzled LDS layouts that are incompatible with the gfx950
+    // buffer_load_dwordx4 ... lds path (which requires a linear, un-swizzled
+    // destination).  Use the synchronous uint4 path here as well so that
+    // cp_async_wait (which issues s_waitcnt vmcnt) correctly synchronises the
+    // data before the consumer MFMA reads it.
     *(uint4 *)lds_base_ptr =
         cond ? *(const uint4 *)global_base_ptr : make_uint4(0, 0, 0, 0);
   } else if constexpr (N == 8) {

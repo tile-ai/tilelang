@@ -3,11 +3,12 @@ import torch
 import tilelang.testing
 from tilelang import tvm as tvm
 import tilelang.language as T
-from tilelang.intrinsics import make_mfma_swizzle_layout as make_swizzle_layout
-from tilelang.intrinsics.mfma_macro_generator import (
+from tilelang.rocm.intrinsics import make_mfma_swizzle_layout as make_swizzle_layout
+from tilelang.rocm.intrinsics.mfma_macro_generator import (
     MatrixCoreIntrinEmitter,
 )
 from tilelang.transform import simplify_prim_func
+from tilelang.utils import determine_fp8_type, determine_target
 
 tilelang.testing.set_random_seed(0)
 
@@ -26,7 +27,7 @@ def tl_matmul(
 ):
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if in_dtype in {T.float8_e4m3fnuz, T.int8}:
+    if in_dtype in {T.float8_e4m3fnuz, T.float8_e4m3fn, T.int8}:
         micro_size_k = 32
 
     block_row_warps = 2
@@ -75,6 +76,7 @@ def tl_matmul(
         warp_col_tiles=warp_col_tiles,
         chunk=chunk,
         k_pack=k_pack,
+        target=determine_target("auto", return_object=True),
     )
 
     @T.prim_func
@@ -162,7 +164,6 @@ def tl_matmul(
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.float32, a_transposed=False, b_transposed=True, k_pack=1):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack)
-    print(matmul)
     kernel = tilelang.compile(matmul)
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
@@ -172,7 +173,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
     if in_dtype == T.int8:
         A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
-    elif in_dtype == T.float8_e4m3fnuz:
+    elif "float8" in str(in_dtype):  # for T.float8_e4m3fnuz in gfx942 and T.float8_e4m3fn in gfx950
         A = torch.rand(A_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
         B = torch.rand(B_shape, device="cuda", dtype=torch.float16).to(getattr(torch, in_dtype))
     else:
@@ -195,7 +196,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
         ref_c = torch.matmul(A.T.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
     elif a_transposed and not b_transposed:
         # Get Reference Result
-        ref_c = torch.matmul(A.Tto(torch.float32), B.to(torch.float32)).to(getattr(torch, out_dtype))
+        ref_c = torch.matmul(A.T.to(torch.float32), B.to(torch.float32)).to(getattr(torch, out_dtype))
     elif not a_transposed and b_transposed:
         # Get Reference Result
         ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
@@ -219,7 +220,11 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
         (128, 256, 256, T.int8, T.int32, T.int32, False, True, 2),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 1),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 2),
-        (128, 128, 128, T.float8_e4m3fnuz, T.float16, T.float32, False, True, 1),
+        (128, 128, 128, determine_fp8_type(), T.float16, T.float32, False, True, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, True, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, True, 2),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, False, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, False, 2),
     ],
 )
 @tilelang.testing.requires_rocm
@@ -235,10 +240,6 @@ def test_assert_tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transpose
         b_transposed=b_transposed,
         k_pack=k_pack,
     )
-    assert_tl_matmul_correctness(128, 256, 256, T.float8_e4m3fnuz, T.float32)
-    assert_tl_matmul_correctness(128, 256, 256, T.float8_e4m3fnuz, T.float32, k_pack=2)
-    assert_tl_matmul_correctness(128, 256, 256, T.float8_e4m3fnuz, T.float32, b_transposed=False)
-    assert_tl_matmul_correctness(128, 256, 256, T.float8_e4m3fnuz, T.float32, b_transposed=False, k_pack=2)
 
 
 if __name__ == "__main__":

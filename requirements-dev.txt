@@ -1,17 +1,16 @@
 # Requirements to run local build with `--no-build-isolation` or other developments
 
-apache-tvm-ffi~=0.1.0,>=0.1.6
+apache-tvm-ffi~=0.1.0,>=0.1.2
 build
 cmake>=3.26
-cython>=3.0.0
+cython>=3.1.0
 ninja
 packaging
 pre-commit>=4.0.0
 scikit-build-core
 setuptools>=61
-torch
 wheel
-z3-solver>=4.13.0
+z3-solver>=4.13.0,<4.15.5
 
 auditwheel; platform_system == 'Linux'
 patchelf; platform_system == 'Linux'

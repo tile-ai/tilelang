@@ -27,21 +27,69 @@ static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
+// Loop annotation key controlling whether PTX async-copy rewriting is enabled
+// in the annotated loop subtree. Value should be Bool (False/True).
+static constexpr const char *kLoopPreferAsync = "parallel_prefer_async";
+// Loop annotation key controlling whether async commit/wait should be omitted
+// for injected cp.async in this parallel loop subtree. Value should be Bool.
+static constexpr const char *kParallelAsyncWithoutAsyncCommitWait =
+    "parallel_async_without_async_commit_wait";
+// Copy-op annotation key controlling whether cp.async commit/wait are managed
+// by an enclosing transform (e.g. software pipeline / warp specialization).
+// Value should be IntImm/Bool-like truthy scalar.
+static constexpr const char *kAsyncCopyNoImplicitCommitWait =
+    "no_implicit_async_commit_wait";
+// Tile-op annotation key carrying an explicit mbarrier parity expression.
+// Pipeline transforms set this on ops whose lowering would otherwise infer
+// parity from surrounding loop context.
+static constexpr const char *kPipelineMbarPhaseExpr =
+    "tl.pipeline_mbar_phase_expr";
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.
 // Type: Array<tir::Var>
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
+// A PrimFunc-level attribute carrying the minimum number of thread blocks
+// per SM (multiprocessor).  When present it is emitted as the second
+// argument of __launch_bounds__(maxThreads, minBlocksPerMultiprocessor).
+// Type: Integer
+static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
+// lexical_alloc_scope may first appear as a Block annotation, requesting that
+// LowerOpaqueBlock materialize a lexical scope boundary for that block subtree.
+// After LowerOpaqueBlock, the same key appears as an AttrStmt marker that
+// generates a C/CUDA lexical scope `{ ... }` in codegen. Allocations nested
+// inside this scope cannot be hoisted past the boundary by StorageRewrite,
+// giving the underlying compiler accurate variable lifetime information for
+// register allocation.
+static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 } // namespace attr
+
+inline Optional<PrimExpr>
+GetAnnotatedMbarPhaseExpr(const Map<String, ObjectRef> &annotations) {
+  if (auto val = annotations.Get(attr::kPipelineMbarPhaseExpr)) {
+    if (val.value()->IsInstance<PrimExprNode>()) {
+      return Downcast<PrimExpr>(val.value());
+    }
+    LOG(FATAL) << "Annotation `" << attr::kPipelineMbarPhaseExpr
+               << "` expects a PrimExpr value, but got "
+               << val.value().GetTypeKey();
+  }
+  return Optional<PrimExpr>();
+}
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
     "tl.debug_merge_shared_memory_allocations";
-static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
+// PrimFunc attribute: set by LowerTileOp to indicate TMA operations were
+// actually generated.  Read by OptimizeForTarget to pick the right pipeline.
+static constexpr const char *kHasTMA = "tl.has_tma";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
+// Deprecated pass config, temporarily re-enabled. Prevents plain T.copy()
+// from auto-lowering to TMA store. Will be removed in v0.1.10.
+static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kEnableAggressiveSharedMemoryMerge =
     "tl.enable_aggressive_shared_memory_merge";
 static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
@@ -51,12 +99,17 @@ static constexpr const char *kPtxasRegisterUsageLevel =
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
 static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
+static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kDisableLoopUnswitching =
     "tl.disable_loop_unswitching";
+// Allow loop unswitching even when the else-version of the loop body is
+// non-trivial (has side effects). Default: false (conservative).
+static constexpr const char *kLoopUnswitchingAllowNonTrivialElse =
+    "tl.loop_unswitching_allow_non_trivial_else";
 
 /*!
  * \brief Enable lowering non-predicated global load/store to ldg/stg intrinsics
@@ -115,12 +168,49 @@ static constexpr const char *kDisableThreadStorageSync =
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
 
 /*!
+ * \brief Disable out of bound warning in LegalizeSafeMemoryAccess pass.
+ *
+ * kDisableOutOfBoundWarning = "tl.disable_out_of_bound_warning"
+ *
+ */
+static constexpr const char *kDisableOutOfBoundWarning =
+    "tl.disable_out_of_bound_warning";
+
+/*!
+ * \brief Enable dumping IR during lowering between passes.
+ *
+ * kEnableDumpIR = "tl.enable_dump_ir"
+ *
+ */
+static constexpr const char *kEnableDumpIR = "tl.enable_dump_ir";
+static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
+
+/*!
  * \brief Get the type of the CUDA tensor map
  *
  * DataType cuTensorMapType()
  *
  */
 DataType cuTensorMapType();
+
+/*!
+ * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
+ *
+ * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so
+ * downstream analysis can recover the referenced `Buffer` (and its strides /
+ * scope), while also carrying the access mask required by synchronization and
+ * safety checks.
+ *
+ * The frontend is expected to lower this op to `tir.builtin.tvm_access_ptr`
+ * once the additional metadata is no longer needed.
+ *
+ * access_ptr(base_load, extent, rw_mask)
+ *
+ * - base_load: BufferLoad whose indices denote the base element address.
+ * - extent: 1D extent in elements (same meaning as tvm_access_ptr arg3).
+ * - rw_mask: 1=read, 2=write, 3=read-write.
+ */
+TVM_DLL const Op &access_ptr();
 
 // fast math related op
 // __exp(x) - fast exponential
@@ -139,6 +229,10 @@ TVM_DLL const Op &__tan();
 TVM_DLL const Op &__cos();
 // __sin(x) - fast sine
 TVM_DLL const Op &__sin();
+// max_nan(x, y) - max with CUDA __hmax_nan semantics for fp16/bf16
+TVM_DLL const Op &max_nan();
+// min_nan(x, y) - min with CUDA __hmin_nan semantics for fp16/bf16
+TVM_DLL const Op &min_nan();
 
 // high precision with IEEE-compliant.
 // ieee_add(x, y, rounding_mode) - IEEE-compliant addition
@@ -157,6 +251,15 @@ TVM_DLL const Op &ieee_fsqrt();
 TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
+
+// Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
+TVM_DLL const Op &add2();
+TVM_DLL const Op &sub2();
+TVM_DLL const Op &mul2();
+TVM_DLL const Op &fma2();
+TVM_DLL const Op &max2();
+TVM_DLL const Op &min2();
+TVM_DLL const Op &abs2();
 
 // random op
 TVM_DLL const Op &rng_init();
@@ -183,22 +286,6 @@ TVM_DLL const Op &create_tma_descriptor();
  *
  */
 TVM_DLL const Op &create_tma_im2col_descriptor();
-
-/*!
- * \brief Create a list of mbarrier with arrive_counts for each barrier
- *
- * create_list_of_mbarrier(arrive_counts0, arrive_counts1, ...)
- *
- */
-TVM_DLL const Op &create_list_of_mbarrier();
-
-/*!
- * \brief Get the mbarrier injected by compiler via barrier_id
- *
- * int64_t* get_mbarrier(barrier_id)
- *
- */
-TVM_DLL const Op &get_mbarrier();
 
 /*!
  * \brief tvm intrinsics for loading data from global tensor descriptor to
@@ -235,6 +322,14 @@ TVM_DLL const Op &tma_store();
  *
  */
 const Op &ptx_fence_barrier_init();
+
+/*
+ * \brief tvm intrinsics for cluster barrier arrive
+ *
+ * ptx_arrive_cluster_barrier(mbarrier, cta_id)
+ *
+ */
+TVM_DLL const Op &ptx_arrive_cluster_barrier();
 
 /*!
  * \brief tvm intrinsics for mbarrier wait with parity bit
@@ -283,6 +378,31 @@ TVM_DLL const Op &ptx_tcgen05_mma_ss();
  * \brief tvm intrinsic for tcgen05 mma tensor-shared instructions.
  */
 TVM_DLL const Op &ptx_tcgen05_mma_ts();
+
+/*!
+ * \brief tvm intrinsic for tcgen05 block-scaled mma shared-shared instructions.
+ */
+TVM_DLL const Op &ptx_tcgen05_mma_blockscaled_ss();
+
+/*!
+ * \brief tvm intrinsic for tcgen05 copy warpx4 (smem to tmem).
+ */
+TVM_DLL const Op &ptx_tcgen05_cp_warpx4();
+
+/*!
+ * \brief tvm intrinsic for scale factor warp transpose in shared memory.
+ */
+TVM_DLL const Op &ptx_tcgen05_sf_warp_transpose();
+
+/*!
+ * \brief Frontend TMEM deallocation marker.
+ *
+ * deallocate_tmem(tmem_buffer_data)
+ *
+ * This op is produced by the TileLang Python frontend and must be lowered by
+ * LowerSharedTmem into ptx_deallocate_tensor_memory(access_ptr, num_cols).
+ */
+TVM_DLL const Op &deallocate_tmem();
 
 /*!
  * \brief tvm intrinsics for initializing tensor memory
@@ -338,8 +458,8 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 /*!
  * \brief TileLang intrinsic for PTX async copy from global to shared memory
  *
- * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes)
- * ptx_cp_async(dst_access_ptr, src_access_ptr, bytes, predicate)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems)
+ * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate)
  *
  */
 TVM_DLL const Op &ptx_cp_async();
@@ -383,6 +503,22 @@ TVM_DLL const Op &tma_store_wait();
  *
  */
 TVM_DLL const Op &set_max_nreg();
+
+/*!
+ * \brief Annotation-only producer reg dealloc hint for warp specialization
+ *
+ * annotate_producer_reg_dealloc(num_reg)
+ *
+ */
+TVM_DLL const Op &annotate_producer_reg_dealloc();
+
+/*!
+ * \brief Annotation-only consumer reg alloc hint for warp specialization
+ *
+ * annotate_consumer_reg_alloc(num_reg)
+ *
+ */
+TVM_DLL const Op &annotate_consumer_reg_alloc();
 
 /*!
  * \brief No set reg hint for warp-specialized branched
@@ -465,6 +601,95 @@ TVM_DLL const Op &get_warp_group_idx();
 TVM_DLL const Op &wait_wgmma();
 
 /*!
+ * \brief Cluster barrier arrive with relaxed ordering
+ *
+ * cluster_arrive_relaxed()
+ *
+ */
+TVM_DLL const Op &cluster_arrive_relaxed();
+
+/*!
+ * \brief Cluster barrier arrive
+ *
+ * cluster_arrive()
+ *
+ */
+TVM_DLL const Op &cluster_arrive();
+
+/*!
+ * \brief Cluster barrier wait
+ *
+ * cluster_wait()
+ *
+ */
+TVM_DLL const Op &cluster_wait();
+
+/*!
+ * \brief Cluster barrier arrive + wait (full sync)
+ *
+ * cluster_sync()
+ *
+ */
+TVM_DLL const Op &cluster_sync();
+
+/*!
+ * \brief Return the 1-D rank of the calling CTA within its cluster
+ *
+ * int block_rank_in_cluster()
+ *
+ */
+TVM_DLL const Op &block_rank_in_cluster();
+
+/*!
+ * \brief Issue a Blackwell cluster launch control query that writes a 16-byte
+ * response into shared memory and signals completion on the given mbarrier.
+ *
+ * clc_try_cancel(result_ptr, mbar_ptr)
+ *
+ */
+TVM_DLL const Op &clc_try_cancel();
+
+/*!
+ * \brief Cluster-wide multicast variant of cluster launch control query.
+ *
+ * clc_try_cancel_multicast(result_ptr, mbar_ptr)
+ *
+ */
+TVM_DLL const Op &clc_try_cancel_multicast();
+
+/*!
+ * \brief Return 1 when a CLC response represents a successful cancellation.
+ *
+ * int32 clc_is_canceled(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_is_canceled();
+
+/*!
+ * \brief Return the x coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_x(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_x();
+
+/*!
+ * \brief Return the y coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_y(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_y();
+
+/*!
+ * \brief Return the z coordinate of the first CTA in a successful CLC response.
+ *
+ * uint32 clc_get_first_ctaid_z(result_ptr)
+ *
+ */
+TVM_DLL const Op &clc_get_first_ctaid_z();
+
+/*!
  * \brief Synchronize all threads in a grid
  *
  * sync_grid()
@@ -497,12 +722,158 @@ TVM_DLL const Op &pdl_trigger();
 TVM_DLL const Op &pdl_sync();
 
 /*!
+ * \brief Warp-vote: non-zero if ANY active lane in the mask has a non-zero
+ * predicate. Lowers to `__any_sync(mask, predicate)` on CUDA and
+ * `__any(predicate)` on HIP (mask is ignored on HIP).
+ *
+ * int32 any_sync(mask, predicate)
+ */
+TVM_DLL const Op &any_sync();
+
+/*!
+ * \brief Warp-vote: non-zero only if ALL active lanes in the mask have a
+ * non-zero predicate. Lowers to `__all_sync(mask, predicate)` on CUDA and
+ * `__all(predicate)` on HIP (mask is ignored on HIP).
+ *
+ * int32 all_sync(mask, predicate)
+ */
+TVM_DLL const Op &all_sync();
+
+/*!
+ * \brief Warp-ballot: bitmask of lanes in the mask with non-zero predicate.
+ *
+ * CUDA: `__ballot_sync(mask, predicate)` returns `uint32`; the codegen
+ * zero-extends the result to `uint64`.
+ * HIP: `__ballot(predicate)` returns `uint64` natively, covering all 64
+ * lanes of the wavefront. Mask is ignored on HIP.
+ *
+ * uint64 ballot_sync(mask, predicate)
+ */
+TVM_DLL const Op &ballot_sync();
+
+/*!
+ * \brief Full-warp / full-wavefront ballot. Equivalent to
+ * `ballot_sync(0xFFFFFFFF, predicate)`.
+ *
+ * uint64 ballot(predicate)
+ */
+TVM_DLL const Op &ballot();
+
+/*!
+ * \brief Bitmask of currently active (non-exited) lanes. Lowers to
+ * `__activemask()` (zero-extended to `uint64`) on CUDA and `__ballot(1)` on
+ * HIP.
+ *
+ * uint64 activemask()
+ */
+TVM_DLL const Op &activemask();
+
+/*!
+ * \brief Block barrier that returns the number of threads whose predicate
+ * evaluates to non-zero. Lowers to `__syncthreads_count(predicate)` on both
+ * CUDA and HIP.
+ *
+ * int32 syncthreads_count(predicate)
+ */
+TVM_DLL const Op &syncthreads_count();
+
+/*!
+ * \brief Block barrier that returns non-zero only if ALL threads have a
+ * non-zero predicate. Lowers to `__syncthreads_and(predicate)` on both
+ * CUDA and HIP.
+ *
+ * int32 syncthreads_and(predicate)
+ */
+TVM_DLL const Op &syncthreads_and();
+
+/*!
+ * \brief Block barrier that returns non-zero if ANY thread has a non-zero
+ * predicate. Lowers to `__syncthreads_or(predicate)` on both CUDA and HIP.
+ *
+ * int32 syncthreads_or(predicate)
+ */
+TVM_DLL const Op &syncthreads_or();
+
+/*!
+ * \brief Warp shuffle: broadcast `value` from `src_lane` within each subgroup
+ * of `width` lanes. Lowers to `__shfl_sync(mask, value, src_lane, width)` on
+ * CUDA and `__shfl(value, src_lane, width)` on HIP. The dtype of the result
+ * matches the dtype of `value`.
+ *
+ * T shfl_sync(mask, value, src_lane, width)
+ */
+TVM_DLL const Op &shfl_sync();
+
+/*!
+ * \brief Warp shuffle (XOR-swap variant). Lowers to `__shfl_xor_sync` on CUDA
+ * and `__shfl_xor` on HIP.
+ *
+ * T shfl_xor_sync(mask, value, lane_mask, width)
+ */
+TVM_DLL const Op &shfl_xor_sync();
+
+/*!
+ * \brief Warp shuffle (shift-down variant). Lowers to `__shfl_down_sync` on
+ * CUDA and `__shfl_down` on HIP.
+ *
+ * T shfl_down_sync(mask, value, delta, width)
+ */
+TVM_DLL const Op &shfl_down_sync();
+
+/*!
+ * \brief Warp shuffle (shift-up variant). Lowers to `__shfl_up_sync` on CUDA
+ * and `__shfl_up` on HIP.
+ *
+ * T shfl_up_sync(mask, value, delta, width)
+ */
+TVM_DLL const Op &shfl_up_sync();
+
+/*!
+ * \brief Warp match-any: returns a mask of lanes in `mask` whose `value`
+ * equals the calling lane's value. Lowers to `__match_any_sync` on CUDA
+ * (compute capability >= 7.0). Not supported on HIP.
+ *
+ * uint32 match_any_sync(mask, value)
+ */
+TVM_DLL const Op &match_any_sync();
+
+/*!
+ * \brief Warp match-all: returns `mask` if all lanes in `mask` agree on
+ * `value`, else 0. Lowers to `__match_all_sync` on CUDA (compute capability
+ * >= 7.0, the trailing `int*` predicate output is discarded via an
+ * immediately-invoked lambda). Not supported on HIP.
+ *
+ * uint32 match_all_sync(mask, value)
+ */
+TVM_DLL const Op &match_all_sync();
+
+/*!
  * \brief tvm intrinsic for loop continue
  *
  * loop_break()
  *
  */
 TVM_DLL const Op &loop_break();
+
+/*!
+ * \brief tilelang intrinsic for gfx950 LDS transpose read, 64-bit, 16-element.
+ *
+ * Reads 8 bytes from LDS with a 16-element transpose (FP16/BF16 MFMA B-load).
+ * Only available on gfx950 (MI350/MI355X).
+ *
+ * uint32x2 ds_read_tr16_b64(smem_access_ptr)
+ */
+TVM_DLL const Op &ds_read_tr16_b64();
+
+/*!
+ * \brief tilelang intrinsic for gfx950 LDS transpose read, 64-bit, 8-element.
+ *
+ * Reads 8 bytes from LDS with an 8-element transpose (FP32 MFMA B-load).
+ * Only available on gfx950 (MI350/MI355X).
+ *
+ * uint32x2 ds_read_tr8_b64(smem_access_ptr)
+ */
+TVM_DLL const Op &ds_read_tr8_b64();
 
 /*!
  * \brief tvm intrinsic for amd matrix core mfma instructions.
@@ -555,7 +926,13 @@ TVM_DLL const Op &tvm_rdna_wmma_store();
 /*!
  * \brief tilelang intrinsic for general matrix multiplication (GEMM).
  *
- *  This op is used to represent a generic GEMM operation in tilelang.
+ *  This op wraps a templated `tl::gemm_*<...>` call into the generated device
+ *  code. Python-side lowering backends that want to delegate to the C++
+ *  template implementations in `src/tl_templates/<target>/gemm*.h` can emit a
+ *  call to this builtin directly via
+ *    T.call_intrin("handle", "tl.tl_gemm", op_instance_str, A_ptr, B_ptr,
+ * C_ptr) where `op_instance_str` is the fully-instantiated `tl::gemm_ss<M, N,
+ * K, ...>` template string.
  */
 TVM_DLL const Op &tl_gemm();
 
@@ -596,6 +973,35 @@ TVM_DLL const Op &initialize_tcgen05_descriptor();
  *  to a shared-memory mbarrier. It mirrors CUTLASS's umma_arrive.
  */
 TVM_DLL const Op &tcgen05_mma_arrive();
+
+/*!
+ * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory load.
+ *
+ *  Internal lowering op used by LowerTmemCopy to represent
+ *  `tl::tcgen05_ld_*` calls without routing through `call_extern`.
+ */
+TVM_DLL const Op &tcgen05_ld();
+
+/*!
+ * \brief tilelang intrinsic for lowered TCGEN05 tensor-memory store.
+ *
+ *  Internal lowering op used by LowerTmemCopy to represent
+ *  `tl::tcgen05_st_*` calls without routing through `call_extern`.
+ */
+TVM_DLL const Op &tcgen05_st();
+
+/*!
+ * \brief TCGEN05 fence before a thread-block-wide sync (__syncthreads /
+ * bar.sync). Matches PTX \c tcgen05.fence::before_thread_sync (DeepGEMM /
+ * Blackwell UMMA sequencing).
+ */
+TVM_DLL const Op &tcgen05_before_thread_sync();
+
+/*!
+ * \brief TCGEN05 fence after a thread-block-wide sync. Matches PTX \c
+ * tcgen05.fence::after_thread_sync.
+ */
+TVM_DLL const Op &tcgen05_after_thread_sync();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor

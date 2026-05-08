@@ -144,7 +144,8 @@ public:
 };
 
 /*!
- * \brief Check if a statement contains any CallNode, excluding a specific If
+ * \brief Check if a statement contains any CallNode, excluding matching If
+ * nodes
  *
  * Loop unswitching is unsafe when there are function calls OUTSIDE the
  * hoisted if statement, because those calls (originally executed by all
@@ -153,15 +154,19 @@ public:
  *
  * Calls INSIDE the if are safe because they were already conditionally
  * executed before unswitching.
+ *
+ * Since we replace ALL if statements with matching conditions, we need to
+ * exclude all such if statements when checking for calls.
  */
 class CallCheckerExcludingIf : public StmtExprVisitor {
 public:
   bool has_call = false;
-  const IfThenElseNode *excluded_if = nullptr;
+  PrimExpr excluded_condition;
 
   void VisitStmt_(const IfThenElseNode *op) final {
-    if (op == excluded_if) {
-      // Skip the interior of the excluded if statement
+    // Skip the interior of any if statement with matching condition
+    if (excluded_condition.defined() &&
+        StructuralEqual()(op->condition, excluded_condition)) {
       return;
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -196,8 +201,8 @@ bool UsesLoopVarThroughLetBindings(
         auto it = let_bindings->find(var_node);
         if (it != let_bindings->end()) {
           // Check if the bound expression uses the loop variable
-          if (UsesVar(it->second,
-                      [&](const VarNode *v) { return v == loop_var.get(); })) {
+          if (UsesLoopVarThroughLetBindings(it->second, loop_var,
+                                            let_bindings)) {
             uses_loop_var = true;
           }
         }
@@ -211,12 +216,155 @@ bool UsesLoopVarThroughLetBindings(
 }
 
 /*!
+ * \brief Check if an expression uses any variable in \p vars (directly or
+ * through Let bindings).
+ *
+ * This is similar to UsesLoopVarThroughLetBindings, but generalized to a set of
+ * variables. It is used to conservatively block unswitching on per-thread
+ * predicates (e.g. threadIdx.x) because later passes may insert synchronization
+ * calls that would become control-flow dependent after unswitching.
+ */
+bool UsesVarsThroughLetBindingsImpl(
+    const PrimExpr &expr, const std::unordered_set<const VarNode *> &vars,
+    const std::unordered_map<const VarNode *, PrimExpr> *let_bindings,
+    std::unordered_set<const VarNode *> *visited_let_vars) {
+  if (vars.empty()) {
+    return false;
+  }
+
+  // Direct use in expr
+  if (UsesVar(expr, [&](const VarNode *v) { return vars.count(v); })) {
+    return true;
+  }
+
+  if (!let_bindings) {
+    return false;
+  }
+
+  bool uses = false;
+  PostOrderVisit(expr, [&](const ObjectRef &obj) {
+    if (uses) {
+      return;
+    }
+    const auto *var_node = obj.as<VarNode>();
+    if (!var_node) {
+      return;
+    }
+    auto it = let_bindings->find(var_node);
+    if (it == let_bindings->end()) {
+      return;
+    }
+    if (visited_let_vars && visited_let_vars->count(var_node)) {
+      return;
+    }
+    if (visited_let_vars) {
+      visited_let_vars->insert(var_node);
+    }
+    if (UsesVarsThroughLetBindingsImpl(it->second, vars, let_bindings,
+                                       visited_let_vars)) {
+      uses = true;
+    }
+  });
+
+  return uses;
+}
+
+bool UsesVarsThroughLetBindings(
+    const PrimExpr &expr, const std::unordered_set<const VarNode *> &vars,
+    const std::unordered_map<const VarNode *, PrimExpr> *let_bindings) {
+  std::unordered_set<const VarNode *> visited_let_vars;
+  return UsesVarsThroughLetBindingsImpl(expr, vars, let_bindings,
+                                        &visited_let_vars);
+}
+
+/*!
+ * \brief Check if a statement is side-effect free (i.e. a no-op), allowing only
+ * pure/read-only expression evaluation.
+ *
+ * This is intentionally conservative, and is used as a profitability/safety
+ * guard: only unswitch when the "else version" of the loop body does not
+ * perform any meaningful work. This keeps the common pattern
+ *
+ *   for i: if cond: S(i)
+ *
+ * while avoiding code-size blowup and control-flow complexity for
+ *
+ *   for i: if cond: S1(i) else: S2(i)
+ *
+ * or when there are other side-effecting statements outside the hoisted if.
+ */
+bool IsSideEffectFreeStmt(const Stmt &stmt) {
+  if (!stmt.defined()) {
+    return true;
+  }
+
+  if (const auto *op = stmt.as<EvaluateNode>()) {
+    // Treat pure or read-only evaluation as no-op.
+    return SideEffect(op->value) <= CallEffectKind::kReadState;
+  }
+
+  if (const auto *op = stmt.as<SeqStmtNode>()) {
+    for (const Stmt &s : op->seq) {
+      if (!IsSideEffectFreeStmt(s)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (const auto *op = stmt.as<LetStmtNode>()) {
+    if (SideEffect(op->value) > CallEffectKind::kReadState) {
+      return false;
+    }
+    return IsSideEffectFreeStmt(op->body);
+  }
+
+  if (const auto *op = stmt.as<IfThenElseNode>()) {
+    if (SideEffect(op->condition) > CallEffectKind::kReadState) {
+      return false;
+    }
+    if (!IsSideEffectFreeStmt(op->then_case)) {
+      return false;
+    }
+    if (op->else_case.defined() &&
+        !IsSideEffectFreeStmt(op->else_case.value())) {
+      return false;
+    }
+    return true;
+  }
+
+  if (const auto *op = stmt.as<ForNode>()) {
+    if (SideEffect(op->min) > CallEffectKind::kReadState ||
+        SideEffect(op->extent) > CallEffectKind::kReadState) {
+      return false;
+    }
+    return IsSideEffectFreeStmt(op->body);
+  }
+
+  // Conservatively treat all other statements as side-effecting.
+  return false;
+}
+
+/*!
  * \brief Check if a condition is loop-invariant
  */
-bool IsLoopInvariant(const PrimExpr &cond, const Var &loop_var,
-                     const std::unordered_set<const VarNode *> &written_vars,
-                     const std::unordered_map<const VarNode *, PrimExpr>
-                         *let_bindings = nullptr) {
+bool IsLoopInvariant(
+    const PrimExpr &cond, const Var &loop_var,
+    const std::unordered_set<const VarNode *> &written_vars,
+    const std::unordered_map<const VarNode *, PrimExpr> *let_bindings = nullptr,
+    const std::unordered_set<const VarNode *> *disallowed_vars = nullptr) {
+  // Check 0: disallow conditions that depend on per-thread binding vars (e.g.
+  // threadIdx.x). These predicates are loop-invariant, but unswitching them can
+  // split the execution into different code paths across threads. Later passes
+  // (e.g. thread sync insertion, fence proxy injection) may add synchronization
+  // calls outside the hoisted if, which would become control-flow dependent and
+  // lead to incorrect codegen.
+  if (disallowed_vars && !disallowed_vars->empty()) {
+    if (UsesVarsThroughLetBindings(cond, *disallowed_vars, let_bindings)) {
+      return false;
+    }
+  }
+
   // Check 1: must not use loop variable (directly or through Let bindings)
   if (UsesLoopVarThroughLetBindings(cond, loop_var, let_bindings)) {
     return false;
@@ -237,18 +385,35 @@ bool IsLoopInvariant(const PrimExpr &cond, const Var &loop_var,
 }
 
 /*!
- * \brief Replace a specific if node with its then/else branch
+ * \brief Replace if nodes with matching condition with their then/else branch
+ *
+ * When hoisting a condition out of a loop, we need to replace ALL if statements
+ * with the same condition, not just the first one found. This ensures that
+ * in the then-branch all matching conditions are replaced with their then-case,
+ * and in the else-branch all matching conditions are replaced with their
+ * else-case.
+ *
+ * Also removes LetStmts for variables that have been hoisted, since they are
+ * now redundant (the variable is already bound outside the loop).
  */
 class IfBranchReplacer : public StmtExprMutator {
 public:
-  const IfThenElseNode *target;
+  PrimExpr hoisted_condition;
   bool take_then;
+  std::unordered_set<const VarNode *> hoisted_vars;
 
-  IfBranchReplacer(const IfThenElseNode *target, bool take_then)
-      : target(target), take_then(take_then) {}
+  IfBranchReplacer(
+      const PrimExpr &condition, bool take_then,
+      const std::vector<std::pair<Var, PrimExpr>> &hoisted_let_bindings)
+      : hoisted_condition(condition), take_then(take_then) {
+    for (const auto &binding : hoisted_let_bindings) {
+      hoisted_vars.insert(binding.first.get());
+    }
+  }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    if (op == target) {
+    // Replace if the condition is structurally equal to the hoisted condition
+    if (StructuralEqual()(op->condition, hoisted_condition)) {
       if (take_then) {
         return VisitStmt(op->then_case);
       } else {
@@ -257,6 +422,43 @@ public:
       }
     }
     return StmtExprMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    // Remove LetStmts for hoisted variables (they are now bound outside the
+    // loop)
+    if (hoisted_vars.count(op->var.get())) {
+      return VisitStmt(op->body);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+};
+
+/*!
+ * \brief Collect Let-bound variables used in an expression
+ */
+class LetVarCollector : public ExprVisitor {
+public:
+  std::vector<std::pair<Var, PrimExpr>> used_let_bindings;
+  const std::unordered_map<const VarNode *, PrimExpr> &let_bindings;
+  std::unordered_set<const VarNode *> visited;
+
+  explicit LetVarCollector(
+      const std::unordered_map<const VarNode *, PrimExpr> &bindings)
+      : let_bindings(bindings) {}
+
+  void VisitExpr_(const VarNode *op) final {
+    if (visited.count(op))
+      return;
+    auto it = let_bindings.find(op);
+    if (it != let_bindings.end()) {
+      visited.insert(op);
+      // First recursively collect Let-bound vars used in this binding's value
+      VisitExpr(it->second);
+      // Then add this binding (so dependencies come first)
+      used_let_bindings.push_back(
+          std::make_pair(ffi::GetRef<Var>(op), it->second));
+    }
   }
 };
 
@@ -270,11 +472,16 @@ public:
   const IfThenElseNode *found = nullptr;
   const Var &loop_var;
   const std::unordered_set<const VarNode *> &written_vars;
+  const std::unordered_set<const VarNode *> *disallowed_vars;
   std::unordered_map<const VarNode *, PrimExpr> let_bindings_;
+  // Let bindings that need to be hoisted with the condition
+  std::vector<std::pair<Var, PrimExpr>> hoisted_let_bindings;
 
   HoistableIfFinder(const Var &loop_var,
-                    const std::unordered_set<const VarNode *> &written_vars)
-      : loop_var(loop_var), written_vars(written_vars) {}
+                    const std::unordered_set<const VarNode *> &written_vars,
+                    const std::unordered_set<const VarNode *> *disallowed_vars)
+      : loop_var(loop_var), written_vars(written_vars),
+        disallowed_vars(disallowed_vars) {}
 
   void VisitStmt_(const LetStmtNode *op) final {
     // Track ALL Let bindings to detect when a condition uses a variable
@@ -291,9 +498,13 @@ public:
   void VisitStmt_(const IfThenElseNode *op) final {
     if (found)
       return;
-    if (IsLoopInvariant(op->condition, loop_var, written_vars,
-                        &let_bindings_)) {
+    if (IsLoopInvariant(op->condition, loop_var, written_vars, &let_bindings_,
+                        disallowed_vars)) {
       found = op;
+      // Collect Let-bound variables used in the condition
+      LetVarCollector collector(let_bindings_);
+      collector(op->condition);
+      hoisted_let_bindings = std::move(collector.used_let_bindings);
       return;
     }
     StmtVisitor::VisitStmt_(op);
@@ -309,7 +520,22 @@ public:
  */
 class LoopUnswitcher : public StmtExprMutator {
 public:
+  explicit LoopUnswitcher(bool allow_non_trivial_else)
+      : allow_non_trivial_else_(allow_non_trivial_else) {}
+
+  std::unordered_set<const VarNode *> thread_idx_vars_in_scope_;
+
   Stmt VisitStmt_(const ForNode *op) final {
+    bool pushed_thread_idx = false;
+    if (op->thread_binding.defined()) {
+      String thread_tag = op->thread_binding.value()->thread_tag;
+      if (thread_tag == "threadIdx.x" || thread_tag == "threadIdx.y" ||
+          thread_tag == "threadIdx.z") {
+        thread_idx_vars_in_scope_.insert(op->loop_var.get());
+        pushed_thread_idx = true;
+      }
+    }
+
     // Bottom-up: process nested structures first
     Stmt body = VisitStmt(op->body);
 
@@ -318,15 +544,22 @@ public:
     collector(body);
 
     // Find hoistable if
-    HoistableIfFinder finder(op->loop_var, collector.written);
+    HoistableIfFinder finder(op->loop_var, collector.written,
+                             &thread_idx_vars_in_scope_);
     finder(body);
 
+    Stmt result;
     if (!finder.found) {
       if (body.same_as(op->body)) {
-        return ffi::GetRef<Stmt>(op);
+        result = ffi::GetRef<Stmt>(op);
+      } else {
+        result = For(op->loop_var, op->min, op->extent, op->kind, body,
+                     op->thread_binding, op->annotations);
       }
-      return For(op->loop_var, op->min, op->extent, op->kind, body,
-                 op->thread_binding, op->annotations);
+      if (pushed_thread_idx) {
+        thread_idx_vars_in_scope_.erase(op->loop_var.get());
+      }
+      return result;
     }
 
     // Check if there are any function calls OUTSIDE the hoisted if statement.
@@ -334,21 +567,42 @@ public:
     // would split them into different code paths, breaking synchronization.
     // Calls inside the if are already conditionally executed, so they're safe.
     CallCheckerExcludingIf call_checker;
-    call_checker.excluded_if = finder.found;
+    call_checker.excluded_condition = finder.found->condition;
     call_checker(body);
     if (call_checker.has_call) {
       if (body.same_as(op->body)) {
-        return ffi::GetRef<Stmt>(op);
+        result = ffi::GetRef<Stmt>(op);
+      } else {
+        result = For(op->loop_var, op->min, op->extent, op->kind, body,
+                     op->thread_binding, op->annotations);
       }
-      return For(op->loop_var, op->min, op->extent, op->kind, body,
-                 op->thread_binding, op->annotations);
+      if (pushed_thread_idx) {
+        thread_idx_vars_in_scope_.erase(op->loop_var.get());
+      }
+      return result;
     }
 
     // Unswitch: create two loop versions
     const IfThenElseNode *if_node = finder.found;
+    PrimExpr hoisted_condition = if_node->condition;
 
-    Stmt then_body = IfBranchReplacer(if_node, true)(body);
-    Stmt else_body = IfBranchReplacer(if_node, false)(body);
+    Stmt then_body = IfBranchReplacer(hoisted_condition, true,
+                                      finder.hoisted_let_bindings)(body);
+    Stmt else_body = IfBranchReplacer(hoisted_condition, false,
+                                      finder.hoisted_let_bindings)(body);
+
+    // Only unswitch when the else-version does not do any meaningful work.
+    // This keeps the canonical optimization `for: if(cond) {S}` ->
+    // `if(cond){for:S}` while avoiding duplicating non-trivial loop bodies into
+    // two versions.
+    if (!allow_non_trivial_else_ && !IsSideEffectFreeStmt(else_body)) {
+      result = For(op->loop_var, op->min, op->extent, op->kind, body,
+                   op->thread_binding, op->annotations);
+      if (pushed_thread_idx) {
+        thread_idx_vars_in_scope_.erase(op->loop_var.get());
+      }
+      return result;
+    }
 
     // Create new loop_var for else_loop to maintain SSA form
     Var else_loop_var(op->loop_var->name_hint, op->loop_var->dtype);
@@ -359,14 +613,29 @@ public:
     For else_loop(else_loop_var, op->min, op->extent, op->kind, else_body,
                   op->thread_binding, op->annotations);
 
-    return IfThenElse(if_node->condition, then_loop, else_loop);
+    result = IfThenElse(if_node->condition, then_loop, else_loop);
+
+    // Wrap with hoisted Let bindings (in reverse order so first binding is
+    // outermost)
+    for (auto it = finder.hoisted_let_bindings.rbegin();
+         it != finder.hoisted_let_bindings.rend(); ++it) {
+      result = LetStmt(it->first, it->second, result);
+    }
+
+    if (pushed_thread_idx) {
+      thread_idx_vars_in_scope_.erase(op->loop_var.get());
+    }
+    return result;
   }
+
+private:
+  bool allow_non_trivial_else_{false};
 };
 
 // --- Public API ---
 
-Stmt ApplyLoopUnswitching(Stmt stmt) {
-  return LoopUnswitcher()(std::move(stmt));
+Stmt ApplyLoopUnswitching(Stmt stmt, bool allow_non_trivial_else) {
+  return LoopUnswitcher(allow_non_trivial_else)(std::move(stmt));
 }
 
 using namespace tir::transform;
@@ -378,7 +647,11 @@ tvm::transform::Pass LoopUnswitching() {
     if (disable_loop_unswitching) {
       return f;
     }
-    f.CopyOnWrite()->body = ApplyLoopUnswitching(f->body);
+    bool allow_non_trivial_else =
+        ctx->GetConfig<Bool>(kLoopUnswitchingAllowNonTrivialElse, Bool(false))
+            .value();
+    f.CopyOnWrite()->body =
+        ApplyLoopUnswitching(f->body, allow_non_trivial_else);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LoopUnswitching", {});

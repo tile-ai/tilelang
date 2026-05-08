@@ -34,6 +34,7 @@ programming_guides/overview
 programming_guides/language_basics
 programming_guides/instructions
 programming_guides/control_flow
+programming_guides/python_compatibility
 programming_guides/autotuning
 programming_guides/type_system
 :::

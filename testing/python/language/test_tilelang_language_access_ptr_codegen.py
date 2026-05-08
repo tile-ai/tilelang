@@ -1,0 +1,197 @@
+import tilelang
+import tilelang.language as T
+import tilelang.testing
+import pytest
+from tilelang import tvm
+
+
+@tilelang.testing.requires_cuda
+def test_access_ptr_cp_async_codegen():
+    """Smoke-test codegen for T.access_ptr -> tl.access_ptr -> tvm_access_ptr -> cp.async."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64,), T.uint8),
+        B: T.Tensor((64,), T.uint8),
+    ):
+        with T.Kernel(1, threads=32):
+            S = T.alloc_shared((64,), T.uint8)
+            T.ptx_cp_async(
+                T.access_ptr(S[8], "w", 16),
+                T.access_ptr(A[16], "r", 16),
+                16,
+            )
+            # Keep the shared buffer live so the pointers remain in generated code.
+            B[0] = S[8]
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== access_ptr cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs<16>" in src, "Expected cp_async_gs<16> in generated CUDA source"
+
+
+@tilelang.testing.requires_cuda
+def test_vectorized_cp_async_num_elems_codegen():
+    """Check vectorized tl.ptx_cp_async widens logical element counts."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=32):
+            S = T.alloc_shared((64,), T.float16)
+            for i in T.vectorized(4):
+                T.ptx_cp_async(
+                    T.access_ptr(S[i], "w", 1),
+                    T.access_ptr(A[i], "r", 1),
+                    1,
+                )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+            B[0] = S[0]
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== vectorized cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs<8>" in src, "Expected vectorized cp.async to fold 4 x fp16 elems into cp_async_gs<8>"
+    assert "cp_async_gs<2>" not in src, "Did not expect scalar cp.async width in generated CUDA source"
+
+
+@tilelang.testing.requires_cuda
+def test_vectorized_int4_cp_async_num_elems_codegen():
+    """Check subbyte tl.ptx_cp_async derives PTX bytes from logical element counts."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((128,), T.int4),
+        B: T.Tensor((128,), T.int4),
+    ):
+        with T.Kernel(1, threads=32):
+            S = T.alloc_shared((128,), T.int4)
+            for i in T.vectorized(32):
+                T.ptx_cp_async(
+                    T.access_ptr(S[i], "w", 1),
+                    T.access_ptr(A[i], "r", 1),
+                    1,
+                )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+            B[0] = S[0]
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== vectorized int4 cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs<16>" in src, "Expected 32 x int4 elems to fold into cp_async_gs<16>"
+
+
+@tilelang.testing.requires_cuda
+def test_async_copy_tileop_lowers_to_cp_async():
+    """Check T.async_copy always uses CPAsync path and does not auto-wait."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4,), T.float16),
+        B: T.Tensor((4,), T.float16),
+    ):
+        with T.Kernel(1, threads=1):
+            S = T.alloc_shared((4,), T.float16)
+            T.async_copy(A[0:4], S)
+            T.copy(S, B[0:4])
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== async_copy -> cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs<8>" in src, "Expected T.async_copy to lower to cp_async_gs<8>"
+    assert "tl::cp_async_commit" in src, "Expected async_copy lowering to emit commit"
+    assert "tl::cp_async_wait<0>" not in src, "Did not expect async_copy lowering to auto-emit wait"
+
+
+@tilelang.testing.requires_cuda
+def test_async_copy_tileop_rejects_invalid_cp_async_scope():
+    """Check T.async_copy rejects non global->shared patterns."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4,), T.float16),
+        B: T.Tensor((4,), T.float16),
+    ):
+        with T.Kernel(1, threads=1):
+            S0 = T.alloc_shared((4,), T.float16)
+            S1 = T.alloc_shared((4,), T.float16)
+            T.copy(A[0:4], S0)
+            # shared->shared cannot use cp.async and should fail for async_copy.
+            T.async_copy(S0, S1)
+            T.copy(S1, B[0:4])
+
+    with pytest.raises(
+        tvm.error.InternalError,
+        match="T\\.async_copy only supports global->shared/shared\\.dyn copies",
+    ):
+        tilelang.compile(main, out_idx=[1], target="cuda")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_parallel_simt_copy_respects_enable_async_copy_config():
+    """Check `tl.enable_async_copy=False` disables auto cp.async rewriting."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((128,), T.float32)
+            for i in T.Parallel(128):
+                S[i] = A[i]
+            B[0] = S[0]
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_ASYNC_COPY: False},
+    )
+    src = kernel.get_kernel_source()
+    print("=== Parallel SIMT copy (async disabled) codegen ===")
+    print(src)
+    assert "cp_async_gs<" not in src, "Did not expect cp_async_gs when async copy is disabled"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_async_copy_oob_lowers_to_predicated_cp_async_without_wait():
+    """Check T.async_copy supports OOB via predicated cp.async and does not auto-wait."""
+
+    M = 130
+    K = 32
+    block_m = 128
+    block_k = 32
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((M, K), T.float16),
+    ):
+        with T.Kernel(T.ceildiv(M, block_m)) as pid_m:
+            S = T.alloc_shared((block_m, block_k), T.float16)
+            T.async_copy(A[pid_m * block_m : (pid_m + 1) * block_m, 0:block_k], S)
+            # Don't read S here (no wait). Keep B live so kernel has an output.
+            B[0, 0] = A[0, 0]
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    print("=== OOB async_copy -> predicated cp.async codegen ===")
+    print(src)
+    assert "cp_async_gs_conditional<" in src, "Expected predicated cp.async (zero-fill) in generated CUDA source"
+    assert "tl::cp_async_commit" in src, "Expected async_copy lowering to emit commit"
+    assert "tl::cp_async_wait<0>" not in src, "Did not expect async_copy lowering to auto-emit wait"
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

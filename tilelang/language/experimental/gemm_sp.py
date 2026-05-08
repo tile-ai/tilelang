@@ -14,13 +14,14 @@ from tilelang.utils.language import (
 from tilelang.language.utils import (
     buffer_region_to_tile_region,
 )
+from tilelang._typing import BufferLikeType
 
 
 def gemm_sp(
-    A_sparse: tir.Buffer | tir.Var,
-    E: tir.Buffer | tir.Var,
-    B: tir.Buffer | tir.Var,
-    C: tir.Buffer | tir.Var,
+    A_sparse: BufferLikeType | tir.Var,
+    E: BufferLikeType | tir.Var,
+    B: BufferLikeType | tir.Var,
+    C: BufferLikeType | tir.Var,
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
@@ -34,10 +35,10 @@ def gemm_sp(
     The operation supports various warp policies and accumulation modes.
 
     Args:
-        A_sparse (Union[tir.Buffer, tir.Var]): First input matrix dense values
-        E (Union[tir.Buffer, tir.Var]): First input matrix sparse metadata
-        B (Union[tir.Buffer, tir.Var]): Second input matrix
-        C (Union[tir.Buffer, tir.Var]): Output matrix for results
+        A_sparse (Union[BufferLikeType, tir.Var]): First input matrix dense values
+        E (Union[BufferLikeType, tir.Var]): First input matrix sparse metadata
+        B (Union[BufferLikeType, tir.Var]): Second input matrix
+        C (Union[BufferLikeType, tir.Var]): Output matrix for results
         transpose_A (bool, optional): Whether to transpose matrix A. Defaults to False.
         transpose_B (bool, optional): Whether to transpose matrix B. Defaults to False.
         policy (GemmWarpPolicy, optional): Warp execution policy. Defaults to GemmWarpPolicy.Square.
@@ -52,14 +53,14 @@ def gemm_sp(
         AssertionError: If the K dimensions of matrices A and B don't match
     """
 
-    def legalize_arguments(arg: tir.Buffer | tir.Var):
+    def legalize_arguments(arg: BufferLikeType | tir.Var):
         """Convert let-bound variables to their corresponding buffers.
 
         Args:
-            arg (Union[tir.Buffer, tir.Var]): Input argument to legalize
+            arg (Union[BufferLikeType, tir.Var]): Input argument to legalize
 
         Returns:
-            Union[tir.Buffer, tir.Var]: The legalized argument
+            Union[BufferLikeType, tir.Var]: The legalized argument
         """
         if isinstance(arg, tir.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
@@ -99,10 +100,10 @@ def gemm_sp(
 
 # experimental currently, for fast compilation
 def gemm_sp_v2(
-    A_sparse: tir.Buffer | tir.Var,
-    E: tir.Buffer | tir.Var,
-    B: tir.Buffer | tir.Var,
-    C: tir.Buffer | tir.Var,
+    A_sparse: BufferLikeType | tir.Var,
+    E: BufferLikeType | tir.Var,
+    B: BufferLikeType | tir.Var,
+    C: BufferLikeType | tir.Var,
     transpose_A: bool = False,
     transpose_B: bool = False,
     transpose_E: bool = False,
@@ -117,10 +118,10 @@ def gemm_sp_v2(
     The operation supports various warp policies and accumulation modes.
 
     Args:
-        A_sparse (Union[tir.Buffer, tir.Var]): First input matrix, contains only non-zero elements
-        E (Union[tir.Buffer, tir.Var]): The metadata of A_sparse, noted as E
-        B (Union[tir.Buffer, tir.Var]): Second input matrix
-        C (Union[tir.Buffer, tir.Var]): Output matrix for results
+        A_sparse (Union[BufferLikeType, tir.Var]): First input matrix, contains only non-zero elements
+        E (Union[BufferLikeType, tir.Var]): The metadata of A_sparse, noted as E
+        B (Union[BufferLikeType, tir.Var]): Second input matrix
+        C (Union[BufferLikeType, tir.Var]): Output matrix for results
         transpose_A (bool, optional): Whether to transpose matrix A. Defaults to False.
         transpose_B (bool, optional): Whether to transpose matrix B. Defaults to False.
         policy (GemmWarpPolicy, optional): Warp execution policy. Defaults to GemmWarpPolicy.Square.
@@ -135,14 +136,14 @@ def gemm_sp_v2(
         AssertionError: If the K dimensions of matrices A and B don't match
     """
 
-    def legalize_arguments(arg: tir.Buffer | tir.Var):
+    def legalize_arguments(arg: BufferLikeType | tir.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
 
         Args:
-            arg (Union[tir.Buffer, tir.Var]): Input argument to legalize
+            arg (Union[BufferLikeType, tir.Var]): Input argument to legalize
 
         Returns:
-            Union[tir.Buffer, tir.Var]: The legalized argument
+            Union[BufferLikeType, tir.Var]: The legalized argument
         """
         if isinstance(arg, tir.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer

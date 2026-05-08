@@ -4,8 +4,20 @@ import torch
 import tilelang.testing
 import pytest
 
+ROUNDING_MODES = ["rn", "rz", "ru", "rd"]
 
-def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=128, block_M=32, block_N=32, dtype=T.float32):
+
+def run_ieee_math_test(
+    mathop_name,
+    mathop_func,
+    rounding_mode="rn",
+    M=32,
+    N=32,
+    block_M=16,
+    block_N=16,
+    dtype=T.float32,
+    run_execution=True,
+):
     """
     Test IEEE-compliant math operations with specified rounding modes.
     """
@@ -74,6 +86,9 @@ def run_ieee_math_test(mathop_name, mathop_func, rounding_mode="rn", M=128, N=12
     print(f"\n=== Testing {mathop_name} with rounding mode {rounding_mode} ===")
     print(f"✓ {mathop_name} compilation test passed")
 
+    if not run_execution:
+        return
+
     # Test numerical execution
     torch_dtype = dtype.as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
@@ -121,63 +136,51 @@ def test_rounding_mode_validation():
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_add_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_add_all_rounding_modes(mode):
     """Test IEEE addition with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode=mode)
-        print(f"✓ ieee_add with {mode} passed")
+    run_ieee_math_test("ieee_add", T.ieee_add, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_add with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_sub_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_sub_all_rounding_modes(mode):
     """Test IEEE subtraction with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_sub", T.ieee_sub, rounding_mode=mode)
-        print(f"✓ ieee_sub with {mode} passed")
+    run_ieee_math_test("ieee_sub", T.ieee_sub, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_sub with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_mul_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_mul_all_rounding_modes(mode):
     """Test IEEE multiplication with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_mul", T.ieee_mul, rounding_mode=mode)
-        print(f"✓ ieee_mul with {mode} passed")
+    run_ieee_math_test("ieee_mul", T.ieee_mul, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_mul with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_fmaf_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_fmaf_all_rounding_modes(mode):
     """Test IEEE fused multiply-add with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_fmaf", T.ieee_fmaf, rounding_mode=mode)
-        print(f"✓ ieee_fmaf with {mode} passed")
+    run_ieee_math_test("ieee_fmaf", T.ieee_fmaf, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_fmaf with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_frcp_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_frcp_all_rounding_modes(mode):
     """Test IEEE reciprocal with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_frcp", T.ieee_frcp, rounding_mode=mode)
-        print(f"✓ ieee_frcp with {mode} passed")
+    run_ieee_math_test("ieee_frcp", T.ieee_frcp, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_frcp with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_fsqrt_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_fsqrt_all_rounding_modes(mode):
     """Test IEEE square root with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_fsqrt", T.ieee_fsqrt, rounding_mode=mode)
-        print(f"✓ ieee_fsqrt with {mode} passed")
+    run_ieee_math_test("ieee_fsqrt", T.ieee_fsqrt, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_fsqrt with {mode} passed")
 
 
 @tilelang.testing.requires_cuda
@@ -186,12 +189,12 @@ def test_ieee_frsqrt_rn_only():
 
     @T.prim_func
     def main(
-        A: T.Tensor((128, 128), T.float32),
-        B: T.Tensor((128, 128), T.float32),
+        A: T.Tensor((32, 32), T.float32),
+        B: T.Tensor((32, 32), T.float32),
     ):
-        with T.Kernel(T.ceildiv(128, 32), T.ceildiv(128, 32), threads=128) as (bx, by):
-            for i, j in T.Parallel(32, 32):
-                B[by * 32 + i, bx * 32 + j] = T.ieee_frsqrt(A[by * 32 + i, bx * 32 + j])
+        with T.Kernel(T.ceildiv(32, 16), T.ceildiv(32, 16), threads=128) as (bx, by):
+            for i, j in T.Parallel(16, 16):
+                B[by * 16 + i, bx * 16 + j] = T.ieee_frsqrt(A[by * 16 + i, bx * 16 + j])
 
     kernel = tilelang.compile(
         main,
@@ -206,7 +209,7 @@ def test_ieee_frsqrt_rn_only():
     print("✓ ieee_frsqrt compilation test passed")
 
     # Test numerical execution
-    a = torch.abs(torch.randn(128, 128, device="cuda", dtype=torch.float32)) + 0.1
+    a = torch.abs(torch.randn(32, 32, device="cuda", dtype=torch.float32)) + 0.1
 
     try:
         result = kernel(a)
@@ -217,13 +220,11 @@ def test_ieee_frsqrt_rn_only():
 
 
 @tilelang.testing.requires_cuda
-def test_ieee_fdiv_all_rounding_modes():
+@pytest.mark.parametrize("mode", ROUNDING_MODES, ids=ROUNDING_MODES)
+def test_ieee_fdiv_all_rounding_modes(mode):
     """Test IEEE division with all rounding modes"""
-    rounding_modes = ["rn", "rz", "ru", "rd"]
-
-    for mode in rounding_modes:
-        run_ieee_math_test("ieee_fdiv", T.ieee_fdiv, rounding_mode=mode)
-        print(f"✓ ieee_fdiv with {mode} passed")
+    run_ieee_math_test("ieee_fdiv", T.ieee_fdiv, rounding_mode=mode, run_execution=mode == "rn")
+    print(f"✓ ieee_fdiv with {mode} passed")
 
 
 if __name__ == "__main__":

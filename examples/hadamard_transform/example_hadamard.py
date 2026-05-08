@@ -1,6 +1,6 @@
 import tilelang
 import tilelang.language as T
-from tilelang.intrinsics import make_mma_swizzle_layout
+from tilelang.cuda.intrinsics import make_mma_swizzle_layout
 
 import math
 import argparse

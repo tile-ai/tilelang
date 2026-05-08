@@ -29,8 +29,7 @@ mapping = {
     "wq_b": ("wq_b", None),
     "wk": ("wk", None),
     "k_norm": ("k_norm", None),
-    "weights_proj": ("weights_proj", None),
-}
+    "weights_proj": ("weights_proj", None)}
 
 
 def main(hf_ckpt_path, save_path, n_experts, mp):

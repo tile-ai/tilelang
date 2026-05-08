@@ -43,7 +43,7 @@ def kernel_with_shfl_sync():
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
             val = tx * 10
-            broadcast = T.shfl_sync(0xFFFFFFFF, val, 31)
+            broadcast = T.shfl_sync(val, 31)
             A[tx] = broadcast
 
     return main

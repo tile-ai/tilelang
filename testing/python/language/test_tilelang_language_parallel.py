@@ -48,6 +48,9 @@ def _require_cuda_tensor(shape, dtype=torch.float32):
         pytest.skip(f"CUDA runtime unavailable: {err}")
 
 
+PARALLEL_DYNAMIC_VALID_LENGTHS = [0, 13, 200, 600]
+
+
 def test_parallel_static_extent():
     kernel = parallel_elementwise_static(length=256)
     data = _require_cuda_tensor((256,), torch.float32)
@@ -55,15 +58,35 @@ def test_parallel_static_extent():
     torch.testing.assert_close(result, data + 1.0, atol=1e-5, rtol=1e-5)
 
 
-def test_parallel_dynamic_extent():
+@pytest.mark.parametrize(
+    "valid_len",
+    PARALLEL_DYNAMIC_VALID_LENGTHS,
+    ids=[f"valid_len={value}" for value in PARALLEL_DYNAMIC_VALID_LENGTHS],
+)
+def test_parallel_dynamic_extent(valid_len):
     kernel = parallel_elementwise_dynamic(max_len=512, threads=256)
     data = _require_cuda_tensor((512,), torch.float32)
-    for valid_len in [0, 13, 200, 600]:
-        out = kernel(data, valid_len)
-        reference = torch.zeros_like(data)
-        clip = min(valid_len, data.shape[0])
-        reference[:clip] = data[:clip] - 1.0
-        torch.testing.assert_close(out, reference, atol=1e-5, rtol=1e-5)
+    out = kernel(data, valid_len)
+    reference = torch.zeros_like(data)
+    clip = min(valid_len, data.shape[0])
+    reference[:clip] = data[:clip] - 1.0
+    torch.testing.assert_close(out, reference, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.jit
+def _parallel_vectorize_local_and_var():
+    with T.Kernel(1) as _:
+        x = T.alloc_fragment([256], T.float32)
+        y = T.alloc_fragment([256], T.float32)
+        z = T.alloc_var(T.float32)
+        for i in T.parallel(256):
+            y[i] = x[i] * z
+
+
+def test_parallel_vectorize_var():
+    source = _parallel_vectorize_local_and_var.get_kernel_source()
+    # do not vectorize if the loop only contains local/fragment and var buffer access
+    assert "float2" not in source
 
 
 if __name__ == "__main__":

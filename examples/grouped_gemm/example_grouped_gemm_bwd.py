@@ -5,7 +5,7 @@ import tilelang
 import tilelang.language as T
 
 
-@tilelang.jit(out_idx=[2], pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
+@tilelang.jit(out_idx=[2], pass_configs={"tl.disable_warp_specialized": True})
 def grouped_gemm_fwd(batch_sum, batch_count, K, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype=T.float16):
     """
     args:
@@ -157,7 +157,7 @@ def construct_inputs(batch_sizes_list, K, M, trans_b, padding_M, device, dtype):
     return A, B, C, batch_sizes, batch_offsets, batch_padded_offsets
 
 
-@tilelang.jit(out_idx=[2], pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
+@tilelang.jit(out_idx=[2], pass_configs={"tl.disable_warp_specialized": True})
 def grouped_gemm_bwd(batch_sum, batch_count, M, N, block_M, block_N, block_K, num_stages=2, threads=128, dtype=T.float16):
     """
     args:

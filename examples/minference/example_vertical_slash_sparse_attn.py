@@ -48,13 +48,11 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
             bz: T.int32,
             by: T.int32,
         ):
-            with T.attr("default", "async_scope", 1):
-                for i, j in T.Parallel(block_N, dim):
-                    K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
+            for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
+                K_shared[i, j] = T.if_then_else(k + i < column_count, K[bz, by, column_index[k + i], j], 0)
 
-            with T.attr("default", "async_scope", 1):
-                for i, j in T.Parallel(block_N, dim):
-                    V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
+            for i, j in T.Parallel(block_N, dim, prefer_async=True, annotations={"parallel_async_without_async_commit_wait": True}):
+                V_shared[i, j] = T.if_then_else(k + i < column_count, V[bz, by, column_index[k + i], j], 0)
 
             T.ptx_commit_group()
 
@@ -152,15 +150,15 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
 
                 if tid >= 128:
                     T.annotate_producer_reg_dealloc()
-                    T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
+                    T.tma_copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared, barrier=mbars[8])
                     T.mbarrier_arrive(mbarrier=mbars[8])
                     for bi in T.serial(block_count):
                         k = block_offset[bi]
                         T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 4], parity=(((bi & 3) >> 1) ^ 1))
-                        T.copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :])
+                        T.tma_copy(K[bz, by, k : k + block_N, :], K_shared[bi % 2, :, :], barrier=mbars[bi % 2])
                         T.mbarrier_arrive(mbarrier=mbars[bi % 2])
                         T.mbarrier_wait_parity(mbarrier=mbars[bi % 2 + 6], parity=(((bi & 3) >> 1) ^ 1))
-                        T.copy(V[bz, by, k : k + block_N, :], V_shared[bi % 2, :, :])
+                        T.tma_copy(V[bz, by, k : k + block_N, :], V_shared[bi % 2, :, :], barrier=mbars[bi % 2 + 2])
                         T.mbarrier_arrive(mbarrier=mbars[bi % 2 + 2])
                 else:
                     T.annotate_consumer_reg_alloc()

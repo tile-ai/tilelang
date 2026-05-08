@@ -21,6 +21,7 @@
 
 import pytest
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import tvm_ffi
 import torch
@@ -40,6 +41,17 @@ BACKENDS = [
 def _get_target_from_backend(backend: str):
     """Map backend to target string."""
     return "cutedsl" if backend == "cutedsl" else "auto"
+
+
+def _require_backend_available(backend: str) -> None:
+    if backend != "cutedsl":
+        return
+    try:
+        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+
+        check_cutedsl_available()
+    except ImportError as e:
+        pytest.skip(f"CuTeDSL backend unavailable: {e}")
 
 
 class PostProcCounter:
@@ -101,6 +113,7 @@ def clean_cache_env(tmp_path, request):
     """
     # This fixture should ONLY be used with @pytest.mark.parametrize("backend", ...)
     backend = request.node.callspec.params["backend"]  # Will raise KeyError if missing
+    _require_backend_available(backend)
 
     cache_dir = tmp_path / "tilelang_cache"
     cache_dir.mkdir()
@@ -137,7 +150,7 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
 
     # Use UUID in global_symbol to ensure unique cache key per test run
     unique_id = uuid.uuid4().hex[:8]
-    M, N = 1024, 1024
+    M, N = 256, 256
 
     @T.prim_func
     def vector_add(
@@ -207,7 +220,7 @@ def test_cache_miss_detection(clean_cache_env, backend):
     counter = PostProcCounter()
     counter.register_callback(backend)
 
-    M, N = 512, 512
+    M, N = 128, 128
 
     # Kernel 1: A + 1.0
     @T.prim_func
