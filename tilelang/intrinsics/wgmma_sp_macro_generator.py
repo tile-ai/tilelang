@@ -3,8 +3,13 @@ from .wgmma_macro_generator import SwizzleMode, gcd
 from .mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.language as T
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var, BufferRegion
+from tvm.tir import PrimExpr, Buffer, Var, BufferRegion, IndexMap
 from tilelang.utils import is_fragment, is_shared, retrive_ptr_from_buffer_region, is_full_region
+from tilelang.intrinsics.mma_layout import (
+    shared_16x8_to_mma_32x4_layout_sr_a,
+    shared_16x16_to_mma_32x8_layout_sr_a,
+    shared_16x32_to_mma_32x16_layout_sr_a,
+)
 from tilelang.layout import (
     Layout,
     make_full_bank_swizzled_layout,
@@ -298,6 +303,139 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
         return _warp_mma(A_ptr, B_ptr, C_buf)
 
+    def wgmma_rs(
+        self,
+        A_region: BufferRegion,
+        E_region: BufferRegion,
+        B_region: BufferRegion,
+        C_region: BufferRegion,
+        clear_accum: PrimExpr = False,
+        wg_wait: int = 0,
+    ):
+        assert is_fragment(A_region), "A operand must be a fragment buffer for wgmma_rs"
+        assert is_shared(E_region), "E operand must be a shared buffer for wgmma_rs"
+
+        local_size_a = self.local_size_a
+        local_size_out = self.local_size_out
+        a_dtype_abbrv = self.a_dtype_abbrv
+        b_dtype_abbrv = self.b_dtype_abbrv
+        accum_dtype = self.accum_dtype
+        accum_dtype_abbrv = self.accum_dtype_abbrv
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        warp_rows, warp_cols = self.warp_rows, self.warp_cols
+        micro_size_k = self.micro_size_k
+        k_dim, n_dim = self.warp_k, self.block_col_warps * self.warp_col_tiles
+        wgmma_prefix = self.wgmma_prefix
+        scale_in_a = 1
+        scale_in_b = 1
+
+        assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
+
+        elems_in_bytes = DataType(self.a_dtype).bits // 8
+        a_bits = DataType(self.a_dtype).bits
+        accum_bits = DataType(accum_dtype).bits
+        a_regs = ((warp_rows * local_size_a * (k_dim // micro_size_k)) * a_bits + 31) // 32
+        accum_regs = ((m_dim // 64) * warp_cols * local_size_out * accum_bits + 31) // 32
+        b_is_k_major = self.b_transposed
+
+        b_swizzle_mode = self._determinate_swizzle_mode(B_region, self.b_shared_layout)
+        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none() else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
+        if not b_swizzle_mode.is_none():
+            if b_is_k_major:
+                b_leading_byte_offset = 16
+                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
+            else:
+                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
+                if b_n_axis_atoms <= 1:
+                    b_leading_byte_offset = 0
+                else:
+                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
+                if b_n_axis_atoms <= 1:
+                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
+                else:
+                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
+
+        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
+        wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
+        num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
+        num_inst_n = self.warp_col_tiles // wgmma_inst_n
+
+        thread_binding = self.get_thread_binding()
+
+        assert is_full_region(A_region), "Fragment input A must be a full region"
+        assert is_full_region(C_region), "Fragment output C must be a full region"
+        A_buf = A_region.buffer
+        B_ptr = retrive_ptr_from_buffer_region(B_region)
+        C_buf = C_region.buffer
+
+        k_blocks = k_dim // micro_size_k
+        e_stage_elems = self.warp_rows * self.local_size_e
+
+        @T.macro
+        def _warp_mma(A_buf, B_ptr, C_buf):
+            _, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+            E_local = T.alloc_local((k_blocks * e_stage_elems), self.e_dtype)
+
+            desc_b = T.alloc_wgmma_desc()
+            T.initialize_wgmma_descriptor(desc_b, B_ptr, b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+
+            for ki in T.unroll(k_blocks):
+                for i in T.unroll(num_inst_m):
+                    self.ldmatrix_e(E_local, E_region, i, warp_m, ki, ki)
+
+            T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
+            T.warpgroup_arrive()
+
+            for ki in T.unroll(k_blocks):
+                for j in T.unroll(num_inst_n):
+                    for i in T.unroll(num_inst_m):
+                        e_local_offset = ki * e_stage_elems
+                        scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
+                        warp_j = warp_n * num_inst_n + j
+                        A_offset = ki * warp_rows * local_size_a + i * local_size_a
+                        B_offset = (
+                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                            + warp_j * wgmma_inst_n * b_swizzle_atom_elems
+                            + (ki % bk_atom_size) * micro_size_k
+                            if b_is_k_major
+                            else (
+                                ki * b_swizzle_atom_elems * micro_size_k
+                                + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
+                            )
+                        )
+                        C_offset = i * warp_cols * local_size_out + j * warp_cols * local_size_out // num_inst_n
+                        T.ptx_wgmma_sp_rs(
+                            accum_dtype,
+                            wgmma_prefix,
+                            b_is_k_major,
+                            a_dtype_abbrv,
+                            b_dtype_abbrv,
+                            accum_dtype_abbrv,
+                            A_buf.data,
+                            A_offset,
+                            E_local.data,
+                            e_local_offset,
+                            desc_b.data,
+                            (B_offset * elems_in_bytes) >> 4,
+                            C_buf.data,
+                            C_offset,
+                            scale_out,
+                            scale_in_a,
+                            scale_in_b,
+                        )
+
+            T.warpgroup_commit_batch()
+            if wg_wait >= 0:
+                T.warpgroup_wait(wg_wait)
+            T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
+            T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
+
+        return _warp_mma(A_buf, B_ptr, C_buf)
+
     def ldmatrix_e(self, E_local_buf: Buffer, E_shared_buf: Buffer, inst_i: PrimExpr, warp_m: PrimExpr, ki: PrimExpr, ki_slot: PrimExpr):
         num_inst_m = 4 * self.warp_row_tiles // self.wgmma_inst_m
         micro_size_k = self.micro_size_k
@@ -369,6 +507,62 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                 )
 
         return _warp_ldmatrix_e(E_local_buf, E_buf, inst_i, ki, thread_binding)
+
+    def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
+        assert matrix == "A", "WGMMA sparse only supports A matrix load layout"
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
+
+        dtype = self.a_dtype
+        dtype_bits = DataType(dtype).bits
+        transposed = self.a_transposed
+
+        if dtype_bits == 32:
+            transform_func_sr_a = shared_16x8_to_mma_32x4_layout_sr_a
+        elif dtype_bits == 16:
+            transform_func_sr_a = shared_16x16_to_mma_32x8_layout_sr_a
+        elif dtype_bits == 8:
+            transform_func_sr_a = shared_16x32_to_mma_32x16_layout_sr_a
+        else:
+            raise ValueError(f"Unsupported dtype {dtype}")
+
+        is_sr_axis_order = not transposed
+
+        transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i)
+
+        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype=T.int32)
+
+        def forward_thread(i: int, j: int) -> int:
+            lane_id, _ = inverse_mma_load_layout.map_indices([i, j])
+            return lane_id
+
+        def forward_index(i: int, j: int) -> int:
+            _, local_id = inverse_mma_load_layout.map_indices([i, j])
+            return local_id
+
+        micro_size_s = self.micro_size_x
+        # sparse: each instruction holds micro_size_k/SPARSE_FACTOR actual K elements
+        micro_size_r = self.micro_size_k // self.SPARSE_FACTOR
+
+        base_fragment = T.Fragment(
+            [micro_size_s, micro_size_r] if is_sr_axis_order else [micro_size_r, micro_size_s],
+            forward_thread_fn=forward_thread,
+            forward_index_fn=forward_index,
+        )
+
+        warp_rows = self.warp_rows
+        # number of instructions in K direction
+        warp_r = self.warp_k // self.micro_size_k
+        block_s = self.block_row_warps
+        replicate = self.block_col_warps
+
+        if is_sr_axis_order:
+            warp_fragment = base_fragment.repeat([block_s, 1], repeat_on_thread=True, lower_dim_first=False).replicate(replicate)
+            block_fragment = warp_fragment.repeat([warp_rows, warp_r], repeat_on_thread=False, lower_dim_first=False)
+        else:
+            warp_fragment = base_fragment.repeat([1, block_s], repeat_on_thread=True, lower_dim_first=False).replicate(replicate)
+            block_fragment = warp_fragment.repeat([warp_r, warp_rows], repeat_on_thread=False, lower_dim_first=True)
+
+        return block_fragment
 
     def make_mma_store_layout(self, local_buf: Buffer) -> T.Fragment:
         """

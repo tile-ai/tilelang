@@ -2819,8 +2819,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     need_wgmma_sp_instruction_h_ = true;
     this->PrintIndent();
     std::string wgmma_sp_rs_asm_code =
-        "tl::wgmma_sp_rs<(AType), (BType), (CType), (M), (N), (K), (tnspB), "
-        "(scaleA), (scaleB)>(reinterpret_cast<const uint32_t*>((A_ptr) + "
+        "tl::wgmma_sp_rs<(AType), (BType), (CType), (M), (N), (K), false, "
+        "(tnspB), (scaleA), (scaleB)>(reinterpret_cast<const "
+        "uint32_t*>((A_ptr) + "
         "(A_offset)), uint64_t((desc_b) + (B_offset)), "
         "reinterpret_cast<uint32_t*>((C_data)) + (C_offset), (scale_out), "
         "*reinterpret_cast<uint32_t*>((e_data) + (E_offset)));\n";

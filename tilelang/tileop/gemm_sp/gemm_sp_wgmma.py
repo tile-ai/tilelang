@@ -135,19 +135,11 @@ class GemmSPWGMMA(GemmSPBase):
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_ssr, inline_let=True)
         elif self.is_gemm_rs():
-            raise NotImplementedError("GemmRS with WGMMA is not implemented yet")
 
             @T.prim_func
             def _gemm_rsr() -> None:
-                """
-                The inner macro that loads data from shared buffers A_shared and
-                B_shared into local fragments, then issues Tensor Core mma ops,
-                accumulating into C_local.
-                """
-                mma_emitter.wgmma(A_region, B_region, C_region, clear_accum, wg_wait)
+                mma_emitter.wgmma_rs(A_region, E_region, B_region, C_region, clear_accum, wg_wait)
 
-            # Simplify to optimize the index computing
-            # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
         raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
 
