@@ -40,7 +40,7 @@ def infer_wgmma_shared_layout(continuity, dtype):
 
 
 # ---------------------------------------------------------------------------
-# SM80+ MMA (atom-level)  --  runs correctness on Hopper
+# SM80+ MMA (atom-level)  --  correctness test
 # ---------------------------------------------------------------------------
 
 
