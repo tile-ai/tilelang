@@ -137,7 +137,7 @@ if(TILELANG_USE_CUDA_STUBS)
 endif()
 
 file(GLOB TILE_LANG_CUDA_SRCS
-  src/runtime/runtime.cc
+  src/backend/cuda/runtime.cc
   src/backend/cuda/codegen/ptx.cc
   src/backend/cuda/codegen/codegen_cuda.cc
   src/backend/cuda/codegen/codegen_py.cc

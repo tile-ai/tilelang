@@ -204,7 +204,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
-    mod = tilelang.transform.LowerL2Persistent()(mod)
+    mod = tilelang.cuda.transform.LowerL2Persistent()(mod)
     # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
@@ -270,7 +270,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerLDGSTG()(mod)
-    mod = tilelang.transform.LowerHopperIntrin()(mod)
+    mod = tilelang.cuda.transform.LowerHopperIntrin()(mod)
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier
     if allow_global_thread_synchronization():
@@ -305,6 +305,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 
     # Transform threadblock to persistent threadblock
-    mod = tilelang.transform.PersistThreadblock()(mod)
+    mod = tilelang.cuda.transform.PersistThreadblock()(mod)
 
     return mod
