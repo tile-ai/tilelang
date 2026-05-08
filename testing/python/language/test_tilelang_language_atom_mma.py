@@ -20,8 +20,10 @@ def make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype
     shape = shared_buf.shape
     if shape[-1] * T.dtype(dtype).bits == 512:
+
         def transform_func(i, j):
             return get_swizzle_layout(i, j, shape[-1], dtype)
+
         return T.Layout(shape, transform_func)
     return T.Layout(shape, lambda *args: args)
 
@@ -40,6 +42,7 @@ def infer_wgmma_shared_layout(continuity, dtype):
 # ---------------------------------------------------------------------------
 # SM80+ MMA (atom-level)  --  runs correctness on Hopper
 # ---------------------------------------------------------------------------
+
 
 def make_mma_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
     micro_size_x = micro_size_y = micro_size_k = 16
@@ -88,10 +91,12 @@ def make_mma_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             T.clear(C_local)
 
@@ -108,10 +113,8 @@ def make_mma_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
                         emitter.mma_atom(A_local, B_local, C_local, i, j, ki)
 
             emitter.stmatrix(C_local, C_shared)
-            for i, j in T.Parallel(block_M, block_N): 
-                C[by * block_M + i, bx * block_N + j] = C_shared[
-                    i // micro_size_x, j // micro_size_y, i % micro_size_x, j % micro_size_y
-                ]
+            for i, j in T.Parallel(block_M, block_N):
+                C[by * block_M + i, bx * block_N + j] = C_shared[i // micro_size_x, j // micro_size_y, i % micro_size_x, j % micro_size_y]
 
     return main
 
@@ -130,6 +133,7 @@ def _run_mma_atom(M, N, K, in_dtype, out_dtype, accum_dtype):
 def test_mma_atom_gemm():
     _run_mma_atom(128, 128, 128, T.float16, T.float16, T.float16)
     _run_mma_atom(256, 256, 256, T.bfloat16, T.float32, T.float32)
+
 
 # ---------------------------------------------------------------------------
 # SM90 WGMMA (atom-level, SS variant)  --  codegen and correctness test
@@ -167,20 +171,22 @@ def make_wgmma_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(1, threads=128):
-            A_shared = T.alloc_shared((M, chunk), in_dtype)
-            B_shared = T.alloc_shared((chunk, N), in_dtype)
+            A_shared = T.alloc_shared((M, block_K), in_dtype)
+            B_shared = T.alloc_shared((block_K, N), in_dtype)
             C_local = T.alloc_fragment((M, N), accum_dtype)
 
             emi._assign_a_shared_layout(a_layout(A_shared))
             emi._assign_b_shared_layout(b_layout(B_shared))
-            T.annotate_layout({
-                A_shared: a_layout(A_shared),
-                B_shared: b_layout(B_shared),
-                C_local: emi.make_mma_store_layout(C_local),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: a_layout(A_shared),
+                    B_shared: b_layout(B_shared),
+                    C_local: emi.make_mma_store_layout(C_local),
+                }
+            )
 
-            T.copy(A[0:M, 0:chunk], A_shared)
-            T.copy(B[0:chunk, 0:N], B_shared)
+            T.copy(A[0:M, 0:block_K], A_shared)
+            T.copy(B[0:block_K, 0:N], B_shared)
 
             a_params = emi.compute_wgmma_a_desc_params(A_shared)
             b_params = emi.compute_wgmma_b_desc_params(B_shared)
@@ -235,6 +241,7 @@ def test_wgmma_atom_gemm():
 # SM100 TCGEN05MMA (atom-level, SS variant)  --  codegen and correctness test
 # ---------------------------------------------------------------------------
 
+
 def make_tcgen05_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
     chunk = K
     emi = TCGEN05TensorCoreIntrinEmitter(
@@ -273,11 +280,13 @@ def make_tcgen05_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
 
             emi._assign_a_shared_layout(a_layout(A_shared))
             emi._assign_b_shared_layout(b_layout(B_shared))
-            T.annotate_layout({
-                A_shared: a_layout(A_shared),
-                B_shared: b_layout(B_shared),
-                C_tmem: emi.make_mma_store_layout(C_tmem),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: a_layout(A_shared),
+                    B_shared: b_layout(B_shared),
+                    C_tmem: emi.make_mma_store_layout(C_tmem),
+                }
+            )
 
             for i, k in T.Parallel(M, K):
                 A_shared[i, k] = A[i, k]
@@ -287,16 +296,17 @@ def make_tcgen05_atom_kernel(M, N, K, in_dtype, out_dtype, accum_dtype):
             a_params = emi.compute_tcgen05_a_desc_params(A_shared)
             b_params = emi.compute_tcgen05_b_desc_params(B_shared)
 
-            desc_a = T.alloc_tcgen05_smem_desc()
-            desc_b = T.alloc_tcgen05_smem_desc()
-            emi.init_tcgen05_a_desc(desc_a, A_shared, a_params)
-            emi.init_tcgen05_b_desc(desc_b, B_shared, b_params)
+            if T.get_thread_binding() // 32 == 0:
+                desc_a = T.alloc_tcgen05_smem_desc()
+                desc_b = T.alloc_tcgen05_smem_desc()
+                emi.init_tcgen05_a_desc(desc_a, A_shared, a_params)
+                emi.init_tcgen05_b_desc(desc_b, B_shared, b_params)
 
-            for n in T.unroll(num_inst_n):
-                for m in T.unroll(num_inst_m):
-                    for ki in T.unroll(0, num_k_atoms):
-                        emi.tcgen05_ss_atom(desc_a, desc_b, C_tmem, m, n, ki, a_params, b_params, instr_desc, T.bool(True))
-            emi.tcgen05_atom_arrive(mbar)
+                for n in T.unroll(num_inst_n):
+                    for m in T.unroll(num_inst_m):
+                        for ki in T.unroll(0, num_k_atoms):
+                            emi.tcgen05_ss_atom(desc_a, desc_b, C_tmem, m, n, ki, a_params, b_params, instr_desc, T.bool(True))
+                emi.tcgen05_atom_arrive(mbar)
             T.mbarrier_wait_parity(mbar, 0)
 
             T.copy(C_tmem, C_local)
@@ -318,13 +328,14 @@ def test_tcgen05_atom_gemm():
         out_idx=[2],
     )
     src = kernel.get_kernel_source()
-    assert "tcgen05.mma" in src
+    assert "tcgen05mma_ss" in src
+    assert "threadIdx.x) >> 5) == 0" in src  # elect 1 thread to issue UMMA
 
     a = torch.randn(M, K, device="cuda", dtype=in_dtype.as_torch())
     b = torch.randn(N, K, device="cuda", dtype=in_dtype.as_torch())
     d = kernel(a, b)
     ref = (a.float() @ b.T.float()).to(out_dtype.as_torch())
-    torch.testing.assert_close(d, ref, rtol=1e-2, atol=0.1)
+    torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":
