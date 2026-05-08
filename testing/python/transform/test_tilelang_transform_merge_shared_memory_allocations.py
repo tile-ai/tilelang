@@ -785,3 +785,58 @@ def before(A: T.Buffer((8,), "float16"), B: T.Buffer((8,), "float16"), C: T.Buff
     assert 'PhaseB[16] = T.float16(0.0)' in after_s
     assert 'TmpB[32] = PhaseB[16]' in after_s
     assert 'D[0] = CarryB[0]' in after_s
+
+
+@tilelang.testing.requires_cuda
+def test_merge_dynamic_shared_grows_arena_from_tail_when_freed_block_too_small():
+    """Regression for upstream commit b4c913be (#2106): when the only free
+    slot reusable by a new buffer sits at the arena tail and is smaller than
+    the requested size, the arena must grow by the deficit rather than push
+    the new allocation past the tail. The legacy best-fit free-list grew the
+    arena by the full need (X(128) + Y(64) + Z(192) = 384 bytes); the
+    interval-based LinearScanPack reuses the freed Y slot and only grows the
+    tail to fit Z, producing a 320-byte arena (X(128) + Z(192) packed)."""
+
+    @T.prim_func(private=True)
+    def before(A: T.Buffer((128,), "float16")):
+        bx = T.launch_thread("blockIdx.x", 1)
+        X = T.allocate([64], "float16", "shared.dyn")   # 128 bytes, live throughout
+        Y = T.allocate([32], "float16", "shared.dyn")   #  64 bytes, dies before Z
+        Z = T.allocate([96], "float16", "shared.dyn")   # 192 bytes, lives after Y
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        Xb = T.Buffer((64,), "float16", data=X, scope="shared.dyn")
+        Yb = T.Buffer((32,), "float16", data=Y, scope="shared.dyn")
+        Zb = T.Buffer((96,), "float16", data=Z, scope="shared.dyn")
+
+        # Phase 1: X and Y co-live; Z not yet generated.
+        Xb[tx] = A[tx]
+        if tx < 32:
+            Yb[tx] = A[tx]
+            A[tx] = Yb[tx]  # last use of Y -> Y becomes free
+        # Phase 2: Z generated; X still live, Y already dead -> Z must reuse
+        # Y's offset and merely grow the tail.
+        if tx < 96:
+            Zb[tx] = T.float16(0.0)
+        if tx < 64:
+            Zb[tx] = Xb[tx]
+        if tx < 96:
+            A[tx] = Zb[tx]
+        A[tx] = Xb[tx]  # last use of X (Z still live -> co-living with X)
+
+    after = _run_merge_pass(before, aggressive=True)
+    after_s = after.script()
+
+    # Peak live = X(128B) + Z(192B) = 320B. Y must reuse the offset that Z
+    # also occupies (relative to X) since Y dies before Z is born.
+    assert 'T.allocate([320], "uint8", "shared.dyn")' in after_s, after_s
+    # Y and Z must both start at offset 64 fp16 elements (= 128 bytes, after
+    # X). The legacy free-list implementation produced 96 fp16 elements
+    # (= 192 bytes) for Z (= bump past the freed Y slot), yielding a
+    # 384-byte arena and a "+ 96" expression in the rewritten script.
+    y_offsets = _buffer_plus_offsets_in_script(after_s, "Yb")
+    z_offsets = _buffer_plus_offsets_in_script(after_s, "Zb")
+    assert y_offsets == {64}, after_s
+    assert z_offsets == {64}, after_s
+    assert "+ 96" not in after_s, after_s
