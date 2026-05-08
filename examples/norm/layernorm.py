@@ -60,6 +60,7 @@ def _layernorm_fwd(N, D, eps=1e-5, blk_m=1, threads=256, in_dtype="bfloat16", ou
 
 @tilelang.jit(out_idx=[-3])
 def _layernorm_bwd(N, D, blk_m=32, threads=256, in_dtype="bfloat16"):
+    assert N % blk_m == 0, f"N={N} must be a multiple of blk_m={blk_m}"
     accum_dtype = "float"
 
     @T.prim_func
@@ -135,6 +136,10 @@ _TORCH_DTYPE_TO_TL = {torch.float16: "float16", torch.bfloat16: "bfloat16"}
 class LayerNormFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, gamma, beta, eps):
+        if x.dtype not in _TORCH_DTYPE_TO_TL:
+            raise TypeError(f"layer_norm: unsupported dtype {x.dtype}; supported: {list(_TORCH_DTYPE_TO_TL)}")
+        if gamma.dtype != x.dtype or beta.dtype != x.dtype:
+            raise TypeError(f"layer_norm: x, gamma, beta must share dtype, got {x.dtype}, {gamma.dtype}, {beta.dtype}")
         N, D = x.shape
         in_dtype = _TORCH_DTYPE_TO_TL[x.dtype]
         kernel = _layernorm_fwd(N, D, eps=eps, in_dtype=in_dtype, out_dtype=in_dtype)
