@@ -890,7 +890,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         this->VisitStmt(stmt);
       }
     }
-    for (auto it = saved_properties.rbegin(); it != saved_properties.rend(); ++it) {
+    for (auto it = saved_properties.rbegin(); it != saved_properties.rend();
+         ++it) {
       if (it->had_prev) {
         let_var_properties_[it->var] = it->prev_prop;
       } else {

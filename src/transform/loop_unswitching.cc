@@ -617,7 +617,8 @@ public:
     // outermost)
     for (auto it = finder.hoisted_let_bindings.rbegin();
          it != finder.hoisted_let_bindings.rend(); ++it) {
-      result = SeqStmt::Flatten(SeqStmt({LetStmt(it->first, it->second), result}));
+      result =
+          SeqStmt::Flatten(SeqStmt({LetStmt(it->first, it->second), result}));
     }
 
     if (pushed_thread_idx) {

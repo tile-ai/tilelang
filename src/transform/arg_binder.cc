@@ -399,9 +399,8 @@ void ArgBinder::BindDLTensors(
     std::string arg_name = func_name + "." + buffer->data->name_hint;
 
     Var is_null_var(arg_name + "_is_null", DataType::Bool());
-    init_nest_.emplace_back(
-        LetStmt(is_null_var,
-                Call(DataType::Bool(), builtin::isnullptr(), {handle})));
+    init_nest_.emplace_back(LetStmt(
+        is_null_var, Call(DataType::Bool(), builtin::isnullptr(), {handle})));
     const PrimExpr &is_null = is_used ? const_false() : is_null_var;
 
     is_null_map[arg_name] = is_null_var;
@@ -797,8 +796,7 @@ void ArgBinder::BindDLTensors(
               Var v_arg = ffi::GetRef<Var>(v);
               defs_.emplace_back(v_arg);
               (*def_map_)[v] = cascaded_value;
-              init_nest_.emplace_back(
-                  LetStmt(v_arg, cascaded_value));
+              init_nest_.emplace_back(LetStmt(v_arg, cascaded_value));
             } else {
               // Single source or no special handling needed, use nullable
               // binding. When the only source is NULL, bind m to 0 safely.

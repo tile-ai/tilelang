@@ -222,7 +222,8 @@ private:
                            {StringImm("tvm_ffi_any"), 16});
     Call init_desc =
         Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
-    return SeqStmt::Flatten(SeqStmt({LetStmt(var, alloc_desc), Evaluate(init_desc)}));
+    return SeqStmt::Flatten(
+        SeqStmt({LetStmt(var, alloc_desc), Evaluate(init_desc)}));
   }
 
   Array<Stmt> prefetch_calls_;

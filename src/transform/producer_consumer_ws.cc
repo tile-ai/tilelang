@@ -348,7 +348,9 @@ static const CallNode *GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
       }
       non_let_stmt = child;
     }
-    return non_let_stmt.defined() ? GetEvaluateCallInSimpleWrapper(non_let_stmt.value()) : nullptr;
+    return non_let_stmt.defined()
+               ? GetEvaluateCallInSimpleWrapper(non_let_stmt.value())
+               : nullptr;
   }
   if (const auto *block = stmt.as<BlockNode>()) {
     return GetEvaluateCallInSimpleWrapper(block->body);
@@ -1668,7 +1670,8 @@ private:
         [&](Stmt body,
             const std::vector<std::pair<Var, PrimExpr>> &bindings) -> Stmt {
       for (auto it = bindings.rbegin(); it != bindings.rend(); ++it) {
-        body = SeqStmt::Flatten(SeqStmt({LetStmt(it->first, it->second), body}));
+        body =
+            SeqStmt::Flatten(SeqStmt({LetStmt(it->first, it->second), body}));
       }
       return body;
     };

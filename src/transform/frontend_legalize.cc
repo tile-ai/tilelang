@@ -86,7 +86,8 @@ private:
       if (const auto *let = stmt.as<LetStmtNode>()) {
         PrimExpr value = VisitExpr(let->value);
         auto it = let_bindings_.find(let->var.get());
-        SavedBinding saved{let->var.get(), it != let_bindings_.end(), PrimExpr()};
+        SavedBinding saved{let->var.get(), it != let_bindings_.end(),
+                           PrimExpr()};
         if (saved.had_prev) {
           saved.prev_value = it->second;
         }

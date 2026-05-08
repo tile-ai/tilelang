@@ -203,7 +203,8 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
           tvm::tir::SeqStmt({tvm::tir::LetStmt(vars[i], idxs[i + 1]), outer}));
     }
     outer = tvm::tir::SeqStmt::Flatten(tvm::tir::SeqStmt(
-        {tvm::tir::LetStmt(vars[vars.size() - 1], idxs[0] * group_size + idxs[vars.size()]),
+        {tvm::tir::LetStmt(vars[vars.size() - 1],
+                           idxs[0] * group_size + idxs[vars.size()]),
          outer}));
     return outer;
   };
