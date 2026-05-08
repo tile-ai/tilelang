@@ -515,6 +515,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_wgmma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
   }
+  if (need_wgmma_sp_instruction_h_) {
+    decl_stream << "#include <tl_templates/cuda/instruction/wgmma_sp.h>\n";
+  }
   if (need_tcgen05mma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/tcgen05mma.h>\n";
   }
@@ -2730,6 +2733,129 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(scale_out)", scale_out);
     wgmma_call = replacer.rewrite(wgmma_call);
     this->stream << wgmma_call;
+  } else if (op->op.same_as(tl::ptx_wgmma_sp_ss())) {
+    ICHECK_EQ(op->args.size(), 18U) << "ptx_wgmma_sp_ss args is " << op->args;
+    std::string wgmma_prefix = Downcast<StringImm>(op->args[0])->value;
+    bool a_is_k_major = Downcast<Bool>(op->args[1])->value;
+    bool b_is_k_major = Downcast<Bool>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_desc = this->PrintExpr(op->args[6]);
+    std::string A_offset = this->PrintExpr(op->args[7]);
+    std::string e_data = this->PrintExpr(op->args[8]);
+    std::string E_offset = this->PrintExpr(op->args[9]);
+    std::string b_desc = this->PrintExpr(op->args[10]);
+    std::string B_offset = this->PrintExpr(op->args[11]);
+    std::string c_data = this->PrintExpr(op->args[12]);
+    std::string C_offset = this->PrintExpr(op->args[13]);
+    std::string scale_out = this->PrintExpr(op->args[14]);
+    bool scale_in_a = Downcast<Bool>(op->args[15])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[16])->value;
+
+    this->PrintIndent();
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(wgmma_prefix);
+    need_wgmma_sp_instruction_h_ = true;
+    std::string wgmma_sp_asm_code =
+        "tl::wgmma_sp_ss<(AType), (BType), (CType), (M), (N), (K), (tnspA), "
+        "(tnspB), (scaleA), (scaleB)>(uint64_t((desc_a) + (A_offset)), "
+        "uint64_t((desc_b) + (B_offset)), "
+        "reinterpret_cast<uint32_t*>((C_data)) "
+        "+ (C_offset), (scale_out), *reinterpret_cast<uint32_t*>((e_data) + "
+        "(E_offset)));\n";
+
+    tl::codegen::Replacer replacer;
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(C_dtype));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(tnspA)", a_is_k_major ? "false" : "true");
+    replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
+    replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
+    replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
+    replacer.register_rule("(desc_a)", a_desc);
+    replacer.register_rule("(A_offset)", A_offset);
+    replacer.register_rule("(e_data)", e_data);
+    replacer.register_rule("(E_offset)", E_offset);
+    replacer.register_rule("(desc_b)", b_desc);
+    replacer.register_rule("(B_offset)", B_offset);
+    replacer.register_rule("(C_data)", c_data);
+    replacer.register_rule("(C_offset)", C_offset);
+    replacer.register_rule("(scale_out)", scale_out);
+    wgmma_sp_asm_code = replacer.rewrite(wgmma_sp_asm_code);
+    this->stream << wgmma_sp_asm_code;
+  } else if (op->op.same_as(tl::ptx_wgmma_sp_rs())) {
+    ICHECK_EQ(op->args.size(), 17U) << "ptx_wgmma_sp_rs args is " << op->args;
+    std::string wgmma_prefix = Downcast<StringImm>(op->args[0])->value;
+    bool b_is_k_major = Downcast<Bool>(op->args[1])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[2])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string a_ref = this->PrintExpr(op->args[5]);
+    std::string A_offset = this->PrintExpr(op->args[6]);
+    std::string e_data = this->PrintExpr(op->args[7]);
+    std::string E_offset = this->PrintExpr(op->args[8]);
+    std::string b_desc = this->PrintExpr(op->args[9]);
+    std::string B_offset = this->PrintExpr(op->args[10]);
+    std::string c_data = this->PrintExpr(op->args[11]);
+    std::string C_offset = this->PrintExpr(op->args[12]);
+    std::string scale_out = this->PrintExpr(op->args[13]);
+    bool scale_in_a = Downcast<Bool>(op->args[14])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[15])->value;
+
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(wgmma_prefix);
+    need_wgmma_sp_instruction_h_ = true;
+    this->PrintIndent();
+    std::string wgmma_sp_rs_asm_code =
+        "tl::wgmma_sp_rs<(AType), (BType), (CType), (M), (N), (K), (tnspB), "
+        "(scaleA), (scaleB)>(reinterpret_cast<const uint32_t*>((A_ptr) + "
+        "(A_offset)), uint64_t((desc_b) + (B_offset)), "
+        "reinterpret_cast<uint32_t*>((C_data)) + (C_offset), (scale_out), "
+        "*reinterpret_cast<uint32_t*>((e_data) + (E_offset)));\n";
+
+    tl::codegen::Replacer replacer;
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(C_dtype));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
+    replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
+    replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", A_offset);
+    replacer.register_rule("(e_data)", e_data);
+    replacer.register_rule("(E_offset)", E_offset);
+    replacer.register_rule("(desc_b)", b_desc);
+    replacer.register_rule("(B_offset)", B_offset);
+    replacer.register_rule("(C_data)", c_data);
+    replacer.register_rule("(C_offset)", C_offset);
+    replacer.register_rule("(scale_out)", scale_out);
+    wgmma_sp_rs_asm_code = replacer.rewrite(wgmma_sp_rs_asm_code);
+    this->stream << wgmma_sp_rs_asm_code;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
     ICHECK_EQ(op->args.size(), 15U)
         << "ptx_tcgen05_mma_ss args is " << op->args;

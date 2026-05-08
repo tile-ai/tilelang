@@ -370,6 +370,16 @@ TVM_DLL const Op &ptx_wgmma_ss();
 TVM_DLL const Op &ptx_wgmma_rs();
 
 /*!
+ * \brief tvm intrinsic for sparse ptx wgmma shared-shared instructions.
+ */
+TVM_DLL const Op &ptx_wgmma_sp_ss();
+
+/*!
+ * \brief tvm intrinsic for sparse ptx wgmma register-shared instructions.
+ */
+TVM_DLL const Op &ptx_wgmma_sp_rs();
+
+/*!
  * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
  */
 TVM_DLL const Op &ptx_tcgen05_mma_ss();

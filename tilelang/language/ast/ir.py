@@ -1884,6 +1884,8 @@ ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
+ptx_wgmma_sp_ss = _dtype_forward(_tir_op.ptx_wgmma_sp_ss)
+ptx_wgmma_sp_rs = _dtype_forward(_tir_op.ptx_wgmma_sp_rs)
 ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
 ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
 ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
@@ -2137,6 +2139,8 @@ __all__ = [
     "ptx_mma_sp",
     "ptx_wgmma_ss",
     "ptx_wgmma_rs",
+    "ptx_wgmma_sp_ss",
+    "ptx_wgmma_sp_rs",
     "ptx_tcgen05_mma_ss",
     "ptx_ldmatrix",
     "ptx_cp_async",
