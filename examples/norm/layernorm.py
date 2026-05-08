@@ -4,8 +4,7 @@ import torch
 
 
 @tilelang.jit(out_idx=[-3, -2, -1])
-def _layernorm_fwd(N, D, eps=1e-5, blk_m=1, threads=256,
-                   in_dtype="bfloat16", out_dtype="bfloat16"):
+def _layernorm_fwd(N, D, eps=1e-5, blk_m=1, threads=256, in_dtype="bfloat16", out_dtype="bfloat16"):
     accum_dtype = "float"
 
     @T.prim_func
@@ -43,8 +42,7 @@ def _layernorm_fwd(N, D, eps=1e-5, blk_m=1, threads=256,
             inv_D = T.float32(1.0) / T.Cast(accum_dtype, D)
             for i in T.Parallel(blk_m):
                 mean_row[i] = sum_row[i] * inv_D
-                rstd_row[i] = T.rsqrt(sumsq_row[i] * inv_D - mean_row[i] * mean_row[i] +
-                                      T.Cast(accum_dtype, eps))
+                rstd_row[i] = T.rsqrt(sumsq_row[i] * inv_D - mean_row[i] * mean_row[i] + T.Cast(accum_dtype, eps))
                 Mean[bx * blk_m + i] = mean_row[i]
                 Rstd[bx * blk_m + i] = rstd_row[i]
 
@@ -135,7 +133,6 @@ _TORCH_DTYPE_TO_TL = {torch.float16: "float16", torch.bfloat16: "bfloat16"}
 
 
 class LayerNormFn(torch.autograd.Function):
-
     @staticmethod
     def forward(ctx, x, gamma, beta, eps):
         N, D = x.shape
@@ -191,10 +188,8 @@ if __name__ == "__main__":
 
     from tilelang.profiler import do_bench
 
-    ms_fwd = do_bench(lambda: layer_norm(x.detach(), g.detach(), b.detach(), eps),
-                      backend="event")
-    ms_fwd_ref = do_bench(lambda: ref_program(x.detach(), g.detach(), b.detach(), eps),
-                          backend="event")
+    ms_fwd = do_bench(lambda: layer_norm(x.detach(), g.detach(), b.detach(), eps), backend="event")
+    ms_fwd_ref = do_bench(lambda: ref_program(x.detach(), g.detach(), b.detach(), eps), backend="event")
     print(f"fwd  tilelang: {ms_fwd:.4f} ms   ref: {ms_fwd_ref:.4f} ms")
 
     xx = x.detach().clone().requires_grad_(True)
