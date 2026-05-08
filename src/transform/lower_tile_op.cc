@@ -1251,8 +1251,7 @@ private:
           // call_extern may pass address_of(non-local-buffer) pointers
           for (const auto &arg : call->args) {
             if (auto ic = arg.as<CallNode>()) {
-              if (ic->op.same_as(builtin::address_of()) &&
-                  !ic->args.empty()) {
+              if (ic->op.same_as(builtin::address_of()) && !ic->args.empty()) {
                 if (auto bl = ic->args[0].as<BufferLoadNode>()) {
                   if (!IsLocalBuffer(bl->buffer)) {
                     has_non_local_store = true;

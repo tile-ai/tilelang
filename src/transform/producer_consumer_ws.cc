@@ -1356,7 +1356,8 @@ private:
         for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
           bool found = false;
           PostOrderVisit(consumer_compute_stmts[ci], [&](const ObjectRef &obj) {
-            if (found) return;
+            if (found)
+              return;
             if (const auto *load = obj.as<BufferLoadNode>()) {
               if (written_vars.count(load->buffer->data.get())) {
                 found = true;
