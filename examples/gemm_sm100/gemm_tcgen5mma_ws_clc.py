@@ -370,19 +370,19 @@ if __name__ == "__main__":
         a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
         b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
         ref = ref_program(a, b)
+        flops = 2 * M * N * K
 
         c = gemm_clc_persistent_2cta(a, b, *base_args, group_size)
         torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
         ms_base = do_bench(lambda a=a, b=b: gemm_clc_persistent_2cta(a, b, *base_args, group_size), backend="event")
 
-        c2 = gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, 3, group_size)
-        torch.testing.assert_close(c2, ref, rtol=1e-2, atol=1e-2)
-        ms_pipe = do_bench(lambda a=a, b=b: gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, 3, group_size), backend="event")
-
         ms_torch = do_bench(lambda a=a, b=b: a @ b, backend="event")
-        flops = 2 * M * N * K
-        print(
-            f"M=N=K={M:<6}  base: {flops / (ms_base / 1e3) / 1e12:6.1f} TFLOPS  "
-            f"pipe(clc=3): {flops / (ms_pipe / 1e3) / 1e12:6.1f} TFLOPS  "
-            f"torch: {flops / (ms_torch / 1e3) / 1e12:6.1f} TFLOPS"
-        )
+        print(f"M=N=K={M:<6}  base: {flops / (ms_base / 1e3) / 1e12:6.1f} TFLOPS  torch: {flops / (ms_torch / 1e3) / 1e12:6.1f} TFLOPS")
+
+        for clc in (2, 3, 4):
+            c2 = gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size)
+            torch.testing.assert_close(c2, ref, rtol=1e-2, atol=1e-2)
+            ms_pipe = do_bench(
+                lambda a=a, b=b, clc=clc: gemm_clc_persistent_2cta_pipelined_clc(a, b, *base_args, clc, group_size), backend="event"
+            )
+            print(f"             pipe(clc={clc}): {flops / (ms_pipe / 1e3) / 1e12:6.1f} TFLOPS  ({ms_base / ms_pipe:.3f}x vs base)")
