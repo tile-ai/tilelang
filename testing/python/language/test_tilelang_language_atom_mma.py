@@ -7,7 +7,7 @@ from tilelang.intrinsics import (
     WGMMATensorCoreIntrinEmitter,
     TCGEN05TensorCoreIntrinEmitter,
 )
-from tilelang.intrinsics.mma_layout import get_swizzle_layout
+from tilelang.cuda.intrinsics.layout.mma_layout import get_swizzle_layout
 from tilelang.layout import (
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
