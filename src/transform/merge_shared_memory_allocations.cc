@@ -343,7 +343,6 @@ private:
     }
     if (const auto *let_node = stmt.as<LetStmtNode>()) {
       this->VisitExpr(let_node->value);
-      VisitWarpSpecializationBody(let_node->body);
       return;
     }
     StmtExprVisitor::VisitStmt(stmt);

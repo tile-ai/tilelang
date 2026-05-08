@@ -316,7 +316,7 @@ bool IsSideEffectFreeStmt(const Stmt &stmt) {
     if (SideEffect(op->value) > CallEffectKind::kReadState) {
       return false;
     }
-    return IsSideEffectFreeStmt(op->body);
+    return true;
   }
 
   if (const auto *op = stmt.as<IfThenElseNode>()) {
@@ -428,7 +428,7 @@ public:
     // Remove LetStmts for hoisted variables (they are now bound outside the
     // loop)
     if (hoisted_vars.count(op->var.get())) {
-      return VisitStmt(op->body);
+      return Evaluate(0);
     }
     return StmtExprMutator::VisitStmt_(op);
   }
@@ -491,8 +491,6 @@ public:
     // conditions using such variables should not be hoisted.
     let_bindings_[op->var.get()] = op->value;
     StmtVisitor::VisitStmt_(op);
-    // Remove the binding when leaving scope
-    let_bindings_.erase(op->var.get());
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
@@ -619,7 +617,7 @@ public:
     // outermost)
     for (auto it = finder.hoisted_let_bindings.rbegin();
          it != finder.hoisted_let_bindings.rend(); ++it) {
-      result = LetStmt(it->first, it->second, result);
+      result = SeqStmt::Flatten(SeqStmt({LetStmt(it->first, it->second), result}));
     }
 
     if (pushed_thread_idx) {

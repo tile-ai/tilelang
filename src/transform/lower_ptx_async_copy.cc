@@ -628,8 +628,8 @@ private:
       out.is_pure_copy_region = false;
       return out;
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return AnalyzeCopyRegion(let->body);
+    if (stmt.as<LetStmtNode>()) {
+      return out;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       return AnalyzeCopyRegion(attr->body);

@@ -1048,13 +1048,9 @@ private:
             current = if_then_else->then_case;
             continue;
           }
-          if (const auto *let_stmt = current.as<LetStmtNode>()) {
-            current = let_stmt->body;
-            continue;
-          }
           LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
                      << "because it is not a SeqStmt, IfThenElse without else, "
-                     << "or LetStmt wrapping them, but got "
+                     << "or a BlockRealize containing them, but got "
                      << current->GetTypeKey();
         }
       }
@@ -1119,13 +1115,9 @@ private:
           current = if_then_else->then_case;
           continue;
         }
-        if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          current = let_stmt->body;
-          continue;
-        }
         LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
                    << "because it is not a SeqStmt, IfThenElse without else, "
-                   << "or LetStmt wrapping them, but got "
+                   << "or a BlockRealize containing them, but got "
                    << current->GetTypeKey();
       }
     }
@@ -2055,7 +2047,7 @@ private:
     // Reconstruct the loop body with the flattened SeqStmt so that
     // InjectSoftwarePipeline sees the correct number of pipeline stages.
     Stmt new_body_seq = SeqStmt(flat_stmts);
-    // Rebuild any wrapper layers (IfThenElse, LetStmt, BlockRealize)
+    // Rebuild any wrapper layers (IfThenElse, BlockRealize)
     // between the loop body and the SeqStmt.
     Stmt new_loop_body;
     if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
@@ -2091,7 +2083,7 @@ private:
   }
 
   /*!
-   * \brief Rebuild the chain of wrapper statements (IfThenElse, LetStmt)
+   * \brief Rebuild the chain of wrapper statements (IfThenElse)
    *        between the loop body root and the inner SeqStmt, replacing
    *        the old SeqStmt with the new (flattened) one.
    */
@@ -2105,10 +2097,6 @@ private:
           if_node->condition,
           RebuildBodyWrapper(if_node->then_case, old_seq, new_seq),
           if_node->else_case);
-    }
-    if (const auto *let_node = current.as<LetStmtNode>()) {
-      return LetStmt(let_node->var, let_node->value,
-                     RebuildBodyWrapper(let_node->body, old_seq, new_seq));
     }
     LOG(FATAL) << "RebuildBodyWrapper: unexpected node type "
                << current->GetTypeKey();

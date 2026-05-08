@@ -117,17 +117,21 @@ private:
   }
 
   bool IsWaitGroupStmt(const Stmt &stmt) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return IsWaitGroupStmt(let->body);
-    }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       return IsWaitGroupStmt(attr->body);
     }
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.size() == 1) {
-        return IsWaitGroupStmt(seq->seq[0]);
+      ffi::Optional<Stmt> non_let_stmt;
+      for (const Stmt &child : seq->seq) {
+        if (child.as<LetStmtNode>()) {
+          continue;
+        }
+        if (non_let_stmt.defined()) {
+          return false;
+        }
+        non_let_stmt = child;
       }
-      return false;
+      return non_let_stmt.defined() && IsWaitGroupStmt(non_let_stmt.value());
     }
     if (const auto *block = stmt.as<BlockNode>()) {
       return IsWaitGroupStmt(block->body);
@@ -157,17 +161,21 @@ private:
   }
 
   bool IsStorageSyncStmt(const Stmt &stmt) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return IsStorageSyncStmt(let->body);
-    }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       return IsStorageSyncStmt(attr->body);
     }
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.size() == 1) {
-        return IsStorageSyncStmt(seq->seq[0]);
+      ffi::Optional<Stmt> non_let_stmt;
+      for (const Stmt &child : seq->seq) {
+        if (child.as<LetStmtNode>()) {
+          continue;
+        }
+        if (non_let_stmt.defined()) {
+          return false;
+        }
+        non_let_stmt = child;
       }
-      return false;
+      return non_let_stmt.defined() && IsStorageSyncStmt(non_let_stmt.value());
     }
     if (const auto *block = stmt.as<BlockNode>()) {
       return IsStorageSyncStmt(block->body);
@@ -855,24 +863,41 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     // clear access entry.
     curr_stmt_.access.clear();
     allow_append_ = false;
-    // traverse body block
-    {
-      auto let_prop = AnalyzeExprProperty(op->value);
-      auto it = let_var_properties_.find(op->var.get());
-      bool had_prev = it != let_var_properties_.end();
+  }
+  void VisitStmt_(const SeqStmtNode *op) final {
+    struct SavedLetProperty {
+      const VarNode *var;
+      bool had_prev;
       ConditionThreadProperty prev_prop;
-      if (had_prev) {
-        prev_prop = it->second;
-      }
-      let_var_properties_[op->var.get()] = let_prop;
-      auto guard = MakeGuard(op->var, op->value);
-      this->VisitStmt(op->body);
-      if (had_prev) {
-        let_var_properties_[op->var.get()] = prev_prop;
+    };
+
+    size_t old_constr_size = constr_stack_.size();
+    std::vector<SavedLetProperty> saved_properties;
+    for (const Stmt &stmt : op->seq) {
+      if (const auto *let = stmt.as<LetStmtNode>()) {
+        this->VisitStmt(stmt);
+
+        auto it = let_var_properties_.find(let->var.get());
+        SavedLetProperty saved{let->var.get(), it != let_var_properties_.end(),
+                               ConditionThreadProperty()};
+        if (saved.had_prev) {
+          saved.prev_prop = it->second;
+        }
+        saved_properties.push_back(saved);
+        let_var_properties_[let->var.get()] = AnalyzeExprProperty(let->value);
+        constr_stack_.push_back(Constr(let->var, let->value));
       } else {
-        let_var_properties_.erase(op->var.get());
+        this->VisitStmt(stmt);
       }
     }
+    for (auto it = saved_properties.rbegin(); it != saved_properties.rend(); ++it) {
+      if (it->had_prev) {
+        let_var_properties_[it->var] = it->prev_prop;
+      } else {
+        let_var_properties_.erase(it->var);
+      }
+    }
+    constr_stack_.resize(old_constr_size);
   }
   void VisitStmt_(const BlockNode *op) final {
     auto block = Downcast<Block>(op);

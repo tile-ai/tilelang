@@ -480,7 +480,6 @@ void CodeGenTileLangPY::VisitStmt_(const LetStmtNode *op) {
   std::string value = PrintExpr_(op->value);
   PrintIndent();
   stream << AllocVarID(op->var.get()) << " = " << value << "\n";
-  PrintStmt_(op->body);
 }
 
 void CodeGenTileLangPY::VisitStmt_(const AllocateNode *op) {

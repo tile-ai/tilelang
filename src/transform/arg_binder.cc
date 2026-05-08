@@ -127,7 +127,7 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
     defs_.emplace_back(v_arg);
     if (with_lets) {
       (*def_map_)[v] = value;
-      init_nest_.emplace_back(LetStmt(v_arg, value, Evaluate(0)));
+      init_nest_.emplace_back(LetStmt(v_arg, value));
     } else {
       (*def_map_)[v] = value;
     }
@@ -190,7 +190,7 @@ bool ArgBinder::Bind_(const PrimExpr &arg, const PrimExpr &value,
       defs_.emplace_back(v_arg);
       if (with_lets) {
         (*def_map_)[v] = arg;
-        init_nest_.emplace_back(LetStmt(v_arg, value, Evaluate(0)));
+        init_nest_.emplace_back(LetStmt(v_arg, value));
       } else {
         (*def_map_)[v] = value;
       }
@@ -401,7 +401,7 @@ void ArgBinder::BindDLTensors(
     Var is_null_var(arg_name + "_is_null", DataType::Bool());
     init_nest_.emplace_back(
         LetStmt(is_null_var,
-                Call(DataType::Bool(), builtin::isnullptr(), {handle}), nop));
+                Call(DataType::Bool(), builtin::isnullptr(), {handle})));
     const PrimExpr &is_null = is_used ? const_false() : is_null_var;
 
     is_null_map[arg_name] = is_null_var;
@@ -436,8 +436,7 @@ void ArgBinder::BindDLTensors(
                 tvm::if_then_else(
                     Not(is_null),
                     TVMArrayGet(DataType::Handle(), handle, builtin::kArrShape),
-                    make_zero(DataType::Handle())),
-                nop));
+                    make_zero(DataType::Handle()))));
     init_nest_.emplace_back(DeclBuffer(buf_shape, nop));
 
     // Save for later use in shape binding
@@ -799,7 +798,7 @@ void ArgBinder::BindDLTensors(
               defs_.emplace_back(v_arg);
               (*def_map_)[v] = cascaded_value;
               init_nest_.emplace_back(
-                  LetStmt(v_arg, cascaded_value, Evaluate(0)));
+                  LetStmt(v_arg, cascaded_value));
             } else {
               // Single source or no special handling needed, use nullable
               // binding. When the only source is NULL, bind m to 0 safely.
@@ -843,8 +842,7 @@ void ArgBinder::BindDLTensors(
                     tvm::if_then_else(Not(is_null),
                                       TVMArrayGet(DataType::Handle(), handle,
                                                   builtin::kArrStrides),
-                                      make_zero(DataType::Handle())),
-                    nop));
+                                      make_zero(DataType::Handle()))));
         init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
         PrimExpr v_strides_is_null =
             Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
@@ -890,8 +888,7 @@ void ArgBinder::BindDLTensors(
                   tvm::if_then_else(Not(is_null),
                                     TVMArrayGet(DataType::Handle(), handle,
                                                 builtin::kArrStrides),
-                                    make_zero(DataType::Handle())),
-                  nop));
+                                    make_zero(DataType::Handle()))));
       init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
       PrimExpr v_strides_is_null =
           Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});

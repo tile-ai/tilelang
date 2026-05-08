@@ -770,7 +770,7 @@ private:
 
         Stmt body = SeqStmt::Flatten(in_let_statement);
         for (size_t i = 0; i < size; i++) {
-          body = LetStmt(in_warp_local_vars[i], loads[i], body);
+          body = SeqStmt::Flatten(SeqStmt({LetStmt(in_warp_local_vars[i], loads[i]), body}));
         }
         in_warp_seq.push_back(body);
       }

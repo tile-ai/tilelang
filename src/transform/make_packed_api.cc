@@ -421,8 +421,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
         type_index,
         tir::Call(DataType::Int(32), builtin::tvm_struct_get(),
                   {v_packed_args, IntImm(DataType::Int(32), i),
-                   IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)}),
-        nop));
+                   IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)})));
     DataType dtype = param.dtype();
     if (dtype.is_handle()) {
       std::ostringstream msg;

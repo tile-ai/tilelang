@@ -183,8 +183,19 @@ public:
     }
   }
   void VisitStmt_(const tir::LetStmtNode *op) override {
-    auto guard = MakeGuard(op->var, op->value);
-    Base::VisitStmt_(op);
+    Base::VisitExpr(op->value);
+  }
+  void VisitStmt_(const tir::SeqStmtNode *op) override {
+    size_t old_size = constr_stack_.size();
+    for (const tir::Stmt &stmt : op->seq) {
+      if (const auto *let = stmt.as<tir::LetStmtNode>()) {
+        Base::VisitExpr(let->value);
+        constr_stack_.push_back(Constr(let->var, let->value));
+      } else {
+        Base::VisitStmt(stmt);
+      }
+    }
+    constr_stack_.resize(old_size);
   }
   void VisitStmt_(const tir::AttrStmtNode *op) override {
     if (op->attr_key == tir::attr::tilelang_assume) {

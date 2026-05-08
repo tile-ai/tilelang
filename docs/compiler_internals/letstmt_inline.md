@@ -50,9 +50,15 @@ The mutator checks this before dropping the binding:
 bool used_in_buffer_def = used_in_buffer_def_.count(op->var.get());
 
 if (can_inline && !used_in_buffer_def) {
-    return body;  // Inline: remove LetStmt and return body directly
+    return Evaluate(0);  // Inline: drop standalone LetStmt binding
 }
 ```
+
+Since `LetStmt` is now a standalone binding statement, the later statements in
+the enclosing `SeqStmt` are rewritten using the analyzer/substitution state that
+was established when the binding was visited. Dropping the binding therefore
+means replacing that individual `LetStmt` with a no-op, not returning a nested
+body.
 
 ## Example: Why Buffer Definition Variables Are Protected
 

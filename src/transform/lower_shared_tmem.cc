@@ -39,8 +39,6 @@ static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
     return {{}, true};
 
   // Unwrap transparent wrapper nodes
-  if (auto *n = stmt.as<LetStmtNode>())
-    return CollectFallthroughDeallocs(n->body);
   if (auto *n = stmt.as<AttrStmtNode>())
     return CollectFallthroughDeallocs(n->body);
   if (auto *n = stmt.as<BlockNode>())

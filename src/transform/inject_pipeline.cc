@@ -1020,8 +1020,8 @@ private:
         : rewriter_(rewriter) {}
 
     DeterministicNoWaitCommitEffect Analyze(const Stmt &stmt) const {
-      if (const auto *let = stmt.as<LetStmtNode>()) {
-        return Analyze(let->body);
+      if (stmt.as<LetStmtNode>()) {
+        return {};
       }
       if (const auto *attr = stmt.as<AttrStmtNode>()) {
         return AnalyzeAttr(attr);
@@ -1121,7 +1121,7 @@ private:
       const auto &lw = *it;
       PrimExpr substituted = Substitute(
           lw.value, {{pipeline_loop_->loop_var, normalized_access_index}});
-      stmt = LetStmt(lw.var, substituted, stmt);
+      stmt = SeqStmt::Flatten(SeqStmt({LetStmt(lw.var, substituted), stmt}));
     }
     return stmt;
   }
@@ -1233,8 +1233,8 @@ private:
 
   HeadAsyncSyncInfo AnalyzeHeadAsyncSync(const Stmt &stmt,
                                          HeadSeqMode seq_mode) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return AnalyzeHeadAsyncSync(let->body, seq_mode);
+    if (stmt.as<LetStmtNode>()) {
+      return {};
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       if (IsAsyncWaitQueueScope(attr)) {
@@ -1372,12 +1372,7 @@ private:
         return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
       }
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      Stmt new_body =
-          RewriteWaitStaticInSimpleWrapper(let->body, new_wait_n, changed);
-      if (*changed) {
-        return LetStmt(let->var, let->value, new_body, let->span);
-      }
+    if (stmt.as<LetStmtNode>()) {
       return stmt;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
@@ -1435,8 +1430,8 @@ private:
   }
 
   std::optional<int> TryGetFirstStaticWaitCount(const Stmt &stmt) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return TryGetFirstStaticWaitCount(let->body);
+    if (stmt.as<LetStmtNode>()) {
+      return std::nullopt;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       HeadAsyncSyncInfo info =
@@ -1475,12 +1470,7 @@ private:
 
   Stmt RewriteHeadStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
                                       bool *changed) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      Stmt new_body =
-          RewriteHeadStaticWaitInWrapper(let->body, new_wait_n, changed);
-      if (*changed) {
-        return LetStmt(let->var, let->value, new_body, let->span);
-      }
+    if (stmt.as<LetStmtNode>()) {
       return stmt;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
@@ -1536,12 +1526,7 @@ private:
 
   Stmt RewriteFirstStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
                                        bool *changed) const {
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      Stmt new_body =
-          RewriteFirstStaticWaitInWrapper(let->body, new_wait_n, changed);
-      if (*changed) {
-        return LetStmt(let->var, let->value, new_body, let->span);
-      }
+    if (stmt.as<LetStmtNode>()) {
       return stmt;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
@@ -1693,12 +1678,7 @@ private:
       *changed = !relaxed.same_as(stmt);
       return relaxed;
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      Stmt new_body =
-          RelaxLoopWaitsInSimpleWrapper(let->body, pre_outstanding_lb, changed);
-      if (*changed) {
-        return LetStmt(let->var, let->value, new_body, let->span);
-      }
+    if (stmt.as<LetStmtNode>()) {
       return stmt;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
@@ -2984,39 +2964,9 @@ private:
           current = if_then_else->then_case;
           continue;
         }
-        if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          // If this Let value uses the pipeline loop var OR any variable
-          // defined by a previously recorded loop-var-dependent LetStmt,
-          // record it and push inside each rewritten block later so the
-          // loop var can be substituted with the correct per-iteration index.
-          // Otherwise, keep it as a normal wrapper.
-          // This handles transitive dependencies like:
-          //   id = ids[i]      # depends on loop var
-          //   id2 = ids2[id]   # depends on id, so transitively on loop var
-          std::unordered_set<const VarNode *> dependent_vars;
-          dependent_vars.insert(op->loop_var.get());
-          for (const auto &lw : loop_var_let_wrappers) {
-            dependent_vars.insert(lw.var.get());
-          }
-          bool depends_on_loop =
-              UsesVar(let_stmt->value, [&dependent_vars](const VarNode *vn) {
-                return dependent_vars.count(vn) > 0;
-              });
-          if (depends_on_loop) {
-            loop_var_let_wrappers.push_back({let_stmt->var, let_stmt->value});
-          } else {
-            Var var = let_stmt->var;
-            PrimExpr value = let_stmt->value;
-            Span span = let_stmt->span;
-            rewrap_fns.emplace_back([var = std::move(var),
-                                     value = std::move(value),
-                                     span](Stmt body) -> Stmt {
-              return LetStmt(var, value, body, span);
-            });
-          }
-          current = let_stmt->body;
-          continue;
-        }
+        ICHECK(!current.as<LetStmtNode>())
+            << "LetStmt no longer wraps a body; expected leading let bindings "
+            << "to appear in the surrounding SeqStmt";
         if (const auto *attr = current.as<AttrStmtNode>()) {
           append_attr_wrapper(attr);
           current = attr->body;

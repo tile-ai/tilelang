@@ -27,6 +27,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <vector>
+
 #include "arith/ir_mutator_with_analyzer.h"
 
 namespace tvm {
@@ -67,8 +69,41 @@ private:
   }
 
   Stmt VisitStmt_(const LetStmtNode *node) final {
-    let_bindings_[node->var.get()] = node->value;
-    return arith::IRMutatorWithAnalyzer::VisitStmt(node->body);
+    VisitExpr(node->value);
+    return Evaluate(0);
+  }
+
+  Stmt VisitStmt_(const SeqStmtNode *node) final {
+    struct SavedBinding {
+      const VarNode *var;
+      bool had_prev;
+      PrimExpr prev_value;
+    };
+
+    std::vector<SavedBinding> saved_bindings;
+    ffi::Array<Stmt> seq;
+    for (const Stmt &stmt : node->seq) {
+      if (const auto *let = stmt.as<LetStmtNode>()) {
+        PrimExpr value = VisitExpr(let->value);
+        auto it = let_bindings_.find(let->var.get());
+        SavedBinding saved{let->var.get(), it != let_bindings_.end(), PrimExpr()};
+        if (saved.had_prev) {
+          saved.prev_value = it->second;
+        }
+        saved_bindings.push_back(saved);
+        let_bindings_[let->var.get()] = value;
+      } else {
+        seq.push_back(VisitStmt(stmt));
+      }
+    }
+    for (auto it = saved_bindings.rbegin(); it != saved_bindings.rend(); ++it) {
+      if (it->had_prev) {
+        let_bindings_[it->var] = it->prev_value;
+      } else {
+        let_bindings_.erase(it->var);
+      }
+    }
+    return SeqStmt::Flatten(seq);
   }
 
   PrimExpr VisitExpr_(const LetNode *node) final {

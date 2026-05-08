@@ -197,7 +197,10 @@ public:
   }
 
   void VisitStmt_(const ForNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const LetStmtNode *op) final { HandleBodyStmt(op); }
+  void VisitStmt_(const LetStmtNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+    SetRole(op, Role::kBoth);
+  }
   void VisitStmt_(const AttrStmtNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const AssertStmtNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const BlockNode *op) final { HandleBodyStmt(op); }
@@ -242,8 +245,7 @@ private:
         }
         return;
       }
-      if (const auto *let = stmt.as<LetStmtNode>()) {
-        collect_stmts(let->body);
+      if (stmt.as<LetStmtNode>()) {
         return;
       }
       if (const auto *attr = stmt.as<AttrStmtNode>()) {

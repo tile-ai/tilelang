@@ -996,15 +996,14 @@ public:
       // Record mapping from the new var to its bound value
       let_value_binding_[op->var] = op->value;
       let_value_binding_[new_var] = value;
-      return LetStmt(new_var, value, this->VisitStmt(op->body));
+      return LetStmt(new_var, value, op->span);
     } else {
       let_var_map_[op->var] = op->var;
       let_value_binding_[op->var] = value;
-      Stmt body = this->VisitStmt(op->body);
-      if (value.same_as(op->value) && body.same_as(op->body)) {
+      if (value.same_as(op->value)) {
         return tvm::ffi::GetRef<Stmt>(op);
       } else {
-        return LetStmt(op->var, value, body);
+        return LetStmt(op->var, value, op->span);
       }
     }
   }
@@ -1055,7 +1054,7 @@ public:
         }
         // Bind the existing var v to its value around the stmt scope
         auto new_value = Substitute(let_value_binding_.at(v), {{var_, idx}});
-        stmt = LetStmt(v, new_value, stmt);
+        stmt = SeqStmt::Flatten(SeqStmt({LetStmt(v, new_value), stmt}));
       }
     }
 

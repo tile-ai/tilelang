@@ -300,7 +300,16 @@ public:
 
   void VisitStmt_(const AssertStmtNode *op) final { VisitNewScope(op); }
 
-  void VisitStmt_(const LetStmtNode *op) final { VisitNewScope(op); }
+  void VisitStmt_(const LetStmtNode *op) final {
+    scope_.push_back(StmtEntry());
+    StmtExprVisitor::VisitStmt_(op);
+    StmtEntry e = scope_.back();
+    scope_.pop_back();
+    if (!e.touched.empty()) {
+      e.stmt = op;
+      linear_seq_.push_back(e);
+    }
+  }
 
   // linearized access sequence.
   std::vector<StmtEntry> linear_seq_;
@@ -1815,13 +1824,11 @@ public:
   Stmt VisitStmt_(const LetStmtNode *op) final {
     auto it = rewrite_map_.find(op->var.get());
     PrimExpr value = this->VisitExpr(op->value);
-    Stmt body = this->VisitStmt(op->body);
     Var var = (it == rewrite_map_.end()) ? op->var : it->second.new_buffer_var;
-    if (var.same_as(op->var) && value.same_as(op->value) &&
-        body.same_as(op->body)) {
+    if (var.same_as(op->var) && value.same_as(op->value)) {
       return tvm::ffi::GetRef<Stmt>(op);
     }
-    return LetStmt(var, value, body);
+    return LetStmt(var, value, op->span);
   }
 
   Buffer RemapBuffer(Buffer buf) {

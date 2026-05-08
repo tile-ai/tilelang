@@ -979,24 +979,17 @@ private:
 
   Stmt VisitStmt_(const LetStmtNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
-    bool recorded = false;
     if (value->IsInstance<BufferLoadNode>()) {
       let_bindings_[op->var] = value;
-      recorded = true;
     }
     if (SideEffect(value) <= CallEffectKind::kPure) {
       analyzer_->Bind(op->var, value);
     }
-    Stmt body = this->VisitStmt(op->body);
-    if (recorded) {
-      let_bindings_.erase(op->var);
-    }
-    if (value.same_as(op->value) && body.same_as(op->body)) {
+    if (value.same_as(op->value)) {
       return tvm::ffi::GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = value;
-      n->body = body;
       return Stmt(n);
     }
   }

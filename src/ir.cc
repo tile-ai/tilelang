@@ -199,10 +199,12 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
                      /*thread_binding=*/std::nullopt, /*annotations=*/anno,
                      /*step=*/step);
     for (int i = 0; i < vars.size() - 1; ++i) {
-      outer = tvm::tir::LetStmt(vars[i], idxs[i + 1], outer);
+      outer = tvm::tir::SeqStmt::Flatten(
+          tvm::tir::SeqStmt({tvm::tir::LetStmt(vars[i], idxs[i + 1]), outer}));
     }
-    outer = tvm::tir::LetStmt(vars[vars.size() - 1],
-                              idxs[0] * group_size + idxs[vars.size()], outer);
+    outer = tvm::tir::SeqStmt::Flatten(tvm::tir::SeqStmt(
+        {tvm::tir::LetStmt(vars[vars.size() - 1], idxs[0] * group_size + idxs[vars.size()]),
+         outer}));
     return outer;
   };
 

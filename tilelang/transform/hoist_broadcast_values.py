@@ -2,6 +2,7 @@ from tvm import tir
 from tvm.tir import (
     BufferStore,
     LetStmt,
+    SeqStmt,
     Broadcast,
     Var,
     PrimFunc,
@@ -52,11 +53,7 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
 
         # 4. Check if there are variables waiting to be defined.
         if self.pending_defs:
-            # 5. Wrap the current statement with LetStmt.
-            # Order: Traverse in reverse to ensure the first definition wraps the outermost layer.
-            # Structure generated: Let my_var = val In BufferStore(...)
-            for var, val in reversed(self.pending_defs):
-                new_stmt = LetStmt(var, val, new_stmt)
+            new_stmt = SeqStmt([LetStmt(var, val) for var, val in self.pending_defs] + [new_stmt])
 
         # 6. Restore the saved state.
         self.hoist_enabled = saved_hoist_enabled
@@ -76,24 +73,15 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         # 3. Visit the value expression (this will trigger visit_broadcast_).
         new_value = self.visit_expr(op.value)
 
-        # 4. Capture the pending defs from the value expression before visiting body.
+        # 4. Capture the pending defs from the value expression.
         value_pending_defs = self.pending_defs
 
-        # 5. Disable hoist flag and clear pending defs before visiting body.
-        self.hoist_enabled = False
-        self.pending_defs = []
-
-        # 6. Recursively visit the body.
-        new_body = self.visit_stmt(op.body)
-
-        # 7. Create the new LetStmt.
-        new_stmt = LetStmt(op.var, new_value, new_body)
+        # 5. Create the new LetStmt.
+        new_stmt = LetStmt(op.var, new_value)
 
         # 8. Check if there are variables waiting to be defined from the value expression.
         if value_pending_defs:
-            # 9. Wrap the current statement with LetStmt.
-            for var, val in reversed(value_pending_defs):
-                new_stmt = LetStmt(var, val, new_stmt)
+            new_stmt = SeqStmt([LetStmt(var, val) for var, val in value_pending_defs] + [new_stmt])
 
         # 10. Restore the saved state.
         self.hoist_enabled = saved_hoist_enabled

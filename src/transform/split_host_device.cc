@@ -375,9 +375,8 @@ private:
       tir::AssertStmt assert_success(
           kernel_error_code == success,
           tir::StringImm("Error executing compute kernel"), tir::Evaluate(0));
-      tir::LetStmt let_check(kernel_error_code, kernel_call, assert_success);
-
-      return let_check;
+      return tir::SeqStmt::Flatten(
+          tir::SeqStmt({tir::LetStmt(kernel_error_code, kernel_call), assert_success}));
 
     } else {
       return tir::Evaluate(

@@ -60,15 +60,6 @@ Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
     return AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
   }
 
-  if (const auto *let_node = stmt.as<LetStmtNode>()) {
-    Stmt new_body =
-        RewriteWarpSpecializationBody(let_node->body, rewrite_if, rewrote);
-    if (new_body.same_as(let_node->body)) {
-      return stmt;
-    }
-    return LetStmt(let_node->var, let_node->value, new_body);
-  }
-
   if (const auto *realize = stmt.as<BlockRealizeNode>()) {
     const Block &block = realize->block;
     Stmt new_body =

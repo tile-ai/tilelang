@@ -384,13 +384,7 @@ private:
       }
     }
     if (remove_buffer_alias) {
-      Stmt body = this->VisitStmt(op->body);
-      bool used = UsesVar(
-          body, [&](const VarNode *var) { return var == op->var.get(); });
-      ICHECK(!used) << "Let binding of BufferLoad is expected to be unused "
-                       "before removal "
-                    << op->var << " : " << op->value << " .";
-      return body;
+      return Evaluate(0);
     }
 
     bool can_inline = CanInlineLetStmt(op);
@@ -399,18 +393,15 @@ private:
     } else if (SideEffect(op->value) <= CallEffectKind::kPure) {
       non_inlined_bindings_.Set(op->var, value);
     }
-    Stmt body = this->VisitStmt(op->body);
-
     bool used_in_buffer_def = used_in_buffer_def_.count(op->var.get());
 
     if (can_inline && !used_in_buffer_def) {
-      return body;
-    } else if (value.same_as(op->value) && body.same_as(op->body)) {
+      return Evaluate(0);
+    } else if (value.same_as(op->value)) {
       return tvm::ffi::GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = std::move(value);
-      n->body = std::move(body);
       return Stmt(n);
     }
   }

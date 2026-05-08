@@ -337,8 +337,18 @@ static const CallNode *GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
   if (const auto *attr = stmt.as<AttrStmtNode>()) {
     return GetEvaluateCallInSimpleWrapper(attr->body);
   }
-  if (const auto *let = stmt.as<LetStmtNode>()) {
-    return GetEvaluateCallInSimpleWrapper(let->body);
+  if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    ffi::Optional<Stmt> non_let_stmt;
+    for (const Stmt &child : seq->seq) {
+      if (child.as<LetStmtNode>()) {
+        continue;
+      }
+      if (non_let_stmt.defined()) {
+        return nullptr;
+      }
+      non_let_stmt = child;
+    }
+    return non_let_stmt.defined() ? GetEvaluateCallInSimpleWrapper(non_let_stmt.value()) : nullptr;
   }
   if (const auto *block = stmt.as<BlockNode>()) {
     return GetEvaluateCallInSimpleWrapper(block->body);
@@ -391,15 +401,13 @@ private:
       : buffer_data_to_buffer_(buffer_map) {}
 
   static bool IsBranchPrivateBuffer(const Buffer &buffer) {
-    return IsFragmentBuffer(buffer) || IsLocalBuffer(buffer, true);
+    return IsFragmentBuffer(buffer) || IsLocalBuffer(buffer);
   }
 
   void VisitStmt_(const LetStmtNode *op) final {
     VisitExpr(op->value);
     summary_.def_vars.insert(op->var);
     bound_vars_.insert(op->var);
-    VisitStmt(op->body);
-    bound_vars_.erase(op->var);
   }
 
   void VisitStmt_(const ForNode *op) final {
@@ -534,6 +542,10 @@ ClassifyPreludeStmt(const Stmt &stmt, const BufferDataToBufferMap &buffer_map,
                     const LocalLiveSet &consumer_live_seed) {
   LocalAccessSummary summary = LocalAccessCollector::Collect(stmt, buffer_map);
   if (!summary.HasTrackedDefs()) {
+    return PreludeStmtPlacement::kKeepSharedPrelude;
+  }
+  if (!summary.def_vars.empty() && summary.read_buffers.empty() &&
+      summary.write_buffers.empty()) {
     return PreludeStmtPlacement::kKeepSharedPrelude;
   }
 
@@ -986,9 +998,8 @@ static bool CollectPreludeStmtsToPipelineLoop(const Stmt &stmt,
     }
     return false;
   }
-  if (const auto *let = stmt.as<LetStmtNode>()) {
-    return CollectPreludeStmtsToPipelineLoop(let->body, pipeline_loop,
-                                             prelude_stmts);
+  if (stmt.as<LetStmtNode>()) {
+    return false;
   }
   if (const auto *realize = stmt.as<BlockRealizeNode>()) {
     return CollectPreludeStmtsToPipelineLoop(realize->block->body,
@@ -1144,11 +1155,22 @@ private:
     if (auto *realize = loop_body.as<BlockRealizeNode>()) {
       loop_body = realize->block->body;
     }
-    // Unwrap LetStmt chain that dominates the whole loop body.
+    // Peel leading LetStmt bindings that dominate the whole loop body.
     std::vector<std::pair<Var, PrimExpr>> outer_let_bindings;
-    while (const auto *let = loop_body.as<LetStmtNode>()) {
-      outer_let_bindings.emplace_back(let->var, let->value);
-      loop_body = let->body;
+    if (const auto *seq = loop_body.as<SeqStmtNode>()) {
+      Array<Stmt> rest;
+      bool peeling_lets = true;
+      for (const Stmt &stmt : seq->seq) {
+        if (peeling_lets) {
+          if (const auto *let = stmt.as<LetStmtNode>()) {
+            outer_let_bindings.emplace_back(let->var, let->value);
+            continue;
+          }
+        }
+        peeling_lets = false;
+        rest.push_back(stmt);
+      }
+      loop_body = SeqStmt::Flatten(rest);
     }
     // Unwrap a single IfThenElse wrapper (no else branch) so that
     // TMA producers inside conditional loop bodies can be classified.
@@ -1158,12 +1180,23 @@ private:
     std::vector<std::pair<Var, PrimExpr>> inner_let_bindings;
     if (const auto *if_stmt = loop_body.as<IfThenElseNode>()) {
       if (!if_stmt->else_case.defined()) {
-        // Peel LetStmt chain from inside the conditional body. These
+        // Peel leading LetStmt bindings from inside the conditional body. These
         // bindings must remain inside the guarded region.
         Stmt inner = if_stmt->then_case;
-        while (const auto *let = inner.as<LetStmtNode>()) {
-          inner_let_bindings.emplace_back(let->var, let->value);
-          inner = let->body;
+        if (const auto *seq = inner.as<SeqStmtNode>()) {
+          Array<Stmt> rest;
+          bool peeling_lets = true;
+          for (const Stmt &stmt : seq->seq) {
+            if (peeling_lets) {
+              if (const auto *let = stmt.as<LetStmtNode>()) {
+                inner_let_bindings.emplace_back(let->var, let->value);
+                continue;
+              }
+            }
+            peeling_lets = false;
+            rest.push_back(stmt);
+          }
+          inner = SeqStmt::Flatten(rest);
         }
         loop_body_condition = if_stmt->condition;
         loop_body = inner;
@@ -1635,7 +1668,7 @@ private:
         [&](Stmt body,
             const std::vector<std::pair<Var, PrimExpr>> &bindings) -> Stmt {
       for (auto it = bindings.rbegin(); it != bindings.rend(); ++it) {
-        body = LetStmt(it->first, it->second, body);
+        body = SeqStmt::Flatten(SeqStmt({LetStmt(it->first, it->second), body}));
       }
       return body;
     };
@@ -1891,8 +1924,8 @@ private:
         }
       }
     }
-    if (auto *let = stmt.as<LetStmtNode>()) {
-      return FindPipelineLoop(let->body);
+    if (stmt.as<LetStmtNode>()) {
+      return nullptr;
     }
     if (auto *realize = stmt.as<BlockRealizeNode>()) {
       return FindPipelineLoop(realize->block->body);
@@ -2095,6 +2128,10 @@ private:
       {
         LocalLiveSet producer_live = producer_prelude_live_seed_;
         LocalLiveSet consumer_live = consumer_prelude_live_seed_;
+        for (int i = loop_idx + 1; i < static_cast<int>(seq->seq.size()); ++i) {
+          consumer_live.AddUses(LocalAccessCollector::Collect(
+              seq->seq[i], buffer_data_to_buffer_));
+        }
         for (int i = loop_idx - 1; i >= 0; --i) {
           LocalAccessSummary summary = LocalAccessCollector::Collect(
               seq->seq[i], buffer_data_to_buffer_);
@@ -2161,12 +2198,7 @@ private:
             Evaluate(let->value), buffer_data_to_buffer_);
         shared_prelude_live_seed_.AddUses(val_summary);
       }
-      ReplaceResult result = ReplacePipelineLoopInStmt(
-          let->body, pipeline_loop, ws_body, consumer_extent);
-      if (!result.found) {
-        return {stmt, false};
-      }
-      return {LetStmt(let->var, let->value, result.stmt), true};
+      return {stmt, false};
     }
     if (auto *realize = stmt.as<BlockRealizeNode>()) {
       ReplaceResult result = ReplacePipelineLoopInStmt(

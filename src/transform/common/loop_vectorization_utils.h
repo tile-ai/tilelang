@@ -629,14 +629,13 @@ public:
         op->value.dtype().get_lanes_or_vscale_factor()) {
       Var new_var(op->var->name_hint, value.dtype());
       let_binding_[op->var] = new_var;
-      return LetStmt(new_var, value, this->VisitStmt(op->body));
+      return LetStmt(new_var, value, op->span);
     } else {
       let_binding_[op->var] = op->var;
-      Stmt body = this->VisitStmt(op->body);
-      if (value.same_as(op->value) && body.same_as(op->body)) {
+      if (value.same_as(op->value)) {
         return tvm::ffi::GetRef<Stmt>(op);
       } else {
-        return LetStmt(op->var, value, body);
+        return LetStmt(op->var, value, op->span);
       }
     }
   }

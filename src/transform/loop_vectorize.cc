@@ -828,14 +828,11 @@ private:
       // Allow override to handle duplicated loop bodies in pipelined loops
       analyzer_->Bind(op->var, value, /*allow_override=*/true);
     }
-    // Continue visiting the body to collect vectorization info
-    Stmt body = this->VisitStmt(op->body);
-    if (value.same_as(op->value) && body.same_as(op->body)) {
+    if (value.same_as(op->value)) {
       return ffi::GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = std::move(value);
-      n->body = std::move(body);
       return Stmt(n);
     }
   }

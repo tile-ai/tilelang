@@ -214,8 +214,7 @@ def inline_let_stmts(stmt: Stmt) -> Stmt:
     values are visible to ``MemoryAccessCollector``.
     """
     if isinstance(stmt, LetStmt):
-        body = inline_let_stmts(stmt.body)
-        return substitute(body, {stmt.var: stmt.value})
+        return stmt
     elif isinstance(stmt, IfThenElse):
         then_case = inline_let_stmts(stmt.then_case)
         else_case = inline_let_stmts(stmt.else_case) if stmt.else_case else None
@@ -223,7 +222,16 @@ def inline_let_stmts(stmt: Stmt) -> Stmt:
             return IfThenElse(stmt.condition, then_case, else_case)
         return stmt
     elif isinstance(stmt, SeqStmt):
-        new_seq = [inline_let_stmts(s) for s in stmt.seq]
+        bindings = {}
+        new_seq = []
+        for s in stmt.seq:
+            if isinstance(s, LetStmt):
+                bindings[s.var] = substitute(s.value, bindings) if bindings else s.value
+                continue
+            new_stmt = inline_let_stmts(s)
+            if bindings:
+                new_stmt = substitute(new_stmt, bindings)
+            new_seq.append(new_stmt)
         return SeqStmt(new_seq)
     else:
         return stmt

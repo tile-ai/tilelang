@@ -33,7 +33,7 @@ def test_stmt_simplify():
     with ib.for_range(0, n, name="i") as i, ib.if_scope(i < 12):
         A[i] = C[i]
 
-    body = tvm.tir.LetStmt(n, 10, ib.get())
+    body = tvm.tir.SeqStmt([tvm.tir.LetStmt(n, 10), ib.get()])
     mod = tvm.IRModule.from_expr(tvm.tir.PrimFunc([A, C, n], body))
     body = tl.transform.Simplify()(mod)["main"].body
     assert isinstance(body.body, tvm.tir.BufferStore)
@@ -51,7 +51,7 @@ def test_thread_extent_simplify():
     ib.scope_attr(ty, "thread_extent", 1)
     with ib.if_scope(tx + ty < 12):
         A[tx] = C[tx + ty]
-    body = tvm.tir.LetStmt(n, 10, ib.get())
+    body = tvm.tir.SeqStmt([tvm.tir.LetStmt(n, 10), ib.get()])
     mod = tvm.IRModule.from_expr(tvm.tir.PrimFunc([A, C, n], body))
     body = tl.transform.Simplify()(mod)["main"].body
     assert isinstance(body.body.body.body, tvm.tir.BufferStore)
