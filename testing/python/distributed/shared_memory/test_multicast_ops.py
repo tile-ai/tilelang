@@ -8,37 +8,13 @@ from __future__ import annotations
 
 import os
 
-import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing
 
 import tilelang.testing
+from testing.python.distributed._utils import distributed_test
 
 os.environ.setdefault("NCCL_DEBUG", "WARN")
-
-_USE_DISTRIBUTED = os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in (
-    "1", "true", "on",
-)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _skip_if_no_multicast():
-    from tilelang.distributed.shared_memory import _supports_multicast
-    if not _supports_multicast():
-        pytest.skip("NVSwitch multicast not supported on this hardware")
-
-
-def _skip_common():
-    if not _USE_DISTRIBUTED:
-        pytest.skip("Requires TILELANG_USE_DISTRIBUTED=1")
-    num_gpus = torch.cuda.device_count()
-    if num_gpus < 2:
-        pytest.skip(f"Need >= 2 GPUs, found {num_gpus}")
-
 
 # ---------------------------------------------------------------------------
 # Single-GPU tests
@@ -55,7 +31,8 @@ def test_supports_multicast():
 # Multi-GPU worker functions (called by spawn)
 # ---------------------------------------------------------------------------
 
-def _worker_distributed_multicast_allocator(local_rank: int, num_ranks: int):
+@distributed_test(nprocs=None, require_multicast=True)
+def test_distributed_multicast_allocator(local_rank: int, num_ranks: int):
     """Create multicast buffer via BaseAllocator, verify P2P access through MC VAs."""
     from tilelang.distributed import init_dist
     from tilelang.utils.allocator import BaseAllocator
@@ -96,20 +73,6 @@ def _worker_distributed_multicast_allocator(local_rank: int, num_ranks: int):
     dist.barrier(group)
     allocator.close()
     dist.destroy_process_group()
-
-
-# ---------------------------------------------------------------------------
-# Multi-GPU pytest entry point
-# ---------------------------------------------------------------------------
-
-@tilelang.testing.requires_cuda
-def test_distributed_multicast_allocator():
-    _skip_if_no_multicast()
-    _skip_common()
-    num_gpus = torch.cuda.device_count()
-    torch.multiprocessing.spawn(
-        _worker_distributed_multicast_allocator, args=(num_gpus,), nprocs=num_gpus
-    )
 
 
 if __name__ == "__main__":

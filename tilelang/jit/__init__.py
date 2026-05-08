@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import inspect
+import logging
+import traceback
 from typing import (
     Any,
     Generic,
@@ -33,6 +35,7 @@ import concurrent.futures
 from tqdm.auto import tqdm
 
 logger = getLogger(__name__)
+_compile_once_logger = logging.getLogger(__name__)
 
 _P = ParamSpec("_P")
 _KP = ParamSpec("_KP")
@@ -49,6 +52,9 @@ def compile(
     verbose: bool | None = None,
     pass_configs: dict[str, Any] | None = None,
     compile_flags: list[str] | str | None = None,
+    compile_once: bool = False,
+    compile_group: Any | None = None,
+    compile_root: int = 0,
 ) -> JITKernel[_KP, _T]:
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
@@ -73,6 +79,15 @@ def compile(
     pass_configs : dict, optional
         Additional keyword arguments to pass to the Compiler PassContext.
         Refer to `tilelang.transform.PassConfigKey` for supported options.
+    compile_once : bool, optional
+        If True and torch.distributed is initialized, compile on ``compile_root`` first,
+        synchronize ``compile_group``, then compile on the remaining ranks. This relies
+        on the normal disk cache path for reuse and does not force rank-dependent kernels
+        to share artifacts.
+    compile_group : torch.distributed.ProcessGroup, optional
+        Process group used for the compile barrier. Defaults to ``dist.group.WORLD``.
+    compile_root : int, optional
+        Group rank that compiles first. Defaults to 0.
 
     Environment Variables
     ---------------------
@@ -107,6 +122,109 @@ def compile(
             else:
                 func_cf.extend(compile_flags)
         compile_flags = func_cf
+
+    return _cached_compile(
+        func=func,
+        out_idx=out_idx,
+        execution_backend=execution_backend,
+        target=target,
+        target_host=target_host,
+        verbose=verbose,
+        pass_configs=pass_configs,
+        compile_flags=compile_flags,
+        compile_once=compile_once,
+        compile_group=compile_group,
+        compile_root=compile_root,
+    )
+
+
+def _cached_compile(
+    *,
+    func: PrimFunc,
+    out_idx: list[int] | int | None,
+    execution_backend: Literal["auto", "dlpack", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None,
+    target: str | Target | None,
+    target_host: str | Target | None,
+    verbose: bool | None,
+    pass_configs: dict[str, Any] | None,
+    compile_flags: list[str] | str | None,
+    compile_once: bool,
+    compile_group: Any | None,
+    compile_root: int,
+) -> JITKernel:
+    if not compile_once:
+        return cached(
+            func=func,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            target=target,
+            target_host=target_host,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+        )
+
+    try:
+        import torch.distributed as dist
+    except Exception:
+        dist = None
+
+    if dist is None or not dist.is_available() or not dist.is_initialized():
+        return cached(
+            func=func,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            target=target,
+            target_host=target_host,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+        )
+
+    from tilelang import env
+
+    if not env.is_cache_enabled():
+        _compile_once_logger.warning(
+            "compile_once=True is most useful with TileLang disk cache enabled; falling back to coordinated uncached compile."
+        )
+
+    group = compile_group if compile_group is not None else dist.group.WORLD
+    rank = dist.get_rank(group)
+    world_size = dist.get_world_size(group)
+    if compile_root < 0 or compile_root >= world_size:
+        raise ValueError(f"compile_root must be a valid group rank in [0, {world_size}), got {compile_root}")
+
+    if rank == compile_root:
+        kernel = None
+        try:
+            kernel = cached(
+                func=func,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                target=target,
+                target_host=target_host,
+                verbose=verbose,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
+            status = {"ok": True, "traceback": None}
+        except Exception:
+            status = {"ok": False, "traceback": traceback.format_exc()}
+    else:
+        kernel = None
+        status = None
+
+    statuses = [None for _ in range(world_size)]
+    dist.all_gather_object(statuses, status, group=group)
+    root_status = statuses[compile_root]
+    if root_status is None or not root_status["ok"]:
+        root_traceback = None if root_status is None else root_status["traceback"]
+        raise RuntimeError(
+            f"compile_once root group rank {compile_root} failed during compilation:\n{root_traceback}"
+        )
+
+    if rank == compile_root:
+        return kernel
 
     return cached(
         func=func,
@@ -284,6 +402,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     pass_configs: dict[str, Any] | None
     debug_root_path: str | None
     compile_flags: list[str] | str | None
+    compile_once: bool
+    compile_group: Any | None
+    compile_root: int
     func_source: str
     signature: inspect.Signature
     mode: Literal["auto", "lazy", "eager"]
@@ -397,6 +518,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             verbose=self.verbose,
             pass_configs=self.pass_configs,
             compile_flags=self.compile_flags,
+            compile_once=self.compile_once,
+            compile_group=self.compile_group,
+            compile_root=self.compile_root,
         )
 
         if self.debug_root_path:
@@ -459,6 +583,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
                 "verbose": self.verbose,
                 "pass_configs": self.pass_configs,
                 "compile_flags": self.compile_flags,
+                "compile_once": self.compile_once,
+                "compile_group": self.compile_group,
+                "compile_root": self.compile_root,
             }
             return compile_args
 
@@ -536,6 +663,9 @@ def jit(
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
+    compile_once: bool = False,
+    compile_group: Any | None = None,
+    compile_root: int = 0,
 ) -> Callable[[Callable[_KP, _T]], JITImpl[_KP, _KP, _T, _T]]: ...
 
 
@@ -550,6 +680,9 @@ def jit(
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
+    compile_once: bool = False,
+    compile_group: Any | None = None,
+    compile_root: int = 0,
 ) -> Callable[[Callable[_P, _T]], JITImpl[_KP, _KP, _T, _T]]:
     """
     JIT compiler decorator for TileLang functions.
@@ -576,6 +709,13 @@ def jit(
         Directory to save compiled kernel source for debugging.
     compile_flags : list[str] | str | None
         Additional compiler flags.
+    compile_once : bool
+        Coordinate compilation across torch.distributed ranks by compiling on
+        ``compile_root`` first, then letting other ranks use the normal cache path.
+    compile_group : torch.distributed.ProcessGroup | None
+        Group used for the compile barrier. Defaults to ``dist.group.WORLD``.
+    compile_root : int
+        Group rank that compiles first.
     """
 
     compile_args = dict(
@@ -587,6 +727,9 @@ def jit(
         pass_configs=pass_configs,
         debug_root_path=debug_root_path,
         compile_flags=compile_flags,
+        compile_once=compile_once,
+        compile_group=compile_group,
+        compile_root=compile_root,
     )
 
     def decorator(func: Callable[_P, _T]):

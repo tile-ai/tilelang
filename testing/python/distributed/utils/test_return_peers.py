@@ -6,33 +6,19 @@ from __future__ import annotations
 
 import os
 
-import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing
 
 import tilelang
-import tilelang.testing
+from testing.python.distributed._utils import distributed_test
 
 os.environ.setdefault("NCCL_DEBUG", "WARN")
-
-_USE_DISTRIBUTED = os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in (
-    "1",
-    "true",
-    "on",
-)
 
 _M = 1024
 
 
-def _skip_common():
-    if not _USE_DISTRIBUTED:
-        pytest.skip("Requires TILELANG_USE_DISTRIBUTED=1")
-    if torch.cuda.device_count() < 2:
-        pytest.skip("Need >= 2 GPUs")
-
-
-def _worker(local_rank: int, num_ranks: int):
+@distributed_test()
+def test_return_peers(local_rank: int, num_ranks: int):
     from tilelang.distributed import init_dist
 
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
@@ -61,11 +47,7 @@ def _worker(local_rank: int, num_ranks: int):
         dist.destroy_process_group()
 
 
-@tilelang.testing.requires_cuda
-def test_return_peers():
-    _skip_common()
-    torch.multiprocessing.spawn(_worker, args=(2,), nprocs=2)
-
-
 if __name__ == "__main__":
+    import tilelang.testing
+
     tilelang.testing.main()

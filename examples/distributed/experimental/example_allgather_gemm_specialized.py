@@ -12,11 +12,10 @@ from tilelang.distributed import init_dist
 from tilelang.distributed import perf_fn
 from tilelang.utils.allocator import get_allocator
 
-tilelang.disable_cache()
 os.environ["NCCL_DEBUG"] = "WARN"
 
 
-@tilelang.jit
+@tilelang.jit(compile_once=True)
 def ag_gemm_sm_specialized_kernel(
     M,
     N,

@@ -11,7 +11,7 @@ from tilelang.distributed import perf_fn
 from reduce_scatter import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
 
 
-@tilelang.jit
+@tilelang.jit(compile_once=True)
 def gemm_kernel(
     M, N, K, local_rank, num_local_rank, block_M, block_N, block_K, threads, persistent=False, dtype=T.float16, accum_dtype=T.float32
 ):

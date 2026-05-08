@@ -10,31 +10,19 @@ from __future__ import annotations
 
 import os
 
-import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from testing.python.distributed._utils import distributed_test
 
 os.environ.setdefault("NCCL_DEBUG", "WARN")
-
-_USE_DISTRIBUTED = os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in (
-    "1", "true", "on",
-)
 
 _M = 65536
 _BLOCK_M = 4096
 _THREADS = 128
-
-
-def _skip_common():
-    if not _USE_DISTRIBUTED:
-        pytest.skip("Requires TILELANG_USE_DISTRIBUTED=1")
-    if torch.cuda.device_count() < 2:
-        pytest.skip(f"Need >= 2 GPUs")
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +111,9 @@ for _fn in _KERNEL_FNS:
 # Worker: runs all four kernel tests in one spawn session
 # ---------------------------------------------------------------------------
 
-def _worker(local_rank: int, num_ranks: int):
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@distributed_test()
+def test_put_get(local_rank: int, num_ranks: int):
     from tilelang.distributed import init_dist
 
     rank, num_ranks, group = init_dist(local_rank, num_ranks)
@@ -138,7 +128,11 @@ def _worker(local_rank: int, num_ranks: int):
     )
 
     for name, kernel_fn in zip(_OP_NAMES, _KERNEL_FNS):
-        kernel = tilelang.compile(kernel_fn(_M, num_ranks, _BLOCK_M, _THREADS))
+        kernel = tilelang.compile(
+            kernel_fn(_M, num_ranks, _BLOCK_M, _THREADS),
+            compile_once=True,
+            compile_group=group,
+        )
         kernel.initialize(allocator=allocator)
 
         dtype = torch.bfloat16 if name == "put_warp" else torch.float32
@@ -162,17 +156,7 @@ def _worker(local_rank: int, num_ranks: int):
     dist.destroy_process_group()
 
 
-# ---------------------------------------------------------------------------
-# Pytest entry point
-# ---------------------------------------------------------------------------
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_put_get():
-    """Spawn once, test all four put/get primitives in sequence."""
-    _skip_common()
-    torch.multiprocessing.spawn(_worker, args=(2,), nprocs=2)
-
-
 if __name__ == "__main__":
+    import tilelang.testing
+
     tilelang.testing.main()

@@ -13,6 +13,7 @@ from tilelang.distributed.shared_memory import (
     _vmm_free,
     _create_vmm_handle,
     _sync_vmm_handles,
+    _supports_vmm_fabric,
     _supports_multicast,
     _mc_create,
     _mc_export_handle,
@@ -89,15 +90,14 @@ if hasattr(_libcudart, "cudaSetDevice"):
     _libcudart.cudaSetDevice.restype = ctypes.c_int
 
 
-def _resolve_use_vmm(use_vmm: bool | None) -> bool:
+def _resolve_use_vmm(use_vmm: bool | None, is_distributed: bool = False) -> bool:
     """Resolve whether to use VMM based on env var and hardware support."""
     env_val = os.environ.get("TILESCALE_USE_VMM", None)
     if env_val is not None:
         return env_val == "1"
     if use_vmm is not None:
         return use_vmm
-    # Default: opt-in (False) for Step 1
-    return False
+    return is_distributed and _supports_vmm_fabric()
 
 
 class BaseAllocator:
@@ -118,7 +118,7 @@ class BaseAllocator:
         if size <= 0:
             raise ValueError("size must be > 0")
         self.size = int(size)
-        self._use_vmm = _resolve_use_vmm(use_vmm)
+        self._use_vmm = _resolve_use_vmm(use_vmm, is_distributed)
         self._base_ptr = ctypes.c_void_p(0)
         self._ptr = ctypes.c_void_p(0)
         self._device = parse_device(device)

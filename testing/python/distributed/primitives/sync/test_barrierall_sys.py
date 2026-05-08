@@ -1,14 +1,19 @@
 import tilelang
-import tilelang.testing
 import tilelang.language as T
 import torch
 import torch.distributed as dist
-import torch.multiprocessing
 import argparse
 from tilelang.distributed import init_dist
+from testing.python.distributed._utils import distributed_test
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True})
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+    },
+    compile_once=True,
+)
 def get_test_barrierall_sys_kernel(num_ranks: int, blocks: int, threads: int):
     @T.prim_func
     def main(
@@ -59,12 +64,16 @@ def main(local_rank: int, num_ranks: int, args: argparse.Namespace):
     dist.destroy_process_group()
 
 
-@tilelang.testing.requires_cuda
-def test_barrierall_sys():
-    # Trigger pre-compile
-    kernel = get_test_barrierall_sys_kernel(2, 64, 128)  # noqa: F841
-    torch.multiprocessing.spawn(main, args=(2, argparse.Namespace(blocks=64, threads=128)), nprocs=2)
+@distributed_test()
+def test_barrierall_sys(local_rank: int, num_ranks: int):
+    main(local_rank, num_ranks, argparse.Namespace(blocks=64, threads=128))
+
+
+# Trigger pre-compile
+get_test_barrierall_sys_kernel(2, 64, 128)
 
 
 if __name__ == "__main__":
+    import tilelang.testing
+
     tilelang.testing.main()

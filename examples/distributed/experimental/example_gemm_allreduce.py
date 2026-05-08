@@ -100,6 +100,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     gemm_red_kernel = tilelang.compile(
         gemm_red_func,
         pass_configs={"tl.disable_tma_lower": True},
+        compile_once=True,
+        compile_group=group,
     )
 
     if local_rank == 0 and args.print_source:

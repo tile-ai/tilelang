@@ -22,7 +22,10 @@ from tilelang.distributed import perf_fn
 os.environ["NCCL_DEBUG"] = "WARN"  # silence NCCL log
 
 
-@tilelang.jit(pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True})
+@tilelang.jit(
+    pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True},
+    compile_once=True,
+)
 def set_signal_kernel(local_rank, num_local_ranks, threads):
     @T.prim_func
     def _set_signal_kernel(
@@ -39,7 +42,7 @@ def set_signal_kernel(local_rank, num_local_ranks, threads):
     return _set_signal_kernel
 
 
-@tilelang.jit
+@tilelang.jit(compile_once=True)
 def gemm_kernel(
     M, N, K, local_rank, num_local_rank, block_M, block_N, block_K, threads, persistent=False, dtype=T.float16, accum_dtype=T.float32
 ):

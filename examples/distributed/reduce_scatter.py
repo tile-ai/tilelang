@@ -16,8 +16,6 @@ from tilelang.utils.target import target_is_hopper, determine_target
 import torch.distributed as dist
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 @dataclasses.dataclass
 class ReduceScatter2DContext:
@@ -170,7 +168,7 @@ def create_reduce_scater_2d_ctx(
     return ctx
 
 
-@tilelang.jit
+@tilelang.jit(compile_once=True)
 def kernel_ring_reduce_tma(
     M_per_rank, N, block_M, block_N, begin_idx, num_splits, threads, persistent=False, dtype=T.float16, accum_dtype=T.float32
 ):

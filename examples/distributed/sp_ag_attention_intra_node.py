@@ -7,7 +7,7 @@ from cuda import cudart
 from tilelang.distributed.utils import CUDA_CHECK
 
 
-@tilelang.jit
+@tilelang.jit(compile_once=True)
 def barrier_all_blocks_sys_kernel(
     num_local_rank,
 ):
@@ -37,6 +37,7 @@ def barrier_all_blocks_sys_kernel(
         "--ptxas-options=-v,--register-usage-level=10",
         "-DNDEBUG",
     ],
+    compile_once=True,
 )
 def flashattn(
     batch_size,

@@ -9,29 +9,17 @@ from __future__ import annotations
 
 import os
 
-import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from testing.python.distributed._utils import distributed_test
 
 os.environ.setdefault("NCCL_DEBUG", "WARN")
 
-_USE_DISTRIBUTED = os.environ.get("TILELANG_USE_DISTRIBUTED", "0").lower() in (
-    "1", "true", "on",
-)
-
 _THREADS = 32
-
-
-def _skip_common():
-    if not _USE_DISTRIBUTED:
-        pytest.skip("Requires TILELANG_USE_DISTRIBUTED=1")
-    if torch.cuda.device_count() < 2:
-        pytest.skip(f"Need >= 2 GPUs")
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +61,9 @@ _KERNEL_NAMES = ["get_rank", "get_num_ranks"]
 _KERNELS = [_kernel_get_rank, _kernel_get_num_ranks]
 
 
-def _worker(local_rank: int, num_local_ranks: int):
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@distributed_test()
+def test_basic(local_rank: int, num_local_ranks: int):
     from tilelang.distributed import init_dist
 
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
@@ -88,7 +78,7 @@ def _worker(local_rank: int, num_local_ranks: int):
     )
 
     for name, kernel_fn in zip(_KERNEL_NAMES, _KERNELS):
-        kernel = tilelang.compile(kernel_fn())
+        kernel = tilelang.compile(kernel_fn(), compile_once=True, compile_group=group)
         kernel.initialize(allocator=allocator)
 
         out = tilelang.tensor((1,), T.uint64, allocator=allocator)
@@ -113,17 +103,7 @@ def _worker(local_rank: int, num_local_ranks: int):
     dist.destroy_process_group()
 
 
-# ---------------------------------------------------------------------------
-# Pytest entry point
-# ---------------------------------------------------------------------------
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_basic():
-    """Spawn once, test get_rank + get_num_ranks."""
-    _skip_common()
-    torch.multiprocessing.spawn(_worker, args=(2,), nprocs=2)
-
-
 if __name__ == "__main__":
+    import tilelang.testing
+
     tilelang.testing.main()

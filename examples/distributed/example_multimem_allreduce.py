@@ -26,7 +26,6 @@ import tilelang.language as T
 from tilelang.distributed import init_dist
 from tilelang.utils.allocator import get_allocator
 
-tilelang.disable_cache()
 os.environ["NCCL_DEBUG"] = "WARN"
 
 
@@ -70,6 +69,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     kernel = tilelang.compile(
         multimem_allreduce_kernel_one_shot(N, BLOCK_N, threads),
         pass_configs={"tl.disable_tma_lower": True},
+        compile_once=True,
+        compile_group=group,
     )
     if local_rank == 0 and args.print_source:
         print(kernel.get_kernel_source())

@@ -13,9 +13,10 @@ import ctypes.util
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing
 
 import tilelang.testing
+import tilelang.utils.allocator as allocator_mod
+from testing.python.distributed._utils import distributed_test
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,31 @@ def test_supports_fabric():
 
     result = _supports_vmm_fabric()
     assert isinstance(result, bool)
+
+
+def test_resolve_use_vmm_defaults_to_supported_fabric(monkeypatch):
+    monkeypatch.delenv("TILESCALE_USE_VMM", raising=False)
+    monkeypatch.setattr(allocator_mod, "_supports_vmm_fabric", lambda: True)
+
+    assert allocator_mod._resolve_use_vmm(None, is_distributed=True)
+    assert not allocator_mod._resolve_use_vmm(None, is_distributed=False)
+    assert not allocator_mod._resolve_use_vmm(False, is_distributed=True)
+
+
+def test_resolve_use_vmm_falls_back_without_fabric(monkeypatch):
+    monkeypatch.delenv("TILESCALE_USE_VMM", raising=False)
+    monkeypatch.setattr(allocator_mod, "_supports_vmm_fabric", lambda: False)
+
+    assert not allocator_mod._resolve_use_vmm(None, is_distributed=True)
+    assert allocator_mod._resolve_use_vmm(True, is_distributed=True)
+
+
+def test_resolve_use_vmm_env_override(monkeypatch):
+    monkeypatch.setenv("TILESCALE_USE_VMM", "0")
+    assert not allocator_mod._resolve_use_vmm(None, is_distributed=True)
+
+    monkeypatch.setenv("TILESCALE_USE_VMM", "1")
+    assert allocator_mod._resolve_use_vmm(None, is_distributed=False)
 
 
 @tilelang.testing.requires_cuda
@@ -108,7 +134,8 @@ def test_vmm_handle_export_import():
 # ---------------------------------------------------------------------------
 
 
-def _worker_distributed_vmm(local_rank: int, num_ranks: int):
+@distributed_test(require_fabric=True)
+def test_distributed_vmm(local_rank: int, num_ranks: int):
     from tilelang.distributed.utils import init_dist
     from tilelang.utils.allocator import BaseAllocator
 
@@ -121,10 +148,10 @@ def _worker_distributed_vmm(local_rank: int, num_ranks: int):
         local_rank=local_rank,
         num_local_ranks=num_ranks,
         group=group,
-        use_vmm=True,
     )
 
     assert allocator.initialized()
+    assert allocator._use_vmm
     assert allocator._buffer_ptrs is not None
     assert allocator._buffer_ptrs.shape[0] == num_ranks
     assert allocator._buffer_ptrs[local_rank].item() != 0
@@ -136,7 +163,8 @@ def _worker_distributed_vmm(local_rank: int, num_ranks: int):
     dist.destroy_process_group()
 
 
-def _worker_distributed_ipc_fallback(local_rank: int, num_ranks: int):
+@distributed_test()
+def test_distributed_ipc_fallback(local_rank: int, num_ranks: int):
     from tilelang.distributed.utils import create_dist_tensor, create_tensor, init_dist
 
     rank, _, group = init_dist(local_rank, num_ranks)
@@ -152,28 +180,6 @@ def _worker_distributed_ipc_fallback(local_rank: int, num_ranks: int):
 
     dist.barrier()
     dist.destroy_process_group()
-
-
-# ---------------------------------------------------------------------------
-# Multi-GPU pytest entry points
-# ---------------------------------------------------------------------------
-
-
-@tilelang.testing.requires_cuda
-def test_distributed_vmm():
-    _skip_if_no_fabric()
-    num_gpus = torch.cuda.device_count()
-    if num_gpus < 2:
-        pytest.skip(f"Need >= 2 GPUs, found {num_gpus}")
-    torch.multiprocessing.spawn(_worker_distributed_vmm, args=(num_gpus,), nprocs=num_gpus)
-
-
-@tilelang.testing.requires_cuda
-def test_distributed_ipc_fallback():
-    num_gpus = torch.cuda.device_count()
-    if num_gpus < 2:
-        pytest.skip(f"Need >= 2 GPUs, found {num_gpus}")
-    torch.multiprocessing.spawn(_worker_distributed_ipc_fallback, args=(num_gpus,), nprocs=num_gpus)
 
 
 if __name__ == "__main__":
