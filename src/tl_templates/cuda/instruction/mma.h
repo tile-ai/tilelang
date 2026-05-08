@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common.h"
+#include <cute/arch/mma_sm120.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
 
@@ -146,6 +147,20 @@ TL_DEFINE_MMA_DISPATCHER(kTensorFloat32, kTensorFloat32, kFloat32, 16, 8, 8,
 TL_DEFINE_MMA_DISPATCHER(kFloat64, kFloat64, kFloat64, 8, 8, 4, false, true,
                          false, cute::SM80_8x8x4_F64F64F64F64_TN)
 
+// SM120 FP4/F8F6F4 inputs (k32)
+using SM120_FP4_FP4_F32_TN =
+    cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e2m1_t, float>;
+using SM120_FP8_FP4_F32_TN =
+    cute::SM120_16x8x32_TN<cute::float_e4m3_t, cute::float_e2m1_t, float>;
+using SM120_FP4_FP8_F32_TN =
+    cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e4m3_t, float>;
+TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
+                         false, true, false, SM120_FP4_FP4_F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat4_e2m1fn, kFloat32, 16, 8, 32,
+                         false, true, false, SM120_FP8_FP4_F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat4_e2m1fn, kFloat8_e4m3, kFloat32, 16, 8, 32,
+                         false, true, false, SM120_FP4_FP8_F32_TN)
+
 #undef TL_DEFINE_MMA_DISPATCHER
 
 } // namespace detail
@@ -163,7 +178,37 @@ TL_DEVICE void mma_sync(
                                            TransB, Saturate>;
   static_assert(!std::is_void_v<typename Dispatcher::CRegType>,
                 "tl::mma_sync: unsupported configuration");
-  Dispatcher::exec(c, a, b, c);
+  if constexpr (AType == DataType::kFloat4_e2m1fn ||
+                BType == DataType::kFloat4_e2m1fn) {
+    // SM120 f8f6f4 MMA expects FP4 operands in the same register placement as
+    // CuTe's b4x16 load path. Shift only FP4 operands; mixed FP8 operands keep
+    // their native register bits.
+    using AReg = typename Dispatcher::ARegType;
+    using BReg = typename Dispatcher::BRegType;
+    constexpr int nA = detail::MmaImplTraits<typename Dispatcher::Impl>::kARegs;
+    constexpr int nB = detail::MmaImplTraits<typename Dispatcher::Impl>::kBRegs;
+    AReg as[nA];
+    BReg bs[nB];
+#pragma unroll
+    for (int i = 0; i < nA; ++i) {
+      if constexpr (AType == DataType::kFloat4_e2m1fn) {
+        as[i] = a[i] << 2;
+      } else {
+        as[i] = a[i];
+      }
+    }
+#pragma unroll
+    for (int i = 0; i < nB; ++i) {
+      if constexpr (BType == DataType::kFloat4_e2m1fn) {
+        bs[i] = b[i] << 2;
+      } else {
+        bs[i] = b[i];
+      }
+    }
+    Dispatcher::exec(c, as, bs, c);
+  } else {
+    Dispatcher::exec(c, a, b, c);
+  }
 }
 
 } // namespace tl

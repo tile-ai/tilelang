@@ -32,9 +32,11 @@ using namespace tir;
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
   explicit PTXAsyncCopyInjector(bool enable_auto_async_copy,
-                                bool async_without_async_commit_wait)
+                                bool async_without_async_commit_wait,
+                                bool fp4_padded_shared_copy)
       : enable_auto_async_copy_(enable_auto_async_copy),
-        async_without_async_commit_wait_(async_without_async_commit_wait) {}
+        async_without_async_commit_wait_(async_without_async_commit_wait),
+        fp4_padded_shared_copy_(fp4_padded_shared_copy) {}
 
   bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
 
@@ -109,6 +111,16 @@ public:
     std::optional<CopyIndexInfo> index_info = PrepareCopyIndexInfo(load, store);
     if (!index_info.has_value()) {
       return Optional<Stmt>();
+    }
+
+    if (fp4_padded_shared_copy_ && IsFp4GlobalToSharedCopy(load, store)) {
+      // FP4 shared destinations on SM120 are padded for b4x16_p64 ldmatrix.
+      // Emit 16-FP4/8B segments instead of a single contiguous byte span.
+      Optional<Stmt> fp4_cp_async = MakeFp4PaddedCPAsyncStmt(
+          load, store, *index_info, predicated, predicate_value);
+      if (fp4_cp_async.defined()) {
+        return fp4_cp_async;
+      }
     }
 
     if (index_info->index_lanes == 1) {
@@ -507,6 +519,69 @@ private:
         Call(store->buffer->dtype, tvm::tl::ptx_cp_async(), cp_async_args));
   }
 
+  static PrimExpr GetFp4PaddedSharedIndex(PrimExpr index) {
+    arith::Analyzer analyzer;
+    return analyzer.Simplify(truncdiv(index, 16) * 32 + truncmod(index, 16));
+  }
+
+  static bool IsFp4GlobalToSharedCopy(const BufferLoadNode *load,
+                                      const BufferStoreNode *store) {
+    return IsGlobalBuffer(load->buffer) && IsSharedBuffer(store->buffer) &&
+           load->buffer->dtype.is_float4_e2m1fn() &&
+           store->buffer->dtype.is_float4_e2m1fn() &&
+           load->buffer->dtype == store->buffer->dtype;
+  }
+
+  Optional<Stmt> MakeFp4PaddedCPAsyncStmt(const BufferLoadNode *load,
+                                          const BufferStoreNode *store,
+                                          const CopyIndexInfo &index_info,
+                                          bool predicated,
+                                          const PrimExpr &predicate_value) {
+    if (current_vectorized_lanes_ != 1 ||
+        (index_info.per_access_num_elems != 16 &&
+         index_info.per_access_num_elems != 32)) {
+      return Optional<Stmt>();
+    }
+
+    PrimExpr src_base = ExtractVectorBase(index_info.src_index);
+    PrimExpr dst_base = ExtractVectorBase(index_info.dst_index);
+    if (!src_base.defined() || !dst_base.defined()) {
+      return Optional<Stmt>();
+    }
+
+    Buffer flat_src = load->buffer.GetFlattenedBuffer();
+    Buffer flat_dst = store->buffer.GetFlattenedBuffer();
+
+    Array<Stmt> stmts;
+    int num_segments = index_info.per_access_num_elems / 16;
+    for (int segment = 0; segment < num_segments; ++segment) {
+      // Source FP4 is packed contiguously, while destination FP4 follows the
+      // padded shared layout. Each segment copies 16 FP4 values, i.e. 8 bytes.
+      PrimExpr src_logical_offset =
+          IntImm(src_base.dtype(), static_cast<int64_t>(segment * 16));
+      PrimExpr dst_logical_offset =
+          IntImm(dst_base.dtype(), static_cast<int64_t>(segment * 16));
+      PrimExpr src_index = analyzer_.Simplify(src_base + src_logical_offset);
+      PrimExpr dst_logical_index =
+          analyzer_.Simplify(dst_base + dst_logical_offset);
+      PrimExpr dst_byte_index = analyzer_.Simplify(
+          truncdiv(GetFp4PaddedSharedIndex(dst_logical_index), 2));
+
+      BufferLoad src_base_load = BufferLoad(flat_src, {src_index});
+      BufferLoad dst_base_load = BufferLoad(flat_dst, {dst_byte_index});
+      Optional<Stmt> cp_async = MakeCPAsyncStmtFromLoads(
+          store, dst_base_load, src_base_load, /*num_elems=*/16, predicated,
+          predicate_value);
+      ICHECK(cp_async.defined());
+      stmts.push_back(cp_async.value());
+    }
+
+    if (stmts.size() == 1) {
+      return stmts[0];
+    }
+    return SeqStmt(stmts);
+  }
+
   static Stmt MakeCommitGroupStmt() {
     return Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
   }
@@ -687,6 +762,7 @@ private:
 
   bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
+  bool fp4_padded_shared_copy_{false};
   int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
@@ -700,9 +776,11 @@ using namespace tir::transform;
 
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                   bool async_without_async_commit_wait) {
+                   bool async_without_async_commit_wait,
+                   bool fp4_padded_shared_copy) {
   PTXAsyncCopyInjector injector(enable_auto_async_copy,
-                                async_without_async_commit_wait);
+                                async_without_async_commit_wait,
+                                fp4_padded_shared_copy);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }

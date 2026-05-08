@@ -80,6 +80,15 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
+  // FP4 address helpers distinguish packed global storage from SM120 padded
+  // shared storage; local fragments remain semantic FP4 arrays.
+  bool IsFp4PackedStorage(const VarNode *buffer_var,
+                          DataType element_dtype) const;
+  bool IsFp4PaddedSharedStorage(const VarNode *buffer_var,
+                                DataType element_dtype) const;
+  bool IsFp4SemanticLocalStorage(const VarNode *buffer_var,
+                                 DataType element_dtype) const;
+  PrimExpr GetFp4PaddedSharedIndex(PrimExpr index) const;
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
@@ -156,8 +165,6 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
-  // Map from VarNode to packed buffer variable name for fp4 packed storage
-  std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,

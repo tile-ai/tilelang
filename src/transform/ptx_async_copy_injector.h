@@ -18,7 +18,8 @@ struct PTXAsyncCopyInjectResult {
  */
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const tvm::tir::Stmt &body, bool enable_auto_async_copy,
-                   bool async_without_async_commit_wait = false);
+                   bool async_without_async_commit_wait = false,
+                   bool fp4_padded_shared_copy = false);
 
 } // namespace tl
 } // namespace tvm

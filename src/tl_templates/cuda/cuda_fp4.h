@@ -2,7 +2,8 @@
 
 #include "common.h"
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)) ||                      \
+    (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 1200))
 #include <cuda_fp4.h>
 
 // Wrapper for __nv_fp4_e2m1 with implicit conversions
@@ -158,6 +159,30 @@ TL_DEVICE fp4_e2_32_t make_fp4_e2_32_t(
                               x12, x13, x14, x15);
   result.y = make_fp4_e2_16_t(y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11,
                               y12, y13, y14, y15);
+  return result;
+}
+
+// Pack sixty-four fp4_e2_t values.
+template <typename... Args>
+TL_DEVICE fp4_e2_64_t make_fp4_e2_64_t(Args... args) {
+  static_assert(sizeof...(Args) == 64,
+                "make_fp4_e2_64_t expects 64 fp4 values");
+  fp4_e2_t values[64] = {fp4_e2_t(args)...};
+  fp4_e2_64_t result;
+  result.x = make_fp4_e2_32_t(
+      values[0], values[1], values[2], values[3], values[4], values[5],
+      values[6], values[7], values[8], values[9], values[10], values[11],
+      values[12], values[13], values[14], values[15], values[16], values[17],
+      values[18], values[19], values[20], values[21], values[22], values[23],
+      values[24], values[25], values[26], values[27], values[28], values[29],
+      values[30], values[31]);
+  result.y = make_fp4_e2_32_t(
+      values[32], values[33], values[34], values[35], values[36], values[37],
+      values[38], values[39], values[40], values[41], values[42], values[43],
+      values[44], values[45], values[46], values[47], values[48], values[49],
+      values[50], values[51], values[52], values[53], values[54], values[55],
+      values[56], values[57], values[58], values[59], values[60], values[61],
+      values[62], values[63]);
   return result;
 }
 
