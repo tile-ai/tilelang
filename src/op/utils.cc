@@ -63,6 +63,18 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
   throw; // Unreachable
 }
 
+AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
+                                     int default_access_mask) {
+  if (const auto *call = arg.as<CallNode>()) {
+    if (call->op.same_as(RegionOp::Get())) {
+      RegionOp region(call->args);
+      return {BufferRegion(region->GetBuffer(), region->GetRanges()),
+              region->GetAccessMask()};
+    }
+  }
+  return {NormalizeToBufferRegion(arg), default_access_mask};
+}
+
 PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
                                  bool require_2d) {
   Buffer buf = region->buffer;
@@ -135,6 +147,13 @@ PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
 
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 int to_CUtensorMapDataType(DataType dtype) {
+  // CUDA 13 adds packed U4 TensorMap formats. The vendored CUDA stub may lag
+  // the installed toolkit, so keep the enum value by CUDA's documented order.
+  constexpr int kTensorMapDataType16U4Align8B = 13;
+  if (dtype.is_float4_e2m1fn()) {
+    return kTensorMapDataType16U4Align8B;
+  }
+
   CUtensorMapDataType tp;
   if (dtype.is_float()) {
     switch (dtype.bits()) {

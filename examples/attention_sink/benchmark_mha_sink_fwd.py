@@ -5,7 +5,7 @@ from tilelang import language as T
 import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
-from example_mha_sink_fwd_bhsd_wgmma_pipelined import flashattn, ref_program, gen_inputs
+from example_mha_sink_fwd_bhsd import flashattn, ref_program, gen_inputs
 from typing import Optional
 
 

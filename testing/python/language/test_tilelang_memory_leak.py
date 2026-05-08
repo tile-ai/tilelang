@@ -9,10 +9,7 @@ import gc
 
 def test_tilelang_globals_leak():
     @tilelang.jit(
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     def get_dummy_kernel():
         @T.prim_func

@@ -58,10 +58,7 @@ jit_kernel = tilelang.compile(
     func,
     out_idx=[2],
     target="cuda",
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 print(jit_kernel.get_kernel_source())
 # 3. Test the kernel in Python with PyTorch data

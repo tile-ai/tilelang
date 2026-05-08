@@ -84,19 +84,19 @@ class GemmSPBase:
 
     @property
     def ARegion(self) -> tir.PrimExpr:
-        return self.gemm_sp_node.ARegion
+        return self.gemm_sp_node.aRegion
 
     @property
     def ERegion(self) -> tir.PrimExpr:
-        return self.gemm_sp_node.ERegion
+        return self.gemm_sp_node.eRegion
 
     @property
     def BRegion(self) -> tir.PrimExpr:
-        return self.gemm_sp_node.BRegion
+        return self.gemm_sp_node.bRegion
 
     @property
     def CRegion(self) -> tir.PrimExpr:
-        return self.gemm_sp_node.CRegion
+        return self.gemm_sp_node.cRegion
 
     @property
     def stride_A(self) -> int:

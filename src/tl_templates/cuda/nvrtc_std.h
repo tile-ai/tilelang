@@ -19,10 +19,26 @@
 
 #ifdef __CUDACC_RTC__
 
-// Disable problematic CUDA standard library headers in NVRTC environment
-// Vector types (float4, uchar, etc.) are built-in to NVRTC and don't need these
-// headers
-#define _LIBCUDACXX___TUPLE_VECTOR_TYPES_H // Prevent vector_types.h inclusion
+// Disable problematic CUDA standard library headers in NVRTC environment.
+// Vector types (float4, uchar, etc.) are built-in to NVRTC and don't need
+// these headers. CCCL renamed the include guard between releases:
+//   * libcudacxx (CUDA <=12): _LIBCUDACXX___TUPLE_VECTOR_TYPES_H
+//   * CCCL (CUDA 13+):        _CUDA_STD___TUPLE_VECTOR_TYPES_H  (header now
+//                             lives at
+//                             cccl/cuda/std/__tuple_dir/vector_types.h)
+// Define both so the inclusion is suppressed regardless of toolkit version.
+#define _LIBCUDACXX___TUPLE_VECTOR_TYPES_H
+#define _CUDA_STD___TUPLE_VECTOR_TYPES_H
+
+// CUDA 13+ CCCL ships ``cuda/std/__tuple_dir/structured_bindings.h`` which
+// forward-declares ``std::tuple_size<class _Tp>`` / ``std::tuple_element<...>``
+// using a single-type parameter. Cutlass's ``cute/container/tuple.hpp``
+// independently forward-declares the same names with variadic packs under
+// ``__CUDACC_RTC__``, producing an ODR template-parameter mismatch. By
+// predefining CCCL's include guard before any cute header is parsed, CCCL's
+// header becomes a no-op and cute's variadic declarations win — cute is what
+// the kernel templates rely on under NVRTC.
+#define _CUDA_STD___TUPLE_STRUCTURED_BINDINGS_H
 
 using int8_t = signed char;
 using uint8_t = unsigned char;

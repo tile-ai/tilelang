@@ -1,5 +1,6 @@
 import tilelang.testing
 from tilelang import language as T
+import torch
 
 
 def alloc_var(
@@ -160,6 +161,79 @@ def run_alloc_multi_vars_with_initializer(
 @tilelang.testing.requires_cuda
 def test_alloc_multi_vars_with_initializer():
     run_alloc_multi_vars_with_initializer(256, 64, T.int32)
+
+
+def alloc_global(
+    N,
+    block_N,
+    dtype,
+):
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
+    ):
+        C = T.alloc_global((N,), dtype)
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+            T.copy(A[bx * block_N : (bx + 1) * block_N], C[bx * block_N : (bx + 1) * block_N])
+            T.copy(C[bx * block_N : (bx + 1) * block_N], B[bx * block_N : (bx + 1) * block_N])
+
+    return main
+
+
+def run_alloc_global(
+    N,
+    block_N,
+    dtype,
+):
+    program = alloc_global(N, block_N, dtype)
+
+    kernel = tilelang.compile(program, out_idx=[1])
+    # print(kernel.get_host_source())
+    # code = kernel.get_kernel_source()
+    # print(code)
+    A = torch.randn(N, device="cuda", dtype=getattr(torch, dtype))
+    B = kernel(A)
+    torch.testing.assert_close(B, A, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.jit
+def alloc_global_eagerjit(A, block_N, dtype):
+    N = T.const("N")
+    A: T.Tensor[[N], dtype]
+    B = T.empty(
+        [
+            N,
+        ],
+        dtype=dtype,
+    )
+    C = T.alloc_global(
+        [
+            N,
+        ],
+        dtype,
+    )
+
+    with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+        T.copy(A[bx * block_N : (bx + 1) * block_N], C[bx * block_N : (bx + 1) * block_N])
+        T.copy(C[bx * block_N : (bx + 1) * block_N], B[bx * block_N : (bx + 1) * block_N])
+
+    return B
+
+
+def run_alloc_global_eagerjit(
+    N,
+    block_N,
+    dtype,
+):
+    A = torch.randn(N, device="cuda", dtype=getattr(torch, dtype))
+    B = alloc_global_eagerjit(A, block_N, dtype)
+    torch.testing.assert_close(B, A, rtol=1e-2, atol=1e-2)
+
+
+def test_alloc_global():
+    run_alloc_global(1024, 128, T.float16)
+    run_alloc_global_eagerjit(1024, 128, T.float16)
 
 
 if __name__ == "__main__":

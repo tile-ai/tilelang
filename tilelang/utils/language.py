@@ -335,6 +335,43 @@ def retrieve_ptr(
     raise ValueError(f"Unsupported retrieve_ptr argument type: {type(obj)} for object {obj}")
 
 
+def retrieve_buffer_and_offset(obj: BufferLikeType) -> tuple[Buffer, PrimExpr | int]:
+    """
+    Retrieve the underlying buffer together with its logical element offset.
+
+    - Buffer -> (buffer, 0)
+    - BufferRegion -> (buffer, offset from region minima)
+    - BufferLoad -> (buffer, offset from indices or derived region minima)
+
+    This is useful when callers need to build custom access patterns from a
+    common buffer base rather than materializing a full `access_ptr` directly.
+    """
+    if isinstance(obj, tir.Buffer):
+        return obj, 0
+
+    if isinstance(obj, tir.BufferRegion):
+        buffer, region = obj.buffer, obj.region
+        strides = retrieve_stride(obj)
+        offset = 0
+        for i, r in enumerate(region):
+            offset += r.min * strides[i]
+        return buffer, offset
+
+    if isinstance(obj, tir.BufferLoad):
+        region = get_buffer_region_from_load(obj)
+        if region is not None:
+            return retrieve_buffer_and_offset(region)
+
+        buffer = obj.buffer
+        strides = retrieve_stride(obj)
+        offset = 0
+        for i, idx in enumerate(obj.indices):
+            offset += idx * strides[i]
+        return buffer, offset
+
+    raise ValueError(f"Unsupported retrieve_buffer_and_offset argument type: {type(obj)} for object {obj}")
+
+
 def retrieve_offset(obj: BufferLikeType) -> list:
     """
     Retrieve per-dimension minima offsets.
@@ -384,13 +421,19 @@ def retrieve_dtype(obj: BufferLikeType) -> str:
 
 def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     """
-    Compute the number of bits in a Buffer (shape with dtype)."""
+    Compute the number of bits in a Buffer (shape with dtype).
+
+    For vector types (e.g. ``bfloat16x2``) ``DataType.bits`` returns the
+    per-lane width, not the full element width.  Multiply by ``lanes`` so
+    that the total bit count is correct.
+    """
     if len(shape) == 0:
         return tir.IntImm("int32", 1)
     result = shape[0]
     for i in range(1, len(shape)):
         result = result * shape[i]
-    return result * DataType(dtype).bits
+    dt = DataType(dtype)
+    return result * dt.bits * dt.lanes
 
 
 def prim_expr_equal(lhs, rhs) -> bool:

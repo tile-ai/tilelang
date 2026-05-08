@@ -271,7 +271,7 @@ private:
   // this does not count the total steps, only count the number of loops
   int auto_max_extent_;
   bool explicit_unroll_;
-  // Wether to unroll loops to local access.
+  // Whether to unroll loops to local access.
   bool unroll_local_access_{false};
   // Number of normal loops in scope
   int normal_loop_depth_{0};

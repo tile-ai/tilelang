@@ -133,9 +133,9 @@ def sparse_mla_fwd(
 
             tx = T.get_thread_binding()
 
-            T.copy(Q[b_i, s_i, H0:H1, 0 : D // 2], Q_shared_l)
-            T.copy(Q[b_i, s_i, H0:H1, D // 2 : D], Q_shared_r)
-            T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
+            T.tma_copy(Q[b_i, s_i, H0:H1, 0 : D // 2], Q_shared_l, barrier=bar_q)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D // 2 : D], Q_shared_r, barrier=bar_q)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared, barrier=bar_q)
             T.barrier_arrive(bar_q)
 
             if tx < 128:
@@ -151,9 +151,9 @@ def sparse_mla_fwd(
 
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
                         acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0, -T.infinity(acc_s.dtype))
-                    T.gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True, wg_wait=-1)
+                    T.wgmma_gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True)
+                    T.wgmma_gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True)
+                    T.wgmma_gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True)
 
                     T.wait_wgmma(0)
 
@@ -187,9 +187,9 @@ def sparse_mla_fwd(
 
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
                         acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0, -T.infinity(acc_s.dtype))
-                    T.gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True, wg_wait=-1)
+                    T.wgmma_gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True)
+                    T.wgmma_gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True)
+                    T.wgmma_gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True)
 
                     T.wait_wgmma(0)
 
@@ -271,17 +271,17 @@ def sparse_mla_fwd(
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                             T.ptx_cp_async(
                                 T.access_ptr(K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, indices_local, g_i, D + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
@@ -296,17 +296,17 @@ def sparse_mla_fwd(
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                             T.ptx_cp_async(
                                 T.access_ptr(K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, indices_local, g_i, D + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 

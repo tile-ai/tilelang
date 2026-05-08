@@ -29,6 +29,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "../op/utils.h"
 #include "../target/utils.h"
 #include "tir/ir/buffer_common.h"
 
@@ -116,7 +117,7 @@ public:
 
       if (auto store = if_stmt->then_case.as<BufferStoreNode>()) {
         // Only handle global memory stores
-        if (store->buffer.scope() == "global") {
+        if (IsGlobalBuffer(store->buffer)) {
           // Assume buffer has been flattened by FlattenBuffer pass
           ICHECK(store->indices.size() == 1)
               << "Expected flattened buffer with single index, but got "
@@ -246,7 +247,7 @@ public:
       if (else_is_zero) {
         // Check if then_value is a BufferLoad from global memory with Ramp
         if (auto load = then_value.as<BufferLoadNode>()) {
-          if (load->buffer.scope() == "global") {
+          if (IsGlobalBuffer(load->buffer)) {
             // Assume buffer has been flattened by FlattenBuffer pass
             ICHECK(load->indices.size() == 1)
                 << "Expected flattened buffer with single index, but got "

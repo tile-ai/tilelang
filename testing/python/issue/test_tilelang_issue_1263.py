@@ -51,18 +51,12 @@ def test_issue_1263_pipeline_no_consumer():
     tilelang.compile(_test_kernel(1024, 1024))
     tilelang.compile(
         _test_kernel(1024, 1024),
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     tilelang.compile(_test_kernel_if_cond(1024, 1024))
     tilelang.compile(
         _test_kernel_if_cond(1024, 1024),
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
 
 

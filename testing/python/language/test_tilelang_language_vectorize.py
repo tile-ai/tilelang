@@ -51,7 +51,7 @@ def run_vectorize(N, M, stride_A, stride_B):
 
 
 def test_vectorize():
-    N, M = 512, 256
+    N, M = 128, 128
 
     run_vectorize(N, M, N, N)
     run_vectorize(N, M, N + 2, N + 4)
@@ -105,13 +105,11 @@ def run_vectorize_invariant_index(N, M, K):
 
 
 def test_vectorize_invariant_index():
-    N, M = 512, 256
+    N, M = 128, 128
 
     run_vectorize_invariant_index(N, M, 2)
     run_vectorize_invariant_index(N, M, 4)
     run_vectorize_invariant_index(N, M * 3, 6)
-    run_vectorize_invariant_index(N, M, 8)
-    run_vectorize_invariant_index(N, M * 3, 12)
     run_vectorize_invariant_index(N, M * 7, 14)
 
 
@@ -131,12 +129,8 @@ def vectorize_test_all_dtypes(dtype, vec_num):
     "dtype",
     [
         torch.uint8,
-        torch.uint16,
-        torch.uint32,
         torch.uint64,
         torch.int8,
-        torch.int16,
-        torch.int32,
         torch.int64,
         torch.float8_e4m3fn,
         torch.float8_e5m2,

@@ -1,7 +1,7 @@
 import pytest
 from tilelang import tvm as tvm
 from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
-from tilelang.utils.tensor import torch_assert_close, map_torch_type
+from tilelang.utils.tensor import torch_assert_close
 from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
@@ -104,10 +104,7 @@ def run_gemm_ss(
     kernel = tilelang.compile(
         program,
         out_idx=[3],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
 
@@ -126,8 +123,8 @@ def run_gemm_ss(
     C = _matmul(A, B)
 
     torch_assert_close(
-        C_sp.to(map_torch_type(out_dtype)).to(torch.float32),
-        C.to(map_torch_type(out_dtype)).to(torch.float32),
+        C_sp.to(T.dtype(out_dtype).as_torch()).to(torch.float32),
+        C.to(T.dtype(out_dtype).as_torch()).to(torch.float32),
         rtol=1e-3,
         atol=1e-3,
         base_name="tilelang_sp",
@@ -145,11 +142,11 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
             low, high = (0, 4) if is_unsigned else (-2, 2)
         else:
             low, high = (0, 128) if is_unsigned else (-64, 64)
-        A = randint_semi_sparse(M, K, low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
-        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda")
+        A = randint_semi_sparse(M, K, low=low, high=high, dtype=T.dtype(in_dtype).as_torch(), device="cuda", transposed=trans_A)
+        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=T.dtype(in_dtype).as_torch(), device="cuda")
     else:
-        A = randn_semi_sparse(M, K, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
-        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(map_torch_type(in_dtype))
+        A = randn_semi_sparse(M, K, dtype=T.dtype(in_dtype).as_torch(), device="cuda", transposed=trans_A)
+        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(T.dtype(in_dtype).as_torch())
     return A, B
 
 
@@ -273,10 +270,7 @@ def run_gemm_rs(
     kernel = tilelang.compile(
         program,
         out_idx=[3],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
@@ -294,8 +288,8 @@ def run_gemm_rs(
     C = _matmul(A, B)
 
     torch_assert_close(
-        C_sp.to(map_torch_type(out_dtype)).to(torch.float32),
-        C.to(map_torch_type(out_dtype)).to(torch.float32),
+        C_sp.to(T.dtype(out_dtype).as_torch()).to(torch.float32),
+        C.to(T.dtype(out_dtype).as_torch()).to(torch.float32),
         rtol=1e-3,
         atol=1e-3,
         base_name="tilelang_sp",
@@ -424,10 +418,7 @@ def run_gemm_sr(
     kernel = tilelang.compile(
         program,
         out_idx=[3],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
@@ -445,8 +436,8 @@ def run_gemm_sr(
     C = _matmul(A, B)
 
     torch_assert_close(
-        C_sp.to(map_torch_type(out_dtype)).to(torch.float32),
-        C.to(map_torch_type(out_dtype)).to(torch.float32),
+        C_sp.to(T.dtype(out_dtype).as_torch()).to(torch.float32),
+        C.to(T.dtype(out_dtype).as_torch()).to(torch.float32),
         rtol=1e-3,
         atol=1e-3,
         base_name="tilelang_sp",
@@ -579,10 +570,7 @@ def run_gemm_rr(
     kernel = tilelang.compile(
         program,
         out_idx=[3],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K, arch="8.0")
@@ -600,8 +588,8 @@ def run_gemm_rr(
     C = _matmul(A, B)
 
     torch_assert_close(
-        C_sp.to(map_torch_type(out_dtype)).to(torch.float32),
-        C.to(map_torch_type(out_dtype)).to(torch.float32),
+        C_sp.to(T.dtype(out_dtype).as_torch()).to(torch.float32),
+        C.to(T.dtype(out_dtype).as_torch()).to(torch.float32),
         rtol=1e-3,
         atol=1e-3,
         base_name="tilelang_sp",

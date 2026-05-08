@@ -119,8 +119,11 @@ maint/host_checks/logs/*
 # csv
 *.csv
 
-# clang-tidy
-/run-clang-tidy.py
-
 # perf regression test
 .perf_regression/
+
+# agent skills folder
+.humanize*
+
+# uv Lockfile
+uv.lock

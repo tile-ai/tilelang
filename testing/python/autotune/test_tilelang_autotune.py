@@ -11,14 +11,14 @@ def ref_program(A, B):
 
     Parameters
     ----------
-    A : numpy.ndarray
+    A : torch.Tensor
         The matrix with shape (M, K).
-    B : numpy.ndarray
+    B : torch.Tensor
         The matrix with shape (N, K).
 
     Returns
     -------
-    np.ndarray
+    torch.Tensor
         The result of A @ B.T, shape (M, N).
     """
     return A @ B.T

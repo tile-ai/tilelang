@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 # for Volta GPUs, which use legacy MMA instructions
 from .gemm_base import GemmBase
-from .inst import GemmInst
 from tilelang.layout import make_volta_swizzled_layout
 from tilelang.intrinsics.mma_sm70_macro_generator import (
     TensorCoreIntrinEmitter,
@@ -14,9 +15,12 @@ from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
 
+GEMM_INST_MMA = "cuda.mma"
+
+
 class GemmMMASm70(GemmBase):
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -48,9 +52,16 @@ class GemmMMASm70(GemmBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         thread_nums = thread_bounds.extent
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(

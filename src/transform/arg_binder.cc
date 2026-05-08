@@ -313,6 +313,7 @@ inline PrimExpr TVMArrayGet(DataType t, Var arr,
 
 void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
                                    const PrimExpr &logical_stride_val,
+                                   const PrimExpr &dim_shape,
                                    const PrimExpr &is_null,
                                    const std::string &stride_element_name) {
   if (const VarNode *v = stride.as<VarNode>()) {
@@ -323,7 +324,10 @@ void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
         LOG(WARNING) << "TileLang: Detected zero-dimension in "
                      << stride_element_name << ". Relaxing stride check.";
       }
-      PrimExpr cond = (expected == logical_stride_val) || (expected == 0);
+      // Tolerate any stride value when dim size is 1 (torch 2.1 DLPack bug:
+      // forces stride=1 for size-1 dims regardless of logical stride).
+      PrimExpr cond = (expected == logical_stride_val) || (expected == 0) ||
+                      (dim_shape == 1);
       BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_,
                       is_null);
     } else {
@@ -336,7 +340,10 @@ void ArgBinder::RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
       LOG(WARNING) << "TileLang: Detected zero-dimension in "
                    << stride_element_name << ". Relaxing stride check.";
     }
-    PrimExpr cond = (expected == logical_stride_val) || (expected == 0);
+    // Tolerate any stride value when dim size is 1 (torch 2.1 DLPack bug:
+    // forces stride=1 for size-1 dims regardless of logical stride).
+    PrimExpr cond =
+        (expected == logical_stride_val) || (expected == 0) || (dim_shape == 1);
     BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_, is_null);
   }
 }
@@ -866,8 +873,9 @@ void ArgBinder::BindDLTensors(
 
           // Relax stride check: if the expected stride is 0, allow any actual
           // stride. This happens when one of the subsequent dimensions is 0.
-          RelaxedStrideCheck(k, buffer->strides[k], logical_stride_val, is_null,
-                             stride_element_name(k));
+          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
+          RelaxedStrideCheck(k, buffer->strides[k], logical_stride_val,
+                             buffer->shape[k], is_null, stride_element_name(k));
         }
       }
     } else {
@@ -952,8 +960,9 @@ void ArgBinder::BindDLTensors(
 
           // Relax stride check: if the expected stride is 0, allow any actual
           // stride. This happens when one of the subsequent dimensions is 0.
-          RelaxedStrideCheck(k, buffer->strides[k], stride_val, is_null,
-                             stride_element_name(k));
+          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
+          RelaxedStrideCheck(k, buffer->strides[k], stride_val,
+                             buffer->shape[k], is_null, stride_element_name(k));
         }
       } else {
         PrimExpr stride_from_shape = 1;
@@ -973,8 +982,9 @@ void ArgBinder::BindDLTensors(
 
           // Relax stride check: if the expected stride is 0, allow any actual
           // stride. This happens when one of the subsequent dimensions is 0.
-          RelaxedStrideCheck(k, buffer->strides[k], stride_val, is_null,
-                             stride_element_name(k));
+          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
+          RelaxedStrideCheck(k, buffer->strides[k], stride_val,
+                             buffer->shape[k], is_null, stride_element_name(k));
         }
       }
     }

@@ -94,7 +94,7 @@ def prepare_output(
 
 @tilelang.jit(
     out_idx=[-5, -4, -3, -2, -1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def tilelang_wy_fast_bwd(
     # task config
@@ -247,7 +247,7 @@ def tilelang_wy_fast_bwd(
     return kernel
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
 def tilelang_wy_fast_bwd_split(
     # task config
     B,

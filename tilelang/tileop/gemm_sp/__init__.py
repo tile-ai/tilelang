@@ -1,25 +1,22 @@
 from tilelang import tvm as tvm
 from tvm import tir
-from tilelang.utils.target import (
-    target_is_cuda,
-)
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
+from tilelang.backend.gemm_sp import resolve_gemm_sp_impl
 from tilelang.tileop.base import GemmWarpPolicy
-from .gemm_sp_mma import GemmSPMMA
 
 
 @tvm_ffi.register_global_func("tl.gemm_sp_py.infer_layout")
-def gemm_sp_py_infer_layout(gemm_sp_py: GemmSPMMA, target: Target, thread_bounds: Range):
+def gemm_sp_py_infer_layout(gemm_sp_py, target: Target, thread_bounds: Range):
     thread_nums = thread_bounds.extent
     return gemm_sp_py.infer_layout(target, thread_nums)
 
 
 @tvm_ffi.register_global_func("tl.gemm_sp_py.lower")
-def gemm_sp_py_lower(gemm_sp_py: GemmSPMMA, target: Target, thread_bounds: Range, thread_var: tir.Var):
+def gemm_sp_py_lower(gemm_sp_py, target: Target, thread_bounds: Range, thread_var: tir.Var):
     thread_nums = thread_bounds.extent
     stmt = gemm_sp_py.lower(target, thread_nums, thread_var)
     return stmt
@@ -54,16 +51,9 @@ class GemmSPPy(Node, Scriptable):
     policy: GemmWarpPolicy
 
     def infer_layout(self, target: Target, thread_nums: int):
-        if target_is_cuda(target):
-            # TODO(lei): Support more cuda architectures, now mma only
-            return GemmSPMMA(self).infer_layout(target, thread_nums)
-        else:
-            raise ValueError(f"Unsupported target: {target}")
+        impl_class = resolve_gemm_sp_impl(target)
+        return impl_class(self).infer_layout(target, thread_nums)
 
     def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
-        if target_is_cuda(target):
-            # TODO(lei): Support more cuda architectures, now mma only
-            # Now only implement ssr layout
-            return GemmSPMMA(self).lower(target, thread_nums, thread_var)
-        else:
-            raise ValueError(f"Unsupported target: {target}")
+        impl_class = resolve_gemm_sp_impl(target)
+        return impl_class(self).lower(target, thread_nums, thread_var)

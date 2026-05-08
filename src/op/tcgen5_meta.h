@@ -19,8 +19,12 @@ struct TCGEN5MMAMeta {
 };
 
 inline std::pair<bool, TCGEN5MMAMeta>
-GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
+GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
+                 bool disable_2cta = false) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
+// NOTE: In case that other tcgen5mma in the same kernel must use 1-cta,
+// we should disable 2cta for the current tcgen5mma.
+// TODO(wt): Add more 2cta-preferred shapes
 #define FAIL                                                                   \
   return {                                                                     \
     false, TCGEN5MMAMeta { 0, 0, 0, false, false }                             \
@@ -34,8 +38,19 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
       (c_dtype.is_float() && c_dtype.bits() == 32)) {
     if (K % 16 != 0)
       FAIL;
+    if (!disable_2cta) {
+      if (M % 128 == 0) {
+        for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+          if (N % atom_n == 0)
+            SUCCESS(256, atom_n, 16, false, true);
+      } else if (M % 64 == 0) {
+        for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+          if (N % atom_n == 0)
+            SUCCESS(128, atom_n, 16, false, true);
+      }
+    }
     if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+      for (int atom_n = 256; atom_n >= 8; atom_n -= 8)
         if (N % atom_n == 0)
           SUCCESS(128, atom_n, 16, false, false);
       FAIL;
@@ -58,13 +73,21 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
               (c_dtype.is_float16() && c_dtype.bits() == 16))) {
     if (K % 32 != 0)
       FAIL;
+    if (!disable_2cta) {
+      if (M % 128 == 0) {
+        for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+          if (N % atom_n == 0)
+            SUCCESS(256, atom_n, 32, false, true);
+      } else if (M % 64 == 0) {
+        for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+          if (N % atom_n == 0)
+            SUCCESS(128, atom_n, 32, false, true);
+      }
+    }
     if (M % 128 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
           SUCCESS(128, atom_n, 32, true, false);
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32, false, true);
       for (int atom_n = 256; atom_n >= 8; atom_n -= 8)
         if (N % atom_n == 0)
           SUCCESS(128, atom_n, 32, false, false);
@@ -89,13 +112,21 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
              ab_dtype.bits() == 8 && c_dtype.is_int() && c_dtype.bits() == 32) {
     if (K % 32 != 0)
       FAIL;
+    if (!disable_2cta) {
+      if (M % 128 == 0) {
+        for (int atom_n = 256; atom_n >= 32; atom_n -= 32)
+          if (N % atom_n == 0)
+            SUCCESS(256, atom_n, 32, false, true);
+      } else if (M % 64 == 0) {
+        for (int atom_n = 256; atom_n >= 32; atom_n -= 32)
+          if (N % atom_n == 0)
+            SUCCESS(128, atom_n, 32, false, true);
+      }
+    }
     if (M % 128 == 0) {
       for (int atom_n : ws_valid_atom_ns)
         if (N % atom_n == 0)
           SUCCESS(128, atom_n, 32, true, false);
-      for (int atom_n = 256; atom_n >= 32; atom_n -= 32)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32, false, true);
       for (int atom_n = 256; atom_n >= 8; atom_n -= (atom_n > 32 ? 16 : 8))
         // steps of 16 after N > 32
         if (N % atom_n == 0)
@@ -147,8 +178,12 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
       return static_cast<uint32_t>(0);
     } else if (dtype.is_float8_e5m2fnuz() || dtype.is_float8_e5m2()) {
       return static_cast<uint32_t>(1);
+    } else if (dtype.is_float6_e2m3fn()) {
+      return static_cast<uint32_t>(3);
+    } else if (dtype.is_float6_e3m2fn()) {
+      return static_cast<uint32_t>(4);
     } else if (dtype.is_float4_e2m1fn()) {
-      return static_cast<uint32_t>(2);
+      return static_cast<uint32_t>(5);
     } else if (dtype.is_int() && dtype.bits() == 8) {
       return static_cast<uint32_t>(1);
     } else if (dtype.is_uint() && dtype.bits() == 8) {
@@ -206,6 +241,72 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
 
   uint32_t max_shift = 0u;
   desc |= set_bits(max_shift, 30, 2);
+
+  return desc;
+}
+
+// Build block-scaled instruction descriptor for mxf8f6f4.block_scale
+// Bit layout: InstrDescriptorBlockScaled (see CUTLASS mma_sm100_desc.hpp)
+inline uint32_t GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n,
+                                              DataType ab_dtype,
+                                              bool a_is_k_major,
+                                              bool b_is_k_major, int scale_in_a,
+                                              int scale_in_b, int a_sf_id,
+                                              int b_sf_id) {
+  ICHECK(atom_m % 16 == 0) << "atom_m must be divisible by 16";
+  ICHECK(atom_n % 8 == 0) << "atom_n must be divisible by 8";
+  ICHECK(scale_in_a == 1 || scale_in_a == -1);
+  ICHECK(scale_in_b == 1 || scale_in_b == -1);
+
+  // a_format / b_format for MXF8F6F4: E4M3=0, E5M2=1
+  auto encode_mxfp_dtype = [&](DataType dtype) -> uint32_t {
+    if (dtype.is_float8_e4m3fn() || dtype.is_float8_e4m3fnuz() ||
+        dtype.is_float8_e4m3()) {
+      return 0u; // E4M3
+    } else if (dtype.is_float8_e5m2fnuz() || dtype.is_float8_e5m2()) {
+      return 1u; // E5M2
+    } else if (dtype.is_float6_e2m3fn()) {
+      return 3u; // E2M3
+    } else if (dtype.is_float6_e3m2fn()) {
+      return 4u; // E3M2
+    } else if (dtype.is_float4_e2m1fn()) {
+      return 5u; // E2M1
+    }
+    LOG(FATAL) << "Unsupported dtype for block-scaled descriptor: " << dtype;
+    return 0u;
+  };
+
+  auto set_bits = [](uint32_t value, int start, int width) -> uint32_t {
+    uint32_t mask = (width == 32) ? 0xFFFFFFFFu : ((1u << width) - 1);
+    return (value & mask) << start;
+  };
+
+  uint32_t a_format = encode_mxfp_dtype(ab_dtype);
+  uint32_t b_format = a_format;
+  uint32_t a_neg = (scale_in_a == -1) ? 1u : 0u;
+  uint32_t b_neg = (scale_in_b == -1) ? 1u : 0u;
+  uint32_t a_major = a_is_k_major ? 0u : 1u;
+  uint32_t b_major = b_is_k_major ? 0u : 1u;
+  uint32_t n_dim = static_cast<uint32_t>(atom_n >> 3);
+  uint32_t m_dim = static_cast<uint32_t>(atom_m >> 4);
+
+  uint32_t desc = 0;
+  desc |= set_bits(0, 0, 2); // sparse_id2
+  desc |= set_bits(0, 2, 1); // sparse_flag
+  // bit 3 reserved
+  desc |= set_bits(static_cast<uint32_t>(b_sf_id), 4, 2); // b_sf_id
+  // bit 6 reserved
+  desc |= set_bits(a_format, 7, 3);  // a_format
+  desc |= set_bits(b_format, 10, 3); // b_format
+  desc |= set_bits(a_neg, 13, 1);    // a_negate
+  desc |= set_bits(b_neg, 14, 1);    // b_negate
+  desc |= set_bits(a_major, 15, 1);  // a_major
+  desc |= set_bits(b_major, 16, 1);  // b_major
+  desc |= set_bits(n_dim, 17, 6);    // n_dim
+  desc |= set_bits(1, 23, 1);        // scale_format = 1 (E8M0)
+  desc |= set_bits(m_dim, 24, 5);    // m_dim
+  desc |= set_bits(static_cast<uint32_t>(a_sf_id), 29, 2); // a_sf_id
+  desc |= set_bits(0, 31, 1);                              // k_size = 0 (K32)
 
   return desc;
 }

@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -8,6 +9,15 @@ import argparse
 from functools import partial
 import numpy as np
 import time
+
+
+def IsRDNA():
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name().strip()
+        return "Radeon" in gpu_name
+    else:
+        print("Error: GPU Device is not detected")
+        sys.exit(1)
 
 
 def ref_program(Q, K, V, is_causal, groups=1):
@@ -30,13 +40,24 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 
 def get_fwd_configs():
-    block_M = [32, 64, 128, 256]
-    block_N = [32, 64, 128, 256]
-    threads = [128, 256, 512]
-    num_split_q = [64, 128, 256]
-    num_stages = [0, 1]
+    # Match the standalone forward example on RDNA. WMMA configs larger than
+    # 32x32 can trigger layout issues when bridging the softmax fragment into
+    # the second GEMM's A-layout.
+    if IsRDNA():
+        block_M = [16, 32, 64]
+        block_N = [16, 32, 64]
+        threads = [32, 64]
+        num_split_q = [16, 32, 64]
+        num_stages = [0]
+        k_pack = [1]
+    else:
+        block_M = [32, 64, 128, 256]
+        block_N = [32, 64, 128, 256]
+        threads = [128, 256, 512]
+        num_split_q = [64, 128, 256]
+        num_stages = [0, 1]
+        k_pack = [2]
     enable_rasterization = [True]
-    k_pack = [2]
     panel_size = [7, 8, 9, 10]
     qk_coalesced_width = [8]
     v_coalesced_width = [4]
@@ -46,6 +67,8 @@ def get_fwd_configs():
     for m, n, s, t, stages, r, k, p, qkw, vw in itertools.product(
         block_M, block_N, num_split_q, threads, num_stages, enable_rasterization, k_pack, panel_size, qk_coalesced_width, v_coalesced_width
     ):
+        if IsRDNA() and m == 16 and n == 16 and t == 64:
+            continue
         valid_configs.append(
             {
                 "block_M": m,
@@ -127,6 +150,10 @@ def fast_flashattn(
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
+                # Bridge the WMMA D-layout softmax fragment into the A-layout
+                # expected by GEMM 2 on RDNA GPUs.
+                if IsRDNA():
+                    P_shared = T.alloc_shared([block_M, block_N], dtype)
                 acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
 
                 acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -188,7 +215,12 @@ def fast_flashattn(
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
 
-                    T.copy(acc_s, acc_s_cast)
+                    if IsRDNA():
+                        for i, j in T.Parallel(block_M, block_N):
+                            P_shared[i, j] = T.cast(acc_s[i, j], dtype)
+                        T.copy(P_shared, acc_s_cast)
+                    else:
+                        T.copy(acc_s, acc_s_cast)
 
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
 
@@ -211,15 +243,27 @@ def fast_flashattn(
 
 
 def get_bwd_configs():
-    block_M = [16, 32, 64, 128, 256]
-    block_N = [16, 32, 64, 128, 256]
-    threads = [64, 128, 256, 512, 1024]
-    num_stages = [0, 1, 2]
+    # Keep the RDNA search space aligned with the WMMA-friendly tile sizes
+    # verified above. Larger tiles and some warp/block combinations are either
+    # unsupported or known to trigger invalid lowering on RDNA.
+    if IsRDNA():
+        block_M = [16, 32]
+        block_N = [16, 32]
+        threads = [32, 64]
+        num_stages = [0]
+        panel_size = [7, 8]
+    else:
+        block_M = [16, 32, 64, 128, 256]
+        block_N = [16, 32, 64, 128, 256]
+        threads = [64, 128, 256, 512, 1024]
+        num_stages = [0, 1, 2]
+        panel_size = [7, 8, 9, 10]
     enable_rasterization = [True]
-    panel_size = [7, 8, 9, 10]
 
     configs = []
     for m, n, stages, t, r, p in itertools.product(block_M, block_N, num_stages, threads, enable_rasterization, panel_size):
+        if IsRDNA() and m == 16 and n == 16 and t == 64:
+            continue
         configs.append(
             {
                 "block_M": m,
@@ -305,6 +349,10 @@ def flashattn_bwd(
             lse_shared = T.alloc_shared([block_N], accum_dtype)
             delta_shared = T.alloc_shared([block_N], accum_dtype)
             ds_shared = T.alloc_shared([block_M, block_N], dtype)
+            if IsRDNA():
+                # Bridge the WMMA D-layout fragment produced by GEMM/elementwise
+                # ops into the A-layout expected by the following GEMM.
+                p_shared = T.alloc_shared([block_M, block_N], dtype)
 
             p_cast = T.alloc_fragment([block_M, block_N], dtype)
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -343,17 +391,29 @@ def flashattn_bwd(
 
                 T.gemm(V_shared, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
-                T.copy(P_acc, p_cast)
+                if IsRDNA():
+                    for i, j in T.Parallel(block_M, block_N):
+                        p_shared[i, j] = T.cast(P_acc[i, j], dtype)
+                    T.copy(p_shared, p_cast)
+                else:
+                    T.copy(P_acc, p_cast)
                 T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(Delta[bz, bx, k * block_N : (k + 1) * block_N], delta_shared)
 
-                for i, j in T.Parallel(block_M, block_N):
-                    p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
-
-                T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
-
+                if IsRDNA():
+                    for i, j in T.Parallel(block_M, block_N):
+                        dP[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+                    for i, j in T.Parallel(block_M, block_N):
+                        p_shared[i, j] = T.cast(dP[i, j], dtype)
+                    T.copy(p_shared, p_cast)
+                    T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
+                else:
+                    for i, j in T.Parallel(block_M, block_N):
+                        p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+                    T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(p_cast, ds_shared)
+
                 T.clear(dq)
                 T.gemm(ds_shared, K_shared, dq, transpose_A=True)
                 for i, j in T.Parallel(block_N, dim):

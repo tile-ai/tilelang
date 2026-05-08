@@ -4,6 +4,14 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+import pytest
+
+SUBTYPE_M_VALUES = [1, 2, 4, 8, 16, 32]
+SUBTYPE_STRIDE_MULTIPLIERS = [1, 2, 4]
+SUBTYPE_LAST_DIM_RUNTIME_SIZES = [4, 8, 16, 32]
+SUBTYPE_SHARED_SYMBOLIC_M_VALUES = [1, 2, 4, 8]
+SUBTYPE_SHARED_SYMBOLIC_STRIDED_M_VALUES = [2, 4, 8]
+SUBTYPE_COMPLEX_EXPRESSION_CASES = [(2, 8), (4, 16), (8, 32)]
 
 
 @tilelang.jit
@@ -72,27 +80,31 @@ def test_subtype_noncontiguous_tensor():
 
 
 @tilelang.testing.requires_cuda
-def test_subtype_different_m_values():
+@pytest.mark.parametrize("m", SUBTYPE_M_VALUES, ids=[f"m={m}" for m in SUBTYPE_M_VALUES])
+def test_subtype_different_m_values(m):
     """Test subtype binding with different values of symbolic variable m."""
-    for m in [1, 2, 4, 8, 16, 32]:
-        # Runtime shape [m, 8] -> Logical shape [m, 16] for fp4
-        t = torch.randint(0, 256, (m, 8), dtype=torch.uint8, device="cuda")
-        basic_shape_kernel(t)
+    # Runtime shape [m, 8] -> Logical shape [m, 16] for fp4
+    t = torch.randint(0, 256, (m, 8), dtype=torch.uint8, device="cuda")
+    basic_shape_kernel(t)
 
 
 @tilelang.testing.requires_cuda
-def test_subtype_different_strides():
+@pytest.mark.parametrize(
+    "stride_multiplier",
+    SUBTYPE_STRIDE_MULTIPLIERS,
+    ids=[f"stride_x{stride}" for stride in SUBTYPE_STRIDE_MULTIPLIERS],
+)
+def test_subtype_different_strides(stride_multiplier):
     """Test subtype stride binding with different stride values."""
     # Test with different non-contiguous strides
-    for stride_multiplier in [1, 2, 4]:
-        # Create tensor with specific stride pattern
-        t_large = torch.randint(0, 256, (4 * stride_multiplier, 8), dtype=torch.uint8, device="cuda")
-        # Slice to get stride [8 * stride_multiplier, 1]
-        t_strided = t_large[::stride_multiplier, :]
-        assert t_strided.shape == (4, 8)
-        assert t_strided.stride() == (8 * stride_multiplier, 1)
+    # Create tensor with specific stride pattern
+    t_large = torch.randint(0, 256, (4 * stride_multiplier, 8), dtype=torch.uint8, device="cuda")
+    # Slice to get stride [8 * stride_multiplier, 1]
+    t_strided = t_large[::stride_multiplier, :]
+    assert t_strided.shape == (4, 8)
+    assert t_strided.stride() == (8 * stride_multiplier, 1)
 
-        strided_kernel(t_strided)
+    strided_kernel(t_strided)
 
 
 @tilelang.jit
@@ -165,12 +177,16 @@ def test_subtype_symbolic_last_dim():
 
 
 @tilelang.testing.requires_cuda
-def test_subtype_symbolic_last_dim_various_sizes():
+@pytest.mark.parametrize(
+    "n_runtime",
+    SUBTYPE_LAST_DIM_RUNTIME_SIZES,
+    ids=[f"runtime_n={n}" for n in SUBTYPE_LAST_DIM_RUNTIME_SIZES],
+)
+def test_subtype_symbolic_last_dim_various_sizes(n_runtime):
     """Test symbolic last dimension with various sizes."""
-    for n_runtime in [4, 8, 16, 32]:
-        # Logical n = runtime_n * 2 (pack_factor for fp4)
-        t = torch.randint(0, 256, (4, n_runtime), dtype=torch.uint8, device="cuda")
-        symbolic_last_dim_kernel(t)
+    # Logical n = runtime_n * 2 (pack_factor for fp4)
+    t = torch.randint(0, 256, (4, n_runtime), dtype=torch.uint8, device="cuda")
+    symbolic_last_dim_kernel(t)
 
 
 @tilelang.testing.requires_cuda
@@ -194,7 +210,12 @@ def test_subtype_symbolic_last_dim_strided():
 
 
 @tilelang.testing.requires_cuda
-def test_subtype_shared_symbolic():
+@pytest.mark.parametrize(
+    "m",
+    SUBTYPE_SHARED_SYMBOLIC_M_VALUES,
+    ids=[f"m={m}" for m in SUBTYPE_SHARED_SYMBOLIC_M_VALUES],
+)
+def test_subtype_shared_symbolic(m):
     """Test shared symbolic variable across multiple buffers.
 
     x has shape (m, 16), y has shape (m*4, 16).
@@ -206,24 +227,27 @@ def test_subtype_shared_symbolic():
     - x runtime: (2, 8), logical: (2, 16)
     - y runtime: (8, 8), logical: (8, 16)
     """
-    for m in [1, 2, 4, 8]:
-        x = torch.randint(0, 256, (m, 8), dtype=torch.uint8, device="cuda")
-        y = torch.randint(0, 256, (m * 4, 8), dtype=torch.uint8, device="cuda")
-        shared_symbolic_kernel(x, y)
+    x = torch.randint(0, 256, (m, 8), dtype=torch.uint8, device="cuda")
+    y = torch.randint(0, 256, (m * 4, 8), dtype=torch.uint8, device="cuda")
+    shared_symbolic_kernel(x, y)
 
 
 @tilelang.testing.requires_cuda
-def test_subtype_shared_symbolic_strided():
+@pytest.mark.parametrize(
+    "m",
+    SUBTYPE_SHARED_SYMBOLIC_STRIDED_M_VALUES,
+    ids=[f"m={m}" for m in SUBTYPE_SHARED_SYMBOLIC_STRIDED_M_VALUES],
+)
+def test_subtype_shared_symbolic_strided(m):
     """Test shared symbolic variable in strides across multiple buffers.
 
     x has shape (m, 16) with stride (s, 1)
     y has shape (m*2, 16) with stride (s, 1)
     """
-    for m in [2, 4, 8]:
-        # Create contiguous tensors
-        x = torch.randint(0, 256, (m, 8), dtype=torch.uint8, device="cuda")
-        y = torch.randint(0, 256, (m * 2, 8), dtype=torch.uint8, device="cuda")
-        shared_symbolic_strided_kernel(x, y)
+    # Create contiguous tensors
+    x = torch.randint(0, 256, (m, 8), dtype=torch.uint8, device="cuda")
+    y = torch.randint(0, 256, (m * 2, 8), dtype=torch.uint8, device="cuda")
+    shared_symbolic_strided_kernel(x, y)
 
 
 @tilelang.testing.requires_cuda
@@ -263,14 +287,113 @@ def test_subtype_complex_expressions():
 
 
 @tilelang.testing.requires_cuda
-def test_subtype_complex_expressions_various():
+@pytest.mark.parametrize(
+    ("m", "n"),
+    SUBTYPE_COMPLEX_EXPRESSION_CASES,
+    ids=[f"m={m}-n={n}" for m, n in SUBTYPE_COMPLEX_EXPRESSION_CASES],
+)
+def test_subtype_complex_expressions_various(m, n):
     """Test complex expressions with various m, n values."""
-    for m, n in [(2, 8), (4, 16), (8, 32)]:
-        # x logical (m, n*2) -> runtime (m, n)
-        # y logical (m*2, n) -> runtime (m*2, n/2)
-        x = torch.randint(0, 256, (m, n), dtype=torch.uint8, device="cuda")
-        y = torch.randint(0, 256, (m * 2, n // 2), dtype=torch.uint8, device="cuda")
-        complex_expr_kernel(x, y)
+    # x logical (m, n*2) -> runtime (m, n)
+    # y logical (m*2, n) -> runtime (m*2, n/2)
+    x = torch.randint(0, 256, (m, n), dtype=torch.uint8, device="cuda")
+    y = torch.randint(0, 256, (m * 2, n // 2), dtype=torch.uint8, device="cuda")
+    complex_expr_kernel(x, y)
+
+
+# ---------------------------------------------------------------------------
+# Scalar fp4 store to StridedTensor with dynamic strides.
+# Before the fix the codegen wrote full bytes instead of nibbles, so
+# consecutive fp4 elements sharing a byte would overwrite each other.
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("block_size", [8, 16])
+def test_subtype_fp4_dynamic_stride_store(block_size):
+    """fp4 store via StridedTensor: dynamic strides must match static strides."""
+    num_blocks, n, padding = 10, 64, 4
+    fp4_bytes = 64  # 128 fp4 elems packed into 64 bytes
+    jit_kw = dict(out_idx=None, target="cuda", pass_configs={"tl.disable_data_race_check": True})
+
+    def make_buf():
+        row = fp4_bytes + padding
+        back = torch.zeros(num_blocks, block_size * row, dtype=torch.uint8, device="cuda")
+        fp4 = back[:, : block_size * fp4_bytes].view(num_blocks, block_size, fp4_bytes).view(torch.int8)
+        return back, fp4
+
+    torch.manual_seed(0)
+    src = torch.randint(0, 256, (n, 64), dtype=torch.uint8, device="cuda").view(torch.int8)
+    slots = torch.randperm(num_blocks * block_size, dtype=torch.int32, device="cuda")[:n]
+
+    # static (reference) — strides known at compile time
+    back_s, fp4_s = make_buf()
+    s0 = fp4_s.stride(0) * 2  # byte stride → fp4-element stride
+    s1 = fp4_s.stride(1) * 2
+
+    @tilelang.jit(**jit_kw)
+    def static_kern(src, dst, slots):
+        nv = T.dynamic("n")
+        nb = T.dynamic("num_blocks")
+        src: T.Tensor[(nv, 128), T.float4_e2m1fn]
+        dst: T.StridedTensor[(nb, block_size, 128), (s0, s1, 1), T.float4_e2m1fn]
+        slots: T.Tensor[(nv,), T.int32]
+        with T.Kernel(nv, threads=32) as i:
+            for k in T.serial(128):
+                dst[slots[i] // block_size, slots[i] % block_size, k] = src[i, k]
+
+    static_kern(src, fp4_s, slots)
+
+    # dynamic — strides resolved at runtime
+    @tilelang.jit(**jit_kw)
+    def dynamic_kern(src, dst, slots):
+        nv = T.dynamic("n")
+        nb = T.dynamic("num_blocks")
+        ds0 = T.dynamic("ds0")
+        ds1 = T.dynamic("ds1")
+        src: T.Tensor[(nv, 128), T.float4_e2m1fn]
+        dst: T.StridedTensor[(nb, block_size, 128), (ds0, ds1, 1), T.float4_e2m1fn]
+        slots: T.Tensor[(nv,), T.int32]
+        with T.Kernel(nv, threads=32) as i:
+            for k in T.serial(128):
+                dst[slots[i] // block_size, slots[i] % block_size, k] = src[i, k]
+
+    back_d, fp4_d = make_buf()
+    dynamic_kern(src, fp4_d, slots)
+
+    assert torch.equal(back_s, back_d), (
+        f"static vs dynamic stride mismatch: {(back_s != back_d).sum().item()}/{back_s.numel()} bytes differ"
+    )
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("n", [64, 128])
+def test_subtype_fp4_scalar_store_codegen(n):
+    """Scatter fp4 elements via indirection — forces scalar (non-vectorized) stores."""
+
+    @tilelang.jit(out_idx=None, pass_configs={"tl.disable_data_race_check": True})
+    def scatter_kern(src, dst, perm):
+        nv = T.dynamic("n")
+        src: T.Tensor[(nv, 128), T.float4_e2m1fn]
+        dst: T.Tensor[(nv, 128), T.float4_e2m1fn]
+        perm: T.Tensor[(nv,), T.int32]
+        with T.Kernel(nv, threads=32) as i:
+            for k in T.serial(128):
+                dst[perm[i], k] = src[i, k]
+
+    torch.manual_seed(42)
+    src = torch.randint(0, 256, (n, 64), dtype=torch.uint8, device="cuda").view(torch.int8)
+    dst = torch.zeros(n, 64, dtype=torch.uint8, device="cuda").view(torch.int8)
+    perm = torch.randperm(n, dtype=torch.int32, device="cuda")
+
+    scatter_kern(src, dst, perm)
+
+    # Invert the permutation and check src[inv[j]] == dst[j] at byte level
+    inv = torch.empty_like(perm)
+    inv[perm] = torch.arange(n, dtype=torch.int32, device="cuda")
+    expected = src.view(torch.uint8)[inv.long()]
+    actual = dst.view(torch.uint8)
+    assert torch.equal(expected, actual), f"scatter fp4 mismatch: {(expected != actual).sum().item()}/{actual.numel()} bytes differ"
 
 
 if __name__ == "__main__":

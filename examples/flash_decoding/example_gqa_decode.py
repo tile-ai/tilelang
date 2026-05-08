@@ -40,13 +40,13 @@ def get_heuristic_config() -> Tuple[Dict, int]:
     return cfg, sm_version
 
 
-# TODO(lei): fix warp specialized and tma lower pass
+# TODO(lei): fix warp specialized pass
 def get_pass_configs():
-    return {tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+    return {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
-@tilelang.jit(out_idx=[6], pass_configs=get_pass_configs())
+@tilelang.jit(out_idx=[4], pass_configs=get_pass_configs())
 def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split, num_stages, threads):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     shape_q = [batch, heads, dim]
@@ -67,10 +67,10 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
         K: T.Tensor(shape_k, dtype),
         V: T.Tensor(shape_v, dtype),
         mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor(part_shape, dtype),
         Output: T.Tensor(shape_o, dtype),
     ):
+        glse = T.alloc_global([batch, heads, num_split], dtype)
+        Output_partial = T.alloc_global(part_shape, dtype)
         # split
         with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
@@ -193,8 +193,6 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
         K: T.Tensor(shape_k, dtype),
         V: T.Tensor(shape_v, dtype),
         mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor(part_shape, dtype),
         Output: T.Tensor(shape_o, dtype),
     ):
         with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
@@ -259,7 +257,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
         return flashattn_gqa_decode_no_split
 
 
-def ref_program(query, key, value, mask, glse, Output_partial):
+def ref_program(query, key, value, mask):
     #     """
     #     Inputs:
     #     - query (Tensor): [batch, heads, dim]
@@ -417,12 +415,9 @@ def main(batch: int = 1, heads: int = 32, groups: int = 8, kv_seqlen: int = 8192
         k = torch.randn(batch, kv_seqlen, groups, dim, device="cuda", dtype=torch.float16)
         v = torch.randn(batch, kv_seqlen, groups, dim, device="cuda", dtype=torch.float16)
         mask = torch.randint(0, 2, (batch, kv_seqlen, groups), device="cuda", dtype=torch.uint8)
-        split = config["num_split"]
-        glse = torch.empty(batch, heads, split, device="cuda", dtype=torch.float16)
-        Output_partial = torch.empty(batch, heads, split, dim, device="cuda", dtype=torch.float16)
-        o = kernel(q, k, v, mask, glse, Output_partial)
-        o_ref = ref_program(q, k, v, mask, glse, Output_partial)
-        o_ref_split = ref_split_program(q, k, v, mask, glse, Output_partial)
+        o = kernel(q, k, v, mask)
+        o_ref = ref_program(q, k, v, mask)
+        o_ref_split = ref_split_program(q, k, v, mask)
 
         print(o)
         print(o_ref)

@@ -27,6 +27,11 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/expr.h>
+// std::vector<Stmt> below requires Stmt to be a complete type when the
+// class layout is computed: clang-cl + MSVC's STL eagerly probes T's
+// is_trivially_destructible / sizeof / alignof during vector instantiation,
+// which fails if Stmt is only forward-declared via expr.h.
+#include <tvm/tir/stmt.h>
 
 #include <string>
 #include <unordered_map>
@@ -166,7 +171,7 @@ public:
 
   void RelaxedStrideCheck(const int dim_idx, const PrimExpr &stride,
                           const PrimExpr &logical_stride_val,
-                          const PrimExpr &is_null,
+                          const PrimExpr &dim_shape, const PrimExpr &is_null,
                           const std::string &stride_element_name);
 
 private:

@@ -6,13 +6,20 @@ from tvm import tir
 import numpy as np
 
 
+def _get_float8_dtypes():
+    """Collect available float8 dtypes - some may not exist in older torch versions."""
+    dtypes = set()
+    for name in ("float8_e5m2", "float8_e5m2fnuz", "float8_e4m3fn", "float8_e4m3fnuz"):
+        if hasattr(torch, name):
+            dtypes.add(getattr(torch, name))
+    return dtypes
+
+
+_FLOAT8_DTYPES = _get_float8_dtypes()
+
+
 def is_float8_dtype(dtype: torch.dtype) -> bool:
-    return dtype in {
-        torch.float8_e5m2,
-        torch.float8_e5m2fnuz,
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-    }
+    return dtype in _FLOAT8_DTYPES
 
 
 def fp8_remove_negative_zeros_(tensor: torch.Tensor):
@@ -30,39 +37,6 @@ class TensorSupplyType(Enum):
     Zero = 5
     One = 6
     Auto = 7
-
-
-def map_torch_type(intype) -> torch.dtype:
-    # Convert to string if needed
-    if not isinstance(intype, str):
-        intype = str(intype)
-
-    if intype == "float8_e4m3":
-        assert hasattr(torch, "float8_e4m3fn"), "torch.float8_e4m3fn is not supported in this version of torchPlease upgrade torch >= 2.1.0"
-        return torch.float8_e4m3fn
-    elif intype == "float8_e5m2":
-        assert hasattr(torch, "float8_e5m2"), "torch.float8_e5m2 is not supported in this version of torchPlease upgrade torch >= 2.1.0"
-        return torch.float8_e5m2
-    elif intype == "e4m3fnuz_float8":
-        assert hasattr(torch, "float8_e4m3fnuz"), (
-            "torch.float8_e4m3fnuz is not supported in this version of torchPlease upgrade torch >= 2.2.0"
-        )
-        return torch.float8_e4m3fnuz
-    elif intype == "float8_e8m0fnu":
-        assert hasattr(torch, "float8_e8m0fnu"), (
-            "torch.float8_e8m0fnu is not supported in this version of torchPlease upgrade torch >= 2.8.0"
-        )
-        return torch.float8_e8m0fnu
-    elif intype == "float4_e2m1fnx2":
-        assert hasattr(torch, "float4_e2m1fnx2"), (
-            "torch.float4_e2m1fnx2 is not supported in this version of torchPlease upgrade torch >= 2.8.0"
-        )
-        return torch.float4_e2m1fnx2
-    elif "float4" in intype:
-        # PyTorch doesn't support float4, use int8 as storage type
-        return torch.int8
-    else:
-        return getattr(torch, intype)
 
 
 def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):

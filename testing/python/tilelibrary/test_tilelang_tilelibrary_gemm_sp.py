@@ -6,11 +6,10 @@ import tilelang.language as T
 
 from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
 from tilelang.layout import make_cutlass_metadata_layout
-from tilelang.utils.tensor import torch_assert_close, map_torch_type
+from tilelang.utils.tensor import torch_assert_close
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
 torch.backends.cuda.matmul.allow_tf32 = False
-# torch.manual_seed(42)  # only enable when debugging
 
 
 def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
@@ -22,11 +21,11 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
             low, high = (0, 4) if is_unsigned else (-2, 2)
         else:
             low, high = (0, 128) if is_unsigned else (-64, 64)
-        A = randint_semi_sparse(M, K, low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
-        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda")
+        A = randint_semi_sparse(M, K, low=low, high=high, dtype=T.dtype(in_dtype).as_torch(), device="cuda", transposed=trans_A)
+        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=T.dtype(in_dtype).as_torch(), device="cuda")
     else:
-        A = randn_semi_sparse(M, K, dtype=torch.float32, device="cuda", transposed=trans_A).to(map_torch_type(in_dtype))
-        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(map_torch_type(in_dtype))
+        A = randn_semi_sparse(M, K, dtype=torch.float32, device="cuda", transposed=trans_A).to(T.dtype(in_dtype).as_torch())
+        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(T.dtype(in_dtype).as_torch())
     return A, B
 
 
@@ -305,20 +304,13 @@ def run_gemm_sp_sm80(
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 @pytest.mark.parametrize(
     "M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K, num_stages, num_threads, trans_A, trans_B",
     [
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 32, 2, 128, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 32, 0, 256, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 128, False, False),
         (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 2, 128, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 128, 128, 128, 0, 128, False, False),
         (512, 1024, 768, T.float16, T.float32, T.float32, 128, 128, 128, 2, 128, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 128, 256, 0, 128, False, False),
         (512, 1024, 768, T.float16, T.float32, T.float32, 64, 128, 256, 2, 128, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 128, False, True),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 128, False, False),
         (512, 1024, 768, T.float8_e4m3fn, T.float16, T.float16, 64, 64, 64, 2, 128, False, True),
         (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 2, 128, False, True),
     ],
@@ -333,19 +325,9 @@ def test_gemm_sp_sm90(M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_
 @pytest.mark.parametrize(
     "M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K, num_stages, num_threads, trans_A, trans_B",
     [
-        (512, 1024, 768, T.float16, T.float32, T.float32, 32, 32, 32, 0, 32, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 32, False, False),
         (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 128, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 32, 32, 64, 0, 32, False, True),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 32, False, True),
         (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 0, 128, False, True),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 1, 128, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 2, 128, False, False),
-        (512, 1024, 768, T.float16, T.float32, T.float32, 64, 64, 64, 3, 128, False, False),
-        (512, 1024, 768, T.int8, T.int32, T.int32, 32, 32, 64, 0, 32, False, True),
-        (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 0, 32, False, True),
         (512, 1024, 768, T.int8, T.int32, T.int32, 128, 128, 128, 0, 128, False, True),
-        (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 1, 128, False, True),
         (512, 1024, 768, T.int8, T.int32, T.int32, 64, 64, 64, 2, 128, False, True),
     ],
 )

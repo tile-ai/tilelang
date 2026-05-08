@@ -222,18 +222,18 @@ def sparse_mla_fwd(
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, index, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, index, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                             # tail_dim (64) needs only one iter of 8 elems per 8 collaborating threads
                             T.ptx_cp_async(
                                 T.access_ptr(K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, index, g_i, D + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
@@ -253,17 +253,17 @@ def sparse_mla_fwd(
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, index, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, index, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                             T.ptx_cp_async(
                                 T.access_ptr(K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, index, g_i, D + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
@@ -294,9 +294,9 @@ def sparse_mla_fwd(
                     T.barrier_wait(bar_k_0_ready[0], (i_i & 1))
 
                     T.fill(acc_s_0, 0)
-                    T.gemm(Q_shared_l, KV_shared_0_l, acc_s_0, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_shared_r, KV_shared_0_r, acc_s_0, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_tail_shared, K_tail_shared_0, acc_s_0, transpose_B=True, wg_wait=-1)
+                    T.wgmma_gemm(Q_shared_l, KV_shared_0_l, acc_s_0, transpose_B=True)
+                    T.wgmma_gemm(Q_shared_r, KV_shared_0_r, acc_s_0, transpose_B=True)
+                    T.wgmma_gemm(Q_tail_shared, K_tail_shared_0, acc_s_0, transpose_B=True)
 
                     T.copy(m_i_0, m_i_prev_0)
                     T.wait_wgmma(0)
@@ -342,13 +342,13 @@ def sparse_mla_fwd(
                     T.copy(acc_s_0, S_shared_0)
                     T.barrier_arrive(bar_S_0_ready)
 
-                    T.gemm(S_shared_0, KV_shared_0_l, acc_o_l, transpose_B=False, wg_wait=-1)
+                    T.wgmma_gemm(S_shared_0, KV_shared_0_l, acc_o_l, transpose_B=False)
 
                     # --- Step 4: O_L += P1 @ V1_L (Cross-Attention) ---
                     # Wait for P1 (S1) from peer
                     T.barrier_wait(bar_S_1_ready, (i_i & 1))
 
-                    T.gemm(S_shared_1, KV_shared_1_l, acc_o_l, transpose_B=False, wg_wait=-1)
+                    T.wgmma_gemm(S_shared_1, KV_shared_1_l, acc_o_l, transpose_B=False)
 
                     # NOTE: However, k_0 and k_1 are used by both consumer0 and consumer1, so this doesn't bring much performance improvement
                     # Except for the most recent async gemm (i.e., S_shared_1 @ KV_shared_1_k), all others need to wait to finish
@@ -398,9 +398,9 @@ def sparse_mla_fwd(
                     T.barrier_wait(bar_k_1_ready[0], (i_i & 1))
 
                     T.fill(acc_s_1, 0)
-                    T.gemm(Q_shared_l, KV_shared_1_l, acc_s_1, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_shared_r, KV_shared_1_r, acc_s_1, transpose_B=True, wg_wait=-1)
-                    T.gemm(Q_tail_shared, K_tail_shared_1, acc_s_1, transpose_B=True, wg_wait=-1)
+                    T.wgmma_gemm(Q_shared_l, KV_shared_1_l, acc_s_1, transpose_B=True)
+                    T.wgmma_gemm(Q_shared_r, KV_shared_1_r, acc_s_1, transpose_B=True)
+                    T.wgmma_gemm(Q_tail_shared, K_tail_shared_1, acc_s_1, transpose_B=True)
 
                     # --- Step 2: Local Softmax Stats & Exchange ---
                     T.copy(m_i_1, m_i_prev_1)
@@ -437,12 +437,12 @@ def sparse_mla_fwd(
 
                     T.barrier_arrive(bar_S_1_ready)
 
-                    T.gemm(S_shared_1, KV_shared_1_r, acc_o_r, transpose_B=False, wg_wait=-1)
+                    T.wgmma_gemm(S_shared_1, KV_shared_1_r, acc_o_r, transpose_B=False)
 
                     # --- Step 4: O_R += P0 @ V0_R (Cross-Attention) ---
                     T.barrier_wait(bar_S_0_ready, (i_i & 1))
 
-                    T.gemm(S_shared_0, KV_shared_0_r, acc_o_r, transpose_B=False, wg_wait=-1)
+                    T.wgmma_gemm(S_shared_0, KV_shared_0_r, acc_o_r, transpose_B=False)
 
                     T.wait_wgmma(1)
                     T.barrier_arrive(bar_k_1_free[0])

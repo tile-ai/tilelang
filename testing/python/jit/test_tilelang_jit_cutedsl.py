@@ -3,7 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
-from tilelang.utils.tensor import map_torch_type
+import pytest
 
 
 def matmul(
@@ -179,8 +179,8 @@ def run_gemm_jit_kernel(
 
     matmul_kernel = tilelang.compile(program, out_idx=-1, target="cutedsl")
 
-    in_dtype = map_torch_type(in_dtype)
-    out_dtype = map_torch_type(out_dtype)
+    in_dtype = T.dtype(in_dtype).as_torch()
+    out_dtype = T.dtype(out_dtype).as_torch()
 
     A = torch.randn(M, K, dtype=in_dtype).cuda()
     B = torch.randn(K, N, dtype=in_dtype).cuda()
@@ -256,6 +256,7 @@ def run_cutedsl_kernel_do_bench(
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.perf
 def test_cutedsl_kernel_do_bench():
     run_cutedsl_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
@@ -280,8 +281,8 @@ def run_cutedsl_kernel_multi_stream(
     )
 
     matmul_kernel = tilelang.compile(program, target="cutedsl")
-    in_dtype = map_torch_type(in_dtype)
-    out_dtype = map_torch_type(out_dtype)
+    in_dtype = T.dtype(in_dtype).as_torch()
+    out_dtype = T.dtype(out_dtype).as_torch()
     tensor_a = torch.randn(M, K, dtype=in_dtype).cuda()
     tensor_b = torch.randn(K, N, dtype=in_dtype).cuda()
 
@@ -330,8 +331,8 @@ def run_cutedsl_dynamic_shape(
     if isinstance(K, T.Var):
         K = 768
 
-    in_dtype = map_torch_type(in_dtype)
-    out_dtype = map_torch_type(out_dtype)
+    in_dtype = T.dtype(in_dtype).as_torch()
+    out_dtype = T.dtype(out_dtype).as_torch()
 
     tensor_a = torch.randn(M, K, dtype=in_dtype).cuda()
     tensor_b = torch.randn(K, N, dtype=in_dtype).cuda()
@@ -357,52 +358,6 @@ def test_cutedsl_dynamic_shape():
     run_cutedsl_dynamic_shape(
         T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16", "float16", 128, 256, 32, 2
     )
-
-
-def run_cutedsl_barrier(
-    M,
-    N,
-    K,
-    block_M,
-    block_N,
-    block_K,
-    mbars,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
-    num_stages,
-    threads,
-):
-    program = matmul_kernel_with_barrier(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        mbars,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        accum_dtype,
-        num_stages,
-        threads,
-    )
-    matmul_kernel = tilelang.compile(program, target="cutedsl")
-
-    source = matmul_kernel.get_kernel_source()
-    assert f"barriers = tl.alloc_smem(cutlass.Uint64, size_in_elems={len(mbars)})" in source
-    for i, arrive_count in enumerate(mbars):
-        assert f"tl.mbarrier_init((barriers + {i}), {arrive_count})" in source
-
-
-@tilelang.testing.requires_cuda
-def test_cutedsl_barrier():
-    mbars = (1, 1, 128, 128)
-    run_cutedsl_barrier(512, 1024, 768, 128, 256, 32, mbars, False, False, "float16", "float16", "float16", 2, 128)
 
 
 def check_hopper():

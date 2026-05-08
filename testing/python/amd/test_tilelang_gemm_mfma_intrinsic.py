@@ -164,7 +164,6 @@ def tl_matmul(
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.float32, a_transposed=False, b_transposed=True, k_pack=1):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack)
-    print(matmul)
     kernel = tilelang.compile(matmul)
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
@@ -221,16 +220,15 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
         (128, 256, 256, T.int8, T.int32, T.int32, False, True, 2),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 1),
         (128, 256, 256, T.int8, T.int32, T.int32, False, False, 2),
-        (128, 128, 128, T.dtype(determine_fp8_type()), T.float16, T.float32, False, True, 1),
-        (128, 256, 256, T.dtype(determine_fp8_type()), T.float32, T.float32, False, True, 1),
-        (128, 256, 256, T.dtype(determine_fp8_type()), T.float32, T.float32, False, True, 2),
-        (128, 256, 256, T.dtype(determine_fp8_type()), T.float32, T.float32, False, False, 1),
-        (128, 256, 256, T.dtype(determine_fp8_type()), T.float32, T.float32, False, False, 2),
+        (128, 128, 128, determine_fp8_type(), T.float16, T.float32, False, True, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, True, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, True, 2),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, False, 1),
+        (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, False, 2),
     ],
 )
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack):
-    print(f"in_dtype: {in_dtype}")
     assert_tl_matmul_correctness(
         M,
         N,

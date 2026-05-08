@@ -27,7 +27,8 @@ ROCm:
 
 ## Implementation
 
-The stubs in `src/target/stubs/` implement a lazy-loading mechanism:
+The CUDA stubs in `src/backend/cuda/stubs/` and ROCm stubs in
+`src/backend/rocm/stubs/` implement a lazy-loading mechanism:
 
 - **Lazy Loading**: Libraries are loaded via `dlopen` only upon the first API call.
 - **Global Symbol Reuse**: For `cudart` and `nvrtc`, the stubs first check the global namespace (`RTLD_DEFAULT`) to use any already loaded symbols (e.g., from PyTorch).

@@ -26,7 +26,14 @@ class GemmBase:
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var):
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
         raise NotImplementedError("lower is not implemented")
 
     def is_gemm_ss(self) -> bool:
@@ -158,6 +165,10 @@ class GemmBase:
         return getattr(self.gemm_node, "wgWait", 0)
 
     @property
+    def is_tcgen05(self) -> bool:
+        return getattr(self.gemm_node, "isTcgen05", False)
+
+    @property
     def policy(self) -> GemmWarpPolicy:
         return getattr(self.gemm_node, "policy", None)
 
@@ -176,6 +187,26 @@ class GemmBase:
             zero = tvm.tir.const(0, T.int32)
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
+
+    @property
+    def SFARegion(self):
+        return getattr(self.gemm_node, "sfaRegion", None)
+
+    @property
+    def SFBRegion(self):
+        return getattr(self.gemm_node, "sfbRegion", None)
+
+    @property
+    def sf_a_id(self) -> PrimExpr:
+        return getattr(self.gemm_node, "sfAId", tvm.tir.const(0, T.int32))
+
+    @property
+    def sf_b_id(self) -> PrimExpr:
+        return getattr(self.gemm_node, "sfBId", tvm.tir.const(0, T.int32))
+
+    @property
+    def is_blockscaled(self) -> bool:
+        return self.SFARegion is not None and self.SFBRegion is not None
 
     def get_region_base_offsets(self, region):
         """

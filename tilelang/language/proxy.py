@@ -6,9 +6,9 @@ from typing import Any, TYPE_CHECKING, Generic, TypeVar
 from tilelang._typing import DType, ShapeType
 from typing_extensions import Self
 
-from tvm import tir
+from tvm import DataType, ir as tvm_ir, tir
 from tvm.tir import Var, PrimExpr
-from tvm.script.ir_builder.tir import buffer, handle, match_buffer
+from tvm.script.ir_builder.tir import LetStmt, buffer, handle, match_buffer
 from tilelang.utils import deprecated
 from tilelang.jit.exceptions import JITNoBuilderError
 
@@ -71,6 +71,15 @@ class BufferProxy:
         return match_buffer(pointer_var, shape, dtype=dtype, strides=strides)
 
 
+def _normalize_tensor_dtype(dtype: DType) -> DType:
+    # `T.Tensor(..., T.ptr)` is a frontend-only marker for pointer tables.
+    # Keep the runtime ABI as int64 storage and rely on T.make_tensor(...)
+    # to reinterpret loaded addresses back into typed pointers as needed.
+    if dtype is ptr:
+        return _dtypes.int64
+    return dtype
+
+
 class BaseTensorProxy:
     """Base proxy class for tensor types with configurable defaults.
 
@@ -97,6 +106,7 @@ class BaseTensorProxy:
         axis_separators=None,
     ) -> tir.Buffer:
         # Use class defaults if not specified
+        dtype = _normalize_tensor_dtype(dtype)
         scope = scope or self.default_scope
         align = align or self.default_align
         offset_factor = offset_factor or self.default_offset_factor
@@ -133,6 +143,7 @@ class BaseTensorProxy:
         Returns:
             A buffer created from the given parameters
         """
+        dtype = _normalize_tensor_dtype(dtype)
         return match_buffer(pointer_var, shape, dtype=dtype, strides=strides)
 
 
@@ -277,9 +288,54 @@ def ptr(dtype: DType | None = None, storage_scope: str = "global", *, is_size_va
     return handle(dtype=dtype, storage_scope=storage_scope, is_size_var=is_size_var)
 
 
-def make_tensor(ptr: Var, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None) -> tir.Buffer:
+def _get_pointer_type_annotation(value: object) -> tvm_ir.PointerType | None:
+    type_annotation = getattr(value, "type_annotation", None)
+    if isinstance(type_annotation, tvm_ir.PointerType):
+        return type_annotation
+    return None
+
+
+def _materialize_pointer_from_addr(addr: PrimExpr, dtype: DType, storage_scope: str = "global") -> Var:
+    from tilelang.language.eager.builder import Builder
+
+    builder = Builder.current()
+    if builder is None:
+        raise JITNoBuilderError("T.make_tensor() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
+
+    value = addr if str(addr.dtype) == "handle" else tir.reinterpret("handle", addr)
+    ptr_type = tvm_ir.PointerType(tvm_ir.PrimType(DataType(dtype)), storage_scope)
+    return builder.enter_frame(LetStmt(value, type_annotation=ptr_type))
+
+
+def make_tensor_from_addr(
+    addr: PrimExpr,
+    shape: ShapeType,
+    dtype: DType = "float32",
+    strides: tuple[PrimExpr, ...] | None = None,
+    storage_scope: str = "global",
+) -> tir.Buffer:
+    from tilelang.language.eager.builder import Builder
+
+    if Builder.current() is None:
+        raise JITNoBuilderError(
+            "T.make_tensor_from_addr() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available."
+        )
+
+    dtype = _normalize_tensor_dtype(dtype)
+    pointer_var = _materialize_pointer_from_addr(addr, dtype, storage_scope)
+    return buffer(shape, dtype=dtype, data=pointer_var, strides=strides, scope=storage_scope)
+
+
+def make_tensor(ptr: Var | PrimExpr, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None) -> tir.Buffer:
     from tilelang.language.eager.builder import Builder
 
     if Builder.current() is None:
         raise JITNoBuilderError("T.make_tensor() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
-    return Tensor.from_ptr(ptr, shape, dtype, strides)
+
+    dtype = _normalize_tensor_dtype(dtype)
+    if isinstance(ptr, Var):
+        return Tensor.from_ptr(ptr, shape, dtype, strides)
+
+    ptr_type = _get_pointer_type_annotation(ptr)
+    storage_scope = ptr_type.storage_scope if ptr_type is not None and ptr_type.storage_scope else "global"
+    return make_tensor_from_addr(ptr, shape, dtype=dtype, strides=strides, storage_scope=storage_scope)

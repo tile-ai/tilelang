@@ -278,9 +278,12 @@ public:
                      {tvm::tir::attr::kKernelLaunchParams, info.launch_params},
                      {tvm::attr::kGlobalSymbol, info.global_symbol}});
     }
-    // @lei: workaround as we may require c host codegen, so we need to set the
-    // global symbol for cpu backend.
-    func = WithAttr(func, tvm::attr::kGlobalSymbol, gvar->name_hint);
+    // Preserve any global_symbol chosen earlier during device splitting.
+    // Source kernels rely on this to launch the external CUDA entry directly.
+    if (!func->GetAttr<String>(tvm::attr::kGlobalSymbol)) {
+      func =
+          WithAttr(std::move(func), tvm::attr::kGlobalSymbol, gvar->name_hint);
+    }
 
     const auto &info = device_info_map_.at(gvar.get());
     const auto &thread_extent = info.thread_extent;

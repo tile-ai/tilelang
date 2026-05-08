@@ -333,74 +333,82 @@ def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_fdiv"), x, y, rounding_mode)
 
 
-def _validate_f32x2_math_args(*args: PrimExpr) -> None:
+_PACKED_X2_DTYPES = frozenset({"float32x2", "bfloat16x2", "float16x2"})
+
+
+def _validate_packed_x2_args(*args: PrimExpr) -> None:
+    """Validate that all arguments are PrimExpr with a supported packed x2 dtype."""
     for arg in args:
         if not isinstance(arg, PrimExpr):
             raise TypeError(f"Expected PrimExpr, got {type(arg)}: {arg}")
-        if arg.dtype != "float32x2":
-            raise ValueError(f"Expected dtype 'float32x2', got '{arg.dtype}'")
+        if arg.dtype not in _PACKED_X2_DTYPES:
+            raise ValueError(f"Expected dtype in {sorted(_PACKED_X2_DTYPES)}, got '{arg.dtype}'")
 
 
-def fadd2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
-    """Packed FP32x2 add.
+# ---------------------------------------------------------------------------
+# Packed x2 element-wise operations
+#
+# All ops accept float32x2, bfloat16x2, and float16x2 operands.
+# On CUDA, the codegen emits ``tl::<op>(...)`` which resolves to the
+# appropriate C++ overload (float2, __half2, __nv_bfloat162, or the uint1
+# bridge overload used by TVM for 16-bit packed types).
+# ---------------------------------------------------------------------------
 
-    Lowers to PTX `add.rn.f32x2` on supported NVIDIA architectures/toolchains,
-    and falls back to per-lane scalar operations otherwise.
 
-    Parameters
-    ----------
-    x : PrimExpr
-        First operand. Must be dtype ``float32x2``.
-    y : PrimExpr
-        Second operand. Must be dtype ``float32x2``.
-
-    Returns
-    -------
-    result : PrimExpr
-        A ``float32x2`` result.
-    """
+def add2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed element-wise add (x + y)."""
     x = tir.convert(x)
     y = tir.convert(y)
-    _validate_f32x2_math_args(x, y)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.fadd2"), x, y)
+    _validate_packed_x2_args(x, y)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.add2"), x, y)
 
 
-def fmul2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
-    """Packed FP32x2 multiply.
-
-    Lowers to PTX `mul.rn.f32x2` on supported NVIDIA architectures/toolchains,
-    and falls back to per-lane scalar operations otherwise.
-    """
+def sub2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed element-wise subtract (x - y)."""
     x = tir.convert(x)
     y = tir.convert(y)
-    _validate_f32x2_math_args(x, y)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.fmul2"), x, y)
+    _validate_packed_x2_args(x, y)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.sub2"), x, y)
+
+
+def mul2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed element-wise multiply (x * y)."""
+    x = tir.convert(x)
+    y = tir.convert(y)
+    _validate_packed_x2_args(x, y)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.mul2"), x, y)
 
 
 def fma2(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
-    """Packed FP32x2 fused multiply-add (x * y + z).
-
-    Lowers to PTX `fma.rn.f32x2` on supported NVIDIA architectures/toolchains,
-    and falls back to per-lane scalar operations otherwise.
-    """
+    """Packed fused multiply-add (x * y + z)."""
     x = tir.convert(x)
     y = tir.convert(y)
     z = tir.convert(z)
-    _validate_f32x2_math_args(x, y, z)
+    _validate_packed_x2_args(x, y, z)
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.fma2"), x, y, z)
 
 
-# Backward-compatible aliases (not exported from `tilelang.language`).
-def fadd_f32x2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
-    return fadd2(x, y)
+def max2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed element-wise maximum."""
+    x = tir.convert(x)
+    y = tir.convert(y)
+    _validate_packed_x2_args(x, y)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.max2"), x, y)
 
 
-def fmul_f32x2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
-    return fmul2(x, y)
+def min2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
+    """Packed element-wise minimum."""
+    x = tir.convert(x)
+    y = tir.convert(y)
+    _validate_packed_x2_args(x, y)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.min2"), x, y)
 
 
-def fma_f32x2(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
-    return fma2(x, y, z)
+def abs2(x: PrimExpr) -> PrimExpr:
+    """Packed element-wise absolute value."""
+    x = tir.convert(x)
+    _validate_packed_x2_args(x)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.abs2"), x)
 
 
 __all__ = [
@@ -420,7 +428,11 @@ __all__ = [
     "ieee_fsqrt",  # noqa: F401
     "ieee_frsqrt",  # noqa: F401
     "ieee_fdiv",  # noqa: F401
-    "fadd2",  # noqa: F401
-    "fmul2",  # noqa: F401
+    "add2",  # noqa: F401
+    "sub2",  # noqa: F401
+    "mul2",  # noqa: F401
     "fma2",  # noqa: F401
+    "max2",  # noqa: F401
+    "min2",  # noqa: F401
+    "abs2",  # noqa: F401
 ]

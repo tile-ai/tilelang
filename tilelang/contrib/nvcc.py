@@ -19,6 +19,32 @@ from tvm.base import py_str
 from tvm.contrib import utils
 
 
+def get_nvcc_subprocess_env() -> dict[str, str] | None:
+    """Return the environment used by NVCC subprocesses.
+
+    On Windows, the pip CUDA toolkit can provide nvcc without a system CUDA
+    install, but nvcc still needs MSVC's host compiler environment.
+    """
+    if os.name != "nt":
+        return None
+
+    from tilelang.contrib.msvc import get_msvc_subprocess_env
+
+    return get_msvc_subprocess_env()
+
+
+def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=None):
+    if kernels_output_dir is None:
+        return temp.relpath(f"{file_name}.cu"), temp.relpath(f"{file_name}.{target_format}")
+
+    os.makedirs(kernels_output_dir, exist_ok=True)
+    fd, temp_code = tempfile.mkstemp(prefix=f"{file_name}_", suffix=".cu", dir=kernels_output_dir)
+    os.close(fd)
+    file_stem, _ = os.path.splitext(os.path.basename(temp_code))
+    temp_target = os.path.join(kernels_output_dir, f"{file_stem}.{target_format}")
+    return temp_code, temp_target
+
+
 def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False):
     """Compile cuda code with NVCC from env.
 
@@ -59,16 +85,9 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     file_name = "tvm_kernels"
     if target_format not in ["cubin", "ptx", "fatbin"]:
         raise ValueError("target_format must be in cubin, ptx, fatbin")
-    temp_code = temp.relpath(f"{file_name}.cu")
-    temp_target = temp.relpath(f"{file_name}.{target_format}")
-
     pass_context = tvm.get_global_func("transform.GetCurrentPassContext")()
     kernels_output_dir = pass_context.config.get("cuda.kernels_output_dir", None)
-    if kernels_output_dir is not None:
-        if not os.path.isdir(kernels_output_dir):
-            os.makedirs(kernels_output_dir)
-        temp_code = os.path.join(kernels_output_dir, f"{file_name}.cu")
-        temp_target = os.path.join(kernels_output_dir, f"{file_name}.{target_format}")
+    temp_code, temp_target = _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=kernels_output_dir)
 
     with open(temp_code, "w") as out_file:
         out_file.write(code)
@@ -82,6 +101,15 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         cmd += arch
     elif isinstance(arch, str):
         cmd += ["-arch", arch]
+    if os.name == "nt":
+        # /Zc:preprocessor: standards-conforming preprocessor (needed by some
+        # CUDA macros).
+        # /Zc:__cplusplus: makes MSVC report the actual C++ standard via the
+        # __cplusplus macro. Without it MSVC reports 199711L, which silently
+        # disables `alignas(128)` on CUtensorMap in cuda.h (CUDA 13). NVCC
+        # then emits ``.param .align 8 .b8 ...[128]`` for the descriptor and
+        # cuLaunchKernel returns CUDA_ERROR_MISALIGNED_ADDRESS at runtime.
+        cmd += ["-Xcompiler", "/Zc:preprocessor /Zc:__cplusplus"]
 
     if options:
         if isinstance(options, str):
@@ -94,15 +122,11 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     cmd += ["-o", file_target]
     cmd += [temp_code]
 
-    # NOTE: ccbin option can be used to tell nvcc where to find the c++ compiler
-    # just in case it is not in the path. On Windows it is not in the path by default.
-    # However, we cannot use TVM_CXX_COMPILER_PATH because the runtime env.
-    # Because it is hard to do runtime compiler detection, we require nvcc is configured
-    # correctly by default.
-    # if cxx_compiler_path != "":
-    #    cmd += ["-ccbin", cxx_compiler_path]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    compiler_env = get_nvcc_subprocess_env()
+    if compiler_env is None:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    else:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=compiler_env)
 
     (out, _) = proc.communicate()
 
@@ -111,6 +135,12 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
 
     if proc.returncode != 0:
         msg = f"{code}\nCompilation error:\n{py_str(out)}\nCommand: {' '.join(cmd)}\n"
+        if os.name == "nt":
+            from tilelang.contrib.msvc import get_msvc_environment_error
+
+            msvc_error = get_msvc_environment_error()
+            if msvc_error:
+                msg += f"MSVC environment: {msvc_error}\n"
         raise RuntimeError(msg)
 
     with open(file_target, "rb") as f:
@@ -137,7 +167,9 @@ def default_compile_options(compile_flags: list[str] | None = None) -> list[str]
     List[str]
         A list of flags suitable for NVCC's command line.
     """
-    options: list[str] = ["-std=c++17"]
+    # Match libgen.py: tl_templates require C++20 (explicit lambda template
+    # parameters used in tl_templates/cuda/reduce.h).
+    options: list[str] = ["-std=c++20"]
     try:
         if TILELANG_TEMPLATE_PATH:
             options.append(f"-I{TILELANG_TEMPLATE_PATH}")
@@ -275,6 +307,38 @@ def find_cuda_path():
     raise RuntimeError(
         "Failed to automatically detect CUDA installation. Please set the CUDA_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda)."
     )
+
+
+def get_cuda_library_dirs(cuda_path=None):
+    """Return CUDA library directories that nvcc may need for host linking."""
+    if cuda_path is None:
+        cuda_path = find_cuda_path()
+
+    base_dirs = []
+    targets_dir = os.path.join(cuda_path, "targets")
+    if os.path.isdir(targets_dir):
+        for target_name in sorted(os.listdir(targets_dir)):
+            base_dirs.append(os.path.join(targets_dir, target_name, "lib"))
+
+    base_dirs.extend(
+        [
+            os.path.join(cuda_path, "lib64"),
+            os.path.join(cuda_path, "lib"),
+        ]
+    )
+
+    candidates = []
+    for lib_dir in base_dirs:
+        candidates.append(lib_dir)
+        candidates.append(os.path.join(lib_dir, "stubs"))
+
+    result = []
+    seen = set()
+    for lib_dir in candidates:
+        if lib_dir not in seen and os.path.isdir(lib_dir):
+            result.append(lib_dir)
+            seen.add(lib_dir)
+    return result
 
 
 def get_cuda_version(cuda_path=None):

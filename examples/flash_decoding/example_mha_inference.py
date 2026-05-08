@@ -8,7 +8,7 @@ from functools import partial
 num_split = 4
 
 
-@tilelang.jit(out_idx=[5])
+@tilelang.jit(out_idx=[3])
 def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
     shape_q = [batch, seqlen_q, heads, dim]
@@ -22,10 +22,10 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
         Q: T.Tensor(shape_q, dtype),
         K: T.Tensor(shape_kv, dtype),
         V: T.Tensor(shape_kv, dtype),
-        glse: T.Tensor([batch, heads, num_split, seqlen_q], dtype),
-        Output_partial: T.Tensor(part_shape, dtype),  # [batch, seqlen_q, heads, num_split, dim]
         Output: T.Tensor(shape_q, dtype),
     ):
+        glse = T.alloc_global([batch, heads, num_split, seqlen_q], dtype)
+        Output_partial = T.alloc_global(part_shape, dtype)  # [batch, seqlen_q, heads, num_split, dim]
         # split
         with T.Kernel(T.ceildiv(seqlen_q, block_M), heads * batch, num_split, threads=128) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
@@ -155,7 +155,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
     return flashattn_mha_inference
 
 
-def ref_program(Q, K, V, glse, Output_partial, causal):
+def ref_program(Q, K, V, causal):
     assert causal is False
     dim = Q.size(-1)
     scores = torch.einsum("bqhd,bkhd->bhqk", Q, K)

@@ -325,8 +325,8 @@ std::pair<PrimExpr, IterVar> CompressIterator(const PrimExpr &expr,
   collector.Collect({iter_sum});
   IterMark mark;
   for (const IterMark &m : collector.visited_) {
-    ICHECK(m->source.as<Var>()) << "Not a normalized iterator: " << mark;
-    if (m->source.as<Var>().value().same_as(var)) {
+    auto v = m->source.as<Var>();
+    if (v && v.value().same_as(var)) {
       mark = m;
       break;
     }
@@ -421,7 +421,7 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
     // Check each physical index component for equality.
     for (size_t i = 0; i < small_physical.size(); i++) {
       auto diff = analyzer.Simplify(small_physical[i] - large_physical[i]);
-      if (!is_zero(diff)) {
+      if (!analyzer.CanProve(diff == 0)) {
         return false;
       }
     }
@@ -456,7 +456,7 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
   // Simplify the difference between the threads.
   auto diff = analyzer.Simplify(thread - check_thread);
   // If the difference is zero, the threads match and the access is valid.
-  return is_zero(diff);
+  return analyzer.CanProve(diff == 0);
 }
 
 } // namespace tl

@@ -23,11 +23,14 @@ else:
 # Python 3.9 compatibility: avoid PEP 604 unions at runtime
 AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
 
-_PYTHON_DTYPE_TO_STR = {
-    bool: "bool",
-    int: "int32",
-    float: "float32",
-}
+
+def _is_any_dtype(obj: object) -> bool:
+    """Check if obj is a dtype-like value. Use instead of isinstance(obj, AnyDType)
+    because Union types cannot be used with isinstance in Python 3.9."""
+    return isinstance(obj, (ir.Type, str, type, torch.dtype, dtype))
+
+
+_PYTHON_DTYPE_TO_STR = {bool: "bool", int: "int32", float: "float32"}
 
 _NUMPY_DTYPE_TO_STR = {
     np.bool_: "bool",
@@ -64,9 +67,6 @@ _TORCH_DTYPE_TO_STR = {
     torch.int32: "int32",
     torch.int64: "int64",
     torch.uint8: "uint8",
-    torch.uint16: "uint16",
-    torch.uint32: "uint32",
-    torch.uint64: "uint64",
     torch.float16: "float16",
     torch.float32: "float32",
     torch.float64: "float64",
@@ -74,6 +74,10 @@ _TORCH_DTYPE_TO_STR = {
 }
 
 _extended_torch_dtypes = [
+    # Some dtypes are not provided by old torch versions
+    ("uint16",),
+    ("uint32",),
+    ("uint64",),
     ("float8_e4m3fn",),
     ("float8_e4m3fnuz",),
     ("float8_e5m2",),
@@ -135,7 +139,12 @@ _STR_TO_TVM_DTYPE_CALL = {
 int_ = int
 
 
-def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var:
+def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tir.Var:
+    # When called with multiple args, pack the scalars into a vector via Shuffle.
+    # e.g. T.bfloat16x2(a, b) -> tir.Shuffle([a, b], [0, 1]) : bfloat16x2
+    if len(args) > 1:
+        return tir.Shuffle(list(args), list(range(len(args))))
+    expr = args[0] if args else None
     if isinstance(expr, int_):
         return tvm.tir.const(expr, dtype=self)
     if self in _STR_TO_TVM_DTYPE_CALL:
@@ -185,7 +194,7 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float8_e5m2":
         assert hasattr(torch, "float8_e5m2"), "torch.float8_e5m2 is not supported in this version of torch. Please upgrade torch >= 2.1.0"
         return torch.float8_e5m2
-    elif dtype_str == "float8_e4m3fnuz":
+    elif dtype_str in ("float8_e4m3fnuz", "e4m3fnuz_float8"):
         assert hasattr(torch, "float8_e4m3fnuz"), (
             "torch.float8_e4m3fnuz is not supported in this version of torch. Please upgrade torch >= 2.2.0"
         )
@@ -203,6 +212,9 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float4_e2m1fn":
         logger.info("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
         return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
+    elif dtype_str == "int4":
+        logger.info("torch doesn't support int4, using int8 as storage dtype.")
+        return torch.int8
     elif dtype_str == "handle":
         return None
     elif dtype_str in _STR_TO_TORCH_DTYPE:
@@ -215,6 +227,8 @@ __orig_dtype_new = dtype.__new__
 
 
 def __dtype_new__(cls, value: AnyDType) -> dtype:
+    if isinstance(value, dtype):
+        return value
     if isinstance(value, str):
         return __orig_dtype_new(cls, _CANONICAL_TO_DISPLAY_STR.get(value, value))
     elif value in _DTYPE_TO_STR:
@@ -407,6 +421,8 @@ if TYPE_CHECKING:
     class float4_e2m1fnx32(dtype): ...
     class float4_e2m1fnx64(dtype): ...
     class bfloat16(dtype): ...
+    class bfloat16x2(dtype): ...
+
     # yapf: enable
 
 else:
@@ -574,8 +590,9 @@ else:
     float4_e2m1fnx32 = dtype("float4_e2m1fnx32")
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
     bfloat16 = dtype("bfloat16")
+    bfloat16x2 = dtype("bfloat16x2")
 
-_all_dtypes = {
+_all_dtypes = [
     "bool",
     "short",
     "int",
@@ -740,7 +757,8 @@ _all_dtypes = {
     "float4_e2m1fnx32",
     "float4_e2m1fnx64",
     "bfloat16",
-}
+    "bfloat16x2",
+]
 
 __all__ = list(_all_dtypes) + [
     "dtype",

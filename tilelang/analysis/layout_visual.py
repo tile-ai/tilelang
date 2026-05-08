@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+import warnings
+
 import tilelang.language as T
 from tvm import tir
 from tvm.tir import PyStmtExprVisitor
@@ -6,7 +11,7 @@ from tvm.tir.transform import prim_func_pass
 from tilelang.tools.plot_layout import plot_layout
 
 
-def print_fragment_format(layout: T.Fragment) -> str:
+def print_fragment_format(layout: T.Fragment) -> None:
     """
     Format fragment layout information into a human-readable string.
 
@@ -23,7 +28,12 @@ def print_fragment_format(layout: T.Fragment) -> str:
     if isinstance(layout, T.Fragment):
         input_shape = layout.get_input_shape()
         output_shape = layout.get_output_shape()
-        lines = [f"  Shape: {input_shape} -> {output_shape}", f"  Thread: {layout.forward_thread}", f"  Index:  {layout.forward_index}"]
+        lines = [
+            f"  Shape: {input_shape} -> {output_shape}",
+            f"  Thread: {layout.forward_thread}",
+            f"  Index:  {layout.forward_index}",
+            f"  Replicate:  {layout.replicate_size}",
+        ]
         print("\n".join(lines))
     else:
         raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
@@ -55,11 +65,21 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
     - "png,svg": Generate multiple formats (comma-separated)
     """
 
-    def __init__(self, formats: list[str] = ""):
+    def __init__(self, formats: str | Sequence[str] = ""):
         super().__init__()
-        self.layout_found = []
-        self.processed_layouts = set()
-        self.formats_list = [f for f in formats if f != "txt"]
+        if formats is None:
+            parsed: list[str] = []
+        elif isinstance(formats, str):
+            formats_str = formats.strip()
+            if formats_str == "":
+                parsed = []
+            elif formats_str == "all":
+                parsed = ["pdf", "png", "svg"]
+            else:
+                parsed = [f.strip() for f in formats_str.split(",") if f.strip()]
+        else:
+            parsed = [str(f).strip() for f in formats if str(f).strip()]
+        self.formats_list = [f for f in parsed if f != "txt"]
 
     def visit_block_(self, op: tir.Block) -> None:
         if "layout_map" in op.annotations:
@@ -67,18 +87,20 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
 
             for key, layout in layout_map.items():
                 if isinstance(layout, T.Fragment):
-                    layout_id = str(layout)
-                    if layout_id not in self.processed_layouts:
-                        print(f"{key} inferenced layout:")
-                        print_fragment_format(layout)
-                        for fmt in self.formats_list:
-                            plot_layout(layout, name=f"{key}_layout", formats=fmt)
-                        self.processed_layouts.add(layout_id)
+                    print(f"{key} inferred layout:")
+                    print_fragment_format(layout)
+                    for fmt in self.formats_list:
+                        input_shape = layout.get_input_shape()
+                        if len(input_shape) != 2:
+                            warnings.warn(
+                                f"Skip plotting {key} layout: input_shape={input_shape} is not 2D.",
+                                stacklevel=2,
+                            )
+                            continue
+                        plot_layout(layout, name=f"{key}_layout", formats=fmt)
 
-        # super().visit_block_(op)
 
-
-def LayoutVisual(formats: str = ""):
+def LayoutVisual(formats: str | Sequence[str] = ""):
     def pass_fn(func: tir.PrimFunc, mod, ctx):
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func

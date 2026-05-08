@@ -170,10 +170,7 @@ def run_gemm_nested_pipelines(
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = kernel.get_profiler()
 
@@ -479,10 +476,7 @@ def run_gemm_mixed_pp():
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = kernel.get_profiler()
 
@@ -516,10 +510,7 @@ def run_gemm_mixed_pp():
         tilelang.compile(
             program1,
             out_idx=[2],
-            pass_configs={
-                tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-                tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            },
+            pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
         )
 
 
@@ -604,10 +595,7 @@ def run_gemm_tiled_op_with_parallel():
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     profiler = kernel.get_profiler()
 
@@ -641,10 +629,7 @@ def run_gemm_tiled_op_with_parallel():
         tilelang.compile(
             program1,
             out_idx=[2],
-            pass_configs={
-                tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-                tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            },
+            pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
         )
 
 

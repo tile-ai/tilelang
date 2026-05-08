@@ -28,8 +28,8 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                 with T.ws(1):
                     T.barrier_wait(compute_is_done, (ko + 1) % 2)
-                    T.copy(A[by * block_M, ko * block_K], A_shared)
-                    T.copy(B[ko * block_K, bx * block_N], B_shared)
+                    T.tma_copy(A[by * block_M, ko * block_K], A_shared, barrier=data_is_ready)
+                    T.tma_copy(B[ko * block_K, bx * block_N], B_shared, barrier=data_is_ready)
                     T.barrier_arrive(data_is_ready)
                 with T.ws(0):
                     T.barrier_wait(data_is_ready, ko % 2)
@@ -48,7 +48,6 @@ def main(M=16384, N=16384, K=16384):
     block_K = 64
 
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K)
-
     # 3. Test the kernel in Python with PyTorch data
     import torch
 
@@ -58,7 +57,6 @@ def main(M=16384, N=16384, K=16384):
 
     # Run the kernel through the Profiler
     c = jit_kernel(a, b)
-
     # Reference multiplication using PyTorch
     ref_c = a @ b
 

@@ -621,8 +621,7 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.uint8": cutlass.Uint8,
       "torch.int16": cutlass.Int16,
       "torch.uint16": cutlass.Uint16,
-      "torch.uchar": cutlass.Uint8,
-  }}
+      "torch.uchar": cutlass.Uint8}}
 
 {cubin_gen_code}
 
@@ -1288,11 +1287,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         for desc_name in desc_names:
             info = self.tma_desc_info[desc_name]
-            # Extract the base buffer variable name (must be a Var, not arbitrary expression)
-            global_addr = info["globalAddress"]
-            if not isinstance(global_addr, tvm.tir.Var):
-                raise ValueError(f"TMA globalAddress must be a buffer Var, got {type(global_addr)}: {global_addr}")
-            tensor_name = global_addr.name
+            # Extract the base buffer variable name
+            tensor_name = info["globalAddress"]
 
             if tensor_name not in tensor_args:
                 tensor_args.append(tensor_name)

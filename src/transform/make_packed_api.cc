@@ -39,6 +39,7 @@
 
 #include "../op/builtin.h"
 #include "arg_binder.h"
+#include "common/attr.h"
 #include "merge_if_stmt.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -202,6 +203,13 @@ Optional<String> RequiresPackedAPI(const PrimFunc &func) {
     if (CallingConv(opt.value()->value) != CallingConv::kDefault) {
       return std::nullopt;
     }
+  }
+
+  // Source kernels must stay as direct GlobalVar calls until
+  // LowerDeviceKernelLaunch can turn them into device launches using the
+  // selected external CUDA entry symbol.
+  if (func->GetAttr<String>(tl::attr::kCodeBlockSource)) {
+    return std::nullopt;
   }
 
   // Internal function calls do not need the PackedFunc API

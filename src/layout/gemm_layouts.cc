@@ -11,6 +11,14 @@
 
 #include "layout.h"
 
+#if defined(_MSC_VER)
+#define TILELANG_COMPILER_UNREACHABLE() __assume(0)
+#elif defined(__GNUC__) || defined(__clang__)
+#define TILELANG_COMPILER_UNREACHABLE() __builtin_unreachable()
+#else
+#define TILELANG_COMPILER_UNREACHABLE() ((void)0)
+#endif
+
 namespace tvm {
 namespace tl {
 
@@ -415,6 +423,15 @@ bool TryGetSwizzleShapeInfo(const Buffer &buffer, SwizzleShapeInfo *info) {
 
 } // namespace
 
+static Layout ExpandLayout2D(const Layout &base, const Buffer &buffer) {
+  Array<PrimExpr> leading_shape;
+  leading_shape.reserve(buffer->shape.size() - 2);
+  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
+    leading_shape.push_back(buffer->shape[i]);
+  }
+  return base->Expand(leading_shape);
+}
+
 // Layout swizzling for 32 bytes
 static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
                                              int element_size) {
@@ -440,12 +457,7 @@ Layout makeQuarterBankSwizzleLayout(const Buffer &buffer) {
   auto base = MakeQuarterBankSwizzleLayout2D(static_cast<int>(info.stride),
                                              static_cast<int>(info.continuous),
                                              info.element_size);
-  Array<PrimExpr> leading_shape;
-  leading_shape.reserve(buffer->shape.size() - 2);
-  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
-    leading_shape.push_back(buffer->shape[i]);
-  }
-  return base->Expand(leading_shape);
+  return ExpandLayout2D(base, buffer);
 }
 
 // Layout swizzling for 64 bytes
@@ -473,12 +485,7 @@ Layout makeHalfBankSwizzleLayout(const Buffer &buffer) {
   auto base = MakeHalfBankSwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
                                           info.element_size);
-  Array<PrimExpr> leading_shape;
-  leading_shape.reserve(buffer->shape.size() - 2);
-  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
-    leading_shape.push_back(buffer->shape[i]);
-  }
-  return base->Expand(leading_shape);
+  return ExpandLayout2D(base, buffer);
 }
 
 // Layout swizzling for 128 bytes
@@ -506,12 +513,7 @@ Layout makeFullBankSwizzleLayout(const Buffer &buffer) {
   auto base = MakeFullBankSwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
                                           info.element_size);
-  Array<PrimExpr> leading_shape;
-  leading_shape.reserve(buffer->shape.size() - 2);
-  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
-    leading_shape.push_back(buffer->shape[i]);
-  }
-  return base->Expand(leading_shape);
+  return ExpandLayout2D(base, buffer);
 }
 
 // Detail implementation please ref to
@@ -865,7 +867,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
-  __builtin_unreachable(); // to prevent compiler warning
+  TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
 Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
@@ -894,12 +896,57 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
     ICHECK(0) << "Unsupported layout for sm100 with stride=" << mat_stride
               << ", continuous=" << mat_continuous
               << ", element_size=" << element_size << ", k_inner=" << k_inner;
-  __builtin_unreachable(); // to prevent compiler warning
+  TILELANG_COMPILER_UNREACHABLE(); // to prevent compiler warning
 }
 
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack) {
   return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
+}
+
+Layout makeSwizzledLayout(const Buffer &buffer, bool k_inner, bool allow_pad) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  Layout base;
+  if (allow_pad) {
+    base = makeGemmABLayout(
+        static_cast<int>(info.stride), static_cast<int>(info.continuous),
+        static_cast<int>(info.continuous), info.element_size, k_inner);
+  } else {
+    base = makeGemmABLayoutHopper(
+        static_cast<int>(info.stride), static_cast<int>(info.continuous),
+        static_cast<int>(info.continuous), info.element_size, k_inner);
+  }
+  return ExpandLayout2D(base, buffer);
+}
+
+Layout makeVoltaSwizzledLayout(const Buffer &buffer, bool is_a, bool k_inner) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base =
+      makeGemmVoltaABLayout(static_cast<int>(info.stride),
+                            static_cast<int>(info.continuous), is_a, k_inner);
+  return ExpandLayout2D(base, buffer);
+}
+
+Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity,
+                               bool k_inner) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  if (continuity < 0)
+    continuity = static_cast<int>(info.continuous);
+  auto base = makeGemmABLayoutHopper(static_cast<int>(info.stride),
+                                     static_cast<int>(info.continuous),
+                                     continuity, info.element_size, k_inner);
+  return ExpandLayout2D(base, buffer);
+}
+
+Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity,
+                                    bool k_inner) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  if (continuity < 0)
+    continuity = static_cast<int>(info.continuous);
+  auto base = makeGemmABLayoutSm100(static_cast<int>(info.stride),
+                                    static_cast<int>(info.continuous),
+                                    continuity, info.element_size, k_inner);
+  return ExpandLayout2D(base, buffer);
 }
 
 SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {

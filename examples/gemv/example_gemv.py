@@ -227,10 +227,7 @@ def get_block_template_configs():
     rep=20,
 )
 @tl.jit(
-    pass_configs={
-        tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
+    pass_configs={tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     out_idx=[2],
 )
 def gemv_alloc_reducer(
