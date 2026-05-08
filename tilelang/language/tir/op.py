@@ -1152,6 +1152,7 @@ def ptx_wgmma_sp_ss(
     A_offset,
     E_data,
     E_offset,
+    sparse_selector,
     B_desc,
     B_offset,
     C_data,
@@ -1173,6 +1174,7 @@ def ptx_wgmma_sp_ss(
         A_offset,
         E_data,
         E_offset,
+        sparse_selector,
         B_desc,
         B_offset,
         C_data,
@@ -1180,7 +1182,6 @@ def ptx_wgmma_sp_ss(
         scale_out,
         scale_in_a,
         scale_in_b,
-        E_data,
     )
 
 
@@ -1195,6 +1196,7 @@ def ptx_wgmma_sp_rs(
     A_offset,
     E_buf,
     E_offset,
+    sparse_selector,
     B_desc,
     B_offset,
     C_data,
@@ -1215,6 +1217,7 @@ def ptx_wgmma_sp_rs(
         A_offset,
         E_buf,
         E_offset,
+        sparse_selector,
         B_desc,
         B_offset,
         C_data,

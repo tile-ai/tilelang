@@ -2745,20 +2745,26 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string A_offset = this->PrintExpr(op->args[7]);
     std::string e_data = this->PrintExpr(op->args[8]);
     std::string E_offset = this->PrintExpr(op->args[9]);
-    std::string b_desc = this->PrintExpr(op->args[10]);
-    std::string B_offset = this->PrintExpr(op->args[11]);
-    std::string c_data = this->PrintExpr(op->args[12]);
-    std::string C_offset = this->PrintExpr(op->args[13]);
-    std::string scale_out = this->PrintExpr(op->args[14]);
-    bool scale_in_a = Downcast<Bool>(op->args[15])->value;
-    bool scale_in_b = Downcast<Bool>(op->args[16])->value;
+    std::string sparse_selector = this->PrintExpr(op->args[10]);
+    std::string b_desc = this->PrintExpr(op->args[11]);
+    std::string B_offset = this->PrintExpr(op->args[12]);
+    std::string c_data = this->PrintExpr(op->args[13]);
+    std::string C_offset = this->PrintExpr(op->args[14]);
+    std::string scale_out = this->PrintExpr(op->args[15]);
+    bool scale_in_a = Downcast<Bool>(op->args[16])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[17])->value;
 
     this->PrintIndent();
     auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(wgmma_prefix);
     need_wgmma_sp_instruction_h_ = true;
+    int sparse_sel_val_ss = Downcast<IntImm>(op->args[10])->value;
+    std::string spsel_ss = (sparse_sel_val_ss == 0)
+                               ? "cute::SM90::GMMA::SparseSel::Zero"
+                               : "cute::SM90::GMMA::SparseSel::One";
     std::string wgmma_sp_asm_code =
         "tl::wgmma_sp_ss<(AType), (BType), (CType), (M), (N), (K), (tnspA), "
-        "(tnspB), (scaleA), (scaleB)>(uint64_t((desc_a) + (A_offset)), "
+        "(tnspB), (scaleA), (scaleB), (spsel)>(uint64_t((desc_a) + "
+        "(A_offset)), "
         "uint64_t((desc_b) + (B_offset)), "
         "reinterpret_cast<uint32_t*>((C_data)) "
         "+ (C_offset), (scale_out), *reinterpret_cast<uint32_t*>((e_data) + "
@@ -2785,6 +2791,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
     replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
     replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
+    replacer.register_rule("(spsel)", spsel_ss);
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(e_data)", e_data);
@@ -2807,20 +2814,25 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string A_offset = this->PrintExpr(op->args[6]);
     std::string e_data = this->PrintExpr(op->args[7]);
     std::string E_offset = this->PrintExpr(op->args[8]);
-    std::string b_desc = this->PrintExpr(op->args[9]);
-    std::string B_offset = this->PrintExpr(op->args[10]);
-    std::string c_data = this->PrintExpr(op->args[11]);
-    std::string C_offset = this->PrintExpr(op->args[12]);
-    std::string scale_out = this->PrintExpr(op->args[13]);
-    bool scale_in_a = Downcast<Bool>(op->args[14])->value;
-    bool scale_in_b = Downcast<Bool>(op->args[15])->value;
+    std::string sparse_selector = this->PrintExpr(op->args[9]);
+    std::string b_desc = this->PrintExpr(op->args[10]);
+    std::string B_offset = this->PrintExpr(op->args[11]);
+    std::string c_data = this->PrintExpr(op->args[12]);
+    std::string C_offset = this->PrintExpr(op->args[13]);
+    std::string scale_out = this->PrintExpr(op->args[14]);
+    bool scale_in_a = Downcast<Bool>(op->args[15])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[16])->value;
 
     auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(wgmma_prefix);
     need_wgmma_sp_instruction_h_ = true;
     this->PrintIndent();
+    int sparse_sel_val_rs = Downcast<IntImm>(op->args[9])->value;
+    std::string spsel_rs = (sparse_sel_val_rs == 0)
+                               ? "cute::SM90::GMMA::SparseSel::Zero"
+                               : "cute::SM90::GMMA::SparseSel::One";
     std::string wgmma_sp_rs_asm_code =
         "tl::wgmma_sp_rs<(AType), (BType), (CType), (M), (N), (K), false, "
-        "(tnspB), (scaleA), (scaleB)>(reinterpret_cast<const "
+        "(tnspB), (scaleA), (scaleB), (spsel)>(reinterpret_cast<const "
         "uint32_t*>((A_ptr) + "
         "(A_offset)), uint64_t((desc_b) + (B_offset)), "
         "reinterpret_cast<uint32_t*>((C_data)) + (C_offset), (scale_out), "
@@ -2846,6 +2858,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
     replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
     replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
+    replacer.register_rule("(spsel)", spsel_rs);
     replacer.register_rule("(A_ptr)", a_ref);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(e_data)", e_data);
