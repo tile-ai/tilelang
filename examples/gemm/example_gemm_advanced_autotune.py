@@ -113,6 +113,53 @@ def get_best_config(
     K,
     with_roller: bool = False,
     profile_backend: str = "event",
+    execution_backend: str = "auto",
+    warmup: int = 3,
+    rep: int = 20,
+    timeout: int = 30,
+    skip_check: bool = False,
+    cache_input_tensors: bool = False,
+    topk: int = 20,
+    use_pipeline: bool = False,
+    enable_grouped_compile: bool = False,
+    group_compile_size: int = 2,
+    benchmark_multi_gpu: bool = False,
+    benchmark_devices: list[int] | None = None,
+):
+    autotuner, _, _ = _build_autotuner(
+        M=M,
+        N=N,
+        K=K,
+        with_roller=with_roller,
+        profile_backend=profile_backend,
+        execution_backend=execution_backend,
+        skip_check=skip_check,
+        cache_input_tensors=cache_input_tensors,
+        topk=topk,
+    )
+    autotuner_result = autotuner.run(
+        warmup=warmup,
+        rep=rep,
+        timeout=timeout,
+        use_pipeline=use_pipeline,
+        enable_grouped_compile=enable_grouped_compile,
+        group_compile_size=group_compile_size,
+        benchmark_multi_gpu=benchmark_multi_gpu,
+        benchmark_devices=benchmark_devices,
+    )
+    return autotuner_result
+
+
+def _build_autotuner(
+    M: int,
+    N: int,
+    K: int,
+    with_roller: bool,
+    profile_backend: str,
+    execution_backend: str,
+    skip_check: bool,
+    cache_input_tensors: bool,
+    topk: int,
 ):
     def kernel(
         block_M=None,
@@ -152,20 +199,23 @@ def get_best_config(
 
         return main
 
+    configs = get_configs(M, N, K, with_roller, topk=topk)
     autotuner = (
-        AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller))
+        AutoTuner.from_kernel(kernel=kernel, configs=configs)
         .set_compile_args(
             out_idx=[-1],
             target="auto",
+            execution_backend=execution_backend,
         )
         .set_profile_args(
             supply_type=tl.TensorSupplyType.Integer,
-            ref_prog=ref_program,
-            skip_check=False,
+            ref_prog=None if skip_check else ref_program,
+            skip_check=skip_check,
+            cache_input_tensors=cache_input_tensors,
             backend=profile_backend,
         )
     )
-    return autotuner.run(warmup=3, rep=20)
+    return autotuner, configs, kernel
 
 
 def get_heuristic_config() -> dict:
@@ -221,7 +271,14 @@ def main(
     use_autotune: bool = False,
     with_roller: bool = False,
     profile_backend: str = "event",
+    use_pipeline: bool = False,
+    enable_grouped_compile: bool = False,
+    group_compile_size: int = 2,
+    benchmark_multi_gpu: bool = False,
+    benchmark_devices: list[int] | None = None,
 ):
+    benchmark_devices = benchmark_devices or []
+
     if use_autotune:
         result = get_best_config(
             M,
@@ -229,6 +286,11 @@ def main(
             K,
             with_roller=with_roller,
             profile_backend=profile_backend,
+            use_pipeline=use_pipeline,
+            enable_grouped_compile=enable_grouped_compile,
+            group_compile_size=group_compile_size,
+            benchmark_multi_gpu=benchmark_multi_gpu,
+            benchmark_devices=benchmark_devices,
         )
         print(result.config)
         kernel = result.kernel
@@ -267,12 +329,51 @@ if __name__ == "__main__":
     parser.add_argument("--use_autotune", action="store_true", default=False, help="Whether to use autotune for matmul configs")
     parser.add_argument("--with_roller", action="store_true", default=False, help="Whether to enable BitBLAS roller for search space")
     parser.add_argument("--profile_backend", type=str, default="event", help="Profiler backend")
+    pipeline_group = parser.add_mutually_exclusive_group()
+    pipeline_group.add_argument(
+        "--pipeline", dest="use_pipeline", action="store_true", help="Enable compile/benchmark pipeline in autotune"
+    )
+    pipeline_group.add_argument(
+        "--no-pipeline", dest="use_pipeline", action="store_false", help="Disable compile/benchmark pipeline in autotune"
+    )
+    parser.set_defaults(use_pipeline=False)
+
+    grouped_compile_group = parser.add_mutually_exclusive_group()
+    grouped_compile_group.add_argument(
+        "--grouped-compile", dest="enable_grouped_compile", action="store_true", help="Enable grouped compilation in autotune"
+    )
+    grouped_compile_group.add_argument(
+        "--no-grouped-compile", dest="enable_grouped_compile", action="store_false", help="Disable grouped compilation in autotune"
+    )
+    parser.set_defaults(enable_grouped_compile=False)
+    parser.add_argument("--group-compile-size", type=int, default=2, help="Number of configs per grouped compile unit")
+
+    benchmark_multi_gpu_group = parser.add_mutually_exclusive_group()
+    benchmark_multi_gpu_group.add_argument(
+        "--benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_true", help="Benchmark autotune configs across multiple GPUs"
+    )
+    benchmark_multi_gpu_group.add_argument(
+        "--no-benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_false", help="Benchmark autotune configs on a single GPU"
+    )
+    parser.set_defaults(benchmark_multi_gpu=False)
+    parser.add_argument(
+        "--benchmark-devices",
+        action="append",
+        type=int,
+        default=[],
+        help="Repeatable CUDA device ordinals for benchmark workers (e.g. --benchmark-devices 0 --benchmark-devices 1)",
+    )
     args = parser.parse_args()
     main(
-        args.m,
-        args.n,
-        args.k,
-        args.use_autotune,
-        args.with_roller,
-        args.profile_backend,
+        M=args.m,
+        N=args.n,
+        K=args.k,
+        use_autotune=args.use_autotune,
+        with_roller=args.with_roller,
+        profile_backend=args.profile_backend,
+        use_pipeline=args.use_pipeline,
+        enable_grouped_compile=args.enable_grouped_compile,
+        group_compile_size=args.group_compile_size,
+        benchmark_multi_gpu=args.benchmark_multi_gpu,
+        benchmark_devices=args.benchmark_devices,
     )
