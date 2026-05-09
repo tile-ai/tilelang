@@ -735,7 +735,7 @@ class AutoTuner:
                 profiler.assert_allclose(
                     ref_prog, input_tensors=jit_input_tensors_cache, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
                 )
-        latency = profiler.do_bench(warmup=warmup, rep=rep, input_tensors=jit_input_tensors_cache, backend=backend)
+        latency = profiler.do_bench(n_warmup=warmup, n_repeat=rep, input_tensors=jit_input_tensors_cache, backend=backend)
 
         if ref_latency_cache is None and ref_prog is not None:
             ref_input_tensors_cache = ref_input_tensors_supply()
