@@ -67,8 +67,8 @@ Stmt BarrierBlocksOpNode::Lower(const LowerArgs &T,
   new_args.push_back(StringImm(ss.str()));
 
   PrimExpr bar_addr = MakeLocalBarAddr(T);
-  PrimExpr rank = Call(DataType::Int(64), tl::get_rank(), {});
-  PrimExpr num_ranks = Call(DataType::Int(64), tl::get_num_ranks(), {});
+  PrimExpr rank = Call(DataType::Int(32), tl::get_rank(), {});
+  PrimExpr num_ranks = Call(DataType::Int(32), tl::get_num_ranks(), {});
 
   new_args.push_back(GetOffsetFromLocalBase(bar_addr));
   new_args.push_back(rank);

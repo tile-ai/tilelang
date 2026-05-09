@@ -43,7 +43,7 @@ inline PrimExpr MakeRemappedAddress(const LowerArgs &T, const Buffer &buffer,
 }
 
 inline PrimExpr GetOffsetFromLocalBase(PrimExpr local_addr) {
-  PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
+  PrimExpr local_rank = Call(DataType::Int(32), tl::get_rank(), {});
   PrimExpr local_base_ptr =
       Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
   return Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {local_addr}),
