@@ -9,7 +9,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
 from tilelang.distributed import init_dist
-from tilelang.distributed import perf_fn
+from tilelang.distributed import do_bench
 from tilelang.utils.allocator import get_allocator
 
 os.environ["NCCL_DEBUG"] = "WARN"
@@ -212,12 +212,14 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         max_diff = (torch_C - tilelang_C).abs().max().item()
         print(f"rank {local_rank} check failed. max_diff={max_diff}")
 
-    tl_t = perf_fn(
+    tl_t = do_bench(
         lambda: ag_gemm_op(A, B, mcast_A, gathered_A, mcast_signal, local_signal, grid_barrier, C, kernel, local_rank),
         warmup=args.warmup,
         rep=args.rep,
+        group=group,
     )
-    print(f"rank {local_rank} tilelang specialized ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / tl_t / num_local_ranks:.2f}")
+    if local_rank == 0:
+        print(f"tilelang specialized ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / tl_t / num_local_ranks:.2f}")
 
     allocator.close()
     dist.destroy_process_group()

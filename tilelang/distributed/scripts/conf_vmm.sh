@@ -18,6 +18,4 @@ else
     echo -e "${GREEN}Channel $IMAX_CHANNEL_NAME created successfully${NC}"
 fi
 
-# Optional: set environment variables to use VMM and distributed
-export TILESCALE_USE_VMM=1
-export TILELANG_USE_DISTRIBUTED=1
+

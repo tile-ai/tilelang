@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing
 from tilelang.distributed import init_dist
-from tilelang.distributed import perf_fn
+from tilelang.distributed import do_bench
 from reduce_scatter import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
 
 
@@ -156,9 +156,15 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check failed.❌")
         print(f"torch_out: {torch_out}, tilelang_out: {tilelang_out}")
 
-    tl_t = perf_fn(lambda: gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank), warmup=5, rep=5)
+    tl_t = do_bench(
+        lambda: gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank),
+        warmup=5,
+        rep=5,
+        group=group,
+    )
 
-    print(f"rank {local_rank} tilelang gemm_rs time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / (tl_t) / num_local_ranks:.2f}")
+    if local_rank == 0:
+        print(f"tilelang gemm_rs time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / (tl_t) / num_local_ranks:.2f}")
 
     dist.destroy_process_group()
 

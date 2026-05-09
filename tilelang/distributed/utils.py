@@ -4,7 +4,7 @@ import torch
 import torch.distributed as dist
 import os
 import inspect
-from typing import Callable
+from typing import Callable, Literal
 from collections.abc import Sequence
 from contextlib import contextmanager
 
@@ -231,35 +231,132 @@ def dist_print(*args, **kwargs):
             print(*args, **kwargs)
 
 
-def perf_fn(fn, warmup: int = 50, rep: int = 50, post_fn=None):
-    """DeepEP style benchmark function.
+def _dist_ready() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def _resolve_bench_group(group):
+    if not _dist_ready():
+        return None
+    return group if group is not None else dist.group.WORLD
+
+
+def _reduce_benchmark_times(
+    times: "np.ndarray",
+    *,
+    group=None,
+    aggregate: Literal["max", "mean", "min", "none"] = "max",
+    device: str | torch.device = "cuda",
+) -> "np.ndarray":
+    if aggregate == "none" or not _dist_ready():
+        return times
+
+    group = _resolve_bench_group(group)
+    world_size = dist.get_world_size(group)
+    if world_size == 1:
+        return times
+
+    time_tensor = torch.as_tensor(times, dtype=torch.float64, device=device)
+    if aggregate == "max":
+        op = dist.ReduceOp.MAX
+    elif aggregate == "min":
+        op = dist.ReduceOp.MIN
+    elif aggregate == "mean":
+        op = dist.ReduceOp.SUM
+    else:
+        raise ValueError(f"unsupported benchmark aggregate mode: {aggregate}")
+
+    dist.all_reduce(time_tensor, op=op, group=group)
+    if aggregate == "mean":
+        time_tensor /= world_size
+    return time_tensor.cpu().numpy()
+
+
+def do_bench(
+    fn,
+    warmup: int = 50,
+    rep: int = 50,
+    post_fn=None,
+    *,
+    group=None,
+    aggregate: Literal["max", "mean", "min", "none"] = "max",
+    flush_l2: bool = True,
+    l2_flush_bytes: int = int(256e6),
+    barrier_comm_profiling: bool = True,
+    barrier: Callable | None = None,
+    discard_first: bool = True,
+    return_mode: Literal["mean", "median", "min", "max", "all"] = "mean",
+):
+    """Benchmark a CUDA function and normalize timing across distributed ranks.
+
+    For distributed runs, the default result is the mean of per-iteration max
+    latency across ranks. This is the latency visible to a collective/multi-GPU
+    operation, and avoids reporting an arbitrary rank's local CUDA event time.
+
     Args:
         fn: the function to benchmark.
-        warmup: the number of warmup iterations.
-        rep: the number of repetitions.
-        post_fn: the function to post-process the results.
+        warmup: number of warmup iterations.
+        rep: number of measured iterations.
+        post_fn: optional function to call after each measured iteration.
+        group: process group used for cross-rank timing reduction.
+        aggregate: cross-rank reduction for each iteration.
+        flush_l2: whether to flush L2 before each measured iteration.
+        l2_flush_bytes: size of the flush buffer in bytes.
+        barrier_comm_profiling: insert a DeepEP-style GPU sleep + comm barrier
+            before each measured iteration to reduce CPU launch skew. This only
+            takes effect for distributed groups with more than one rank.
+        barrier: custom barrier used when barrier_comm_profiling is enabled.
+        discard_first: drop the first measured iteration when rep > 1.
+        return_mode: aggregate over measured iterations.
 
     Returns:
-        time (ms): the average time of the function.
+        Runtime in milliseconds. If return_mode is "all", returns the measured
+        per-iteration runtimes after cross-rank aggregation.
     """
     import numpy as np
 
-    # Flush L2 cache with 256 MB data
-    torch.cuda.synchronize()
-    cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+    if rep <= 0:
+        raise ValueError("rep must be positive")
+    if warmup < 0:
+        raise ValueError("warmup must be non-negative")
+    if l2_flush_bytes <= 0:
+        raise ValueError("l2_flush_bytes must be positive")
 
-    # Warmup
+    group = _resolve_bench_group(group)
+
+    torch.cuda.synchronize()
+    if group is not None:
+        dist.barrier(group)
+    world_size = dist.get_world_size(group) if group is not None else 1
+    use_barrier_comm_profiling = barrier_comm_profiling and group is not None and world_size > 1
+
+    cache = None
+    if flush_l2:
+        cache = torch.empty(int(l2_flush_bytes // 4), dtype=torch.int, device="cuda")
+
     for _ in range(warmup):
         fn()
 
-    # Flush L2
-    cache.zero_()
+    torch.cuda.synchronize()
+    if group is not None:
+        dist.barrier(group)
 
-    # Testing
+    dummy = None
+    if use_barrier_comm_profiling and barrier is None:
+        dummy = torch.ones(1, dtype=torch.float32, device="cuda")
+
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
     end_events = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
     for i in range(rep):
-        # Record
+        if cache is not None:
+            cache.zero_()
+        if use_barrier_comm_profiling:
+            if hasattr(torch.cuda, "_sleep"):
+                torch.cuda._sleep(int(2e7))
+            if barrier is None:
+                dist.all_reduce(dummy, group=group)
+            else:
+                barrier()
         start_events[i].record()
         fn()
         end_events[i].record()
@@ -267,8 +364,25 @@ def perf_fn(fn, warmup: int = 50, rep: int = 50, post_fn=None):
             post_fn()
     torch.cuda.synchronize()
 
-    times = np.array([s.elapsed_time(e) for s, e in zip(start_events, end_events)])[1:]
-    return np.average(times).item()
+    local_times = np.array([s.elapsed_time(e) for s, e in zip(start_events, end_events)], dtype=np.float64)
+    if discard_first and len(local_times) > 1:
+        local_times = local_times[1:]
+    times = _reduce_benchmark_times(local_times, group=group, aggregate=aggregate)
+
+    if return_mode == "all":
+        return times
+    if return_mode == "mean":
+        return np.average(times).item()
+    if return_mode == "median":
+        return np.median(times).item()
+    if return_mode == "min":
+        return np.min(times).item()
+    if return_mode == "max":
+        return np.max(times).item()
+    raise ValueError(f"unsupported benchmark return_mode: {return_mode}")
+
+
+perf_fn = do_bench
 
 
 def CUDA_CHECK(err):

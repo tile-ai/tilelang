@@ -17,7 +17,7 @@ if version.parse(cuda_python_version) >= version.parse("12.8.0"):
     from cuda.bindings import driver as cuda
 else:
     from cuda import cuda
-from tilelang.distributed import perf_fn
+from tilelang.distributed import do_bench
 
 os.environ["NCCL_DEBUG"] = "WARN"  # silence NCCL log
 
@@ -282,7 +282,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check failed.❌")
         print(f"torch_C: {torch_C}, tilelang_C: {tilelang_C}")
 
-    tl_t = perf_fn(
+    tl_t = do_bench(
         lambda: ag_gemm_op(
             A,
             B,
@@ -301,9 +301,11 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         ),
         warmup=5,
         rep=10,
+        group=group,
     )
 
-    print(f"rank {local_rank} tilelang ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / (tl_t) / num_local_ranks:.2f}")
+    if local_rank == 0:
+        print(f"tilelang ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / (tl_t) / num_local_ranks:.2f}")
 
     dist.destroy_process_group()
 

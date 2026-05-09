@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing
 from tilelang.distributed import init_dist
-from tilelang.distributed import perf_fn
+from tilelang.distributed import do_bench
 from sp_ag_attention_intra_node import (
     create_sp_ag_attention_context_intra_node,
     fused_sp_ag_attn_intra_node,
@@ -369,9 +369,15 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check failed.❌")
         print(f"torch_out: {torch_out}, tilelang_out: {tilescale_out}")
 
-    tl_t = perf_fn(lambda: tilescale_module(q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k), warmup=5, rep=5)
+    tl_t = do_bench(
+        lambda: tilescale_module(q_shard, k_shards, v_shards, cu_seqlens_q, cu_seqlens_k),
+        warmup=5,
+        rep=5,
+        group=group,
+    )
 
-    print(f"rank {local_rank} tilescale time: {tl_t:.2f} ms")
+    if local_rank == 0:
+        print(f"tilescale time: {tl_t:.2f} ms")
 
     dist.destroy_process_group()
 
