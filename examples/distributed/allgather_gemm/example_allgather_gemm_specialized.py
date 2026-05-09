@@ -39,6 +39,8 @@ def ag_gemm_sm_specialized_kernel(
     k_blocks = T.ceildiv(K, block_K)
     comm_block_M = block_M * 2
     comm_block_K = block_K * 2
+    comm_tile_elems = comm_block_M * comm_block_K
+    comm_threads = threads + 128
     local_comm_m_blocks = T.ceildiv(M_per_rank, comm_block_M)
     comm_k_blocks = T.ceildiv(K, comm_block_K)
     total_tiles = m_blocks * n_blocks
@@ -58,43 +60,27 @@ def ag_gemm_sm_specialized_kernel(
         C: T.Tensor((M, N_per_rank), dtype),
     ):
         with T.Kernel(sm_num, threads=threads) as bid:
-            local_rank = T.cast(T.get_rank(), "int32")
+            local_rank = T.get_rank()
             tid = T.get_thread_binding(0)
-
             T.barrier_blocks(barriers[0, 0])
-
             if bid < num_comp_sms:
-                A_comp_shared = T.alloc_shared((block_M, block_K), dtype)
-                B_comp_shared = T.alloc_shared((block_K, block_N), dtype)
-                C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-                for w in T.serial(waves):
-                    tile_id = bid + w * num_comp_sms
-                    if tile_id < total_tiles:
-                        num_pid_in_group = GROUP_SIZE_M * n_blocks
-                        group_id = tile_id // num_pid_in_group
-                        first_pid_m = group_id * GROUP_SIZE_M
-                        group_size_m = T.min(m_blocks - first_pid_m, GROUP_SIZE_M)
-                        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-                        pid_n = (tile_id % num_pid_in_group) // group_size_m
-                        owner_rank = pid_m // local_m_blocks
-
-                        if owner_rank != local_rank:
+                with T.sm_specialize_scope(auto_ws=True):
+                    A_comp_shared = T.alloc_shared((block_M, block_K), dtype)
+                    B_comp_shared = T.alloc_shared((block_K, block_N), dtype)
+                    C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+                    for w in T.serial(waves):
+                        tile_id = bid + w * num_comp_sms
+                        if tile_id < total_tiles:
+                            num_pid_in_group = GROUP_SIZE_M * n_blocks
+                            group_id = tile_id // num_pid_in_group
+                            first_pid_m = group_id * GROUP_SIZE_M
+                            group_size_m = T.min(m_blocks - first_pid_m, GROUP_SIZE_M)
+                            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+                            pid_n = (tile_id % num_pid_in_group) // group_size_m
                             T.wait_eq(local_signal[pid_m], 1)
 
-                        T.clear(C_local)
-                        for k in T.Pipelined(k_blocks, num_stages=3):
-                            if owner_rank == local_rank:
-                                T.copy(
-                                    A_local[
-                                        (pid_m - local_rank * local_m_blocks) * block_M : (
-                                            pid_m - local_rank * local_m_blocks + 1
-                                        )
-                                        * block_M,
-                                        k * block_K : (k + 1) * block_K,
-                                    ],
-                                    A_comp_shared,
-                                )
-                            else:
+                            T.clear(C_local)
+                            for k in T.Pipelined(k_blocks, num_stages=3):
                                 T.copy(
                                     gathered_A[
                                         pid_m * block_M : (pid_m + 1) * block_M,
@@ -102,49 +88,43 @@ def ag_gemm_sm_specialized_kernel(
                                     ],
                                     A_comp_shared,
                                 )
+                                T.copy(
+                                    B[
+                                        k * block_K : (k + 1) * block_K,
+                                        pid_n * block_N : (pid_n + 1) * block_N,
+                                    ],
+                                    B_comp_shared,
+                                )
+                                T.gemm(A_comp_shared, B_comp_shared, C_local)
                             T.copy(
-                                B[
-                                    k * block_K : (k + 1) * block_K,
-                                    pid_n * block_N : (pid_n + 1) * block_N,
-                                ],
-                                B_comp_shared,
+                                C_local,
+                                C[pid_m * block_M : (pid_m + 1) * block_M, pid_n * block_N : (pid_n + 1) * block_N],
                             )
-                            T.gemm(A_comp_shared, B_comp_shared, C_local)
-                        T.copy(
-                            C_local,
-                            C[pid_m * block_M : (pid_m + 1) * block_M, pid_n * block_N : (pid_n + 1) * block_N],
-                        )
             else:
-                A_comm_shared = T.alloc_shared((comm_block_M, comm_block_K), dtype)
-                comm_sm_id = bid - num_comp_sms
-                for local_m in T.serial(T.ceildiv(local_comm_m_blocks, num_comm_sms)):
-                    local_comm_pid_m = comm_sm_id + local_m * num_comm_sms
-                    if local_comm_pid_m < local_comm_m_blocks:
-                        global_comm_pid_m = local_rank * local_comm_m_blocks + local_comm_pid_m
-                        local_m_start = local_comm_pid_m * comm_block_M
-                        global_m_start = global_comm_pid_m * comm_block_M
-                        for k in T.serial(comm_k_blocks):
-                            T.copy(
-                                A_local[
-                                    local_m_start : local_m_start + comm_block_M,
-                                    k * comm_block_K : (k + 1) * comm_block_K,
-                                ],
-                                A_comm_shared,
-                            )
-                            T.copy(
-                                A_comm_shared,
-                                mcast_A[
-                                    global_m_start : global_m_start + comm_block_M,
-                                    k * comm_block_K : (k + 1) * comm_block_K,
-                                ],
-                            )
+                with T.sm_specialize_scope(auto_ws=False):
+                    comm_sm_id = bid - num_comp_sms
+                    for local_m in T.serial(T.ceildiv(local_comm_m_blocks, num_comm_sms)):
+                        local_comm_pid_m = comm_sm_id + local_m * num_comm_sms
+                        if local_comm_pid_m < local_comm_m_blocks:
+                            global_comm_pid_m = local_rank * local_comm_m_blocks + local_comm_pid_m
+                            local_m_start = local_comm_pid_m * comm_block_M
+                            global_m_start = global_comm_pid_m * comm_block_M
+                            for k in T.serial(comm_k_blocks):
+                                for elem in T.serial(T.ceildiv(comm_tile_elems, comm_threads)):
+                                    offset = elem * comm_threads + tid
+                                    if offset < comm_tile_elems:
+                                        mi = offset // comm_block_K
+                                        ki = offset % comm_block_K
+                                        mcast_A[global_m_start + mi, k * comm_block_K + ki] = A_local[
+                                            local_m_start + mi, k * comm_block_K + ki
+                                        ]
 
-                        T.sync_threads()
-                        T.fence_sys()
-                        if tid == 0:
-                            T.multimem_signal(mcast_signal[global_comm_pid_m * 2], 1)
-                            if global_comm_pid_m * 2 + 1 < m_blocks:
-                                T.multimem_signal(mcast_signal[global_comm_pid_m * 2 + 1], 1)
+                            T.sync_threads()
+                            T.fence_sys()
+                            if tid == 0:
+                                T.multimem_signal(mcast_signal[global_comm_pid_m * 2], 1)
+                                if global_comm_pid_m * 2 + 1 < m_blocks:
+                                    T.multimem_signal(mcast_signal[global_comm_pid_m * 2 + 1], 1)
 
     return main
 

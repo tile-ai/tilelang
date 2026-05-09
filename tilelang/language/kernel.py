@@ -6,6 +6,7 @@ import os
 from tvm import tirx
 from tvm.tirx import Var
 from tvm.tirx.script.builder import evaluate as T_evaluate
+from tvm.tirx.script.builder.ir import sblock_attr
 from tvm.tirx.script.builder.frame import TIRFrame
 from tvm.tirx.script.builder.frame import SBlockFrame
 from tvm.ffi import register_object
@@ -343,6 +344,11 @@ def Kernel(
         attrs["cluster_dims"] = cluster_dims
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
+
+
+def sm_specialize_scope(*, auto_ws: bool = True):
+    """Mark a scope inside an SM-specialized persistent kernel."""
+    return sblock_attr({"tilelang.sm_specialize": int(bool(auto_ws))})
 
 
 # For CUDA source kernels, we need to load the source code from a file or string.

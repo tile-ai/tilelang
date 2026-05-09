@@ -68,6 +68,23 @@ void FlattenSeqStmt(const Stmt &s, Array<Stmt> *out) {
 /// Annotation key marking that this function was transformed by the tiled WS
 /// pass, so downstream passes can skip redundant transformations.
 static constexpr const char *kTiledWSApplied = "tl_tiled_ws_applied";
+static constexpr const char *kSmSpecialize = "tilelang.sm_specialize";
+
+static bool SmSpecializeAutoWSValue(const ObjectRef &obj) {
+  if (const auto *imm = obj.as<IntImmNode>()) {
+    return imm->value != 0;
+  }
+  return true;
+}
+
+static Optional<ObjectRef> GetSmSpecializeAnnotation(const SBlockNode *op) {
+  if (!op->annotations.count(kSmSpecialize)) {
+    return Optional<ObjectRef>();
+  }
+  auto value = op->annotations.Get(kSmSpecialize);
+  ICHECK(value.has_value());
+  return Downcast<ObjectRef>(value.value());
+}
 
 // ---------------------------------------------------------------------------
 // PhaseCounter: local counter for correct barrier parity in guarded loops
@@ -1233,6 +1250,11 @@ private:
       return StmtExprMutator::VisitStmt_(op);
 
     const SBlock &orig_block = op->block;
+    if (auto sm_specialize = GetSmSpecializeAnnotation(orig_block.get())) {
+      if (!SmSpecializeAutoWSValue(sm_specialize.value())) {
+        return StmtExprMutator::VisitStmt_(op);
+      }
+    }
 
     // Find the pipelined loop.
     Optional<For> pipeline_loop_opt = FindPipelineLoop(orig_block->body);
@@ -2110,6 +2132,15 @@ private:
       StmtVisitor::VisitStmt_(op);
     }
 
+    void VisitStmt_(const SBlockNode *op) final {
+      if (auto sm_specialize = GetSmSpecializeAnnotation(op)) {
+        if (!SmSpecializeAutoWSValue(sm_specialize.value())) {
+          return;
+        }
+      }
+      StmtVisitor::VisitStmt_(op);
+    }
+
     Optional<For> pipeline_loop_;
   };
 
@@ -2663,6 +2694,11 @@ private:
   }
 
   void VisitStmt_(const SBlockNode *op) final {
+    if (auto sm_specialize = GetSmSpecializeAnnotation(op)) {
+      if (!SmSpecializeAutoWSValue(sm_specialize.value())) {
+        return;
+      }
+    }
     // Collect layout_map entries so we can cross-check TMA copy targets.
     if (op->annotations.count("layout_map")) {
       auto anno = op->annotations.Get("layout_map");
@@ -2709,6 +2745,76 @@ private:
   BufferLayoutMap layout_map_;
 };
 
+static Stmt StripPipelineAnnotations(Stmt body) {
+  class StripPipelineAnnotation : public StmtExprMutator {
+  public:
+    Stmt VisitStmt_(const ForNode *op) final {
+      auto stmt = StmtExprMutator::VisitStmt_(op);
+      const auto *for_node = stmt.as<ForNode>();
+      ICHECK(for_node);
+      if (for_node->annotations.count("num_stages")) {
+        For new_for = Downcast<For>(stmt);
+        auto *n = new_for.CopyOnWrite();
+        n->annotations.erase("num_stages");
+        return std::move(new_for);
+      }
+      return stmt;
+    }
+  };
+  StripPipelineAnnotation stripper;
+  return stripper(std::move(body));
+}
+
+static PrimFunc ApplyTiledWSOrFallback(PrimFunc f) {
+  PrimFunc original_f = f;
+  f = ApplyMultiVersionBufferRewriter(std::move(f));
+  PrimFunc result = ProducerConsumerWSRewriter::Substitute(std::move(f));
+  if (!result->HasNonzeroAttr(kTiledWSApplied)) {
+    DLOG(WARNING) << "[WS] rewriter did not fire, falling back";
+    auto *fn = original_f.CopyOnWrite();
+    fn->body = StripPipelineAnnotations(original_f->body);
+    return original_f;
+  }
+  return result;
+}
+
+class SmSpecializeDetector : public StmtExprVisitor {
+public:
+  static bool HasSmSpecialize(const Stmt &stmt) {
+    SmSpecializeDetector d;
+    d(stmt);
+    return d.found_;
+  }
+
+private:
+  void VisitStmt_(const SBlockNode *op) final {
+    if (GetSmSpecializeAnnotation(op).defined()) {
+      found_ = true;
+      return;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool found_{false};
+};
+
+static PrimFunc StripSmSpecializeAnnotations(PrimFunc f) {
+  class Stripper : public StmtExprMutator {
+  public:
+    Stmt VisitStmt_(const SBlockNode *op) final {
+      SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
+      if (block->annotations.count(kSmSpecialize)) {
+        block.CopyOnWrite()->annotations.erase(kSmSpecialize);
+      }
+      return block;
+    }
+  };
+
+  Stripper stripper;
+  f.CopyOnWrite()->body = stripper(f->body);
+  return f;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -2718,62 +2824,31 @@ private:
 tvm::transform::Pass ProducerConsumerWarpSpecialized() {
   using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    bool has_sm_specialize = SmSpecializeDetector::HasSmSpecialize(f->body);
     // Skip if disabled.
     if (ctx->GetConfig(kDisableWarpSpecialized, Optional<Bool>())
             .value_or(false)) {
-      return f;
+      return has_sm_specialize ? StripSmSpecializeAnnotations(std::move(f)) : f;
     }
     // Skip if the function already has manual WS.
     if (ManualWSDetector::HasManualWS(f->body)) {
-      return f;
+      return has_sm_specialize ? StripSmSpecializeAnnotations(std::move(f)) : f;
     }
     // Skip if TMA is not available.
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     if (!target.defined() || !TargetHasBulkCopy(target.value())) {
-      return f;
+      return has_sm_specialize ? StripSmSpecializeAnnotations(std::move(f)) : f;
     }
     // Only apply MVB + WS if the function is a tiled WS candidate.
     if (!TiledWSCandidate::Check(f->body, target.value())) {
       DLOG(WARNING) << "[WS] skipped: no TMA copies in pipeline loop";
-      return f;
+      return has_sm_specialize ? StripSmSpecializeAnnotations(std::move(f)) : f;
     }
     DLOG(WARNING) << "[WS] candidate found, applying MVB + WS";
-    // Expand shared buffers for pipelining before the WS split.
-    // Keep the original so we can fall back if the WS rewriter doesn't fire
-    // (e.g. non-tile-op consumers in the loop body).
-    PrimFunc original_f = f;
-    f = ApplyMultiVersionBufferRewriter(std::move(f));
-    PrimFunc result = ProducerConsumerWSRewriter::Substitute(std::move(f));
-    if (!result->HasNonzeroAttr(kTiledWSApplied)) {
-      DLOG(WARNING) << "[WS] rewriter did not fire, falling back";
-      // The TMA kernel needs warp specialization for correct pipelined
-      // execution.  Since the tiled rewriter could not apply WS (e.g.
-      // conditional loop body), strip pipeline annotations so that
-      // PipelinePlanning / InjectSoftwarePipeline do not generate
-      // broken non-WS TMA pipeline code.
-      class StripPipelineAnnotation : public tirx::StmtExprMutator {
-      public:
-        tirx::Stmt VisitStmt_(const tirx::ForNode *op) final {
-          auto stmt = tirx::StmtExprMutator::VisitStmt_(op);
-          const auto *for_node = stmt.as<tirx::ForNode>();
-          ICHECK(for_node);
-          if (for_node->annotations.count("num_stages")) {
-            tirx::For new_for = Downcast<tirx::For>(stmt);
-            auto *n = new_for.CopyOnWrite();
-            n->annotations.erase("num_stages");
-            return std::move(new_for);
-          }
-          return stmt;
-        }
-      };
-      StripPipelineAnnotation stripper;
-      auto stripped = stripper(original_f->body);
-      auto *fn = original_f.CopyOnWrite();
-      fn->body = stripped;
-      return original_f;
-    }
+    PrimFunc result = ApplyTiledWSOrFallback(std::move(f));
     DLOG(WARNING) << "[WS] transformation applied successfully";
-    return result;
+    return has_sm_specialize ? StripSmSpecializeAnnotations(std::move(result))
+                             : result;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ProducerConsumerWarpSpecialized",
                             {});

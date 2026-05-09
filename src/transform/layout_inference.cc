@@ -1101,6 +1101,9 @@ private:
     for (auto &&[root, members] : components) {
       DLOG(INFO) << "======================= processing component " << root
                  << '\n';
+      if (components_buffers[root].empty()) {
+        continue;
+      }
       decltype(infer_list_) best_infer_list;
       LayoutMap best_layout_map;
       int64_t min_reg_num = INT64_MAX;
