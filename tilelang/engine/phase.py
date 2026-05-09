@@ -80,6 +80,13 @@ def should_enable_race_check(pass_ctx: PassContext | None = None) -> bool:
     return enabled
 
 
+def should_enable_prelower_semantic_check(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    enabled = not pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_PRELOWER_SEMANTIC_CHECK, False)
+    return enabled
+
+
 def get_layout_visual_formats(pass_ctx: PassContext | None = None) -> list[str]:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
@@ -121,6 +128,9 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     in Python side instead of letting the error dive into the complicated TVM/C++ stack.
     Note: This is a validation-only pipeline of passes and does not modify or return the module.
     """
+
+    if not should_enable_prelower_semantic_check():
+        return
 
     # Print AST for debugging purpose
     if should_enable_ast_print():
@@ -194,7 +204,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
-    mod = tilelang.transform.LowerL2Persistent()(mod)
+    mod = tilelang.cuda.transform.LowerL2Persistent()(mod)
     # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
@@ -260,7 +270,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerLDGSTG()(mod)
-    mod = tilelang.transform.LowerHopperIntrin()(mod)
+    mod = tilelang.cuda.transform.LowerHopperIntrin()(mod)
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier
     if allow_global_thread_synchronization():
@@ -295,6 +305,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 
     # Transform threadblock to persistent threadblock
-    mod = tilelang.transform.PersistThreadblock()(mod)
+    mod = tilelang.cuda.transform.PersistThreadblock()(mod)
 
     return mod

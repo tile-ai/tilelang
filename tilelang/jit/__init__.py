@@ -410,7 +410,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
                 func_name = getattr(self.func, "__name__", "jit_kernel")
 
             # cutedsl emits python executor not `c`
-            is_cutedsl = self.execution_backend == "cutedsl"
+            is_cutedsl = (self.execution_backend or self.target) == "cutedsl"
             kernel_suffix = "py" if is_cutedsl else "c"
             kernel_file = f"tilelang_jit_kernel_{func_name}.{kernel_suffix}"
 

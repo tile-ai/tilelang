@@ -36,6 +36,9 @@ public:
                         InferLevel level) const override;
   TileOperator Clone() const override;
 
+  /// Build a SIMT-style nested parallel loop implementing the transpose.
+  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
+
 private:
   /// Create iterator variables for dimensions with extent > 1.
   Array<IterVar> MakeIterVars() const;
@@ -48,10 +51,19 @@ private:
   /// Build boundary predicate with transposed index mapping for dst.
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
-
-  /// Build a SIMT-style nested parallel loop implementing the transpose.
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
 };
+
+using TransposeTargetPredicate = bool (*)(Target target);
+
+struct TransposeImpl {
+  const char *name;
+  TransposeTargetPredicate match_target;
+
+  Stmt (*lower)(const TransposeNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterTransposeImpl(TransposeImpl impl);
 
 /// Wrapper class for transpose operations
 class Transpose : public TileOperator {

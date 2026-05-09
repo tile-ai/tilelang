@@ -172,6 +172,26 @@ class GemmBase:
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
 
+    @property
+    def SFARegion(self):
+        return getattr(self.gemm_node, "sfaRegion", None)
+
+    @property
+    def SFBRegion(self):
+        return getattr(self.gemm_node, "sfbRegion", None)
+
+    @property
+    def sf_a_id(self) -> PrimExpr:
+        return getattr(self.gemm_node, "sfAId", tvm.tir.const(0, T.int32))
+
+    @property
+    def sf_b_id(self) -> PrimExpr:
+        return getattr(self.gemm_node, "sfBId", tvm.tir.const(0, T.int32))
+
+    @property
+    def is_blockscaled(self) -> bool:
+        return self.SFARegion is not None and self.SFBRegion is not None
+
     def get_region_base_offsets(self, region):
         """
         Get the base offset (start index) for each dimension from a BufferRegion.

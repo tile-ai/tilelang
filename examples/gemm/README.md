@@ -174,7 +174,7 @@ Below is a more advanced snippet that showcases how to apply memory layouts, ena
 import tilelang.language as T
 # `make_mma_swizzle_layout` is a python-defined layout function
 # that helps align data for MMA (Matrix Multiply-Accumulate) operations.
-from tilelang.intrinsics import make_mma_swizzle_layout as make_swizzle_layout
+from tilelang.cuda.intrinsics import make_mma_swizzle_layout as make_swizzle_layout
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float):
     @T.prim_func

@@ -27,7 +27,7 @@ def tl_gemm(
     ], "Currently only float16 and float32 are supported"
 
     group_size = 128
-    block_M = 128
+    block_M = 64
     block_K = 128
 
     A_shape = (M, K)
@@ -50,7 +50,6 @@ def tl_gemm(
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype)
-            Scale_C_shared = T.alloc_shared((block_M), T.float32)
             C_local = T.alloc_fragment(C_shared_shape, accum_dtype)
             C_local_accum = T.alloc_fragment(C_shared_shape, accum_dtype)
 
@@ -65,15 +64,12 @@ def tl_gemm(
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 # Load B into shared memory
                 T.copy(B[bx * block_N, k * block_K], B_shared)
-                # Load scale into shared memory
                 Scale_B = scales_b[bx * block_N // group_size, k]
-                for i in T.Parallel(block_M):
-                    Scale_C_shared[i] = scales_a[by * block_M + i, k] * Scale_B
 
                 T.gemm(A_shared, B_shared, C_local, transpose_B=True)
                 # Promote to enable 2xAcc
                 for i, j in T.Parallel(block_M, block_N):
-                    C_local_accum[i, j] += C_local[i, j] * Scale_C_shared[i]
+                    C_local_accum[i, j] += C_local[i, j] * (scales_a[by * block_M + i, k] * Scale_B)
                 T.clear(C_local)
             # TMA store
             T.copy(C_local_accum, C_shared)

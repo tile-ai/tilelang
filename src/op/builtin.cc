@@ -10,8 +10,8 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "../target/stubs/cuda.h"
-#include "../target/utils.h"
+#include "backend/cuda/stubs/cuda.h"
+#include "target/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -222,6 +222,21 @@ TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_ts)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_mma_blockscaled_ss)
+    .set_num_inputs(16)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_cp_warpx4)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_tcgen05_sf_warp_transpose)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(deallocate_tmem)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
@@ -288,6 +303,16 @@ TIR_DEFINE_TL_BUILTIN(tma_store_wait)
                                Integer(CallEffectKind::kOpaque));
 TIR_DEFINE_TL_BUILTIN(set_max_nreg)
     .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(annotate_producer_reg_dealloc)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(annotate_consumer_reg_alloc)
+    .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -636,6 +661,20 @@ TIR_DEFINE_TL_BUILTIN(warp_reduce_bitor)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+// ds_read_tr16_b64(smem_ptr) -> uint32x2
+// gfx950 LDS transpose read: 64-bit, 16-element transpose (FP16/BF16 MFMA)
+TIR_DEFINE_TL_BUILTIN(ds_read_tr16_b64)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+// ds_read_tr8_b64(smem_ptr) -> uint32x2
+// gfx950 LDS transpose read: 64-bit, 8-element transpose (FP32 MFMA)
+TIR_DEFINE_TL_BUILTIN(ds_read_tr8_b64)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
 
 // __ldg(BufferLoad | Buffer, idx?) -> value
 // Treat as a pure call that returns the loaded value.
