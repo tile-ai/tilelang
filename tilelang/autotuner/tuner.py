@@ -367,11 +367,14 @@ class AutoTuner:
             AutoTuner: Self for method chaining.
         """
         # If the program is under `with set_autotune_inputs` context,
-        # the `supply_prog` will be ignored and the `get_autotune_inputs` will be used instead.
-        if get_autotune_inputs() is not None:
+        # freeze captured tensors now so benchmark worker threads do not
+        # lose them via thread-local storage lookups.
+        captured_inputs = get_autotune_inputs()
+        if captured_inputs is not None:
             if supply_prog is not None:
                 logger.warning("`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context.")
-            supply_prog = lambda _: get_autotune_inputs()  # noqa: E731
+            frozen_inputs = list(captured_inputs)
+            supply_prog = lambda _, _frozen_inputs=frozen_inputs: _frozen_inputs  # noqa: E731
 
         self.profile_args = ProfileArgs(
             supply_type=supply_type,
