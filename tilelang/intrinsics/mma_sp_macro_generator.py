@@ -143,9 +143,13 @@ class SparseTensorCoreIntrinEmitter:
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size // self.SPARSE_FACTOR
-        self.local_size_e = (m_dim * k_dim) // self.e_factor // warp_size * self.E_REPLICATE_FACTOR[self.a_dtype]
+        self.local_size_e = (m_dim * k_dim) // self.e_factor * self.E_REPLICATE_FACTOR[self.a_dtype] // warp_size
         self.local_size_b = (n_dim * k_dim) // warp_size
         self.local_size_out = (m_dim * n_dim) // warp_size
+        assert self.local_size_a > 0, f"local_size_a must be greater than 0, got {self.local_size_a}"
+        assert self.local_size_e > 0, f"local_size_e must be greater than 0, got {self.local_size_e}"
+        assert self.local_size_b > 0, f"local_size_b must be greater than 0, got {self.local_size_b}"
+        assert self.local_size_out > 0, f"local_size_out must be greater than 0, got {self.local_size_out}"
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
         self.a_dtype_abbrv = self.dtype_abbrv[a_dtype]
