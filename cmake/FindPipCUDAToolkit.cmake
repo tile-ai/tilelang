@@ -466,14 +466,6 @@ endfunction()
 
 _tilelang_activate_ninja()
 
-# --- Try host CUDA first ---
-find_package(CUDAToolkit QUIET)
-if(CUDAToolkit_FOUND)
-  set(TILELANG_CUDA_TOOLKIT_AVAILABLE ON CACHE INTERNAL "Whether a CUDA toolkit is available" FORCE)
-  set(TILELANG_CUDA_TOOLKIT_SOURCE "host" CACHE INTERNAL "How TileLang discovered CUDA" FORCE)
-  return()
-endif()
-
 set(TILELANG_CUDA_TOOLKIT_AVAILABLE OFF CACHE INTERNAL "Whether a CUDA toolkit is available" FORCE)
 set(TILELANG_CUDA_TOOLKIT_SOURCE "none" CACHE INTERNAL "How TileLang discovered CUDA" FORCE)
 

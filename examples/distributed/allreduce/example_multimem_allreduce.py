@@ -26,7 +26,7 @@ import tilelang.language as T
 from tilelang.distributed import init_dist
 from tilelang.utils.allocator import get_allocator
 
-os.environ["NCCL_DEBUG"] = "WARN"
+os.environ.setdefault("NCCL_DEBUG", "ERROR")
 
 
 def multimem_allreduce_kernel_one_shot(N, block_N, threads):
@@ -68,7 +68,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     # Compile kernel
     kernel = tilelang.compile(
         multimem_allreduce_kernel_one_shot(N, BLOCK_N, threads),
-        pass_configs={"tl.disable_tma_lower": True},
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
         compile_once=True,
         compile_group=group,
     )

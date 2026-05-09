@@ -15,7 +15,10 @@ os.environ.setdefault("NCCL_DEBUG", "WARN")
 
 
 @tilelang.jit(
-    pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True},
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+    },
     compile_once=True,
 )
 def _signal_wait_kernel():

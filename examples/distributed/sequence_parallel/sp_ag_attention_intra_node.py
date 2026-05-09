@@ -49,7 +49,6 @@ def flashattn(
     is_causal,
     enable_zig_zag,
     enable_specialized,
-    rank,
     num_ranks,
     block_M=64,
     block_N=64,
@@ -196,6 +195,7 @@ def flashattn(
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
 
+            rank = T.get_rank()
             global_offset_q = q_current_seqlen * rank
             kv_len_per_sp_block = k_current_seqlen // num_ranks
 
@@ -265,6 +265,7 @@ def flashattn(
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
 
+            rank = T.get_rank()
             half_q_shard_len = q_current_seqlen // 2
             global_offset_q = (
                 rank * half_q_shard_len if bx * block_M < half_q_shard_len else q_current_seqlen * num_ranks - (rank + 2) * half_q_shard_len
@@ -350,6 +351,7 @@ def flashattn(
             q_current_seqlen = q_end_idx - q_start_idx
             k_current_seqlen = k_end_idx - k_start_idx
 
+            rank = T.get_rank()
             global_offset_q = q_current_seqlen * rank
             tid = T.get_thread_binding(0)
 
@@ -490,6 +492,7 @@ def flashattn(
             bx = T.ceildiv(max_seqlen_q, block_M) - bx_ - 1
 
             half_q_shard_len = q_current_seqlen // 2
+            rank = T.get_rank()
             global_offset_q = (
                 rank * half_q_shard_len if bx * block_M < half_q_shard_len else q_current_seqlen * num_ranks - (rank + 2) * half_q_shard_len
             )
@@ -803,7 +806,6 @@ def fused_sp_ag_attn_intra_node(
             is_causal,
             enable_zig_zag,
             enable_specialized,
-            rank,
             world_size,
             block_M=BLOCK_M,
             block_N=BLOCK_N,

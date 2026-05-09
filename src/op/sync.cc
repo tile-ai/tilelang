@@ -110,6 +110,8 @@ WaitOp::WaitOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->addr = args[1];
   node->expected = args[2];
   node->peer = args[3];
+  node->scope = args.size() > 4 ? args[4].as<IntImmNode>()->value : 0;
+  node->semantics = args.size() > 5 ? args[5].as<IntImmNode>()->value : 0;
   data_ = std::move(node);
 }
 
@@ -126,7 +128,15 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   // Map relation as int to literal_strings
   const char *relation_str[] = {"eq", "ne", "ge", "le", "gt", "lt"};
+  const char *scope_str[] = {"tl::WaitScope::kSys", "tl::WaitScope::kGpu"};
+  const char *semantics_str[] = {"tl::WaitSemantics::kAcquire",
+                                 "tl::WaitSemantics::kVolatile"};
+  ICHECK_GE(scope, 0);
+  ICHECK_LT(scope, 2);
+  ICHECK_GE(semantics, 0);
+  ICHECK_LT(semantics, 2);
   ss << "tl::wait_" << relation_str[relation];
+  ss << "<" << scope_str[scope] << ", " << semantics_str[semantics] << ">";
 
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
@@ -158,7 +168,7 @@ TIR_REGISTER_TL_TILE_OP(BarrierBlocksOp, barrier_blocks)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_REGISTER_TL_TILE_OP(WaitOp, wait)
-    .set_num_inputs(4)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

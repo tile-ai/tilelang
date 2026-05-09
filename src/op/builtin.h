@@ -541,9 +541,9 @@ TVM_DLL const Op &fence_proxy_async();
 TVM_DLL const Op &tma_store_arrive();
 
 /*!
- * \brief Wait for TMA_STORE to finish
+ * \brief Wait for TMA_STORE progress.
  *
- * tma_store_wait()
+ * tma_store_wait(count, read)
  *
  */
 TVM_DLL const Op &tma_store_wait();

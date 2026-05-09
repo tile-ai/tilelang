@@ -39,7 +39,7 @@ if not os.path.exists(THIRD_PARTY_ROOT):
     # to avoid adding the entire build root to sys.path.
     TL_LIBS = [os.path.join(dev_lib_root, "lib"), os.path.join(dev_lib_root, "tvm")]
     THIRD_PARTY_ROOT = os.path.join(tl_dev_root, "3rdparty")
-    logger.warning(f"Loading tilelang libs from dev root: {dev_lib_root}")
+    logger.debug(f"Loading tilelang libs from dev root: {dev_lib_root}")
 
 assert TL_LIBS and all(os.path.exists(i) for i in TL_LIBS), f"tilelang lib root do not exists: {TL_LIBS}"
 

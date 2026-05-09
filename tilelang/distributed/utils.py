@@ -46,6 +46,9 @@ dtype_map = {
 
 
 def init_dist(local_rank: int, num_local_ranks: int, master_port: int | None = None):
+    os.environ.setdefault("NCCL_IB_DISABLE", "1")
+    os.environ.setdefault("NCCL_DEBUG", "ERROR")
+
     ip = os.getenv("MASTER_ADDR", "127.0.0.1")
     port = (
         master_port
@@ -368,6 +371,8 @@ def do_bench(
     if discard_first and len(local_times) > 1:
         local_times = local_times[1:]
     times = _reduce_benchmark_times(local_times, group=group, aggregate=aggregate)
+    if group is not None:
+        dist.barrier(group)
 
     if return_mode == "all":
         return times
@@ -382,7 +387,7 @@ def do_bench(
     raise ValueError(f"unsupported benchmark return_mode: {return_mode}")
 
 
-perf_fn = do_bench
+perf_fn = do_bench  # backward compatibility
 
 
 def CUDA_CHECK(err):

@@ -3,11 +3,22 @@ from __future__ import annotations
 from .common import (
     get_rank,
     get_num_ranks,
+)
+
+from .comm import (
     put_warp,
     get_warp,
     put_block,
     get_block,
+    ld,
+    st,
+    atom_add,
+)
+
+from .sync import (
     BinaryRelation,
+    WaitScope,
+    WaitSemantics,
     wait_eq,
     wait_ne,
     wait_ge,
@@ -32,7 +43,12 @@ __all__ = [
     "get_warp",
     "put_block",
     "get_block",
+    "ld",
+    "st",
+    "atom_add",
     "BinaryRelation",
+    "WaitScope",
+    "WaitSemantics",
     "wait_eq",
     "wait_ne",
     "wait_ge",

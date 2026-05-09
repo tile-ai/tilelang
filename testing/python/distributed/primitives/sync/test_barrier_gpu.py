@@ -4,7 +4,13 @@ import torch
 import tilelang.testing
 
 
-@tilelang.jit(out_idx=-1, pass_configs={"tl.disable_warp_specialized": True, "tl.disable_tma_lower": True})
+@tilelang.jit(
+    out_idx=-1,
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+    },
+)
 def get_test_barrier_gpu_kernel(num_blocks: int, threads: int):
     @T.prim_func
     def main(

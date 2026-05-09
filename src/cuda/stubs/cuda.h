@@ -67,6 +67,7 @@
   _(cuCtxGetLimit)                                                             \
   _(cuCtxSetLimit)                                                             \
   _(cuCtxResetPersistingL2Cache)                                               \
+  _(cuDriverGetVersion)                                                        \
   _(cuDeviceGetName)                                                           \
   _(cuDeviceGetAttribute)                                                      \
   _(cuModuleLoadData)                                                          \
@@ -167,6 +168,7 @@ TILELANG_CUDA_STUB_API CUresult cuCtxGetDevice(CUdevice *device);
 TILELANG_CUDA_STUB_API CUresult cuCtxGetLimit(size_t *pvalue, CUlimit limit);
 TILELANG_CUDA_STUB_API CUresult cuCtxSetLimit(CUlimit limit, size_t value);
 TILELANG_CUDA_STUB_API CUresult cuCtxResetPersistingL2Cache(void);
+TILELANG_CUDA_STUB_API CUresult cuDriverGetVersion(int *driverVersion);
 TILELANG_CUDA_STUB_API CUresult cuDeviceGetName(char *name, int len,
                                                 CUdevice dev);
 TILELANG_CUDA_STUB_API CUresult cuDeviceGetAttribute(int *pi,

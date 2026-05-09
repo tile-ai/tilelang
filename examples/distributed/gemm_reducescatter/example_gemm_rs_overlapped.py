@@ -13,7 +13,7 @@ from reduce_scatter import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
 
 @tilelang.jit(compile_once=True)
 def gemm_kernel(
-    M, N, K, local_rank, num_local_rank, block_M, block_N, block_K, threads, persistent=False, dtype=T.float16, accum_dtype=T.float32
+    M, N, K, num_local_rank, block_M, block_N, block_K, threads, persistent=False, dtype=T.bfloat16, accum_dtype=T.float32
 ):
     M_per_rank = T.ceildiv(M, num_local_rank)
     GROUP_SIZE_M = 8
@@ -36,6 +36,7 @@ def gemm_kernel(
         C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(M, block_M) * T.ceildiv(N, block_N), threads=threads) as (bid):
+            local_rank = T.get_rank()
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_shared = T.alloc_shared((block_M, block_N), dtype)
@@ -112,7 +113,7 @@ def torch_gemm_rs(
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    dtype = torch.float16
+    dtype = torch.bfloat16
     M = args.M if args else 8192
     N = args.N if args else 8192
     K = args.K if args else 8192
@@ -130,7 +131,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     allocator = tilelang.get_allocator(
         size=2**30, device="cuda", is_distributed=True, local_rank=local_rank, num_local_ranks=num_local_ranks, group=group
     )
-    gemm_func = gemm_kernel(M, N, K, local_rank, num_local_ranks, BLOCK_M, BLOCK_N, BLOCK_K, threads, persistent)
+    gemm_func = gemm_kernel(M, N, K, num_local_ranks, BLOCK_M, BLOCK_N, BLOCK_K, threads, persistent)
     gemm_func.initialize(allocator=allocator)
 
     A = tilelang.tensor((M, K_per_rank), dtype, allocator=allocator).normal_() / 10
@@ -145,7 +146,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     dist.barrier()
 
-    tilelang_out = gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank, print_source=True)
+    tilelang_out = gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank, print_source=args.print_source)
     torch_out = torch_gemm_rs(group, A, B, None, num_local_ranks)
 
     atol = 1e-2
@@ -166,16 +167,18 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if local_rank == 0:
         print(f"tilelang gemm_rs time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / (tl_t) / num_local_ranks:.2f}")
 
+    allocator.close()
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-processes", type=int, default=2, help="Number of processes to spawn (default: 2)")
-    parser.add_argument("--M", type=int, default=8192, help="M dimension")
-    parser.add_argument("--N", type=int, default=8192, help="N dimension")
-    parser.add_argument("--K", type=int, default=29568, help="K dimension")
+    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 2)")
+    parser.add_argument("--M", type=int, default=32768, help="M dimension")
+    parser.add_argument("--N", type=int, default=6144, help="N dimension")
+    parser.add_argument("--K", type=int, default=16384, help="K dimension")
     parser.add_argument("--persistent", action="store_true", help="Use persistent kernel")
+    parser.add_argument("--print-source", action="store_true", help="Print generated kernel source")
     args = parser.parse_args()
     num_processes = args.num_processes
 

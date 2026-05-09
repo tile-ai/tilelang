@@ -51,7 +51,7 @@ def test_multimem(local_rank: int, num_ranks: int):
 
     kernel = tilelang.compile(
         _multimem_allreduce_kernel(_N, _BLOCK_N, _THREADS),
-        pass_configs={"tl.disable_tma_lower": True},
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
         compile_once=True,
         compile_group=group,
     )

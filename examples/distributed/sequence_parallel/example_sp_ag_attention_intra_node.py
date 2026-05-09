@@ -379,6 +379,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if local_rank == 0:
         print(f"tilescale time: {tl_t:.2f} ms")
 
+    allocator.close()
     dist.destroy_process_group()
 
 

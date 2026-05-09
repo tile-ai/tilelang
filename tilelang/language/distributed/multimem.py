@@ -6,7 +6,6 @@ to correctly handle fragment layouts, then post-process to emit multimem instruc
 
 from __future__ import annotations
 from enum import Enum
-from typing import Literal
 from tvm import tir
 from tvm.tir import PrimExpr, address_of
 from tilelang.utils.language import to_buffer_region
@@ -104,5 +103,16 @@ def multimem_tma_store(src, dst, reduce_op: MultimemReduceOp | None = None):
     return _multimem_impl(src, dst, mode=_MultimemMode.TMA_RED_STORE, reduce_op=reduce_op)
 
 
-def multimem_signal(addr, value: PrimExpr, dtype_tag: Literal["uint32", "uint64"] = "uint32"):
-    return tir.call_extern("handle", f"tl::multimem::Signal<{dtype_tag}>::run", address_of(addr), value)
+def _signal_dtype_tag(addr) -> str:
+    dtype = getattr(addr, "dtype", None)
+    if dtype is None:
+        raise TypeError("multimem_signal requires an address expression with a dtype")
+    if dtype == "uint32" or dtype == "uint32_t":
+        return "uint32_t"
+    if dtype == "uint64" or dtype == "uint64_t":
+        return "uint64_t"
+    raise TypeError(f"multimem_signal only supports uint32/uint64 signal dtypes, got {dtype}")
+
+
+def multimem_signal(addr, value: PrimExpr):
+    return tir.call_extern("handle", f"tl::multimem::Signal<{_signal_dtype_tag(addr)}>::run", address_of(addr), value)

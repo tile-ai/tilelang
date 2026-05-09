@@ -144,7 +144,8 @@ TL_DEVICE void tma_store_arrive() {
 
 template <int Count, bool Read = true> TL_DEVICE void tma_store_wait() {
   if constexpr (Read) {
-    asm volatile("cp.async.bulk.wait_group.read %0;" : : "n"(Count) : "memory");
+    asm volatile("cp.async.bulk.wait_group.read %0;" : : "n"(Count)
+                 : "memory");
   } else {
     asm volatile("cp.async.bulk.wait_group %0;" : : "n"(Count) : "memory");
   }

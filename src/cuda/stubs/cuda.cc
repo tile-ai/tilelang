@@ -161,6 +161,10 @@ CUresult CUDAAPI cuCtxResetPersistingL2Cache(void) {
   return CUDADriverAPI::get()->cuCtxResetPersistingL2Cache_();
 }
 
+CUresult CUDAAPI cuDriverGetVersion(int *driverVersion) {
+  return CUDADriverAPI::get()->cuDriverGetVersion_(driverVersion);
+}
+
 CUresult CUDAAPI cuDeviceGetName(char *name, int len, CUdevice dev) {
   return CUDADriverAPI::get()->cuDeviceGetName_(name, len, dev);
 }

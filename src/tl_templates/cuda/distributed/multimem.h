@@ -259,7 +259,7 @@ template <typename T> struct Signal {
 };
 template <> struct Signal<uint32_t> {
   TL_DEVICE static void run(void *mcast_ptr, uint32_t val) {
-    asm volatile("multimem.st.relaxed.sys.global.u32 [%0], %1;"
+    asm volatile("multimem.st.release.sys.global.u32 [%0], %1;"
                  :
                  : "l"(mcast_ptr), "r"(val)
                  : "memory");
@@ -267,7 +267,7 @@ template <> struct Signal<uint32_t> {
 };
 template <> struct Signal<uint64_t> {
   TL_DEVICE static void run(void *mcast_ptr, uint64_t val) {
-    asm volatile("multimem.st.relaxed.sys.global.u64 [%0], %1;"
+    asm volatile("multimem.st.release.sys.global.u64 [%0], %1;"
                  :
                  : "l"(mcast_ptr), "l"(val)
                  : "memory");

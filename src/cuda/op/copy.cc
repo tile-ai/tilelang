@@ -254,6 +254,23 @@ PrimExpr GetLeaderScopeThreads(const CopyNode &op, const LowerArgs &T) {
   return T.thread_bounds->extent;
 }
 
+bool CanProveExtentEqual(arith::Analyzer *analyzer, PrimExpr lhs,
+                         PrimExpr rhs) {
+  if (StructuralEqual()(lhs, rhs)) {
+    return true;
+  }
+  if (lhs.dtype() != rhs.dtype() && lhs.dtype().is_scalar() &&
+      rhs.dtype().is_scalar() &&
+      (lhs.dtype().is_int() || lhs.dtype().is_uint()) &&
+      (rhs.dtype().is_int() || rhs.dtype().is_uint())) {
+    DataType dtype =
+        lhs.dtype().bits() >= rhs.dtype().bits() ? lhs.dtype() : rhs.dtype();
+    lhs = Cast(dtype, lhs);
+    rhs = Cast(dtype, rhs);
+  }
+  return analyzer->CanProve(EQ(lhs, rhs));
+}
+
 bool IsContiguousRegion(const Buffer &buf, const Array<Range> &ranges,
                         arith::Analyzer *analyzer) {
   ICHECK_EQ(buf->shape.size(), ranges.size())
@@ -1662,7 +1679,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     auto s_range = shared_range[s_range_idx];
     s_range_idx++;
 
-    ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
+    ICHECK(CanProveExtentEqual(analyzer, g_range->extent, s_range->extent))
         << global_tensor->name << "[" << i << "] is illegal, "
         << global_tensor->name << "[" << i << "] = " << g_range->extent << ", "
         << shared_tensor->name << "[" << s_range_idx

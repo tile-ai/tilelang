@@ -59,6 +59,19 @@ static void cu_mem_set_access_all(void *ptr, size_t size) {
       cuMemSetAccess((CUdeviceptr)ptr, size, access_desc.data(), device_count));
 }
 
+static void cu_mem_set_access_devices(void *ptr, size_t size,
+                                      int64_t num_devices) {
+  std::vector<CUmemAccessDesc> access_desc(num_devices);
+  for (int64_t idx = 0; idx < num_devices; ++idx) {
+    access_desc[idx].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access_desc[idx].location.id = (int)idx;
+    access_desc[idx].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+  }
+
+  SM_CU_CHECK(cuMemSetAccess((CUdeviceptr)ptr, size, access_desc.data(),
+                             (size_t)num_devices));
+}
+
 static size_t align_to_granularity(size_t size_raw, size_t granularity) {
   size_t size = (size_raw + granularity - 1) & ~(granularity - 1);
   if (size == 0)
@@ -326,7 +339,7 @@ static int64_t mc_map_impl(int64_t mc_handle_val, int64_t size_raw,
   SM_CU_CHECK(
       cuMemAddressReserve((CUdeviceptr *)&mc_ptr, size, granularity, 0, 0));
   SM_CU_CHECK(cuMemMap((CUdeviceptr)mc_ptr, size, 0, mc_handle, 0));
-  cu_mem_set_access_all(mc_ptr, size);
+  cu_mem_set_access_devices(mc_ptr, size, num_devices);
 
   return (int64_t)(uintptr_t)mc_ptr;
 }

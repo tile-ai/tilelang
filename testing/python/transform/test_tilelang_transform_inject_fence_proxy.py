@@ -370,7 +370,7 @@ def test_inject_fence_proxy_does_not_inject_tma_store_sync():
                 name = getattr(call.op, "name", None)
                 if name == "tl.tma_store_arrive":
                     arrives += 1
-                elif name in ("tl.tma_store_wait", "tl.tma_store_wait<0>"):
+                elif name in ("tl.tma_store_wait", "tl.tma_store_wait<0>", "tl.tma_store_wait<0, true>"):
                     waits += 1
 
     tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
