@@ -45,8 +45,9 @@
 
 #include "../op/builtin.h"
 #include "../target/utils.h"
-#include "runtime/thread_storage_scope.h"
+#include "./common/epoch_graph.h"
 #include "./common/shared_access_analysis.h"
+#include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/tir/function.h"
 
@@ -230,8 +231,7 @@ public:
     return ranges;
   }
 
-  Array<Range> MakeRangesFromLinearAccess(const Buffer &buffer,
-                                          PrimExpr offset,
+  Array<Range> MakeRangesFromLinearAccess(const Buffer &buffer, PrimExpr offset,
                                           PrimExpr extent) const {
     Array<Range> buffer_ranges;
     if (!buffer.defined() || buffer->shape.empty()) {
@@ -264,17 +264,19 @@ public:
     };
 
     Array<PrimExpr> start_indices = linear_to_indices(offset, buffer->shape);
-    Array<PrimExpr> end_indices = linear_to_indices(offset + extent, buffer->shape);
+    Array<PrimExpr> end_indices =
+        linear_to_indices(offset + extent, buffer->shape);
     for (size_t i = 0; i < buffer->shape.size(); ++i) {
-      buffer_ranges.push_back(Range::FromMinExtent(start_indices[i],
-                                                   end_indices[i] - start_indices[i]));
+      buffer_ranges.push_back(Range::FromMinExtent(
+          start_indices[i], end_indices[i] - start_indices[i]));
     }
     return buffer_ranges;
   }
 
-  shared_access_analysis::AccessEntry MakePreciseAccess(
-      const Buffer &buffer, const Array<PrimExpr> &indices, DataType dtype,
-      shared_access_analysis::AccessType type, bool is_pointer_access = false) const {
+  shared_access_analysis::AccessEntry
+  MakePreciseAccess(const Buffer &buffer, const Array<PrimExpr> &indices,
+                    DataType dtype, shared_access_analysis::AccessType type,
+                    bool is_pointer_access = false) const {
     shared_access_analysis::AccessEntry access;
     access.cset = GetConstrSet();
     access.threads = env_threads_;
@@ -292,8 +294,9 @@ public:
     return access;
   }
 
-  shared_access_analysis::AccessEntry MakePointerAccess(
-      const VarNode *buf, shared_access_analysis::AccessType type) const {
+  shared_access_analysis::AccessEntry
+  MakePointerAccess(const VarNode *buf,
+                    shared_access_analysis::AccessType type) const {
     shared_access_analysis::AccessEntry access;
     access.cset = GetConstrSet();
     access.threads = env_threads_;
@@ -305,9 +308,10 @@ public:
     return access;
   }
 
-  shared_access_analysis::AccessEntry MakeLinearPointerAccess(
-      const VarNode *buf, const Buffer &buffer, PrimExpr offset, PrimExpr extent,
-      DataType dtype, shared_access_analysis::AccessType type) const {
+  shared_access_analysis::AccessEntry
+  MakeLinearPointerAccess(const VarNode *buf, const Buffer &buffer,
+                          PrimExpr offset, PrimExpr extent, DataType dtype,
+                          shared_access_analysis::AccessType type) const {
     shared_access_analysis::AccessEntry access;
     access.cset = GetConstrSet();
     access.threads = env_threads_;
@@ -315,7 +319,8 @@ public:
     access.buffer_name = buffer;
     access.buffer_ranges = MakeRangesFromLinearAccess(buffer, offset, extent);
     access.dtype = dtype;
-    access.touched = {arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
+    access.touched = {
+        arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
     access.type = type;
     access.scope = GetSummaryScope(buf);
     access.is_pointer_access = true;
@@ -340,7 +345,8 @@ public:
         // the more global aggressive mode.
         bool use_innermost_scope =
             enable_aggressive_merge_ || if_scope_depth_ > 0;
-        size_t access_level = use_innermost_scope ? scope_.size() - 1 : it->second.level;
+        size_t access_level =
+            use_innermost_scope ? scope_.size() - 1 : it->second.level;
         if (use_innermost_scope) {
           RecordAccess(scope_.size() - 1, buf, true, op);
         } else {
@@ -366,7 +372,8 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     bool is_shared_sync = false;
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(builtin::tvm_storage_sync()) && !call->args.empty()) {
+      if (call->op.same_as(builtin::tvm_storage_sync()) &&
+          !call->args.empty()) {
         if (const auto *scope_imm = call->args[0].as<StringImmNode>()) {
           is_shared_sync = IsRelevantSharedSync(scope_imm->value);
         }
@@ -437,19 +444,17 @@ public:
             enable_aggressive_merge_ || if_scope_depth_ > 0;
         if (use_innermost_scope) {
           RecordAccess(scope_.size() - 1, buf, false, buf);
-          RecordPreciseAccess(scope_.size() - 1,
-                              MakePointerAccess(buf,
-                                                shared_access_analysis::kRead),
-                              buf);
+          RecordPreciseAccess(
+              scope_.size() - 1,
+              MakePointerAccess(buf, shared_access_analysis::kRead), buf);
         } else {
           // Attribute same-level uses to the allocation frame, mirroring the
           // BufferLoad handling to keep reuse decisions consistent.
           size_t access_level = std::min(it->second.level, scope_.size() - 1);
           RecordAccess(access_level, buf, false, buf);
-          RecordPreciseAccess(access_level,
-                              MakePointerAccess(buf,
-                                                shared_access_analysis::kRead),
-                              buf);
+          RecordPreciseAccess(
+              access_level,
+              MakePointerAccess(buf, shared_access_analysis::kRead), buf);
         }
       }
     }
@@ -472,13 +477,13 @@ public:
                   : std::min(it->second.level, scope_.size() - 1);
           if (flag->value & 1) {
             RecordAccess(access_level, buf, false, op);
-            RecordPreciseAccess(
-                access_level,
-                MakePreciseAccess(base_load->buffer, base_load->indices,
-                                  base_load->dtype.element_of(),
-                                  shared_access_analysis::kRead,
-                                  /*is_pointer_access=*/true),
-                op);
+            RecordPreciseAccess(access_level,
+                                MakePreciseAccess(base_load->buffer,
+                                                  base_load->indices,
+                                                  base_load->dtype.element_of(),
+                                                  shared_access_analysis::kRead,
+                                                  /*is_pointer_access=*/true),
+                                op);
           }
           if (flag->value & 2) {
             RecordAccess(access_level, buf, true, op);
@@ -501,8 +506,8 @@ public:
         if (it != alloc_info_.end() && it->second.alloc &&
             IsAppropriateSharedMemory(tvm::ffi::GetRef<Var>(buffer_var))) {
           Buffer buffer;
-          if (auto buffer_opt =
-                  buffer_data_to_buffer_.Get(tvm::ffi::GetRef<Var>(buffer_var))) {
+          if (auto buffer_opt = buffer_data_to_buffer_.Get(
+                  tvm::ffi::GetRef<Var>(buffer_var))) {
             buffer = buffer_opt.value();
           }
           size_t access_level =
@@ -513,8 +518,8 @@ public:
             RecordAccess(access_level, buffer_var, false, op);
             RecordPreciseAccess(
                 access_level,
-                MakeLinearPointerAccess(buffer_var, buffer, op->args[2], op->args[3],
-                                        op->args[0].dtype(),
+                MakeLinearPointerAccess(buffer_var, buffer, op->args[2],
+                                        op->args[3], op->args[0].dtype(),
                                         shared_access_analysis::kRead),
                 op);
           }
@@ -522,8 +527,8 @@ public:
             RecordAccess(access_level, buffer_var, true, op);
             RecordPreciseAccess(
                 access_level,
-                MakeLinearPointerAccess(buffer_var, buffer, op->args[2], op->args[3],
-                                        op->args[0].dtype(),
+                MakeLinearPointerAccess(buffer_var, buffer, op->args[2],
+                                        op->args[3], op->args[0].dtype(),
                                         shared_access_analysis::kWrite),
                 op);
           }
@@ -791,9 +796,109 @@ public:
     // First compute liveness over the flattened schedule, then feed it into the
     // arena packer.
     this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
-    if (verbose_) {
-      this->LogBoundarySummaryDeltas(finder.linear_seq_, finder.stmt_attrs_);
+
+    // ----- Per-epoch liveness (always-on, drives alias decisions) -----
+    //
+    // Build the EpochGraph and the (buffer, epoch) access map keyed by
+    // VarNode*, then solve the forward+backward liveness fixed point. The
+    // resulting `live_epochs` set per buffer is consumed by `PlanMemory`
+    // via `liveness_epochs_by_var_` to relax conflicts that the per-epoch
+    // dataflow proves safe.
+    liveness_epochs_by_var_.clear();
+    {
+      epoch_graph::EpochGraphBuilder eg_builder;
+      epoch_graph::EpochGraph eg = eg_builder.Build(stmt);
+      struct EpochAccessAgg {
+        bool has_read = false;
+        bool has_write = false;
+      };
+      std::map<int, std::map<const VarNode *, EpochAccessAgg>> agg;
+      for (size_t i = 0; i < finder.linear_seq_.size(); ++i) {
+        const auto &e = finder.linear_seq_[i];
+        int epoch_id = e.stmt ? eg.EpochOf(e.stmt) : -1;
+        if (epoch_id < 0)
+          continue;
+        for (const VarNode *v : e.read_touched)
+          agg[epoch_id][v].has_read = true;
+        for (const VarNode *v : e.write_touched)
+          agg[epoch_id][v].has_write = true;
+      }
+      std::unordered_map<const VarNode *,
+                         std::unordered_map<int, epoch_graph::EpochAccess>>
+          live_input;
+      for (const auto &epoch_kv : agg) {
+        for (const auto &buf_kv : epoch_kv.second) {
+          auto &cell = live_input[buf_kv.first][epoch_kv.first];
+          cell.def = cell.def || buf_kv.second.has_write;
+          cell.use = cell.use || buf_kv.second.has_read;
+        }
+      }
+      auto live_out =
+          epoch_graph::ComputePerEpochLiveness<const VarNode *>(eg, live_input);
+      for (const auto &kv : live_out) {
+        std::set<int> &dst = liveness_epochs_by_var_[kv.first];
+        for (const auto &p : kv.second) {
+          if (p.second.Live())
+            dst.insert(p.first);
+        }
+      }
+
+      if (verbose_) {
+        this->LogBoundarySummaryDeltas(finder.linear_seq_, finder.stmt_attrs_);
+        // Per-stmt witness dump: print every linear_seq_ index, scope offset,
+        // and the buffers it reads/writes/touches.  Used to map planner indices
+        // back to actual TIR statements (and hence CUDA lines) for the lowbit
+        // kernel investigation.
+        for (size_t i = 0; i < finder.linear_seq_.size(); ++i) {
+          const auto &e = finder.linear_seq_[i];
+          std::stringstream rs, ws, ts;
+          for (const VarNode *v : e.read_touched)
+            rs << v->name_hint << " ";
+          for (const VarNode *v : e.write_touched)
+            ws << v->name_hint << " ";
+          for (const VarNode *v : e.touched)
+            ts << v->name_hint << " ";
+          std::string tk = e.stmt ? std::string(e.stmt->GetTypeKey())
+                                  : std::string("<null>");
+          int epoch_id = e.stmt ? eg.EpochOf(e.stmt) : -1;
+          std::cerr << "[MSMA-SEQ] i=" << i << " kind=" << tk
+                    << " scope_off=" << e.scope_pair_offset
+                    << " sync=" << (e.is_sync ? 1 : 0) << " epoch=" << epoch_id
+                    << " R=[" << rs.str() << "]"
+                    << " W=[" << ws.str() << "]"
+                    << " T=[" << ts.str() << "]\n";
+        }
+        eg.Dump(std::cerr);
+        for (const auto &epoch_kv : agg) {
+          for (const auto &buf_kv : epoch_kv.second) {
+            std::cerr << "[MSMA-EPOCH-ACCESS] epoch=" << epoch_kv.first
+                      << " buf=" << buf_kv.first->name_hint
+                      << " r=" << (buf_kv.second.has_read ? 1 : 0)
+                      << " w=" << (buf_kv.second.has_write ? 1 : 0) << "\n";
+          }
+        }
+        // Re-render liveness with name_hint for log readability.
+        std::map<int, std::vector<
+                          std::pair<std::string, epoch_graph::EpochLiveness>>>
+            by_epoch;
+        for (const auto &kv : live_out) {
+          for (const auto &p : kv.second) {
+            if (p.second.Live()) {
+              by_epoch[p.first].push_back({kv.first->name_hint, p.second});
+            }
+          }
+        }
+        for (const auto &kv : by_epoch) {
+          for (const auto &p : kv.second) {
+            std::cerr << "[MSMA-EPOCH-LIVE] epoch=" << kv.first
+                      << " buf=" << p.first
+                      << " in=" << (p.second.live_in ? 1 : 0)
+                      << " out=" << (p.second.live_out ? 1 : 0) << "\n";
+          }
+        }
+      }
     }
+
     this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
   }
 
@@ -864,20 +969,24 @@ private:
     auto node = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
 
     auto rewrite_region = [this, op](const BufferRegion &region) {
-      if (!region.defined() || !IsAppropriateSharedMemory(region->buffer->data)) {
+      if (!region.defined() ||
+          !IsAppropriateSharedMemory(region->buffer->data)) {
         return region;
       }
       Array<Range> new_region;
       new_region.reserve(region->region.size());
-      PrimExpr elem_offset = GetBufferOffset(region->buffer->data, region->buffer->dtype, op);
+      PrimExpr elem_offset =
+          GetBufferOffset(region->buffer->data, region->buffer->dtype, op);
       if (verbose_) {
-        auto binding_it = buffer_segment_bindings_.find(region->buffer->data.get());
+        auto binding_it =
+            buffer_segment_bindings_.find(region->buffer->data.get());
         if (binding_it != buffer_segment_bindings_.end() &&
             binding_it->second.size() > 1) {
           std::ostringstream os;
           os << "Block BufferRegion rewrite: buffer="
-             << region->buffer->data->name_hint << ", access_node="
-             << op->GetTypeKey() << ", elem_offset=" << elem_offset;
+             << region->buffer->data->name_hint
+             << ", access_node=" << op->GetTypeKey()
+             << ", elem_offset=" << elem_offset;
           if (!region->region.empty()) {
             os << ", first_min=" << region->region[0]->min
                << ", first_extent=" << region->region[0]->extent;
@@ -888,14 +997,16 @@ private:
       for (size_t i = 0; i < region->region.size(); ++i) {
         Range range = region->region[i];
         if (i == 0) {
-          new_region.push_back(Range::FromMinExtent(range->min + elem_offset, range->extent));
+          new_region.push_back(
+              Range::FromMinExtent(range->min + elem_offset, range->extent));
         } else {
           new_region.push_back(range);
         }
       }
 
       Buffer new_buffer = GetUpdatedBuffer(region->buffer);
-      if (new_buffer.same_as(region->buffer) && new_region.same_as(region->region)) {
+      if (new_buffer.same_as(region->buffer) &&
+          new_region.same_as(region->region)) {
         return region;
       }
       return BufferRegion(new_buffer, new_region);
@@ -904,18 +1015,18 @@ private:
     auto writer = node.CopyOnWrite();
     writer->reads = node->reads.Map(rewrite_region);
     writer->writes = node->writes.Map(rewrite_region);
-    writer->alloc_buffers = node->alloc_buffers.Map([this](const Buffer &buffer) {
-      return GetUpdatedBuffer(buffer);
-    });
-    writer->match_buffers = node->match_buffers.Map([&rewrite_region, this](const MatchBufferRegion &match_buffer) {
-      Buffer new_buffer = GetUpdatedBuffer(match_buffer->buffer);
-      BufferRegion new_source = rewrite_region(match_buffer->source);
-      if (new_buffer.same_as(match_buffer->buffer) &&
-          new_source.same_as(match_buffer->source)) {
-        return match_buffer;
-      }
-      return MatchBufferRegion(new_buffer, new_source);
-    });
+    writer->alloc_buffers = node->alloc_buffers.Map(
+        [this](const Buffer &buffer) { return GetUpdatedBuffer(buffer); });
+    writer->match_buffers = node->match_buffers.Map(
+        [&rewrite_region, this](const MatchBufferRegion &match_buffer) {
+          Buffer new_buffer = GetUpdatedBuffer(match_buffer->buffer);
+          BufferRegion new_source = rewrite_region(match_buffer->source);
+          if (new_buffer.same_as(match_buffer->buffer) &&
+              new_source.same_as(match_buffer->source)) {
+            return match_buffer;
+          }
+          return MatchBufferRegion(new_buffer, new_source);
+        });
     return std::move(node);
   }
 
@@ -931,17 +1042,17 @@ private:
     return VisitBufferAccess(std::move(node), op);
   }
 
-  template <typename Node> Node VisitBufferAccess(Node node,
-                                                  const Object *access_node) {
+  template <typename Node>
+  Node VisitBufferAccess(Node node, const Object *access_node) {
     if (IsAppropriateSharedMemory(node->buffer->data)) {
       ICHECK_EQ(node->indices.size(), 1)
           << "MergeSharedMemoryAllocations expects flat memory buffers, "
           << "and is to be run after "
           << "StorageFlatten (TE schedules) or FlattenBuffer (TIR schedules)";
-      Array<PrimExpr> indices = {
-          node->indices[0] + this->GetBufferOffset(node->buffer->data,
-                                                   node->buffer->dtype,
-                                                   access_node)};
+      Array<PrimExpr> indices = {node->indices[0] +
+                                 this->GetBufferOffset(node->buffer->data,
+                                                       node->buffer->dtype,
+                                                       access_node)};
 
       auto writer = node.CopyOnWrite();
       writer->buffer = GetUpdatedBuffer(node->buffer);
@@ -1009,10 +1120,11 @@ private:
       if (!IsAppropriateSharedMemory(buffer)) {
         return StmtExprMutator::VisitExpr_(op);
       }
-      
+
       DataType dtype = op->dtype;
       DataType ptr_dtype = dst_access_ptr->args[0].dtype();
-      PrimExpr extra_offset = GetBufferOffset(buffer, ptr_dtype, dst_access_ptr.get());
+      PrimExpr extra_offset =
+          GetBufferOffset(buffer, ptr_dtype, dst_access_ptr.get());
       if (verbose_) {
         auto binding_it = buffer_segment_bindings_.find(buffer.get());
         if (binding_it != buffer_segment_bindings_.end() &&
@@ -1045,9 +1157,9 @@ private:
     } else {
       if (verbose_) {
         const OpNode *call_op = op->op.as<OpNode>();
-        std::string call_name =
-            call_op != nullptr ? std::string(call_op->name.c_str())
-                              : std::string(op->op->GetTypeKey());
+        std::string call_name = call_op != nullptr
+                                    ? std::string(call_op->name.c_str())
+                                    : std::string(op->op->GetTypeKey());
         for (const PrimExpr &arg : op->args) {
           if (const auto *region = arg.as<BufferRegionNode>()) {
             const VarNode *buffer_var = region->buffer->data.get();
@@ -1055,9 +1167,10 @@ private:
             if (IsAppropriateSharedMemory(region->buffer->data) &&
                 binding_it != buffer_segment_bindings_.end() &&
                 binding_it->second.size() > 1) {
-              LOG(DEBUG) << "Opaque call with multi-segment BufferRegion arg: op="
-                         << call_name << ", buffer=" << buffer_var->name_hint
-                         << ", segments=" << binding_it->second.size();
+              LOG(DEBUG)
+                  << "Opaque call with multi-segment BufferRegion arg: op="
+                  << call_name << ", buffer=" << buffer_var->name_hint
+                  << ", segments=" << binding_it->second.size();
             }
           }
         }
@@ -1073,7 +1186,8 @@ private:
       if (auto segment_id = ResolveSegmentId(buffer_var.get(), access_node)) {
         if (binding_it != buffer_segment_bindings_.end() &&
             binding_it->second.size() > static_cast<size_t>(*segment_id)) {
-          size_t offset = binding_it->second[static_cast<size_t>(*segment_id)].offset;
+          size_t offset =
+              binding_it->second[static_cast<size_t>(*segment_id)].offset;
           if (verbose_ && binding_it->second.size() > 1) {
             LOG(DEBUG) << "Resolved segment-aware offset for buffer "
                        << buffer_var->name_hint << " on access node "
@@ -1126,7 +1240,7 @@ private:
     }
 
     class NestedAccessProbe final : public StmtExprVisitor {
-     public:
+    public:
       NestedAccessProbe(const SharedMemoryRewriter *rewriter,
                         const VarNode *buffer_var)
           : rewriter_(rewriter), buffer_var_(buffer_var) {}
@@ -1161,7 +1275,7 @@ private:
         }
       }
 
-     private:
+    private:
       void Probe(const Object *node) {
         if (!result_) {
           result_ = rewriter_->LookupSegmentId(buffer_var_, node);
@@ -1177,7 +1291,8 @@ private:
     if (access_node->IsInstance<StmtNode>()) {
       probe(tvm::ffi::GetRef<Stmt>(static_cast<const StmtNode *>(access_node)));
     } else if (access_node->IsInstance<PrimExprNode>()) {
-      probe(tvm::ffi::GetRef<PrimExpr>(static_cast<const PrimExprNode *>(access_node)));
+      probe(tvm::ffi::GetRef<PrimExpr>(
+          static_cast<const PrimExprNode *>(access_node)));
     }
     return probe.Result();
   }
@@ -1204,7 +1319,8 @@ private:
     int alignment{0};                        // required byte alignment.
     int start{0}; // first statement index touching the buf.
     int end{0};   // one-past-last statement index.
-    std::vector<std::pair<int, int>> segments; // disjoint [start, end) intervals.
+    std::vector<std::pair<int, int>>
+        segments; // disjoint [start, end) intervals.
     DataType size_dtype{DataType::Int(32)};
   };
 
@@ -1216,6 +1332,13 @@ private:
     int alignment{0};
     const VarNode *var{nullptr};
     int segment_id{0};
+    // Optional pointer into `liveness_epochs_by_var_`. If non-null and the
+    // pointed-to set is non-empty, two intervals A and B are treated as
+    // non-conflicting when their live epoch sets are disjoint, even if their
+    // legacy `[start, end)` linear-seq intervals overlap. This is a strict
+    // refinement: the legacy decision is preserved unless the per-epoch
+    // dataflow can *prove* the buffers are never simultaneously alive.
+    const std::set<int> *live_epochs{nullptr};
   };
 
   // Result of a linear-scan arena packing.  Offsets contain the byte offset for
@@ -1276,19 +1399,47 @@ private:
           if (&other == &interval) {
             continue;
           }
-          if (other.var == interval.var && other.segment_id == interval.segment_id) {
+          if (other.var == interval.var &&
+              other.segment_id == interval.segment_id) {
             continue;
           }
-          bool live_overlap = !(interval.end <= other.start || other.end <= interval.start);
+          bool live_overlap =
+              !(interval.end <= other.start || other.end <= interval.start);
           if (!live_overlap) {
             continue;
           }
+          // Strict relaxer: if both intervals have a non-empty live-epoch
+          // set and the sets are disjoint, the legacy 1-D linear-seq overlap
+          // is spurious (two buffers happen to span the same syntactic range
+          // but are never simultaneously *alive* under per-epoch dataflow).
+          if (interval.live_epochs && other.live_epochs &&
+              !interval.live_epochs->empty() && !other.live_epochs->empty()) {
+            const auto &la = *interval.live_epochs;
+            const auto &lb = *other.live_epochs;
+            auto ia = la.begin(), ib = lb.begin();
+            bool intersects = false;
+            while (ia != la.end() && ib != lb.end()) {
+              if (*ia < *ib)
+                ++ia;
+              else if (*ib < *ia)
+                ++ib;
+              else {
+                intersects = true;
+                break;
+              }
+            }
+            if (!intersects) {
+              continue;
+            }
+          }
           auto other_it = segment_offsets.find(other.var);
           if (other_it == segment_offsets.end() ||
-              other_it->second.size() <= static_cast<size_t>(other.segment_id)) {
+              other_it->second.size() <=
+                  static_cast<size_t>(other.segment_id)) {
             continue;
           }
-          size_t other_offset = other_it->second[static_cast<size_t>(other.segment_id)];
+          size_t other_offset =
+              other_it->second[static_cast<size_t>(other.segment_id)];
           bool mem_overlap = !(offset + interval.size_bytes <= other_offset ||
                                other_offset + other.size_bytes <= offset);
           if (mem_overlap) {
@@ -1311,8 +1462,7 @@ private:
       }
       auto &per_var_offsets = segment_offsets[interval.var];
       if (per_var_offsets.size() <= static_cast<size_t>(interval.segment_id)) {
-        per_var_offsets.resize(static_cast<size_t>(interval.segment_id) + 1,
-                               0);
+        per_var_offsets.resize(static_cast<size_t>(interval.segment_id) + 1, 0);
       }
       per_var_offsets[static_cast<size_t>(interval.segment_id)] = offset;
     }
@@ -1336,8 +1486,9 @@ private:
     return runtime::StorageScope::Create(is_dynamic_ ? "shared.dyn" : "shared");
   }
 
-  SummaryAccessEntry MakeSyntheticAccess(
-      const VarNode *var, shared_access_analysis::AccessType type) const {
+  SummaryAccessEntry
+  MakeSyntheticAccess(const VarNode *var,
+                      shared_access_analysis::AccessType type) const {
     SummaryAccessEntry access;
     access.buffer = tvm::ffi::GetRef<Var>(var);
     access.dtype = DataType::UInt(8);
@@ -1362,8 +1513,8 @@ private:
         summary_entry.access.push_back(sync_access);
       }
       if (!entry.access.empty()) {
-        summary_entry.access.insert(summary_entry.access.end(), entry.access.begin(),
-                                    entry.access.end());
+        summary_entry.access.insert(summary_entry.access.end(),
+                                    entry.access.begin(), entry.access.end());
       } else {
         for (const VarNode *var : entry.read_touched) {
           summary_entry.access.push_back(
@@ -1421,8 +1572,8 @@ private:
     return os.str();
   }
 
-  std::vector<std::string>
-  AccessSetToSortedStrings(const std::vector<SummaryAccessEntry> &accesses) const {
+  std::vector<std::string> AccessSetToSortedStrings(
+      const std::vector<SummaryAccessEntry> &accesses) const {
     std::vector<std::string> result;
     result.reserve(accesses.size());
     for (const SummaryAccessEntry &access : accesses) {
@@ -1433,12 +1584,13 @@ private:
     return result;
   }
 
-  std::vector<std::string>
-  BufferSetToSortedStrings(const std::vector<SummaryAccessEntry> &accesses) const {
+  std::vector<std::string> BufferSetToSortedStrings(
+      const std::vector<SummaryAccessEntry> &accesses) const {
     std::vector<std::string> result;
     result.reserve(accesses.size());
     for (const SummaryAccessEntry &access : accesses) {
-      if (access.type == shared_access_analysis::kSync || !access.buffer.defined()) {
+      if (access.type == shared_access_analysis::kSync ||
+          !access.buffer.defined()) {
         continue;
       }
       result.push_back(access.buffer->name_hint);
@@ -1448,8 +1600,9 @@ private:
     return result;
   }
 
-  std::vector<std::string> VectorDiff(const std::vector<std::string> &lhs,
-                                      const std::vector<std::string> &rhs) const {
+  std::vector<std::string>
+  VectorDiff(const std::vector<std::string> &lhs,
+             const std::vector<std::string> &rhs) const {
     std::vector<std::string> result;
     std::set_difference(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
                         std::back_inserter(result));
@@ -1607,7 +1760,8 @@ private:
     bool has_write{false};
   };
 
-  int AccessWitnessScore(const shared_access_analysis::AccessEntry &access) const {
+  int AccessWitnessScore(
+      const shared_access_analysis::AccessEntry &access) const {
     if (!access.buffer_indices.empty()) {
       return 3;
     }
@@ -1739,14 +1893,15 @@ private:
     return os.str();
   }
 
-  std::string DescribeBufferAccessExpr(const Object *stmt, const std::string &buffer,
+  std::string DescribeBufferAccessExpr(const Object *stmt,
+                                       const std::string &buffer,
                                        bool want_read) const {
     if (stmt == nullptr) {
       return "none";
     }
 
     class BufferAccessExprExtractor final : public StmtExprVisitor {
-     public:
+    public:
       BufferAccessExprExtractor(const std::string &buffer, bool want_read)
           : buffer_(buffer), want_read_(want_read) {}
 
@@ -1796,16 +1951,16 @@ private:
           if (buffer_var != nullptr && buffer_var->name_hint == buffer_ &&
               ((want_read_ && has_read) || (!want_read_ && has_write))) {
             std::ostringstream os;
-            os << "access_ptr(" << buffer_var->name_hint << ", offset="
-               << op->args[2] << ", extent=" << op->args[3] << ", rw="
-               << (want_read_ ? "read" : "write") << ")";
+            os << "access_ptr(" << buffer_var->name_hint
+               << ", offset=" << op->args[2] << ", extent=" << op->args[3]
+               << ", rw=" << (want_read_ ? "read" : "write") << ")";
             result_ = os.str();
           }
         }
         StmtExprVisitor::VisitExpr_(op);
       }
 
-     private:
+    private:
       std::string buffer_;
       bool want_read_{false};
       std::optional<std::string> result_;
@@ -1815,7 +1970,8 @@ private:
     if (stmt->IsInstance<StmtNode>()) {
       extractor(tvm::ffi::GetRef<Stmt>(static_cast<const StmtNode *>(stmt)));
     } else if (stmt->IsInstance<PrimExprNode>()) {
-      extractor(tvm::ffi::GetRef<PrimExpr>(static_cast<const PrimExprNode *>(stmt)));
+      extractor(
+          tvm::ffi::GetRef<PrimExpr>(static_cast<const PrimExprNode *>(stmt)));
     }
     return extractor.Result().value_or("none");
   }
@@ -1952,7 +2108,7 @@ private:
     }
 
     class BufferAccessFootprintExtractor final : public StmtExprVisitor {
-     public:
+    public:
       BufferAccessFootprintExtractor(const SharedMemoryRewriter *planner,
                                      const std::string &buffer, bool want_read)
           : planner_(planner), buffer_(buffer), want_read_(want_read) {}
@@ -1984,13 +2140,14 @@ private:
           bool has_write = flag != nullptr && (flag->value & 2);
           if (buffer_var != nullptr && buffer_var->name_hint == buffer_ &&
               ((want_read_ && has_read) || (!want_read_ && has_write))) {
-            result_ = planner_->DescribeLinearFootprint(op->args[2], op->args[3]);
+            result_ =
+                planner_->DescribeLinearFootprint(op->args[2], op->args[3]);
           }
         }
         StmtExprVisitor::VisitExpr_(op);
       }
 
-     private:
+    private:
       const SharedMemoryRewriter *planner_;
       std::string buffer_;
       bool want_read_{false};
@@ -2001,7 +2158,8 @@ private:
     if (stmt->IsInstance<StmtNode>()) {
       extractor(tvm::ffi::GetRef<Stmt>(static_cast<const StmtNode *>(stmt)));
     } else if (stmt->IsInstance<PrimExprNode>()) {
-      extractor(tvm::ffi::GetRef<PrimExpr>(static_cast<const PrimExprNode *>(stmt)));
+      extractor(
+          tvm::ffi::GetRef<PrimExpr>(static_cast<const PrimExprNode *>(stmt)));
     }
     return extractor.Result().value_or("none");
   }
@@ -2061,9 +2219,8 @@ private:
     return "unknown";
   }
 
-  BufferPhaseClass InferBufferPhaseClass(
-      const BufferLifetimePlanSeed &seed,
-      size_t total_boundaries) const {
+  BufferPhaseClass InferBufferPhaseClass(const BufferLifetimePlanSeed &seed,
+                                         size_t total_boundaries) const {
     size_t carry_count = seed.carry_over_boundaries.size();
     size_t stable_count = seed.stable_closures.size();
     size_t unstable_count = seed.unstable_closures.size();
@@ -2071,9 +2228,11 @@ private:
     size_t anchor_threshold = std::max<size_t>(4, total_boundaries / 2);
     bool single_birth = seed.gen_count <= 1;
     bool read_mostly = seed.read_stmt_count > 0 && seed.write_stmt_count <= 1;
-    bool repeated_working_writes = seed.write_stmt_count > 1 || seed.gen_count > 1;
+    bool repeated_working_writes =
+        seed.write_stmt_count > 1 || seed.gen_count > 1;
     bool tiny_carry = carry_count <= 1;
-    bool derived_single_write = seed.write_stmt_count == 1 && seed.gen_count == 1;
+    bool derived_single_write =
+        seed.write_stmt_count == 1 && seed.gen_count == 1;
 
     if (carry_count >= anchor_threshold && unstable_count == 0) {
       return BufferPhaseClass::kAnchor;
@@ -2095,8 +2254,8 @@ private:
     return BufferPhaseClass::kLocalWorkingSet;
   }
 
-  BufferSplitPolicy SuggestSplitPolicy(
-      const BufferLifetimePlanSeed &seed) const {
+  BufferSplitPolicy
+  SuggestSplitPolicy(const BufferLifetimePlanSeed &seed) const {
     switch (seed.inferred_phase_class) {
     case BufferPhaseClass::kAnchor:
     case BufferPhaseClass::kReadMostlyAnchor:
@@ -2112,12 +2271,12 @@ private:
     return BufferSplitPolicy::kSplitAtStableClosure;
   }
 
-  std::vector<BufferLifetimePlanSeed>
-  BuildLifetimePlanSeeds(
+  std::vector<BufferLifetimePlanSeed> BuildLifetimePlanSeeds(
       const std::vector<BoundaryDeltaRecord> &records,
       const std::unordered_map<std::string, BufferAccessStats>
           &access_stats_by_buffer,
-      const std::unordered_map<size_t, LoopBoundarySummary> &loop_summaries) const {
+      const std::unordered_map<size_t, LoopBoundarySummary> &loop_summaries)
+      const {
     std::vector<BufferLifetimePlanSeed> seeds;
     if (records.empty()) {
       return seeds;
@@ -2125,14 +2284,17 @@ private:
 
     std::unordered_set<std::string> buffer_names;
     for (const BoundaryDeltaRecord &record : records) {
-      buffer_names.insert(record.post_buffers.begin(), record.post_buffers.end());
-      buffer_names.insert(record.closed_buffers.begin(), record.closed_buffers.end());
+      buffer_names.insert(record.post_buffers.begin(),
+                          record.post_buffers.end());
+      buffer_names.insert(record.closed_buffers.begin(),
+                          record.closed_buffers.end());
       buffer_names.insert(record.persistent_buffers.begin(),
                           record.persistent_buffers.end());
       buffer_names.insert(record.new_buffers.begin(), record.new_buffers.end());
     }
 
-    std::vector<std::string> sorted_buffers(buffer_names.begin(), buffer_names.end());
+    std::vector<std::string> sorted_buffers(buffer_names.begin(),
+                                            buffer_names.end());
     std::sort(sorted_buffers.begin(), sorted_buffers.end());
 
     auto contains = [](const std::vector<std::string> &items,
@@ -2159,15 +2321,19 @@ private:
         if (auto loop_it = loop_summaries.find(record.boundary);
             loop_it != loop_summaries.end()) {
           if (contains(loop_it->second.loop_local_buffers, buffer)) {
-            seed.loop_local_boundaries.push_back(std::to_string(record.boundary));
+            seed.loop_local_boundaries.push_back(
+                std::to_string(record.boundary));
           }
           if (contains(loop_it->second.loop_carried_buffers, buffer)) {
-            seed.loop_carried_boundaries.push_back(std::to_string(record.boundary));
+            seed.loop_carried_boundaries.push_back(
+                std::to_string(record.boundary));
           }
-          std::vector<std::string> middle_only = VectorDiff(
-              loop_it->second.loop_carried_buffers, loop_it->second.loop_local_buffers);
+          std::vector<std::string> middle_only =
+              VectorDiff(loop_it->second.loop_carried_buffers,
+                         loop_it->second.loop_local_buffers);
           if (contains(middle_only, buffer)) {
-            seed.loop_middle_boundaries.push_back(std::to_string(record.boundary));
+            seed.loop_middle_boundaries.push_back(
+                std::to_string(record.boundary));
           }
         }
         if (!contains(record.closed_buffers, buffer)) {
@@ -2185,9 +2351,9 @@ private:
         }
 
         if (reappears_at.has_value()) {
-          seed.unstable_closures.push_back(std::to_string(record.boundary) +
-                                           "->" +
-                                           std::to_string(reappears_at.value()));
+          seed.unstable_closures.push_back(
+              std::to_string(record.boundary) + "->" +
+              std::to_string(reappears_at.value()));
         } else {
           seed.stable_closures.push_back(std::to_string(record.boundary));
         }
@@ -2195,8 +2361,9 @@ private:
 
       seed.inferred_phase_class = InferBufferPhaseClass(seed, records.size());
       seed.suggested_split_policy = SuggestSplitPolicy(seed);
-      seed.reclaim_root = seed.inferred_phase_class == BufferPhaseClass::kPhaseLocalScratch ||
-                          seed.inferred_phase_class == BufferPhaseClass::kDerivedScratch;
+      seed.reclaim_root =
+          seed.inferred_phase_class == BufferPhaseClass::kPhaseLocalScratch ||
+          seed.inferred_phase_class == BufferPhaseClass::kDerivedScratch;
       seed.requires_loop_aware_summary =
           seed.suggested_split_policy ==
               BufferSplitPolicy::kSplitWithLoopAwareSummary ||
@@ -2211,7 +2378,8 @@ private:
   BuildBufferAccessStats(const std::vector<StmtEntry> &seq) const {
     std::unordered_map<std::string, BufferAccessStats> stats_by_buffer;
 
-    auto touch_stats = [&](const std::vector<const VarNode *> &vars, bool is_write) {
+    auto touch_stats = [&](const std::vector<const VarNode *> &vars,
+                           bool is_write) {
       for (const VarNode *var : vars) {
         BufferAccessStats &stats = stats_by_buffer[var->name_hint];
         stats.buffer = var->name_hint;
@@ -2247,8 +2415,8 @@ private:
   }
 
   LoopLifetimeSummary AnalyzeLoopLifetime(const std::vector<StmtEntry> &seq,
-                                         size_t loop_begin,
-                                         size_t loop_end) const {
+                                          size_t loop_begin,
+                                          size_t loop_end) const {
     LoopLifetimeSummary result;
     if (loop_end <= loop_begin + 1 || loop_end > seq.size()) {
       return result;
@@ -2278,12 +2446,15 @@ private:
         loop_body, loop, CurrentSummaryScope(), ffi::Array<tir::IterVar>(),
         ConstrSet{}, {}, false);
 
-    result.head_buffers = BufferSetToSortedStrings(head_summary.exposed_accesses);
+    result.head_buffers =
+        BufferSetToSortedStrings(head_summary.exposed_accesses);
     result.middle_buffers =
         BufferSetToSortedStrings(middle_summary.exposed_accesses);
-    result.tail_buffers = BufferSetToSortedStrings(tail_summary.exposed_accesses);
+    result.tail_buffers =
+        BufferSetToSortedStrings(tail_summary.exposed_accesses);
     result.loop_carried_buffers = result.tail_buffers;
-    result.loop_local_buffers = VectorDiff(result.middle_buffers, result.tail_buffers);
+    result.loop_local_buffers =
+        VectorDiff(result.middle_buffers, result.tail_buffers);
     return result;
   }
 
@@ -2307,11 +2478,13 @@ private:
       }
 
       LoopLifetimeSummary loop_summary = AnalyzeLoopLifetime(seq, i, end_index);
-      if (loop_summary.head_buffers.empty() && loop_summary.tail_buffers.empty()) {
+      if (loop_summary.head_buffers.empty() &&
+          loop_summary.tail_buffers.empty()) {
         continue;
       }
-      loop_summaries.emplace(i, LoopBoundarySummary{loop_summary.loop_local_buffers,
-                                                    loop_summary.loop_carried_buffers});
+      loop_summaries.emplace(
+          i, LoopBoundarySummary{loop_summary.loop_local_buffers,
+                                 loop_summary.loop_carried_buffers});
     }
     return loop_summaries;
   }
@@ -2332,11 +2505,12 @@ private:
     nodes.reserve(seq.size());
     for (size_t i = 0; i < seq.size(); ++i) {
       int scope_level = -1;
-      if (auto attr_it = stmt_attrs.find(seq[i].stmt); attr_it != stmt_attrs.end()) {
+      if (auto attr_it = stmt_attrs.find(seq[i].stmt);
+          attr_it != stmt_attrs.end()) {
         scope_level = static_cast<int>(attr_it->second.level);
       }
-      nodes.push_back(CutpointNode{static_cast<int>(i), seq[i].stmt->GetTypeKey(),
-                                   scope_level});
+      nodes.push_back(CutpointNode{static_cast<int>(i),
+                                   seq[i].stmt->GetTypeKey(), scope_level});
     }
     return nodes;
   }
@@ -2355,8 +2529,8 @@ private:
     return "seq_edge";
   }
 
-  std::vector<ExecutionEdge> BuildExecutionEdges(
-      const std::vector<StmtEntry> &seq) const {
+  std::vector<ExecutionEdge>
+  BuildExecutionEdges(const std::vector<StmtEntry> &seq) const {
     std::vector<ExecutionEdge> edges;
     if (seq.size() < 2) {
       return edges;
@@ -2375,16 +2549,16 @@ private:
       reads.erase(std::unique(reads.begin(), reads.end()), reads.end());
       std::sort(writes.begin(), writes.end());
       writes.erase(std::unique(writes.begin(), writes.end()), writes.end());
-      edges.push_back(ExecutionEdge{static_cast<int>(i), static_cast<int>(i + 1),
-                                    InferEdgeKind(seq[i], seq[i + 1]), reads,
-                                    writes});
+      edges.push_back(
+          ExecutionEdge{static_cast<int>(i), static_cast<int>(i + 1),
+                        InferEdgeKind(seq[i], seq[i + 1]), reads, writes});
     }
     return edges;
   }
 
-  void LogCutpointGraph(const std::vector<StmtEntry> &seq,
-                        const std::unordered_map<const Object *, StmtAttr>
-                            &stmt_attrs) const {
+  void LogCutpointGraph(
+      const std::vector<StmtEntry> &seq,
+      const std::unordered_map<const Object *, StmtAttr> &stmt_attrs) const {
     std::vector<CutpointNode> nodes = BuildCutpointNodes(seq, stmt_attrs);
     std::vector<ExecutionEdge> edges = BuildExecutionEdges(seq);
 
@@ -2430,18 +2604,16 @@ private:
         reason = "closure";
       } else if (record.closed_buffers.empty() && !record.new_buffers.empty()) {
         reason = "birth";
-      } else if (!record.closed_buffers.empty() && !record.new_buffers.empty()) {
+      } else if (!record.closed_buffers.empty() &&
+                 !record.new_buffers.empty()) {
         reason = "transition";
       }
 
-      cutpoints.push_back(CompressedCutpoint{static_cast<int>(cutpoints.size()),
-                                             static_cast<int>(record.boundary),
-                                             static_cast<int>(record.boundary + 1),
-                                             reason,
-                                             changed_buffers,
-                                             record.new_buffers,
-                                             record.closed_buffers,
-                                             record.persistent_buffers});
+      cutpoints.push_back(CompressedCutpoint{
+          static_cast<int>(cutpoints.size()), static_cast<int>(record.boundary),
+          static_cast<int>(record.boundary + 1), reason, changed_buffers,
+          record.new_buffers, record.closed_buffers,
+          record.persistent_buffers});
     }
     return cutpoints;
   }
@@ -2474,13 +2646,15 @@ private:
     };
 
     std::ostringstream os;
-    os << "prev=" << describe_cutpoint(prev) << ", next="
-       << describe_cutpoint(next);
+    os << "prev=" << describe_cutpoint(prev)
+       << ", next=" << describe_cutpoint(next);
     return os.str();
   }
 
-  void LogCompressedCutpoints(const std::vector<BoundaryDeltaRecord> &records) const {
-    std::vector<CompressedCutpoint> cutpoints = BuildCompressedCutpoints(records);
+  void LogCompressedCutpoints(
+      const std::vector<BoundaryDeltaRecord> &records) const {
+    std::vector<CompressedCutpoint> cutpoints =
+        BuildCompressedCutpoints(records);
     for (const CompressedCutpoint &cutpoint : cutpoints) {
       std::ostringstream os;
       os << "[MergeSharedCompressedCutpoint] id=" << cutpoint.id << "\n";
@@ -2490,8 +2664,10 @@ private:
       os << "  changed_buffers: " << JoinStrings(cutpoint.changed_buffers)
          << "\n";
       os << "  born_buffers: " << JoinStrings(cutpoint.born_buffers) << "\n";
-      os << "  closed_buffers: " << JoinStrings(cutpoint.closed_buffers) << "\n";
-      os << "  persistent_buffers: " << JoinStrings(cutpoint.persistent_buffers);
+      os << "  closed_buffers: " << JoinStrings(cutpoint.closed_buffers)
+         << "\n";
+      os << "  persistent_buffers: "
+         << JoinStrings(cutpoint.persistent_buffers);
       LOG(INFO) << os.str();
     }
   }
@@ -2506,8 +2682,8 @@ private:
       if (open_segments.count(buffer)) {
         return;
       }
-      open_segments.emplace(buffer,
-                            BufferLocalSegment{buffer, start_stmt, -1, kind, ""});
+      open_segments.emplace(
+          buffer, BufferLocalSegment{buffer, start_stmt, -1, kind, ""});
     };
 
     auto close_open = [&](const std::string &buffer, int end_stmt,
@@ -2541,26 +2717,27 @@ private:
       segments.push_back(kv.second);
     }
 
-    std::sort(segments.begin(), segments.end(), [](const BufferLocalSegment &lhs,
-                                                   const BufferLocalSegment &rhs) {
-      if (lhs.buffer != rhs.buffer) {
-        return lhs.buffer < rhs.buffer;
-      }
-      if (lhs.start_stmt != rhs.start_stmt) {
-        return lhs.start_stmt < rhs.start_stmt;
-      }
-      return lhs.end_stmt < rhs.end_stmt;
-    });
+    std::sort(segments.begin(), segments.end(),
+              [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
+                if (lhs.buffer != rhs.buffer) {
+                  return lhs.buffer < rhs.buffer;
+                }
+                if (lhs.start_stmt != rhs.start_stmt) {
+                  return lhs.start_stmt < rhs.start_stmt;
+                }
+                return lhs.end_stmt < rhs.end_stmt;
+              });
     return segments;
   }
 
-  std::vector<BufferLocalSegment> BuildLocalSegments(
-      const std::vector<BoundaryDeltaRecord> &records) const {
+  std::vector<BufferLocalSegment>
+  BuildLocalSegments(const std::vector<BoundaryDeltaRecord> &records) const {
     return BuildLocalSegmentsFromCompressedCutpoints(
         BuildCompressedCutpoints(records));
   }
 
-  bool StmtTouchesBuffer(const StmtEntry &entry, const std::string &buffer) const {
+  bool StmtTouchesBuffer(const StmtEntry &entry,
+                         const std::string &buffer) const {
     for (const shared_access_analysis::AccessEntry &access : entry.access) {
       if (AccessMatchesBuffer(access, buffer)) {
         return true;
@@ -2571,7 +2748,8 @@ private:
            ContainsBuffer(entry.write_touched, buffer);
   }
 
-  int FindFirstAccessNodeIndex(const StmtEntry &entry, const std::string &buffer) const {
+  int FindFirstAccessNodeIndex(const StmtEntry &entry,
+                               const std::string &buffer) const {
     for (size_t i = 0; i < entry.access.size(); ++i) {
       if (AccessMatchesBuffer(entry.access[i], buffer)) {
         return static_cast<int>(i);
@@ -2580,7 +2758,8 @@ private:
     return -1;
   }
 
-  int FindLastAccessNodeIndex(const StmtEntry &entry, const std::string &buffer) const {
+  int FindLastAccessNodeIndex(const StmtEntry &entry,
+                              const std::string &buffer) const {
     for (int i = static_cast<int>(entry.access.size()) - 1; i >= 0; --i) {
       if (AccessMatchesBuffer(entry.access[static_cast<size_t>(i)], buffer)) {
         return i;
@@ -2617,16 +2796,16 @@ private:
       concrete.end_stmt = last_touch;
       refined.push_back(std::move(concrete));
     }
-    std::sort(refined.begin(), refined.end(), [](const BufferLocalSegment &lhs,
-                                                 const BufferLocalSegment &rhs) {
-      if (lhs.buffer != rhs.buffer) {
-        return lhs.buffer < rhs.buffer;
-      }
-      if (lhs.start_stmt != rhs.start_stmt) {
-        return lhs.start_stmt < rhs.start_stmt;
-      }
-      return lhs.end_stmt < rhs.end_stmt;
-    });
+    std::sort(refined.begin(), refined.end(),
+              [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
+                if (lhs.buffer != rhs.buffer) {
+                  return lhs.buffer < rhs.buffer;
+                }
+                if (lhs.start_stmt != rhs.start_stmt) {
+                  return lhs.start_stmt < rhs.start_stmt;
+                }
+                return lhs.end_stmt < rhs.end_stmt;
+              });
     return refined;
   }
 
@@ -2644,13 +2823,14 @@ private:
       for (int stmt_id = std::max(0, segment.start_stmt);
            stmt_id < std::min(segment.end_stmt, seq_len); ++stmt_id) {
         const StmtEntry &entry = seq[static_cast<size_t>(stmt_id)];
-        int first_access_index = FindFirstAccessNodeIndex(entry, segment.buffer);
+        int first_access_index =
+            FindFirstAccessNodeIndex(entry, segment.buffer);
         int last_access_index = FindLastAccessNodeIndex(entry, segment.buffer);
         if (first_access_index < 0 || last_access_index < 0) {
           continue;
         }
-        for (int access_index = first_access_index; access_index <= last_access_index;
-             ++access_index) {
+        for (int access_index = first_access_index;
+             access_index <= last_access_index; ++access_index) {
           const shared_access_analysis::AccessEntry &access =
               entry.access[static_cast<size_t>(access_index)];
           if (!AccessMatchesBuffer(access, segment.buffer)) {
@@ -2659,7 +2839,8 @@ private:
           if (entry.access_nodes.size() <= static_cast<size_t>(access_index)) {
             continue;
           }
-          const Object *access_node = entry.access_nodes[static_cast<size_t>(access_index)];
+          const Object *access_node =
+              entry.access_nodes[static_cast<size_t>(access_index)];
           if (access_node == nullptr) {
             continue;
           }
@@ -2669,8 +2850,8 @@ private:
     }
   }
 
-  std::vector<BufferCarryEdge> BuildCarryEdges(
-      const std::vector<BufferLocalSegment> &segments) const {
+  std::vector<BufferCarryEdge>
+  BuildCarryEdges(const std::vector<BufferLocalSegment> &segments) const {
     std::vector<BufferCarryEdge> carry_edges;
     std::unordered_map<std::string, std::vector<BufferLocalSegment>> by_buffer;
     for (const BufferLocalSegment &segment : segments) {
@@ -2679,16 +2860,15 @@ private:
 
     for (auto &kv : by_buffer) {
       auto &buffer_segments = kv.second;
-      std::sort(buffer_segments.begin(), buffer_segments.end(),
-                [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
-                  return lhs.start_stmt < rhs.start_stmt;
-                });
+      std::sort(
+          buffer_segments.begin(), buffer_segments.end(),
+          [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
+            return lhs.start_stmt < rhs.start_stmt;
+          });
       for (size_t i = 0; i + 1 < buffer_segments.size(); ++i) {
-        carry_edges.push_back(BufferCarryEdge{kv.first,
-                                              buffer_segments[i].end_stmt,
-                                              buffer_segments[i + 1].start_stmt,
-                                              1,
-                                              "candidate"});
+        carry_edges.push_back(
+            BufferCarryEdge{kv.first, buffer_segments[i].end_stmt,
+                            buffer_segments[i + 1].start_stmt, 1, "candidate"});
       }
     }
     return carry_edges;
@@ -2704,8 +2884,7 @@ private:
       by_buffer[segment.buffer].push_back(segment);
     }
 
-    auto analyze_gap_value_flow = [&](const std::string &buffer,
-                                      int gap_start,
+    auto analyze_gap_value_flow = [&](const std::string &buffer, int gap_start,
                                       int rhs_end_stmt) -> GapValueFlow {
       if (seq.empty()) {
         return GapValueFlow::kNoReaccess;
@@ -2726,7 +2905,8 @@ private:
           }
           matched_precise = true;
           has_read = has_read || access.type == shared_access_analysis::kRead;
-          has_write = has_write || access.type == shared_access_analysis::kWrite;
+          has_write =
+              has_write || access.type == shared_access_analysis::kWrite;
         }
         if (!matched_precise) {
           has_read = ContainsBuffer(entry.read_touched, buffer);
@@ -2746,8 +2926,9 @@ private:
       return GapValueFlow::kNoReaccess;
     };
 
-    auto observe_last_access_in_range = [&](const std::string &buffer, int begin,
-                                            int end) -> BufferAccessObservation {
+    auto observe_last_access_in_range =
+        [&](const std::string &buffer, int begin,
+            int end) -> BufferAccessObservation {
       BufferAccessObservation observation;
       if (seq.empty()) {
         return observation;
@@ -2782,8 +2963,9 @@ private:
       return observation;
     };
 
-    auto observe_first_access_in_range = [&](const std::string &buffer, int begin,
-                                             int end) -> BufferAccessObservation {
+    auto observe_first_access_in_range =
+        [&](const std::string &buffer, int begin,
+            int end) -> BufferAccessObservation {
       BufferAccessObservation observation;
       if (seq.empty()) {
         return observation;
@@ -2795,8 +2977,8 @@ private:
       }
       for (int i = begin; i <= end; ++i) {
         const StmtEntry &entry = seq[static_cast<size_t>(i)];
-        if (auto access_index =
-                SelectPreferredAccessIndex(entry, buffer, std::nullopt, false)) {
+        if (auto access_index = SelectPreferredAccessIndex(
+                entry, buffer, std::nullopt, false)) {
           const shared_access_analysis::AccessEntry &access =
               entry.access[static_cast<size_t>(access_index.value())];
           observation.stmt = i;
@@ -2830,15 +3012,15 @@ private:
       }
       for (int i = begin; i <= end; ++i) {
         const StmtEntry &entry = seq[static_cast<size_t>(i)];
-        if (SelectPreferredAccessIndex(entry, buffer, shared_access_analysis::kRead,
-                                       false)) {
+        if (SelectPreferredAccessIndex(entry, buffer,
+                                       shared_access_analysis::kRead, false)) {
           return i;
         }
-        bool matched_precise = std::any_of(
-            entry.access.begin(), entry.access.end(),
-            [&](const shared_access_analysis::AccessEntry &access) {
-              return AccessMatchesBuffer(access, buffer);
-            });
+        bool matched_precise =
+            std::any_of(entry.access.begin(), entry.access.end(),
+                        [&](const shared_access_analysis::AccessEntry &access) {
+                          return AccessMatchesBuffer(access, buffer);
+                        });
         if (!matched_precise && ContainsBuffer(entry.read_touched, buffer)) {
           return i;
         }
@@ -2846,8 +3028,8 @@ private:
       return -1;
     };
 
-    auto observe_first_write_in_range = [&](const std::string &buffer, int begin,
-                                            int end) -> int {
+    auto observe_first_write_in_range = [&](const std::string &buffer,
+                                            int begin, int end) -> int {
       if (seq.empty()) {
         return -1;
       }
@@ -2858,15 +3040,15 @@ private:
       }
       for (int i = begin; i <= end; ++i) {
         const StmtEntry &entry = seq[static_cast<size_t>(i)];
-        if (SelectPreferredAccessIndex(entry, buffer, shared_access_analysis::kWrite,
-                                       false)) {
+        if (SelectPreferredAccessIndex(entry, buffer,
+                                       shared_access_analysis::kWrite, false)) {
           return i;
         }
-        bool matched_precise = std::any_of(
-            entry.access.begin(), entry.access.end(),
-            [&](const shared_access_analysis::AccessEntry &access) {
-              return AccessMatchesBuffer(access, buffer);
-            });
+        bool matched_precise =
+            std::any_of(entry.access.begin(), entry.access.end(),
+                        [&](const shared_access_analysis::AccessEntry &access) {
+                          return AccessMatchesBuffer(access, buffer);
+                        });
         if (!matched_precise && ContainsBuffer(entry.write_touched, buffer)) {
           return i;
         }
@@ -2875,7 +3057,8 @@ private:
     };
 
     auto same_enclosing_if_scope = [&](int lhs_stmt, int rhs_stmt) -> bool {
-      if (lhs_stmt < 0 || rhs_stmt < 0 || lhs_stmt >= static_cast<int>(seq.size()) ||
+      if (lhs_stmt < 0 || rhs_stmt < 0 ||
+          lhs_stmt >= static_cast<int>(seq.size()) ||
           rhs_stmt >= static_cast<int>(seq.size())) {
         return false;
       }
@@ -2897,8 +3080,10 @@ private:
       return common > 0;
     };
 
-    auto gap_is_single_branch_alternative = [&](int lhs_end, int rhs_start) -> bool {
-      if (lhs_end < 0 || rhs_start < 0 || lhs_end >= static_cast<int>(seq.size()) ||
+    auto gap_is_single_branch_alternative = [&](int lhs_end,
+                                                int rhs_start) -> bool {
+      if (lhs_end < 0 || rhs_start < 0 ||
+          lhs_end >= static_cast<int>(seq.size()) ||
           rhs_start >= static_cast<int>(seq.size()) || lhs_end > rhs_start) {
         return false;
       }
@@ -2934,97 +3119,106 @@ private:
 
     for (auto &kv : by_buffer) {
       auto &buffer_segments = kv.second;
-      std::sort(buffer_segments.begin(), buffer_segments.end(),
-                [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
-                  return lhs.start_stmt < rhs.start_stmt;
-                });
+      std::sort(
+          buffer_segments.begin(), buffer_segments.end(),
+          [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
+            return lhs.start_stmt < rhs.start_stmt;
+          });
       for (size_t i = 0; i + 1 < buffer_segments.size(); ++i) {
         const BufferLocalSegment &lhs = buffer_segments[i];
         const BufferLocalSegment &rhs = buffer_segments[i + 1];
         std::string relation = "continuation";
         GapValueFlow gap_value_flow =
             analyze_gap_value_flow(kv.first, lhs.end_stmt, rhs.end_stmt);
-        BufferAccessObservation last_lhs_access =
-            observe_last_access_in_range(kv.first, lhs.start_stmt, lhs.end_stmt);
+        BufferAccessObservation last_lhs_access = observe_last_access_in_range(
+            kv.first, lhs.start_stmt, lhs.end_stmt);
         const SummaryAccessEntry *last_lhs_precise_access =
             last_lhs_access.stmt >= 0 && last_lhs_access.access_index >= 0
                 ? &seq[static_cast<size_t>(last_lhs_access.stmt)]
-                       .access[static_cast<size_t>(last_lhs_access.access_index)]
+                       .access[static_cast<size_t>(
+                           last_lhs_access.access_index)]
                 : nullptr;
         std::string last_lhs_access_expr =
             last_lhs_precise_access != nullptr
                 ? DescribeAccessExpr(*last_lhs_precise_access)
-                : last_lhs_access.stmt >= 0
-                      ? DescribeBufferAccessExpr(
-                            seq[static_cast<size_t>(last_lhs_access.stmt)].stmt,
-                            kv.first, last_lhs_access.has_read)
+            : last_lhs_access.stmt >= 0
+                ? DescribeBufferAccessExpr(
+                      seq[static_cast<size_t>(last_lhs_access.stmt)].stmt,
+                      kv.first, last_lhs_access.has_read)
                 : "none";
         std::string last_lhs_access_footprint =
             last_lhs_precise_access != nullptr
                 ? DescribeAccessFootprint(*last_lhs_precise_access)
-                : last_lhs_access.stmt >= 0
-                      ? DescribeBufferAccessFootprint(
-                            seq[static_cast<size_t>(last_lhs_access.stmt)].stmt,
-                            kv.first, last_lhs_access.has_read)
+            : last_lhs_access.stmt >= 0
+                ? DescribeBufferAccessFootprint(
+                      seq[static_cast<size_t>(last_lhs_access.stmt)].stmt,
+                      kv.first, last_lhs_access.has_read)
                 : "none";
-        BufferAccessObservation first_gap_access = observe_first_access_in_range(
-            kv.first, lhs.end_stmt + 1, rhs.start_stmt - 1);
-        BufferAccessObservation first_rhs_access = observe_first_access_in_range(
-            kv.first, rhs.start_stmt, rhs.end_stmt);
-        int first_post_gap_read_stmt =
-            observe_first_read_in_range(kv.first, lhs.end_stmt + 1, rhs.end_stmt);
-        int first_post_gap_write_stmt =
-            observe_first_write_in_range(kv.first, lhs.end_stmt + 1, rhs.end_stmt);
+        BufferAccessObservation first_gap_access =
+            observe_first_access_in_range(kv.first, lhs.end_stmt + 1,
+                                          rhs.start_stmt - 1);
+        BufferAccessObservation first_rhs_access =
+            observe_first_access_in_range(kv.first, rhs.start_stmt,
+                                          rhs.end_stmt);
+        int first_post_gap_read_stmt = observe_first_read_in_range(
+            kv.first, lhs.end_stmt + 1, rhs.end_stmt);
+        int first_post_gap_write_stmt = observe_first_write_in_range(
+            kv.first, lhs.end_stmt + 1, rhs.end_stmt);
         int first_rhs_read_stmt =
             observe_first_read_in_range(kv.first, rhs.start_stmt, rhs.end_stmt);
-        int first_rhs_write_stmt =
-            observe_first_write_in_range(kv.first, rhs.start_stmt, rhs.end_stmt);
-        BufferAccessObservation first_rhs_read_access = observe_first_access_in_range(
-            kv.first, first_rhs_read_stmt, first_rhs_read_stmt);
-        BufferAccessObservation first_rhs_write_access = observe_first_access_in_range(
-            kv.first, first_rhs_write_stmt, first_rhs_write_stmt);
+        int first_rhs_write_stmt = observe_first_write_in_range(
+            kv.first, rhs.start_stmt, rhs.end_stmt);
+        BufferAccessObservation first_rhs_read_access =
+            observe_first_access_in_range(kv.first, first_rhs_read_stmt,
+                                          first_rhs_read_stmt);
+        BufferAccessObservation first_rhs_write_access =
+            observe_first_access_in_range(kv.first, first_rhs_write_stmt,
+                                          first_rhs_write_stmt);
         const SummaryAccessEntry *first_rhs_read_precise_access =
-            first_rhs_read_access.stmt >= 0 && first_rhs_read_access.access_index >= 0
+            first_rhs_read_access.stmt >= 0 &&
+                    first_rhs_read_access.access_index >= 0
                 ? &seq[static_cast<size_t>(first_rhs_read_access.stmt)]
-                       .access[static_cast<size_t>(first_rhs_read_access.access_index)]
+                       .access[static_cast<size_t>(
+                           first_rhs_read_access.access_index)]
                 : nullptr;
         const SummaryAccessEntry *first_rhs_write_precise_access =
             first_rhs_write_access.stmt >= 0 &&
                     first_rhs_write_access.access_index >= 0
                 ? &seq[static_cast<size_t>(first_rhs_write_access.stmt)]
-                       .access[static_cast<size_t>(first_rhs_write_access.access_index)]
+                       .access[static_cast<size_t>(
+                           first_rhs_write_access.access_index)]
                 : nullptr;
         std::string first_rhs_read_expr =
             first_rhs_read_precise_access != nullptr
                 ? DescribeAccessExpr(*first_rhs_read_precise_access)
-                : first_rhs_read_stmt >= 0
-                      ? DescribeBufferAccessExpr(
-                            seq[static_cast<size_t>(first_rhs_read_stmt)].stmt,
-                            kv.first, true)
+            : first_rhs_read_stmt >= 0
+                ? DescribeBufferAccessExpr(
+                      seq[static_cast<size_t>(first_rhs_read_stmt)].stmt,
+                      kv.first, true)
                 : "none";
         std::string first_rhs_write_expr =
             first_rhs_write_precise_access != nullptr
                 ? DescribeAccessExpr(*first_rhs_write_precise_access)
-                : first_rhs_write_stmt >= 0
-                      ? DescribeBufferAccessExpr(
-                            seq[static_cast<size_t>(first_rhs_write_stmt)].stmt,
-                            kv.first, false)
+            : first_rhs_write_stmt >= 0
+                ? DescribeBufferAccessExpr(
+                      seq[static_cast<size_t>(first_rhs_write_stmt)].stmt,
+                      kv.first, false)
                 : "none";
         std::string first_rhs_read_footprint =
             first_rhs_read_precise_access != nullptr
                 ? DescribeAccessFootprint(*first_rhs_read_precise_access)
-                : first_rhs_read_stmt >= 0
-                      ? DescribeBufferAccessFootprint(
-                            seq[static_cast<size_t>(first_rhs_read_stmt)].stmt,
-                            kv.first, true)
+            : first_rhs_read_stmt >= 0
+                ? DescribeBufferAccessFootprint(
+                      seq[static_cast<size_t>(first_rhs_read_stmt)].stmt,
+                      kv.first, true)
                 : "none";
         std::string first_rhs_write_footprint =
             first_rhs_write_precise_access != nullptr
                 ? DescribeAccessFootprint(*first_rhs_write_precise_access)
-                : first_rhs_write_stmt >= 0
-                      ? DescribeBufferAccessFootprint(
-                            seq[static_cast<size_t>(first_rhs_write_stmt)].stmt,
-                            kv.first, false)
+            : first_rhs_write_stmt >= 0
+                ? DescribeBufferAccessFootprint(
+                      seq[static_cast<size_t>(first_rhs_write_stmt)].stmt,
+                      kv.first, false)
                 : "none";
         auto footprint_is_subregion = [&](const std::string &footprint) {
           return IsSubregionFootprint(footprint);
@@ -3075,41 +3269,38 @@ private:
         } else if (partial_overwrite_only) {
           gap_semantics = "partial_overwrite_only";
         }
-        relations.push_back(BufferSegmentRelation{kv.first,
-                                                  static_cast<int>(i),
-                                                  static_cast<int>(i + 1),
-                                                  lhs.end_stmt,
-                                                  rhs.start_stmt,
-                                                  relation,
-                                                  overwrite_safe,
-                                                  value_live_across_gap,
-                                                  GapValueFlowToString(
-                                                      gap_value_flow),
-                                                  gap_semantics,
-                                                  subregion_live_across_gap,
-                                                  last_lhs_access.stmt,
-                                                  AccessObservationKind(
-                                                      last_lhs_access.has_read,
-                                                      last_lhs_access.has_write),
-                                                  last_lhs_access_expr,
-                                                  last_lhs_access_footprint,
-                                                  first_gap_access.stmt,
-                                                  AccessObservationKind(
-                                                      first_gap_access.has_read,
-                                                      first_gap_access.has_write),
-                                                  first_rhs_access.stmt,
-                                                  AccessObservationKind(
-                                                      first_rhs_access.has_read,
-                                                      first_rhs_access.has_write),
-                                                  first_post_gap_read_stmt,
-                                                  first_post_gap_write_stmt,
-                                                  first_rhs_read_stmt,
-                                                  first_rhs_write_stmt,
-                                                  first_rhs_read_expr,
-                                                  first_rhs_write_expr,
-                                                  first_rhs_read_footprint,
-                                                  first_rhs_write_footprint,
-                                                  gap_region_signal});
+        relations.push_back(BufferSegmentRelation{
+            kv.first,
+            static_cast<int>(i),
+            static_cast<int>(i + 1),
+            lhs.end_stmt,
+            rhs.start_stmt,
+            relation,
+            overwrite_safe,
+            value_live_across_gap,
+            GapValueFlowToString(gap_value_flow),
+            gap_semantics,
+            subregion_live_across_gap,
+            last_lhs_access.stmt,
+            AccessObservationKind(last_lhs_access.has_read,
+                                  last_lhs_access.has_write),
+            last_lhs_access_expr,
+            last_lhs_access_footprint,
+            first_gap_access.stmt,
+            AccessObservationKind(first_gap_access.has_read,
+                                  first_gap_access.has_write),
+            first_rhs_access.stmt,
+            AccessObservationKind(first_rhs_access.has_read,
+                                  first_rhs_access.has_write),
+            first_post_gap_read_stmt,
+            first_post_gap_write_stmt,
+            first_rhs_read_stmt,
+            first_rhs_write_stmt,
+            first_rhs_read_expr,
+            first_rhs_write_expr,
+            first_rhs_read_footprint,
+            first_rhs_write_footprint,
+            gap_region_signal});
       }
     }
     return relations;
@@ -3119,8 +3310,10 @@ private:
       const std::vector<BufferLocalSegment> &segments,
       const std::vector<BufferSegmentRelation> &relations) const {
     std::vector<BufferSemanticSegment> semantic_segments;
-    std::unordered_map<std::string, std::vector<BufferLocalSegment>> by_buffer_segments;
-    std::unordered_map<std::string, std::vector<BufferSegmentRelation>> by_buffer_relations;
+    std::unordered_map<std::string, std::vector<BufferLocalSegment>>
+        by_buffer_segments;
+    std::unordered_map<std::string, std::vector<BufferSegmentRelation>>
+        by_buffer_relations;
     for (const BufferLocalSegment &segment : segments) {
       by_buffer_segments[segment.buffer].push_back(segment);
     }
@@ -3130,13 +3323,15 @@ private:
 
     for (auto &kv : by_buffer_segments) {
       auto &buffer_segments = kv.second;
-      std::sort(buffer_segments.begin(), buffer_segments.end(),
-                [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
-                  return lhs.start_stmt < rhs.start_stmt;
-                });
+      std::sort(
+          buffer_segments.begin(), buffer_segments.end(),
+          [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
+            return lhs.start_stmt < rhs.start_stmt;
+          });
       auto relation_it = by_buffer_relations.find(kv.first);
       const std::vector<BufferSegmentRelation> *buffer_relations =
-          relation_it == by_buffer_relations.end() ? nullptr : &relation_it->second;
+          relation_it == by_buffer_relations.end() ? nullptr
+                                                   : &relation_it->second;
 
       if (buffer_segments.empty()) {
         continue;
@@ -3148,12 +3343,9 @@ private:
       int semantic_from_structural = 0;
 
       auto flush_semantic = [&](int to_structural_segment) {
-        semantic_segments.push_back(BufferSemanticSegment{kv.first,
-                                                          semantic_id,
-                                                          semantic_start,
-                                                          semantic_end,
-                                                          semantic_from_structural,
-                                                          to_structural_segment});
+        semantic_segments.push_back(BufferSemanticSegment{
+            kv.first, semantic_id, semantic_start, semantic_end,
+            semantic_from_structural, to_structural_segment});
       };
 
       for (size_t i = 0; i + 1 < buffer_segments.size(); ++i) {
@@ -3165,7 +3357,8 @@ private:
         bool carry_value_across_gap =
             relation != nullptr && relation->value_live_across_gap;
         if (carry_value_across_gap) {
-          semantic_end = std::max(semantic_end, buffer_segments[i + 1].end_stmt);
+          semantic_end =
+              std::max(semantic_end, buffer_segments[i + 1].end_stmt);
           continue;
         }
 
@@ -3179,32 +3372,29 @@ private:
       flush_semantic(static_cast<int>(buffer_segments.size() - 1));
     }
 
-    std::sort(semantic_segments.begin(), semantic_segments.end(),
-              [](const BufferSemanticSegment &lhs, const BufferSemanticSegment &rhs) {
-                if (lhs.buffer != rhs.buffer) {
-                  return lhs.buffer < rhs.buffer;
-                }
-                return lhs.semantic_segment < rhs.semantic_segment;
-              });
+    std::sort(
+        semantic_segments.begin(), semantic_segments.end(),
+        [](const BufferSemanticSegment &lhs, const BufferSemanticSegment &rhs) {
+          if (lhs.buffer != rhs.buffer) {
+            return lhs.buffer < rhs.buffer;
+          }
+          return lhs.semantic_segment < rhs.semantic_segment;
+        });
     return semantic_segments;
   }
 
-  std::vector<BufferSemanticGap> BuildSemanticGaps(
-      const std::vector<BufferSegmentRelation> &relations) const {
+  std::vector<BufferSemanticGap>
+  BuildSemanticGaps(const std::vector<BufferSegmentRelation> &relations) const {
     std::vector<BufferSemanticGap> semantic_gaps;
     std::unordered_map<std::string, int> semantic_cursor;
     for (const BufferSegmentRelation &relation : relations) {
       int current_semantic = semantic_cursor[relation.buffer];
       bool split_after = !relation.value_live_across_gap;
       if (split_after) {
-        semantic_gaps.push_back(BufferSemanticGap{relation.buffer,
-                                                  current_semantic,
-                                                  current_semantic + 1,
-                                                  relation.gap_start,
-                                                  relation.gap_end,
-                                                  relation.relation,
-                                                  relation.gap_semantics,
-                                                  relation.overwrite_safe});
+        semantic_gaps.push_back(BufferSemanticGap{
+            relation.buffer, current_semantic, current_semantic + 1,
+            relation.gap_start, relation.gap_end, relation.relation,
+            relation.gap_semantics, relation.overwrite_safe});
         semantic_cursor[relation.buffer] = current_semantic + 1;
       }
     }
@@ -3215,8 +3405,10 @@ private:
       const std::vector<BufferLocalSegment> &segments,
       const std::vector<BufferSegmentRelation> &relations) const {
     std::vector<BufferPlannerSegment> planner_segments;
-    std::unordered_map<std::string, std::vector<BufferLocalSegment>> by_buffer_segments;
-    std::unordered_map<std::string, std::vector<BufferSegmentRelation>> by_buffer_relations;
+    std::unordered_map<std::string, std::vector<BufferLocalSegment>>
+        by_buffer_segments;
+    std::unordered_map<std::string, std::vector<BufferSegmentRelation>>
+        by_buffer_relations;
     for (const BufferLocalSegment &segment : segments) {
       by_buffer_segments[segment.buffer].push_back(segment);
     }
@@ -3226,13 +3418,15 @@ private:
 
     for (auto &kv : by_buffer_segments) {
       auto &buffer_segments = kv.second;
-      std::sort(buffer_segments.begin(), buffer_segments.end(),
-                [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
-                  return lhs.start_stmt < rhs.start_stmt;
-                });
+      std::sort(
+          buffer_segments.begin(), buffer_segments.end(),
+          [](const BufferLocalSegment &lhs, const BufferLocalSegment &rhs) {
+            return lhs.start_stmt < rhs.start_stmt;
+          });
       auto relation_it = by_buffer_relations.find(kv.first);
       const std::vector<BufferSegmentRelation> *buffer_relations =
-          relation_it == by_buffer_relations.end() ? nullptr : &relation_it->second;
+          relation_it == by_buffer_relations.end() ? nullptr
+                                                   : &relation_it->second;
 
       if (buffer_segments.empty()) {
         continue;
@@ -3244,12 +3438,9 @@ private:
       int planner_from_structural = 0;
 
       auto flush_planner = [&](int to_structural_segment) {
-        planner_segments.push_back(BufferPlannerSegment{kv.first,
-                                                        planner_id,
-                                                        planner_start,
-                                                        planner_end,
-                                                        planner_from_structural,
-                                                        to_structural_segment});
+        planner_segments.push_back(BufferPlannerSegment{
+            kv.first, planner_id, planner_start, planner_end,
+            planner_from_structural, to_structural_segment});
       };
 
       for (size_t i = 0; i + 1 < buffer_segments.size(); ++i) {
@@ -3258,8 +3449,9 @@ private:
           relation = &(*buffer_relations)[i];
         }
 
-        bool split_storage_epoch = relation != nullptr &&
-                                   relation->gap_semantics == "partial_overwrite_only";
+        bool split_storage_epoch =
+            relation != nullptr &&
+            relation->gap_semantics == "partial_overwrite_only";
         if (!split_storage_epoch) {
           planner_end = std::max(planner_end, buffer_segments[i + 1].end_stmt);
           continue;
@@ -3275,13 +3467,14 @@ private:
       flush_planner(static_cast<int>(buffer_segments.size() - 1));
     }
 
-    std::sort(planner_segments.begin(), planner_segments.end(),
-              [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
-                if (lhs.buffer != rhs.buffer) {
-                  return lhs.buffer < rhs.buffer;
-                }
-                return lhs.planner_segment < rhs.planner_segment;
-              });
+    std::sort(
+        planner_segments.begin(), planner_segments.end(),
+        [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+          if (lhs.buffer != rhs.buffer) {
+            return lhs.buffer < rhs.buffer;
+          }
+          return lhs.planner_segment < rhs.planner_segment;
+        });
     return planner_segments;
   }
 
@@ -3328,7 +3521,8 @@ private:
       return std::find(items.begin(), items.end(), value) != items.end();
     };
 
-    std::unordered_map<std::string, std::vector<BufferPlannerSegment>> by_buffer;
+    std::unordered_map<std::string, std::vector<BufferPlannerSegment>>
+        by_buffer;
     for (const BufferPlannerSegment &segment : planner_segments) {
       by_buffer[segment.buffer].push_back(segment);
     }
@@ -3338,14 +3532,14 @@ private:
 
     for (auto &kv : by_buffer) {
       auto &segments = kv.second;
-      std::sort(segments.begin(), segments.end(),
-                [](const BufferPlannerSegment &lhs,
-                   const BufferPlannerSegment &rhs) {
-                  if (lhs.start_stmt != rhs.start_stmt) {
-                    return lhs.start_stmt < rhs.start_stmt;
-                  }
-                  return lhs.end_stmt < rhs.end_stmt;
-                });
+      std::sort(
+          segments.begin(), segments.end(),
+          [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+            if (lhs.start_stmt != rhs.start_stmt) {
+              return lhs.start_stmt < rhs.start_stmt;
+            }
+            return lhs.end_stmt < rhs.end_stmt;
+          });
 
       if (segments.size() <= 1) {
         merged_segments.insert(merged_segments.end(), segments.begin(),
@@ -3382,8 +3576,8 @@ private:
         std::vector<int> overlapping;
         for (size_t i = 0; i < segments.size(); ++i) {
           const BufferPlannerSegment &segment = segments[i];
-          bool overlaps_loop =
-              !(segment.end_stmt <= loop.begin || loop.end <= segment.start_stmt);
+          bool overlaps_loop = !(segment.end_stmt <= loop.begin ||
+                                 loop.end <= segment.start_stmt);
           if (overlaps_loop) {
             overlapping.push_back(static_cast<int>(i));
           }
@@ -3405,11 +3599,10 @@ private:
         BufferPlannerSegment &merged = it->second;
         merged.start_stmt = std::min(merged.start_stmt, segment.start_stmt);
         merged.end_stmt = std::max(merged.end_stmt, segment.end_stmt);
-        merged.from_structural_segment =
-            std::min(merged.from_structural_segment,
-                     segment.from_structural_segment);
-        merged.to_structural_segment =
-            std::max(merged.to_structural_segment, segment.to_structural_segment);
+        merged.from_structural_segment = std::min(
+            merged.from_structural_segment, segment.from_structural_segment);
+        merged.to_structural_segment = std::max(merged.to_structural_segment,
+                                                segment.to_structural_segment);
       }
 
       std::vector<BufferPlannerSegment> compacted;
@@ -3417,14 +3610,14 @@ private:
       for (auto &group_kv : grouped) {
         compacted.push_back(std::move(group_kv.second));
       }
-      std::sort(compacted.begin(), compacted.end(),
-                [](const BufferPlannerSegment &lhs,
-                   const BufferPlannerSegment &rhs) {
-                  if (lhs.start_stmt != rhs.start_stmt) {
-                    return lhs.start_stmt < rhs.start_stmt;
-                  }
-                  return lhs.end_stmt < rhs.end_stmt;
-                });
+      std::sort(
+          compacted.begin(), compacted.end(),
+          [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+            if (lhs.start_stmt != rhs.start_stmt) {
+              return lhs.start_stmt < rhs.start_stmt;
+            }
+            return lhs.end_stmt < rhs.end_stmt;
+          });
       for (size_t i = 0; i < compacted.size(); ++i) {
         compacted[i].planner_segment = static_cast<int>(i);
       }
@@ -3432,21 +3625,23 @@ private:
                              compacted.end());
     }
 
-    std::sort(merged_segments.begin(), merged_segments.end(),
-              [](const BufferPlannerSegment &lhs,
-                 const BufferPlannerSegment &rhs) {
-                if (lhs.buffer != rhs.buffer) {
-                  return lhs.buffer < rhs.buffer;
-                }
-                return lhs.planner_segment < rhs.planner_segment;
-              });
+    std::sort(
+        merged_segments.begin(), merged_segments.end(),
+        [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+          if (lhs.buffer != rhs.buffer) {
+            return lhs.buffer < rhs.buffer;
+          }
+          return lhs.planner_segment < rhs.planner_segment;
+        });
     return merged_segments;
   }
 
-  std::vector<BufferPlannerSegment> CoalescePlannerSegmentsWithAmbiguousAccessNodes(
+  std::vector<BufferPlannerSegment>
+  CoalescePlannerSegmentsWithAmbiguousAccessNodes(
       const std::vector<BufferPlannerSegment> &planner_segments,
       const std::vector<StmtEntry> &seq) const {
-    std::unordered_map<std::string, std::vector<BufferPlannerSegment>> by_buffer;
+    std::unordered_map<std::string, std::vector<BufferPlannerSegment>>
+        by_buffer;
     for (const BufferPlannerSegment &segment : planner_segments) {
       by_buffer[segment.buffer].push_back(segment);
     }
@@ -3456,14 +3651,14 @@ private:
 
     for (auto &kv : by_buffer) {
       auto &segments = kv.second;
-      std::sort(segments.begin(), segments.end(),
-                [](const BufferPlannerSegment &lhs,
-                   const BufferPlannerSegment &rhs) {
-                  if (lhs.start_stmt != rhs.start_stmt) {
-                    return lhs.start_stmt < rhs.start_stmt;
-                  }
-                  return lhs.end_stmt < rhs.end_stmt;
-                });
+      std::sort(
+          segments.begin(), segments.end(),
+          [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+            if (lhs.start_stmt != rhs.start_stmt) {
+              return lhs.start_stmt < rhs.start_stmt;
+            }
+            return lhs.end_stmt < rhs.end_stmt;
+          });
 
       if (segments.size() <= 1) {
         coalesced_segments.insert(coalesced_segments.end(), segments.begin(),
@@ -3494,12 +3689,14 @@ private:
 
       std::unordered_map<const Object *, int> access_owner;
       const int seq_len = static_cast<int>(seq.size());
-      for (size_t segment_index = 0; segment_index < segments.size(); ++segment_index) {
+      for (size_t segment_index = 0; segment_index < segments.size();
+           ++segment_index) {
         const BufferPlannerSegment &segment = segments[segment_index];
         for (int stmt_id = std::max(0, segment.start_stmt);
              stmt_id < std::min(segment.end_stmt, seq_len); ++stmt_id) {
           const StmtEntry &entry = seq[static_cast<size_t>(stmt_id)];
-          for (size_t access_index = 0; access_index < entry.access.size(); ++access_index) {
+          for (size_t access_index = 0; access_index < entry.access.size();
+               ++access_index) {
             const shared_access_analysis::AccessEntry &access =
                 entry.access[access_index];
             if (!AccessMatchesBuffer(access, kv.first)) {
@@ -3535,11 +3732,10 @@ private:
         BufferPlannerSegment &merged = it->second;
         merged.start_stmt = std::min(merged.start_stmt, segment.start_stmt);
         merged.end_stmt = std::max(merged.end_stmt, segment.end_stmt);
-        merged.from_structural_segment =
-            std::min(merged.from_structural_segment,
-                     segment.from_structural_segment);
-        merged.to_structural_segment =
-            std::max(merged.to_structural_segment, segment.to_structural_segment);
+        merged.from_structural_segment = std::min(
+            merged.from_structural_segment, segment.from_structural_segment);
+        merged.to_structural_segment = std::max(merged.to_structural_segment,
+                                                segment.to_structural_segment);
       }
 
       std::vector<BufferPlannerSegment> compacted;
@@ -3547,14 +3743,14 @@ private:
       for (auto &group_kv : grouped) {
         compacted.push_back(std::move(group_kv.second));
       }
-      std::sort(compacted.begin(), compacted.end(),
-                [](const BufferPlannerSegment &lhs,
-                   const BufferPlannerSegment &rhs) {
-                  if (lhs.start_stmt != rhs.start_stmt) {
-                    return lhs.start_stmt < rhs.start_stmt;
-                  }
-                  return lhs.end_stmt < rhs.end_stmt;
-                });
+      std::sort(
+          compacted.begin(), compacted.end(),
+          [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+            if (lhs.start_stmt != rhs.start_stmt) {
+              return lhs.start_stmt < rhs.start_stmt;
+            }
+            return lhs.end_stmt < rhs.end_stmt;
+          });
       for (size_t i = 0; i < compacted.size(); ++i) {
         compacted[i].planner_segment = static_cast<int>(i);
       }
@@ -3562,14 +3758,14 @@ private:
                                 compacted.end());
     }
 
-    std::sort(coalesced_segments.begin(), coalesced_segments.end(),
-              [](const BufferPlannerSegment &lhs,
-                 const BufferPlannerSegment &rhs) {
-                if (lhs.buffer != rhs.buffer) {
-                  return lhs.buffer < rhs.buffer;
-                }
-                return lhs.planner_segment < rhs.planner_segment;
-              });
+    std::sort(
+        coalesced_segments.begin(), coalesced_segments.end(),
+        [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+          if (lhs.buffer != rhs.buffer) {
+            return lhs.buffer < rhs.buffer;
+          }
+          return lhs.planner_segment < rhs.planner_segment;
+        });
     return coalesced_segments;
   }
 
@@ -3605,7 +3801,8 @@ private:
       int last_write{-1};
     };
 
-    std::unordered_map<std::string, std::vector<BufferPlannerSegment>> by_buffer;
+    std::unordered_map<std::string, std::vector<BufferPlannerSegment>>
+        by_buffer;
     for (const BufferPlannerSegment &segment : planner_segments) {
       by_buffer[segment.buffer].push_back(segment);
     }
@@ -3615,14 +3812,14 @@ private:
 
     for (auto &kv : by_buffer) {
       auto &segments = kv.second;
-      std::sort(segments.begin(), segments.end(),
-                [](const BufferPlannerSegment &lhs,
-                   const BufferPlannerSegment &rhs) {
-                  if (lhs.start_stmt != rhs.start_stmt) {
-                    return lhs.start_stmt < rhs.start_stmt;
-                  }
-                  return lhs.end_stmt < rhs.end_stmt;
-                });
+      std::sort(
+          segments.begin(), segments.end(),
+          [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+            if (lhs.start_stmt != rhs.start_stmt) {
+              return lhs.start_stmt < rhs.start_stmt;
+            }
+            return lhs.end_stmt < rhs.end_stmt;
+          });
 
       if (segments.size() <= 1) {
         merged_segments.insert(merged_segments.end(), segments.begin(),
@@ -3654,9 +3851,11 @@ private:
       for (const LoopInterval &loop : loop_intervals) {
         BufferLoopUse use;
         for (int stmt_id = std::max(0, loop.begin);
-             stmt_id < std::min(loop.end, static_cast<int>(seq.size())); ++stmt_id) {
+             stmt_id < std::min(loop.end, static_cast<int>(seq.size()));
+             ++stmt_id) {
           const StmtEntry &entry = seq[static_cast<size_t>(stmt_id)];
-          for (const shared_access_analysis::AccessEntry &access : entry.access) {
+          for (const shared_access_analysis::AccessEntry &access :
+               entry.access) {
             if (!AccessMatchesBuffer(access, kv.first)) {
               continue;
             }
@@ -3676,7 +3875,8 @@ private:
         for (size_t i = 0; i < segments.size(); ++i) {
           const BufferPlannerSegment &segment = segments[i];
           bool overlaps_tail_transition =
-              !(segment.end_stmt <= use.last_read || use.last_write < segment.start_stmt);
+              !(segment.end_stmt <= use.last_read ||
+                use.last_write < segment.start_stmt);
           if (overlaps_tail_transition) {
             overlapping_segments.push_back(static_cast<int>(i));
           }
@@ -3698,11 +3898,10 @@ private:
         BufferPlannerSegment &merged = it->second;
         merged.start_stmt = std::min(merged.start_stmt, segment.start_stmt);
         merged.end_stmt = std::max(merged.end_stmt, segment.end_stmt);
-        merged.from_structural_segment =
-            std::min(merged.from_structural_segment,
-                     segment.from_structural_segment);
-        merged.to_structural_segment =
-            std::max(merged.to_structural_segment, segment.to_structural_segment);
+        merged.from_structural_segment = std::min(
+            merged.from_structural_segment, segment.from_structural_segment);
+        merged.to_structural_segment = std::max(merged.to_structural_segment,
+                                                segment.to_structural_segment);
       }
 
       std::vector<BufferPlannerSegment> compacted;
@@ -3710,14 +3909,14 @@ private:
       for (auto &group_kv : grouped) {
         compacted.push_back(std::move(group_kv.second));
       }
-      std::sort(compacted.begin(), compacted.end(),
-                [](const BufferPlannerSegment &lhs,
-                   const BufferPlannerSegment &rhs) {
-                  if (lhs.start_stmt != rhs.start_stmt) {
-                    return lhs.start_stmt < rhs.start_stmt;
-                  }
-                  return lhs.end_stmt < rhs.end_stmt;
-                });
+      std::sort(
+          compacted.begin(), compacted.end(),
+          [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+            if (lhs.start_stmt != rhs.start_stmt) {
+              return lhs.start_stmt < rhs.start_stmt;
+            }
+            return lhs.end_stmt < rhs.end_stmt;
+          });
       for (size_t i = 0; i < compacted.size(); ++i) {
         compacted[i].planner_segment = static_cast<int>(i);
       }
@@ -3725,14 +3924,14 @@ private:
                              compacted.end());
     }
 
-    std::sort(merged_segments.begin(), merged_segments.end(),
-              [](const BufferPlannerSegment &lhs,
-                 const BufferPlannerSegment &rhs) {
-                if (lhs.buffer != rhs.buffer) {
-                  return lhs.buffer < rhs.buffer;
-                }
-                return lhs.planner_segment < rhs.planner_segment;
-              });
+    std::sort(
+        merged_segments.begin(), merged_segments.end(),
+        [](const BufferPlannerSegment &lhs, const BufferPlannerSegment &rhs) {
+          if (lhs.buffer != rhs.buffer) {
+            return lhs.buffer < rhs.buffer;
+          }
+          return lhs.planner_segment < rhs.planner_segment;
+        });
     return merged_segments;
   }
 
@@ -3744,7 +3943,8 @@ private:
     std::vector<BufferCarryEdge> carry_edges = BuildCarryEdges(segments);
     std::vector<BufferSegmentRelation> relations =
         BuildSegmentRelations(segments, seq, stmt_attrs);
-    std::vector<CompressedCutpoint> cutpoints = BuildCompressedCutpoints(records);
+    std::vector<CompressedCutpoint> cutpoints =
+        BuildCompressedCutpoints(records);
     std::vector<BufferSemanticSegment> semantic_segments =
         BuildSemanticSegments(segments, relations);
     std::vector<BufferSemanticGap> semantic_gaps = BuildSemanticGaps(relations);
@@ -3786,19 +3986,27 @@ private:
       os << "  last_lhs_access_stmt: " << relation.last_lhs_access_stmt << "\n";
       os << "  last_lhs_access_kind: " << relation.last_lhs_access_kind << "\n";
       os << "  last_lhs_access_expr: " << relation.last_lhs_access_expr << "\n";
-      os << "  last_lhs_access_footprint: " << relation.last_lhs_access_footprint
+      os << "  last_lhs_access_footprint: "
+         << relation.last_lhs_access_footprint << "\n";
+      os << "  first_gap_access_stmt: " << relation.first_gap_access_stmt
          << "\n";
-      os << "  first_gap_access_stmt: " << relation.first_gap_access_stmt << "\n";
-      os << "  first_gap_access_kind: " << relation.first_gap_access_kind << "\n";
-      os << "  first_rhs_access_stmt: " << relation.first_rhs_access_stmt << "\n";
-      os << "  first_rhs_access_kind: " << relation.first_rhs_access_kind << "\n";
-      os << "  first_post_gap_read_stmt: " << relation.first_post_gap_read_stmt << "\n";
+      os << "  first_gap_access_kind: " << relation.first_gap_access_kind
+         << "\n";
+      os << "  first_rhs_access_stmt: " << relation.first_rhs_access_stmt
+         << "\n";
+      os << "  first_rhs_access_kind: " << relation.first_rhs_access_kind
+         << "\n";
+      os << "  first_post_gap_read_stmt: " << relation.first_post_gap_read_stmt
+         << "\n";
       os << "  first_post_gap_read_ctx: "
-         << DescribeStmtCutpointContext(relation.first_post_gap_read_stmt, cutpoints)
+         << DescribeStmtCutpointContext(relation.first_post_gap_read_stmt,
+                                        cutpoints)
          << "\n";
-      os << "  first_post_gap_write_stmt: " << relation.first_post_gap_write_stmt << "\n";
+      os << "  first_post_gap_write_stmt: "
+         << relation.first_post_gap_write_stmt << "\n";
       os << "  first_post_gap_write_ctx: "
-         << DescribeStmtCutpointContext(relation.first_post_gap_write_stmt, cutpoints)
+         << DescribeStmtCutpointContext(relation.first_post_gap_write_stmt,
+                                        cutpoints)
          << "\n";
       os << "  first_rhs_read_stmt: " << relation.first_rhs_read_stmt << "\n";
       os << "  first_rhs_read_ctx: "
@@ -3809,16 +4017,16 @@ private:
          << "\n";
       os << "  first_rhs_write_stmt: " << relation.first_rhs_write_stmt << "\n";
       os << "  first_rhs_write_ctx: "
-         << DescribeStmtCutpointContext(relation.first_rhs_write_stmt, cutpoints)
+         << DescribeStmtCutpointContext(relation.first_rhs_write_stmt,
+                                        cutpoints)
          << "\n";
       os << "  first_rhs_write_expr: " << relation.first_rhs_write_expr << "\n";
-      os << "  first_rhs_write_footprint: " << relation.first_rhs_write_footprint
-         << "\n";
+      os << "  first_rhs_write_footprint: "
+         << relation.first_rhs_write_footprint << "\n";
       os << "  gap_region_signal: " << relation.gap_region_signal << "\n";
       os << "  value_live_across_gap: "
          << (relation.value_live_across_gap ? "yes" : "no") << "\n";
-      os << "  overwrite_safe: "
-         << (relation.overwrite_safe ? "yes" : "no");
+      os << "  overwrite_safe: " << (relation.overwrite_safe ? "yes" : "no");
       LOG(INFO) << os.str();
     }
 
@@ -3828,7 +4036,8 @@ private:
       os << "  semantic_segment: " << segment.semantic_segment << "\n";
       os << "  start_stmt: " << segment.start_stmt << "\n";
       os << "  end_stmt: " << segment.end_stmt << "\n";
-      os << "  from_structural_segment: " << segment.from_structural_segment << "\n";
+      os << "  from_structural_segment: " << segment.from_structural_segment
+         << "\n";
       os << "  to_structural_segment: " << segment.to_structural_segment;
       LOG(INFO) << os.str();
     }
@@ -3852,14 +4061,15 @@ private:
       os << "  planner_segment: " << segment.planner_segment << "\n";
       os << "  start_stmt: " << segment.start_stmt << "\n";
       os << "  end_stmt: " << segment.end_stmt << "\n";
-      os << "  from_structural_segment: " << segment.from_structural_segment << "\n";
+      os << "  from_structural_segment: " << segment.from_structural_segment
+         << "\n";
       os << "  to_structural_segment: " << segment.to_structural_segment;
       LOG(INFO) << os.str();
     }
   }
 
-  void LogLifetimePlanSeeds(
-      const std::vector<BufferLifetimePlanSeed> &seeds) const {
+  void
+  LogLifetimePlanSeeds(const std::vector<BufferLifetimePlanSeed> &seeds) const {
     for (const BufferLifetimePlanSeed &seed : seeds) {
       if (seed.stable_closures.empty() && seed.unstable_closures.empty() &&
           seed.carry_over_boundaries.empty()) {
@@ -3872,8 +4082,7 @@ private:
          << BufferPhaseClassToString(seed.inferred_phase_class) << "\n";
       os << "  suggested_split_policy: "
          << BufferSplitPolicyToString(seed.suggested_split_policy) << "\n";
-      os << "  reclaim_root: " << (seed.reclaim_root ? "yes" : "no")
-         << "\n";
+      os << "  reclaim_root: " << (seed.reclaim_root ? "yes" : "no") << "\n";
       os << "  requires_loop_aware_summary: "
          << (seed.requires_loop_aware_summary ? "yes" : "no") << "\n";
       os << "  read_stmt_count: " << seed.read_stmt_count << "\n";
@@ -3895,25 +4104,29 @@ private:
     }
   }
 
-  void LogCandidateStability(
-      const std::vector<BoundaryDeltaRecord> &records,
-      const std::unordered_map<std::string, BufferAccessStats>
-          &access_stats_by_buffer,
-      const std::unordered_map<size_t, LoopBoundarySummary> &loop_summaries) const {
+  void
+  LogCandidateStability(const std::vector<BoundaryDeltaRecord> &records,
+                        const std::unordered_map<std::string, BufferAccessStats>
+                            &access_stats_by_buffer,
+                        const std::unordered_map<size_t, LoopBoundarySummary>
+                            &loop_summaries) const {
     if (records.empty()) {
       return;
     }
 
     std::unordered_set<std::string> buffer_names;
     for (const BoundaryDeltaRecord &record : records) {
-      buffer_names.insert(record.post_buffers.begin(), record.post_buffers.end());
-      buffer_names.insert(record.closed_buffers.begin(), record.closed_buffers.end());
+      buffer_names.insert(record.post_buffers.begin(),
+                          record.post_buffers.end());
+      buffer_names.insert(record.closed_buffers.begin(),
+                          record.closed_buffers.end());
       buffer_names.insert(record.persistent_buffers.begin(),
                           record.persistent_buffers.end());
       buffer_names.insert(record.new_buffers.begin(), record.new_buffers.end());
     }
 
-    std::vector<std::string> sorted_buffers(buffer_names.begin(), buffer_names.end());
+    std::vector<std::string> sorted_buffers(buffer_names.begin(),
+                                            buffer_names.end());
     std::sort(sorted_buffers.begin(), sorted_buffers.end());
 
     auto contains = [](const std::vector<std::string> &items,
@@ -3966,12 +4179,13 @@ private:
       LOG(INFO) << os.str();
     }
 
-    LogLifetimePlanSeeds(
-        BuildLifetimePlanSeeds(records, access_stats_by_buffer, loop_summaries));
+    LogLifetimePlanSeeds(BuildLifetimePlanSeeds(records, access_stats_by_buffer,
+                                                loop_summaries));
   }
 
-  std::vector<BoundaryDeltaRecord> CollectBoundaryDeltaRecords(
-      const std::vector<StmtEntry> &seq, bool emit_logs) const {
+  std::vector<BoundaryDeltaRecord>
+  CollectBoundaryDeltaRecords(const std::vector<StmtEntry> &seq,
+                              bool emit_logs) const {
     std::vector<BoundaryDeltaRecord> emitted_records;
     if (seq.size() < 2) {
       return emitted_records;
@@ -3991,12 +4205,14 @@ private:
                                             summary_seq.begin() + boundary + 1);
       std::vector<SummaryStmtEntry> post_seq(summary_seq.begin() + boundary + 1,
                                              summary_seq.end());
-      SummaryResult pre_summary = shared_access_analysis::SummarizeAccessSequence(
-          std::move(pre_seq), nullptr, sync_scope, env_threads, current_cset,
-          {}, false);
-      SummaryResult post_summary = shared_access_analysis::SummarizeAccessSequence(
-          std::move(post_seq), nullptr, sync_scope, env_threads, current_cset,
-          {}, false);
+      SummaryResult pre_summary =
+          shared_access_analysis::SummarizeAccessSequence(
+              std::move(pre_seq), nullptr, sync_scope, env_threads,
+              current_cset, {}, false);
+      SummaryResult post_summary =
+          shared_access_analysis::SummarizeAccessSequence(
+              std::move(post_seq), nullptr, sync_scope, env_threads,
+              current_cset, {}, false);
 
       std::vector<std::string> pre_accesses =
           AccessSetToSortedStrings(pre_summary.exposed_accesses);
@@ -4019,7 +4235,8 @@ private:
           VectorDiff(pre_accesses, closed_accesses);
       std::vector<std::string> closed_buffers =
           VectorDiff(pre_buffers, post_buffers);
-      std::vector<std::string> new_buffers = VectorDiff(post_buffers, pre_buffers);
+      std::vector<std::string> new_buffers =
+          VectorDiff(post_buffers, pre_buffers);
       std::vector<std::string> persistent_buffers =
           VectorDiff(pre_buffers, closed_buffers);
 
@@ -4033,9 +4250,9 @@ private:
       if (emit_logs) {
         std::ostringstream os;
         os << "[MergeSharedSummaryDelta] scope=" << sync_scope.to_string()
-           << " boundary=" << boundary << " left="
-           << seq[boundary].stmt->GetTypeKey() << " right="
-           << seq[boundary + 1].stmt->GetTypeKey() << "\n";
+           << " boundary=" << boundary
+           << " left=" << seq[boundary].stmt->GetTypeKey()
+           << " right=" << seq[boundary + 1].stmt->GetTypeKey() << "\n";
         os << "  left_reads: " << VarVecToString(seq[boundary].read_touched)
            << "\n";
         os << "  left_writes: " << VarVecToString(seq[boundary].write_touched)
@@ -4046,15 +4263,16 @@ private:
            << VarVecToString(seq[boundary + 1].write_touched) << "\n";
         if (seq[boundary].is_sync || seq[boundary + 1].is_sync) {
           os << "  boundary_sync: left="
-             << (seq[boundary].is_sync ? "yes" : "no") << ", right="
-             << (seq[boundary + 1].is_sync ? "yes" : "no") << "\n";
+             << (seq[boundary].is_sync ? "yes" : "no")
+             << ", right=" << (seq[boundary + 1].is_sync ? "yes" : "no")
+             << "\n";
         }
         auto left_event_it = event_map_.find(seq[boundary].stmt);
         if (left_event_it != event_map_.end() &&
             (!left_event_it->second.gen.empty() ||
              !left_event_it->second.kill.empty())) {
-          os << "  left_event_gen: " << VarVecToString(left_event_it->second.gen)
-             << "\n";
+          os << "  left_event_gen: "
+             << VarVecToString(left_event_it->second.gen) << "\n";
           os << "  left_event_kill: "
              << VarVecToString(left_event_it->second.kill) << "\n";
         }
@@ -4062,8 +4280,8 @@ private:
         if (right_event_it != event_map_.end() &&
             (!right_event_it->second.gen.empty() ||
              !right_event_it->second.kill.empty())) {
-          os << "  right_event_gen: " << VarVecToString(right_event_it->second.gen)
-             << "\n";
+          os << "  right_event_gen: "
+             << VarVecToString(right_event_it->second.gen) << "\n";
           os << "  right_event_kill: "
              << VarVecToString(right_event_it->second.kill) << "\n";
         }
@@ -4087,12 +4305,9 @@ private:
       previous_persistent_buffers = persistent_buffers;
       previous_new_buffers = new_buffers;
       has_previous_emitted = true;
-      emitted_records.push_back(BoundaryDeltaRecord{boundary, post_buffers,
-                                                    closed_buffers,
-                                                    persistent_buffers,
-                                                    new_buffers,
-                                                    seq[boundary].stmt,
-                                                    seq[boundary + 1].stmt});
+      emitted_records.push_back(BoundaryDeltaRecord{
+          boundary, post_buffers, closed_buffers, persistent_buffers,
+          new_buffers, seq[boundary].stmt, seq[boundary + 1].stmt});
     }
 
     return emitted_records;
@@ -4420,7 +4635,7 @@ private:
     }
   }
 
-  /*! 
+  /*!
    * \brief Memory plan algorithm
    * \param seq the linear pattern of storage access
    * \param alloc_info
@@ -4467,7 +4682,8 @@ private:
         if (kill_it != event_map_.end()) {
           kill_it->second.kill.push_back(kv.first);
         }
-        structural_segments_by_var[kv.first].push_back({kv.second.value(), seq_len});
+        structural_segments_by_var[kv.first].push_back(
+            {kv.second.value(), seq_len});
         kv.second.reset();
       }
     }
@@ -4475,17 +4691,48 @@ private:
     std::vector<BoundaryDeltaRecord> boundary_records =
         CollectBoundaryDeltaRecords(seq, false);
     std::vector<BufferLocalSegment> structural_segments =
-        RefineLocalSegmentsToConcreteAccesses(BuildLocalSegments(boundary_records), seq);
+        RefineLocalSegmentsToConcreteAccesses(
+            BuildLocalSegments(boundary_records), seq);
+    if (verbose_) {
+      for (const auto &s : structural_segments) {
+        std::cerr << "[MSMA-EPOCHSEG] buffer=" << s.buffer
+                  << " start=" << s.start_stmt << " end=" << s.end_stmt
+                  << " start_kind=" << s.start_kind
+                  << " end_kind=" << s.end_kind << "\n";
+      }
+    }
 
     std::vector<BufferSegmentRelation> segment_relations =
         BuildSegmentRelations(structural_segments, seq, stmt_attrs);
-    std::vector<BufferPlannerSegment> planner_segments =
-        MergePlannerSegmentsAcrossLoopTailWrites(
-            CoalescePlannerSegmentsWithAmbiguousAccessNodes(
-                MergeLoopCarriedPlannerSegments(
-                    BuildPlannerSegments(structural_segments, segment_relations), seq),
-                seq),
-            seq);
+    auto stage0 = BuildPlannerSegments(structural_segments, segment_relations);
+    auto stage1 = MergeLoopCarriedPlannerSegments(stage0, seq);
+    auto stage2 = CoalescePlannerSegmentsWithAmbiguousAccessNodes(stage1, seq);
+    auto stage3 = MergePlannerSegmentsAcrossLoopTailWrites(stage2, seq);
+    std::vector<BufferPlannerSegment> planner_segments = stage3;
+    if (verbose_) {
+      auto dump_stage = [](const char *tag,
+                           const std::vector<BufferPlannerSegment> &segs) {
+        for (const auto &p : segs) {
+          std::cerr << tag << " buffer=" << p.buffer
+                    << " id=" << p.planner_segment << " start=" << p.start_stmt
+                    << " end=" << p.end_stmt << "\n";
+        }
+      };
+      dump_stage("[MSMA-STAGE0-RAW]", stage0);
+      dump_stage("[MSMA-STAGE1-AFTER-LOOPCARRY]", stage1);
+      dump_stage("[MSMA-STAGE2-AFTER-COALESCE]", stage2);
+      dump_stage("[MSMA-STAGE3-AFTER-TAILWRITE]", stage3);
+      for (const auto &r : segment_relations) {
+        std::cerr << "[MSMA-RELATION] buffer=" << r.buffer
+                  << " from=" << r.from_segment << " to=" << r.to_segment
+                  << " gap=[" << r.gap_start << "," << r.gap_end << "]"
+                  << " value_flow=" << r.gap_value_flow
+                  << " gap_semantics=" << r.gap_semantics
+                  << " overwrite_safe=" << (r.overwrite_safe ? 1 : 0)
+                  << " value_live=" << (r.value_live_across_gap ? 1 : 0)
+                  << "\n";
+      }
+    }
 
     std::unordered_map<std::string, const VarNode *> name_to_var;
     for (const auto &kv : shmem_allocs_) {
@@ -4587,7 +4834,8 @@ private:
         continue;
       // Only constant-sized buffers participate in the arena packing because
       // dynamic sizes must be placed sequentially later.
-      for (size_t segment_id = 0; segment_id < info.segments.size(); ++segment_id) {
+      for (size_t segment_id = 0; segment_id < info.segments.size();
+           ++segment_id) {
         Interval interval;
         interval.start = info.segments[segment_id].first;
         interval.end = info.segments[segment_id].second;
@@ -4596,6 +4844,11 @@ private:
         interval.alignment = info.alignment;
         interval.var = info.var;
         interval.segment_id = static_cast<int>(segment_id);
+        auto live_it = liveness_epochs_by_var_.find(info.var);
+        if (live_it != liveness_epochs_by_var_.end() &&
+            !live_it->second.empty()) {
+          interval.live_epochs = &live_it->second;
+        }
         intervals.push_back(interval);
       }
     }
@@ -4613,7 +4866,8 @@ private:
       }
       for (const auto &kv : plan.segment_offsets) {
         const VarNode *var = kv.first;
-        for (size_t segment_id = 0; segment_id < kv.second.size(); ++segment_id) {
+        for (size_t segment_id = 0; segment_id < kv.second.size();
+             ++segment_id) {
           LOG(DEBUG) << "  " << var->name_hint << "[seg" << segment_id
                      << "] -> offset=" << kv.second[segment_id];
         }
@@ -4655,17 +4909,19 @@ private:
       if (segment_it != plan.segment_offsets.end()) {
         std::vector<SegmentBinding> bindings;
         bindings.reserve(segment_it->second.size());
-        for (size_t segment_id = 0; segment_id < segment_it->second.size(); ++segment_id) {
+        for (size_t segment_id = 0; segment_id < segment_it->second.size();
+             ++segment_id) {
           bindings.push_back(SegmentBinding{info.segments[segment_id].first,
                                             info.segments[segment_id].second,
                                             segment_it->second[segment_id]});
         }
         if (!bindings.empty()) {
           buffer_segment_bindings_[info.var] = bindings;
-          buffer_byte_offsets_[info.var] =
-              make_const(offset_dtype, static_cast<int64_t>(bindings.front().offset));
+          buffer_byte_offsets_[info.var] = make_const(
+              offset_dtype, static_cast<int64_t>(bindings.front().offset));
           if (verbose_) {
-            for (size_t binding_id = 0; binding_id < bindings.size(); ++binding_id) {
+            for (size_t binding_id = 0; binding_id < bindings.size();
+                 ++binding_id) {
               LOG(DEBUG) << "  binding " << info.name << "[seg" << binding_id
                          << "] start=" << bindings[binding_id].start
                          << " end=" << bindings[binding_id].end
@@ -4676,7 +4932,6 @@ private:
       }
       PrimExpr buf_end = offset_expr + CastToOffset(info.size_expr);
       total_size = max(total_size, buf_end);
-
     }
 
     BuildAccessSegmentBindings(planner_segments, name_to_var, seq);
@@ -4705,7 +4960,8 @@ private:
             a_it->second.size() <= static_cast<size_t>(a.segment_id)) {
           continue;
         }
-        int64_t a_off = static_cast<int64_t>(a_it->second[static_cast<size_t>(a.segment_id)]);
+        int64_t a_off = static_cast<int64_t>(
+            a_it->second[static_cast<size_t>(a.segment_id)]);
         int64_t a_end = a_off + static_cast<int64_t>(a.size_bytes);
         for (size_t j = i + 1; j < packed_intervals.size(); ++j) {
           const Interval &b = packed_intervals[j];
@@ -4721,17 +4977,41 @@ private:
           if (!live_overlap) {
             continue;
           }
-          int64_t b_off = static_cast<int64_t>(b_it->second[static_cast<size_t>(b.segment_id)]);
+          // Same relaxer as in `LinearScanPack`: skip the overlap check if
+          // per-epoch dataflow proves the buffers are never simultaneously
+          // alive.
+          if (a.live_epochs && b.live_epochs && !a.live_epochs->empty() &&
+              !b.live_epochs->empty()) {
+            const auto &la = *a.live_epochs;
+            const auto &lb = *b.live_epochs;
+            auto ia = la.begin(), ib = lb.begin();
+            bool intersects = false;
+            while (ia != la.end() && ib != lb.end()) {
+              if (*ia < *ib)
+                ++ia;
+              else if (*ib < *ia)
+                ++ib;
+              else {
+                intersects = true;
+                break;
+              }
+            }
+            if (!intersects)
+              continue;
+          }
+          int64_t b_off = static_cast<int64_t>(
+              b_it->second[static_cast<size_t>(b.segment_id)]);
           int64_t b_end = b_off + static_cast<int64_t>(b.size_bytes);
           bool mem_overlap = !(a_end <= b_off || b_end <= a_off);
           if (mem_overlap) {
             overlap_detected = true;
-            LOG(WARNING) << "Buffer overlap detected between " << a.var->name_hint
-                         << "[seg" << a.segment_id << "] and "
-                         << b.var->name_hint << "[seg" << b.segment_id
+            LOG(WARNING) << "Buffer overlap detected between "
+                         << a.var->name_hint << "[seg" << a.segment_id
+                         << "] and " << b.var->name_hint << "[seg"
+                         << b.segment_id
                          << "] (lifetime overlap with offset ranges [" << a_off
-                         << ", " << a_end << ") and [" << b_off << ", "
-                         << b_end << ")).";
+                         << ", " << a_end << ") and [" << b_off << ", " << b_end
+                         << ")).";
           }
         }
       }
@@ -4793,9 +5073,13 @@ private:
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
   // Last concrete access statement recorded during linearization.
   std::unordered_map<const VarNode *, const Object *> last_access_stmt_;
+  // Per-buffer set of live epoch ids, computed from the EpochGraph + per-epoch
+  // access map by `ComputePerEpochLiveness`. Empty if liveness was not
+  // computed (e.g. EpochGraph build skipped). Used by `LinearScanPack` as a
+  // strict relaxer on the legacy 1-D interval conflict test.
+  std::unordered_map<const VarNode *, std::set<int>> liveness_epochs_by_var_;
   // Approximate statement position during rewrite.
   int stmt_visit_index_{0};
-
 };
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,

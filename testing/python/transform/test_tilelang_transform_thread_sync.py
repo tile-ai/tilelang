@@ -113,9 +113,7 @@ def test_explicit_shared_sync_is_not_duplicated_by_planner():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod)
-    assert s.count('T.tvm_storage_sync("shared")') == 1, (
-        f"Explicit shared sync should not be duplicated:\n{s}"
-    )
+    assert s.count('T.tvm_storage_sync("shared")') == 1, f"Explicit shared sync should not be duplicated:\n{s}"
 
 
 @tilelang.testing.requires_cuda
@@ -139,9 +137,7 @@ def test_shared_dyn_buffers_are_coalesced_for_dependency_planning():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     s = str(mod)
-    assert 'T.tvm_storage_sync("shared.dyn")' in s, (
-        f"Expected sync when coalesced shared.dyn buffers create a dependency:\n{s}"
-    )
+    assert 'T.tvm_storage_sync("shared.dyn")' in s, f"Expected sync when coalesced shared.dyn buffers create a dependency:\n{s}"
 
 
 @tilelang.testing.requires_cuda
@@ -166,9 +162,7 @@ def test_explicit_shared_dyn_sync_is_not_duplicated_after_coalescing():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     s = str(mod)
-    assert s.count('T.tvm_storage_sync("shared.dyn")') == 1, (
-        f"Explicit shared.dyn sync should not be duplicated:\n{s}"
-    )
+    assert s.count('T.tvm_storage_sync("shared.dyn")') == 1, f"Explicit shared.dyn sync should not be duplicated:\n{s}"
 
 
 @tilelang.testing.requires_cuda

@@ -18,13 +18,7 @@
 
 namespace tvm::tl::shared_access_analysis {
 
-enum AccessType : uint8_t {
-  kRead,
-  kWrite,
-  kSync,
-  kAlloc,
-  kReadAcquire
-};
+enum AccessType : uint8_t { kRead, kWrite, kSync, kAlloc, kReadAcquire };
 
 struct AccessEntry {
   ffi::Array<tir::IterVar> threads;
@@ -162,10 +156,10 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                     Range::FromMinExtent(loop->min, adjusted_extent));
     }
 
-    bool prev_implies_curr =
-        analyzer.z3_prover.CanProve(tir::Or(tir::Not(prev_constr), curr_constr));
-    bool curr_implies_prev =
-        analyzer.z3_prover.CanProve(tir::Or(tir::Not(curr_constr), prev_constr));
+    bool prev_implies_curr = analyzer.z3_prover.CanProve(
+        tir::Or(tir::Not(prev_constr), curr_constr));
+    bool curr_implies_prev = analyzer.z3_prover.CanProve(
+        tir::Or(tir::Not(curr_constr), prev_constr));
 
     return !(prev_implies_curr && curr_implies_prev);
   }
@@ -196,9 +190,8 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                     Range::FromMinExtent(loop->min, adjusted_extent));
     }
 
-    bool same_access_type =
-        (prev.type == kWrite && curr.type == kWrite) ||
-        (prev.type == kRead && curr.type == kRead);
+    bool same_access_type = (prev.type == kWrite && curr.type == kWrite) ||
+                            (prev.type == kRead && curr.type == kRead);
 
     PrimExpr thread_condition = Bool(false);
     ffi::Map<tir::Var, PrimExpr> prev_sub, curr_sub;
@@ -217,7 +210,8 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                           old_prev_var.dtype());
         tir::Var curr_var(std::string(thread_names[idx]) + "2",
                           old_curr_var.dtype());
-        thread_condition = tir::Or(thread_condition, tir::NE(prev_var, curr_var));
+        thread_condition =
+            tir::Or(thread_condition, tir::NE(prev_var, curr_var));
         prev_sub.Set(old_prev_var, prev_var);
         curr_sub.Set(old_curr_var, curr_var);
       }
@@ -229,8 +223,10 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
     curr_cset.Substitute(curr_sub).Populate(analyzer);
     bool provably_disjoint = false;
 
-    prev_indice_bytes = analyzer.Simplify(tir::Substitute(prev_indice_bytes, prev_sub));
-    curr_indice_bytes = analyzer.Simplify(tir::Substitute(curr_indice_bytes, curr_sub));
+    prev_indice_bytes =
+        analyzer.Simplify(tir::Substitute(prev_indice_bytes, prev_sub));
+    curr_indice_bytes =
+        analyzer.Simplify(tir::Substitute(curr_indice_bytes, curr_sub));
 
     if (const auto *prev_ramp = prev_indice_bytes.as<tir::RampNode>()) {
       DataType prev_index_dtype = prev_ramp->base.dtype();
@@ -249,10 +245,13 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
     if (prev_indice_bytes.dtype().is_scalar() &&
         curr_indice_bytes.dtype().is_scalar()) {
       if (prev_indice_bytes.dtype() != curr_indice_bytes.dtype()) {
-        if (prev_indice_bytes.dtype().bits() < curr_indice_bytes.dtype().bits()) {
-          prev_indice_bytes = tir::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
+        if (prev_indice_bytes.dtype().bits() <
+            curr_indice_bytes.dtype().bits()) {
+          prev_indice_bytes =
+              tir::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
         } else {
-          curr_indice_bytes = tir::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
+          curr_indice_bytes =
+              tir::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
         }
       }
       ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
@@ -260,16 +259,16 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
           analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
     } else {
       try {
-        auto prev_min = analyzer.Simplify(
-            tir::Substitute(prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
-        auto prev_max = analyzer.Simplify(
-            tir::Substitute(prev.touched[i].max() * prev_dtype.bytes(), prev_sub));
-        auto curr_min = analyzer.Simplify(
-            tir::Substitute(curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
-        auto curr_max = analyzer.Simplify(
-            tir::Substitute(curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
-        provably_disjoint = analyzer.CanProve(
-            analyzer.Simplify(tir::Or(prev_min > curr_max, curr_min > prev_max)));
+        auto prev_min = analyzer.Simplify(tir::Substitute(
+            prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
+        auto prev_max = analyzer.Simplify(tir::Substitute(
+            prev.touched[i].max() * prev_dtype.bytes(), prev_sub));
+        auto curr_min = analyzer.Simplify(tir::Substitute(
+            curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
+        auto curr_max = analyzer.Simplify(tir::Substitute(
+            curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
+        provably_disjoint = analyzer.CanProve(analyzer.Simplify(
+            tir::Or(prev_min > curr_max, curr_min > prev_max)));
       } catch (const std::exception &) {
         auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
         auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);

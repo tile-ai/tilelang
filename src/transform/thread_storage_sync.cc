@@ -1477,7 +1477,8 @@ private:
     return os.str();
   }
 
-  std::string AccessVecToString(const std::vector<AccessEntry> &accesses) const {
+  std::string
+  AccessVecToString(const std::vector<AccessEntry> &accesses) const {
     if (accesses.empty()) {
       return "<empty>";
     }
@@ -1491,10 +1492,11 @@ private:
     return os.str();
   }
 
-  void LogSummary(const std::vector<StmtEntry> &seq,
-                  const shared_access_analysis::SequenceSummaryResult &raw_result,
-                  const shared_access_analysis::SequenceSummaryResult &coalesced_result,
-                  const ForNode *loop) const {
+  void LogSummary(
+      const std::vector<StmtEntry> &seq,
+      const shared_access_analysis::SequenceSummaryResult &raw_result,
+      const shared_access_analysis::SequenceSummaryResult &coalesced_result,
+      const ForNode *loop) const {
     bool has_stmt_access = false;
     for (const StmtEntry &entry : seq) {
       if (!entry.access.empty()) {
@@ -1576,11 +1578,10 @@ tvm::transform::Pass ThreadSync(const String &storage_scope) {
     if (disable_syncthreads) {
       return f;
     }
-    bool debug_summary = ctx
-                             ->GetConfig(::tvm::tl::kDebugThreadStorageSyncSummary,
-                                         Bool(false))
-                             .value()
-                             ->value;
+    bool debug_summary =
+        ctx->GetConfig(::tvm::tl::kDebugThreadStorageSyncSummary, Bool(false))
+            .value()
+            ->value;
     return tl::TileLangThreadSync(std::move(f), storage_scope, debug_summary);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
