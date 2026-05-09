@@ -1027,6 +1027,67 @@ static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
   return Optional<Var>();
 }
 
+static int
+FindFirstAsyncProducerConsumerRead(const Stmt &producer_stmt,
+                                   const Array<Stmt> &consumer_compute_stmts,
+                                   const BufferDataToBufferMap &buffer_map) {
+  int earliest_read = static_cast<int>(consumer_compute_stmts.size());
+  auto update_earliest_read = [&](const Var &buffer_data) {
+    for (size_t ci = 0; ci < static_cast<size_t>(earliest_read); ++ci) {
+      BufferDataAccessInfo access = AnalyzeBufferDataAccess(
+          consumer_compute_stmts[ci], buffer_data, buffer_map);
+      if (access.read) {
+        earliest_read = static_cast<int>(ci);
+        return;
+      }
+    }
+  };
+  if (Optional<Var> write_buffer_data =
+          ExtractProducerWriteBufferData(producer_stmt)) {
+    update_earliest_read(write_buffer_data.value());
+  }
+  PostOrderVisit(producer_stmt, [&](const ObjectRef &obj) {
+    if (earliest_read == 0) {
+      return;
+    }
+    if (const auto *store = obj.as<BufferStoreNode>()) {
+      if (IsSharedBuffer(store->buffer)) {
+        update_earliest_read(store->buffer->data);
+      }
+      return;
+    }
+    const auto *call = obj.as<CallNode>();
+    if (!call || !(call->op.same_as(builtin::ptx_cp_async()) ||
+                   call->op.same_as(tl::ptx_cp_async()))) {
+      return;
+    }
+    PostOrderVisit(call->args[0], [&](const ObjectRef &ptr_obj) {
+      if (earliest_read == 0) {
+        return;
+      }
+      if (const auto *load = ptr_obj.as<BufferLoadNode>()) {
+        if (IsSharedBuffer(load->buffer)) {
+          update_earliest_read(load->buffer->data);
+        }
+        return;
+      }
+      const auto *ptr_call = ptr_obj.as<CallNode>();
+      if (!ptr_call || !ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        return;
+      }
+      const auto *var = ptr_call->args[1].as<VarNode>();
+      if (!var) {
+        return;
+      }
+      auto it = buffer_map.find(ffi::GetRef<Var>(var));
+      if (it != buffer_map.end() && IsSharedBuffer(it->second)) {
+        update_earliest_read(it->second->data);
+      }
+    });
+  });
+  return earliest_read;
+}
+
 static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
                                           const Buffer &barrier_buf,
                                           PrimExpr barrier_id) {
@@ -1331,49 +1392,23 @@ private:
     }
 
     // --- Adjust wait positions for SIMT/cp.async producers ---
-    // SIMT producers (global→shared via cp.async) tie their completion to ALL
-    // forward barriers.  The consumer must therefore wait on a forward barrier
-    // BEFORE it reads any SIMT-produced shared buffer.  If the current
-    // wait_insert_pos is too late (i.e. the consumer reads the SIMT-produced
-    // buffer before the earliest TMA wait), we must pull ALL waits earlier.
+    // SIMT and cp.async producers tie their completion to all forward barriers.
+    // If a consumer reads any such shared destination before the first TMA
+    // read, pull all waits earlier so the async producer is also covered.
     if (has_simt_producer || has_cp_async_producer) {
-      int earliest_simt_read = static_cast<int>(consumer_compute_stmts.size());
+      int earliest_async_read = static_cast<int>(consumer_compute_stmts.size());
       for (size_t i = 0; i < flat_stmts.size(); ++i) {
         if (kinds[i] != TileStmtKind::kSimtProducer &&
             kinds[i] != TileStmtKind::kCpAsyncProducer) {
           continue;
         }
-        // Collect shared buffers written by this SIMT/cp.async producer.
-        std::unordered_set<const VarNode *> written_vars;
-        PostOrderVisit(flat_stmts[i], [&](const ObjectRef &obj) {
-          if (const auto *store = obj.as<BufferStoreNode>()) {
-            if (IsSharedBuffer(store->buffer)) {
-              written_vars.insert(store->buffer->data.get());
-            }
-          }
-        });
-        // Find first consumer read of any of these buffers.
-        for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
-          bool found = false;
-          PostOrderVisit(consumer_compute_stmts[ci], [&](const ObjectRef &obj) {
-            if (found)
-              return;
-            if (const auto *load = obj.as<BufferLoadNode>()) {
-              if (written_vars.count(load->buffer->data.get())) {
-                found = true;
-              }
-            }
-          });
-          if (found) {
-            earliest_simt_read =
-                std::min(earliest_simt_read, static_cast<int>(ci));
-            break;
-          }
-        }
+        int first_read = FindFirstAsyncProducerConsumerRead(
+            flat_stmts[i], consumer_compute_stmts, buffer_data_to_buffer_);
+        earliest_async_read = std::min(earliest_async_read, first_read);
       }
       // Pull all wait positions earlier if needed.
       for (int g = 0; g < num_producer_groups; ++g) {
-        wait_insert_pos[g] = std::min(wait_insert_pos[g], earliest_simt_read);
+        wait_insert_pos[g] = std::min(wait_insert_pos[g], earliest_async_read);
       }
     }
 
