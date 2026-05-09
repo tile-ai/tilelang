@@ -2,6 +2,7 @@
 
 #include "../common.h"
 #include "cute_extension/mma_sm80_sparse.hpp"
+#include "cute_extension/mma_sm89_sparse.hpp"
 
 #ifndef __CUDACC_RTC__
 #include <type_traits>
@@ -147,6 +148,21 @@ TL_DEFINE_MMA_SP_DISPATCHER(kInt8, kInt8, kInt32, 16, 8, 64, false, true,
                             SM80::MMA::SPARSE::SM80_16x8x64_S32S8S8S32_TN)
 TL_DEFINE_MMA_SP_DISPATCHER(kUInt8, kUInt8, kInt32, 16, 8, 64, false, true,
                             SM80::MMA::SPARSE::SM80_16x8x64_S32U8U8S32_TN)
+
+// FP8 — logical K=64 (A holds K/2=32, 4 regs); only SparseSel::Zero is valid on
+// SM89
+TL_DEFINE_MMA_SP_DISPATCHER(kFloat8_e4m3, kFloat8_e4m3, kFloat32, 16, 8, 64,
+                            false, true,
+                            SM89::MMA::SPARSE::SM89_16x8x64_F32E4M3E4M3F32_TN)
+TL_DEFINE_MMA_SP_DISPATCHER(kFloat8_e4m3, kFloat8_e5m2, kFloat32, 16, 8, 64,
+                            false, true,
+                            SM89::MMA::SPARSE::SM89_16x8x64_F32E4M3E5M2F32_TN)
+TL_DEFINE_MMA_SP_DISPATCHER(kFloat8_e5m2, kFloat8_e4m3, kFloat32, 16, 8, 64,
+                            false, true,
+                            SM89::MMA::SPARSE::SM89_16x8x64_F32E5M2E4M3F32_TN)
+TL_DEFINE_MMA_SP_DISPATCHER(kFloat8_e5m2, kFloat8_e5m2, kFloat32, 16, 8, 64,
+                            false, true,
+                            SM89::MMA::SPARSE::SM89_16x8x64_F32E5M2E5M2F32_TN)
 
 #undef TL_DEFINE_MMA_SP_DISPATCHER
 
