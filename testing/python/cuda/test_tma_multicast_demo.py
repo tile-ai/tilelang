@@ -1,19 +1,4 @@
-"""
-TMA multicast validation demo.
-
-Verification logic:
-- cluster_size=4, cluster_mask=0b0011 (bits 0 and 1 set, i.e. CTA ranks 0 and 1 are in the mask)
-- CTA rank 0: issues tma_load_multicast, broadcasting its A tile to both rank 0 and rank 1
-- CTA rank 1: does not issue a load; passively receives the multicast data (same tile as rank 0)
-- CTA ranks 2, 3: not in the mask, each performs a regular tma_load for its own tile
-
-Therefore within the same cluster:
-- B at rank 0's region = A at rank 0's region
-- B at rank 1's region = A at rank 0's region (multicast result, identical to rank 0)
-- B at ranks 2, 3 regions = A at ranks 2, 3 respective regions
-
-The test verifies multicast by checking that rank 1's B region equals rank 0's A region.
-"""
+"""TMA multicast validation."""
 
 import torch
 import tilelang
@@ -22,15 +7,6 @@ import tilelang.testing
 
 
 def make_tma_multicast_demo_kernel(M, N, block_M, block_N, cluster_mask):
-    """
-    Build the TMA multicast demo kernel.
-
-    cluster_mask: multicast bitmask. A set bit means the corresponding CTA
-                  participates in multicast (receives the tile from the min-rank CTA).
-                  e.g. 0b0011 means ranks 0 and 1 are in the mask; rank 0 issues
-                  the multicast, rank 1 passively receives.
-    """
-
     @T.prim_func
     def kernel(
         A: T.Tensor((M, N), "float16"),
@@ -62,12 +38,8 @@ def test_tma_multicast_demo():
     mod = tilelang.compile(
         kernel,
         out_idx=[1],
-        verbose=True,
         execution_backend="cython",
     )
-
-    print("--- TMA Multicast Demo Kernel Source ---")
-    print(mod.get_kernel_source())
 
     A = torch.randn(M, N, device="cuda", dtype=torch.float16)
     B = mod(A)
@@ -82,7 +54,6 @@ def test_tma_multicast_demo():
     B_rank1 = B[0:block_M, block_N : 2 * block_N]
     A_rank0 = A[0:block_M, 0:block_N]
     torch.testing.assert_close(B_rank1, A_rank0, rtol=1e-2, atol=1e-2)
-    print("PASS: Multicast verified (B[rank1_region] == A[rank0_region])")
 
     # rank 0 itself: B should equal A
     torch.testing.assert_close(B[0:block_M, 0:block_N], A[0:block_M, 0:block_N], rtol=1e-2, atol=1e-2)
@@ -99,7 +70,6 @@ def test_tma_multicast_demo():
         rtol=1e-2,
         atol=1e-2,
     )
-    print("PASS: TMA multicast demo passed")
 
 
 if __name__ == "__main__":

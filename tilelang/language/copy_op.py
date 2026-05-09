@@ -131,25 +131,7 @@ def copy_cluster(
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
 ) -> tir.PrimExpr | tir.Stmt:
-    """Cluster-aware copy between shared memory regions or from global to shared memory.
-
-    This is the entry point for two Hopper cluster features that require
-    ``cluster_dims`` to be set on the enclosing ``T.Kernel``:
-
-    **TMA multicast** (global → shared, ``cluster_mask`` set):
-        The hardware delivers a single TMA load to the shared memory of every
-        masked CTA in the cluster simultaneously.  At runtime the kernel splits
-        into three cases based on each CTA's rank:
-
-        * **Leader** (rank == lowest set bit): issues ``tma_load_multicast``.
-        * **Masked peer** (other set bits): does nothing — receives passively.
-        * **Unmasked CTA**: issues a regular ``tma_load`` independently.
-
-    **SM-to-SM copy** (shared → shared, ``dst_block`` set):
-        Copies from the local CTA's shared memory to a remote CTA's shared
-        memory within the same cluster.  When ``remote_barrier`` is also
-        provided, a single bulk-async ``tl::tma_store_cluster`` instruction
-        is emitted; otherwise an element-by-element SIMT loop is used.
+    """Cluster-aware copy for TMA multicast or SM-to-SM shared-memory copy.
 
     Args:
         src: Source memory region.

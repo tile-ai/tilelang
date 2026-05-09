@@ -347,10 +347,7 @@ private:
       workspace_stack_.pop_back();
     }
 
-    // Apply any barrier arrive-count overrides registered by LowerClusterCopy
-    // during the multi-TMA decomposition path.  We update the barrier_init
-    // annotation here (before LowerSharedBarrier consumes it) so that the
-    // mbarrier is initialised with arrive_count = N (number of TMA rows).
+    // Apply arrive-count overrides before LowerSharedBarrier consumes them.
     if (!barrier_arrive_updates_.empty() &&
         block->annotations.count("barrier_init")) {
       auto barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
@@ -1422,11 +1419,7 @@ private:
   // without recomputing indices, since swizzle is encoded in TMA descriptor
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
-  // Pending barrier arrive-count overrides from multi-TMA cluster-copy
-  // decomposition.  Maps barrier buffer data Var → new arrive count N.
-  // Populated by LowerClusterCopy via UpdateBarrierArriveCallback and
-  // consumed (then cleared) in VisitStmt_(BlockNode) before LowerSharedBarrier
-  // processes the barrier_init annotation.
+  // Pending barrier arrive-count overrides from multi-TMA cluster copies.
   std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
       barrier_arrive_updates_;
 };

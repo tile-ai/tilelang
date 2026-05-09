@@ -1,38 +1,10 @@
-"""
-Regression tests for SM-to-SM cluster copy (T.copy_cluster with dst_block).
-
-Three lowering paths are covered:
-
-  Fast path  (test_tma_store_cluster):
-    T.copy_cluster(src, dst, dst_block=1, remote_barrier=bar)
-    → single tl::tma_store_cluster issued by one thread; mbarrier completion
-      is tracked by the TMA hardware via mbarrier.arrive.expect_tx.
-
-  SIMT fallback, no barrier  (test_store_cluster_simt_no_barrier):
-    T.copy_cluster(src, dst, dst_block=1)   # no remote_barrier
-    → element-wise cooperative_groups::map_shared_rank stores by all threads;
-      caller uses T.cluster_sync() for ordering.
-
-  SIMT fallback, with barrier  (test_store_cluster_simt_barrier):
-    T.copy_cluster(src2d[0:M, 0:N_tile], dst2d[0:M, 0:N_tile],
-                   dst_block=1, remote_barrier=bar)
-    where N_tile < N_full, so the inner-dim extent fails the contiguity check.
-    → element-wise map_shared_rank stores, followed by auto-injected
-        __syncthreads();
-        if (threadIdx.x == 0) s_barrier[0].arrive(1u);
-      so the destination CTA can wait on the same mbarrier as in the fast path.
-"""
+"""Regression tests for SM-to-SM cluster copy."""
 
 import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
 import numpy as np
-
-
-# ---------------------------------------------------------------------------
-# Fast path kernel
-# ---------------------------------------------------------------------------
 
 
 def make_store_cluster_kernel(N: int):
@@ -63,13 +35,8 @@ def make_store_cluster_kernel(N: int):
     return kernel
 
 
-# ---------------------------------------------------------------------------
-# SIMT fallback, no barrier
-# ---------------------------------------------------------------------------
-
-
 def make_store_cluster_simt_no_barrier_kernel(N: int):
-    """No remote_barrier → SIMT fallback always taken; cluster_sync() orders stores."""
+    """No remote_barrier -> SIMT fallback always taken; cluster_sync() orders stores."""
 
     @T.prim_func
     def kernel(
@@ -87,7 +54,7 @@ def make_store_cluster_simt_no_barrier_kernel(N: int):
             if pid == 0:
                 for i in T.Parallel(N):
                     s_src[i] = A[i]
-                # No remote_barrier: LowerClusterCopy always takes the SIMT path.
+                # No remote_barrier: cluster copy lowering takes the SIMT path.
                 # All threads write into block 1's s_dst via map_shared_rank.
                 T.copy_cluster(s_src, s_dst, dst_block=1)
 
@@ -103,11 +70,6 @@ def make_store_cluster_simt_no_barrier_kernel(N: int):
     return kernel
 
 
-# ---------------------------------------------------------------------------
-# SIMT fallback, with auto-injected ptx_arrive_cluster_barrier
-# ---------------------------------------------------------------------------
-
-
 def make_store_cluster_simt_barrier_kernel(M: int, N_full: int, N_tile: int):
     """2-D slice copy that forces the SIMT fallback even though remote_barrier is set.
 
@@ -116,7 +78,7 @@ def make_store_cluster_simt_barrier_kernel(M: int, N_full: int, N_tile: int):
     is_contiguous_region() check fails: the inner-dim extent of the copy
     region (N_tile) does not equal the buffer shape (N_full).
 
-    LowerClusterCopy falls back to map_shared_rank stores and, because
+    Cluster copy lowering falls back to map_shared_rank stores and, because
     remote_barrier was supplied, automatically appends:
         __syncthreads();
         if (threadIdx.x == 0) s_barrier[0].arrive(1u);
@@ -145,7 +107,7 @@ def make_store_cluster_simt_barrier_kernel(M: int, N_full: int, N_tile: int):
                     s_src[i, j] = A[i, j]
 
                 # [0:M, 0:N_tile] inner-dim extent N_tile != N_full
-                # → contiguity check fails → SIMT fallback.
+                # contiguity check fails, so this uses the SIMT fallback.
                 # Compiler auto-injects: __syncthreads() +
                 #   if (t == 0) s_barrier[0].arrive(1u);
                 T.copy_cluster(
@@ -162,11 +124,6 @@ def make_store_cluster_simt_barrier_kernel(M: int, N_full: int, N_tile: int):
                     B[i, j] = s_dst[i, j]
 
     return kernel
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 @tilelang.testing.requires_cuda
@@ -224,7 +181,7 @@ def test_store_cluster_multi_tma_barrier():
     """Multi-TMA path: non-contiguous 2-D slice decomposed into N row TMA calls.
 
     The compiler decomposes a non-full-span 2-D slice (shape [M, N_tile] inside
-    a buffer of shape [M, N_full]) into M individual tma_store_cluster calls –
+    a buffer of shape [M, N_full]) into M individual tma_store_cluster calls -
     one per contiguous row.  The mbarrier arrive_count is updated to M so the
     destination CTA's wait(0) completes only after all rows are transferred.
     """
@@ -253,11 +210,6 @@ def test_store_cluster_multi_tma_barrier():
         atol=0,
         err_msg="Multi-TMA row-decomposed cluster copy produced wrong result",
     )
-
-
-# ---------------------------------------------------------------------------
-# 3-D multi-TMA: two levels of recursive decomposition
-# ---------------------------------------------------------------------------
 
 
 def make_store_cluster_3d_multi_tma_kernel(D: int, M: int, N_full: int, N_tile: int):

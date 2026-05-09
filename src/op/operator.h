@@ -28,10 +28,6 @@ using namespace tir;
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using AllocMBarrierCallback = std::function<int(int arrive_count)>;
-// Called by LowerClusterCopy when the multi-TMA path decomposes a
-// non-contiguous region into N separate tma_store_cluster calls.  The pass
-// records the (barrier_data_var → N) mapping and updates the barrier_init
-// block annotation before LowerSharedBarrier consumes it.
 using UpdateBarrierArriveCallback = std::function<void(Var, PrimExpr)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;

@@ -21,7 +21,6 @@ memory via the `shared::cluster` address space.
 ```python
 with T.Kernel(grid_x, grid_y, threads=128, cluster_dims=(4, 1, 1)) as (bx, by):
     rank  = T.block_rank_in_cluster()   # 0..3 within this cluster
-    nctas = T.get_cluster_block_nums()   # total CTAs in this cluster
     T.cluster_sync()                     # barrier across all CTAs in cluster
 ```
 
@@ -160,7 +159,7 @@ Steps:
 import tilelang
 import tilelang.language as T
 
-@tilelang.jit(verbose=True, execution_backend="cython")
+@tilelang.jit(execution_backend="cython")
 def make_cluster_copy_kernel(N: int):
     @T.prim_func
     def kernel(
@@ -282,7 +281,6 @@ mbarrier without any API change.
 | Builtin | Return | Description |
 |---------|--------|-------------|
 | `T.block_rank_in_cluster()` | `int32` | Block rank (0-indexed) within the cluster |
-| `T.get_cluster_block_nums()` | `int32` | Total number of CTAs in the cluster |
 | `T.cluster_sync()` | — | Barrier synchronisation across all cluster CTAs (arrive + wait) |
 | `T.cluster_arrive()` | — | Signal cluster barrier arrival (aligned) |
 | `T.cluster_arrive_relaxed()` | — | Signal cluster barrier arrival (relaxed) |
