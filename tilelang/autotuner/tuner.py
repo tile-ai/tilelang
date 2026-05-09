@@ -374,7 +374,22 @@ class AutoTuner:
             if supply_prog is not None:
                 logger.warning("`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context.")
             frozen_inputs = list(captured_inputs)
-            supply_prog = lambda _, _frozen_inputs=frozen_inputs: _frozen_inputs  # noqa: E731
+            device_cache = {}
+
+            def supply_prog(device, _frozen_inputs=frozen_inputs, _device_cache=device_cache):
+                if not isinstance(device, (int, str, torch.device)):
+                    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+                if device not in _device_cache:
+                    if isinstance(device, torch.device):
+                        target_device = device
+                    elif isinstance(device, str):
+                        target_device = torch.device(device)
+                    else:
+                        target_device = torch.device(f"cuda:{device}") if torch.cuda.is_available() else torch.device("cpu")
+                    _device_cache[device] = [
+                        tensor.to(device=target_device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
+                    ]
+                return _device_cache[device]
 
         self.profile_args = ProfileArgs(
             supply_type=supply_type,
@@ -603,10 +618,15 @@ class AutoTuner:
             try:
                 if timeout > 0:
                     call_result_queue: queue.SimpleQueue = queue.SimpleQueue()
+                    call_state = _BenchmarkWorkerState(
+                        jit_input_tensors=worker_state.jit_input_tensors,
+                        ref_input_tensors=worker_state.ref_input_tensors,
+                        ref_latency_cache=worker_state.ref_latency_cache,
+                    )
 
                     def _run_benchmark_target(
                         _jit_kernel: tilelang.JITKernel = jit_kernel,
-                        _worker_state: _BenchmarkWorkerState = worker_state,
+                        _worker_state: _BenchmarkWorkerState = call_state,
                         _call_result_queue: queue.SimpleQueue = call_result_queue,
                     ):
                         try:
@@ -644,6 +664,9 @@ class AutoTuner:
                         continue
 
                     if status == "ok":
+                        worker_state.jit_input_tensors = call_state.jit_input_tensors
+                        worker_state.ref_input_tensors = call_state.ref_input_tensors
+                        worker_state.ref_latency_cache = call_state.ref_latency_cache
                         result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
                     elif status == "timeout":
                         result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
@@ -791,7 +814,7 @@ class AutoTuner:
             if parsed_visible_devices:
                 requested_devices = list(range(len(parsed_visible_devices)))
             else:
-                requested_devices = single_device
+                requested_devices = list(range(visible_device_count)) if visible_device_count > 0 else single_device
 
         valid_devices: list[int] = []
         invalid_devices: list[int] = []
