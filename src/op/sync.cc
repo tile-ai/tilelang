@@ -11,6 +11,7 @@
 #include <tvm/tir/op_attr_types.h>
 
 #include "distributed.h"
+#include "distributed_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -68,13 +69,8 @@ Stmt BarrierBlocksOpNode::Lower(const LowerArgs &T,
   PrimExpr bar_addr = MakeLocalBarAddr(T);
   PrimExpr rank = Call(DataType::Int(64), tl::get_rank(), {});
   PrimExpr num_ranks = Call(DataType::Int(64), tl::get_num_ranks(), {});
-  PrimExpr local_base_ptr =
-      Call(DataType::Handle(), tl::get_remote_base_ptr(), {rank});
-  PrimExpr offset_to_base =
-      Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {bar_addr}),
-          local_base_ptr);
 
-  new_args.push_back(offset_to_base);
+  new_args.push_back(GetOffsetFromLocalBase(bar_addr));
   new_args.push_back(rank);
   new_args.push_back(num_ranks);
 
@@ -105,8 +101,7 @@ PrimExpr BarrierBlocksOpNode::MakeLocalBarAddr(const LowerArgs &T) const {
   if (T.buffer_remap.count(buffer)) {
     buffer = T.buffer_remap[buffer];
   }
-  return Call(DataType::Handle(), builtin::address_of(),
-              {BufferLoad(buffer, local_indices)});
+  return MakeAddress(buffer, local_indices);
 }
 
 WaitOp::WaitOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
@@ -135,14 +130,7 @@ Stmt WaitOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base = Sub(
-        Call(DataType::Handle(), tl::get_uintptr_t(), {addr}), local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {peer}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(addr, peer));
   } else {
     new_args.push_back(addr);
   }

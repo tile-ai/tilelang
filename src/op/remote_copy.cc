@@ -15,6 +15,7 @@
 #include "backend/common/target_utils.h"
 #include "builtin.h"
 #include "distributed.h"
+#include "distributed_utils.h"
 #include "operator.h"
 #include "parallel.h"
 #include <cuda.h>
@@ -33,22 +34,6 @@ PrimExpr PutOpNode::get_offset(const BufferLoadNode *load) const {
     stride *= buffer_shape[i];
   }
   return div(offset * load->dtype.bits(), 8);
-}
-
-PrimExpr PutOpNode::MakeAddress(const Buffer &buffer,
-                                const Array<PrimExpr> &indices) const {
-  return Call(DataType::Handle(), builtin::address_of(),
-              {BufferLoad(buffer, indices)});
-}
-
-PrimExpr PutOpNode::MakeRemappedAddress(const LowerArgs &T,
-                                        const Buffer &buffer,
-                                        const Array<PrimExpr> &indices) const {
-  Buffer remapped = buffer;
-  if (T.buffer_remap.count(buffer)) {
-    remapped = T.buffer_remap[buffer];
-  }
-  return MakeAddress(remapped, indices);
 }
 
 PutOp::PutOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
@@ -104,15 +89,7 @@ Stmt PutOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
     PrimExpr dst_addr_expr = MakeRemappedAddress(T, dst_buffer, dst_indices);
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base =
-        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {dst_addr_expr}),
-            local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(dst_addr_expr, dst_pe));
   } else {
     new_args.push_back(MakeRemappedAddress(T, dst_buffer, dst_indices));
   }
@@ -142,22 +119,6 @@ PrimExpr GetOpNode::get_offset(const BufferLoadNode *load) const {
     stride *= buffer_shape[i];
   }
   return div(offset * load->dtype.bits(), 8);
-}
-
-PrimExpr GetOpNode::MakeAddress(const Buffer &buffer,
-                                const Array<PrimExpr> &indices) const {
-  return Call(DataType::Handle(), builtin::address_of(),
-              {BufferLoad(buffer, indices)});
-}
-
-PrimExpr GetOpNode::MakeRemappedAddress(const LowerArgs &T,
-                                        const Buffer &buffer,
-                                        const Array<PrimExpr> &indices) const {
-  Buffer remapped = buffer;
-  if (T.buffer_remap.count(buffer)) {
-    remapped = T.buffer_remap[buffer];
-  }
-  return MakeAddress(remapped, indices);
 }
 
 GetOp::GetOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
@@ -215,15 +176,7 @@ Stmt GetOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   new_args.push_back(dst_addr_expr); // Always dst first in tl_templates
   if (is_distributed()) {
     PrimExpr src_addr_expr = MakeRemappedAddress(T, src_buffer, src_indices);
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base =
-        Sub(Call(DataType::Handle(), tl::get_uintptr_t(), {src_addr_expr}),
-            local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(src_addr_expr, src_pe));
   } else {
     new_args.push_back(MakeRemappedAddress(T, src_buffer, src_indices));
   }
@@ -282,14 +235,7 @@ Stmt StOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base = Sub(
-        Call(DataType::Handle(), tl::get_uintptr_t(), {dst}), local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {dst_pe}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(dst, dst_pe));
   } else {
     new_args.push_back(dst);
   }
@@ -350,14 +296,7 @@ Stmt LdOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   new_args.push_back(StringImm(ss.str()));
   if (is_distributed()) {
-    PrimExpr local_rank = Call(DataType::Int(64), tl::get_rank(), {});
-    PrimExpr local_base_ptr =
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {local_rank});
-    PrimExpr offset_to_base = Sub(
-        Call(DataType::Handle(), tl::get_uintptr_t(), {src}), local_base_ptr);
-    new_args.push_back(
-        Call(DataType::Handle(), tl::get_remote_base_ptr(), {src_pe}) +
-        offset_to_base);
+    new_args.push_back(RemapRemoteAddress(src, src_pe));
   } else {
     new_args.push_back(src);
   }

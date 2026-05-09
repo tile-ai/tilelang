@@ -13,6 +13,8 @@
 #include "cuda/op/copy.h"
 #include "layout/tcgen05_layout.h"
 #include "op/builtin.h"
+#include "op/distributed.h"
+#include "op/distributed_utils.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
@@ -207,6 +209,36 @@ bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
 }
 
+PrimExpr GetRemotePEAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    return Downcast<PrimExpr>(val.value());
+  }
+  return RemotePESentinel();
+}
+
+bool HasRemotePEAnnotation(const CopyNode &op) {
+  return IsRemotePE(GetRemotePEAnnotation(op, "src_pe")) ||
+         IsRemotePE(GetRemotePEAnnotation(op, "dst_pe"));
+}
+
+PrimExpr GetTmaRemotePE(const CopyNode &op, bool is_load) {
+  PrimExpr src_pe = GetRemotePEAnnotation(op, "src_pe");
+  PrimExpr dst_pe = GetRemotePEAnnotation(op, "dst_pe");
+
+  if (IsRemotePE(src_pe) && IsRemotePE(dst_pe)) {
+    LOG(FATAL) << "TMA remote copy cannot specify both src_pe and dst_pe.";
+  }
+
+  PrimExpr remote_pe = is_load ? src_pe : dst_pe;
+  PrimExpr wrong_side_pe = is_load ? dst_pe : src_pe;
+  if (IsRemotePE(wrong_side_pe)) {
+    LOG(FATAL) << "TMA remote copy can only remap the global side: "
+               << (is_load ? "src_pe" : "dst_pe")
+               << " is valid for this copy direction.";
+  }
+  return remote_pe;
+}
+
 PrimExpr GetLeaderScopeThreads(const CopyNode &op, const LowerArgs &T) {
   if (auto val = op.annotations.Get("leader_scope_threads")) {
     auto int_val = val->as<IntImmNode>();
@@ -253,6 +285,136 @@ bool IsContiguousRegion(const Buffer &buf, const Array<Range> &ranges,
     }
   }
   return true;
+}
+
+bool CanProveEqual(arith::Analyzer *analyzer, PrimExpr lhs, PrimExpr rhs) {
+  return StructuralEqual()(lhs, rhs) || analyzer->CanProve(EQ(lhs, rhs));
+}
+
+bool IsInBoundsRegion(const Buffer &buffer, const Array<Range> &ranges,
+                      arith::Analyzer *analyzer) {
+  ICHECK_EQ(buffer->shape.size(), ranges.size());
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    PrimExpr start = ranges[i]->min;
+    PrimExpr end = analyzer->Simplify(start + ranges[i]->extent);
+    PrimExpr dim = buffer->shape[i];
+    if (!analyzer->CanProve(GE(start, make_zero(start.dtype()))) ||
+        !(CanProveEqual(analyzer, end, dim) ||
+          analyzer->CanProve(LE(end, dim)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+class RemoteSIMTRewriter : public StmtExprMutator {
+public:
+  RemoteSIMTRewriter(const LowerArgs &T, Buffer src, Buffer dst,
+                     PrimExpr src_pe, PrimExpr dst_pe)
+      : T_(T), src_(src), dst_(dst), src_pe_(src_pe), dst_pe_(dst_pe) {}
+
+private:
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    if (!IsRemotePE(src_pe_) || !load->buffer.same_as(src_)) {
+      return load;
+    }
+
+    PrimExpr addr = RemapRemoteAddress(
+        MakeRemappedAddress(T_, src_, load->indices), src_pe_);
+    return Call(load.dtype(), builtin::call_extern(),
+                {StringImm("tl::remote_load"), addr,
+                 make_zero(load.dtype())});
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    if (!IsRemotePE(dst_pe_) || !store->buffer.same_as(dst_)) {
+      return store;
+    }
+
+    PrimExpr addr = RemapRemoteAddress(
+        MakeRemappedAddress(T_, dst_, store->indices), dst_pe_);
+    Array<PrimExpr> args{StringImm("tl::remote_store"), addr, store->value};
+    return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
+  }
+
+  const LowerArgs &T_;
+  Buffer src_;
+  Buffer dst_;
+  PrimExpr src_pe_;
+  PrimExpr dst_pe_;
+};
+
+Stmt LowerRemoteSIMTElementwise(const CopyNode &op, const LowerArgs &T,
+                                arith::Analyzer *analyzer, PrimExpr src_pe,
+                                PrimExpr dst_pe) {
+  auto simt_loop = op.MakeSIMTLoop(analyzer);
+  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+  auto par_op = ParallelOp(fused_loop);
+
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  for (auto level : levels) {
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         T.bind_var_to_expr},
+                        level);
+  }
+  auto loop_layout = par_op->GetLoopLayout();
+  Stmt lowered_loop = LowerParallelLoop(
+      par_op->GetRoot(), loop_layout, T.thread_var, analyzer, T.layout_map,
+      par_op->GetPredicate(T.thread_var), /*parallel_loop=*/true,
+      /*should_vectorize=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+  return RemoteSIMTRewriter(T, op.src, op.dst, src_pe, dst_pe)(lowered_loop);
+}
+
+Stmt LowerRemoteSIMTCopy(const CopyNode &op, const LowerArgs &T,
+                         arith::Analyzer *analyzer, PrimExpr src_pe,
+                         PrimExpr dst_pe) {
+  ICHECK(!(IsRemotePE(src_pe) && IsRemotePE(dst_pe)))
+      << "SIMT remote copy cannot specify both src_pe and dst_pe.";
+  ICHECK(op.src->dtype == op.dst->dtype)
+      << "SIMT remote copy fallback requires matching dtypes, got "
+      << op.src->dtype << " and " << op.dst->dtype;
+  ICHECK(IsContiguousRegion(op.src, op.src_range, analyzer) &&
+         IsContiguousRegion(op.dst, op.dst_range, analyzer))
+      << "SIMT remote copy fallback requires contiguous source and destination "
+      << "regions.";
+
+  if (!IsInBoundsRegion(op.src, op.src_range, analyzer) ||
+      !IsInBoundsRegion(op.dst, op.dst_range, analyzer)) {
+    return LowerRemoteSIMTElementwise(op, T, analyzer, src_pe, dst_pe);
+  }
+
+  Array<PrimExpr> src_indices;
+  Array<PrimExpr> dst_indices;
+  PrimExpr total_elements = 1;
+  for (auto r : op.src_range) {
+    src_indices.push_back(r->min);
+    total_elements *= r->extent;
+  }
+  for (auto r : op.dst_range) {
+    dst_indices.push_back(r->min);
+  }
+
+  PrimExpr src_addr = MakeRemappedAddress(T, op.src, src_indices);
+  PrimExpr dst_addr = MakeRemappedAddress(T, op.dst, dst_indices);
+  if (IsRemotePE(src_pe)) {
+    src_addr = RemapRemoteAddress(src_addr, src_pe);
+  }
+  if (IsRemotePE(dst_pe)) {
+    dst_addr = RemapRemoteAddress(dst_addr, dst_pe);
+  }
+
+  std::stringstream ss;
+  ss << "tl::cp_block<" << analyzer->Simplify(total_elements) << ">";
+  Array<PrimExpr> args{StringImm(ss.str()), dst_addr, src_addr};
+  return Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
 }
 
 std::pair<Array<Stmt>, PrimExpr>
@@ -667,9 +829,14 @@ CopyInst Copy::SelectInst(const CopyNode &op, Target target,
   ctx.layout_map = &layout_map;
   ctx.analyzer = analyzer;
   ctx.buffer_oob = buffer_oob;
-  ctx.emit_diagnostics = true;
+  ctx.emit_diagnostics = !HasRemotePEAnnotation(op);
   auto result = SelectCopyInstForLowering(op, ctx);
-  ICHECK(result.supported) << result.reason;
+  if (!result.supported) {
+    if (HasRemotePEAnnotation(op) && !GetIsTmaCopy(op)) {
+      return CopyInst::kNormal;
+    }
+    LOG(FATAL) << result.reason;
+  }
   return result.inst;
 }
 
@@ -677,6 +844,16 @@ Stmt Copy::Lower(const CopyNode &op, const LowerArgs &T,
                  arith::Analyzer *analyzer) {
   auto copy_inst =
       SelectInst(op, T.target, T.layout_map, analyzer, /*buffer_oob=*/false);
+  PrimExpr src_pe = GetRemotePEAnnotation(op, "src_pe");
+  PrimExpr dst_pe = GetRemotePEAnnotation(op, "dst_pe");
+  bool has_remote_pe = IsRemotePE(src_pe) || IsRemotePE(dst_pe);
+  bool is_tma_copy = copy_inst == CopyInst::kBulkLoad ||
+                     copy_inst == CopyInst::kBulkStore ||
+                     copy_inst == CopyInst::kBulkLoad1D ||
+                     copy_inst == CopyInst::kBulkStore1D;
+  ICHECK(!has_remote_pe || !GetIsTmaCopy(op) || is_tma_copy)
+      << "T.tma_copy with src_pe or dst_pe requires TMA lowering; got "
+      << CopyInstToString(copy_inst);
   if (op.dst_block.defined()) {
     ICHECK(TargetHasBulkCopy(T.target))
         << "T.copy with dst_block requires cluster-copy support (CUDA SM90+). "
@@ -711,6 +888,9 @@ Stmt Copy::Lower(const CopyNode &op, const LowerArgs &T,
     ICHECK(cp_async_copy.defined()) << "Failed to lower cp.async copy";
     return cp_async_copy;
   } else if (copy_inst == CopyInst::kNormal) {
+    if (has_remote_pe) {
+      return LowerRemoteSIMTCopy(op, T, analyzer, src_pe, dst_pe);
+    }
     return LowerNormal(op, T, analyzer);
   } else {
     LOG(FATAL) << "Unsupported copy inst " << static_cast<int>(copy_inst);
@@ -1432,6 +1612,10 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
   desc.data_type =
       TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
+  ICHECK(!IsRemotePE(GetTmaRemotePE(op, is_load)))
+      << "Remote descriptor TMA copy is not supported yet because descriptor "
+      << "creation requires a static buffer base. Use 1D TMA or T.copy SIMT "
+      << "fallback for remote copies.";
   desc.global_addr = global_tensor->data;
   desc.global_shape = ReverseArray(global_tensor->shape);
   Array<PrimExpr> global_coords =
@@ -2016,6 +2200,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
       is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, elements);
   PrimExpr global_addr = global_tensor.access_ptr(
       is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
+  global_addr = RemapRemoteAddress(global_addr, GetTmaRemotePE(op, is_load));
 
   int barrier_base_id = -1;
   PrimExpr mbar_handle;

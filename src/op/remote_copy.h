@@ -66,12 +66,6 @@ public:
   TileOperator Clone() const override;
 
   PrimExpr get_offset(const BufferLoadNode *load) const;
-
-private:
-  PrimExpr MakeAddress(const Buffer &buffer,
-                       const Array<PrimExpr> &indices) const;
-  PrimExpr MakeRemappedAddress(const LowerArgs &T, const Buffer &buffer,
-                               const Array<PrimExpr> &indices) const;
 };
 
 class PutOp : public TileOperator {
@@ -131,12 +125,6 @@ public:
   TileOperator Clone() const override;
 
   PrimExpr get_offset(const BufferLoadNode *load) const;
-
-private:
-  PrimExpr MakeAddress(const Buffer &buffer,
-                       const Array<PrimExpr> &indices) const;
-  PrimExpr MakeRemappedAddress(const LowerArgs &T, const Buffer &buffer,
-                               const Array<PrimExpr> &indices) const;
 };
 
 class GetOp : public TileOperator {

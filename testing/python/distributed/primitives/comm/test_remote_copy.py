@@ -54,6 +54,10 @@ def test_remote_copy(local_rank: int, num_ranks: int):
         compile_once=True,
         compile_group=group,
     )
+    if rank == 0:
+        source = kernel.get_kernel_source()
+        assert "tl::get_remote_base_ptr" in source
+        assert "tl::get_uintptr_t" in source
     kernel.initialize(allocator=allocator)
 
     src = tilelang.tensor((_M,), torch.float32, allocator=allocator).normal_()

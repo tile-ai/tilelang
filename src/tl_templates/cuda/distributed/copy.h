@@ -1,10 +1,23 @@
 #pragma once
 
+#include "../copy.h"
 #include "../common.h"
 #include <cstddef>
 #include <cstdint>
 
 namespace tl {
+
+template <typename BarrierType = uint64_t>
+TL_DEVICE void tma_load(void *smem_ptr, uint64_t gmem_ptr,
+                        BarrierType &smem_mbar, uint32_t size) {
+  tma_load(smem_ptr, reinterpret_cast<void const *>(gmem_ptr), smem_mbar,
+           size);
+}
+
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
+TL_DEVICE void tma_store(uint64_t gmem_ptr, void *smem_ptr, uint32_t size) {
+  tma_store<cache_hint>(reinterpret_cast<void *>(gmem_ptr), smem_ptr, size);
+}
 
 // ---------------------------------------------------------------------------
 // cp_warp / cp_block — per-warp and per-block remote memcpy via P2P pointers
@@ -138,6 +151,16 @@ template <int N, typename dtype_t>
 TL_DEVICE void cp_block(dtype_t *dst_addr, const uint64_t src_addr_uint64) {
   const dtype_t *src_addr = reinterpret_cast<const dtype_t *>(src_addr_uint64);
   cp_block<N>(dst_addr, src_addr);
+}
+
+template <typename T>
+TL_DEVICE T remote_load(uint64_t addr, T) {
+  return *reinterpret_cast<const T *>(addr);
+}
+
+template <typename T>
+TL_DEVICE void remote_store(uint64_t addr, T value) {
+  *reinterpret_cast<T *>(addr) = value;
 }
 
 } // namespace tl

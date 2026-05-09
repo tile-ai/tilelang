@@ -59,6 +59,8 @@ def copy(
     disable_tma: bool = False,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     prefer_instruction: str | None = None,
+    src_pe: int | tirx.PrimExpr | None = None,
+    dst_pe: int | tirx.PrimExpr | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
@@ -75,9 +77,11 @@ def copy(
             "sync". For "tma", T.copy keeps synchronous copy semantics; global -> shared copies
             lower through TMA with an automatically allocated barrier and wait when constraints
             are satisfied.
+        src_pe (Optional[Union[int, tirx.PrimExpr]], keyword-only): Remote PE for the source side.
+        dst_pe (Optional[Union[int, tirx.PrimExpr]], keyword-only): Remote PE for the destination side.
         annotations (Optional[dict], keyword-only): Additional annotations dict. If provided,
-            coalesced_width, disable_tma, eviction_policy, and prefer_instruction can also
-            be specified here.
+            coalesced_width, disable_tma, eviction_policy, prefer_instruction, src_pe, and dst_pe
+            can also be specified here.
             Values in annotations take precedence over individual arguments.
         loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy
             (only valid for normal SIMT copy; incompatible with TMA/LDSM/STSM/TMem). When provided,
@@ -107,8 +111,12 @@ def copy(
       and passed through to the backend; low-level loop construction and any
       scope-specific decisions happen during lowering.
     """
+    has_remote_pe = src_pe is not None or dst_pe is not None
+    if annotations and ("src_pe" in annotations or "dst_pe" in annotations):
+        has_remote_pe = True
+
     src, dst = _normalize_copy_regions(src, dst)
-    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad):
+    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not has_remote_pe:
         return tirx.BufferStore(dst.buffer, src, dst.indices)
 
     # Build annotations dict
@@ -126,6 +134,10 @@ def copy(
         ann["prefer_instruction"] = prefer_instruction
     if isinstance(ann.get("prefer_instruction"), str):
         ann["prefer_instruction"] = tirx.StringImm(ann["prefer_instruction"])
+    if "src_pe" not in ann and src_pe is not None:
+        ann["src_pe"] = src_pe
+    if "dst_pe" not in ann and dst_pe is not None:
+        ann["dst_pe"] = dst_pe
 
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
@@ -238,6 +250,8 @@ def tma_copy(
     barrier=None,
     leader_scope_threads: int | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    src_pe: int | tirx.PrimExpr | None = None,
+    dst_pe: int | tirx.PrimExpr | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
     """TMA copy with user-managed synchronization.
@@ -266,6 +280,8 @@ def tma_copy(
         leader_scope_threads: Number of threads in each TMA leader-election scope
             (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
         eviction_policy: Cache eviction policy. Defaults to None.
+        src_pe: Remote PE for global-source TMA copy.
+        dst_pe: Remote PE for global-destination TMA copy.
         annotations: Additional annotations dict. Values in annotations take
             precedence over individual arguments.
 
@@ -306,6 +322,10 @@ def tma_copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if "src_pe" not in ann and src_pe is not None:
+        ann["src_pe"] = src_pe
+    if "dst_pe" not in ann and dst_pe is not None:
+        ann["dst_pe"] = dst_pe
 
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann if ann else None)
 
