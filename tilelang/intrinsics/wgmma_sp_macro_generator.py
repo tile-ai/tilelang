@@ -125,6 +125,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         assert is_shared(E_region), "E operand must be a shared buffer for wgmma_ss"
 
         local_size_out = self.local_size_out
+        local_size_e = self.local_size_e
         a_dtype_abbrv = self.a_dtype_abbrv
         b_dtype_abbrv = self.b_dtype_abbrv
         accum_dtype = self.accum_dtype
@@ -253,7 +254,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             for ki in T.unroll(k_blocks):
                 for j in T.unroll(num_inst_n):
                     for i in T.unroll(num_inst_m):
-                        e_local_offset = ki * e_stage_elems
+                        e_local_offset = ki * e_stage_elems + i * local_size_e
                         scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
                         warp_i = (warp_m // 4) * num_inst_m + i
                         warp_j = warp_n * num_inst_n + j
@@ -262,7 +263,8 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                             + warp_i * 64 * a_swizzle_atom_elems
                             + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
                             if a_is_k_major
-                            else warp_i * 64 * k_dim + ki * a_swizzle_atom_elems * (micro_size_k // self.SPARSE_FACTOR)
+                            else warp_i * 64 * (k_dim // self.SPARSE_FACTOR)
+                            + ki * a_swizzle_atom_elems * (micro_size_k // self.SPARSE_FACTOR)
                         )
                         B_offset = (
                             (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
@@ -318,6 +320,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
         local_size_a = self.local_size_a
         local_size_out = self.local_size_out
+        local_size_e = self.local_size_e
         a_dtype_abbrv = self.a_dtype_abbrv
         b_dtype_abbrv = self.b_dtype_abbrv
         accum_dtype = self.accum_dtype
@@ -394,7 +397,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             for ki in T.unroll(k_blocks):
                 for j in T.unroll(num_inst_n):
                     for i in T.unroll(num_inst_m):
-                        e_local_offset = ki * e_stage_elems
+                        e_local_offset = ki * e_stage_elems + i * local_size_e
                         scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
                         warp_j = warp_n * num_inst_n + j
                         A_offset = ki * warp_rows * local_size_a + i * local_size_a

@@ -57,7 +57,7 @@ class GemmSPMMA(GemmSPBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
-    def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
+    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
         # NOTE(wt): Actually gemm_sp v2 currently use GemmWarpPolicy
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.MMA)
         warp_row_tiles = int(self.M // m_warp)
