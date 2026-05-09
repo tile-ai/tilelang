@@ -193,8 +193,8 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
     for (const auto &r : src_ranges) {
       total_elems = total_elems * r->extent;
     }
-    PrimExpr size_bytes = cast(DataType::UInt(32),
-                               TMABytesFromElements(total_elems, src->dtype));
+    PrimExpr size_bytes =
+        cast(DataType::UInt(32), TMABytesFromElements(total_elems, src->dtype));
     PrimExpr src_ptr = src.access_ptr(1, DataType::Handle(), 1,
                                       linear_off(src, src_ranges), total_elems);
     PrimExpr dst_ptr = dst.access_ptr(2, DataType::Handle(), 1,
@@ -247,8 +247,8 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
                Range::FromMinExtent(src_ranges[split_dim]->min + k, 1));
   body_dst.Set(split_dim,
                Range::FromMinExtent(dst_ranges[split_dim]->min + k, 1));
-  auto [body_stmts, body_cnt] = MakeTMARows(
-      src, body_src, dst, body_dst, dst_block, barrier_load, analyzer);
+  auto [body_stmts, body_cnt] = MakeTMARows(src, body_src, dst, body_dst,
+                                            dst_block, barrier_load, analyzer);
   Stmt body = body_stmts.size() == 1 ? body_stmts[0]
                                      : static_cast<Stmt>(SeqStmt(body_stmts));
   Stmt for_loop =
@@ -744,19 +744,17 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &T,
       for (auto r : src_range) {
         total_elements = total_elements * r->extent;
       }
-      PrimExpr size_bytes = cast(DataType::UInt(32),
-                                 TMABytesFromElements(total_elements,
-                                                      src->dtype));
+      PrimExpr size_bytes = cast(
+          DataType::UInt(32), TMABytesFromElements(total_elements, src->dtype));
 
       PrimExpr dst_ptr =
           dst.access_ptr(2, DataType::Handle(), 1, dst_offset, total_elements);
       PrimExpr src_ptr =
           src.access_ptr(1, DataType::Handle(), 1, src_offset, total_elements);
 
-      Stmt bulk_copy =
-          Evaluate(Call(DataType::Handle(), tma_store_cluster(),
-                        {dst_ptr, src_ptr, op.dst_block.value(), size_bytes,
-                         barrier_load}));
+      Stmt bulk_copy = Evaluate(Call(
+          DataType::Handle(), tma_store_cluster(),
+          {dst_ptr, src_ptr, op.dst_block.value(), size_bytes, barrier_load}));
 
       return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), bulk_copy);
     }

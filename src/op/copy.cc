@@ -166,6 +166,7 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
   node->SetAccessRegions({src_access, dst_access});
+  // Copy annotations from the Call node
   node->annotations = annotations;
   if (auto dst_block = node->annotations.Get("dst_block")) {
     if (auto int_imm = dst_block->as<IntImmNode>()) {
@@ -409,7 +410,6 @@ LayoutMap CopyNode::InferSIMTLayout(const LayoutInferArgs &T,
   }
   return par_op_->InferLayout(T, level);
 }
-
 // Lowers the copy operation by dispatching to the selected target
 // implementation.
 Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
@@ -475,7 +475,7 @@ TVM_REGISTER_OP("tl.tileop.async_copy")
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-// Register the tma_copy operation - same as copy but forces TMA path
+// Register the tma_copy operation — same as copy but forces TMA path
 // and emits only expect_tx + tma_load (no wait).
 TVM_REGISTER_OP("tl.tileop.tma_copy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "tma_copy")

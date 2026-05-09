@@ -546,8 +546,8 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     oss << "cluster_mask=0x" << std::hex << facts.cluster_mask
         << " requires descriptor-based TMA (kBulkLoad), but the copy does not "
            "meet TMA bulk-load constraints. src="
-        << op.src->name << " (scope=" << op.src.scope() << "), dst="
-        << op.dst->name << " (scope=" << op.dst.scope() << ").";
+        << op.src->name << " (scope=" << op.src.scope()
+        << "), dst=" << op.dst->name << " (scope=" << op.dst.scope() << ").";
     return Unsupported(oss.str());
   }
 
