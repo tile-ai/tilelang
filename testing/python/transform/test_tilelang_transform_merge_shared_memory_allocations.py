@@ -839,3 +839,54 @@ def test_merge_dynamic_shared_grows_arena_from_tail_when_freed_block_too_small()
     assert y_offsets == {64}, after_s
     assert z_offsets == {64}, after_s
     assert "+ 96" not in after_s, after_s
+
+
+@tilelang.testing.requires_cuda
+def test_general_cond_branch_alternatives_share_offset_with_postdom_buffer():
+    """Mutually exclusive buffers under a runtime-cond if/else, plus a
+    post-dominator buffer after a sync, must collapse to a single 64-byte arena.
+
+    Upstream's linear-scan plan does not see ``if cond == 0: A else: B`` as
+    mutually exclusive (it only handles ``threadIdx``-style branches via the
+    aggressive path), so it places ``A`` at offset 0 and ``B`` at offset 32,
+    yielding a 128-byte arena. The per-epoch / branch-alternative analysis in
+    this pass collapses ``A`` and ``B`` onto offset 0, then reuses that same
+    offset for ``C`` after the sync, giving a 64-byte arena (50% smaller).
+    """
+
+    @T.prim_func(private=True)
+    def before(
+        A_in: T.Buffer((8,), "float16"),
+        out: T.Buffer((8,), "float16"),
+        cond: T.int32,
+    ):
+        T.launch_thread("blockIdx.x", 1)
+        A = T.allocate([32], "float16", "shared.dyn")
+        B = T.allocate([32], "float16", "shared.dyn")
+        C = T.allocate([32], "float16", "shared.dyn")
+        T.launch_thread("threadIdx.x", 1)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        Ab = T.Buffer((32,), "float16", data=A, scope="shared.dyn")
+        Bb = T.Buffer((32,), "float16", data=B, scope="shared.dyn")
+        Cb = T.Buffer((32,), "float16", data=C, scope="shared.dyn")
+        if cond == 0:
+            Ab[0] = A_in[0]
+            out[0] = Ab[0]
+        else:
+            Bb[0] = A_in[1]
+            out[0] = Bb[0]
+        T.tvm_storage_sync("shared.dyn")
+        Cb[0] = A_in[2]
+        out[1] = Cb[0]
+
+    after = _run_merge_pass(before)
+    after_s = after.script()
+
+    # Arena = max(A, B, C) = 32 fp16 elems = 64 bytes (vs 128 on upstream).
+    assert 'T.allocate([64], "uint8", "shared.dyn")' in after_s, after_s
+    # All three buffers must start at offset 0 (no '+ N' indices).
+    assert "Ab[0]" in after_s
+    assert "Bb[0]" in after_s
+    assert "Cb[0]" in after_s
+    assert "Bb[32]" not in after_s, after_s
