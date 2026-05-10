@@ -944,6 +944,51 @@ def test_merged_sync_phased_buffers_generate_correct_results():
     )
 
 
+def test_dynamic_size_buffer_fallback_does_not_incorrectly_alias():
+    """Dynamic-size (symbolic) shared.dyn buffers must not be aliased with
+    constant-size buffers when their liveness intervals overlap.  The pass
+    deliberately keeps dynamic buffers on the legacy interval path, so the
+    result must stay safe: the arena should be at least the sum of the
+    constant-size buffer bytes (the dynamic contribution is not checked here
+    because T.var introduces a symbolic extent that IR-level assertions
+    cannot directly capture).
+    """
+
+    @T.prim_func(private=True, check_well_formed=False)
+    def before(
+        N: T.int64,
+        A: T.Buffer((16,), "float16"),
+        out: T.Buffer((16,), "float16"),
+    ):
+        T.launch_thread("blockIdx.x", 1)
+        dyn = T.allocate([N], "float16", "shared.dyn")
+        fix = T.allocate([16], "float16", "shared.dyn")
+        T.launch_thread("threadIdx.x", 1)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        D = T.Buffer((N,), "float16", data=dyn, scope="shared.dyn")
+        F = T.Buffer((16,), "float16", data=fix, scope="shared.dyn")
+        D[0] = A[0]
+        out[0] = D[0]
+        T.tvm_storage_sync("shared.dyn")
+        F[0] = A[1]
+        out[1] = F[0]
+
+    after = _run_merge_pass(before)
+    after_s = after.script()
+
+    # Both buffers should be mapped onto the same buf_dyn_shmem (they are
+    # sync-separated, so aliasing is safe even with dynamic size).
+    assert after_s.count("buf_dyn_shmem") >= 3, after_s
+    # D starts at offset 0 (no D[x + N]) — it uses the base of buf_dyn_shmem.
+    assert "D[0]" in after_s
+    # F starts at offset 0 as well (shared slot).
+    assert "F[0]" in after_s
+    # Sync separates the two live ranges; arena should contain both.
+    assert "D[0] = A[0]" in after_s
+    assert "F[0] = A[1]" in after_s
+
+
 @tilelang.testing.requires_cuda
 def test_general_cond_branch_alternatives_share_offset_with_postdom_buffer():
     """Mutually exclusive buffers under a runtime-cond if/else, plus a
