@@ -29,7 +29,7 @@ from tilelang.intrinsics.mma_sp_layout import (
     metadata_16bit_load_32x2_to_shared_16x2_layout_32bit,
     metadata_8bit_load_32x4_to_shared_16x4_layout_16bit,
     metadata_16bit_load_32x2_to_shared_16x2_layout_16bit,
-    metadata_8bit_load_32x4_to_shared_16x4_layout_8bit,
+    metadata_8bit_load_32x4_to_shared_16x8_layout_8bit,
     metadata_16bit_load_32x2_to_shared_16x4_layout_8bit,
     metadata_32bit_load_32x1_to_shared_16x2_layout_8bit,
     get_ldmatrix_offset_b,
@@ -339,7 +339,7 @@ class SparseTensorCoreIntrinEmitter:
         if not ldmatrix_available:
             if DataType(e_dtype).bits == 8:
                 if DataType(a_dtype).bits == 8:
-                    mma_load_layout = metadata_8bit_load_32x4_to_shared_16x4_layout_8bit
+                    mma_load_layout = metadata_8bit_load_32x4_to_shared_16x8_layout_8bit
                 elif DataType(a_dtype).bits == 16:
                     mma_load_layout = metadata_8bit_load_32x4_to_shared_16x4_layout_16bit
                 elif DataType(a_dtype).bits == 32:

@@ -87,7 +87,10 @@ def metadata_16bit_load_32x2_to_shared_16x2_layout_32bit(thread_id: int, local_i
 
 
 def metadata_8bit_load_32x4_to_shared_16x4_layout_16bit(thread_id: int, local_id: int) -> tuple[int, int]:
-    return metadata_8bit_load_32x4_to_shared_16x4_layout_32bit(thread_id, local_id)  # same mapping for 16bit and 32bit
+    logical_id = get_logical_id_32bit(thread_id)
+    row = logical_id // 2 + (local_id // 2) * 8
+    col = (logical_id % 2) * 2 + (local_id % 2)
+    return row, col
 
 
 def metadata_16bit_load_32x2_to_shared_16x2_layout_16bit(thread_id: int, local_id: int) -> tuple[int, int]:
@@ -98,9 +101,9 @@ def get_logical_id_8bit(thread_id: int) -> int:
     return thread_id
 
 
-def metadata_8bit_load_32x4_to_shared_16x4_layout_8bit(thread_id: int, local_id: int) -> tuple[int, int]:
+def metadata_8bit_load_32x4_to_shared_16x8_layout_8bit(thread_id: int, local_id: int) -> tuple[int, int]:
     logical_id = get_logical_id_8bit(thread_id)
-    row = logical_id // 2 + local_id * 8
+    row = logical_id // 4 + (logical_id % 2) * 8
     col = (logical_id % 4) // 2 * 4 + local_id
     return row, col
 
