@@ -36,8 +36,6 @@ def _compress_fn(D, dtype, meta_dtype, group=4, elem=2, block_M=_BLOCK_M, elem_p
     bits_per_pos = (group - 1).bit_length()
     bits_per_group = elem * bits_per_pos
     S = T.dynamic("S")
-    print(f"{D=} {elem=} {group=} {e_factor=} {bits_per_pos=} {bits_per_group=}")
-    print(f"{[S, D * elem // group]=}, {[S, D // e_factor]=}")
 
     @T.prim_func
     def kernel(

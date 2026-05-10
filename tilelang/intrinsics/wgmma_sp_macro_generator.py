@@ -217,23 +217,6 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         assert is_full_region(C_region), "Fragment output C must be a full region"
         C_buf = C_region.buffer
 
-        print(f"{elems_in_bytes=}")
-        print(
-            f"{self.block_row_warps=}\n{self.block_col_warps=}\n{self.warp_row_tiles=}\n{self.warp_col_tiles=}\n{self.warp_k=}\n{self.warp_rows=}\n{self.warp_cols=}"
-        )
-        print(f"{self.M_DIM=}\n{self.n_dim=}\n{self.k_dim=}\n{self.wgmma_prefix=}")
-        print(f"{self.micro_size_x=}\n{self.micro_size_y=}\n{self.micro_size_k=}")
-        print(f"{m_dim=}\n{n_dim=}\n{k_dim=}")
-        print(f"{a_swizzle_mode=}\n{b_swizzle_mode=}")
-        print(f"{a_leading_byte_offset=}\n{a_stride_byte_offset=}\n{b_leading_byte_offset=}\n{b_stride_byte_offset=}")
-        print(f"{ak_atom_size=}\n{bk_atom_size=}")
-        print(f"{num_inst_m=}\n{num_inst_n=}")
-        print(f"{accum_regs=}")
-        print(f"{self.e_dtype=}")
-        print(f"{self.SPARSE_FACTOR=}")
-        print(f"{self.SPARSE_SELECTOR=}")
-        print(f"{a_swizzle_atom_elems=} {b_swizzle_atom_elems=}")
-
         @T.macro
         def _warp_mma(A_ptr, B_ptr, C_buf):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
