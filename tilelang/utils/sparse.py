@@ -1,105 +1,106 @@
 from __future__ import annotations
-import os
 import torch
-import warnings
-from tilelang.contrib import nvcc
-from tilelang.utils.tensor import is_float8_dtype, fp8_remove_negative_zeros_
-from torch.utils.cpp_extension import load, _import_module_from_library
-from tilelang import env
+import tilelang
+import tilelang.language as T
+from tilelang.language.dtypes import _TORCH_DTYPE_TO_STR, dtype
+from tvm import DataType
 
-# Include version information to ensure different versions use separate caches
-from tilelang import __version__
+_ELEM_PER_THREAD = 32
+_BLOCK_M = 16
 
-# Define paths
-compress_util = os.path.join(env.TILELANG_TEMPLATE_PATH, "tl_templates/cuda/compress_sm90.cu")
-# Cache directory for compiled extensions
-_CACHE_DIR = os.path.join(env.TILELANG_CACHE_DIR, "sparse_compressor", __version__)
-os.makedirs(_CACHE_DIR, exist_ok=True)
+_DTYPE_CONFIG = {
+    torch.float16: (2, 4, T.int16),
+    torch.bfloat16: (2, 4, T.int16),
+    torch.float32: (1, 2, T.int16),
+    torch.int8: (2, 4, T.int16),
+}
 
-
-def _get_cached_lib():
-    name = "compress_lib"
-
-    if os.path.exists(os.path.join(_CACHE_DIR, f"{name}.so")):
-        try:
-            return _import_module_from_library(name, _CACHE_DIR, is_python_module=True)
-        except Exception:
-            pass
-
-    # Set TORCH_CUDA_ARCH_LIST
-    env._initialize_torch_cuda_arch_flags()
-
-    # Compile if not cached or loading failed
-    return load(
-        name=name,
-        sources=[compress_util],
-        extra_cuda_cflags=[
-            "-O2",
-            "-std=c++17",
-            "-lineinfo",
-            f"-I{env.CUTLASS_INCLUDE_DIR}",
-            f"-I{env.CUTLASS_INCLUDE_DIR}/../tools/util/include",
-            "-arch=sm_90",
-        ],
-        build_directory=_CACHE_DIR,
-    )
+for _name in ("float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz"):
+    _dt = getattr(torch, _name, None)
+    if _dt is not None:
+        _DTYPE_CONFIG[_dt] = (2, 4, T.int16)
 
 
-def compress_sm90(A: torch.Tensor, block_k: int, transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    if block_k > 128:
-        block_k = 128
-        # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
-        warnings.warn(f"block_k {block_k} is too large, set to 128 for sm90 compression.", stacklevel=2)
-    # Load the library (will use cache if available)
-    compress_lib = _get_cached_lib()
-
-    return compress_lib.compress_sm90(A, block_k, transposed)
+def _e_factor(meta_dtype: str, group: int, elem: int) -> int:
+    bits_per_pos = (group - 1).bit_length()
+    bits_per_group = elem * bits_per_pos
+    return (DataType(meta_dtype).bits // bits_per_group) * group
 
 
-def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    try:
-        from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
-    except ImportError as err:
-        raise ImportError(
-            "SparseSemiStructuredTensor is not available in this version of PyTorch. Please install a compatible version."
-        ) from err
-    orig_val = SparseSemiStructuredTensor._FORCE_CUTLASS
-    try:
-        SparseSemiStructuredTensor._FORCE_CUTLASS = True
-        if transposed is not False:
-            raise NotImplementedError("transposed flag is deprecated by pytorch")
-        compressed = to_sparse_semi_structured(A)
-        return compressed.packed, compressed.meta
-    finally:
-        SparseSemiStructuredTensor._FORCE_CUTLASS = orig_val
+@tilelang.jit(
+    out_idx=[-2, -1],
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+)
+def _compress_fn(D, dtype, meta_dtype, group=4, elem=2, block_M=_BLOCK_M, elem_per_thread=_ELEM_PER_THREAD):
+    e_factor = _e_factor(meta_dtype, group, elem)
+    bits_per_pos = (group - 1).bit_length()
+    bits_per_group = elem * bits_per_pos
+    S = T.dynamic("S")
+    print(f"{D=} {elem=} {group=} {e_factor=} {bits_per_pos=} {bits_per_group=}")
+    print(f"{[S, D * elem // group]=}, {[S, D // e_factor]=}")
+
+    @T.prim_func
+    def kernel(
+        dense: T.Tensor([S, D], dtype),
+        nonzero: T.Tensor([S, D * elem // group], dtype),
+        meta: T.Tensor([S, D // e_factor], meta_dtype),
+    ):
+        with T.Kernel(S // block_M, threads=(block_M, D // elem_per_thread)) as (bz,):
+            tm = T.get_thread_binding(0)
+            tn = T.get_thread_binding(1)
+            dense_local = T.alloc_local([elem_per_thread], dtype)
+            sparse_local = T.alloc_local([elem_per_thread * elem // group], dtype)
+            meta_local = T.alloc_local([elem_per_thread // e_factor], meta_dtype)
+            nz_idx = T.alloc_local([elem], T.uint8)
+            nz_count = T.alloc_var(dtype=T.uint8)
+
+            T.clear(sparse_local)
+            T.clear(meta_local)
+
+            T.copy(dense[bz * block_M + tm, tn * elem_per_thread : (tn + 1) * elem_per_thread], dense_local)
+
+            for g_i in range(elem_per_thread // group):
+                T.clear(nz_idx)
+                local_idx = g_i * group
+
+                nz_count = 0
+                for i in T.serial(group):
+                    if dense_local[local_idx + i] != 0:
+                        nz_idx[nz_count] = i
+                        nz_count = nz_count + 1
+
+                for i in T.serial(elem):
+                    sparse_local[local_idx * elem // group + i] = dense_local[local_idx + nz_idx[i]]
+                    meta_local[local_idx // e_factor] |= T.shift_left(
+                        nz_idx[i].astype(meta_dtype),
+                        (bits_per_group * (g_i % (e_factor // group)) + bits_per_pos * i).astype(meta_dtype),
+                    )
+
+            sparse_per_thread = elem_per_thread * elem // group
+            T.copy(sparse_local, nonzero[bz * block_M + tm, tn * sparse_per_thread : (tn + 1) * sparse_per_thread])
+            T.copy(meta_local, meta[bz * block_M + tm, tn * (elem_per_thread // e_factor) : (tn + 1) * (elem_per_thread // e_factor)])
+
+    return kernel
 
 
-def compress(A: torch.Tensor, transposed: bool, arch: str | None = None, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compress a tensor using the appropriate method based on the CUDA architecture.
-    """
-    if arch is None:
-        arch = nvcc.get_target_compute_version()
+def compress(
+    A: torch.Tensor,
+    meta_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if A.dtype not in _DTYPE_CONFIG:
+        raise ValueError(f"Unsupported dtype {A.dtype}. Supported: {list(_DTYPE_CONFIG)}")
+    assert A.is_contiguous(), "Input must be contiguous"
+    assert A.dim() == 2, "Input must be 2D"
 
-    compute_version = nvcc.parse_compute_version(arch)
+    elem, group = _DTYPE_CONFIG[A.dtype][:2]
+    meta_dtype = dtype(_TORCH_DTYPE_TO_STR[meta_dtype]) if meta_dtype is not None else _DTYPE_CONFIG[A.dtype][2]
+    S, D = A.shape
+    assert D % _ELEM_PER_THREAD == 0, f"Last dim D={D} must be divisible by {_ELEM_PER_THREAD}"
+    assert S % _BLOCK_M == 0, f"Rows S={S} must be divisible by block_M={_BLOCK_M}"
 
-    if compute_version >= (9, 0):
-        return compress_sm90(A, transposed=transposed, **kwargs)
-    elif compute_version >= (8, 0):
-        if transposed:
-            A = A.t().contiguous()
-        origin_dtype = A.dtype
-        if is_float8_dtype(origin_dtype):
-            fp8_remove_negative_zeros_(A)
-            A = A.view(torch.int8)
-        A_sp, E = compress_sm80(A, transposed=False)
-        if is_float8_dtype(origin_dtype):
-            A_sp = A_sp.view(origin_dtype)
-        if transposed:
-            A_sp = A_sp.t().contiguous()
-        return A_sp, E
-    else:
-        raise ValueError(f"Unsupported CUDA compute version: {compute_version}. Supported versions are sm_80 and sm_90.")
+    A_sparse, E = _compress_fn(D, dtype(_TORCH_DTYPE_TO_STR[A.dtype]), meta_dtype, group, elem, _BLOCK_M, _ELEM_PER_THREAD)(A)
+
+    return A_sparse, E
 
 
 def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device="cuda", transposed: bool = False):
