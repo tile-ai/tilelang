@@ -1,9 +1,10 @@
 import torch
 import tilelang
-from tilelang.utils.sparse import compress_sm90
-from tilelang.layout import make_cutlass_metadata_layout
+from tilelang.utils.sparse import compress
 from tilelang import language as T
 import tilelang.testing
+
+E_FACTOR = 16  # int16 metadata covers 16 K-elements (2:4 sparsity, float16)
 
 
 @tilelang.jit(out_idx=[-1])
@@ -28,24 +29,18 @@ def matmul_sp(
     @T.prim_func
     def main(
         A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-        E: T.Tensor((M, K // 8), "uint8"),
+        E: T.Tensor((M, K // E_FACTOR), T.int16),
         B: T.Tensor(B_shape, in_dtype),
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // 8), "uint8")
+            E_shared = T.alloc_shared((block_M, block_K // E_FACTOR), T.int16)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout(
-                {
-                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="9.0", block_k=block_K),
-                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="9.0", block_k=block_K),
-                }
-            )
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(E[by * block_M, k * block_K // 8], E_shared)
+                T.copy(E[by * block_M, k * block_K // E_FACTOR], E_shared)
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(B[k * block_K, bx * block_N], B_shared)
                 T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False)
@@ -100,7 +95,7 @@ def run_gemm_sp(
     )
 
     A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device="cuda")
-    A_sparse, E = compress_sm90(A, block_k=block_K, transposed=False)
+    A_sparse, E = compress(A)
     B = torch.randn((K, N), device="cuda", dtype=torch.float16)
 
     C_sp = kernel(A_sparse, E, B).half()
@@ -141,7 +136,7 @@ def run_regression_perf():
         num_threads,
     )
     A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device="cuda")
-    A_sparse, E = compress_sm90(A, block_k=block_K, transposed=False)
+    A_sparse, E = compress(A)
     B = torch.randn((K, N), device="cuda", dtype=torch.float16)
 
     from tilelang.profiler import do_bench

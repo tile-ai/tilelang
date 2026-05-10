@@ -2,38 +2,26 @@ import torch
 import tilelang
 import tilelang.testing
 
-from tilelang.utils.sparse import compress_sm90, randn_semi_sparse
+from tilelang.utils.sparse import compress, randn_semi_sparse
 
 
-def _test_compress_sm90(M, K, block_k, dtype):
+def _test_compress(M, K, dtype):
     A = randn_semi_sparse(M, K, dtype=dtype, device="cuda")
-    A_sparse, E = compress_sm90(A, block_k, False)
+    A_sparse, E = compress(A)
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_compress_sm90():
-    _test_compress_sm90(1024, 1024, 128, torch.float16)
-    _test_compress_sm90(1024, 1024, 64, torch.float16)
-    _test_compress_sm90(1024, 1024, 32, torch.float16)
+def test_compress():
+    _test_compress(1024, 1024, torch.float16)
+    _test_compress(1024, 1024, torch.bfloat16)
+    _test_compress(1024, 1024, torch.float32)
 
-    _test_compress_sm90(1024, 1024, 128, torch.bfloat16)
-    _test_compress_sm90(1024, 1024, 64, torch.bfloat16)
-    _test_compress_sm90(1024, 1024, 32, torch.bfloat16)
-
-    _test_compress_sm90(1024, 1024, 64, torch.float32)
-    _test_compress_sm90(1024, 1024, 32, torch.float32)
-    _test_compress_sm90(1024, 1024, 16, torch.float32)
-
-    _test_compress_sm90(1024, 1024, 256, torch.float8_e4m3fn)
-    _test_compress_sm90(1024, 1024, 128, torch.float8_e4m3fn)
-    _test_compress_sm90(1024, 1024, 64, torch.float8_e4m3fn)
-
-    _test_compress_sm90(1024, 1024, 256, torch.float8_e5m2)
-    _test_compress_sm90(1024, 1024, 128, torch.float8_e5m2)
-    _test_compress_sm90(1024, 1024, 64, torch.float8_e5m2)
+    for name in ("float8_e4m3fn", "float8_e5m2"):
+        dt = getattr(torch, name, None)
+        if dt is not None:
+            _test_compress(1024, 1024, dt)
 
 
 if __name__ == "__main__":
-    test_compress_sm90()
+    test_compress()
     print("All tests passed.")

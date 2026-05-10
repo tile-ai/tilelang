@@ -38,43 +38,35 @@ To utilize sparse Tensor Cores, a dense tensor must first be **compressed** into
 
 Both `PyTorch` and `vLLM` use `CUTLASS` as their computation backend (see references [here](https://github.com/pytorch/pytorch/blob/a8d6afb511a69687bbb2b7e88a3cf67917e1697e/aten/src/ATen/native/sparse/cuda/SparseSemiStructuredOps.cu#L47) and [here](https://github.com/vllm-project/vllm/blob/a5dd03c1ebc5e4f56f3c9d3dc0436e9c582c978f/csrc/sparse/cutlass/sparse_scaled_mm_c3x.cuh#L116)), leveraging `CUTLASS`’s built-in compressor (or reimplementing it in `PyTorch`).
 
-A set of **CUTLASS-compatible** compressors is provided in `tilelang.utils.sparse`, where a dense tensor—along with other required arguments (e.g., block_K for sm90, transpose options)—can be passed in to perform the compression.
+A compressor is provided in `tilelang.utils.sparse`. Pass in a dense 2:4-sparse tensor and optionally a metadata dtype to get back the compressed values and metadata:
 
 ```python
 from tilelang.utils.sparse import compress
-A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
+A_sparse, E = compress(A)                        # default: int16 metadata for fp16/bf16
+A_sparse, E = compress(A.t().contiguous())       # compress the transposed layout
 ```
 
-Here, `A_sparse` contains all the non-zero elements of `A`, while `E` stores the corresponding metadata (indexing information) required to reconstruct the original sparse pattern.
+Here, `A_sparse` contains all the non-zero elements of `A`, while `E` stores the corresponding metadata (indexing information) required to reconstruct the original sparse pattern. The metadata uses a natural row-major layout that `T.gemm_sp` consumes directly — no additional layout annotation is needed.
 
-> NOTE: When using CUTLASS compressor, there is no naive position correspondence between the positions in `A_sparse`/`A` and `E`. (i.e. the 4-element group at [n, k] doesn't match the 4-bit metadata at [n, k] if you consider metadata as int4 tensor)
-The metadata is reordered internally to optimize memory access patterns (e.g., for ldsm instructions and vectorized loads).
+## `T.gemm_sp`
 
-## `T.gemm_sp` with CUTLASS's compressor
+A 2:4 sparse GEMM kernel is similar to its dense counterpart, except that it also requires loading the metadata into shared memory and passing it to `T.gemm_sp`.
 
-A 2:4 sparse GEMM kernel is similar to its dense counterpart, except that it also requires handling the associated metadata.
-
-Check comments in below kernel code for required modification.
+The default metadata dtype for fp16/bf16 is `int16` with an E-factor of 16 (one `int16` value covers 16 K-elements). For int8/float8 the default is `int32` with E-factor 32.
 
 ```python
-def matmul_sp_sm80(
-    M,
-    N,
-    K,
-    block_M,
-    block_N,
-    block_K,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
-    num_stages,
-    threads,
-    trans_A,
-    trans_B,
+from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
+
+def matmul_sp(
+    M, N, K,
+    block_M, block_N, block_K,
+    in_dtype, out_dtype, accum_dtype,
+    num_stages, threads,
+    trans_A, trans_B,
 ):
     is_8_bit = "8" in in_dtype
-    metadata_dtype = 'int32' if is_8_bit else 'int16'
-    E_factor = SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype]  # Calculate shape for given datatypes
+    metadata_dtype = "int32" if is_8_bit else "int16"
+    E_factor = SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype]
     A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
@@ -84,23 +76,16 @@ def matmul_sp_sm80(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), metadata_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), metadata_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)  # Allocate smem for metadata
+            E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({  # Annotate reordered cutlass metadata layout
-                E:
-                    make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
-                E_shared:
-                    make_cutlass_metadata_layout(
-                        E_shared, mma_dtype=in_dtype, arch="8.0"),
-            })
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -112,13 +97,11 @@ def matmul_sp_sm80(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)  # Call gemm_sp with non-zero values and metadata
+                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)
             T.copy(C_frag, C[by * block_M, bx * block_N])
 
     return main
 ```
-
-When using `CUTLASS` compressor, the layout has to be made clear to `TileLang` via `T.annotate_layout`.
 
 ## `T.gemm_sp` with a custom compressor
 
