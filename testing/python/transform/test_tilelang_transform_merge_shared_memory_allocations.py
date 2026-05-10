@@ -842,6 +842,109 @@ def test_merge_dynamic_shared_grows_arena_from_tail_when_freed_block_too_small()
 
 
 @tilelang.testing.requires_cuda
+def test_merged_branch_kernel_generates_correct_results():
+    """End-to-end correctness check on a merged branch-alternative kernel.
+
+    Confirms that the arena packing produced by MergeSharedMemoryAllocations
+    (64 bytes for 3 buffers that would naively consume 192 bytes) does not
+    alter numerical results relative to a bit-exact reference.
+    """
+
+    @T.prim_func(private=True)
+    def before(
+        data: T.Buffer((2,), "float16"),
+        out: T.Buffer((1,), "float16"),
+        cond: T.int32,
+    ):
+        T.launch_thread("blockIdx.x", 1)
+        A = T.allocate([32], "float16", "shared.dyn")
+        B = T.allocate([32], "float16", "shared.dyn")
+        C = T.allocate([32], "float16", "shared.dyn")
+        T.launch_thread("threadIdx.x", 1)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        Ab = T.Buffer((32,), "float16", data=A, scope="shared.dyn")
+        Bb = T.Buffer((32,), "float16", data=B, scope="shared.dyn")
+        Cb = T.Buffer((32,), "float16", data=C, scope="shared.dyn")
+        if cond == 0:
+            Ab[0] = data[0]
+            out[0] = Ab[0]
+        else:
+            Bb[0] = data[1]
+            out[0] = Bb[0]
+        T.tvm_storage_sync("shared.dyn")
+        Cb[0] = T.float16(0.0)
+
+    after = _run_merge_pass(before)
+    after_s = after.script()
+
+    assert 'T.allocate([64], "uint8", "shared.dyn")' in after_s, after_s
+
+    kernel = tilelang.compile(
+        after.with_attr("global_symbol", "test_branch_correctness"),
+        target="cuda",
+        out_idx=[1],
+    )
+
+    import torch  # noqa: E402
+
+    data_t = torch.tensor([1.0, 2.0], dtype=torch.float16, device="cuda")
+
+    out_t = kernel(data_t, 0)
+    torch.testing.assert_close(out_t, torch.tensor([1.0], dtype=torch.float16, device="cuda"))
+
+    out_t = kernel(data_t, 1)
+    torch.testing.assert_close(out_t, torch.tensor([2.0], dtype=torch.float16, device="cuda"))
+
+
+@tilelang.testing.requires_cuda
+def test_merged_sync_phased_buffers_generate_correct_results():
+    """End-to-end correctness on a sync-separated two-buffer kernel."""
+
+    @T.prim_func(private=True)
+    def before(
+        A: T.Buffer((8,), "float16"),
+        B: T.Buffer((8,), "float16"),
+        out: T.Buffer((8,), "float16"),
+    ):
+        T.launch_thread("blockIdx.x", 1)
+        X = T.allocate([16], "float16", "shared.dyn")
+        Y = T.allocate([16], "float16", "shared.dyn")
+        T.launch_thread("threadIdx.x", 1)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        Xb = T.Buffer((16,), "float16", data=X, scope="shared.dyn")
+        Yb = T.Buffer((16,), "float16", data=Y, scope="shared.dyn")
+        Xb[0] = A[0]
+        out[0] = Xb[0]
+        T.tvm_storage_sync("shared.dyn")
+        Yb[0] = B[0]
+        out[1] = Yb[0]
+
+    after = _run_merge_pass(before)
+    after_s = after.script()
+
+    assert 'T.allocate([32], "uint8", "shared.dyn")' in after_s, after_s
+
+    kernel = tilelang.compile(
+        after.with_attr("global_symbol", "test_sync_phased_correctness"),
+        target="cuda",
+        out_idx=[-1],
+    )
+
+    import torch  # noqa: E402
+
+    a_t = torch.ones(8, dtype=torch.float16, device="cuda")
+    b_t = torch.full((8,), 2.0, dtype=torch.float16, device="cuda")
+
+    result = kernel(a_t, b_t)
+    torch.testing.assert_close(
+        result,
+        torch.tensor([1.0, 2.0] + [0.0] * 6, dtype=torch.float16, device="cuda"),
+    )
+
+
+@tilelang.testing.requires_cuda
 def test_general_cond_branch_alternatives_share_offset_with_postdom_buffer():
     """Mutually exclusive buffers under a runtime-cond if/else, plus a
     post-dominator buffer after a sync, must collapse to a single 64-byte arena.
