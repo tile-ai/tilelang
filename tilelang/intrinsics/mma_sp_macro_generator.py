@@ -11,10 +11,7 @@ from .utils import (
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
-from tilelang.utils.sparse_config import (
-    E_FACTOR_MAP as _E_FACTOR_MAP,
-    E_REPLICATE_FACTOR as _E_REPLICATE_FACTOR,
-)
+from tilelang.utils.sparse_config import get_e_factor, get_e_replicate_factor
 
 from tilelang.intrinsics.mma_sp_layout import (
     shared_16x16_to_mma_sp_layout_sr_a,
@@ -64,9 +61,6 @@ class SparseTensorCoreIntrinEmitter:
         "float8_e5m2": "e5m2",
     }
 
-    E_FACTOR_MAP = _E_FACTOR_MAP
-    E_REPLICATE_FACTOR = _E_REPLICATE_FACTOR
-
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
     is_m_first = False
 
@@ -102,7 +96,7 @@ class SparseTensorCoreIntrinEmitter:
         self.warp_row_tiles = warp_row_tiles
         self.warp_col_tiles = warp_col_tiles
         self.warp_k = warp_k
-        self.e_factor = self.E_FACTOR_MAP[self.a_dtype][self.e_dtype]
+        self.e_factor = get_e_factor(self.a_dtype, self.e_dtype)
         self._initialize_k_dim(a_dtype)
         self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
         self._initialize_micro_size(self.M_DIM, self.k_dim)
@@ -129,7 +123,7 @@ class SparseTensorCoreIntrinEmitter:
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size // self.SPARSE_FACTOR
-        self.local_size_e = (m_dim * k_dim) // self.e_factor * self.E_REPLICATE_FACTOR[self.a_dtype] // warp_size
+        self.local_size_e = (m_dim * k_dim) // self.e_factor * get_e_replicate_factor(self.a_dtype) // warp_size
         self.local_size_b = (n_dim * k_dim) // warp_size
         self.local_size_out = (m_dim * n_dim) // warp_size
         assert self.local_size_a > 0, f"local_size_a must be greater than 0, got {self.local_size_a}"

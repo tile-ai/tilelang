@@ -6,9 +6,8 @@ from tilelang.language.dtypes import _TORCH_DTYPE_TO_STR, dtype
 from tvm import DataType
 from tilelang.utils.sparse_config import (  # noqa: F401  (re-export for callers)
     SPARSE_PARAMS,
-    E_FACTOR_MAP,
-    E_REPLICATE_FACTOR,
     get_e_factor,
+    get_e_replicate_factor,
 )
 
 _ELEM_PER_THREAD = 32
