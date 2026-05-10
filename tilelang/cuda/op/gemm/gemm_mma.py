@@ -57,6 +57,11 @@ class GemmMMA(GemmBase):
             chunk=self.chunk,
             thread_var=thread_var,
         )
+        if self.chunk % emitter.micro_size_k != 0:
+            raise ValueError(
+                f"T.gemm K tile ({self.chunk}) must be divisible by MMA instruction K tile "
+                f"({emitter.micro_size_k}) for A={self.A.dtype}, B={self.B.dtype}"
+            )
         return emitter
 
     def infer_layout(self, target: Target, thread_nums: int):

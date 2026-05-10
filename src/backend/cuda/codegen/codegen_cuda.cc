@@ -2039,6 +2039,30 @@ std::string CodeGenTileLangCUDA::GetVecLoad(DataType t,
     return os.str();
   }
 
+  if (IsFp4PackedStorage(buffer_var, buffer->dtype) && t.is_float4_e2m1fn() &&
+      t.lanes() > 1) {
+    arith::Analyzer analyzer;
+    bool base_aligned = is_zero(analyzer.Simplify(truncmod(base, 2)));
+    if (!base_aligned) {
+      // Packed FP4 vector reinterpret is only nibble-aligned for even logical
+      // bases. Odd or symbolic bases need per-lane nibble selection.
+      std::string vid = GetVarID(buffer_var);
+      std::ostringstream os;
+      os << "make_fp4_e2_" << t.lanes() << "_t(";
+      for (int i = 0; i < t.lanes(); ++i) {
+        if (i != 0) {
+          os << ", ";
+        }
+        PrimExpr index = analyzer.Simplify(
+            base + IntImm(base.dtype(), static_cast<int64_t>(i)));
+        os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", "
+           << PrintExpr(index) << ")";
+      }
+      os << ")";
+      return os.str();
+    }
+  }
+
   std::string scope;
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
@@ -2131,6 +2155,30 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
       this->stream << "}\n";
     }
     return;
+  }
+
+  if (IsFp4PackedStorage(buffer_var, buffer->dtype) && t.is_float4_e2m1fn() &&
+      t.lanes() > 1) {
+    arith::Analyzer analyzer;
+    bool base_aligned = is_zero(analyzer.Simplify(truncmod(base, 2)));
+    if (!base_aligned) {
+      std::ostringstream vec_type;
+      PrintType(t, vec_type);
+      std::string vid = GetVarID(buffer_var);
+      this->PrintIndent();
+      this->stream << "{ " << vec_type.str() << " __tl_fp4_vec = " << value
+                   << "; ";
+      for (int i = 0; i < t.lanes(); ++i) {
+        std::ostringstream elem;
+        PrintVecElemLoad("__tl_fp4_vec", t, i, elem);
+        PrimExpr index = analyzer.Simplify(
+            base + IntImm(base.dtype(), static_cast<int64_t>(i)));
+        this->stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << vid << ", "
+                     << PrintExpr(index) << ", " << elem.str() << "); ";
+      }
+      this->stream << "}\n";
+      return;
+    }
   }
 
   std::string scope;
