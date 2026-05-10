@@ -43,6 +43,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../layout/layout.h"
 #include "../op/builtin.h"
 #include "../target/utils.h"
 #include "./common/epoch_graph.h"
@@ -765,6 +766,44 @@ private:
 };
 
 /*!
+ * \brief Collect per-buffer layout signatures from `Block` annotations.
+ *
+ * `T.annotate_layout(...)` writes the user-supplied physical-to-logical mapping
+ * into `block.annotations[attr::kLayoutMap]` as a `Map<Var, Layout>`. When two
+ * shared-memory buffers carry distinct annotated layouts, downstream passes
+ * (layout_inference, lower_tile_op, swizzle lowering) may emit access patterns
+ * that are only sound under the *original* layout of each buffer. Aliasing the
+ * underlying storage in that case can silently corrupt indexing arithmetic
+ * even when the per-epoch dataflow proves the two buffers are never alive
+ * simultaneously.
+ *
+ * This collector harvests the (buffer Var, Layout) pairs so that
+ * `SharedMemoryRewriter` can require structural Layout equality before
+ * permitting the per-epoch relaxer to drop a conflict between two annotated
+ * buffers.  Buffers without an entry are treated as layout-agnostic and remain
+ * eligible for aliasing.
+ */
+class LayoutSignatureCollector final : public StmtVisitor {
+public:
+  std::unordered_map<const VarNode *, Layout> layouts;
+
+  void VisitStmt_(const BlockNode *op) final {
+    auto it = op->annotations.find(attr::kLayoutMap);
+    if (it != op->annotations.end()) {
+      if (auto layout_map_opt = (*it).second.as<Map<Var, Layout>>()) {
+        for (const auto &kv : layout_map_opt.value()) {
+          // Keep the first non-trivial entry; conflicting annotations on the
+          // same Var across nested blocks are already caught by upstream
+          // layout-inference passes.
+          layouts.emplace(kv.first.get(), kv.second);
+        }
+      }
+    }
+    StmtVisitor::VisitStmt_(op);
+  }
+};
+
+/*!
  * \brief merge the buffers whose live range has no intersection and rewrite the
  * body
  */
@@ -793,6 +832,15 @@ public:
     finder(stmt);
     shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
     last_access_stmt_ = finder.last_access_stmt_;
+    // Collect per-buffer annotated layouts before liveness analysis so the
+    // B2 alias gate (`LayoutAliasIncompatible`) can short-circuit the
+    // per-epoch relaxer for buffers with structurally distinct layouts.
+    layout_sigs_.clear();
+    {
+      LayoutSignatureCollector layout_collector;
+      layout_collector(stmt);
+      layout_sigs_ = std::move(layout_collector.layouts);
+    }
     // First compute liveness over the flattened schedule, then feed it into the
     // arena packer.
     this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
@@ -1303,6 +1351,28 @@ private:
     return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
   }
 
+  /*!
+   * \brief B2 layout-signature alias gate.
+   *
+   * Returns true iff both `a` and `b` carry an annotated `Layout` (collected
+   * from `Block` annotations under `attr::kLayoutMap`) and the two layouts are
+   * not structurally equal.  The caller treats a true return as "alias is
+   * unsafe regardless of liveness", short-circuiting the per-epoch relaxer.
+   *
+   * Buffers without an entry in `layout_sigs_` are layout-agnostic and never
+   * trigger the gate, preserving the existing arena-packing behaviour for the
+   * common (un-annotated) case.
+   */
+  bool LayoutAliasIncompatible(const VarNode *a, const VarNode *b) const {
+    auto ia = layout_sigs_.find(a);
+    if (ia == layout_sigs_.end())
+      return false;
+    auto ib = layout_sigs_.find(b);
+    if (ib == layout_sigs_.end())
+      return false;
+    return !StructuralEqual()(ia->second, ib->second);
+  }
+
   using StmtEntry = SharedMemLinearAccessPatternFinder::StmtEntry;
   using StmtAttr = SharedMemLinearAccessPatternFinder::StmtAttr;
   using SummaryStmtEntry = shared_access_analysis::StmtEntry;
@@ -1371,7 +1441,7 @@ private:
     return value + (alignment - remainder);
   }
 
-  static ArenaPlan LinearScanPack(std::vector<Interval> intervals) {
+  ArenaPlan LinearScanPack(std::vector<Interval> intervals) {
     // Process intervals in program order so lifetimes correspond to the
     // linearised CFG.
     std::sort(intervals.begin(), intervals.end(),
@@ -1412,8 +1482,16 @@ private:
           // set and the sets are disjoint, the legacy 1-D linear-seq overlap
           // is spurious (two buffers happen to span the same syntactic range
           // but are never simultaneously *alive* under per-epoch dataflow).
+          //
+          // B2 gate: even when liveness proves disjointness, two buffers with
+          // structurally distinct annotated layouts must NOT alias, since
+          // downstream layout-driven access lowering can emit indexing
+          // arithmetic that is only sound under each buffer's original
+          // layout.  Skip the relaxer in that case to preserve the legacy
+          // conflict.
           if (interval.live_epochs && other.live_epochs &&
-              !interval.live_epochs->empty() && !other.live_epochs->empty()) {
+              !interval.live_epochs->empty() && !other.live_epochs->empty() &&
+              !LayoutAliasIncompatible(interval.var, other.var)) {
             const auto &la = *interval.live_epochs;
             const auto &lb = *other.live_epochs;
             auto ia = la.begin(), ib = lb.begin();
@@ -4979,9 +5057,11 @@ private:
           }
           // Same relaxer as in `LinearScanPack`: skip the overlap check if
           // per-epoch dataflow proves the buffers are never simultaneously
-          // alive.
+          // alive.  The B2 layout-signature gate keeps the legacy conflict
+          // for buffers whose annotated layouts differ structurally.
           if (a.live_epochs && b.live_epochs && !a.live_epochs->empty() &&
-              !b.live_epochs->empty()) {
+              !b.live_epochs->empty() &&
+              !LayoutAliasIncompatible(a.var, b.var)) {
             const auto &la = *a.live_epochs;
             const auto &lb = *b.live_epochs;
             auto ia = la.begin(), ib = lb.begin();
@@ -5078,6 +5158,12 @@ private:
   // computed (e.g. EpochGraph build skipped). Used by `LinearScanPack` as a
   // strict relaxer on the legacy 1-D interval conflict test.
   std::unordered_map<const VarNode *, std::set<int>> liveness_epochs_by_var_;
+  // Per-buffer annotated `Layout` collected from `Block` annotations under
+  // `attr::kLayoutMap`. Populated by `PlanReuse` via `LayoutSignatureCollector`
+  // and consulted by `LayoutAliasIncompatible` to gate the per-epoch relaxer:
+  // two buffers with non-trivial *and* structurally distinct layouts must not
+  // alias, even when their live-epoch sets are disjoint.
+  std::unordered_map<const VarNode *, Layout> layout_sigs_;
   // Approximate statement position during rewrite.
   int stmt_visit_index_{0};
 };
