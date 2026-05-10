@@ -4,21 +4,28 @@ import tilelang
 import tilelang.language as T
 from tilelang.language.dtypes import _TORCH_DTYPE_TO_STR, dtype
 from tvm import DataType
+from tilelang.utils.sparse_config import (  # noqa: F401  (re-export for callers)
+    SPARSE_PARAMS,
+    E_FACTOR_MAP,
+    E_REPLICATE_FACTOR,
+    get_e_factor,
+)
 
 _ELEM_PER_THREAD = 32
 _BLOCK_M = 16
 
-_DTYPE_CONFIG = {
-    torch.float16: (2, 4, T.int16),
-    torch.bfloat16: (2, 4, T.int16),
-    torch.float32: (1, 2, T.int16),
-    torch.int8: (2, 4, T.int16),
+# torch dtype → (elem, group, default_meta_dtype_str); derived from SPARSE_PARAMS.
+_DEFAULT_META_DTYPE = T.int16
+_DTYPE_CONFIG: dict = {
+    torch.float16: (*SPARSE_PARAMS["float16"], _DEFAULT_META_DTYPE),
+    torch.bfloat16: (*SPARSE_PARAMS["bfloat16"], _DEFAULT_META_DTYPE),
+    torch.float32: (*SPARSE_PARAMS["float32"], _DEFAULT_META_DTYPE),
+    torch.int8: (*SPARSE_PARAMS["int8"], _DEFAULT_META_DTYPE),
 }
-
 for _name in ("float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz"):
     _dt = getattr(torch, _name, None)
     if _dt is not None:
-        _DTYPE_CONFIG[_dt] = (2, 4, T.int16)
+        _DTYPE_CONFIG[_dt] = (2, 4, _DEFAULT_META_DTYPE)
 
 
 def _e_factor(meta_dtype: str, group: int, elem: int) -> int:
@@ -111,9 +118,7 @@ def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device="cuda", transp
         device: Device to create the tensor on
         transposed (bool): If True, returns a transposed tensor of shape (K, M)
     """
-    elem, group = 2, 4
-    if dtype == torch.float32:
-        elem, group = 1, 2
+    elem, group = _DTYPE_CONFIG[dtype][:2]
     tensor = torch.randn((M, K), dtype=torch.float, device=device).view(M, -1, group)
     indice = tensor.topk(elem, dim=-1).indices
     tensor.scatter_(-1, indice, 0)
@@ -135,9 +140,7 @@ def randint_semi_sparse(M: int, K: int, low: int, high: int, dtype=torch.int32, 
         device: Device to create the tensor on
         transposed (bool): If True, returns a transposed tensor of shape (K, M)
     """
-    elem, group = 2, 4
-    if dtype == torch.float32:
-        elem, group = 1, 2
+    elem, group = _DTYPE_CONFIG[dtype][:2]
     tensor = torch.randint(low, high, (M, K), dtype=dtype, device=device).view(M, -1, group)
     indice = tensor.topk(elem, dim=-1).indices
     tensor.scatter_(-1, indice, 0)
@@ -157,9 +160,7 @@ def arange_semi_sparse(M: int, K: int, dtype=torch.float16, device="cuda", trans
         device: Device to create the tensor on
         transposed (bool): If True, returns a transposed tensor of shape (K, M)
     """
-    elem, group = 2, 4
-    if dtype == torch.float32:
-        elem, group = 1, 2
+    elem, group = _DTYPE_CONFIG[dtype][:2]
     tensor = torch.arange(M * K, dtype=dtype, device=device).view(M, -1, group)
     indice = tensor.topk(elem, dim=-1).indices
     tensor.scatter_(-1, indice, 0)

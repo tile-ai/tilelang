@@ -1,10 +1,10 @@
 import torch
 import tilelang
-from tilelang.utils.sparse import compress
+from tilelang.utils.sparse import compress, get_e_factor
 from tilelang import language as T
 import tilelang.testing
 
-E_FACTOR = 16  # int16 metadata covers 16 K-elements (2:4 sparsity, float16)
+E_FACTOR = get_e_factor(T.float16, T.int16)
 
 
 @tilelang.jit(out_idx=[-1])

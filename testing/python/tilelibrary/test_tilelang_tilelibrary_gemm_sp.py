@@ -1,7 +1,6 @@
 import pytest
-from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
+from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse, get_e_factor
 from tilelang.utils.tensor import torch_assert_close, map_torch_type
-from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
 import tilelang.testing
 import torch
@@ -92,7 +91,7 @@ def run_gemm_ss(
         out_dtype,
         dtypeAccum,
         metadata_dtype,
-        SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype],
+        get_e_factor(in_dtype, metadata_dtype),
         num_stages,
         num_threads,
     )
@@ -280,7 +279,7 @@ def run_gemm_rs(
         out_dtype,
         dtypeAccum,
         metadata_dtype,
-        SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype],
+        get_e_factor(in_dtype, metadata_dtype),
         num_stages,
         num_threads,
     )
@@ -448,7 +447,7 @@ def run_gemm_sr(
         out_dtype,
         dtypeAccum,
         metadata_dtype,
-        SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype],
+        get_e_factor(in_dtype, metadata_dtype),
         num_stages,
         num_threads,
     )
@@ -621,7 +620,7 @@ def run_gemm_rr(
         out_dtype,
         dtypeAccum,
         metadata_dtype,
-        SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype],
+        get_e_factor(in_dtype, metadata_dtype),
         num_stages,
         num_threads,
     )

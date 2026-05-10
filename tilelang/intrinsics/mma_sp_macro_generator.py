@@ -11,6 +11,10 @@ from .utils import (
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
+from tilelang.utils.sparse_config import (
+    E_FACTOR_MAP as _E_FACTOR_MAP,
+    E_REPLICATE_FACTOR as _E_REPLICATE_FACTOR,
+)
 
 from tilelang.intrinsics.mma_sp_layout import (
     shared_16x16_to_mma_sp_layout_sr_a,
@@ -60,26 +64,8 @@ class SparseTensorCoreIntrinEmitter:
         "float8_e5m2": "e5m2",
     }
 
-    E_FACTOR_MAP = {  # e_kdim = mma_kdim // e_factor
-        "float": {"int16": 8, "uint16": 8},
-        "float32": {"int16": 8, "uint16": 8},
-        "float16": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "bfloat16": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "int8": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "uint8": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "float8_e4m3": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-        "float8_e5m2": {"int8": 8, "uint8": 8, "int16": 16, "uint16": 16, "int32": 32, "uint32": 32},
-    }
-
-    E_REPLICATE_FACTOR = {  # metadata replicate every 4 consecutive threads
-        "float32": 2,
-        "float16": 2,  # 2 of 4 consecutive threads provides
-        "bfloat16": 2,
-        "int8": 1,  # 4 of 4 consecutive threads provides
-        "uint8": 1,
-        "float8_e4m3": 1,
-        "float8_e5m2": 1,
-    }
+    E_FACTOR_MAP = _E_FACTOR_MAP
+    E_REPLICATE_FACTOR = _E_REPLICATE_FACTOR
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
     is_m_first = False
