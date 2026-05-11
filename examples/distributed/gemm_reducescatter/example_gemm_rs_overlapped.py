@@ -159,8 +159,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     tl_t = do_bench(
         lambda: gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank),
-        warmup=50,
-        rep=50,
+        warmup=args.warmup,
+        rep=args.rep,
         group=group,
     )
 
@@ -179,6 +179,8 @@ if __name__ == "__main__":
     parser.add_argument("--K", type=int, default=16384, help="K dimension")
     parser.add_argument("--persistent", action="store_true", help="Use persistent kernel")
     parser.add_argument("--print-source", action="store_true", help="Print generated kernel source")
+    parser.add_argument("--warmup", type=int, default=50, help="Benchmark warmup iterations")
+    parser.add_argument("--rep", type=int, default=50, help="Benchmark measured iterations")
     args = parser.parse_args()
     num_processes = args.num_processes
 
