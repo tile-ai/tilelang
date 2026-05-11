@@ -62,6 +62,28 @@ def prepend_dll_search_path(paths: list[str]) -> None:
 
 prepend_dll_search_path(TL_LIBS)
 
+
+def configure_rocm_tvm_ffi_dlpack_env(torch_module: object | None = None) -> bool:
+    """Disable tvm-ffi's C DLPack fast path for ROCm PyTorch builds.
+
+    The C exchange path can corrupt DLTensor metadata with ROCm nightly stacks,
+    surfacing as shape[0] being read as ``ndim`` by generated packed APIs.
+    """
+    if torch_module is None:
+        try:
+            import torch as torch_module  # type: ignore[import-not-found]
+        except Exception:
+            return False
+
+    torch_version = getattr(torch_module, "version", None)
+    if getattr(torch_version, "hip", None) is None:
+        return False
+
+    os.environ.setdefault("TVM_FFI_SKIP_C_DLPACK_EXCHANGE_API", "1")
+    os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
+    return True
+
+
 # TVM's Python loader (3rdparty/tvm/python/tvm/base.py) ORs ``os.RTLD_LAZY``
 # into ``ctypes.CDLL`` mode unconditionally. Windows has no lazy dlopen mode,
 # so we expose a 0 sentinel to keep ``LoadLibrary``'s default behavior.

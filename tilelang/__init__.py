@@ -108,7 +108,10 @@ del _init_logger
 
 @contextlib.contextmanager
 def _lazy_load_lib():
-    import torch  # noqa: F401 # preload torch to avoid dlopen errors
+    import torch  # preload torch to avoid dlopen errors
+    from .env import configure_rocm_tvm_ffi_dlpack_env
+
+    configure_rocm_tvm_ffi_dlpack_env(torch)
 
     if sys.platform.startswith("win32"):
         yield
