@@ -5,6 +5,7 @@
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)) ||                      \
     (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 1200))
 #include <cuda_fp4.h>
+#include <cute/numeric/numeric_types.hpp>
 
 // Wrapper for __nv_fp4_e2m1 with implicit conversions
 struct fp4_e2_t {
@@ -44,6 +45,12 @@ struct fp4_e2_t {
   // Implicit conversion to __half
   TL_DEVICE operator __half() const { return __half(float(*this)); }
 };
+
+namespace tl {
+template <> struct to_cute_type<::fp4_e2_t> {
+  using type = cute::float_e2m1_t;
+};
+} // namespace tl
 
 class fp4_e2_2_t {
 public:
@@ -163,26 +170,27 @@ TL_DEVICE fp4_e2_32_t make_fp4_e2_32_t(
 }
 
 // Pack sixty-four fp4_e2_t values.
-template <typename... Args>
-TL_DEVICE fp4_e2_64_t make_fp4_e2_64_t(Args... args) {
-  static_assert(sizeof...(Args) == 64,
-                "make_fp4_e2_64_t expects 64 fp4 values");
-  fp4_e2_t values[64] = {fp4_e2_t(args)...};
+TL_DEVICE fp4_e2_64_t make_fp4_e2_64_t(
+    fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2, fp4_e2_t x3, fp4_e2_t x4,
+    fp4_e2_t x5, fp4_e2_t x6, fp4_e2_t x7, fp4_e2_t x8, fp4_e2_t x9,
+    fp4_e2_t x10, fp4_e2_t x11, fp4_e2_t x12, fp4_e2_t x13, fp4_e2_t x14,
+    fp4_e2_t x15, fp4_e2_t x16, fp4_e2_t x17, fp4_e2_t x18, fp4_e2_t x19,
+    fp4_e2_t x20, fp4_e2_t x21, fp4_e2_t x22, fp4_e2_t x23, fp4_e2_t x24,
+    fp4_e2_t x25, fp4_e2_t x26, fp4_e2_t x27, fp4_e2_t x28, fp4_e2_t x29,
+    fp4_e2_t x30, fp4_e2_t x31, fp4_e2_t y0, fp4_e2_t y1, fp4_e2_t y2,
+    fp4_e2_t y3, fp4_e2_t y4, fp4_e2_t y5, fp4_e2_t y6, fp4_e2_t y7,
+    fp4_e2_t y8, fp4_e2_t y9, fp4_e2_t y10, fp4_e2_t y11, fp4_e2_t y12,
+    fp4_e2_t y13, fp4_e2_t y14, fp4_e2_t y15, fp4_e2_t y16, fp4_e2_t y17,
+    fp4_e2_t y18, fp4_e2_t y19, fp4_e2_t y20, fp4_e2_t y21, fp4_e2_t y22,
+    fp4_e2_t y23, fp4_e2_t y24, fp4_e2_t y25, fp4_e2_t y26, fp4_e2_t y27,
+    fp4_e2_t y28, fp4_e2_t y29, fp4_e2_t y30, fp4_e2_t y31) {
   fp4_e2_64_t result;
-  result.x = make_fp4_e2_32_t(
-      values[0], values[1], values[2], values[3], values[4], values[5],
-      values[6], values[7], values[8], values[9], values[10], values[11],
-      values[12], values[13], values[14], values[15], values[16], values[17],
-      values[18], values[19], values[20], values[21], values[22], values[23],
-      values[24], values[25], values[26], values[27], values[28], values[29],
-      values[30], values[31]);
-  result.y = make_fp4_e2_32_t(
-      values[32], values[33], values[34], values[35], values[36], values[37],
-      values[38], values[39], values[40], values[41], values[42], values[43],
-      values[44], values[45], values[46], values[47], values[48], values[49],
-      values[50], values[51], values[52], values[53], values[54], values[55],
-      values[56], values[57], values[58], values[59], values[60], values[61],
-      values[62], values[63]);
+  result.x = make_fp4_e2_32_t(x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11,
+                              x12, x13, x14, x15, x16, x17, x18, x19, x20, x21,
+                              x22, x23, x24, x25, x26, x27, x28, x29, x30, x31);
+  result.y = make_fp4_e2_32_t(y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11,
+                              y12, y13, y14, y15, y16, y17, y18, y19, y20, y21,
+                              y22, y23, y24, y25, y26, y27, y28, y29, y30, y31);
   return result;
 }
 

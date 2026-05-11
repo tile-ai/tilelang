@@ -118,7 +118,8 @@ class TensorCoreIntrinEmitter:
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        if str(a_dtype) == "float4_e2m1fn":
+        a_dtype_str = str(a_dtype)
+        if a_dtype_str == "float4_e2m1fn":
             if self.chunk < 32:
                 raise ValueError(f"float4_e2m1fn MMA requires chunk >= 32, got chunk={self.chunk}")
             self.k_dim = 32
@@ -300,7 +301,9 @@ class TensorCoreIntrinEmitter:
         micro_size_k = self.micro_size_k
         local_size_a = self.local_size_a
         a_transposed = self.a_transposed
-        a_dtype_bits = DataType(a_dtype).bits
+        a_dtype_obj = DataType(a_dtype)
+        a_dtype_bits = a_dtype_obj.bits
+        is_fp4_a = str(a_dtype_obj) == "float4_e2m1fn"
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (a_dtype_bits != 16 and a_transposed)
 
@@ -344,8 +347,7 @@ class TensorCoreIntrinEmitter:
 
                 if ldmatrix_available:
                     num = 4
-                    is_fp4 = str(DataType(a_dtype)) == "float4_e2m1fn"
-                    access_extent = 4 * num if is_fp4 else 2 * num
+                    access_extent = 4 * num if is_fp4_a else 2 * num
                     row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
                     src_indices = (
                         tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
@@ -416,7 +418,9 @@ class TensorCoreIntrinEmitter:
         micro_size_k = self.micro_size_k
         local_size_b = self.local_size_b
         b_transposed = self.b_transposed
-        b_dtype_bits = DataType(b_dtype).bits
+        b_dtype_obj = DataType(b_dtype)
+        b_dtype_bits = b_dtype_obj.bits
+        is_fp4_b = str(b_dtype_obj) == "float4_e2m1fn"
         thread_binding = self.get_thread_binding()
 
         # legalize shared buffer to region
@@ -464,8 +468,7 @@ class TensorCoreIntrinEmitter:
 
                 if ldmatrix_available:
                     num = 4 if replicate_b else 2
-                    is_fp4 = str(DataType(b_dtype)) == "float4_e2m1fn"
-                    access_extent = 4 * num if is_fp4 else 2 * num
+                    access_extent = 4 * num if is_fp4_b else 2 * num
                     row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
                     src_indices = (
                         tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
@@ -928,10 +931,11 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         self._initialize_transform_kind(transform_kind_a, transform_kind_b)
 
     def _initialize_k_dim(self, a_dtype=T.float16):
-        if str(DataType(a_dtype)) == "float4_e2m1fn":
+        a_dtype_obj = DataType(a_dtype)
+        if str(a_dtype_obj) == "float4_e2m1fn":
             self.k_dim = 32
         else:
-            self.k_dim = 256 // DataType(a_dtype).bits
+            self.k_dim = 256 // a_dtype_obj.bits
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size

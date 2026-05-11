@@ -28,9 +28,9 @@ def get_ldmatrix_offset(
     transposed: bool = False,
 ):
     assert matrix in ["A", "B"], "matrix should be either A or B"
-    dtype = DataType(dtype)
-    dtype_bits = dtype.bits
-    is_fp4_e2m1fn = dtype_bits == 4 and str(dtype) == "float4_e2m1fn"
+    dtype_obj = DataType(dtype)
+    dtype_bits = dtype_obj.bits
+    is_fp4_e2m1fn = dtype_bits == 4 and str(dtype_obj) == "float4_e2m1fn"
     if dtype_bits == 32:
         if matrix == "B" and transposed:
             transform_func = ldmatrix_32x4_to_shared_16x8_layout_b
@@ -78,7 +78,7 @@ def get_ldmatrix_offset(
         else:
             raise ValueError("ldmatrix only supports B transposed and A non-transposed for int8")
     else:
-        raise ValueError(f"Unsupported dtype {dtype}")
+        raise ValueError(f"Unsupported dtype {dtype_obj}")
 
 
 def shared_16x16_to_mma_32x8_layout(i, j):
