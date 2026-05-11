@@ -4,7 +4,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.language.dtypes import _TORCH_DTYPE_TO_STR, dtype
 from tvm import DataType
-from tilelang.utils.sparse_config import (  # noqa: F401  (re-export for callers)
+from tilelang.intrinsics.sparse_config import (  # noqa: F401  (re-export for callers)
     SPARSE_PARAMS,
     get_e_factor,
     get_e_replicate_factor,
