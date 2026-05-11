@@ -995,6 +995,21 @@ static bool CollectPreludeStmtsToPipelineLoop(const Stmt &stmt,
     return CollectPreludeStmtsToPipelineLoop(let->body, pipeline_loop,
                                              prelude_stmts);
   }
+  if (const auto *for_node = stmt.as<ForNode>()) {
+    return CollectPreludeStmtsToPipelineLoop(for_node->body, pipeline_loop,
+                                             prelude_stmts);
+  }
+  if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+    if (CollectPreludeStmtsToPipelineLoop(if_stmt->then_case, pipeline_loop,
+                                          prelude_stmts)) {
+      return true;
+    }
+    if (if_stmt->else_case.defined()) {
+      return CollectPreludeStmtsToPipelineLoop(if_stmt->else_case.value(),
+                                               pipeline_loop, prelude_stmts);
+    }
+    return false;
+  }
   if (const auto *realize = stmt.as<BlockRealizeNode>()) {
     return CollectPreludeStmtsToPipelineLoop(realize->block->body,
                                              pipeline_loop, prelude_stmts);
@@ -1676,15 +1691,19 @@ private:
     producer_body = wrap_lets(producer_body, outer_let_bindings);
     consumer_body = wrap_lets(consumer_body, outer_let_bindings);
 
-    // Rewrite shared-buffer stage indices from loop-var-based to
-    // counter-based so they stay in sync with barrier parity.
-    if (needs_phase_counter) {
+    // Rewrite shared-buffer stage indices from loop-var-based to the same
+    // iteration counter used by barriers so stage slots stay aligned.
+    if (needs_phase_counter || !enclosing_loops.empty()) {
       producer_body = StageExprReplacer::Replace(
           producer_body, loop_var, loop_min, num_stages,
-          producer_phase_counter.value().StageExpr(num_stages));
+          needs_phase_counter
+              ? producer_phase_counter.value().StageExpr(num_stages)
+              : base_stage_expr);
       consumer_body = StageExprReplacer::Replace(
           consumer_body, loop_var, loop_min, num_stages,
-          consumer_phase_counter.value().StageExpr(num_stages));
+          needs_phase_counter
+              ? consumer_phase_counter.value().StageExpr(num_stages)
+              : base_stage_expr);
     }
     producer_body =
         TileOpMbarPhaseAnnotator::Annotate(producer_body, p_parity_expr);
