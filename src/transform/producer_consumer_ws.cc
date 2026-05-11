@@ -1469,9 +1469,10 @@ private:
     std::vector<Array<Stmt>> prelude_waits_before_consumer(
         consumer_compute_stmts.size());
     PrimExpr prelude_wait_guard =
-        needs_phase_counter ? EQ(consumer_phase_counter.value().Load(),
-                                 IntImm(DataType::Int(32), 0))
-                            : EQ(global_linear_idx, IntImm(DataType::Int(32), 0));
+        needs_phase_counter
+            ? EQ(consumer_phase_counter.value().Load(),
+                 IntImm(DataType::Int(32), 0))
+            : EQ(global_linear_idx, IntImm(DataType::Int(32), 0));
     int prelude_barrier_base = num_fwd + num_bp;
     for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
       PrimExpr barrier_id = IntImm(DataType::Int(32), prelude_barrier_base + i);
@@ -2357,10 +2358,10 @@ private:
         if (!body_split.found) {
           return {};
         }
-        return {AttrStmt(attr_node->node, attr_node->attr_key,
-                         attr_node->value, body_split.producer),
-                AttrStmt(attr_node->node, attr_node->attr_key,
-                         attr_node->value, body_split.consumer),
+        return {AttrStmt(attr_node->node, attr_node->attr_key, attr_node->value,
+                         body_split.producer),
+                AttrStmt(attr_node->node, attr_node->attr_key, attr_node->value,
+                         body_split.consumer),
                 true};
       }
 
@@ -2519,9 +2520,9 @@ private:
         return {new_if, true};
       }
       if (if_stmt->else_case.defined()) {
-        ReplaceResult else_result = ReplacePipelineLoopInStmt(
-            if_stmt->else_case.value(), pipeline_loop, ws_body,
-            consumer_extent);
+        ReplaceResult else_result =
+            ReplacePipelineLoopInStmt(if_stmt->else_case.value(), pipeline_loop,
+                                      ws_body, consumer_extent);
         if (else_result.found) {
           IfThenElse new_if = ffi::GetRef<IfThenElse>(if_stmt);
           new_if.CopyOnWrite()->else_case = else_result.stmt;
