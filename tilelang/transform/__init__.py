@@ -121,17 +121,6 @@ def VerifyParallelLoop():
     return _ffi_api.VerifyParallelLoop()  # type: ignore
 
 
-def LowerHopperIntrin():
-    """LowerHopperIntrin
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f  # type: ignore
-
-
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 
@@ -424,19 +413,9 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
     return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes)  # type: ignore
 
 
-def LowerL2Persistent():
-    """LowerL2Persistent"""
-    return _ffi_api.LowerL2Persistent()  # type: ignore
-
-
 def MarkCudaSyncCalls(have_pdl: bool = False):
     """MarkCudaSyncCalls"""
     return _ffi_api.MarkCudaSyncCalls(have_pdl)  # type: ignore
-
-
-def PersistThreadblock():
-    """PersistThreadblock"""
-    return _ffi_api.PersistThreadblock()  # type: ignore
 
 
 def LowerSharedBarrier():

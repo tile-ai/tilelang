@@ -52,12 +52,21 @@ def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> in
         raise RuntimeError("Invalid format. Must be one of: bytes, kb, mb")
 
 
+def _load_cudart():
+    """Load the CUDA runtime library, searching for the version-suffixed DLL on Windows."""
+    if sys.platform == "win32":
+        for ver in ("13", "12", "110", "11"):
+            try:
+                return ctypes.windll.LoadLibrary(f"cudart64_{ver}.dll")
+            except OSError:
+                continue
+        raise OSError("Cannot find cudart64_*.dll")
+    return ctypes.cdll.LoadLibrary("libcudart.so")
+
+
 def get_device_attribute(attr: int, device_id: int = 0) -> int:
     try:
-        if sys.platform == "win32":
-            libcudart = ctypes.windll.LoadLibrary("cudart64_110.dll")
-        else:
-            libcudart = ctypes.cdll.LoadLibrary("libcudart.so")
+        libcudart = _load_cudart()
 
         value = ctypes.c_int()
         cudaDeviceGetAttribute = libcudart.cudaDeviceGetAttribute
@@ -74,7 +83,7 @@ def get_device_attribute(attr: int, device_id: int = 0) -> int:
 
         return value.value
     except Exception as e:
-        print(f"Error getting device attribute: {str(e)}")
+        print(f"Error getting device attribute: {e}")
         return None
 
 

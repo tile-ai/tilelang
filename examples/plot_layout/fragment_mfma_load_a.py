@@ -1,9 +1,9 @@
 import tilelang.language as T
 from typing import Literal, Callable
 from tvm.tir import IndexMap
-from tilelang.intrinsics.utils import get_mma_micro_size
+from tilelang.rocm.intrinsics.utils import get_mma_micro_size
 
-from tilelang.intrinsics.mfma_layout import (
+from tilelang.rocm.intrinsics.mfma_layout import (
     shared_16x4_to_local_64x1_layout_A,
     shared_16x16_to_local_64x4_layout_A,
     shared_16x32_to_local_64x8_layout_A,

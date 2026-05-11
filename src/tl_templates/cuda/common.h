@@ -6,6 +6,18 @@
 #include <cuda_runtime.h>
 #endif
 
+// TVM's `PrintMMAAssembly` and several `cp.async.*` codegen paths emit
+// GCC-style `__asm__ __volatile__(...)` (see
+// 3rdparty/tvm/src/target/source/ptx.cc and codegen_cuda.cc). NVCC's EDG
+// frontend on Windows and MSVC do not recognize those keywords, so map them
+// to the portable CUDA spellings on non-GCC/Clang toolchains. TileLang's own
+// template headers already use `asm volatile`, so this only affects
+// generated kernel bodies.
+#if !defined(__GNUC__) && !defined(__clang__)
+#define __asm__ asm
+#define __volatile__ volatile
+#endif
+
 #include "atomic.h"
 #include <cute/arch/util.hpp>
 #include <cutlass/fast_math.h>
@@ -339,7 +351,10 @@ enum class DataType : int {
   kBit8 = 19,
   kBit16 = 20,
   kBit32 = 21,
-  kBit64 = 22
+  kBit64 = 22,
+  kFloat6_e2m3fn = 23,
+  kFloat6_e3m2fn = 24,
+  kFloat4_e2m1fn = 25
 };
 
 union GmmaDescriptor {
@@ -790,7 +805,11 @@ TL_DEVICE __nv_bfloat162 fma2(__nv_bfloat162 a, __nv_bfloat162 b,
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
   return __hfma2(a, b, c);
 #else
-  return __nv_bfloat162{__hfma(a.x, b.x, c.x), __hfma(a.y, b.y, c.y)};
+  float a_x = __bfloat162float(a.x), a_y = __bfloat162float(a.y);
+  float b_x = __bfloat162float(b.x), b_y = __bfloat162float(b.y);
+  float c_x = __bfloat162float(c.x), c_y = __bfloat162float(c.y);
+  return __nv_bfloat162{__float2bfloat16(a_x * b_x + c_x),
+                        __float2bfloat16(a_y * b_y + c_y)};
 #endif
 }
 
