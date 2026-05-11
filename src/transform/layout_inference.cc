@@ -433,16 +433,12 @@ public:
       }
     }
 
-    // Check that all local.fragment buffers have inferred layouts.
-    // On Metal targets, fragment buffers used as GEMM accumulators are
-    // lowered to opaque simdgroup matrices, so they have no explicit
-    // thread-level layout and can be safely skipped.
+    // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
       if (IsFragmentBuffer(buffer)) {
-        if (!TargetIsMetal(target_) && layout_map.count(buffer) == 0) {
-          ICHECK(false) << "The layout for fragment " << buffer
-                        << " can not be inferred correctly.";
-        }
+        ICHECK_NE(layout_map.count(buffer), 0)
+            << "The layout for fragment " << buffer
+            << " can not be inferred correctly.";
       }
     }
 

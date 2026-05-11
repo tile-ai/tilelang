@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .gemm_base import GemmBase
-from tilelang.utils.language import is_shared, is_full_region, is_metal_simdgroup, is_fragment
+from tilelang.utils.language import is_shared, is_full_region, is_fragment, is_metal_simdgroup
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
@@ -61,16 +61,16 @@ class GemmMetal(GemmBase):
         C_buf = C_region.buffer
 
         clear_accum = self.clear_accum
-        c_in_simdgroup_reg = is_metal_simdgroup(C_buf) or is_fragment(C_buf)
+        c_in_register = is_fragment(C_buf) or is_metal_simdgroup(C_buf)
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
         assert is_full_region(C_region), "Fragment output C must be a full region"
-        assert c_in_simdgroup_reg or is_shared(C_buf), (
-            f"Metal GEMM requires C in local.fragment, metal.simdgroup, or shared scope, got {C_buf.scope()}"
+        assert c_in_register or is_shared(C_buf), (
+            f"Metal GEMM requires C in local.fragment, metal.simdgroup or shared scope, got {C_buf.scope()}"
         )
 
         if self.is_gemm_ss():
-            if c_in_simdgroup_reg:
+            if c_in_register:
 
                 @T.prim_func
                 def _gemm_ss_simdgroup() -> None:

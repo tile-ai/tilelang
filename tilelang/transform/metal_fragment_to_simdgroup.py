@@ -1,4 +1,9 @@
-"""Rewrite local.fragment → metal.simdgroup for GEMM accumulators on Metal."""
+"""Rewrite local.fragment → metal.simdgroup for GEMM accumulator buffers on Metal.
+
+This pass runs after pipelining and before LayoutInference, so that
+simdgroup matrices (which are hardware-opaque and have no explicit
+thread-level layout) are never seen by LayoutInference.
+"""
 
 from __future__ import annotations
 
@@ -80,7 +85,7 @@ def _rewrite_scope(body, var_map):
                     changed = True
             if changed:
                 new_body = tir.stmt_functor.substitute(stmt.body, var_map)
-                new_block = tir.Block(
+                return tir.Block(
                     stmt.iter_vars,
                     stmt.reads,
                     stmt.writes,
@@ -90,15 +95,6 @@ def _rewrite_scope(body, var_map):
                     new_alloc_bufs,
                     stmt.match_buffers,
                     stmt.annotations,
-                )
-                return (
-                    tir.BlockRealize(
-                        stmt.iter_vars,
-                        tir.const(True, "bool"),
-                        new_block,
-                    )
-                    if False
-                    else new_block
                 )
         elif isinstance(stmt, tir.Allocate):
             new_var = var_map.get(stmt.buffer_var, None)

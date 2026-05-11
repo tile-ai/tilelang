@@ -2,10 +2,10 @@
  * \file rt_mod_metal.cc
  * \brief Metal codegen entry point.
  *
- * Metal codegen is handled by CodeGenCHost (target/codegen_c_host.cc), which
- * has built-in Metal context support via the is_in_metal_context flag.
- * When IR contains AttrStmt with attr_key == "metal_context", the host
- * codegen emits Metal-specific dispatch_sync / MTLCommandBuffer code.
+ * Metal codegen is implemented in target/codegen_metal.cc, which handles
+ * simdgroup types, intrinsics, and MSL emission.
+ * This file exists to satisfy the backend/metal/CMakeLists.txt dependency
+ * but delegates to the main implementation.
  */
 #include "target/codegen_c_host.h"
 
@@ -14,14 +14,8 @@
 namespace tvm {
 namespace codegen {
 
-ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
-  return tl::BuildTileLangCHost(mod, target);
-}
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("target.build.tilelang_metal", BuildTileLangMetal);
-}
+// Metal codegen entry point is in target/codegen_metal.cc.
+// This backend path is kept for future migration.
 
 } // namespace codegen
 } // namespace tvm
