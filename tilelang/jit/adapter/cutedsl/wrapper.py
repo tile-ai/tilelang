@@ -612,6 +612,7 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.float8_e4m3fnuz": cutlass.Float8E4M3FN,
       "torch.float8_e4m3fn": cutlass.Float8E4M3FN,
       "torch.float8_e5m2": cutlass.Float8E5M2,
+      "torch.float4_e2m1fn_x2": cutlass.Float4E2M1FN,
       "torch.float64": cutlass.Float64,
       "torch.int64": cutlass.Int64,
       "torch.int32": cutlass.Int32,
