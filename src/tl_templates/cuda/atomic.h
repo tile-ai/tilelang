@@ -168,6 +168,13 @@ TL_DEVICE void tl_atomic_add_v2_bf16(unsigned short &ret_x,
   }
 }
 
+TL_DEVICE void tl_red_add_v2_bf16(bfloat16_t *addr, uint32_t val) {
+  asm volatile("red.global.add.noftz.bf16x2 [%0], %1;"
+               :
+               : "l"(addr), "r"(val)
+               : "memory");
+}
+
 TL_DEVICE void tl_atomic_add_v2_f32(float &ret_x, float &ret_y,
                                     unsigned long long addr, float val_x,
                                     float val_y, int memory_order) {
@@ -539,7 +546,8 @@ TL_DEVICE void AtomicAddx2(bfloat16_t *ref, ValType val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   __nv_bfloat162 add_val = ToBfloat162(val);
   if (tl_atomic_detail::IsRelaxedMemoryOrder(memory_order)) {
-    atomicAdd(reinterpret_cast<__nv_bfloat162 *>(ref), add_val);
+    tl_atomic_detail::tl_red_add_v2_bf16(
+        ref, *reinterpret_cast<uint32_t *>(&add_val));
   } else {
     unsigned short add_val_x_cast = tl_atomic_detail::PackBits16(add_val.x);
     unsigned short add_val_y_cast = tl_atomic_detail::PackBits16(add_val.y);
