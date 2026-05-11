@@ -3,6 +3,8 @@ if(NOT USE_ROCM)
   return()
 endif()
 
+message(STATUS "ROCM Backend is enabled")
+
 set(CMAKE_HIP_STANDARD 17)
 include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
 find_rocm(${USE_ROCM})
@@ -75,6 +77,6 @@ list(APPEND TILE_LANG_INCLUDES ${ROCM_INCLUDE_DIRS})
 
 # Register stubs for linking and install
 if(TILELANG_USE_HIP_STUBS)
-  set(TILELANG_ACTIVE_BACKEND_STUB_LINK hip_stub)
-  set(TILELANG_ACTIVE_BACKEND_STUB_TARGETS hip_stub hiprtc_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK hip_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_TARGETS hip_stub hiprtc_stub)
 endif()
