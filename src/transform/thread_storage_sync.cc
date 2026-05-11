@@ -679,13 +679,19 @@ private:
     if (op->op.same_as(builtin::tvm_access_ptr()) ||
         op->op.same_as(builtin::address_of())) {
       current_.depends_on_runtime = true;
-      if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() >= 2) {
-        if (const auto *data_var = op->args[1].as<VarNode>()) {
-          if (IsThreadLocalScope(GetScope(GetRef<Var>(data_var)))) {
-            current_.is_block_uniform = false;
-          }
-        }
-      }
+      // Do not mark local-scope tvm_access_ptr loads as non-block-uniform
+      // solely based on storage scope.  Thread-local buffers (fragments)
+      // commonly hold block-uniform data when populated from block-uniform
+      // global addresses (e.g., a per-thread fragment that every thread
+      // fills with the same global value).  If the access indices actually
+      // depend on threadIdx, the recursive visit of args below (via
+      // IRMutatorWithAnalyzer::VisitExpr_) will correctly mark the
+      // condition as non-block-uniform through VisitExpr_(VarNode*).
+      //
+      // Mirrors the BufferLoadNode handling above(#90299d68); without this,
+      // conditions like `T.any_of(local_fragment[:])` get hoisted out of the
+      // if-body and break write-before-read sync between shared-memory loads
+      // and mma/tma reads.
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }

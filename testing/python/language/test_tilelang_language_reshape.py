@@ -160,7 +160,7 @@ def test_reshape_fragment():
 
 
 def reshape_layout_transform_shared(N, M, dtype):
-    from tilelang.intrinsics.mma_layout import make_mma_swizzle_layout
+    from tilelang.cuda.intrinsics.layout.mma_layout import make_mma_swizzle_layout
 
     @T.prim_func
     def main(

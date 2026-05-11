@@ -264,7 +264,7 @@ class PassConfigKey(str, Enum):
     """Output directory for generated CUDA kernels. Default: empty string"""
 
     TL_DISABLE_OUT_OF_BOUND_WARNING = "tl.disable_out_of_bound_warning"
-    """Disable out-of-bound access warnings in safe memory access legalization. Default: False"""
+    """Disable out-of-bound access warnings in safe memory access legalization. Default: True"""
 
     TL_ENABLE_DUMP_IR = "tl.enable_dump_ir"
     """Enable dumping IR during lowering between passes. Default: False"""

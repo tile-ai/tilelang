@@ -129,9 +129,11 @@ private:
     // After iterating over the body, set all layout_map to block
     auto p_result = result.CopyOnWrite();
     Map<Var, Layout> layout_map;
-    if (auto opt_layout_map = p_result->annotations.Get(attr::kLayoutMap)) {
-      layout_map =
-          opt_layout_map.value().as<Map<Var, Layout>>().value_or(layout_map);
+    if (auto layout_map_ref = p_result->annotations.Get(attr::kLayoutMap)) {
+      if (auto maybe_layout_map =
+              layout_map_ref.value().as<Map<Var, Layout>>()) {
+        layout_map = maybe_layout_map.value();
+      }
     }
     for (auto &&[k, v] : new_layout_map_)
       layout_map.Set(k, v);

@@ -101,31 +101,39 @@ Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
 
 class SetMaxNRegCollector : public StmtExprVisitor {
 public:
-  static Array<IntImm> Collect(const PrimFunc &f) {
+  struct Result {
+    Array<IntImm> nreg;
+    bool preserve_explicit_set_max_nreg{false};
+  };
+
+  static Result Collect(const PrimFunc &f) {
     SetMaxNRegCollector collector;
     collector(f->body);
     if (collector.warp_specialized_) {
-      return Array<IntImm>({});
+      return {Array<IntImm>({}), true};
     }
-    return collector.has_no_set_max_nreg_
-               ? Array<IntImm>({IntImm(DataType::Int(32), -1),
-                                IntImm(DataType::Int(32), -1)})
-               : collector.nreg_;
+    Array<IntImm> nreg = collector.has_no_set_max_nreg_
+                             ? Array<IntImm>({IntImm(DataType::Int(32), -1),
+                                              IntImm(DataType::Int(32), -1)})
+                             : collector.nreg_;
+    return {nreg, false};
   }
 
 private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
       if (call->op.same_as(set_max_nreg())) {
+        return;
+      } else if (call->op.same_as(annotate_producer_reg_dealloc())) {
         auto reg_hint = call->args[0].as<IntImmNode>()->value;
-        auto is_inc = call->args[1].as<IntImmNode>()->value;
         ICHECK(reg_hint <= 240 && reg_hint >= 24)
             << "Invalid reg hint: " << reg_hint;
-        ICHECK(is_inc == 0 || is_inc == 1) << "Invalid is_inc: " << is_inc;
-
-        // producer should decrease register hint while consumer should increase
-        // register hint
-        nreg_.Set(is_inc, IntImm(DataType::Int(32), reg_hint));
+        nreg_.Set(0, IntImm(DataType::Int(32), reg_hint));
+      } else if (call->op.same_as(annotate_consumer_reg_alloc())) {
+        auto reg_hint = call->args[0].as<IntImmNode>()->value;
+        ICHECK(reg_hint <= 240 && reg_hint >= 24)
+            << "Invalid reg hint: " << reg_hint;
+        nreg_.Set(1, IntImm(DataType::Int(32), reg_hint));
       } else if (call->op.same_as(no_set_max_nreg())) {
         has_no_set_max_nreg_ = true;
       }
@@ -181,7 +189,9 @@ class SetMaxNRegInjector : public StmtExprMutator {
 public:
   static PrimFunc Inject(PrimFunc f) {
     auto T = SetMaxNRegInjector();
-    T.nreg_ = SetMaxNRegCollector::Collect(f);
+    SetMaxNRegCollector::Result result = SetMaxNRegCollector::Collect(f);
+    T.nreg_ = result.nreg;
+    T.preserve_explicit_set_max_nreg_ = result.preserve_explicit_set_max_nreg;
     if (T.nreg_.empty()) {
       return f;
     }
@@ -192,9 +202,14 @@ public:
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(no_set_max_nreg())) {
-        // Remove the original set_max_nreg calls as they will be re-inserted
-        // at appropriate locations
+      if (!preserve_explicit_set_max_nreg_ &&
+          call->op.same_as(set_max_nreg())) {
+        return StmtExprMutator::VisitStmt_(op);
+      }
+      if (call->op.same_as(annotate_producer_reg_dealloc()) ||
+          call->op.same_as(annotate_consumer_reg_alloc()) ||
+          call->op.same_as(no_set_max_nreg())) {
+        // Remove annotations after they have been consumed by this pass.
         return Evaluate(0);
       }
     }
@@ -229,16 +244,24 @@ private:
         auto inc_reg_stmt = Evaluate(0);
         auto dec_reg_stmt = Evaluate(0);
 
-        // Only inject if we have valid register hints and no SIMT copy
+        // Default hints stay conservative: skip auto-injection when producer
+        // contains SIMT copy-like statements. Explicit user hints should still
+        // be honored even in that case.
         bool has_simt_copy = SimtCopyDetector::Detect(producer_body);
+        bool has_explicit_hints = dec_reg != 0 || inc_reg != 0;
 
-        if (dec_reg == 0 && inc_reg == 0 && !has_simt_copy) {
-          auto inc_reg_num = IntImm(DataType::Int(32), 240);
-          auto dec_reg_num = IntImm(DataType::Int(32), 24);
-          inc_reg_stmt = Evaluate(
-              Call(DataType::Handle(), set_max_nreg(), {inc_reg_num, 1}));
-          dec_reg_stmt = Evaluate(
-              Call(DataType::Handle(), set_max_nreg(), {dec_reg_num, 0}));
+        if (dec_reg != -1 && inc_reg != -1 &&
+            (has_explicit_hints || !has_simt_copy)) {
+          int final_dec_reg = has_explicit_hints ? dec_reg : 24;
+          int final_inc_reg = has_explicit_hints ? inc_reg : 240;
+          dec_reg_stmt =
+              Evaluate(Call(DataType::Handle(), set_max_nreg(),
+                            {IntImm(DataType::Int(32), final_dec_reg),
+                             IntImm(DataType::Int(32), 0)}));
+          inc_reg_stmt =
+              Evaluate(Call(DataType::Handle(), set_max_nreg(),
+                            {IntImm(DataType::Int(32), final_inc_reg),
+                             IntImm(DataType::Int(32), 1)}));
         }
 
         Array<Stmt> producer_stmts;
@@ -270,6 +293,7 @@ private:
   }
 
   Array<IntImm> nreg_;
+  bool preserve_explicit_set_max_nreg_{false};
   IterVar thread_iv_;
   Optional<PrimExpr> updated_thread_extent_;
   bool need_update_thread_extent_ = false;

@@ -82,10 +82,9 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
                        IterVar(Range(op->min, op->extent), op->loop_var,
                                IterVarType::kOrdered));
   p->analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-  if (auto reducer_info_anno = op->annotations.Get(attr::kReducerInfo)) {
-    auto reducer_info_map =
-        reducer_info_anno.value().as<Map<Var, ReducerInfo>>();
-    if (reducer_info_map) {
+  if (auto reducer_info_ref = op->annotations.Get(attr::kReducerInfo)) {
+    if (auto reducer_info_map =
+            reducer_info_ref.value().as<Map<Var, ReducerInfo>>()) {
       for (auto &&[buffer, info] : reducer_info_map.value())
         p->reducer_info_map_.Set(buffer, info);
     }

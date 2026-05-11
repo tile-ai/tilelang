@@ -7,7 +7,7 @@ import tilelang.language as T
 from tvm import DataType
 from tvm.tir import IndexMap
 from typing import Literal, Callable
-from tilelang.intrinsics.utils import get_mma_micro_size
+from tilelang.cuda.intrinsics.layout.utils import get_mma_micro_size
 from tilelang.tools import plot_layout
 
 def make_mma_load_base_layout(dtype: str = T.float16,
@@ -36,7 +36,7 @@ def make_mma_load_base_layout(dtype: str = T.float16,
     AssertionError
         If `local_buf` is not detected to be a fragment buffer.
     """
-    from tilelang.intrinsics.mma_layout import (
+    from tilelang.cuda.intrinsics.layout.mma_layout import (
         shared_16x16_to_mma_32x8_layout_sr,
         shared_16x16_to_mma_32x8_layout_rs,
         shared_16x32_to_mma_32x16_layout,

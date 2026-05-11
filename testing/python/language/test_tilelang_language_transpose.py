@@ -1,6 +1,7 @@
 """Tests for T.transpose shared memory transpose primitive."""
 
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 import torch
 
@@ -94,11 +95,70 @@ def run_tilelang_transpose_square(M=256, block_M=128, dtype=T.float16):
     print(f"PASS: square transpose M={M}, block_M={block_M}")
 
 
+def _smem_optin_bytes() -> int:
+    """Per-block opt-in dynamic shared memory limit (bytes) of the current CUDA
+    device, queried via cudaDevAttrMaxSharedMemoryPerBlockOptin.
+
+    Reference per-block opt-in caps:
+        sm_70 (V100)         : 96 KB
+        sm_75 (T4 / Turing)  : 64 KB
+        sm_80 (A100)         : 164 KB
+        sm_86 / sm_89 (Ada)  : 99 KB
+        sm_90 (H100)         : 228 KB
+        sm_100 (B100)        : 228 KB
+        sm_120 (consumer Blackwell, RTX 50-series): 99 KB
+    """
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    return getattr(props, "shared_memory_per_block_optin", 0)
+
+
+# Transpose test tiers. Each entry is (label, M, N, block_M, block_N).
+# `T.transpose` allocates two shared tiles (`tile` + `tile_T`), each
+# block_M * block_N * sizeof(dtype) bytes, so the per-block shared-memory
+# requirement is 2 * block_M * block_N * elem_bytes plus minor headroom.
+# Tiers are ordered smallest -> largest. The top tier matches the original
+# (pre-downgrade) test footprint of 128 KB; we never auto-promote past that.
+# Smaller tiers exist so consumer cards (e.g. sm_120 with a 99 KB opt-in cap)
+# still exercise the codepath instead of skipping outright.
+_TRANSPOSE_TIERS = [
+    # label              M    N    block_M block_N    # tile pair (fp16) -> total smem
+    ("small_64x64", 128, 128, 64, 64),  # 2 * 64*64*2 = 16 KB
+    ("default_128x128_square", 128, 128, 128, 128),  # 2 * 128*128*2 = 64 KB
+    ("default_128x128_multi_tile", 256, 256, 128, 128),  # 64 KB, 2x2 tiling
+    ("wide_128x256", 128, 256, 128, 256),  # 2 * 128*256*2 = 128 KB (original top)
+]
+
+
 @tilelang.testing.requires_cuda
 def test_tilelang_transpose():
-    run_tilelang_transpose(M=128, N=128, block_M=128, block_N=128)
-    run_tilelang_transpose(M=256, N=256, block_M=128, block_N=128)
-    run_tilelang_transpose(M=128, N=256, block_M=128, block_N=256)
+    import warnings
+
+    optin = _smem_optin_bytes()  # codespell:ignore
+    elem_bytes = 2  # fp16
+    ran: list[str] = []
+    skipped: list[str] = []
+    for label, M, N, block_M, block_N in _TRANSPOSE_TIERS:
+        required = 2 * block_M * block_N * elem_bytes
+        if required > optin:  # codespell:ignore
+            skipped.append(f"{label} (needs {required} B)")
+            continue
+        run_tilelang_transpose(M=M, N=N, block_M=block_M, block_N=block_N)
+        ran.append(label)
+
+    # If we did not get to the top tier, emit a runtime warning so it shows
+    # up in the pytest warnings summary instead of silently downgrading.
+    top_label = _TRANSPOSE_TIERS[-1][0]
+    if skipped and top_label not in ran:
+        warnings.warn(
+            f"test_tilelang_transpose downgraded on this device (shared_memory_per_block_optin={optin} B): ran {ran}; skipped {skipped}",  # codespell:ignore
+            stacklevel=1,
+        )
+
+    if not ran:
+        import pytest
+
+        smallest_required = 2 * _TRANSPOSE_TIERS[0][3] * _TRANSPOSE_TIERS[0][4] * elem_bytes
+        pytest.skip(f"No transpose tier fits this device (optin={optin} B, smallest tier needs {smallest_required} B)")  # codespell:ignore
 
 
 @tilelang.testing.requires_cuda

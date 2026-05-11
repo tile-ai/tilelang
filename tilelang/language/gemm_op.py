@@ -453,7 +453,7 @@ def make_blockscaled_gemm_layout(
     Returns:
         A Layout object for C's TMEM storage.
     """
-    from tilelang.intrinsics.tcgen05_macro_generator import TensorCoreIntrinEmitter
+    from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import TensorCoreIntrinEmitter
 
     C_region = to_buffer_region(C)
     A_region = to_buffer_region(A)

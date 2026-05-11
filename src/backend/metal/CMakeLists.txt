@@ -3,6 +3,8 @@ if(NOT USE_METAL)
   return()
 endif()
 
+message(STATUS "METAL Backend is enabled")
+
 if(NOT APPLE)
   # On non-Apple platforms USE_METAL=ON enables only codegen (Metal source
   # generation) without requiring the Metal/Foundation frameworks.
@@ -11,7 +13,7 @@ if(NOT APPLE)
 endif()
 
 file(GLOB TILE_LANG_METAL_SRCS
-  src/target/rt_mod_metal.cc
+  src/backend/metal/codegen/rt_mod_metal.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_METAL_SRCS})
 # FIXME: CIBW failed with backtrace, why???
