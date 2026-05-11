@@ -13,7 +13,7 @@ from reduce_scatter import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
 
 @tilelang.jit(compile_once=True)
 def gemm_kernel(
-    M, N, K, num_local_rank, block_M, block_N, block_K, threads, persistent=False, dtype=T.bfloat16, accum_dtype=T.float32
+    M, N, K, num_local_rank, block_M, block_N, block_K, threads, persistent=False, dtype=T.float16, accum_dtype=T.float32
 ):
     M_per_rank = T.ceildiv(M, num_local_rank)
     GROUP_SIZE_M = 8
@@ -113,7 +113,7 @@ def torch_gemm_rs(
 
 
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    dtype = torch.bfloat16
+    dtype = torch.float16
     M = args.M if args else 8192
     N = args.N if args else 8192
     K = args.K if args else 8192
@@ -129,7 +129,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     assert rank == local_rank and num_ranks == num_local_ranks, "only support single node for now"
     allocator = tilelang.get_allocator(
-        size=2**30, device="cuda", is_distributed=True, local_rank=local_rank, num_local_ranks=num_local_ranks, group=group
+        size=2**35, device="cuda", is_distributed=True, local_rank=local_rank, num_local_ranks=num_local_ranks, group=group
     )
     gemm_func = gemm_kernel(M, N, K, num_local_ranks, BLOCK_M, BLOCK_N, BLOCK_K, threads, persistent)
     gemm_func.initialize(allocator=allocator)
@@ -159,8 +159,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     tl_t = do_bench(
         lambda: gemm_rs_op(A, B, C, output, ctx, gemm_func, gemm_stream, rs_stream, local_rank),
-        warmup=5,
-        rep=5,
+        warmup=50,
+        rep=50,
         group=group,
     )
 

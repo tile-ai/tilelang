@@ -8,16 +8,13 @@ import torch.multiprocessing
 import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
-from tilelang.distributed import init_dist
-from tilelang.distributed.shared_memory import tensor_from_ptr
+from tilelang.distributed import init_dist, do_bench
 
 os.environ.setdefault("NCCL_DEBUG", "ERROR")
-tilelang.enable_cache()
 
 
 @tilelang.jit(
     pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
         tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE: True,
     },
     compile_once=True,
@@ -47,8 +44,9 @@ def gemm_rs_specialized_kernel(
     waves = T.ceildiv(total_tiles, sm_num)
     accum_dtype = T.float32
 
+    store_block_M = block_M // 2   # avoid SMEM spill when #stages = 4
+
     def tile_coords(tile_id, local_rank):
-        """TK-style rotated Super-M scheduler for B tile locality."""
         rotation = ((local_rank + 1) * blocks_per_rank * n_blocks) % total_tiles
         rotated = (tile_id + rotation) % total_tiles
         super_rows = (m_blocks // group_size_m) * group_size_m
@@ -78,92 +76,57 @@ def gemm_rs_specialized_kernel(
         by = by_expr
         bx = bx_expr
         return by, bx
-
-    @T.macro
-    def atomic_add_shared_output(C_dst, local_by, bx, C_shared):
-        # Match TK/blackwell-numa: first materialize the accumulator tile in
-        # shared memory, then issue bf16x2 global reductions from that row-major
-        # staging buffer. This avoids keeping the converted C fragment live
-        # across the full peer atomic epilogue.
-        tid = T.get_thread_binding()
-        for idx in T.serial(tid, block_M * block_N // 2, threads):
-            elem = idx * 2
-            T.atomic_addx2(
-                C_dst[local_by * block_M + elem // block_N, bx * block_N + elem % block_N],
-                C_shared[elem // block_N, elem % block_N],
-            )
-
-    @T.macro
-    def tma_atomic_add_shared_output(C_dst, local_by, bx, C_shared):
-        T.atomic_add(
-            C_dst[
-                local_by * block_M : (local_by + 1) * block_M,
-                bx * block_N : (bx + 1) * block_N,
-            ],
-            C_shared,
-            use_tma=True,
-        )
-
-    @T.macro
-    def reduce_shared_output(C_dst, local_by, bx, C_shared):
-        if use_tma_epilogue:
-            tma_atomic_add_shared_output(C_dst, local_by, bx, C_shared)
-        else:
-            atomic_add_shared_output(C_dst, local_by, bx, C_shared)
-
+        
     @T.prim_func
     def main(
         A: T.Tensor((M, K_per_rank), dtype),
         B: T.Tensor((K_per_rank, N), dtype),
-        C0: T.Tensor((M_per_rank, N), dtype),
-        C1: T.Tensor((M_per_rank, N), dtype),
-        C2: T.Tensor((M_per_rank, N), dtype),
-        C3: T.Tensor((M_per_rank, N), dtype),
-        C4: T.Tensor((M_per_rank, N), dtype),
-        C5: T.Tensor((M_per_rank, N), dtype),
-        C6: T.Tensor((M_per_rank, N), dtype),
-        C7: T.Tensor((M_per_rank, N), dtype),
+        C: T.Tensor((M_per_rank, N), dtype),
     ):
         with T.Kernel(sm_num, threads=threads) as bid:
             local_rank = T.get_rank()
-            with T.sm_specialize_scope(auto_ws=True):
-                A_shared = T.alloc_shared((block_M, block_K), dtype)
-                B_shared = T.alloc_shared((block_K, block_N), dtype)
-                C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_shared = T.alloc_shared((store_block_M, block_N), dtype)
 
-                for w in T.serial(waves):
-                    tile_id = bid + w * sm_num
-                    if tile_id < total_tiles:
-                        by, bx = materialized_tile_coords(tile_id, local_rank)
-                        dst_rank = by // blocks_per_rank
-                        local_by = by - dst_rank * blocks_per_rank
+            for w in T.serial(waves):
+                tile_id = bid + w * sm_num
+                if tile_id < total_tiles:
+                    by, bx = materialized_tile_coords(tile_id, local_rank)
+                    dst_rank = by // blocks_per_rank
+                    local_by = by - dst_rank * blocks_per_rank
 
-                        T.clear(C_local)
-                        for k in T.Pipelined(k_blocks, num_stages=pipeline_stages):
-                            T.copy(A[by * block_M, k * block_K], A_shared)
-                            T.copy(B[k * block_K, bx * block_N], B_shared)
-                            T.gemm(A_shared, B_shared, C_local)
+                    T.clear(C_local)
+                    for k in T.Pipelined(k_blocks, num_stages=pipeline_stages):
+                        T.copy(A[by * block_M, k * block_K], A_shared)
+                        T.copy(B[k * block_K, bx * block_N], B_shared)
+                        T.gemm(A_shared, B_shared, C_local)
 
-                        C_shared = T.alloc_shared((block_M, block_N), dtype)
-                        T.copy(C_local, C_shared)
-                        T.sync_threads(3, threads)
-                        if dst_rank == 0:
-                            reduce_shared_output(C0, local_by, bx, C_shared)
-                        elif dst_rank == 1:
-                            reduce_shared_output(C1, local_by, bx, C_shared)
-                        elif dst_rank == 2:
-                            reduce_shared_output(C2, local_by, bx, C_shared)
-                        elif dst_rank == 3:
-                            reduce_shared_output(C3, local_by, bx, C_shared)
-                        elif dst_rank == 4:
-                            reduce_shared_output(C4, local_by, bx, C_shared)
-                        elif dst_rank == 5:
-                            reduce_shared_output(C5, local_by, bx, C_shared)
-                        elif dst_rank == 6:
-                            reduce_shared_output(C6, local_by, bx, C_shared)
+                    # Fused reduce-scatter
+                    for row_offset in T.serial(0, block_M, store_block_M):
+                        T.copy(C_local[row_offset, 0], C_shared)
+                        if use_tma_epilogue:
+                            # TMA store-add into peer C.
+                            T.atomic_add(
+                                C[
+                                    local_by * block_M + row_offset : local_by * block_M + row_offset + store_block_M,
+                                    bx * block_N : (bx + 1) * block_N,
+                                ],
+                                C_shared,
+                                use_tma=True,
+                                dst_pe=dst_rank,
+                            )
                         else:
-                            reduce_shared_output(C7, local_by, bx, C_shared)
-                        T.sync_threads(3, threads)
+                            # vectorized bf16x2 red.global.add.
+                            tid = T.get_thread_binding()
+                            for idx in T.serial(tid, store_block_M * block_N // 2, threads):
+                                elem = idx * 2
+                                T.atomic_addx2(
+                                    C[local_by * block_M + row_offset + elem // block_N, bx * block_N + elem % block_N],
+                                    C_shared[elem // block_N, elem % block_N],
+                                    dst_pe=dst_rank,
+                                )
 
     return main
 
@@ -175,63 +138,12 @@ def torch_gemm_rs(group: torch.distributed.ProcessGroup, A: torch.Tensor, B: tor
     return output
 
 
-def benchmark_tk_aligned(fn, prepare_fn, group, *, warmup: int, rep: int):
-    torch.cuda.synchronize()
-    dist.barrier(group)
-    for _ in range(warmup):
-        prepare_fn()
-        fn()
-    torch.cuda.synchronize()
-    dist.barrier(group)
-
-    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(rep)]
-    for i in range(rep):
-        prepare_fn()
-        start_events[i].record()
-        fn()
-        end_events[i].record()
-    torch.cuda.synchronize()
-
-    local_times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_events, end_events)],
-        dtype=torch.float64,
-        device="cuda",
-    )
-    dist.all_reduce(local_times, op=dist.ReduceOp.MAX, group=group)
-    dist.barrier(group)
-    return local_times.mean().item()
-
-
-def make_peer_views(local_tensor: torch.Tensor, allocator, shape, dtype, local_rank: int, num_ranks: int):
-    dtype_str = str(dtype).split(".")[-1]
-    elem_bytes = torch.empty((), dtype=dtype).element_size()
-    base_ptr = int(allocator._base_ptr.value)
-    local_ptr = local_tensor.data_ptr()
-    offset = local_ptr - base_ptr
-    expected_bytes = 1
-    for extent in shape:
-        expected_bytes *= extent
-    expected_bytes *= elem_bytes
-    if offset < 0 or offset + expected_bytes > allocator.size:
-        raise RuntimeError("local tensor is not inside the distributed allocator arena")
-
-    peer_views = []
-    for rank in range(num_ranks):
-        if rank == local_rank:
-            peer_views.append(local_tensor)
-        else:
-            peer_ptr = int(allocator._buffer_ptrs[rank]) + offset
-            peer_views.append(tensor_from_ptr(peer_ptr, shape, dtype_str, allocator._device, False))
-    return peer_views
-
-
 def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     dtype = torch.bfloat16
     M, N, K = args.M, args.N, args.K
     block_M, block_N, block_K = args.block_m, args.block_n, args.block_k
 
-    assert num_local_ranks == 8, "this specialized example currently passes 8 peer C tensors explicitly"
+    assert num_local_ranks == 8, "remote TMA descriptor selection is currently specialized for 8 local ranks"
     assert M % (num_local_ranks * block_M) == 0
     assert N % block_N == 0
     assert K % (num_local_ranks * block_K) == 0
@@ -273,19 +185,18 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     A = tilelang.tensor((M, K_per_rank), dtype, allocator=allocator).normal_() / (K_per_rank**0.25)
     B = tilelang.tensor((K_per_rank, N), dtype, allocator=allocator).normal_() / (K_per_rank**0.25)
     C_local = tilelang.tensor((M_per_rank, N), dtype, allocator=allocator)
-    C_peers = make_peer_views(C_local, allocator, (M_per_rank, N), dtype, local_rank, num_local_ranks)
     C_local.zero_()
     dist.barrier(group)
 
-    def prepare():
+    def reset_output():
         C_local.zero_()
         torch.cuda.synchronize()
         dist.barrier(group)
 
     def run_kernel():
-        kernel(A, B, *C_peers)
+        kernel(A, B, C_local)
 
-    prepare()
+    reset_output()
     run_kernel()
     torch.cuda.synchronize()
     dist.barrier(group)
@@ -298,7 +209,17 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check {'passed' if passed else 'failed'}. max_diff={max_diff}")
         dist.barrier(group)
 
-    tl_t = benchmark_tk_aligned(run_kernel, prepare, group, warmup=args.warmup, rep=args.rep)
+    for _ in range(args.warmup):
+        reset_output()
+        run_kernel()
+    reset_output()
+    tl_t = do_bench(
+        run_kernel,
+        warmup=0,
+        rep=args.rep,
+        post_fn=reset_output,
+        group=group,
+    )
 
     if local_rank == 0:
         tflops = 2 * M * N * K_per_rank / 1e9 / tl_t
@@ -319,10 +240,17 @@ if __name__ == "__main__":
     parser.add_argument("--block-k", type=int, default=64)
     parser.add_argument("--threads", type=int, default=256)
     parser.add_argument("--group-size-m", type=int, default=12)
-    parser.add_argument("--pipeline-stages", type=int, default=3)
-    parser.add_argument("--tma-epilogue", action="store_true")
-    parser.add_argument("--warmup", type=int, default=5)
-    parser.add_argument("--rep", type=int, default=10)
+    parser.add_argument("--pipeline-stages", type=int, default=4)
+    epilogue = parser.add_mutually_exclusive_group()
+    epilogue.add_argument(
+        "--tma-epilogue",
+        dest="tma_epilogue",
+        action="store_true",
+        help="Use TMA store-add epilogue (default)",
+    )
+    parser.set_defaults(tma_epilogue=True)
+    parser.add_argument("--warmup", type=int, default=50)
+    parser.add_argument("--rep", type=int, default=50)
     parser.add_argument("--atol", type=float, default=0.5)
     parser.add_argument("--rtol", type=float, default=1e-1)
     parser.add_argument("--check", action="store_true")
