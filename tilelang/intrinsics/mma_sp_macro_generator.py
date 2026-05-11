@@ -11,7 +11,7 @@ from .utils import (
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
-from .sparse_config import get_e_factor, get_e_replicate_factor
+from .sparse_params import get_e_factor, get_e_replicate_factor
 
 from tilelang.intrinsics.mma_sp_layout import (
     shared_16x16_to_mma_sp_layout_sr_a,
