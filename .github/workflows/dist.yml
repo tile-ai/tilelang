@@ -1,26 +1,6 @@
 name: Dist
 on:
   workflow_dispatch:
-  schedule:
-    # gemini said this is 6:00 china time
-    - cron: "0 22 * * *"
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-    paths:
-      - setup.py
-      - setup.cfg
-      - pyproject.toml
-      - MANIFEST.in
-      - CMakeLists.txt
-      - VERSION
-      - version_provider.py
-      - .github/workflows/dist.yml
-      # Type aliases can affect package import/build behavior.
-      - tilelang/_typing.py
   release:
     types:
       - published
