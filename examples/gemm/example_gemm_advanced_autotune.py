@@ -1,3 +1,11 @@
+"""
+Scripts to test a series of advanced autotuning techniques.
+
+To maximze the autotuning speed in a 8xGPUs node, please use the following command:
+
+python3 examples/gemm/example_gemm_advanced_autotune.py --use_autotune --enable_grouped_compile --use_pipeline --benchmark_multi_gpu --benchmark_devices 0 1 2 3 4 5 6 7
+"""
+
 import argparse
 import itertools
 import tilelang as tl
@@ -329,40 +337,19 @@ if __name__ == "__main__":
     parser.add_argument("--use_autotune", action="store_true", default=False, help="Whether to use autotune for matmul configs")
     parser.add_argument("--with_roller", action="store_true", default=False, help="Whether to enable BitBLAS roller for search space")
     parser.add_argument("--profile_backend", type=str, default="event", help="Profiler backend")
-    pipeline_group = parser.add_mutually_exclusive_group()
-    pipeline_group.add_argument(
-        "--pipeline", dest="use_pipeline", action="store_true", help="Enable compile/benchmark pipeline in autotune"
-    )
-    pipeline_group.add_argument(
-        "--no-pipeline", dest="use_pipeline", action="store_false", help="Disable compile/benchmark pipeline in autotune"
-    )
-    parser.set_defaults(use_pipeline=False)
+    parser.add_argument("--use_pipeline", action="store_true", default=False, help="Enable compile/benchmark pipeline in autotune")
+    parser.add_argument("--enable_grouped_compile", action="store_true", default=False, help="Enable grouped compilation in autotune")
+    parser.add_argument("--group_compile_size", type=int, default=2, help="Number of configs per grouped compile unit")
+    parser.add_argument("--benchmark_multi_gpu", action="store_true", default=False, help="Benchmark autotune configs across multiple GPUs")
 
-    grouped_compile_group = parser.add_mutually_exclusive_group()
-    grouped_compile_group.add_argument(
-        "--grouped-compile", dest="enable_grouped_compile", action="store_true", help="Enable grouped compilation in autotune"
-    )
-    grouped_compile_group.add_argument(
-        "--no-grouped-compile", dest="enable_grouped_compile", action="store_false", help="Disable grouped compilation in autotune"
-    )
-    parser.set_defaults(enable_grouped_compile=False)
-    parser.add_argument("--group-compile-size", type=int, default=2, help="Number of configs per grouped compile unit")
-
-    benchmark_multi_gpu_group = parser.add_mutually_exclusive_group()
-    benchmark_multi_gpu_group.add_argument(
-        "--benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_true", help="Benchmark autotune configs across multiple GPUs"
-    )
-    benchmark_multi_gpu_group.add_argument(
-        "--no-benchmark-multi-gpu", dest="benchmark_multi_gpu", action="store_false", help="Benchmark autotune configs on a single GPU"
-    )
-    parser.set_defaults(benchmark_multi_gpu=False)
     parser.add_argument(
-        "--benchmark-devices",
-        action="append",
+        "--benchmark_devices",
+        nargs="+",
         type=int,
         default=[],
-        help="Repeatable CUDA device ordinals for benchmark workers (e.g. --benchmark-devices 0 --benchmark-devices 1)",
+        help="Benchmark devices number (e.g. --benchmark-devices 0 1 2)",
     )
+
     args = parser.parse_args()
     main(
         M=args.m,
