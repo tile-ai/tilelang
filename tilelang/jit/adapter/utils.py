@@ -419,6 +419,13 @@ def parse_tma_descriptor_args(
         if len(args) < 3:
             raise ValueError(f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
 
+        if getattr(args[0], "value", None) == "__tvm_tensormap_create_remote_tiled":
+            raise NotImplementedError(
+                "Remote TMA descriptor initialization is only supported by the TVM FFI backend today. "
+                "The Cython/NVRTC wrappers do not yet keep the distributed allocator base table needed "
+                "to remap descriptor base pointers."
+            )
+
         tma_create_str, _, dtype, tensor_rank, global_address, *remaining_args = args
 
         is_img2col = tma_create_str.value == "__tvm_tensormap_create_im2col"

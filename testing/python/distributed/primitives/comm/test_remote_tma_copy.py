@@ -2,7 +2,6 @@
 
 import os
 
-import pytest
 import torch
 import torch.distributed as dist
 
@@ -86,6 +85,25 @@ def _kernel_remote_descriptor_tma_load(M: int, N: int, block_M: int, block_N: in
     return main
 
 
+def _kernel_remote_descriptor_auto_tma_store(M: int, N: int, block_M: int, block_N: int, threads: int):
+    @T.prim_func
+    def main(dst: T.Tensor((M, N), "float32"), src: T.Tensor((M, N), "float32")):
+        with T.Kernel(T.ceildiv(M, block_M), threads=threads) as by:
+            rank = T.alloc_local((1,), "uint64")
+            rank[0] = T.get_rank()
+            shared = T.alloc_shared((block_M, N // 2), "float32")
+            T.copy(src[by * block_M : (by + 1) * block_M, 0 : N // 2], shared, disable_tma=True)
+            T.sync_threads()
+            T.copy(
+                shared,
+                dst[by * block_M : (by + 1) * block_M, 0 : N // 2],
+                dst_pe=rank[0] ^ 1,
+            )
+            T.tma_store_wait()
+
+    return main
+
+
 def _kernel_remote_tma_load(M: int, N: int, block_M: int, block_N: int, threads: int):
     @T.prim_func
     def main(out: T.Tensor((M, N), "float32"), src: T.Tensor((M, N), "float32")):
@@ -127,9 +145,85 @@ def _kernel_remote_tma_store(M: int, N: int, block_M: int, block_N: int, threads
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_remote_descriptor_tma_rejected():
-    with pytest.raises(Exception, match="Remote descriptor TMA copy is not supported"):
-        tilelang.compile(_kernel_remote_descriptor_tma_load(_M, _N, _BLOCK_M, _BLOCK_N, _THREADS))
+def test_remote_descriptor_tma_codegen():
+    for kernel_func in (
+        _kernel_remote_descriptor_tma_load,
+        _kernel_remote_descriptor_auto_tma_store,
+    ):
+        kernel = tilelang.compile(kernel_func(_M, _N, _BLOCK_M, _BLOCK_N, _THREADS))
+        source = kernel.get_kernel_source()
+        host_source = kernel.get_host_source()
+        assert "_desc" in source
+        assert "__tvm_tensormap_create_remote_tiled" in host_source
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@distributed_test()
+def test_remote_descriptor_tma_copy(local_rank: int, num_ranks: int):
+    from tilelang.distributed import init_dist
+
+    rank, num_ranks, group = init_dist(local_rank, num_ranks)
+    allocator = tilelang.get_allocator(
+        size=2**22,
+        device="cuda",
+        is_distributed=True,
+        local_rank=local_rank,
+        num_local_ranks=num_ranks,
+        group=group,
+    )
+
+    load_kernel = tilelang.compile(
+        _kernel_remote_descriptor_tma_load(_M, _N, _BLOCK_M, _BLOCK_N, _THREADS),
+        compile_once=True,
+        compile_group=group,
+    )
+    store_kernel = tilelang.compile(
+        _kernel_remote_descriptor_auto_tma_store(_M, _N, _BLOCK_M, _BLOCK_N, _THREADS),
+        compile_once=True,
+        compile_group=group,
+    )
+    if rank == 0:
+        for kernel in (load_kernel, store_kernel):
+            source = kernel.get_kernel_source()
+            host_source = kernel.get_host_source()
+            assert "_desc" in source
+            assert "__tvm_tensormap_create_remote_tiled" in host_source
+
+    load_kernel.initialize(allocator=allocator)
+    store_kernel.initialize(allocator=allocator)
+
+    src = tilelang.tensor((_M, _N), torch.float32, allocator=allocator).normal_()
+    out = tilelang.tensor((_M, _N // 2), torch.float32, allocator=allocator).zero_()
+    dst = tilelang.tensor((_M, _N), torch.float32, allocator=allocator).zero_()
+
+    src_refs = [torch.empty_like(src) for _ in range(num_ranks)]
+    dist.all_gather(src_refs, src, group)
+    expected_peer_half = src_refs[rank ^ 1][:, : _N // 2]
+
+    torch.cuda.synchronize()
+    dist.barrier(group)
+    load_kernel(out, src)
+    torch.cuda.synchronize()
+    dist.barrier(group)
+
+    assert torch.allclose(expected_peer_half, out, atol=1e-6, rtol=1e-6), (
+        f"rank {rank}: remote descriptor TMA load mismatch"
+    )
+
+    torch.cuda.synchronize()
+    dist.barrier(group)
+    store_kernel(dst, src)
+    torch.cuda.synchronize()
+    dist.barrier(group)
+
+    assert torch.allclose(expected_peer_half, dst[:, : _N // 2], atol=1e-6, rtol=1e-6), (
+        f"rank {rank}: remote descriptor TMA store mismatch"
+    )
+    assert torch.allclose(torch.zeros_like(dst[:, _N // 2 :]), dst[:, _N // 2 :]), (
+        f"rank {rank}: remote descriptor TMA store touched unwritten columns"
+    )
+
+    dist.destroy_process_group()
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)

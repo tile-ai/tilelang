@@ -545,6 +545,101 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
 
 namespace cuda {
 
+constexpr int kMaxRemoteTMADescriptors = 8;
+
+Call MakeTmaDescriptorCall(const TMADesc &desc, PrimExpr remote_pe) {
+  Array<PrimExpr> args = desc.EncodeCallArgs();
+  if (IsRemotePE(remote_pe)) {
+    Array<PrimExpr> remote_args;
+    remote_args.reserve(args.size() + 1);
+    remote_args.push_back(remote_pe);
+    remote_args.insert(remote_args.end(), args.begin(), args.end());
+    return Call(DataType::Handle(), create_remote_tma_descriptor(),
+                remote_args);
+  }
+  return Call(DataType::Handle(), create_tma_descriptor(), args);
+}
+
+Stmt MakeTmaCopyStmt(const TMADesc &desc, const Buffer &shared_tensor,
+                     PrimExpr shared_offset, PrimExpr total_elements,
+                     Array<PrimExpr> global_coords, int inner_box_dim,
+                     int instruction_dim, bool is_load, const Op &tma_op,
+                     int barrier_base_id, PrimExpr mbar_handle,
+                     int eviction_policy, const Map<String, ObjectRef> &ann,
+                     Optional<PrimExpr> remote_pe) {
+  Call create_descriptor = MakeTmaDescriptorCall(
+      desc, remote_pe.defined() ? remote_pe.value() : RemotePESentinel());
+
+  if (inner_box_dim != instruction_dim) {
+    Var loop_var("i");
+    int loop_extent = inner_box_dim / instruction_dim;
+
+    Array<PrimExpr> args;
+    args.reserve(desc.rank + 4);
+    args.push_back(create_descriptor);
+    if (is_load) {
+      args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
+    }
+    PrimExpr shared_addr = shared_tensor.access_ptr(
+        is_load ? 2 : 1, DataType::Handle(), 1,
+        shared_offset + total_elements * loop_var, total_elements);
+    args.push_back(shared_addr);
+    Array<PrimExpr> loop_global_coords = global_coords;
+    loop_global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
+    for (auto coord : loop_global_coords) {
+      args.push_back(coord);
+    }
+    if (!is_load) {
+      args.push_back(0);
+    }
+    args.push_back(eviction_policy);
+    return For(loop_var, 0, loop_extent, ForKind::kUnrolled,
+               Evaluate(Call(DataType::Handle(), tma_op, args, ann)));
+  }
+
+  Array<PrimExpr> args;
+  args.reserve(desc.rank + 4);
+  args.push_back(create_descriptor);
+  if (is_load) {
+    args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
+  }
+  PrimExpr shared_addr = shared_tensor.access_ptr(
+      is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
+  args.push_back(shared_addr);
+  for (auto coord : global_coords) {
+    args.push_back(coord);
+  }
+  if (!is_load) {
+    args.push_back(0);
+  }
+  args.push_back(eviction_policy);
+  return Evaluate(Call(DataType::Handle(), tma_op, args, ann));
+}
+
+Stmt MakeRemoteTmaCopyStmt(const TMADesc &desc, const Buffer &shared_tensor,
+                           PrimExpr shared_offset, PrimExpr total_elements,
+                           Array<PrimExpr> global_coords, int inner_box_dim,
+                           int instruction_dim, bool is_load, const Op &tma_op,
+                           int barrier_base_id, PrimExpr mbar_handle,
+                           int eviction_policy,
+                           const Map<String, ObjectRef> &ann,
+                           PrimExpr remote_pe) {
+  Stmt else_case = MakeTmaCopyStmt(
+      desc, shared_tensor, shared_offset, total_elements, global_coords,
+      inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
+      mbar_handle, eviction_policy, ann,
+      make_const(remote_pe.dtype(), kMaxRemoteTMADescriptors - 1));
+  for (int pe = kMaxRemoteTMADescriptors - 2; pe >= 0; --pe) {
+    Stmt then_case = MakeTmaCopyStmt(
+        desc, shared_tensor, shared_offset, total_elements, global_coords,
+        inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
+        mbar_handle, eviction_policy, ann, make_const(remote_pe.dtype(), pe));
+    else_case = IfThenElse(EQ(remote_pe, make_const(remote_pe.dtype(), pe)),
+                           then_case, else_case);
+  }
+  return else_case;
+}
+
 struct TMAIm2ColDesc {
   size_t rank;
   int data_type;
@@ -1647,10 +1742,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
 
   desc.data_type =
       TensorMapDataTypeForTMA(global_tensor->dtype, shared_tensor->dtype);
-  ICHECK(!IsRemotePE(GetTmaRemotePE(op, is_load)))
-      << "Remote descriptor TMA copy is not supported yet because descriptor "
-      << "creation requires a static buffer base. Use 1D TMA or T.copy SIMT "
-      << "fallback for remote copies.";
+  PrimExpr remote_pe = GetTmaRemotePE(op, is_load);
   desc.global_addr = global_tensor->data;
   desc.global_shape = ReverseArray(global_tensor->shape);
   Array<PrimExpr> global_coords =
@@ -1863,9 +1955,6 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
-  Call create_descriptor =
-      Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
-
   int64_t cluster_mask = GetClusterMask(op);
   bool use_multicast = is_load && (cluster_mask > 0);
 
@@ -1890,11 +1979,6 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
-  Array<PrimExpr> args;
-  args.reserve(desc.rank + 4);
-  args.push_back(create_descriptor);
-  if (is_load)
-    args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
   auto tma_op = is_load ? tma_load() : tma_store();
 
   Stmt tma_copy;
@@ -1902,93 +1986,116 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   for (auto e : desc.smem_box)
     total_elements *= e;
 
-  auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
-    Array<PrimExpr> mc_args;
-    mc_args.reserve(regular_args.size() + 1);
-    mc_args.push_back(regular_args[0]); // descriptor
-    mc_args.push_back(regular_args[1]); // mbarrier
-    mc_args.push_back(regular_args[2]); // shared memory pointer
-    mc_args.push_back(IntImm(DataType::Int(32), cluster_mask));
-    for (size_t i = 3; i < regular_args.size(); ++i) {
-      mc_args.push_back(regular_args[i]);
-    }
-    return mc_args;
-  };
-
-  if ((*inner_box_dim) != instruction_dim) {
-    Var loop_var("i");
-    int loop_extent = (*inner_box_dim) / instruction_dim;
-
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1,
-        shared_offset + total_elements * loop_var, total_elements);
-    args.push_back(shared_addr);
-    global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
-    for (auto coord : global_coords)
-      args.push_back(coord);
-    int need_reduce = 0;
-    if (!is_load)
-      args.push_back(need_reduce);
-    args.push_back(GetEvictionPolicy(op));
-    Map<String, ObjectRef> ann_loop;
-    if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
-      ann_loop.Set("use_2cta", IntImm(DataType::Int(32), 1));
-    }
-    tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-                   Evaluate(Call(DataType::Handle(), tma_op, args, ann_loop)));
-
-    if (use_multicast) {
-      Array<PrimExpr> mc_args = build_multicast_args(args);
-      Stmt multicast_copy = For(
-          loop_var, 0, loop_extent, ForKind::kUnrolled,
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args)));
-
-      int min_cta_rank = MinRankInClusterMask(cluster_mask);
-      PrimExpr block_rank =
-          Call(DataType::Int(32), block_rank_in_cluster(), {});
-      PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
-      PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
-                                            IntImm(DataType::Int(32), 1)),
-                                IntImm(DataType::Int(32), 0));
-      Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
-      tma_copy =
-          IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
-                     multicast_copy, regular_or_noop);
-    }
+  Map<String, ObjectRef> tma_ann;
+  if (TargetIsSm100(T.target) && is_load &&
+      (annotations.find("use_2cta") != annotations.end() ||
+       is_cluster_barrier)) {
+    tma_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+  }
+  if (is_cluster_barrier && TargetIsSm100(T.target) && is_load) {
+    tma_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+  }
+  if (IsRemotePE(remote_pe)) {
+    ICHECK(!use_multicast)
+        << "Remote descriptor TMA copy does not support cluster multicast.";
+    tma_copy = MakeRemoteTmaCopyStmt(
+        desc, shared_tensor, shared_offset, total_elements, global_coords,
+        *inner_box_dim, instruction_dim, is_load, tma_op, barrier_base_id,
+        mbar_handle, GetEvictionPolicy(op), tma_ann, remote_pe);
   } else {
-    PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
-    args.push_back(shared_addr);
-    for (auto coord : global_coords)
-      args.push_back(coord);
-    int need_reduce = 0;
-    if (!is_load)
-      args.push_back(need_reduce);
-    args.push_back(GetEvictionPolicy(op));
-    Map<String, ObjectRef> ann;
-    if (TargetIsSm100(T.target) && is_load &&
-        (annotations.find("use_2cta") != annotations.end() ||
-         is_cluster_barrier)) {
-      ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+    Call create_descriptor =
+        Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
+    Array<PrimExpr> args;
+    args.reserve(desc.rank + 4);
+    args.push_back(create_descriptor);
+    if (is_load) {
+      args.push_back(barrier_base_id >= 0 ? mbar_handle : PrimExpr(0));
     }
-    tma_copy = Evaluate(Call(DataType::Handle(), tma_op, args, ann));
 
-    if (use_multicast) {
-      Array<PrimExpr> mc_args = build_multicast_args(args);
-      Stmt multicast_copy =
-          Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args));
+    auto build_multicast_args = [&](const Array<PrimExpr> &regular_args) {
+      Array<PrimExpr> mc_args;
+      mc_args.reserve(regular_args.size() + 1);
+      mc_args.push_back(regular_args[0]); // descriptor
+      mc_args.push_back(regular_args[1]); // mbarrier
+      mc_args.push_back(regular_args[2]); // shared memory pointer
+      mc_args.push_back(IntImm(DataType::Int(32), cluster_mask));
+      for (size_t i = 3; i < regular_args.size(); ++i) {
+        mc_args.push_back(regular_args[i]);
+      }
+      return mc_args;
+    };
 
-      int min_cta_rank = MinRankInClusterMask(cluster_mask);
-      PrimExpr block_rank =
-          Call(DataType::Int(32), block_rank_in_cluster(), {});
-      PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
-      PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
-                                            IntImm(DataType::Int(32), 1)),
-                                IntImm(DataType::Int(32), 0));
-      Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
+    if ((*inner_box_dim) != instruction_dim) {
+      Var loop_var("i");
+      int loop_extent = (*inner_box_dim) / instruction_dim;
+
+      PrimExpr shared_addr = shared_tensor.access_ptr(
+          is_load ? 2 : 1, DataType::Handle(), 1,
+          shared_offset + total_elements * loop_var, total_elements);
+      args.push_back(shared_addr);
+      global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
+      for (auto coord : global_coords) {
+        args.push_back(coord);
+      }
+      int need_reduce = 0;
+      if (!is_load) {
+        args.push_back(need_reduce);
+      }
+      args.push_back(GetEvictionPolicy(op));
       tma_copy =
-          IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
-                     multicast_copy, regular_or_noop);
+          For(loop_var, 0, loop_extent, ForKind::kUnrolled,
+              Evaluate(Call(DataType::Handle(), tma_op, args, tma_ann)));
+
+      if (use_multicast) {
+        Array<PrimExpr> mc_args = build_multicast_args(args);
+        Stmt multicast_copy = For(
+            loop_var, 0, loop_extent, ForKind::kUnrolled,
+            Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args)));
+
+        int min_cta_rank = MinRankInClusterMask(cluster_mask);
+        PrimExpr block_rank =
+            Call(DataType::Int(32), block_rank_in_cluster(), {});
+        PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
+        PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
+                                              IntImm(DataType::Int(32), 1)),
+                                  IntImm(DataType::Int(32), 0));
+        Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
+        tma_copy =
+            IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
+                       multicast_copy, regular_or_noop);
+      }
+    } else {
+      PrimExpr shared_addr = shared_tensor.access_ptr(
+          is_load ? 2 : 1, DataType::Handle(), 1, shared_offset,
+          total_elements);
+      args.push_back(shared_addr);
+      for (auto coord : global_coords) {
+        args.push_back(coord);
+      }
+      int need_reduce = 0;
+      if (!is_load) {
+        args.push_back(need_reduce);
+      }
+      args.push_back(GetEvictionPolicy(op));
+      tma_copy = Evaluate(Call(DataType::Handle(), tma_op, args, tma_ann));
+
+      if (use_multicast) {
+        Array<PrimExpr> mc_args = build_multicast_args(args);
+        Stmt multicast_copy =
+            Evaluate(Call(DataType::Handle(), tma_load_multicast(), mc_args));
+
+        int min_cta_rank = MinRankInClusterMask(cluster_mask);
+        PrimExpr block_rank =
+            Call(DataType::Int(32), block_rank_in_cluster(), {});
+        PrimExpr mask_imm = IntImm(DataType::Int(32), cluster_mask);
+        PrimExpr not_in_mask = EQ(bitwise_and(right_shift(mask_imm, block_rank),
+                                              IntImm(DataType::Int(32), 1)),
+                                  IntImm(DataType::Int(32), 0));
+        Stmt regular_or_noop = IfThenElse(not_in_mask, tma_copy, std::nullopt);
+        tma_copy =
+            IfThenElse(EQ(block_rank, IntImm(DataType::Int(32), min_cta_rank)),
+                       multicast_copy, regular_or_noop);
+      }
     }
   }
 

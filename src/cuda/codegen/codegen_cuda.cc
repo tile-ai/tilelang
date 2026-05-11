@@ -25,6 +25,7 @@
 #include "cuda/codegen/ptx.h"
 #include "op/builtin.h"
 #include "op/distributed.h"
+#include "op/distributed_utils.h"
 #include "op/sync.h"
 #include "transform/common/attr.h"
 
@@ -59,6 +60,24 @@ std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
     const auto *buffer_load = ptr_call->args[0].as<BufferLoadNode>();
     ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
     return buffer_load->buffer->dtype;
+  }
+  return std::nullopt;
+}
+
+std::string RemapRemotePointerExpr(const std::string &ptr_expr,
+                                   const std::string &pe_expr) {
+  return "reinterpret_cast<decltype(" + ptr_expr +
+         ")>(tl::get_remote_base_ptr(" + pe_expr +
+         ") + (tl::get_uintptr_t(" + ptr_expr +
+         ") - tl::get_remote_base_ptr(tl::get_rank())))";
+}
+
+std::optional<PrimExpr> GetDstPEAnnotation(const CallNode *op) {
+  if (auto val = op->annotations.Get("dst_pe")) {
+    PrimExpr pe = Downcast<PrimExpr>(val.value());
+    if (tl::IsRemotePE(pe)) {
+      return pe;
+    }
   }
   return std::nullopt;
 }
@@ -4398,6 +4417,9 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::atomic_add_elem_op())) {
     // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
+    if (auto dst_pe = GetDstPEAnnotation(op)) {
+      dst_ptr = RemapRemotePointerExpr(dst_ptr, PrintExpr(dst_pe.value()));
+    }
     std::string src_value = PrintExpr(op->args[1]);
     this->PrintIndent();
     this->stream << "AtomicAdd(" << dst_ptr << ", " << src_value;
@@ -4409,8 +4431,11 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
     // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
-    os << "AtomicAddRet(" << PrintExpr(op->args[0]) << ", "
-       << PrintExpr(op->args[1]);
+    std::string dst_ptr = PrintExpr(op->args[0]);
+    if (auto dst_pe = GetDstPEAnnotation(op)) {
+      dst_ptr = RemapRemotePointerExpr(dst_ptr, PrintExpr(dst_pe.value()));
+    }
+    os << "AtomicAddRet(" << dst_ptr << ", " << PrintExpr(op->args[1]);
     if (op->args.size() > 2) {
       os << ", " << PrintExpr(op->args[2]);
     }
@@ -4419,6 +4444,9 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
     // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(op->args[0]);
+    if (auto dst_pe = GetDstPEAnnotation(op)) {
+      dst_ptr = RemapRemotePointerExpr(dst_ptr, PrintExpr(dst_pe.value()));
+    }
     std::string src_ptr = PrintExpr(op->args[1]);
     this->PrintIndent();
     this->stream << "AtomicAddx2(" << dst_ptr << ", " << src_ptr;

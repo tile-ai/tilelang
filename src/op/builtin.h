@@ -201,6 +201,12 @@ static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 DataType cuTensorMapType();
 
 /*!
+ * \brief TileLang intrinsic for creating a TMA descriptor whose global address
+ * is remapped to a peer rank using the distributed symmetric allocation table.
+ */
+TVM_DLL const Op &create_remote_tma_descriptor();
+
+/*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
  *
  * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so

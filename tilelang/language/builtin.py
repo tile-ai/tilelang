@@ -318,6 +318,17 @@ def create_tma_descriptor(*args):
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.create_tma_descriptor"), *args)
 
 
+def create_remote_tma_descriptor(*args):
+    """Create a peer-remapped Tensor Memory Access descriptor.
+
+    This internal API has the same descriptor payload as
+    ``create_tma_descriptor`` with an extra leading ``dst_pe`` argument. The
+    host/runtime side remaps the descriptor base pointer through the distributed
+    symmetric allocation table before encoding the CUtensorMap.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.create_remote_tma_descriptor"), *args)
+
+
 def tma_load(*args):
     """Perform a Tensor Memory Access (TMA) load operation.
 

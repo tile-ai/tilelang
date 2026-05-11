@@ -25,6 +25,12 @@ static thread_local bool __tl_prev_persisting_l2_cache_saved = false;
 #endif
 
 #if (CUDA_MAJOR_VERSION >= 12)
+static std::vector<uint64_t> remote_tensormap_meta_data;
+
+void SetRemoteTensorMapMetaData(const uint64_t *table, size_t table_size) {
+  remote_tensormap_meta_data.assign(table, table + table_size);
+}
+
 template <typename T> static std::string ArrayToStr(const T *ptr, size_t n) {
   std::stringstream ss;
   ss << "[";
@@ -213,6 +219,29 @@ static bool IsPackedAlign16TensorMapType(CUtensorMapDataType type) {
          IsTensorMapDataType16U6Align16B(type);
 }
 
+static void *RemapSymmetricRemoteAddress(void *local_address, int64_t dst_pe) {
+  ICHECK_GE(remote_tensormap_meta_data.size(), 3U)
+      << "Distributed meta_data is not initialized. Call "
+         "kernel.initialize(allocator=...) before using remote TMA "
+         "descriptors.";
+  ICHECK_GE(dst_pe, 0);
+  uint64_t local_rank = remote_tensormap_meta_data[0];
+  if (dst_pe >= static_cast<int64_t>(remote_tensormap_meta_data[1])) {
+    // Remote descriptor lowering may materialize a fixed peer descriptor set
+    // and select among them in device code. Descriptors for peers outside the
+    // current process group are never selected, but still need a valid dummy
+    // address during host-side CUtensorMap encoding.
+    dst_pe = static_cast<int64_t>(local_rank);
+  }
+  uint64_t local_base = remote_tensormap_meta_data[2 + local_rank];
+  uint64_t remote_base = remote_tensormap_meta_data[2 + dst_pe];
+  uint64_t local_ptr = reinterpret_cast<uint64_t>(local_address);
+  ICHECK_GE(local_ptr, local_base)
+      << "Remote TMA descriptor base pointer is outside the symmetric "
+         "allocator arena.";
+  return reinterpret_cast<void *>(remote_base + (local_ptr - local_base));
+}
+
 static bool IsTensorMapSwizzle128BFamily(CUtensorMapSwizzle swizzle) {
   switch (static_cast<int>(swizzle)) {
   case CU_TENSOR_MAP_SWIZZLE_128B:
@@ -329,6 +358,39 @@ struct TensorMapArgs {
     T.globalAddress = args[idx++].cast<void *>();
     ICHECK(T.tensorRank >= 1 && T.tensorRank <= 5);
     ICHECK(args.size() == static_cast<int>(8 + T.tensorRank * 4));
+    for (size_t i = 0; i < T.tensorRank; i++) {
+      T.globalDim[i] = args[idx++].cast<cuuint64_t>();
+    }
+    for (size_t i = 0; i < T.tensorRank; i++) {
+      T.globalStride[i] = args[idx++].cast<cuuint64_t>();
+    }
+    for (size_t i = 0; i < T.tensorRank; i++) {
+      T.boxDim[i] = args[idx++].cast<cuuint64_t>();
+    }
+    for (size_t i = 0; i < T.tensorRank; i++) {
+      T.elementStrides[i] = args[idx++].cast<cuuint64_t>();
+    }
+    T.interleave =
+        static_cast<CUtensorMapInterleave>(args[idx++].cast<int64_t>());
+    T.swizzle = static_cast<CUtensorMapSwizzle>(args[idx++].cast<int64_t>());
+    T.l2Promotion =
+        static_cast<CUtensorMapL2promotion>(args[idx++].cast<int64_t>());
+    T.oobFill =
+        static_cast<CUtensorMapFloatOOBfill>(args[idx++].cast<int64_t>());
+    return T;
+  }
+
+  static TensorMapArgs ExtractRemote(PackedArgs args, int64_t *dst_pe) {
+    TensorMapArgs T;
+    int idx = 0;
+    ICHECK(args.size() >= 9);
+    T.map = reinterpret_cast<CUtensorMap *>(args[idx++].cast<void *>());
+    *dst_pe = args[idx++].cast<int64_t>();
+    T.type = static_cast<CUtensorMapDataType>(args[idx++].cast<int64_t>());
+    T.tensorRank = static_cast<cuuint32_t>(args[idx++].cast<int64_t>());
+    T.globalAddress = args[idx++].cast<void *>();
+    ICHECK(T.tensorRank >= 1 && T.tensorRank <= 5);
+    ICHECK(args.size() == static_cast<int>(9 + T.tensorRank * 4));
     for (size_t i = 0; i < T.tensorRank; i++) {
       T.globalDim[i] = args[idx++].cast<cuuint64_t>();
     }
@@ -551,6 +613,31 @@ TVM_FFI_STATIC_INIT_BLOCK() {
             T.swizzle, T.l2Promotion, T.oobFill);
         if (result != CUDA_SUCCESS) {
           LOG_FATAL << "Failed to initialize the TMA descriptor "
+                    << CudaResultToString(result) << '\n'
+                    << "No local tiled-TMA constraint violation was detected "
+                       "before calling cuTensorMapEncodeTiled.\n"
+                    << T.ToDebugString();
+        }
+        *ret = static_cast<int>(result);
+      });
+
+  refl::GlobalDef().def_packed(
+      tl::tvm_tensormap_create_remote_tiled, [](PackedArgs args, Any *ret) {
+        int64_t dst_pe = 0;
+        TensorMapArgs T = TensorMapArgs::ExtractRemote(args, &dst_pe);
+        T.globalAddress = RemapSymmetricRemoteAddress(T.globalAddress, dst_pe);
+        std::vector<std::string> issues = ValidateTensorMapArgs(T);
+        if (!issues.empty()) {
+          LOG_FATAL << "Invalid remote TMA descriptor arguments for "
+                    << tl::tvm_tensormap_create_remote_tiled << ":\n"
+                    << FormatValidationIssues(issues) << T.ToDebugString();
+        }
+        CUresult result = cuTensorMapEncodeTiled(
+            T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
+            T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave,
+            T.swizzle, T.l2Promotion, T.oobFill);
+        if (result != CUDA_SUCCESS) {
+          LOG_FATAL << "Failed to initialize the remote TMA descriptor "
                     << CudaResultToString(result) << '\n'
                     << "No local tiled-TMA constraint violation was detected "
                        "before calling cuTensorMapEncodeTiled.\n"

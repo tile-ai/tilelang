@@ -13,6 +13,7 @@
 #include "cuda/op/copy.h"
 #include "layout/layout.h"
 #include "op/builtin.h"
+#include "op/distributed_utils.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
@@ -61,6 +62,73 @@ bool UseTMA(const AtomicAddNode &op) {
     }
   }
   return false;
+}
+
+constexpr int kMaxRemoteTMADescriptors = 8;
+
+PrimExpr GetRemotePEAnnotation(const AtomicAddNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    return Downcast<PrimExpr>(val.value());
+  }
+  return RemotePESentinel();
+}
+
+Call MakeDescriptorCall(const TMADesc &desc, Optional<PrimExpr> dst_pe) {
+  Array<PrimExpr> args = desc.EncodeCallArgs();
+  if (dst_pe.defined()) {
+    Array<PrimExpr> remote_args;
+    remote_args.reserve(args.size() + 1);
+    remote_args.push_back(dst_pe.value());
+    remote_args.insert(remote_args.end(), args.begin(), args.end());
+    return Call(DataType::Handle(), create_remote_tma_descriptor(),
+                remote_args);
+  }
+  return Call(DataType::Handle(), create_tma_descriptor(), args);
+}
+
+Stmt MakeTMAReduceStmt(const TMADesc &desc, const Buffer &shared_tensor,
+                       PrimExpr shared_offset, PrimExpr total_elements,
+                       Array<PrimExpr> global_coords,
+                       int inner_box_dim, int instruction_dim,
+                       const Map<String, ObjectRef> &op_annotations,
+                       Optional<PrimExpr> dst_pe) {
+  Call create_descriptor = MakeDescriptorCall(desc, dst_pe);
+
+  if (inner_box_dim != instruction_dim) {
+    Var loop_var("i");
+    int loop_extent = inner_box_dim / instruction_dim;
+
+    Array<PrimExpr> args;
+    args.reserve(desc.rank + 4);
+    args.push_back(create_descriptor);
+    PrimExpr shared_addr = shared_tensor.access_ptr(
+        1, DataType::Handle(), 1, shared_offset + total_elements * loop_var,
+        total_elements);
+    args.push_back(shared_addr);
+    Array<PrimExpr> loop_global_coords = global_coords;
+    loop_global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
+    for (auto coord : loop_global_coords) {
+      args.push_back(coord);
+    }
+    args.push_back(1);
+    args.push_back(0);
+    return For(loop_var, 0, loop_extent, ForKind::kUnrolled,
+               Evaluate(Call(DataType::Handle(), tma_store(), args,
+                             op_annotations)));
+  }
+
+  Array<PrimExpr> args;
+  args.reserve(desc.rank + 4);
+  args.push_back(create_descriptor);
+  PrimExpr shared_addr = shared_tensor.access_ptr(
+      1, DataType::Handle(), 1, shared_offset, total_elements);
+  args.push_back(shared_addr);
+  for (auto coord : global_coords) {
+    args.push_back(coord);
+  }
+  args.push_back(1);
+  args.push_back(0);
+  return Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations));
 }
 
 Array<IterVar> MakeIterVars(const AtomicAddNode &op) {
@@ -181,6 +249,7 @@ For MakeSIMTLoop(const AtomicAddNode &op, arith::Analyzer *analyzer) {
       Call(DataType::Handle(), tl::access_ptr(),
            {BufferLoad(op.dst, dst_indices), make_const(idx_dtype, 1),
             make_const(DataType::Int(32), 3)});
+  dst_ptr = RemapRemoteAddress(dst_ptr, GetRemotePEAnnotation(op, "dst_pe"));
 
   new_args.push_back(dst_ptr);
   new_args.push_back(src_value_arg);
@@ -188,6 +257,7 @@ For MakeSIMTLoop(const AtomicAddNode &op, arith::Analyzer *analyzer) {
 
   auto annotations = op.annotations;
   annotations.erase("use_tma");
+  annotations.erase("dst_pe");
   Call atomicadd_call =
       tvm::tirx::Call(op.dst->dtype, op.GetElemOp(), new_args, annotations);
 
@@ -309,6 +379,7 @@ struct AtomicAdd {
         << shared_tensor->dtype << " and " << global_tensor->dtype;
 
     desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
+    PrimExpr dst_pe = GetRemotePEAnnotation(op, "dst_pe");
     desc.global_addr = global_tensor->data;
     desc.global_shape = ReverseArray(global_tensor->shape);
     Array<PrimExpr> global_coords =
@@ -437,9 +508,6 @@ struct AtomicAdd {
       shared_offset += shared_indices[i] * shared_strides[i];
     }
 
-    Call create_descriptor = Call(DataType::Handle(), create_tma_descriptor(),
-                                  desc.EncodeCallArgs());
-
     PrimExpr total_elements = 1;
     for (auto e : desc.smem_box) {
       total_elements *= e;
@@ -447,43 +515,25 @@ struct AtomicAdd {
 
     auto op_annotations = op.annotations;
     op_annotations.erase("use_tma");
+    op_annotations.erase("dst_pe");
 
     Stmt tma_reduce;
-    if ((*inner_box_dim) != instruction_dim) {
-      Var loop_var("i");
-      int loop_extent = (*inner_box_dim) / instruction_dim;
-
-      Array<PrimExpr> args;
-      args.reserve(desc.rank + 4);
-      args.push_back(create_descriptor);
-      PrimExpr shared_addr = shared_tensor.access_ptr(
-          1, DataType::Handle(), 1, shared_offset + total_elements * loop_var,
-          total_elements);
-      args.push_back(shared_addr);
-      Array<PrimExpr> loop_global_coords = global_coords;
-      loop_global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
-      for (auto coord : loop_global_coords) {
-        args.push_back(coord);
+    if (IsRemotePE(dst_pe)) {
+      Stmt else_case = MakeTMAReduceStmt(
+          desc, shared_tensor, shared_offset, total_elements, global_coords,
+          *inner_box_dim, instruction_dim, op_annotations,
+          PrimExpr(kMaxRemoteTMADescriptors - 1));
+      for (int pe = kMaxRemoteTMADescriptors - 2; pe >= 0; --pe) {
+        Stmt then_case = MakeTMAReduceStmt(
+            desc, shared_tensor, shared_offset, total_elements, global_coords,
+            *inner_box_dim, instruction_dim, op_annotations, PrimExpr(pe));
+        else_case = IfThenElse(EQ(dst_pe, pe), then_case, else_case);
       }
-      args.push_back(1);
-      args.push_back(0);
-      tma_reduce = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-                       Evaluate(Call(DataType::Handle(), tma_store(), args,
-                                     op_annotations)));
+      tma_reduce = else_case;
     } else {
-      Array<PrimExpr> args;
-      args.reserve(desc.rank + 4);
-      args.push_back(create_descriptor);
-      PrimExpr shared_addr = shared_tensor.access_ptr(
-          1, DataType::Handle(), 1, shared_offset, total_elements);
-      args.push_back(shared_addr);
-      for (auto coord : global_coords) {
-        args.push_back(coord);
-      }
-      args.push_back(1);
-      args.push_back(0);
-      tma_reduce =
-          Evaluate(Call(DataType::Handle(), tma_store(), args, op_annotations));
+      tma_reduce = MakeTMAReduceStmt(
+          desc, shared_tensor, shared_offset, total_elements, global_coords,
+          *inner_box_dim, instruction_dim, op_annotations, std::nullopt);
     }
 
     Array<Stmt> seq;

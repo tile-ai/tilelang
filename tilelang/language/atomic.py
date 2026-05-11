@@ -182,7 +182,14 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     return T.call_intrin("handle", op.Op.get("tl.tileop.atomicmin"), value, dst, annotations=ann if ann else None)
 
 
-def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False, use_tma: bool = False) -> PrimExpr:
+def atomic_add(
+    dst: Buffer,
+    value: PrimExpr,
+    memory_order: str | None = None,
+    return_prev: bool = False,
+    use_tma: bool = False,
+    dst_pe: PrimExpr | int | None = None,
+) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
 
@@ -194,6 +201,7 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
         memory_order (Optional[str]): Optional memory-order name controlling the atomic operation's ordering.
         return_prev (bool): If True, return the previous value; if False, return handle (default False).
         use_tma (bool): If True, use TMA (cp.reduce) to perform the atomic add. This is available only for sm90+ (default False).
+        dst_pe (Optional[Union[PrimExpr, int]]): Remote PE for symmetric destination addressing.
 
     Returns:
         PrimExpr: A handle representing the atomic addition operation, or the previous value if return_prev is True.
@@ -229,6 +237,9 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
 
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
+    ann = {}
+    if dst_pe is not None:
+        ann["dst_pe"] = dst_pe
 
     # Thread-level atomic add, where both extent can't be inferred
     if dst_extent is None and src_extent is None:
@@ -237,7 +248,7 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
 
         # Pass destination by pointer to match device signature
         if memory_order is None:
-            return T.call_intrin(return_type, atomic_add_op, T.access_ptr(dst, "rw"), value)
+            return T.call_intrin(return_type, atomic_add_op, T.access_ptr(dst, "rw"), value, annotations=ann if ann else None)
         else:
             return T.call_intrin(
                 return_type,
@@ -245,6 +256,7 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
                 T.access_ptr(dst, "rw"),
                 value,
                 _MEMORY_ORDER_ID_MAP[memory_order],
+                annotations=ann if ann else None,
             )
 
     # When both arguments are Buffer, we can check whether they are structural equal.
@@ -268,8 +280,6 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     if return_prev:
         raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
 
-    # Build annotations dict
-    ann = {}
     if use_tma:
         ann["use_tma"] = 1
     if memory_order is not None:
@@ -278,13 +288,14 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None, re
     return T.call_intrin("handle", op.Op.get("tl.tileop.atomicadd"), value, dst, annotations=ann if ann else None)
 
 
-def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
+def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False, dst_pe: PrimExpr | int | None = None) -> PrimExpr:
     """Perform an atomic addition operation with double-width operands.
 
     Args:
         dst (Buffer): Destination buffer where the atomic addition will be performed
         value (PrimExpr): Value to be atomically added (double-width)
         return_prev (bool): If True, return the previous value; if False, return handle (default False)
+        dst_pe (Optional[Union[PrimExpr, int]]): Remote PE for symmetric destination addressing.
 
     Returns:
         PrimExpr: Handle to the double-width atomic addition operation, or the previous value if return_prev is True
@@ -313,7 +324,16 @@ def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
     """
     atomic_addx2_op = op.Op.get("tl.atomic_addx2_elem_op") if return_prev else op.Op.get("tl.atomic_addx2_elem_op")
     return_type = dst.dtype if return_prev else "handle"
-    return T.call_intrin(return_type, atomic_addx2_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
+    ann = {}
+    if dst_pe is not None:
+        ann["dst_pe"] = dst_pe
+    return T.call_intrin(
+        return_type,
+        atomic_addx2_op,
+        T.access_ptr(dst, "rw"),
+        T.access_ptr(value, "r"),
+        annotations=ann if ann else None,
+    )
 
 
 def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:

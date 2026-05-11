@@ -180,20 +180,28 @@ public:
 
   PrimExpr VisitExpr_(const CallNode *call) final {
     if (call->op.same_as(create_tma_descriptor()) ||
+        call->op.same_as(create_remote_tma_descriptor()) ||
         call->op.same_as(create_tma_im2col_descriptor())) {
       Var var;
       auto iter = desc_map_.find(GetRef<Call>(call));
       if (iter != desc_map_.end()) {
         var = iter->second;
       } else {
-        String name = call->args[2].as<Var>().value()->name_hint;
-        var = Var(name + "_desc",
+        bool is_remote = call->op.same_as(create_remote_tma_descriptor());
+        int base_arg_index = is_remote ? 3 : 2;
+        String name = call->args[base_arg_index].as<Var>().value()->name_hint;
+        std::string suffix = "_desc";
+        if (is_remote) {
+          suffix += "_pe";
+          suffix += std::to_string(call->args[0].as<IntImmNode>()->value);
+        }
+        var = Var(name + suffix,
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
         Call call_ref = GetRef<Call>(call);
         desc_map_[call_ref] = var;
         Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
         init_desc_arg_map_.Set(var, init_desc_args);
-        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
+        desc_inits_.push_back({call->args[base_arg_index].as<Var>().value().get(),
                                MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
@@ -240,6 +248,8 @@ private:
     Array<PrimExpr> init_desc_args;
     if (call->op.same_as(create_tma_descriptor())) {
       init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
+    } else if (call->op.same_as(create_remote_tma_descriptor())) {
+      init_desc_args.push_back(StringImm(tvm_tensormap_create_remote_tiled));
     } else if (call->op.same_as(create_tma_im2col_descriptor())) {
       init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
     } else {
