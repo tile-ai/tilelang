@@ -374,22 +374,22 @@ class AutoTuner:
             if supply_prog is not None:
                 logger.warning("`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context.")
             frozen_inputs = list(captured_inputs)
-            device_cache = {}
+            cached_tensors_by_device = {}
 
-            def supply_prog(device, _frozen_inputs=frozen_inputs, _device_cache=device_cache):
+            def supply_prog(device, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
                 if not isinstance(device, (int, str, torch.device)):
                     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-                if device not in _device_cache:
+                if device not in _cached_tensors_by_device:
                     if isinstance(device, torch.device):
                         target_device = device
                     elif isinstance(device, str):
                         target_device = torch.device(device)
                     else:
                         target_device = torch.device(f"cuda:{device}") if torch.cuda.is_available() else torch.device("cpu")
-                    _device_cache[device] = [
+                    _cached_tensors_by_device[device] = [
                         tensor.to(device=target_device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
                     ]
-                return _device_cache[device]
+                return _cached_tensors_by_device[device]
 
         self.profile_args = ProfileArgs(
             supply_type=supply_type,
@@ -489,7 +489,7 @@ class AutoTuner:
                 f"grouped compilation is currently implemented for CUDA+tvm_ffi only; "
                 f"fallback to per-config mode (target={target_kind}, execution_backend={execution_backend})"
             )
-            logger.info("%s", grouped_compile_reason)
+            logger.warning("%s", grouped_compile_reason)
         return target_kind, execution_backend, grouped_compile_active, grouped_compile_reason
 
     def _resolve_num_compile_workers(self) -> int:
@@ -590,15 +590,15 @@ class AutoTuner:
     def _benchmark_worker_loop(
         self,
         worker_device: int,
-        worker_queue: queue.SimpleQueue,
-        result_queue: queue.SimpleQueue,
+        worker_queue: queue.Queue,
+        result_queue: queue.Queue,
         start_event: threading.Event,
         target_kind: str,
         benchmark_target: Callable[..., tuple[float, float | None]],
         timeout: int,
         worker_state: _BenchmarkWorkerState,
     ) -> None:
-        if torch.cuda.is_available() and target_kind == "cuda":
+        if target_kind == "cuda":
             try:
                 torch.cuda.set_device(worker_device)
             except Exception:
@@ -617,7 +617,7 @@ class AutoTuner:
             jit_kernel, config, idx = item
             try:
                 if timeout > 0:
-                    call_result_queue: queue.SimpleQueue = queue.SimpleQueue()
+                    call_result_queue: queue.Queue = queue.Queue()
                     call_state = _BenchmarkWorkerState(
                         jit_input_tensors=worker_state.jit_input_tensors,
                         ref_input_tensors=worker_state.ref_input_tensors,
@@ -627,7 +627,7 @@ class AutoTuner:
                     def _run_benchmark_target(
                         _jit_kernel: tilelang.JITKernel = jit_kernel,
                         _worker_state: _BenchmarkWorkerState = call_state,
-                        _call_result_queue: queue.SimpleQueue = call_result_queue,
+                        _call_result_queue: queue.Queue = call_result_queue,
                     ):
                         try:
                             latency, worker_ref_latency = benchmark_target(
@@ -865,11 +865,8 @@ class AutoTuner:
             benchmark_multi_gpu: Whether to benchmark configurations across multiple CUDA GPUs.
 
         Returns:
-            AutotuneResult: The best autotuned artifact.
+            AutotuneResult: Results of the auto-tuning process.
         """
-        if group_compile_size <= 0:
-            raise ValueError("group_compile_size must be > 0")
-
         _init_logger_handlers()
 
         sig = inspect.signature(self.fn)
@@ -1009,8 +1006,8 @@ class AutoTuner:
             tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
 
         benchmark_worker_devices = benchmark_device_list if benchmark_multi_gpu_active else [benchmark_device_list[0]]
-        benchmark_task_queues = [queue.SimpleQueue() for _ in benchmark_worker_devices]
-        benchmark_result_queue: queue.SimpleQueue = queue.SimpleQueue()
+        benchmark_task_queues = [queue.Queue() for _ in benchmark_worker_devices]
+        benchmark_result_queue: queue.Queue = queue.Queue()
         benchmark_start_event = threading.Event()
         benchmark_threads: list[threading.Thread] = []
         benchmark_expected_results = 0
