@@ -61,7 +61,6 @@ class GemmSP(Node, Scriptable):
     def lower(self, target: Target, layout_map: dict, thread_nums: int, thread_var: tir.Var):
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
-        print(f"{gemm_inst=}, {impl_class=}, {target=}, {layout_map=}, {thread_nums=}, {thread_var=}")
         return impl_class(self).lower(layout_map, target, thread_nums, thread_var)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
