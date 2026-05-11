@@ -274,6 +274,29 @@ template <> struct Signal<uint64_t> {
   }
 };
 
+template <typename T> struct SignalAdd {
+  TL_DEVICE static void run(void *, T) {
+    static_assert(always_false_v<T>,
+                  "tl::multimem::SignalAdd: unsupported type");
+  }
+};
+template <> struct SignalAdd<uint32_t> {
+  TL_DEVICE static void run(void *mcast_ptr, uint32_t val) {
+    asm volatile("multimem.red.release.sys.global.add.u32 [%0], %1;"
+                 :
+                 : "l"(mcast_ptr), "r"(val)
+                 : "memory");
+  }
+};
+template <> struct SignalAdd<int32_t> {
+  TL_DEVICE static void run(void *mcast_ptr, int32_t val) {
+    asm volatile("multimem.red.release.sys.global.add.s32 [%0], %1;"
+                 :
+                 : "l"(mcast_ptr), "r"(val)
+                 : "memory");
+  }
+};
+
 // === Bulk async TMA-to-multicast (SM100+ / PTX 9.1+ / CUDA 13.0+) ===
 // Both: shared::cta → global(mcast), bulk_group completion
 

@@ -248,6 +248,7 @@ def tma_copy(
     dst: BufferLikeType,
     *,
     barrier=None,
+    leader_thread_extent: int | None = None,
     leader_scope_threads: int | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     src_pe: int | tirx.PrimExpr | None = None,
@@ -277,8 +278,10 @@ def tma_copy(
             Required for loads (global -> shared). Not needed for stores.
             The TMA load will arrive at this barrier with expected byte count.
             The user must wait on the same barrier via T.mbarrier_wait_parity().
-        leader_scope_threads: Number of threads in each TMA leader-election scope
-            (e.g., 32 for per-warp). Defaults to the thread extend in the current context if not specified.
+        leader_thread_extent: Logical thread group size for electing one TMA
+            issuing thread. Defaults to the whole CTA. Use 32 to issue one copy
+            per warp when each warp owns independent buffers/barriers.
+        leader_scope_threads: Deprecated alias for leader_thread_extent.
         eviction_policy: Cache eviction policy. Defaults to None.
         src_pe: Remote PE for global-source TMA copy.
         dst_pe: Remote PE for global-destination TMA copy.
@@ -311,17 +314,28 @@ def tma_copy(
 
         ann["barrier"] = _mbar_to_buffer_load(barrier)
 
+    if leader_thread_extent is not None and leader_scope_threads is not None:
+        raise ValueError("Specify only one of leader_thread_extent or leader_scope_threads")
+    if leader_thread_extent is None:
+        leader_thread_extent = leader_scope_threads
     if leader_scope_threads is not None:
-        if not isinstance(leader_scope_threads, int) or leader_scope_threads <= 0:
-            raise ValueError(f"leader_scope_threads must be a positive int, got {leader_scope_threads}")
-        if leader_scope_threads % 32 != 0:
-            raise ValueError(f"leader_scope_threads must be a multiple of warp size (32), got {leader_scope_threads}")
-        if "leader_scope_threads" not in ann:
-            ann["leader_scope_threads"] = leader_scope_threads
+        import warnings
+
+        warnings.warn(
+            "leader_scope_threads is deprecated; use leader_thread_extent.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     if "eviction_policy" not in ann and eviction_policy is not None:
         eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
         ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if "leader_thread_extent" not in ann and leader_thread_extent is not None:
+        if not isinstance(leader_thread_extent, int) or leader_thread_extent <= 0:
+            raise ValueError(f"leader_thread_extent must be a positive int, got {leader_thread_extent}")
+        if leader_thread_extent % 32 != 0:
+            raise ValueError(f"leader_thread_extent must be a multiple of warp size (32), got {leader_thread_extent}")
+        ann["leader_thread_extent"] = int(leader_thread_extent)
     if "src_pe" not in ann and src_pe is not None:
         ann["src_pe"] = src_pe
     if "dst_pe" not in ann and dst_pe is not None:

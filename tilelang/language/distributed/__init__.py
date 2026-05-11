@@ -34,6 +34,7 @@ from .multimem import (
     multimem_red,
     multimem_tma_store,
     multimem_signal,
+    multimem_signal_add,
 )
 
 __all__ = [
@@ -61,4 +62,5 @@ __all__ = [
     "multimem_red",
     "multimem_tma_store",
     "multimem_signal",
+    "multimem_signal_add",
 ]

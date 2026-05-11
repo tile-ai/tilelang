@@ -99,6 +99,19 @@ int64_t TMAElementsForBytes(int64_t bytes, DataType dtype) {
   return bytes * 8 / dtype.bits();
 }
 
+int64_t TMASwizzleBytes(int swizzle) {
+  if (swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B)) {
+    return 32;
+  }
+  if (swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
+    return 64;
+  }
+  if (swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
+    return 128;
+  }
+  return 0;
+}
+
 PrimExpr GetCopyMbarPhaseExpr(const Map<String, ObjectRef> &annotations,
                               const LowerArgs &T) {
   PrimExpr phase = T.mbar_phase_expr;
@@ -239,15 +252,20 @@ PrimExpr GetTmaRemotePE(const CopyNode &op, bool is_load) {
   return remote_pe;
 }
 
-PrimExpr GetLeaderScopeThreads(const CopyNode &op, const LowerArgs &T) {
-  if (auto val = op.annotations.Get("leader_scope_threads")) {
+PrimExpr GetTmaLeaderThreadExtent(const CopyNode &op, const LowerArgs &T) {
+  auto val = op.annotations.Get("leader_thread_extent");
+  if (!val) {
+    val = op.annotations.Get("leader_scope_threads");
+  }
+  if (val) {
     auto int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "T.tma_copy leader_scope_threads annotation must be an "
-                       "integer constant.";
+    ICHECK(int_val)
+        << "T.tma_copy leader_thread_extent annotation must be an integer "
+           "constant.";
     ICHECK_GT(int_val->value, 0)
-        << "T.tma_copy leader_scope_threads must be positive.";
+        << "T.tma_copy leader_thread_extent must be positive.";
     ICHECK_EQ(int_val->value % 32, 0)
-        << "T.tma_copy leader_scope_threads must be a multiple of warp size "
+        << "T.tma_copy leader_thread_extent must be a multiple of warp size "
            "(32).";
     return IntImm(DataType::Int(32), int_val->value);
   }
@@ -1740,6 +1758,65 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     }
   }
 
+  int64_t swizzle_bytes = TMASwizzleBytes(desc.swizzle);
+  if (desc.rank == 2 && swizzle_bytes > 0) {
+    auto tile_cols = as_const_int(desc.smem_box[0]);
+    auto tile_rows = as_const_int(desc.smem_box[1]);
+    int64_t swizzle_elements =
+        TMAElementsForBytes(swizzle_bytes, global_tensor->dtype);
+    PrimExpr swizzle_elements_expr =
+        IntImm(DataType::Int(64), swizzle_elements);
+    PrimExpr swizzle_elements_coord =
+        IntImm(global_coords[0].dtype(), swizzle_elements);
+    PrimExpr zero_coord = make_zero(global_coords[0].dtype());
+    PrimExpr row_stride_bytes = desc.global_stride[1];
+    PrimExpr contiguous_row_stride =
+        TMABytesFromElements(desc.global_shape[0], global_tensor->dtype);
+    bool can_use_5d_swizzle =
+        tile_cols != nullptr && tile_rows != nullptr &&
+        *tile_cols % swizzle_elements == 0 && *tile_rows <= 256 &&
+        (*tile_cols / swizzle_elements) <= 256 &&
+        CanProveEqual(analyzer, row_stride_bytes, contiguous_row_stride) &&
+        analyzer->CanProve(
+            EQ(FloorMod(global_coords[0], swizzle_elements_coord), zero_coord));
+
+    if (can_use_5d_swizzle) {
+      PrimExpr cols = desc.global_shape[0];
+      PrimExpr rows = desc.global_shape[1];
+      PrimExpr matrix_elems =
+          cast(DataType::Int(64), rows) * cast(DataType::Int(64), cols);
+      PrimExpr matrix_bytes =
+          TMABytesFromElements(matrix_elems, global_tensor->dtype);
+      PrimExpr col_groups = analyzer->Simplify(
+          FloorDiv(cast(DataType::Int(64), cols) + swizzle_elements_expr -
+                       IntImm(DataType::Int(64), 1),
+                   swizzle_elements_expr));
+      PrimExpr col_coord = analyzer->Simplify(FloorDiv(
+          cast(DataType::Int(64), global_coords[0]), swizzle_elements_expr));
+      PrimExpr zero_i64 = IntImm(DataType::Int(64), 0);
+      PrimExpr one_i64 = IntImm(DataType::Int(64), 1);
+
+      desc.rank = 5;
+      desc.global_shape = {swizzle_elements_expr, rows, col_groups, one_i64,
+                           one_i64};
+      desc.global_stride = {
+          TMABytesFromElements(IntImm(DataType::Int(64), 1),
+                               global_tensor->dtype),
+          row_stride_bytes, IntImm(DataType::Int(64), swizzle_bytes),
+          matrix_bytes, matrix_bytes};
+      desc.smem_box = {
+          swizzle_elements_expr,
+          IntImm(DataType::Int(64), *tile_rows),
+          IntImm(DataType::Int(64), *tile_cols / swizzle_elements),
+          one_i64,
+          one_i64,
+      };
+      desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
+      global_coords = {zero_i64, global_coords[1], col_coord, zero_i64,
+                       zero_i64};
+    }
+  }
+
   auto inner_box_dim = as_const_int(desc.smem_box[0]);
   if (inner_box_dim == nullptr) {
     DLOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
@@ -1975,9 +2052,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer =
-        IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
-                   SeqStmt(producer_seq));
+    Stmt producer = IfThenElse(
+        MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
+        SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
       return producer;
@@ -1990,8 +2067,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
-                        tma_copy);
+  tma_copy = IfThenElse(
+      MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)), tma_copy);
 
   return tma_copy;
 }
@@ -2283,9 +2360,9 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer =
-        IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
-                   SeqStmt(producer_seq));
+    Stmt producer = IfThenElse(
+        MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)),
+        SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
       return producer;
@@ -2298,8 +2375,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
     return SeqStmt({producer, wait_stmt});
   }
 
-  tma_copy = IfThenElse(MakeTmaLeaderCondition(GetLeaderScopeThreads(op, T)),
-                        tma_copy);
+  tma_copy = IfThenElse(
+      MakeTmaLeaderCondition(GetTmaLeaderThreadExtent(op, T)), tma_copy);
   return tma_copy;
 }
 
