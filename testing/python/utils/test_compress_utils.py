@@ -1,106 +1,136 @@
+import pytest
 import torch
 import tilelang
+from tilelang.intrinsics.mma_sp_macro_generator import get_e_factor
 import tilelang.testing
+import tilelang.language as T
 
-from tilelang.utils.sparse import compress, randn_semi_sparse
+from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse, torch_compress
+from tilelang.utils.tensor import torch_assert_close
 
 
-def torch_compress(dense: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Reference 2:4 sparse compressor in pure PyTorch with natural row-major metadata.
+def matmul(
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    trans_A,
+    trans_B,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    metadata_dtype,
+    E_factor,
+    num_stages,
+    threads,
+):
+    A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
+    B_shape = (N, K) if trans_B else (K, N)
+    A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
+    B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
+    E_shape = (M, K // E_factor) if not trans_A else (K // E_factor, M)
+    E_shared_shape = (block_M, block_K // E_factor) if not trans_A else (block_K // E_factor, block_M)
 
-    Each 4-bit chunk of the metadata integer encodes the two nonzero positions
-    within one group of 4 consecutive elements:
-        bits [1:0] = index of first  nonzero (0-3)
-        bits [3:2] = index of second nonzero (0-3)
+    @T.prim_func
+    def main(
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor(E_shape, metadata_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+            E_shared = T.alloc_shared(E_shared_shape, metadata_dtype)
+            C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
+            T.clear(C_frag)
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                if trans_A:
+                    T.copy(E[k * block_K // E_factor, by * block_M], E_shared)
+                    T.copy(A_sparse[k * block_K // 2, by * block_M], A_shared)
+                else:
+                    T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
+                    T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
+                if trans_B:
+                    T.copy(B[bx * block_N, k * block_K], B_shared)
+                else:
+                    T.copy(B[k * block_K, bx * block_N], B_shared)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B, trans_A)
+            T.copy(C_frag, C[by * block_M, bx * block_N])
 
-    This layout matches tilelang.utils.sparse.compress() for all supported dtypes.
+    return main
 
-    For 8-bit types that do not support gather natively (e.g. float8), the dense
-    tensor is temporarily viewed as int8 before indexing and restored afterward.
-    """
-    if dense.dim() != 2:
-        raise RuntimeError(f"Expected 2D tensor, got {dense.dim()}D")
-    m, k = dense.shape
 
-    is_32bit = dense.dtype == torch.float32
-    ksparse = 2 if is_32bit else 4
-    # int8 uses int32 metadata to match CUTLASS convention; all others use int16
-    meta_dtype = torch.int32 if dense.dtype == torch.int8 else torch.int16
-    quadbits = meta_dtype.itemsize * 8 // 4  # 4-bit groups that fit in one meta element
-
-    # 8-bit non-integer types (float8 variants) may not support gather; view as int8
-    gather_dtype = torch.int8 if (dense.element_size() == 1 and dense.dtype != torch.int8) else None
-    work = dense.view(gather_dtype) if gather_dtype is not None else dense
-
-    groups = work.view(-1, k // ksparse, ksparse)
-    nz = groups != 0
-    if not is_32bit:
-        m0, m1, _m2, m3 = nz.unbind(-1)
+def generate_dense_input(N, trans_A, trans_B, in_dtype, seed=0):
+    torch.manual_seed(seed)
+    is_8bit = "8" in str(in_dtype)
+    is_unsigned = "uint" in str(in_dtype)
+    is_int = "int" in str(in_dtype)
+    if is_int:
+        if is_8bit:
+            low, high = (0, 128) if is_unsigned else (-64, 64)
+        else:
+            low, high = (0, 258) if is_unsigned else (-128, 128)
+        A = randint_semi_sparse(N, N, low=low, high=high, dtype=in_dtype, device="cuda", transposed=trans_A)
+        B = torch.randint(size=(N, N) if trans_B else (N, N), low=low, high=high, dtype=in_dtype, device="cuda")
     else:
-        m0, _m2 = m1, m3 = nz.unbind(-1)
-
-    meta_ncols = k // (ksparse * quadbits)
-
-    expr0 = m0 & m1
-    expr1 = ~m0 & m1
-    expr2 = ~m0 & ~m1
-    idxs0 = expr1.to(torch.int64) | (expr2.to(torch.int64) << 1)
-    idxs1 = (expr0 | expr2 | m3).to(torch.int64) | ((expr1 | ~m1).to(torch.int64) << 1)
-
-    if not is_32bit:
-        sp0 = groups.gather(-1, idxs0.unsqueeze(-1))
-        sp1 = groups.gather(-1, idxs1.unsqueeze(-1))
-        sparse = torch.stack((sp0, sp1), dim=-1).view(m, k // 2)
-    else:
-        sparse = groups.gather(-1, idxs0.unsqueeze(-1) // 2).view(m, k // 2)
-
-    if gather_dtype is not None:
-        sparse = sparse.view(dense.dtype)
-
-    meta_4 = idxs0 | (idxs1 << 2)
-    meta_n = meta_4.view(-1, meta_ncols, quadbits).to(meta_dtype)
-    # Pack 4-bit chunks into each meta element (little-endian)
-    meta = meta_n[:, :, 0]
-    for i in range(1, quadbits):
-        meta = meta | (meta_n[:, :, i] << (4 * i))
-
-    return sparse, meta
+        A = randn_semi_sparse(N, N, dtype=in_dtype, device="cuda", transposed=trans_A)
+        B = torch.randn((N, N) if trans_B else (N, N), device="cuda", dtype=torch.float32).to(in_dtype)
+    return A, B
 
 
-def _test_compress(M, K, dtype):
-    A = randn_semi_sparse(M, K, dtype=dtype, device="cuda")
-    A_sparse, E = compress(A)
-    assert A_sparse.shape == (M, K // 2)
+def _test_compress(dtype, meta_dtype):
+    A, B = generate_dense_input(64, in_dtype=dtype.as_torch(), trans_A=False, trans_B=False)
+    sp_tl, meta_tl = compress(A, meta_dtype=meta_dtype.as_torch())
+    sp_ref, meta_ref = torch_compress(A, meta_dtype=meta_dtype.as_torch())
+    # NOTE: in case that there are multiple zeros, the case might fail occasionally
+    # if we directly compare the compressed sparse values
+    program = matmul(
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        False,
+        False,
+        dtype,
+        dtype,
+        T.int32 if dtype == T.int8 else T.float32,
+        meta_dtype,
+        get_e_factor(dtype, meta_dtype),
+        0,
+        128,
+    )
+    kernel = tilelang.compile(
+        program,
+        out_idx=[3],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
+    )
 
-
-def _test_compress_matches_reference(M, K, dtype):
-    """Verify compress() and torch_compress() produce the same output for 2:4 types."""
-    A = randn_semi_sparse(M, K, dtype=dtype, device="cuda")
-    sp_tl, meta_tl = compress(A)
-    sp_ref, meta_ref = torch_compress(A)
-    torch.testing.assert_close(sp_tl, sp_ref)
-    torch.testing.assert_close(meta_tl, meta_ref)
+    C_tl = kernel(sp_tl, meta_tl, B)
+    C_ref = kernel(sp_ref, meta_ref, B)
+    torch_assert_close(C_tl, C_ref, atol=1e-2, rtol=1e-2)
 
 
 @tilelang.testing.requires_cuda
-def test_compress():
-    for dtype in (torch.float16, torch.bfloat16, torch.float32):
-        _test_compress(1024, 1024, dtype)
-    for name in ("float8_e4m3fn", "float8_e5m2"):
-        dt = getattr(torch, name, None)
-        if dt is not None:
-            _test_compress(1024, 1024, dt)
-
-
-@tilelang.testing.requires_cuda
-def test_compress_matches_reference():
-    """compress() should agree with the pure-PyTorch reference for float16/bfloat16."""
-    for dtype in (torch.float16, torch.bfloat16):
-        _test_compress_matches_reference(1024, 1024, dtype)
+@pytest.mark.parametrize(
+    "dtype, meta_dtype",
+    [
+        (T.int8, T.int8),
+        (T.int8, T.int16),
+        (T.int8, T.int32),
+        (T.float16, T.int8),
+        (T.float16, T.int16),
+        (T.float32, T.int8),
+        (T.float32, T.int16),
+    ],
+)
+def test_compress(dtype, meta_dtype):
+    _test_compress(dtype, meta_dtype)
 
 
 if __name__ == "__main__":
     test_compress()
-    test_compress_matches_reference()
-    print("All tests passed.")
