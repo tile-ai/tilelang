@@ -3,6 +3,8 @@ if(NOT USE_CUDA)
   return()
 endif()
 
+message(STATUS "CUDA Backend is enabled")
+
 set(CMAKE_CUDA_STANDARD 17)
 find_package(CUDAToolkit REQUIRED)
 if(CUDAToolkit_NVCC_EXECUTABLE)
@@ -137,7 +139,7 @@ if(TILELANG_USE_CUDA_STUBS)
 endif()
 
 file(GLOB TILE_LANG_CUDA_SRCS
-  src/runtime/runtime.cc
+  src/backend/cuda/runtime.cc
   src/backend/cuda/codegen/ptx.cc
   src/backend/cuda/codegen/codegen_cuda.cc
   src/backend/cuda/codegen/codegen_py.cc
@@ -156,8 +158,8 @@ link_directories(${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR}/stubs)
 
 # Register stubs for linking and install
 if(TILELANG_USE_CUDA_STUBS)
-  set(TILELANG_ACTIVE_BACKEND_STUB_LINK cuda_stub)
-  set(TILELANG_ACTIVE_BACKEND_STUB_TARGETS cuda_stub cudart_stub nvrtc_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK cuda_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_TARGETS cuda_stub cudart_stub nvrtc_stub)
 endif()
 
 # Register additional RPATH for CUDA toolkit lib directory

@@ -141,8 +141,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     accum_dtype,
     transform_b,
 ):
-    from tilelang.intrinsics.mma_layout import make_mma_swizzle_layout as make_swizzle_layout
-    from tilelang.intrinsics.mma_macro_generator import (
+    from tilelang.cuda.intrinsics.layout.mma_layout import make_mma_swizzle_layout as make_swizzle_layout
+    from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
         TensorCoreIntrinEmitterWithLadderTransform,
     )
 
