@@ -121,6 +121,8 @@ class TensorCoreIntrinEmitter:
         # SM120 f8f6f4 FP4 MMA is m16n8k32.  Although 256 / 4 would allow a
         # k64 fragment by bit count, there is no k64 dispatcher for FP4.
         if str(a_dtype) == "float4_e2m1fn":
+            if self.chunk < 32:
+                raise ValueError("FP4 MMA requires chunk to be a multiple of 32 (m16n8k32)")
             self.k_dim = min(32, self.chunk)
         else:
             self.k_dim = min(256 // a_dtype.bits, self.chunk)

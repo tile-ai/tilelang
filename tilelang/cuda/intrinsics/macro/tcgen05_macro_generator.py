@@ -160,17 +160,17 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def _determinate_swizzle_mode(self, buffer: Buffer, layout: Layout) -> SwizzleMode:
         # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
         tir_buffer = buffer.buffer if isinstance(buffer, BufferRegion) else buffer
-        if layout is None or layout.is_equal(make_linear_layout(buffer)):
+        if layout is None or layout.is_equal(make_linear_layout(tir_buffer)):
             return SwizzleMode.NONE
         if DataType(tir_buffer.dtype).bits < 8:
-            if layout.is_equal(make_align16b_swizzled_layout(buffer)):
+            if layout.is_equal(make_align16b_swizzled_layout(tir_buffer)):
                 return SwizzleMode.SWIZZLE_128B
             raise ValueError(f"Unsupported sub-byte swizzle mode: {layout}")
-        elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
+        elif layout.is_equal(make_quarter_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_32B
-        elif layout.is_equal(make_half_bank_swizzled_layout(buffer)):
+        elif layout.is_equal(make_half_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_64B
-        elif layout.is_equal(make_full_bank_swizzled_layout(buffer)):
+        elif layout.is_equal(make_full_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_128B
         else:
             raise ValueError(f"Unsupported swizzle mode: {layout}")
@@ -543,6 +543,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool, b_is_k_major: bool, scale_in_a: int, scale_in_b: int
     ) -> PrimExpr:
         """Build the 64-bit instruction descriptor for a ``tcgen05.mma`` PTX call."""
+
         def encode_dtype(dtype: str) -> int:
             dtype = str(DataType(dtype))
             if dtype == "float16":

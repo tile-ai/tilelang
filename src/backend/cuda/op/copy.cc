@@ -1215,9 +1215,12 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   if (is_load && barrier_base_id >= 0) {
     PrimExpr total_bytes;
     if (is_align16b_subbyte_layout) {
+      int loop_extent =
+          ((*inner_box_dim) != instruction_dim) ? ((*inner_box_dim) / instruction_dim) : 1;
       // mbarrier transaction bytes track the FP4 payload moved by TMA, not the
       // byte-container shared-memory footprint introduced by 16U4_ALIGN16B.
-      total_bytes = TMABytesFromElements(total_elements, shared_tensor->dtype);
+      total_bytes =
+          TMABytesFromElements(total_elements * loop_extent, shared_tensor->dtype);
     } else if ((*inner_box_dim) != instruction_dim) {
       int loop_extent = (*inner_box_dim) / instruction_dim;
       total_bytes = TMABytesFromElements(total_elements * loop_extent,
