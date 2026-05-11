@@ -9,6 +9,7 @@ from tilelang import _ffi_api
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
     Layout,
+    make_align16b_swizzled_layout,
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
@@ -133,8 +134,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def _determinate_swizzle_mode(self, buffer: Buffer, layout: Layout) -> SwizzleMode:
         # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
+        tir_buffer = buffer.buffer if isinstance(buffer, BufferRegion) else buffer
         if layout is None or layout.is_equal(make_linear_layout(buffer)):
             return SwizzleMode.NONE
+        if DataType(tir_buffer.dtype).bits < 8:
+            if layout.is_equal(make_align16b_swizzled_layout(buffer)):
+                return SwizzleMode.SWIZZLE_128B
+            raise ValueError(f"Unsupported sub-byte swizzle mode: {layout}")
         elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
             return SwizzleMode.SWIZZLE_32B
         elif layout.is_equal(make_half_bank_swizzled_layout(buffer)):
@@ -918,6 +924,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             atom_n,
             atom_k,
             DataType(self.a_dtype),
+            DataType(self.b_dtype),
             DataType(self.accum_dtype),
             a_is_k_major,
             b_is_k_major,

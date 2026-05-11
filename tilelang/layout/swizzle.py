@@ -3,10 +3,14 @@
 # pylint: disable=invalid-name, unsupported-binary-operation
 from __future__ import annotations
 
+import warnings
 import tvm
 from tvm import tir
 from tilelang import _ffi_api
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple
+
+
+_WARNED_LEGACY_TCGEN05_LAYOUT_FFI = False
 
 
 def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tir.Buffer, list[int], str]:
@@ -84,10 +88,36 @@ def make_wgmma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k
 
 # for TCGEN05MMA Intrinsics
 def make_tcgen05mma_swizzled_layout(buffer: BufferLikeType, continuity: int = None, k_major: bool = True):
-    buf, _, _ = _get_buffer_info(buffer)
+    global _WARNED_LEGACY_TCGEN05_LAYOUT_FFI
+    buf, shape, _ = _get_buffer_info(buffer)
+    stride, continuous = _get_stride_continuous(buffer)
+    element_size = _get_element_size(buffer)
     if continuity is None:
-        continuity = -1
-    return _ffi_api.make_tcgen05mma_swizzled_layout(buf, continuity, k_major)
+        continuity = continuous
+    try:
+        base = _ffi_api.make_tcgen05mma_swizzled_layout(
+            stride,
+            continuous,
+            continuity,
+            element_size,
+            k_major,
+        )
+        return base.reshape(shape)
+    except TypeError as err:
+        # Keep Python sources compatible with older built libs that still expose
+        # the legacy FFI signature: (buffer, continuity, k_major).
+        if "Mismatched number of arguments" not in str(err):
+            raise
+        if not _WARNED_LEGACY_TCGEN05_LAYOUT_FFI:
+            warnings.warn(
+                "Detected legacy tcgen05 swizzle-layout FFI in the loaded native "
+                "TileLang library. Rebuild the native `build/` artifacts so FP4 "
+                "SM100/SM110 kernels use the current gap-aware ALIGN16B layout.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            _WARNED_LEGACY_TCGEN05_LAYOUT_FFI = True
+        return _ffi_api.make_tcgen05mma_swizzled_layout(buf, continuity, k_major)
 
 
 # swizzle 128B
@@ -124,6 +154,24 @@ def make_quarter_bank_swizzled_layout(buffer: BufferLikeType):
     """
     buf, _, _ = _get_buffer_info(buffer)
     return _ffi_api.make_quarter_bank_swizzled_layout(buf)
+
+
+def make_align16b_swizzled_layout(buffer: BufferLikeType):
+    """ALIGN16B gap-aware 128B swizzle for sub-byte types (e.g. FP4).
+
+    Each group of 16 sub-byte elements occupies 16 SMEM bytes (8 data + 8 gap).
+    The layout's index formula, combined with div_factor=2, skips the gap bytes.
+
+    Args:
+        buffer: BufferLikeType with a sub-byte dtype (e.g. float4_e2m1fn)
+    """
+    buf, _, _ = _get_buffer_info(buffer)
+    if hasattr(_ffi_api, "make_align16b_swizzled_layout"):
+        return _ffi_api.make_align16b_swizzled_layout(buf)
+    # Compatibility with native builds that already route sub-byte TCGEN05
+    # layouts through makeGemmABLayoutSm100, but do not expose the dedicated FFI
+    # wrapper yet. Rebuild native artifacts to use the direct symbol.
+    return make_tcgen05mma_swizzled_layout(buffer)
 
 
 def make_linear_layout(buffer_or_load_or_region: BufferLikeType):

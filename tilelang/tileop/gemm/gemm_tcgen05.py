@@ -6,6 +6,7 @@ from tilelang.layout import (
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
+    make_tcgen05mma_swizzled_layout,
     make_linear_layout,
 )
 from tilelang.intrinsics.tcgen05_macro_generator import (
@@ -43,8 +44,29 @@ class GemmTCGEN5(GemmBase):
     of operands A and B.
     """
 
-    def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
-        """Infer a standard shared-memory swizzle layout for TCGEN05 operands."""
+    def infer_shared_layout(self, continuity: int, k_major: bool) -> Callable[[tir.Buffer], Layout]:
+        """Infer the shared-memory layout for TCGEN05 operands.
+
+        Sub-byte inputs (e.g. FP4) must use the TCGEN05-specific layout helper so
+        they match the ALIGN16B + gap-aware SMEM organization expected by TMA and
+        descriptor generation.  When TMA is disabled (non-TMA / cp.async path),
+        the SIMT copy writes packed-linear data, so we return a plain linear layout
+        to keep the SMEM descriptor consistent with the actual data layout.
+        """
+        if self.in_dtype.bits < 8:
+            import tvm
+            try:
+                _pass_ctx = tvm.transform.PassContext.current()
+                disable_tma = _pass_ctx.config.get("tl.disable_tma_lower", False)
+            except Exception:
+                disable_tma = False
+            if disable_tma:
+                # Non-TMA path: SIMT copy writes packed-linear nibbles; use a
+                # linear layout so the SMEM descriptor matches the actual data.
+                return make_linear_layout
+            return lambda buffer: make_tcgen05mma_swizzled_layout(
+                buffer, continuity=continuity, k_major=k_major
+            )
         vectorized_size = 128 // self.in_dtype.bits
         if continuity % (vectorized_size * 8) == 0:
             return make_full_bank_swizzled_layout
@@ -93,15 +115,15 @@ class GemmTCGEN5(GemmBase):
             b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])  # don't use N, as it may be for 2cta
 
             return {
-                self.A: self.infer_shared_layout(a_continuity)(self.A),
-                self.B: self.infer_shared_layout(b_continuity)(self.B),
+                self.A: self.infer_shared_layout(a_continuity, a_is_k_major)(self.A),
+                self.B: self.infer_shared_layout(b_continuity, b_is_k_major)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
             b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
             layouts = {
                 self.A: mma_emitter.make_mma_store_layout(self.A),
-                self.B: self.infer_shared_layout(b_continuity)(self.B),
+                self.B: self.infer_shared_layout(b_continuity, b_is_k_major)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
             return layouts

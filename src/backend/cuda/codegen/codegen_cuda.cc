@@ -1933,8 +1933,6 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
        << " + " << index_str << ")";
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
-    // FP4 div_factor=2 only for global memory (packed 2/byte).
-    // Shared/local stores unpacked FP4 (1 byte per element, sizeof=1).
     bool is_packed_scope = scope.empty() || scope == "global";
     if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
         && is_packed_scope) {
@@ -4113,6 +4111,9 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     } else if (op->dtype == DataType::Int(1) && scope == "shared") {
       constant_size = constant_size / 32;
     }
+    // SM100 (TCGEN05MMA): FP4 shared memory keeps full allocation (N elements
+    // of fp4_e2_t = N byte containers).  With 16U4_ALIGN16B TMA, each logical
+    // FP4 occupies one 8-bit SMEM container consumed by tcgen05.mma.
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
@@ -4236,12 +4237,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   int lanes = op->dtype.lanes();
   // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    // For scalar fp4 loads from non-packed buffers, use tl_fp4_packed_load
-    // to correctly extract the nibble at the given index (the /2 in
-    // GetBufferRef maps two consecutive fp4 elements to the same byte, but
-    // reading that byte only returns the low nibble — the odd-indexed element
-    // is lost).
-    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+    // Scalar global FP4 is packed (two logical values per byte).  Shared FP4 on
+    // SM100 unpacksmem is byte-container based and must use normal buffer refs.
+    std::string scope = GetPtrStorageScope(buffer_var);
+    bool is_packed_fp4_scope = scope.empty() || scope == "global";
+    if (element_dtype.is_float4() && element_dtype.lanes() == 1 &&
+        is_packed_fp4_scope) {
       std::string idx_str = PrintExpr(index);
       std::string vid = GetVarID(buffer_var.get());
       os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
@@ -4336,11 +4337,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     return;
   }
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    // For scalar fp4 stores to non-packed buffers, use tl_fp4_packed_store
-    // to correctly handle nibble-level writes. The /2 in GetBufferRef maps two
-    // consecutive fp4 elements to the same byte, and a plain assignment
-    // overwrites the entire byte — destroying the neighboring nibble.
-    if (element_dtype.is_float4() && element_dtype.lanes() == 1) {
+    // Scalar global FP4 is packed (two logical values per byte).  Shared FP4 on
+    // SM100 unpacksmem is byte-container based and must use normal buffer refs.
+    std::string scope = GetPtrStorageScope(buffer_var);
+    bool is_packed_fp4_scope = scope.empty() || scope == "global";
+    if (element_dtype.is_float4() && element_dtype.lanes() == 1 &&
+        is_packed_fp4_scope) {
       std::string idx_str = PrintExpr(index_expr);
       std::string value = this->PrintExpr(op->value);
       std::string vid = GetVarID(buffer_var.get());

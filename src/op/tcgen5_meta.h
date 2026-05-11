@@ -156,7 +156,8 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
 }
 
 inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
-                                   DataType ab_dtype, DataType c_dtype,
+                                   DataType a_dtype, DataType b_dtype,
+                                   DataType c_dtype,
                                    bool a_is_k_major, bool b_is_k_major,
                                    int scale_in_a, int scale_in_b) {
   ICHECK(atom_m % 16 == 0) << "atom_m must be divisible by 16";
@@ -193,8 +194,8 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
     return 0u;
   };
 
-  uint32_t a_format = encode_dtype(ab_dtype);
-  uint32_t b_format = a_format;
+  uint32_t a_format = encode_dtype(a_dtype);
+  uint32_t b_format = encode_dtype(b_dtype);
 
   uint32_t c_format = 0;
   if (c_dtype.is_float16()) {

@@ -488,6 +488,33 @@ Layout makeHalfBankSwizzleLayout(const Buffer &buffer) {
   return ExpandLayout2D(base, buffer);
 }
 
+// Layout swizzling for 128 bytes (ALIGN16B unpacksmem variant for sub-byte types)
+// For CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B: each FP4 element occupies one
+// 8-bit SMEM container.  The FP4 payload lives inside that byte container
+// (bits 2..5 for NVIDIA unpacksmem), so shared-memory indexing must not pack
+// two logical FP4 values into one byte.
+static Layout MakeAlign16BSwizzleLayout2D(int stride, int continuous,
+                                          int element_size) {
+  ICHECK(element_size < 8 && element_size > 0)
+      << "ALIGN16B layout is for sub-byte types, got element_size=" << element_size;
+  const int elements_per_chunk = 16;
+  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  ICHECK(continuous % (elements_per_chunk * 8) == 0)
+      << "continuous=" << continuous
+      << " must be a multiple of " << (elements_per_chunk * 8);
+
+  Var i = InputPlaceholder(0);
+  Var j = InputPlaceholder(1);
+  PrimExpr ts = FloorDiv(i, 8);
+  PrimExpr s = FloorMod(i, 8);
+  PrimExpr tc = FloorDiv(FloorDiv(j, elements_per_chunk), 8);
+  PrimExpr c = FloorMod(FloorDiv(j, elements_per_chunk), 8);
+  PrimExpr vec = FloorMod(j, elements_per_chunk);
+  PrimExpr c_swizzle = xor8x8(c, s);
+  PrimExpr index = vec + (c_swizzle + s * 8) * elements_per_chunk;
+  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+}
+
 // Layout swizzling for 128 bytes
 static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
                                           int element_size) {
@@ -514,6 +541,19 @@ Layout makeFullBankSwizzleLayout(const Buffer &buffer) {
                                           static_cast<int>(info.continuous),
                                           info.element_size);
   return ExpandLayout2D(base, buffer);
+}
+
+Layout makeAlign16BSwizzleLayout(const Buffer &buffer) {
+  auto info = GetSwizzleShapeInfoChecked(buffer);
+  auto base = MakeAlign16BSwizzleLayout2D(static_cast<int>(info.stride),
+                                          static_cast<int>(info.continuous),
+                                          info.element_size);
+  Array<PrimExpr> leading_shape;
+  leading_shape.reserve(buffer->shape.size() - 2);
+  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
+    leading_shape.push_back(buffer->shape[i]);
+  }
+  return base->Expand(leading_shape);
 }
 
 // Detail implementation please ref to
@@ -875,6 +915,11 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
   if (element_size == 64) {
     ICHECK(0) << "float64 on sm100 is not supported now";
   }
+  // Sub-byte types (FP4): use ALIGN16B unpacksmem layout.  TMA writes each
+  // logical FP4 into an 8-bit SMEM container, matching tcgen05.mma consumption.
+  if (element_size < 8) {
+    return MakeAlign16BSwizzleLayout2D(mat_stride, mat_continuous, element_size);
+  }
   int vector_size = 128 / element_size;
 
   if (mat_stride % 8 == 0) {
@@ -954,6 +999,17 @@ SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
   if (!TryGetSwizzleShapeInfo(buffer, &info)) {
     return SwizzleMode::kNone;
   }
+
+  // Sub-byte types: check ALIGN16B unpacksmem layout (maps to 128B swizzle)
+  if (info.element_size < 8 && info.element_size > 0) {
+    if (info.stride % 8 == 0 && info.continuous % 128 == 0) {
+      if (StructuralEqual()(layout, makeAlign16BSwizzleLayout(buffer))) {
+        return SwizzleMode::kFull;
+      }
+    }
+    return SwizzleMode::kNone;
+  }
+
   int vector_size = 128 / info.element_size;
 
   // Check from smallest to largest granularity
