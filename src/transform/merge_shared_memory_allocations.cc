@@ -274,6 +274,31 @@ public:
     linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
   }
 
+  const Object *MakeSyntheticScopeKey() {
+    synthetic_scope_keys_.push_back(Evaluate(IntImm(DataType::Int(32), 0)));
+    return synthetic_scope_keys_.back().get();
+  }
+
+  void VisitBranchScope(const Stmt &body) {
+    scope_.push_back(StmtEntry());
+    StmtEntry e;
+    e.stmt = MakeSyntheticScopeKey();
+    UpdateStmtAttr(e.stmt, scope_level_);
+    int64_t begin_index = static_cast<int64_t>(linear_seq_.size());
+    linear_seq_.push_back(e);
+
+    StmtExprVisitor::VisitStmt(body);
+
+    e.touched = std::move(scope_.back().touched);
+    scope_.pop_back();
+    int64_t end_index = static_cast<int64_t>(linear_seq_.size());
+    ICHECK_GT(end_index, begin_index);
+    e.scope_pair_offset = begin_index - end_index;
+    linear_seq_.push_back(e);
+    ICHECK_NE(end_index, 0U);
+    linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
+  }
+
   void VisitStmt_(const AttrStmtNode *op) final {
     // Only record the outer most thread extent.
     if (op->attr_key == tirx::attr::thread_extent && !in_thread_env_) {
@@ -291,7 +316,20 @@ public:
     }
   }
 
-  void VisitStmt_(const IfThenElseNode *op) final { VisitNewScope(op); }
+  void VisitStmt_(const IfThenElseNode *op) final {
+    // Then/else branches are mutually exclusive.  Treat each branch as a
+    // separate lifetime scope so shared-memory allocations that are local to
+    // different sm_specialize branches can be packed as a union instead of a
+    // sum.  Accesses to buffers allocated outside the branch are still
+    // attributed to their original allocation scope, preserving the existing
+    // conservative behaviour for cross-branch values.
+    this->VisitExpr(op->condition);
+    VisitBranchScope(op->then_case);
+    if (op->else_case.defined()) {
+      const Stmt &else_case = op->else_case.value();
+      VisitBranchScope(else_case);
+    }
+  }
 
   bool ContainsSeqStmt(const Stmt &stmt) {
     if (stmt->IsInstance<SeqStmtNode>()) {
@@ -363,6 +401,9 @@ private:
   bool in_thread_env_{false};
   // The scope stack.
   std::vector<StmtEntry> scope_;
+  // Synthetic statements used only as stable unique keys for branch scope
+  // sentinels during PlanReuse.
+  std::vector<Stmt> synthetic_scope_keys_;
   // The size of the scope.
   size_t scope_level_{0};
 };
