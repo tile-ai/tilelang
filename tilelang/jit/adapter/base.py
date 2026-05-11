@@ -94,3 +94,20 @@ class BaseKernelAdapter(ABC):
 
     def _post_init(self):
         self.func = self._convert_torch_func()
+
+    def _load_cached_text_source(self, source_attr: str, path_attr: str) -> str | None:
+        source = getattr(self, source_attr, None)
+        if source is not None:
+            return source
+
+        path = getattr(self, path_attr, None)
+        if path is None:
+            return None
+
+        try:
+            with open(path, encoding="utf-8") as file:
+                source = file.read()
+        except OSError:
+            return None
+        setattr(self, source_attr, source)
+        return source

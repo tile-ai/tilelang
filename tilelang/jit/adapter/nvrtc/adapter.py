@@ -102,18 +102,23 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         result_idx: list[int],
         target: str,
         func_or_mod: tir.PrimFunc | tvm.IRModule,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: str | None,
+        device_kernel_source: str | None,
         kernel_lib_path: str,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
+        host_kernel_source_path: str | None = None,
+        device_kernel_source_path: str | None = None,
     ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.host_kernel_source = host_kernel_source
         adapter.device_kernel_source = device_kernel_source
+        adapter.host_func = host_kernel_source
+        adapter._host_kernel_source_path = host_kernel_source_path
+        adapter._device_kernel_source_path = device_kernel_source_path
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -201,9 +206,13 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             The kernel source code, or None if not available
         """
         if kernel_only:
-            return self.device_kernel_source
+            return self._load_cached_text_source("device_kernel_source", "_device_kernel_source_path")
         else:
-            return self.host_func
+            return self._load_cached_text_source("host_func", "_host_kernel_source_path")
+
+    def get_host_source(self) -> str | None:
+        """Get the cached host-side source code."""
+        return self._load_cached_text_source("host_func", "_host_kernel_source_path")
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled CUDA kernel."""

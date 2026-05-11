@@ -46,7 +46,9 @@ class KernelCache:
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
+    prim_func_path = "prim_func.pkl"
     cache_root_dir = "kernels"
+    frontend_cache_root_dir = "frontend"
     staging_root_dir = ".staging"
 
     @staticmethod
@@ -166,6 +168,7 @@ class KernelCache:
         os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
         os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
         os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
+        os.makedirs(KernelCache._get_frontend_cache_root(), exist_ok=True)
         os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
 
         staging_root = KernelCache._get_staging_root()
@@ -181,6 +184,10 @@ class KernelCache:
     @staticmethod
     def _get_cache_root() -> str:
         return os.path.join(KernelCache._get_namespace_root(), KernelCache.cache_root_dir)
+
+    @staticmethod
+    def _get_frontend_cache_root() -> str:
+        return os.path.join(KernelCache._get_namespace_root(), KernelCache.frontend_cache_root_dir)
 
     @staticmethod
     def _get_staging_root() -> str:
@@ -330,19 +337,23 @@ class KernelCache:
                 )
                 return self._memory_cache[key]
 
-            if verbose:
-                self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
+        if verbose:
+            self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
 
-            # Then check disk cache
-            kernel = self._load_kernel_from_disk(
-                key, target, target_host, out_idx, execution_backend, pass_configs, compile_flags, func, verbose
-            )
-            if kernel is not None:
-                if verbose:
-                    self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
-                # Populate memory cache with disk result
+        # Disk loads can be expensive for large kernel sets; keep them outside
+        # the global cache lock so independent cache hits can proceed in parallel.
+        kernel = self._load_kernel_from_disk(
+            key, target, target_host, out_idx, execution_backend, pass_configs, compile_flags, func, verbose
+        )
+        if kernel is not None:
+            if verbose:
+                self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
+            with self._lock:
+                existing = self._memory_cache.get(key)
+                if existing is not None:
+                    return existing
                 self._memory_cache[key] = kernel
-                return kernel
+            return kernel
 
         if verbose:
             self.logger.debug(f"No cached kernel for {get_prim_func_name(func, '<unknown>')}")
@@ -365,6 +376,7 @@ class KernelCache:
                 self._set_adapter_cache_path(kernel, cache_path)
 
         # Store in memory cache after compilation
+        self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
         self._memory_cache[key] = kernel
         return kernel
 
@@ -387,6 +399,20 @@ class KernelCache:
             str: Absolute path to the cache directory for this kernel.
         """
         return os.path.join(self._get_cache_root(), key)
+
+    def _get_frontend_cache_path(self, frontend_key: str) -> str:
+        return os.path.join(
+            self._get_frontend_cache_root(),
+            f"{self._sanitize_path_component(frontend_key)}.json",
+        )
+
+    @staticmethod
+    def _tag_kernel_cache_entry(kernel: JITKernel, key: str, cache_path: str) -> None:
+        try:
+            kernel._tilelang_cache_key = key
+            kernel._tilelang_cache_path = cache_path
+        except Exception:
+            pass
 
     @staticmethod
     def _load_binary(path: str):
@@ -459,6 +485,19 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
+            # Save the PrimFunc so frontend cache hits can rebuild the adapter
+            # without re-elaborating the Python DSL in a fresh process. This is
+            # optional for backward compatibility with existing cache entries.
+            if func is not None:
+                prim_func_path = os.path.join(staging_path, self.prim_func_path)
+                if verbose:
+                    self.logger.debug(f"Saving PrimFunc to disk: {prim_func_path}")
+                try:
+                    KernelCache._safe_write_file(prim_func_path, "wb", lambda file: cloudpickle.dump(func, file))
+                except Exception:
+                    if verbose:
+                        self.logger.exception("Error saving optional PrimFunc cache metadata")
+
             missing_files = self._get_missing_complete_cache_files(staging_path)
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
@@ -513,13 +552,11 @@ class KernelCache:
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
         params_path = os.path.join(cache_path, self.params_path)
 
-        required_files = self._get_required_files(cache_path)
-
-        if not all([os.path.exists(file) for file in required_files]):
+        missing_files = self._get_missing_complete_cache_files(cache_path)
+        if missing_files:
+            if verbose:
+                self.logger.debug("Disk cache entry is incomplete; missing files: %s", missing_files)
             return None
-
-        # Load the kernel source file (optional)
-        device_kernel_source, host_kernel_source = self._load_kernel_source(device_kernel_path, host_kernel_path, verbose)
 
         # Load kernel parameters
         kernel_params: list[KernelParam] | None = None
@@ -531,10 +568,12 @@ class KernelCache:
         except Exception:
             self.logger.exception("Error loading kernel parameters from disk")
 
-        return self._build_kernel(
+        kernel = self._build_kernel(
             func=func,
-            host_kernel_source=host_kernel_source,
-            device_kernel_source=device_kernel_source,
+            host_kernel_source=None,
+            device_kernel_source=None,
+            host_kernel_path=host_kernel_path,
+            device_kernel_path=device_kernel_path,
             kernel_lib_path=kernel_lib_path,
             kernel_params=kernel_params,
             target=target,
@@ -544,6 +583,95 @@ class KernelCache:
             pass_configs=pass_configs,
             compile_flags=compile_flags,
         )
+        if kernel is not None:
+            prim_func_path = os.path.join(cache_path, self.prim_func_path)
+            if func is not None and not os.path.exists(prim_func_path):
+                try:
+                    KernelCache._safe_write_file(prim_func_path, "wb", lambda file: cloudpickle.dump(func, file))
+                except Exception:
+                    if verbose:
+                        self.logger.exception("Error upgrading cache entry with PrimFunc")
+            self._tag_kernel_cache_entry(kernel, key, cache_path)
+        return kernel
+
+    def load_frontend_cached(
+        self,
+        frontend_key: str,
+        *,
+        target: str | Target = "auto",
+        target_host: str | Target | None = None,
+        out_idx: list[int] | None = None,
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        pass_configs: dict | None = None,
+        compile_flags: list[str] | str | None = None,
+        verbose: bool = False,
+    ) -> JITKernel | None:
+        if not env.is_cache_enabled():
+            return None
+
+        frontend_path = self._get_frontend_cache_path(frontend_key)
+        try:
+            with open(frontend_path, encoding="utf-8") as file:
+                frontend_entry = json.load(file)
+        except OSError:
+            return None
+        except Exception:
+            self.logger.exception("Error loading frontend cache entry")
+            return None
+
+        key = frontend_entry.get("kernel_key")
+        if not isinstance(key, str) or not key:
+            return None
+
+        with self._lock:
+            existing = self._memory_cache.get(key)
+            if existing is not None:
+                return existing
+
+        cache_path = self._get_cache_path(key)
+        prim_func_path = os.path.join(cache_path, self.prim_func_path)
+        try:
+            with open(prim_func_path, "rb") as file:
+                func = cloudpickle.load(file)
+        except OSError:
+            return None
+        except Exception:
+            self.logger.exception("Error loading PrimFunc from frontend cache entry")
+            return None
+
+        kernel = self._load_kernel_from_disk(
+            key,
+            target=target,
+            target_host=target_host,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+            func=func,
+            verbose=verbose,
+        )
+        if kernel is None:
+            return None
+
+        with self._lock:
+            existing = self._memory_cache.get(key)
+            if existing is not None:
+                return existing
+            self._memory_cache[key] = kernel
+        return kernel
+
+    def store_frontend_cache(self, frontend_key: str, kernel_key: str, *, verbose: bool = False) -> None:
+        if not env.is_cache_enabled():
+            return
+
+        KernelCache._create_dirs()
+        frontend_path = self._get_frontend_cache_path(frontend_key)
+        payload = {"kernel_key": kernel_key}
+        try:
+            KernelCache._safe_write_file(frontend_path, "w", lambda file: json.dump(payload, file, sort_keys=True))
+        except Exception:
+            if verbose:
+                self.logger.exception("Error saving frontend cache entry")
 
     def _clear_disk_cache(self):
         """
@@ -638,8 +766,10 @@ class KernelCache:
     def _build_kernel(
         self,
         func: Callable | None,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: str | None,
+        device_kernel_source: str | None,
+        host_kernel_path: str | None,
+        device_kernel_path: str | None,
         kernel_lib_path: str,
         kernel_params: list[KernelParam] | None,
         target: str | Target,
@@ -651,10 +781,6 @@ class KernelCache:
     ) -> JITKernel | None:
         # Check all required components and report specific failures
         missing_components = []
-        if not host_kernel_source:
-            missing_components.append("host_kernel_source")
-        if not device_kernel_source:
-            missing_components.append("device_kernel_source")
         if not kernel_params:
             missing_components.append("kernel_params")
 
@@ -674,4 +800,6 @@ class KernelCache:
             execution_backend=execution_backend,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
+            host_kernel_source_path=host_kernel_path,
+            device_kernel_source_path=device_kernel_path,
         )

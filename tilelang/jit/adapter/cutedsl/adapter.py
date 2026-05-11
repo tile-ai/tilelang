@@ -104,18 +104,23 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         result_idx: list[int],
         target: str,
         func_or_mod: tir.PrimFunc | tvm.IRModule,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: str | None,
+        device_kernel_source: str | None,
         kernel_lib_path: str,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
+        host_kernel_source_path: str | None = None,
+        device_kernel_source_path: str | None = None,
     ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.host_kernel_source = host_kernel_source
         adapter.device_kernel_source = device_kernel_source
+        adapter.host_func = host_kernel_source
+        adapter._host_kernel_source_path = host_kernel_source_path
+        adapter._device_kernel_source_path = device_kernel_source_path
 
         if isinstance(func_or_mod, tir.PrimFunc):
             gsym = func_or_mod.attrs.get("global_symbol")
@@ -220,6 +225,13 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             return self._dynamic_symbolic_name_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
+    def get_host_source(self) -> str | None:
+        """Get the cached host-side source code."""
+        source = self._load_cached_text_source("host_kernel_source", "_host_kernel_source_path")
+        if source is not None:
+            return source
+        return getattr(self, "host_func", None)
+
     def get_kernel_source(self, kernel_only: bool = True) -> str | None:
         """Get the CUDA kernel source code.
 
@@ -228,7 +240,13 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         str | None
             The kernel source code, or None if not available
         """
-        return self.device_kernel_source
+        if not kernel_only:
+            return self.get_host_source()
+
+        source = self._load_cached_text_source("device_kernel_source", "_device_kernel_source_path")
+        if source is not None:
+            self.kernel_global_source = source
+        return source
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None, device_id: int = 0):
         """Low-level function to call the compiled CUDA kernel.

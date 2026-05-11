@@ -155,18 +155,22 @@ class CythonKernelAdapter(BaseKernelAdapter):
         result_idx: list[int],
         target: str,
         func_or_mod: tir.PrimFunc | tvm.IRModule,
-        host_kernel_source: str,
-        device_kernel_source: str,
+        host_kernel_source: str | None,
+        device_kernel_source: str | None,
         kernel_lib_path: str,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
+        host_kernel_source_path: str | None = None,
+        device_kernel_source_path: str | None = None,
     ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.host_kernel_source = host_kernel_source
         adapter.device_kernel_source = device_kernel_source
+        adapter._host_kernel_source_path = host_kernel_source_path
+        adapter._device_kernel_source_path = device_kernel_source_path
         adapter.kernel_global_source = device_kernel_source  # Set alias for compatibility
         adapter.pass_configs = pass_configs
 
@@ -386,12 +390,16 @@ class CythonKernelAdapter(BaseKernelAdapter):
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""
         if kernel_only:
-            return self.device_kernel_source
+            source = self._load_cached_text_source("device_kernel_source", "_device_kernel_source_path")
+            if source is not None:
+                self.kernel_global_source = source
+            return source
         else:
             # Wrapper only has host kernel source
-            assert self.host_kernel_source is not None, "Wrapped source is not available"
-            return self.host_kernel_source
+            source = self._load_cached_text_source("host_kernel_source", "_host_kernel_source_path")
+            assert source is not None, "Wrapped source is not available"
+            return source
 
     def get_host_source(self):
         """Returns the source code of the host function."""
-        return self.host_kernel_source
+        return self._load_cached_text_source("host_kernel_source", "_host_kernel_source_path")
