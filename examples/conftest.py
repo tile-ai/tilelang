@@ -33,6 +33,8 @@ CUTEDSL_KNOWN_FAILURES = {
     "gemm_sp/test_example_gemm_sp.py::test_example_gemm_sp",
     # Flaky — passes when run in isolation, fails under parallel execution
     "minference/test_vs_sparse_attn.py::test_vs_sparse_attn",
+    # CuTeDSL does not yet lower DeepSeek V4 FP4 act quant conversions.
+    "deepseek_v4/test_tilelang_example_deepseek_v4.py::test_example_act_quant",
 }
 
 
