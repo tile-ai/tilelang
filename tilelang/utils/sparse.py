@@ -1,5 +1,5 @@
-from __future__ import annotations
 import torch
+from typing import Optional
 import tilelang
 import tilelang.language as T
 from tilelang.language.dtypes import _TORCH_DTYPE_TO_STR, dtype
@@ -89,7 +89,7 @@ def _compress_fn(D, dtype, meta_dtype, group=4, elem=2, block_M=_BLOCK_M, elem_p
 
 def compress(
     A: torch.Tensor,
-    meta_dtype: torch.dtype | None = None,
+    meta_dtype: Optional[torch.dtype] = None,  # noqa: FA100
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if A.dtype not in _DTYPE_CONFIG:
         raise ValueError(f"Unsupported dtype {A.dtype}. Supported: {list(_DTYPE_CONFIG)}")
