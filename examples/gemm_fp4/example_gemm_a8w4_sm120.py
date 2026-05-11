@@ -8,10 +8,6 @@ Uses SM120 native mma.sync.kind::f8f6f4 with mixed-type operands:
 No block scaling. Direct FP8 x FP4 tensor core multiply-accumulate.
 """
 
-<<<<<<< HEAD
-=======
-import os
->>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 import time
 import torch
 import tilelang
@@ -19,7 +15,6 @@ import tilelang.language as T
 
 
 def gemm_a8w4(
-<<<<<<< HEAD
     M,
     N,
     K,
@@ -30,11 +25,6 @@ def gemm_a8w4(
     accum_dtype,
     num_stages=2,
     threads=128,
-=======
-    M, N, K, block_M, block_N, block_K,
-    out_dtype, accum_dtype,
-    num_stages=2, threads=128,
->>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 ):
     A_shape = (M, K)
     B_shape = (N, K)
@@ -62,7 +52,6 @@ def gemm_a8w4(
 
 
 FP4_E2M1_TO_FLOAT = [
-<<<<<<< HEAD
     0.0,
     0.5,
     1.0,
@@ -79,10 +68,6 @@ FP4_E2M1_TO_FLOAT = [
     -3.0,
     -4.0,
     -6.0,
-=======
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
->>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 ]
 
 
@@ -98,7 +83,6 @@ out_dtype = T.float32
 accum_dtype = T.float32
 
 print(f"Running A8W4 GEMM: M={M}, N={N}, K={K}")
-<<<<<<< HEAD
 print("  A: float8_e4m3fn, B: FP4 (unpacked uint8)")
 
 func = gemm_a8w4(
@@ -112,14 +96,6 @@ func = gemm_a8w4(
     accum_dtype,
     num_stages=2,
     threads=128,
-=======
-print(f"  A: float8_e4m3fn, B: FP4 (unpacked uint8)")
-
-func = gemm_a8w4(
-    M, N, K, block_M, block_N, block_K,
-    out_dtype, accum_dtype,
-    num_stages=2, threads=128,
->>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 )
 
 jit_kernel = tilelang.compile(
@@ -164,11 +140,7 @@ print(f"[NUMERICAL] max_abs_diff={max_diff:.4f}, rel_err={rel_err:.6f}")
 if rel_err < 0.01:
     print("[PASS] numerical verification (rel_err < 0.01)")
 else:
-<<<<<<< HEAD
     print("[WARN] large diff -- may indicate layout or data flow issue")
-=======
-    print(f"[WARN] large diff -- may indicate layout or data flow issue")
->>>>>>> f13a6b71 (feat: A8W4 mixed-type MMA (FP8xFP4) + FP4 MoE example on SM120)
 
 # --- Benchmark ---
 torch.cuda.synchronize()
