@@ -15,7 +15,7 @@ from tilelang.intrinsics.tcgen05_macro_generator import (
 from tilelang import language as T
 from tilelang.utils.language import retrieve_ptr
 from tilelang.transform.simplify import _Simplify
-from tvm import tir
+from tvm import DataType, tir
 from tvm.target import Target
 from tvm.ir import Range
 from tvm.arith import Analyzer
@@ -44,7 +44,7 @@ class GemmTCGEN5(GemmBase):
     of operands A and B.
     """
 
-    def infer_shared_layout(self, continuity: int, k_major: bool) -> Callable[[tir.Buffer], Layout]:
+    def infer_shared_layout(self, dtype, continuity: int, k_major: bool) -> Callable[[tir.Buffer], Layout]:
         """Infer the shared-memory layout for TCGEN05 operands.
 
         Sub-byte inputs (e.g. FP4) must use the TCGEN05-specific layout helper so
@@ -53,8 +53,10 @@ class GemmTCGEN5(GemmBase):
         the SIMT copy writes packed-linear data, so we return a plain linear layout
         to keep the SMEM descriptor consistent with the actual data layout.
         """
-        if self.in_dtype.bits < 8:
+        dtype_bits = dtype.bits if hasattr(dtype, "bits") else DataType(dtype).bits
+        if dtype_bits < 8:
             import tvm
+
             try:
                 _pass_ctx = tvm.transform.PassContext.current()
                 disable_tma = _pass_ctx.config.get("tl.disable_tma_lower", False)
@@ -64,10 +66,8 @@ class GemmTCGEN5(GemmBase):
                 # Non-TMA path: SIMT copy writes packed-linear nibbles; use a
                 # linear layout so the SMEM descriptor matches the actual data.
                 return make_linear_layout
-            return lambda buffer: make_tcgen05mma_swizzled_layout(
-                buffer, continuity=continuity, k_major=k_major
-            )
-        vectorized_size = 128 // self.in_dtype.bits
+            return lambda buffer: make_tcgen05mma_swizzled_layout(buffer, continuity=continuity, k_major=k_major)
+        vectorized_size = 128 // dtype_bits
         if continuity % (vectorized_size * 8) == 0:
             return make_full_bank_swizzled_layout
         elif continuity % (vectorized_size * 4) == 0:
@@ -93,7 +93,7 @@ class GemmTCGEN5(GemmBase):
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
+            b_dtype=self.in_dtype_b,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -115,15 +115,15 @@ class GemmTCGEN5(GemmBase):
             b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])  # don't use N, as it may be for 2cta
 
             return {
-                self.A: self.infer_shared_layout(a_continuity, a_is_k_major)(self.A),
-                self.B: self.infer_shared_layout(b_continuity, b_is_k_major)(self.B),
+                self.A: self.infer_shared_layout(self.in_dtype, a_continuity, a_is_k_major)(self.A),
+                self.B: self.infer_shared_layout(self.in_dtype_b, b_continuity, b_is_k_major)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         if self.is_gemm_ts():
             b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
             layouts = {
                 self.A: mma_emitter.make_mma_store_layout(self.A),
-                self.B: self.infer_shared_layout(b_continuity, b_is_k_major)(self.B),
+                self.B: self.infer_shared_layout(self.in_dtype_b, b_continuity, b_is_k_major)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
             return layouts
@@ -148,7 +148,7 @@ class GemmTCGEN5(GemmBase):
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
-            b_dtype=self.in_dtype,
+            b_dtype=self.in_dtype_b,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,

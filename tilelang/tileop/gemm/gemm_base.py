@@ -89,7 +89,10 @@ class GemmBase:
         """
         if is_tensor_memory(self.A):
             return self.B.dtype
-        return self.A.dtype
+        dtype = self.A.dtype
+        if dtype == "uint8" and self.C.dtype in ("float32", "float16"):
+            return "float4_e2m1fn"
+        return dtype
 
     @property
     def in_dtype_b(self) -> str:

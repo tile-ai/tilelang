@@ -1934,8 +1934,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   } else if (t == buffer_element_dtype) {
     int div_factor = 1;
     bool is_packed_scope = scope.empty() || scope == "global";
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
-        && is_packed_scope) {
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1 &&
+        is_packed_scope) {
       div_factor = 2;
     }
     index_str =
@@ -1944,8 +1944,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   } else {
     int div_factor = 1;
     bool is_packed_scope = scope.empty() || scope == "global";
-    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1
-        && is_packed_scope) {
+    if (buffer_element_dtype.is_float4() && buffer_element_dtype.lanes() == 1 &&
+        is_packed_scope) {
       div_factor = 2;
     }
     index_str =

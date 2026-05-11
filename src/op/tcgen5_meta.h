@@ -157,9 +157,9 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
 
 inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
                                    DataType a_dtype, DataType b_dtype,
-                                   DataType c_dtype,
-                                   bool a_is_k_major, bool b_is_k_major,
-                                   int scale_in_a, int scale_in_b) {
+                                   DataType c_dtype, bool a_is_k_major,
+                                   bool b_is_k_major, int scale_in_a,
+                                   int scale_in_b) {
   ICHECK(atom_m % 16 == 0) << "atom_m must be divisible by 16";
   ICHECK(atom_n % 8 == 0) << "atom_n must be divisible by 8";
   ICHECK(atom_k == 16 || atom_k == 32)

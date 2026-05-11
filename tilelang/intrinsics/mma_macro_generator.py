@@ -118,7 +118,12 @@ class TensorCoreIntrinEmitter:
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        self.k_dim = min(256 // a_dtype.bits, self.chunk)
+        # SM120 f8f6f4 FP4 MMA is m16n8k32.  Although 256 / 4 would allow a
+        # k64 fragment by bit count, there is no k64 dispatcher for FP4.
+        if str(a_dtype) == "float4_e2m1fn":
+            self.k_dim = min(32, self.chunk)
+        else:
+            self.k_dim = min(256 // a_dtype.bits, self.chunk)
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size

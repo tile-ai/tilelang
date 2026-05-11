@@ -488,20 +488,21 @@ Layout makeHalfBankSwizzleLayout(const Buffer &buffer) {
   return ExpandLayout2D(base, buffer);
 }
 
-// Layout swizzling for 128 bytes (ALIGN16B unpacksmem variant for sub-byte types)
-// For CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B: each FP4 element occupies one
-// 8-bit SMEM container.  The FP4 payload lives inside that byte container
+// Layout swizzling for 128 bytes (ALIGN16B unpacksmem variant for sub-byte
+// types) For CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B: each FP4 element occupies
+// one 8-bit SMEM container.  The FP4 payload lives inside that byte container
 // (bits 2..5 for NVIDIA unpacksmem), so shared-memory indexing must not pack
 // two logical FP4 values into one byte.
 static Layout MakeAlign16BSwizzleLayout2D(int stride, int continuous,
                                           int element_size) {
   ICHECK(element_size < 8 && element_size > 0)
-      << "ALIGN16B layout is for sub-byte types, got element_size=" << element_size;
+      << "ALIGN16B layout is for sub-byte types, got element_size="
+      << element_size;
   const int elements_per_chunk = 16;
   ICHECK(stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (elements_per_chunk * 8) == 0)
-      << "continuous=" << continuous
-      << " must be a multiple of " << (elements_per_chunk * 8);
+      << "continuous=" << continuous << " must be a multiple of "
+      << (elements_per_chunk * 8);
 
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
@@ -918,7 +919,8 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
   // Sub-byte types (FP4): use ALIGN16B unpacksmem layout.  TMA writes each
   // logical FP4 into an 8-bit SMEM container, matching tcgen05.mma consumption.
   if (element_size < 8) {
-    return MakeAlign16BSwizzleLayout2D(mat_stride, mat_continuous, element_size);
+    return MakeAlign16BSwizzleLayout2D(mat_stride, mat_continuous,
+                                       element_size);
   }
   int vector_size = 128 / element_size;
 

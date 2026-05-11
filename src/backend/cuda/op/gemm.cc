@@ -362,9 +362,9 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       });
   refl::GlobalDef().def(
       "tl.get_tcgen5_instr_desc",
-      [](int atom_m, int atom_n, int atom_k, DataType a_dtype,
-         DataType b_dtype, DataType c_dtype, bool a_is_k_major,
-         bool b_is_k_major, int scale_in_a, int scale_in_b) {
+      [](int atom_m, int atom_n, int atom_k, DataType a_dtype, DataType b_dtype,
+         DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int scale_in_a,
+         int scale_in_b) {
         uint32_t desc = GetTCGEN5InstrDesc(
             atom_m, atom_n, atom_k, a_dtype, b_dtype, c_dtype, a_is_k_major,
             b_is_k_major, scale_in_a, scale_in_b);

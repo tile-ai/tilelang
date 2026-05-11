@@ -1102,10 +1102,10 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       << " is not divisible by instruction_dim: " << instruction_dim;
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
-  int inner_box_dim_ = is_align16b_subbyte_layout
-                           ? instruction_dim * shared_tensor->dtype.bytes()
-                           : TMABytesFromElements(instruction_dim,
-                                                  shared_tensor->dtype);
+  int inner_box_dim_ =
+      is_align16b_subbyte_layout
+          ? instruction_dim * shared_tensor->dtype.bytes()
+          : TMABytesFromElements(instruction_dim, shared_tensor->dtype);
 
   struct SwizzleCheck {
     int swizzle;
