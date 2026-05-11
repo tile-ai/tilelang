@@ -386,14 +386,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     // uses rmem element access (e.g. cast_dst[i]) instead of MLIR
     // vector extractelement, which fails for FP8 types due to
     // unrealized_conversion_cast in LLVM translation.
-    if (target_ty.element_of().is_float4_e2m1fn()) {
-      ICHECK_EQ(aligned_lanes % lanes, 0)
-          << "Unaligned FP4 cast expects lanes to divide the aligned width";
-      os << cast_dst << ".load().reshape((" << (aligned_lanes / lanes) << ", "
-         << lanes << "))[0, None]";
-    } else {
-      os << cast_dst;
-    }
+    os << cast_dst;
   } else {
     os << cast_dst << ".load()";
   }
@@ -1346,21 +1339,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
       scalar_base = ramp_base.Eval() * element_dtype.lanes();
     }
 
-    if (value_dtype.element_of().is_float4_e2m1fn() && value_lanes % 2 == 0) {
-      std::string view_var = name_supply_->FreshName("_f4view");
-      std::string packed_var = name_supply_->FreshName("_f4pack");
-      PrintIndent();
-      stream << view_var << " = cute.recast_tensor(" << vid
-             << ", cutlass.Int8)\n";
-      PrintIndent();
-      stream << packed_var << " = tl.make_tensor_at_offset(" << view_var
-             << ".iterator, (" << PrintExpr_(scalar_base) << ") // 2, ("
-             << (value_lanes / 2) << ",), div_by=" << (value_lanes / 2)
-             << ").load()\n";
-      os << "tl.unpack_i8_to_f4(" << packed_var << ", cutlass.Float4E2M1FN)";
-      return;
-    }
-
     // Load aligned vector into an rmem tensor (not a raw MLIR vector).
     // This ensures downstream element access uses rmem tensor indexing
     // (which CuTeDSL handles correctly for FP8) instead of MLIR
@@ -1614,33 +1592,6 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
     std::string scope;
     if (alloc_storage_scope_.count(buffer_var.get())) {
       scope = alloc_storage_scope_.at(buffer_var.get());
-    }
-
-    if (value_dtype.element_of().is_float4_e2m1fn() && value_lanes % 2 == 0) {
-      PrimExpr scalar_base;
-      if (value_lanes == element_dtype.lanes()) {
-        scalar_base = index_expr * value_lanes;
-      } else {
-        arith::PVar<PrimExpr> ramp_base;
-        ICHECK(arith::ramp(ramp_base, 1, value_lanes / element_dtype.lanes())
-                   .Match(index_expr))
-            << "Non-contiguous narrow-precision store not supported";
-        scalar_base = ramp_base.Eval() * element_dtype.lanes();
-      }
-
-      std::string packed_var = name_supply_->FreshName("_f4pack");
-      std::string view_var = name_supply_->FreshName("_f4view");
-      PrintIndent();
-      stream << packed_var << " = tl.pack_f4_to_i8(" << value_str << ")\n";
-      PrintIndent();
-      stream << view_var << " = cute.recast_tensor(" << vid
-             << ", cutlass.Int8)\n";
-      PrintIndent();
-      stream << "tl.make_tensor_at_offset(" << view_var << ".iterator, ("
-             << PrintExpr_(scalar_base) << ") // 2, (" << (value_lanes / 2)
-             << ",), div_by=" << (value_lanes / 2) << ").store(" << packed_var
-             << ")\n";
-      return;
     }
 
     if (scope == "local") {

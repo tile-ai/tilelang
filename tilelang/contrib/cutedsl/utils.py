@@ -9,17 +9,15 @@ import cutlass
 import cutlass.cute as cute
 
 from cutlass.base_dsl.typing import Int8, Int16, Int32, Uint8, Uint16, Uint32, Float16, Float32, BFloat16
-from cutlass._mlir.dialects import builtin, llvm, nvvm, vector
+from cutlass._mlir.dialects import llvm, nvvm
 from cutlass._mlir import ir as mlir_ir
-from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass.cutlass_dsl import dsl_user_op
 
 __all__ = [
     "BYTES_PER_TENSORMAP",
     "BYTES_PER_POINTER",
     "type_map",
     "bitcast",
-    "pack_f4_to_i8",
-    "unpack_i8_to_f4",
     "make_filled_tensor",
     "make_tensor_at_offset",
     "shuffle_elect",
@@ -93,39 +91,6 @@ def bitcast(value, target_dtype):
         return tgt_wrapper(result)
 
     return bitcast_impl(value)
-
-
-@dsl_user_op
-def pack_f4_to_i8(value, *, loc=None, ip=None):
-    """Bit-pack a Float4 TensorSSA into an Int8 TensorSSA."""
-    recast_shape = cute.recast_layout(8, 4, cute.make_layout(value.shape, loc=loc, ip=ip), loc=loc, ip=ip).shape
-    i4_vec = builtin.unrealized_conversion_cast(
-        [T.vector(value.type.shape[0], T.i(4))],
-        [value.maybe_downcast()],
-        loc=loc,
-        ip=ip,
-    )
-    packed = vector.bitcast(T.vector(i4_vec.type.shape[0] // 2, T.i8()), i4_vec, loc=loc, ip=ip)
-    return cute.TensorSSA(packed, recast_shape, Int8)
-
-
-@dsl_user_op
-def unpack_i8_to_f4(value, dtype, *, loc=None, ip=None):
-    """Unpack an Int8 TensorSSA into a Float4 TensorSSA of ``dtype``."""
-    recast_shape = cute.recast_layout(4, 8, cute.make_layout(value.shape, loc=loc, ip=ip), loc=loc, ip=ip).shape
-    i4_vec = vector.bitcast(
-        T.vector(value.type.shape[0] * 2, T.i(4)),
-        value.maybe_downcast(),
-        loc=loc,
-        ip=ip,
-    )
-    unpacked = builtin.unrealized_conversion_cast(
-        [T.vector(i4_vec.type.shape[0], dtype.mlir_type)],
-        [i4_vec],
-        loc=loc,
-        ip=ip,
-    )
-    return cute.TensorSSA(unpacked, recast_shape, dtype)
 
 
 def make_filled_tensor(shape, value):
