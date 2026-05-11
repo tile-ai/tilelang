@@ -25,6 +25,28 @@ from tilelang.language.dtypes import dtype
 
 COMPILE_ARGS = {}
 
+
+def _torch_float8_dtypes() -> tuple[torch.dtype, ...]:
+    return tuple(
+        dtype
+        for name in ("float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz")
+        if (dtype := getattr(torch, name, None)) is not None
+    )
+
+
+_TORCH_FLOAT8_DTYPES = _torch_float8_dtypes()
+
+
+def _adapt_rocm_float8_tensor(arg: Any, expected_dtype: Any):
+    if getattr(torch.version, "hip", None) is None or not isinstance(arg, torch.Tensor) or arg.dtype not in _TORCH_FLOAT8_DTYPES:
+        return arg
+
+    # PyTorch's legacy DLPack exporter cannot handle FP8 directly.  Export the
+    # byte storage and restore the TileLang dtype on the TVM view.
+    tvm_tensor = runtime.from_dlpack(torch.utils.dlpack.to_dlpack(arg.view(torch.int8)))
+    return tvm_tensor._create_view(arg.shape, dtype=str(expected_dtype))
+
+
 if sys.platform == "darwin":
     from torch.utils import cpp_extension
 
@@ -249,7 +271,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
-            executable(*tensor_list)
+            executable(*(_adapt_rocm_float8_tensor(tensor, self.params[i].dtype) for i, tensor in enumerate(tensor_list)))
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:

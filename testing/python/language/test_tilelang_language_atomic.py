@@ -26,16 +26,9 @@ def run_atomic_add(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
     import torch
 
-    def ref_program(A, B):
-        for k in range(K):
-            for i in range(M):
-                for j in range(N):
-                    B[i, j] += A[k, i, j]
-
     A = torch.randn(K, M, N, dtype=getattr(torch, dtype)).cuda()
     B = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
-    ref_B = B.clone()
-    ref_program(A, ref_B)
+    ref_B = B + A.sum(dim=0)
     kernel(A, B)
     torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
 
@@ -59,16 +52,9 @@ def run_atomic_memory_order(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = atomic_memory_order_program(K, M, N, block_M, block_N, dtype=dtype)
     import torch
 
-    def ref_program(A, B):
-        for k in range(K):
-            for i in range(M):
-                for j in range(N):
-                    B[i, j] += A[k, i, j]
-
     A = torch.randn(K, M, N, dtype=getattr(torch, dtype)).cuda()
     B = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
-    ref_B = B.clone()
-    ref_program(A, ref_B)
+    ref_B = B + A.sum(dim=0)
     kernel(A, B)
     torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
 
@@ -349,16 +335,9 @@ def run_tile_atomic_add(K, M, N, block_M, block_N, dtype=T.float32):
     kernel = tile_atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
     import torch
 
-    def ref_program(A, B):
-        for k in range(K):
-            for i in range(M):
-                for j in range(N):
-                    B[i, j] += A[k, i, j]
-
     A = torch.randn(K, M, N, dtype=getattr(torch, dtype)).cuda()
     B = torch.zeros(M, N, dtype=getattr(torch, dtype)).cuda()
-    ref_B = B.clone()
-    ref_program(A, ref_B)
+    ref_B = B + A.sum(dim=0)
     kernel(A, B)
     torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
 
