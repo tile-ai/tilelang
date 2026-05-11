@@ -65,6 +65,11 @@ void FlattenSeqStmt(const Stmt &s, Array<Stmt> *out) {
 /// pass, so downstream passes can skip redundant transformations.
 static constexpr const char *kTiledWSApplied = "tl_tiled_ws_applied";
 
+static bool ExprUsesAnyVar(const PrimExpr &expr,
+                           const std::unordered_set<const VarNode *> &vars) {
+  return UsesVar(expr, [&vars](const VarNode *v) { return vars.count(v); });
+}
+
 // ---------------------------------------------------------------------------
 // PhaseCounter: local counter for correct barrier parity in guarded loops
 // ---------------------------------------------------------------------------
@@ -1188,10 +1193,15 @@ private:
     if (num_tma == 0)
       return StmtExprMutator::VisitStmt_(op);
 
+    std::vector<const ForNode *> enclosing_loops;
+    ICHECK(CollectEnclosingForLoops(orig_block->body, pipeline_loop,
+                                    &enclosing_loops))
+        << "ProducerConsumerWS: failed to collect pipeline loop ancestry";
+
     // --- Build the WS transformation ---
     return BuildWSBlock(op, orig_block, pipeline_loop, num_stages, flat_stmts,
                         kinds, outer_let_bindings, inner_let_bindings,
-                        loop_body_condition);
+                        loop_body_condition, enclosing_loops);
   }
 
   Stmt
@@ -1201,19 +1211,33 @@ private:
                const std::vector<TileStmtKind> &kinds,
                const std::vector<std::pair<Var, PrimExpr>> &outer_let_bindings,
                const std::vector<std::pair<Var, PrimExpr>> &inner_let_bindings,
-               Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>()) {
+               Optional<PrimExpr> loop_body_condition,
+               const std::vector<const ForNode *> &enclosing_loops) {
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_min = pipeline_loop->min;
     PrimExpr loop_extent = pipeline_loop->extent;
     PrimExpr linear_idx = loop_var - loop_min;
+    PrimExpr outer_linear_idx = IntImm(DataType::Int(32), 0);
+    std::unordered_set<const VarNode *> outer_loop_vars;
+    for (const ForNode *outer_loop : enclosing_loops) {
+      outer_loop_vars.insert(outer_loop->loop_var.get());
+      outer_linear_idx = outer_linear_idx * outer_loop->extent +
+                         (outer_loop->loop_var - outer_loop->min);
+    }
+    PrimExpr global_linear_idx = outer_linear_idx * loop_extent + linear_idx;
 
-    PrimExpr base_stage_expr = FloorMod(linear_idx, num_stages);
-    PrimExpr base_parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
+    PrimExpr base_stage_expr = FloorMod(global_linear_idx, num_stages);
+    PrimExpr base_parity_expr =
+        FloorMod(FloorDiv(global_linear_idx, num_stages), 2);
 
     // When the loop body is conditionally guarded, use PhaseCounters
     // instead of the loop variable for barrier stage/parity.  This
     // ensures parity stays correct when iterations are skipped.
-    bool needs_phase_counter = loop_body_condition.defined();
+    bool non_rectangular_loop_nest =
+        ExprUsesAnyVar(loop_min, outer_loop_vars) ||
+        ExprUsesAnyVar(loop_extent, outer_loop_vars);
+    bool needs_phase_counter =
+        loop_body_condition.defined() || non_rectangular_loop_nest;
     Optional<PhaseCounter> producer_phase_counter;
     Optional<PhaseCounter> consumer_phase_counter;
     PrimExpr p_stage_expr = base_stage_expr;
@@ -1432,7 +1456,7 @@ private:
     PrimExpr prelude_wait_guard =
         needs_phase_counter ? EQ(consumer_phase_counter.value().Load(),
                                  IntImm(DataType::Int(32), 0))
-                            : EQ(loop_var, loop_min);
+                            : EQ(global_linear_idx, IntImm(DataType::Int(32), 0));
     int prelude_barrier_base = num_fwd + num_bp;
     for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
       PrimExpr barrier_id = IntImm(DataType::Int(32), prelude_barrier_base + i);
@@ -1839,6 +1863,11 @@ private:
         << "ProducerConsumerWS: failed to replace pipeline loop";
     Stmt new_block_body = SinkGuardedConsumerPostlude::Rewrite(
         replaced.stmt, thread_iv_->var, consumer_extent);
+    if (!enclosing_loops.empty()) {
+      new_block_body = HoistWSBranchOutOfLoops::Rewrite(
+          new_block_body, thread_iv_->var, consumer_extent, ws_partition,
+          static_cast<int>(enclosing_loops.size()));
+    }
 
     // --- Update block ---
     Block new_block = orig_block;
@@ -1882,6 +1911,7 @@ private:
       if (for_node->annotations.Get("num_stages")) {
         return for_node;
       }
+      return FindPipelineLoop(for_node->body);
     }
     // Walk through SeqStmt, LetStmt, etc.
     if (auto *seq = stmt.as<SeqStmtNode>()) {
@@ -1889,6 +1919,14 @@ private:
         if (auto *result = FindPipelineLoop(s)) {
           return result;
         }
+      }
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (auto *result = FindPipelineLoop(if_stmt->then_case)) {
+        return result;
+      }
+      if (if_stmt->else_case.defined()) {
+        return FindPipelineLoop(if_stmt->else_case.value());
       }
     }
     if (auto *let = stmt.as<LetStmtNode>()) {
@@ -1904,6 +1942,52 @@ private:
       return FindPipelineLoop(attr->body);
     }
     return nullptr;
+  }
+
+  bool CollectEnclosingForLoops(const Stmt &stmt, const ForNode *target,
+                                std::vector<const ForNode *> *loops) {
+    if (stmt.get() == target) {
+      return true;
+    }
+    if (auto *for_node = stmt.as<ForNode>()) {
+      loops->push_back(for_node);
+      if (CollectEnclosingForLoops(for_node->body, target, loops)) {
+        return true;
+      }
+      loops->pop_back();
+      return false;
+    }
+    if (auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const Stmt &s : seq->seq) {
+        if (CollectEnclosingForLoops(s, target, loops)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      if (CollectEnclosingForLoops(if_stmt->then_case, target, loops)) {
+        return true;
+      }
+      if (if_stmt->else_case.defined()) {
+        return CollectEnclosingForLoops(if_stmt->else_case.value(), target,
+                                        loops);
+      }
+      return false;
+    }
+    if (auto *let = stmt.as<LetStmtNode>()) {
+      return CollectEnclosingForLoops(let->body, target, loops);
+    }
+    if (auto *realize = stmt.as<BlockRealizeNode>()) {
+      return CollectEnclosingForLoops(realize->block->body, target, loops);
+    }
+    if (auto *block = stmt.as<BlockNode>()) {
+      return CollectEnclosingForLoops(block->body, target, loops);
+    }
+    if (auto *attr = stmt.as<AttrStmtNode>()) {
+      return CollectEnclosingForLoops(attr->body, target, loops);
+    }
+    return false;
   }
 
   struct ReplaceResult {
@@ -2060,6 +2144,235 @@ private:
     PrimExpr consumer_extent_;
   };
 
+  class HoistWSBranchOutOfLoops : public StmtExprMutator {
+  public:
+    static Stmt Rewrite(const Stmt &stmt, Var thread_var,
+                        PrimExpr consumer_extent,
+                        const Array<IntImm> &ws_partition, int max_hoists) {
+      HoistWSBranchOutOfLoops hoister(std::move(thread_var),
+                                      std::move(consumer_extent), ws_partition,
+                                      max_hoists);
+      return hoister.VisitStmt(stmt);
+    }
+
+  private:
+    struct SplitResult {
+      Stmt producer;
+      Stmt consumer;
+      bool found{false};
+    };
+
+    HoistWSBranchOutOfLoops(Var thread_var, PrimExpr consumer_extent,
+                            Array<IntImm> ws_partition, int max_hoists)
+        : thread_var_(std::move(thread_var)),
+          consumer_extent_(std::move(consumer_extent)),
+          ws_partition_(std::move(ws_partition)),
+          remaining_hoists_(max_hoists) {}
+
+    static bool SameExpr(const PrimExpr &lhs, const PrimExpr &rhs) {
+      return ExprDeepEqual()(lhs, rhs);
+    }
+
+    bool IsWSBranchStmt(const Stmt &stmt, Stmt *producer,
+                        Stmt *consumer) const {
+      const auto *if_node = stmt.as<IfThenElseNode>();
+      if (!if_node || !if_node->else_case.defined()) {
+        return false;
+      }
+      const auto *ge = if_node->condition.as<GENode>();
+      if (!ge) {
+        return false;
+      }
+      const auto *lhs = ge->a.as<VarNode>();
+      if (!lhs || lhs != thread_var_.get()) {
+        return false;
+      }
+      if (!SameExpr(ge->b, consumer_extent_)) {
+        return false;
+      }
+      *producer = if_node->then_case;
+      *consumer = if_node->else_case.value();
+      return true;
+    }
+
+    bool IsWSBranch(const Stmt &stmt, Stmt *producer, Stmt *consumer) const {
+      if (IsWSBranchStmt(stmt, producer, consumer)) {
+        return true;
+      }
+      const auto *attr_node = stmt.as<AttrStmtNode>();
+      if (!attr_node || attr_node->attr_key != attr::kWarpSpecializationScope) {
+        return false;
+      }
+      return IsWSBranchStmt(attr_node->body, producer, consumer);
+    }
+
+    bool IsGuardedConsumerStmt(const Stmt &stmt, Stmt *body) const {
+      const auto *if_node = stmt.as<IfThenElseNode>();
+      if (!if_node || if_node->else_case.defined()) {
+        return false;
+      }
+      const auto *lt = if_node->condition.as<LTNode>();
+      if (!lt) {
+        return false;
+      }
+      const auto *lhs = lt->a.as<VarNode>();
+      if (!lhs || lhs != thread_var_.get()) {
+        return false;
+      }
+      if (!SameExpr(lt->b, consumer_extent_)) {
+        return false;
+      }
+      *body = if_node->then_case;
+      return true;
+    }
+
+    bool SafeToDuplicateBeforeWSBranch(const Stmt &stmt) const {
+      bool safe = true;
+      PostOrderVisit(stmt, [&](const ObjectRef &node) {
+        if (!safe) {
+          return;
+        }
+        if (const auto *call = node.as<CallNode>()) {
+          if (IsBarrierOrTmaControlCall(call) ||
+              call->op.same_as(tl::fence_proxy_async()) ||
+              call->op.same_as(tl::ptx_wgmma_ss()) ||
+              call->op.same_as(tl::ptx_wgmma_rs()) ||
+              call->op.same_as(tl::tl_gemm()) ||
+              call->op.same_as(tl::tl_gemm_sp()) ||
+              call->op.same_as(tl::ptx_tcgen05_mma_ss()) ||
+              call->op.same_as(tl::ptx_tcgen05_mma_ts()) ||
+              call->op.same_as(tl::tcgen05_ld()) ||
+              call->op.same_as(tl::tcgen05_st())) {
+            safe = false;
+          }
+        }
+      });
+      return safe;
+    }
+
+    static Stmt MakeSeq(const Array<Stmt> &stmts) {
+      ICHECK(!stmts.empty());
+      return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
+    }
+
+    Stmt MakeWSBranch(const Stmt &producer, const Stmt &consumer) const {
+      Stmt branch =
+          IfThenElse(GE(thread_var_, consumer_extent_), producer, consumer);
+      return AttrStmt(ws_partition_, attr::kWarpSpecializationScope, 0, branch);
+    }
+
+    SplitResult SplitWSBranch(const Stmt &stmt) const {
+      Stmt producer;
+      Stmt consumer;
+      if (IsWSBranch(stmt, &producer, &consumer)) {
+        return {producer, consumer, true};
+      }
+
+      if (const auto *seq = stmt.as<SeqStmtNode>()) {
+        Array<Stmt> producer_seq;
+        Array<Stmt> consumer_seq;
+        bool found = false;
+        for (const Stmt &child : seq->seq) {
+          if (!found) {
+            SplitResult child_split = SplitWSBranch(child);
+            if (child_split.found) {
+              producer_seq.push_back(child_split.producer);
+              consumer_seq.push_back(child_split.consumer);
+              found = true;
+            } else {
+              if (!SafeToDuplicateBeforeWSBranch(child)) {
+                return {};
+              }
+              producer_seq.push_back(child);
+              consumer_seq.push_back(child);
+            }
+            continue;
+          }
+
+          Stmt consumer_body;
+          if (IsGuardedConsumerStmt(child, &consumer_body)) {
+            consumer_seq.push_back(consumer_body);
+          } else {
+            producer_seq.push_back(child);
+            consumer_seq.push_back(child);
+          }
+        }
+        if (!found) {
+          return {};
+        }
+        return {MakeSeq(producer_seq), MakeSeq(consumer_seq), true};
+      }
+
+      if (const auto *let = stmt.as<LetStmtNode>()) {
+        SplitResult body_split = SplitWSBranch(let->body);
+        if (!body_split.found) {
+          return {};
+        }
+        return {LetStmt(let->var, let->value, body_split.producer),
+                LetStmt(let->var, let->value, body_split.consumer), true};
+      }
+
+      if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+        SplitResult then_split = SplitWSBranch(if_stmt->then_case);
+        if (then_split.found) {
+          return {IfThenElse(if_stmt->condition, then_split.producer,
+                             if_stmt->else_case),
+                  IfThenElse(if_stmt->condition, then_split.consumer,
+                             if_stmt->else_case),
+                  true};
+        }
+        if (if_stmt->else_case.defined()) {
+          SplitResult else_split = SplitWSBranch(if_stmt->else_case.value());
+          if (else_split.found) {
+            return {IfThenElse(if_stmt->condition, if_stmt->then_case,
+                               else_split.producer),
+                    IfThenElse(if_stmt->condition, if_stmt->then_case,
+                               else_split.consumer),
+                    true};
+          }
+        }
+      }
+
+      if (const auto *attr_node = stmt.as<AttrStmtNode>()) {
+        SplitResult body_split = SplitWSBranch(attr_node->body);
+        if (!body_split.found) {
+          return {};
+        }
+        return {AttrStmt(attr_node->node, attr_node->attr_key,
+                         attr_node->value, body_split.producer),
+                AttrStmt(attr_node->node, attr_node->attr_key,
+                         attr_node->value, body_split.consumer),
+                true};
+      }
+
+      return {};
+    }
+
+    Stmt VisitStmt_(const ForNode *op) final {
+      For visited_for = Downcast<For>(StmtExprMutator::VisitStmt_(op));
+      if (remaining_hoists_ <= 0) {
+        return visited_for;
+      }
+
+      SplitResult split = SplitWSBranch(visited_for->body);
+      if (!split.found) {
+        return visited_for;
+      }
+
+      For producer_for = visited_for;
+      producer_for.CopyOnWrite()->body = split.producer;
+      For consumer_for = visited_for;
+      consumer_for.CopyOnWrite()->body = split.consumer;
+      --remaining_hoists_;
+      return MakeWSBranch(producer_for, consumer_for);
+    }
+
+    Var thread_var_;
+    PrimExpr consumer_extent_;
+    Array<IntImm> ws_partition_;
+    int remaining_hoists_;
+  };
+
   Stmt GuardConsumerOnly(const Stmt &stmt, PrimExpr consumer_extent) {
     return IfThenElse(LT(thread_iv_->var, consumer_extent), stmt);
   }
@@ -2167,6 +2480,36 @@ private:
         return {stmt, false};
       }
       return {LetStmt(let->var, let->value, result.stmt), true};
+    }
+    if (auto *for_node = stmt.as<ForNode>()) {
+      ReplaceResult result = ReplacePipelineLoopInStmt(
+          for_node->body, pipeline_loop, ws_body, consumer_extent);
+      if (!result.found) {
+        return {stmt, false};
+      }
+      For new_for = ffi::GetRef<For>(for_node);
+      new_for.CopyOnWrite()->body = result.stmt;
+      return {new_for, true};
+    }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      ReplaceResult then_result = ReplacePipelineLoopInStmt(
+          if_stmt->then_case, pipeline_loop, ws_body, consumer_extent);
+      if (then_result.found) {
+        IfThenElse new_if = ffi::GetRef<IfThenElse>(if_stmt);
+        new_if.CopyOnWrite()->then_case = then_result.stmt;
+        return {new_if, true};
+      }
+      if (if_stmt->else_case.defined()) {
+        ReplaceResult else_result = ReplacePipelineLoopInStmt(
+            if_stmt->else_case.value(), pipeline_loop, ws_body,
+            consumer_extent);
+        if (else_result.found) {
+          IfThenElse new_if = ffi::GetRef<IfThenElse>(if_stmt);
+          new_if.CopyOnWrite()->else_case = else_result.stmt;
+          return {new_if, true};
+        }
+      }
+      return {stmt, false};
     }
     if (auto *realize = stmt.as<BlockRealizeNode>()) {
       ReplaceResult result = ReplacePipelineLoopInStmt(
