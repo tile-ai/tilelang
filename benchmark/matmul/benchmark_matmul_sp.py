@@ -4,20 +4,13 @@ import logging
 import torch
 from triton.testing import do_bench
 
-import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
-from tilelang.contrib import nvcc
-from tilelang.layout import make_cutlass_metadata_layout
+from tilelang.utils.sparse import get_e_factor
 
-# Configure logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-arch = nvcc.get_target_compute_version()
-
-ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 
 
 def ref_program(A, B):
@@ -88,7 +81,7 @@ def get_configs(M, N, K):
     return configs
 
 
-def matmul_sp(M, N, K, in_dtype, accum_dtype):
+def matmul_sp(M, N, K, in_dtype, accum_dtype, e_dtype):
     """
     Create an autotuned matrix multiplication kernel for matrices of shape:
       - A: (M, K)
@@ -164,8 +157,8 @@ def matmul_sp(M, N, K, in_dtype, accum_dtype):
             A TVM Tensor Language function (T.prim_func) that computes matmul.
         """
         # Use half-precision for input data to reduce memory bandwidth,
-        # accumulate in float for better numerical accuracy
-        e_factor, e_dtype = ARCH_INFO[arch]
+        # accumulate in float for better numerical accurac
+        e_factor = get_e_factor(in_dtype, e_dtype)
 
         @T.prim_func
         def main(
@@ -200,15 +193,8 @@ def matmul_sp(M, N, K, in_dtype, accum_dtype):
 
                 # Clear out the accumulation buffer
                 T.clear(C_local)
-                T.disable_warp_group_reg_alloc()
 
                 T.use_swizzle(panel_size=10, enable=enable_rasterization)
-                T.annotate_layout(
-                    {
-                        E: make_cutlass_metadata_layout(E, mma_dtype=in_dtype, block_k=block_K),
-                        E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=in_dtype, block_k=block_K),
-                    }
-                )
                 # Loop over sub-blocks in K dimension, pipelined by num_stages
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                     # Load a sub-block of A from global memory into A_shared
@@ -224,6 +210,8 @@ def matmul_sp(M, N, K, in_dtype, accum_dtype):
                         E_shared,
                         B_shared,
                         C_local,
+                        transpose_A=False,
+                        transpose_E=False,
                         transpose_B=False,
                         policy=policy,
                     )
@@ -242,8 +230,8 @@ if __name__ == "__main__":
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument("--disable_cache", action="store_true")
     parser.add_argument("--accum_dtype", type=str, default="float", choices=["float", "float16"], help="Accumulation datatype")
+    parser.add_argument("--e_dtype", type=str, default="int16", choices=["int16", "int8", "int32"], help="Metadata E datatype")
     parser.add_argument(
         "--bench_torch_sparse",
         type=str,
@@ -253,16 +241,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.disable_cache:
-        tilelang.disable_cache()
-
     M, N, K = args.m, args.n, args.k
 
     # Compute total floating-point operations to measure throughput
     total_flops = 2 * M * N * K
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
-    best_result = matmul_sp(M, N, K, T.float16, args.accum_dtype)
+    best_result = matmul_sp(M, N, K, T.float16, args.accum_dtype, e_dtype=args.e_dtype)
     best_latency = best_result.latency
     best_config = best_result.config
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")
