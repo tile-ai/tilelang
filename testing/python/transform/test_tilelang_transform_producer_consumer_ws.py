@@ -114,6 +114,43 @@ def prelude_tma_wait_sink(block=64, iters=2, dtype="float16", threads=128):
     return main
 
 
+def nested_prelude_tma_wait_sink(block=64, outer_iters=2, inner_iters=2, dtype="float16", threads=128):
+    """Nested tiled-WS kernel with pre-loop TMA loads before the inner pipeline."""
+
+    @T.prim_func
+    def main(
+        Q: T.Buffer((outer_iters * inner_iters * block, block), dtype),
+        K_in: T.Buffer((block, block), dtype),
+        V_in: T.Buffer((block, block), dtype),
+        O: T.Buffer((block, block), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            K_shared = T.alloc_shared((block, block), dtype)
+            V_shared = T.alloc_shared((block, block), dtype)
+            q = T.alloc_shared((block, block), dtype)
+            acc0 = T.alloc_fragment((block, block), "float32")
+            acc1 = T.alloc_fragment((block, block), "float32")
+            out = T.alloc_fragment((block, block), "float32")
+
+            T.clear(out)
+            for outer in T.serial(outer_iters):
+                T.copy(K_in[0, 0], K_shared)
+                T.copy(V_in[0, 0], V_shared)
+                for inner in T.Pipelined(inner_iters, num_stages=2):
+                    q_idx = (outer * inner_iters + inner) * block
+                    T.copy(Q[q_idx, 0], q)
+                    T.clear(acc0)
+                    T.gemm(K_shared, q, acc0, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    T.clear(acc1)
+                    T.gemm(V_shared, q, acc1, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    for i, j in T.Parallel(block, block):
+                        out[i, j] = out[i, j] + acc0[i, j] + acc1[i, j]
+
+            T.copy(out, O[0, 0])
+
+    return main
+
+
 def grouped_gemm_padded_pipelined(
     batch_sizes,
     K,
@@ -429,6 +466,26 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
 
     assert min(k_load, v_load, branch, first_wait) >= 0
     assert k_load < v_load < branch < first_wait
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_collects_nested_preloop_tma_waits():
+    """Nested pre-loop TMA loads should be rewritten and waited by consumers."""
+
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(nested_prelude_tma_wait_sink(), pass_configs, out_idx=[3])
+    src = kernel.get_kernel_source()
+
+    k_load = _find_after(src, "tl::tma_load(K_in_desc")
+    v_load = _find_after(src, "tl::tma_load(V_in_desc")
+    branch = _find_after(src, "if (128 <= ((int)threadIdx.x))")
+    consumer_branch = _find_after(src, "} else {", branch)
+    first_wait = _find_after(src, ".wait(0)")
+
+    assert "__launch_bounds__(256, 1)" in src
+    assert "uint64_t mbarrier_mem[6]" in src
+    assert branch < k_load < v_load < consumer_branch < first_wait
 
 
 @tilelang.testing.requires_cuda

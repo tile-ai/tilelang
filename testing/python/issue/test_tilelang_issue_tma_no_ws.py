@@ -309,6 +309,55 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_nested_ws_stage_uses_global_loop_index():
+    """Nested WS pipelines must keep shared-buffer stages aligned with barriers."""
+
+    M = N = 128
+    block_m = block_n = 128
+    block_k = 32
+    outer_extent = 2
+    inner_extent = 5
+    num_stages = 3
+    K = outer_extent * inner_extent * block_k
+    threads = 128
+
+    @T.prim_func
+    def nested_gemm(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((K, N), T.float16),
+        C: T.Tensor((M, N), T.float16),
+    ):
+        with T.Kernel(T.ceildiv(N, block_n), T.ceildiv(M, block_m), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared((block_m, block_k), T.float16)
+            B_shared = T.alloc_shared((block_k, block_n), T.float16)
+            C_local = T.alloc_fragment((block_m, block_n), T.float32)
+
+            T.clear(C_local)
+            for ko in T.serial(outer_extent):
+                for ki in T.Pipelined(inner_extent, num_stages=num_stages):
+                    k = ko * inner_extent + ki
+                    T.copy(A[by * block_m, k * block_k], A_shared)
+                    T.copy(B[k * block_k, bx * block_n], B_shared)
+                    T.gemm(A_shared, B_shared, C_local)
+
+            T.copy(C_local, C[by * block_m, bx * block_n])
+
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(nested_gemm, pass_configs, out_idx=[2])
+
+    src = kernel.get_kernel_source()
+    flat_src = " ".join(src.split())
+
+    assert f"uint64_t mbarrier_mem[{2 * num_stages}]" in src
+    assert re.search(r"mbarrier\[\(\(\(ko \* 5\) \+ ki\) % 3\)\]", flat_src)
+    assert re.search(r"buf_dyn_shmem\)\[\(\(\(\(ko \* 5\) \+ ki\) % 3\) \* 4096\)", flat_src)
+    assert re.search(
+        r"buf_dyn_shmem\)\[\(\(\(\(\(ko \* 5\) \+ ki\) % 3\) \* 4096\) \+ 12288\)",
+        flat_src,
+    )
+
+
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     """Ordinary global->shared metadata copies should stay in the producer."""
