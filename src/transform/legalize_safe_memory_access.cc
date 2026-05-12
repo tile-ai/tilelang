@@ -39,7 +39,7 @@ struct SafeMemChecker : public StmtExprVisitor {
     disableOOBWarning =
         tvm::transform::PassContext::Current()
             ->GetConfig(kDisableOutOfBoundWarning, Optional<Bool>())
-            .value_or(false);
+            .value_or(true);
   }
   void VisitExpr_(const BufferLoadNode *op) final {
     // If the buffer is in global scope, we will check its indices and add
@@ -127,12 +127,28 @@ struct SafeMemChecker : public StmtExprVisitor {
         // of hard-failing compilation.
         can_prove_upper = false;
       }
+
+      if (!can_prove_upper) {
+        // Fallback: use const_int_bound directly.
+        // CanProve's kSymbolicBound strategy uses int_set, which only tracks
+        // Var-keyed constraints. const_int_bound tracks PrimExpr-keyed
+        // constraints (including BufferLoad), so it can leverage bounds
+        // from an enclosing if-condition like `if bin_id < N`.
+        arith::ConstIntBound index_bound = analyzer_->const_int_bound(index);
+        arith::ConstIntBound shape_bound =
+            analyzer_->const_int_bound(shape_dim);
+        if (index_bound->max_value < shape_bound->min_value) {
+          can_prove_upper = true;
+        }
+      }
+
       if (!can_prove_upper) {
         if (throw_warning) {
           LOG(WARNING) << "Index access may exceed buffer bounds: " << index
                        << " >= " << shape_dim
                        << "; Buffer name: " << buffer->name;
-        } else {
+        }
+        if (IsGlobalBuffer(buffer)) {
           _conditions.push_back(upper_bound_cond);
         }
       }
@@ -145,11 +161,21 @@ struct SafeMemChecker : public StmtExprVisitor {
       } catch (const Error &e) {
         can_prove_lower = false;
       }
+
+      if (!can_prove_lower) {
+        // Same fallback as above for the lower bound.
+        arith::ConstIntBound index_bound = analyzer_->const_int_bound(index);
+        if (index_bound->min_value >= 0) {
+          can_prove_lower = true;
+        }
+      }
+
       if (!can_prove_lower) {
         if (throw_warning) {
           LOG(WARNING) << "Index access may be negative: " << index << " < 0"
                        << "; Buffer name: " << buffer->name;
-        } else {
+        }
+        if (IsGlobalBuffer(buffer)) {
           _conditions.push_back(lower_bound_cond);
         }
       }

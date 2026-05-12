@@ -59,6 +59,7 @@ def _make_async_tcgen05_kernel(gemm_op):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 @pytest.mark.parametrize(
     ("sync_api", "async_api"),
     [
@@ -77,6 +78,7 @@ def test_tcgen05_gemm_matches_sync_gemm_codegen(sync_api, async_api):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_tcgen05_gemm_dispatch_matches_sync_gemm_codegen():
     sync_kernel = tilelang.compile(
         _make_sync_tcgen05_kernel(lambda A, B, C, mbar: T.gemm(A, B, C, transpose_B=True, mbar=mbar, clear_accum=True)),
@@ -92,6 +94,7 @@ def test_tcgen05_gemm_dispatch_matches_sync_gemm_codegen():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_tcgen05_gemm_rejects_non_tcgen05_lowering():
     @T.prim_func
     def main(

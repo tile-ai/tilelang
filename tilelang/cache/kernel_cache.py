@@ -39,15 +39,24 @@ class KernelCache:
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
+    _staging_cleanup_lock = threading.Lock()
+    _last_cleaned_staging_root: str | None = None
     execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi"
     device_kernel_path = "device_kernel.cu"
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
+    cache_root_dir = "kernels"
+    staging_root_dir = ".staging"
 
     @staticmethod
     @functools.cache
     def _get_compile_args() -> dict:
+        if sys.platform == "win32":
+            from tilelang.contrib.msvc import create_shared as msvc_create_shared
+
+            return {"fcompile": msvc_create_shared}
+
         if sys.platform != "darwin":
             return {}
 
@@ -80,7 +89,7 @@ class KernelCache:
             pass
 
         if sys.platform == "win32":
-            lib_names = ["tilelang.dll", "libtilelang.dll"]
+            lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
         elif sys.platform == "darwin":
             lib_names = ["libtilelang.dylib", "libtilelang.so"]
         else:
@@ -110,6 +119,29 @@ class KernelCache:
             base["torch"] = torch.__version__
         return base
 
+    @staticmethod
+    def _sanitize_path_component(component: str) -> str:
+        sanitized = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in component)
+        sanitized = sanitized.strip("._-")
+        return sanitized or "unknown"
+
+    @staticmethod
+    def _format_version_namespace(version: str) -> str:
+        public, sep, local = version.partition("+")
+        public = KernelCache._sanitize_path_component(public)
+        if not sep:
+            return public
+        local = "".join(ch if ch.isalnum() else "_" for ch in local).strip("_")
+        return f"{public}_{local}" if local else public
+
+    @staticmethod
+    @functools.cache
+    def _get_cache_namespace() -> str:
+        base_key = KernelCache._get_base_key()
+        version = KernelCache._format_version_namespace(str(base_key.get("version", "unknown")))
+        platform_name = KernelCache._sanitize_path_component(str(base_key.get("platform", "unknown")))
+        return f"{version}-{platform_name}"
+
     def __new__(cls):
         """
         Implements singleton pattern for KernelCache class.
@@ -132,11 +164,31 @@ class KernelCache:
     def _create_dirs():
         os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
         os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
-        KernelCache._cleanup_stale_staging_dirs()
+        os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
+        os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
+        os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
+
+        staging_root = KernelCache._get_staging_root()
+        with KernelCache._staging_cleanup_lock:
+            if KernelCache._last_cleaned_staging_root != staging_root:
+                KernelCache._cleanup_stale_staging_dirs()
+                KernelCache._last_cleaned_staging_root = staging_root
+
+    @staticmethod
+    def _get_namespace_root() -> str:
+        return os.path.join(env.TILELANG_CACHE_DIR, KernelCache._get_cache_namespace())
+
+    @staticmethod
+    def _get_cache_root() -> str:
+        return os.path.join(KernelCache._get_namespace_root(), KernelCache.cache_root_dir)
+
+    @staticmethod
+    def _get_staging_root() -> str:
+        return os.path.join(KernelCache._get_namespace_root(), KernelCache.staging_root_dir)
 
     @staticmethod
     def _cleanup_stale_staging_dirs(max_age_seconds: int = 3600):
-        """Remove staging directories older than *max_age_seconds* (default 1 h).
+        """Remove stale entries from the dedicated staging root.
 
         These are left behind when a process crashes mid-save.
         """
@@ -144,8 +196,12 @@ class KernelCache:
 
         try:
             now = time.time()
-            for entry in os.scandir(env.TILELANG_CACHE_DIR):
-                if entry.name.startswith(".staging_") and entry.is_dir(follow_symlinks=False):
+            staging_root = KernelCache._get_staging_root()
+            if not os.path.isdir(staging_root):
+                return
+
+            for entry in os.scandir(staging_root):
+                if entry.is_dir(follow_symlinks=False):
                     try:
                         if now - entry.stat().st_mtime > max_age_seconds:
                             shutil.rmtree(entry.path, ignore_errors=True)
@@ -330,7 +386,7 @@ class KernelCache:
         Returns:
             str: Absolute path to the cache directory for this kernel.
         """
-        return os.path.join(env.TILELANG_CACHE_DIR, key)
+        return os.path.join(self._get_cache_root(), key)
 
     @staticmethod
     def _load_binary(path: str):
@@ -358,10 +414,10 @@ class KernelCache:
         """
         Persists a compiled kernel to disk cache using atomic directory rename.
 
-        All files are first written into a temporary staging directory under
-        TILELANG_CACHE_DIR.  Once every file is in place, the staging directory
-        is atomically renamed to the final cache path so that other processes
-        never observe an incomplete cache entry.
+        All files are first written into a temporary staging directory under the
+        namespace staging root. Once every file is in place, the staging directory
+        is atomically renamed to the final cache path so that other processes never
+        observe an incomplete cache entry.
 
         Args:
             key (str): The hash key identifying the kernel.
@@ -369,16 +425,21 @@ class KernelCache:
             func (Callable, optional): The original function.
             verbose (bool): Enable verbose log messages.
         """
+        # Env-backed cache roots may change across tests or at runtime; recreate the
+        # namespace-specific directories lazily here so direct save helpers keep working
+        # even when the singleton instance is reused.
+        KernelCache._create_dirs()
         cache_path = self._get_cache_path(key)
 
         # Another process already wrote a complete entry — nothing to do.
         if self._is_complete_cache_dir(cache_path):
             return
 
-        # Staging dir lives under CACHE_DIR (same filesystem) so os.rename works.
+        # Staging dir lives under CACHE_DIR/<namespace>/.staging (same filesystem) so
+        # os.rename works without scanning the full cache root during stale cleanup.
         staging_path = os.path.join(
-            env.TILELANG_CACHE_DIR,
-            f".staging_{key}_{os.getpid()}_{uuid.uuid4().hex[:8]}",
+            self._get_staging_root(),
+            f"{key}_{os.getpid()}_{uuid.uuid4().hex[:8]}",
         )
         os.makedirs(staging_path)
 
@@ -489,14 +550,13 @@ class KernelCache:
         Removes all cached kernels from disk.
 
         Note:
-            This operation will delete the entire cache directory and recreate it empty.
+            This operation will delete the current kernel-cache namespace and recreate it empty.
             Use with caution as this operation cannot be undone.
         """
         try:
-            # Delete the entire cache directory
-            shutil.rmtree(env.TILELANG_CACHE_DIR)
+            shutil.rmtree(self._get_cache_root(), ignore_errors=True)
+            shutil.rmtree(self._get_staging_root(), ignore_errors=True)
 
-            # Re-create the cache directory
             KernelCache._create_dirs()
         except Exception:
             self.logger.exception("Error clearing disk cache")

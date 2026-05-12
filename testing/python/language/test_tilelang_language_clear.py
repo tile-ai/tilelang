@@ -43,10 +43,9 @@ def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=
     program = matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
     kernel = tilelang.compile(program, out_idx=[2])
     import torch
-    from tilelang.utils import map_torch_type
 
-    a = torch.randn((M, K), dtype=map_torch_type(dtype)).cuda()
-    b = torch.randn((N, K), dtype=map_torch_type(dtype)).cuda()
+    a = torch.randn((M, K), dtype=dtype.as_torch()).cuda()
+    b = torch.randn((N, K), dtype=dtype.as_torch()).cuda()
     c = kernel(a, b)
     assert torch.allclose(c, torch.zeros_like(c))
 

@@ -9,17 +9,63 @@
 
 #include "builtin.h"
 #include <tvm/tir/builtin.h>
+#include <tvm/tir/function.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
 #include "tvm/ffi/string.h"
+
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+namespace {
+
+std::vector<GemmSPImpl> &GemmSPImplRegistry() {
+  static std::vector<GemmSPImpl> registry;
+  return registry;
+}
+
+const GemmSPImpl &ResolveGemmSPImpl(Target target) {
+  const auto &registry = GemmSPImplRegistry();
+  const GemmSPImpl *matched_impl = nullptr;
+  for (const GemmSPImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.gemm found multiple target-specific implementations for "
+          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.gemm requires a target-specific implementation, but no gemm "
+         "implementation is registered for "
+      << target->ToDebugString();
+  return *matched_impl;
+}
+
+} // namespace
+
+std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(
+    int M, int N, int block_size, Target target, String gemm_inst) const {
+  return ResolveGemmSPImpl(target).compute_warp_partition(
+      *this, M, N, block_size, target, gemm_inst);
+}
+
+void RegisterGemmSPImpl(GemmSPImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.select_inst != nullptr);
+  ICHECK(impl.compute_warp_partition != nullptr);
+  ICHECK(impl.reuse_existing_shared_layout != nullptr);
+  ICHECK(impl.instruction_kind != nullptr);
+  GemmSPImplRegistry().push_back(impl);
+}
 
 /**
  * @brief Construct a GemmSP operator from serialized TL arguments.
@@ -61,7 +107,7 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->M = args[7].as<IntImm>().value()->value;
   node->N = args[8].as<IntImm>().value()->value;
   node->K = args[9].as<IntImm>().value()->value;
-  node->policy = GemmWarpPolicy(args[10].as<IntImm>().value()->value);
+  node->policy = GemmSPWarpPolicy(args[10].as<IntImm>().value()->value);
   node->clear_accum = args[11].as<PrimExpr>().value();
   node->stride_A = args[12].as<IntImm>().value()->value;
   node->stride_B = args[13].as<IntImm>().value()->value;
@@ -76,6 +122,17 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   if (args.size() > 17) {
     node->wg_wait = args[17].as<IntImm>().value()->value;
   }
+  if (auto val = annotations.Get("is_wgmma")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "is_wgmma annotation must be IntImmNode";
+    node->isWgmma_ = int_val->value != 0;
+  }
+  if (auto val = annotations.Get("is_tcgen05")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
+    node->isTcgen05_ = int_val->value != 0;
+  }
+
   data_ = std::move(node);
 }
 
@@ -96,50 +153,15 @@ TileOperator GemmSPNode::Clone() const {
   return GemmSP(op);
 }
 
-GemmInst GemmSPNode::GetGemmSPInst(int block_size, Target target) const {
-  int warp_size = TargetGetWarpSize(target);
-  int num_warps = block_size / warp_size;
-  bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
-                     (num_warps % 4 == 0) && CheckWGMMA();
-  if (allow_wgmma) {
-    return GemmInst::kWGMMA;
-  } else if (TargetIsCDNA(target)) {
-    return GemmInst::kMFMA;
-  } else if (TargetIsRDNA(target)) {
-    return GemmInst::kWMMA;
-  } else if (TargetIsCuda(target)) {
-    return GemmInst::kMMA;
-  } else {
-    ICHECK(0) << "Unsupported target for gemm: " << target->str();
-  }
+String GemmSPNode::getGemmSPInstructionKey(int block_size,
+                                           Target target) const {
+  return ResolveGemmSPImpl(target).select_inst(*this, block_size, target);
 }
 
-bool GemmSPNode::CheckWGMMA() const {
-  if (B.scope() != "shared.dyn" && B.scope() != "shared") {
-    return false;
-  }
-
-  if (C->dtype == DataType::Float(16) || C->dtype == DataType::Float(32)) {
-    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
-      return K % 32 == 0;
-    else if (A->dtype == DataType::BFloat(16) &&
-             B->dtype == DataType::BFloat(16))
-      return K % 32 == 0;
-    else if (A->dtype == DataType::Float(32) && B->dtype == DataType::Float(32))
-      return (!trans_A) && trans_B && K % 16 == 0;
-    else if (A->dtype.is_float8() && B->dtype.is_float8())
-      return (!trans_A) && trans_B && K % 64 == 0;
-    else
-      return false;
-  } else if (C->dtype == DataType::Int(32)) {
-    if ((A->dtype == DataType::Int(8) || A->dtype == DataType::UInt(8)) &&
-        (B->dtype == DataType::Int(8) || B->dtype == DataType::UInt(8)))
-      return (!trans_A) && trans_B && K % 64 == 0;
-    else
-      return false;
-  } else {
-    return false;
-  }
+String GemmSPNode::getGemmSPInstructionKind(int block_size,
+                                            Target target) const {
+  const GemmSPImpl &impl = ResolveGemmSPImpl(target);
+  return impl.instruction_kind(impl.select_inst(*this, block_size, target));
 }
 
 Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
@@ -184,10 +206,26 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
   if (completed_)
     return {};
   LayoutMap results;
-
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp.infer_layout")) {
-    results = Downcast<LayoutMap>(
+    auto inferred_layouts = Downcast<LayoutMap>(
         (*f)(tvm::ffi::GetRef<GemmSP>(this), T.target, T.thread_bounds));
+    auto block_size = *as_const_int(T.thread_bounds->extent);
+    String gemm_inst = getGemmSPInstructionKey(block_size, T.target);
+    bool reuse_existing_shared_layout =
+        ResolveGemmSPImpl(T.target).reuse_existing_shared_layout(gemm_inst);
+    for (auto kv : inferred_layouts) {
+      const Buffer &buf = kv.first;
+      const Layout &layout = kv.second;
+      if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
+          T.layout_map.count(buf)) {
+        continue;
+      }
+      if (auto frag = layout.as<Fragment>()) {
+        results.Set(buf, frag.value()->BindThreadRange(T.thread_bounds));
+      } else {
+        results.Set(buf, layout);
+      }
+    }
   } else {
     LOG(FATAL) << "No infer layout function found for gemm_sp";
   }
@@ -197,27 +235,52 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TIR_REGISTER_TL_TILE_OP(GemmSP, gemm_sp)
-    .set_num_inputs(5)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_REGISTER_OP("tl.GemmSPWarpPolicy")
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmSPWarpPolicy");
+TVM_REGISTER_OP("tl.tileop.wgmma_gemm_sp")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "wgmma_gemm_sp")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_wgmma",
+                                       IntImm(DataType::Int(32), 1));
+                               return GemmSP(args, ann);
+                             })
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.tileop.tcgen05_gemm_sp")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "tcgen05_gemm_sp")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               Map<String, ObjectRef> ann = annotations;
+                               ann.Set("is_tcgen05",
+                                       IntImm(DataType::Int(32), 1));
+                               return GemmSP(args, ann);
+                             })
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  GemmSPNode::RegisterReflection();
   GemmSPWarpPolicyNode::RegisterReflection();
+  GemmSPNode::RegisterReflection();
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def(
-      "tl.GemmSPWarpPolicyComputeWarpPartition",
-      [](GemmSPWarpPolicy policy, int M, int N, int block_size, Target target,
-         GemmInst gemm_inst, int bits) {
-        policy->computeWarpPartition(M, N, block_size, target, gemm_inst, bits);
-        return;
-      });
-  refl::GlobalDef().def("tl.GemmSPGetGemmSPInst",
-                        [](GemmSP gemm_sp, int block_size, Target target) {
-                          return gemm_sp->GetGemmSPInst(block_size, target);
+  refl::GlobalDef().def("tl.GemmSPWarpPolicyComputeWarpPartition",
+                        [](GemmSPWarpPolicy policy, int M, int N,
+                           int block_size, Target target, String gemm_inst) {
+                          policy->computeWarpPartition(M, N, block_size, target,
+                                                       gemm_inst);
+                        });
+  refl::GlobalDef().def("tl.GemmSPGetGemmInstructionKey",
+                        [](GemmSP gemm, int block_size, Target target) {
+                          return gemm->getGemmSPInstructionKey(block_size,
+                                                               target);
                         });
 }
 } // namespace tl

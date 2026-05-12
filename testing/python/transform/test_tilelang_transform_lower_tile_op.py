@@ -2,6 +2,7 @@
 
 import tilelang as tl
 import tilelang.language as T
+import tilelang.testing
 from tilelang import tvm
 from tvm.tir.stmt_functor import post_order_visit
 
@@ -42,7 +43,7 @@ def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
         mod = tl.transform.LowerTileOp()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) == 0
     assert calls.get("tir.ptx_wait_group", 0) == 0
 
@@ -71,7 +72,7 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
         mod = tl.transform.LowerTileOp()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) == 0
     assert calls.get("tir.ptx_wait_group", 0) == 0
 
@@ -101,6 +102,10 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
         mod = tl.transform.LowerTileOp()(mod)
     calls = _count_calls(mod["main"])
 
-    assert calls.get("tir.ptx_cp_async", 0) > 0
+    assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tir.ptx_commit_group", 0) == 0
     assert calls.get("tir.ptx_wait_group", 0) == 0
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

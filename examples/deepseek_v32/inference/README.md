@@ -1,6 +1,6 @@
 # DeepSeek V3.2
 
-First convert huggingface model weights to the the format required by our inference demo. Set `MP` to match your available GPU count:
+First convert huggingface model weights to the format required by our inference demo. Set `MP` to match your available GPU count:
 ```bash
 cd inference
 export EXPERTS=256

@@ -3,7 +3,6 @@ import re
 import tilelang
 import tilelang.testing
 from tilelang import language as T
-from tilelang.layout import make_cutlass_metadata_layout
 
 
 def _compile_tvm_ffi(func, pass_configs=None):
@@ -31,27 +30,15 @@ def test_ws_keeps_full_producer_extent_for_lowered_simt_copy():
     @T.prim_func
     def main(
         A_sparse: T.Tensor((M, K // 2), T.float16),
-        E: T.Tensor((M, K // e_factor), "uint8"),
+        E: T.Tensor((M, K // e_factor), T.int8),
         B: T.Tensor((K, N), T.float16),
         C: T.Tensor((M, N), T.float32),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K // 2), T.float16)
             B_shared = T.alloc_shared((block_K, block_N), T.float16)
-            E_shared = T.alloc_shared((block_M, block_K // e_factor), "uint8")
+            E_shared = T.alloc_shared((block_M, block_K // e_factor), T.int8)
             C_frag = T.alloc_fragment((block_M, block_N), T.float32)
-            T.annotate_layout(
-                {
-                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="9.0", block_k=block_K),
-                    E_shared: make_cutlass_metadata_layout(
-                        E_shared,
-                        mma_dtype=T.float16,
-                        arch="9.0",
-                        block_k=block_K,
-                    ),
-                }
-            )
-            T.disable_warp_group_reg_alloc()
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // e_factor], E_shared)

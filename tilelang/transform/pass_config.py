@@ -52,6 +52,9 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
     """Disable data race check in TileLang. Default: False"""
 
+    TL_DISABLE_PRELOWER_SEMANTIC_CHECK = "tl.disable_prelower_semantic_check"
+    """Disable Python-side pre-lower semantic checks. Default: False"""
+
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
@@ -261,7 +264,7 @@ class PassConfigKey(str, Enum):
     """Output directory for generated CUDA kernels. Default: empty string"""
 
     TL_DISABLE_OUT_OF_BOUND_WARNING = "tl.disable_out_of_bound_warning"
-    """Disable out-of-bound access warnings in safe memory access legalization. Default: False"""
+    """Disable out-of-bound access warnings in safe memory access legalization. Default: True"""
 
     TL_ENABLE_DUMP_IR = "tl.enable_dump_ir"
     """Enable dumping IR during lowering between passes. Default: False"""

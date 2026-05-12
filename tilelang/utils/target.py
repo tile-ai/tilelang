@@ -6,6 +6,7 @@ import torch
 from platform import mac_ver
 from typing import Literal
 from tilelang import tvm as tvm
+from tilelang import language as T
 from tilelang import _ffi_api
 from tvm.target import Target
 from tvm.contrib import rocm
@@ -73,18 +74,18 @@ def determine_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> str:
     if fp8_format not in {"e4m3", "e5m2"}:
         raise ValueError(f"Unsupported FP8 format: {fp8_format}")
     if torch.version.hip is None:
-        return "float8_e4m3fn" if fp8_format == "e4m3" else "float8_e5m2"
+        return T.float8_e4m3fn if fp8_format == "e4m3" else T.float8_e5m2
     if not torch.cuda.is_available():
-        return "float8_e4m3fnuz" if fp8_format == "e4m3" else "float8_e5m2fnuz"
+        return T.float8_e4m3fnuz if fp8_format == "e4m3" else T.float8_e5m2fnuz
     props = torch.cuda.get_device_properties(0)
     gcn_arch = getattr(props, "gcnArchName", "")
     if fp8_format == "e4m3":
         if gcn_arch.startswith("gfx950"):
-            return "float8_e4m3fn"
-        return "float8_e4m3fnuz"
-    if gcn_arch.startswith("gfx950") and hasattr(torch, "float8_e5m2"):
-        return "float8_e5m2"
-    return "float8_e5m2fnuz"
+            return T.float8_e4m3fn
+        return T.float8_e4m3fnuz
+    if gcn_arch.startswith("gfx950") and hasattr(T, "float8_e5m2"):
+        return T.float8_e5m2
+    return T.float8_e5m2fnuz
 
 
 def determine_torch_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> torch.dtype:

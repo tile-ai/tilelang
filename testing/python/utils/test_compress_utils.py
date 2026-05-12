@@ -1,7 +1,7 @@
 import pytest
 import torch
 import tilelang
-from tilelang.intrinsics.mma_sp_macro_generator import get_e_factor
+from tilelang.utils.sparse import get_e_factor
 import tilelang.testing
 import tilelang.language as T
 

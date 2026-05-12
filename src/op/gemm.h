@@ -9,6 +9,8 @@
 
 #include "operator.h"
 
+#include <utility>
+
 namespace tvm {
 
 namespace tl {
@@ -38,36 +40,6 @@ inline const char *GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
   }
 }
 
-// Target GEMM instruction
-enum class GemmInst : uint8_t {
-  kMMA,
-  kWGMMA,
-  kTCGEN5MMA,
-  kMFMA,
-  kScalar,
-  kWMMA
-};
-
-/// Convert GemmInst enum to string for debugging
-inline const char *GemmInstToString(GemmInst inst) {
-  switch (inst) {
-  case GemmInst::kMMA:
-    return "MMA";
-  case GemmInst::kWGMMA:
-    return "WGMMA";
-  case GemmInst::kTCGEN5MMA:
-    return "TCGEN5MMA";
-  case GemmInst::kMFMA:
-    return "MFMA";
-  case GemmInst::kScalar:
-    return "Scalar";
-  case GemmInst::kWMMA:
-    return "WMMA";
-  default:
-    return "Unknown";
-  }
-}
-
 class GemmWarpPolicyNode : public Object {
 public:
   mutable int m_warp{0};
@@ -86,7 +58,7 @@ public:
 
   std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
                                            Target target,
-                                           GemmInst gemm_inst) const;
+                                           String gemm_inst) const;
 
   bool isSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);
@@ -128,9 +100,6 @@ public:
 
 class GemmNode : public TileOperatorNode {
 public:
-  bool checkWgmma() const;
-  bool allowTcgen5Mma(Target target) const;
-  bool allowWgmma(int block_size, Target target) const;
   tir::Buffer a_, b_, c_;
   // BufferRegion for A, B and C
   BufferRegion aRegion_, bRegion_, cRegion_;
@@ -149,6 +118,8 @@ public:
   bool isTcgen05_ = false;
   mutable GemmWarpPolicy policy_;
   Map<String, ObjectRef> annotations_;
+  BufferRegion sfaRegion_, sfbRegion_;
+  PrimExpr sfAId_, sfBId_;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
@@ -178,7 +149,11 @@ public:
         .def_ro("isWgmma", &GemmNode::isWgmma_)
         .def_ro("isTcgen05", &GemmNode::isTcgen05_)
         .def_ro("policy", &GemmNode::policy_)
-        .def_ro("annotations", &GemmNode::annotations_);
+        .def_ro("annotations", &GemmNode::annotations_)
+        .def_ro("sfaRegion", &GemmNode::sfaRegion_)
+        .def_ro("sfbRegion", &GemmNode::sfbRegion_)
+        .def_ro("sfAId", &GemmNode::sfAId_)
+        .def_ro("sfBId", &GemmNode::sfBId_);
   }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
@@ -188,12 +163,32 @@ public:
 
   TileOperator Clone() const;
 
-  // Target GEMM instruction
-  GemmInst getGemmInst(int block_size, Target target) const;
+  // Target-specific GEMM instruction key.
+  String getGemmInstructionKey(int block_size, Target target) const;
+  String getGemmInstructionKind(int block_size, Target target) const;
 
 private:
   mutable bool completed_ = false;
 };
+
+using GemmTargetPredicate = bool (*)(Target target);
+
+struct GemmImpl {
+  const char *name;
+  GemmTargetPredicate match_target;
+
+  String (*select_inst)(const GemmNode &op, int block_size, Target target);
+
+  std::pair<int, int> (*compute_warp_partition)(
+      const GemmWarpPolicyNode &policy, int M, int N, int block_size,
+      Target target, String gemm_inst);
+
+  bool (*reuse_existing_shared_layout)(String gemm_inst);
+
+  String (*instruction_kind)(String gemm_inst);
+};
+
+void RegisterGemmImpl(GemmImpl impl);
 
 class Gemm : public TileOperator {
 public:

@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title desc">
+  <title id="title">Block-scaled GEMM kernel variants</title>
+  <desc id="desc">Comparison of 1CTA, 2CTA, and persistent 2CTA scheduling designs.</desc>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fbfaf6"/>
+      <stop offset="55%" stop-color="#f7fbff"/>
+      <stop offset="100%" stop-color="#f8fff8"/>
+    </linearGradient>
+    <linearGradient id="cardGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="126%">
+      <feDropShadow dx="0" dy="8" stdDeviation="9" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#263238"/>
+    </marker>
+  </defs>
+  <style>
+    .bg { fill: url(#bgGrad); }
+    .title { font: 700 27px Inter, Segoe UI, Arial, sans-serif; fill: #1f2933; }
+    .head { font: 700 19px Inter, Segoe UI, Arial, sans-serif; fill: #111827; }
+    .label { font: 700 14px Arial, sans-serif; fill: #1f2933; }
+    .small { font: 12px Arial, sans-serif; fill: #334155; }
+    .tiny { font: 11px Arial, sans-serif; fill: #475569; }
+    .card { fill: url(#cardGrad); stroke: #d0d7de; stroke-width: 1.25; rx: 14; filter: url(#shadow); }
+    .cta0 { fill: #e8f4ff; stroke: #6da9ff; }
+    .cta1 { fill: #fff5df; stroke: #d49a30; }
+    .tile { fill: #e9f8ef; stroke: #4cae68; }
+    .tmem { fill: #f4ecff; stroke: #a56ae8; }
+    .ep { fill: #ffe9e4; stroke: #e28a60; }
+    .line { stroke: #263238; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .dash { stroke-dasharray: 6 5; }
+  </style>
+  <rect class="bg" width="1200" height="650"/>
+  <text class="title" x="46" y="46">Three Versions in GEMM Example</text>
+  <text class="small" x="48" y="72">All versions run the same block-scaled MMA data path; they differ in CTA grouping and scheduling.</text>
+
+  <rect class="card" x="40" y="105" width="340" height="500"/>
+  <text class="head" x="70" y="140">1CTA</text>
+  <text class="small" x="70" y="164">mxfp8_blockscaled_gemm</text>
+  <rect class="tile" x="82" y="200" width="250" height="120"/>
+  <text class="label" x="160" y="230">one CTA tile</text>
+  <text class="small" x="170" y="254">128 x 128</text>
+  <text class="tiny" x="116" y="282">local SMEM, local TMEM, local barriers</text>
+  <rect class="cta0" x="78" y="360" width="260" height="44"/>
+  <text class="label" x="96" y="388">warp 0: TMA producer</text>
+  <rect class="tmem" x="78" y="414" width="260" height="44"/>
+  <text class="label" x="96" y="442">warp 1: UTCCP + MMA issue</text>
+  <rect class="cta1" x="78" y="468" width="260" height="44"/>
+  <text class="label" x="96" y="496">warp 2: SF transpose</text>
+  <text class="tiny" x="78" y="542">Epilogue waits tmem_full.</text>
+  <text class="tiny" x="78" y="562">Then C_tmem is copied through regs/SMEM to C.</text>
+
+  <rect class="card" x="430" y="105" width="340" height="500"/>
+  <text class="head" x="460" y="140">2CTA</text>
+  <text class="small" x="460" y="164">mxfp8_blockscaled_gemm_2cta</text>
+  <rect class="tile" x="468" y="200" width="260" height="120"/>
+  <line x1="598" y1="200" x2="598" y2="320" stroke="#238636" stroke-width="2"/>
+  <text class="label" x="565" y="230">logical tile</text>
+  <text class="small" x="565" y="254">128 x 256</text>
+  <text class="tiny" x="535" y="282">CTA pair computes one tile</text>
+  <rect class="cta0" x="466" y="354" width="120" height="70"/>
+  <text class="label" x="490" y="382">CTA 0</text>
+  <text class="tiny" x="488" y="404">B columns 0..127</text>
+  <rect class="cta1" x="612" y="354" width="120" height="70"/>
+  <text class="label" x="636" y="382">CTA 1</text>
+  <text class="tiny" x="634" y="404">B columns 128..255</text>
+  <path class="line dash" d="M586 390 L612 390"/>
+  <rect class="tmem" x="474" y="454" width="246" height="58"/>
+  <text class="label" x="505" y="484">leader CTA issues cta_group::2</text>
+  <text class="tiny" x="512" y="504">cluster barriers cover both CTAs</text>
+  <text class="tiny" x="466" y="542">A and SFA are available in both peers.</text>
+  <text class="tiny" x="466" y="562">SFB covers the full logical block_N.</text>
+
+  <rect class="card" x="820" y="105" width="340" height="500"/>
+  <text class="head" x="850" y="140">2CTA Persistent</text>
+  <text class="small" x="850" y="164">mxfp8_blockscaled_gemm_2cta_persistent</text>
+  <rect class="cta0" x="864" y="200" width="230" height="52"/>
+  <text class="label" x="890" y="232">resident CTA pair per cluster</text>
+  <path class="line" d="M980 252 C980 280, 980 292, 980 318"/>
+  <rect class="tile" x="860" y="318" width="240" height="92"/>
+  <text class="label" x="900" y="348">wave loop over tiles</text>
+  <text class="tiny" x="890" y="374">tile_id = num_clusters * w + cluster_id</text>
+  <rect class="tmem" x="854" y="438" width="118" height="68"/>
+  <text class="label" x="878" y="466">MMA</text>
+  <text class="tiny" x="876" y="488">warps 0..2</text>
+  <rect class="ep" x="986" y="438" width="118" height="68"/>
+  <text class="label" x="1012" y="466">Store</text>
+  <text class="tiny" x="1004" y="488">warps 4..7</text>
+  <path class="line" d="M972 472 L986 472"/>
+  <path class="line dash" d="M1045 506 C1045 534, 900 534, 900 506"/>
+  <text class="tiny" x="914" y="542">tmem_full sends data to epilogue.</text>
+  <text class="tiny" x="914" y="562">tmem_empty releases TMEM for the next wave.</text>
+</svg>

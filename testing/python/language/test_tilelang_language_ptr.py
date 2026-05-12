@@ -4,7 +4,6 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
 import tilelang.language as T
-from tilelang.utils import map_torch_type
 
 
 def matmul_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
@@ -118,10 +117,10 @@ def run_matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=
     def ref_program(a, b):
         return (a @ b.T).to(torch.float32)
 
-    a = torch.randn(M, K, device="cuda", dtype=map_torch_type(dtype))
-    b = torch.randn(N, K, device="cuda", dtype=map_torch_type(dtype))
-    ffi_c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
-    cython_c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
+    a = torch.randn(M, K, device="cuda", dtype=dtype.as_torch())
+    b = torch.randn(N, K, device="cuda", dtype=dtype.as_torch())
+    ffi_c = torch.zeros(M, N, device="cuda", dtype=accum_dtype.as_torch())
+    cython_c = torch.zeros(M, N, device="cuda", dtype=accum_dtype.as_torch())
 
     ffi_jit_kernel(a, b, ffi_c, M, N, K)
     cython_jit_kernel(a.data_ptr(), b.data_ptr(), cython_c.data_ptr(), M, N, K)
@@ -133,10 +132,10 @@ def run_pointer_table_copy(N, dtype=T.float16):
     program = pointer_table_copy_test(N, dtype)
     cython_jit_kernel = tl.compile(program, execution_backend="cython")
     ffi_jit_kernel = tl.compile(program, execution_backend="tvm_ffi")
-    src = torch.randn(N, device="cuda", dtype=map_torch_type(dtype))
+    src = torch.randn(N, device="cuda", dtype=dtype.as_torch())
     src_ptrs = torch.tensor([src.data_ptr()], device="cuda", dtype=torch.int64)
-    ffi_out = torch.empty(N, device="cuda", dtype=map_torch_type(dtype))
-    cython_out = torch.empty(N, device="cuda", dtype=map_torch_type(dtype))
+    ffi_out = torch.empty(N, device="cuda", dtype=dtype.as_torch())
+    cython_out = torch.empty(N, device="cuda", dtype=dtype.as_torch())
 
     ffi_jit_kernel(src_ptrs, ffi_out)
     cython_jit_kernel(src_ptrs, cython_out)
@@ -150,11 +149,11 @@ def run_pointer_table_multi_copy(G, N, dtype=T.float16):
     program = pointer_table_multi_copy_test(G, N, dtype)
     cython_jit_kernel = tl.compile(program, execution_backend="cython")
     ffi_jit_kernel = tl.compile(program, execution_backend="tvm_ffi")
-    srcs = [torch.randn(N, device="cuda", dtype=map_torch_type(dtype)) for _ in range(G)]
+    srcs = [torch.randn(N, device="cuda", dtype=dtype.as_torch()) for _ in range(G)]
     src_ptrs = torch.tensor([src.data_ptr() for src in srcs], device="cuda", dtype=torch.int64)
     ref = torch.stack(srcs, dim=0)
-    ffi_out = torch.empty((G, N), device="cuda", dtype=map_torch_type(dtype))
-    cython_out = torch.empty((G, N), device="cuda", dtype=map_torch_type(dtype))
+    ffi_out = torch.empty((G, N), device="cuda", dtype=dtype.as_torch())
+    cython_out = torch.empty((G, N), device="cuda", dtype=dtype.as_torch())
 
     ffi_jit_kernel(src_ptrs, ffi_out)
     cython_jit_kernel(src_ptrs, cython_out)
@@ -171,8 +170,8 @@ def run_pointer_table_grouped_matmul(batch_sizes_list, N, K, block_M, block_N, b
     ffi_jit_kernel = tl.compile(program, execution_backend="tvm_ffi", **compile_kwargs)
 
     device = "cuda"
-    torch_dtype = map_torch_type(dtype)
-    torch_accum_dtype = map_torch_type(accum_dtype)
+    torch_dtype = dtype.as_torch()
+    torch_accum_dtype = accum_dtype.as_torch()
     max_M = max(batch_sizes_list)
     batch_tile_offsets = [0]
     for size in batch_sizes_list[:-1]:

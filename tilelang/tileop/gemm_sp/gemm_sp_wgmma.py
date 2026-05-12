@@ -9,7 +9,7 @@ from tilelang.layout import (
     make_linear_layout,
     Layout,
 )
-from tilelang.intrinsics.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
+from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
 from tvm.target import Target
 from tvm.ir import Range

@@ -1,6 +1,6 @@
 import pytest
 from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse, get_e_factor
-from tilelang.utils.tensor import torch_assert_close, map_torch_type
+from tilelang.utils.tensor import torch_assert_close
 
 import tilelang.testing
 import torch
@@ -103,7 +103,7 @@ def run_gemm_ss(
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
 
-    A_sparse, E = compress(A.t().contiguous() if trans_A else A, meta_dtype=map_torch_type(meta_dtype))
+    A_sparse, E = compress(A.t().contiguous() if trans_A else A, meta_dtype=meta_dtype.as_torch())
     if trans_A:
         A_sparse = A_sparse.t().contiguous()
         E = E.t().contiguous()
@@ -121,8 +121,8 @@ def run_gemm_ss(
     C = _matmul(A, B)
 
     torch_assert_close(
-        C_sp.to(map_torch_type(out_dtype)).to(torch.float32),
-        C.to(map_torch_type(out_dtype)).to(torch.float32),
+        C_sp.to(out_dtype.as_torch()).to(torch.float32),
+        C.to(out_dtype.as_torch()).to(torch.float32),
         rtol=1e-3,
         atol=1e-3,
         base_name="tilelang_sp",
@@ -140,11 +140,12 @@ def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype, seed=0):
             low, high = (0, 4) if is_unsigned else (-2, 2)
         else:
             low, high = (0, 128) if is_unsigned else (-64, 64)
-        A = randint_semi_sparse(M, K, low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
-        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=map_torch_type(in_dtype), device="cuda")
+        A = randint_semi_sparse(M, K, low=low, high=high, dtype=in_dtype.as_torch(), device="cuda", transposed=trans_A)
+        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=in_dtype.as_torch(), device="cuda")
     else:
-        A = randn_semi_sparse(M, K, dtype=map_torch_type(in_dtype), device="cuda", transposed=trans_A)
-        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(map_torch_type(in_dtype))
+        A = randn_semi_sparse(M, K, dtype=in_dtype.as_torch(), device="cuda", transposed=trans_A)
+        B = torch.randn((N, K) if trans_B else (K, N), device="cuda", dtype=torch.float32).to(in_dtype.as_torch())
+
     return A, B
 
 
@@ -289,7 +290,7 @@ def run_gemm_rs(
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
-    A_sparse, E = compress(A.t().contiguous() if trans_A else A, meta_dtype=map_torch_type(meta_dtype))
+    A_sparse, E = compress(A.t().contiguous() if trans_A else A, meta_dtype=meta_dtype.as_torch())
     if trans_A:
         A_sparse = A_sparse.t().contiguous()
         E = E.t().contiguous()
@@ -307,8 +308,8 @@ def run_gemm_rs(
     C = _matmul(A, B)
 
     torch_assert_close(
-        C_sp.to(map_torch_type(out_dtype)).to(torch.float32),
-        C.to(map_torch_type(out_dtype)).to(torch.float32),
+        C_sp.to(out_dtype.as_torch()).to(torch.float32),
+        C.to(out_dtype.as_torch()).to(torch.float32),
         rtol=1e-3,
         atol=1e-3,
         base_name="tilelang_sp",
@@ -458,7 +459,7 @@ def run_gemm_sr(
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
-    A_sparse, E = compress(A.t().contiguous() if trans_A else A, meta_dtype=map_torch_type(meta_dtype))
+    A_sparse, E = compress(A.t().contiguous() if trans_A else A, meta_dtype=meta_dtype.as_torch())
     if trans_A:
         A_sparse = A_sparse.t().contiguous()
         E = E.t().contiguous()
@@ -476,8 +477,8 @@ def run_gemm_sr(
     C = _matmul(A, B)
 
     torch_assert_close(
-        C_sp.to(map_torch_type(out_dtype)).to(torch.float32),
-        C.to(map_torch_type(out_dtype)).to(torch.float32),
+        C_sp.to(out_dtype.as_torch()).to(torch.float32),
+        C.to(out_dtype.as_torch()).to(torch.float32),
         rtol=1e-3,
         atol=1e-3,
         base_name="tilelang_sp",
@@ -631,7 +632,7 @@ def run_gemm_rr(
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     A, B = generate_dense_input(M, N, K, trans_A, trans_B, in_dtype)
-    A_sparse, E = compress(A.t().contiguous() if trans_A else A, meta_dtype=map_torch_type(meta_dtype))
+    A_sparse, E = compress(A.t().contiguous() if trans_A else A, meta_dtype=meta_dtype.as_torch())
     if trans_A:
         A_sparse = A_sparse.t().contiguous()
         E = E.t().contiguous()
@@ -649,8 +650,8 @@ def run_gemm_rr(
     C = _matmul(A, B)
 
     torch_assert_close(
-        C_sp.to(map_torch_type(out_dtype)).to(torch.float32),
-        C.to(map_torch_type(out_dtype)).to(torch.float32),
+        C_sp.to(out_dtype.as_torch()).to(torch.float32),
+        C.to(out_dtype.as_torch()).to(torch.float32),
         rtol=1e-3,
         atol=1e-3,
         base_name="tilelang_sp",

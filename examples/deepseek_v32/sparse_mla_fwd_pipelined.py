@@ -271,17 +271,17 @@ def sparse_mla_fwd(
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                             T.ptx_cp_async(
                                 T.access_ptr(K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, indices_local, g_i, D + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
@@ -296,17 +296,17 @@ def sparse_mla_fwd(
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                                 T.ptx_cp_async(
                                     T.access_ptr(KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                     T.access_ptr(KV[b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                    16,
+                                    8,
                                 )
                             T.ptx_cp_async(
                                 T.access_ptr(K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, indices_local, g_i, D + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 

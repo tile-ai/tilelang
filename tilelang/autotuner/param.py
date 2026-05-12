@@ -373,20 +373,20 @@ class AutotuneResult:
     def save_to_disk(self, path: Path, verbose: bool = False):
         """Persist autotune result to disk using atomic directory rename.
 
-        All files are written into a temporary staging directory next to the
-        final *path*.  Once complete, the staging directory is atomically
-        renamed to *path* so that concurrent readers never see a half-written
-        result.
+        All files are written into a temporary staging directory under the
+        shared namespace staging root. Once complete, the staging directory is
+        atomically renamed to *path* so that concurrent readers never see a
+        half-written result.
         """
         # Already saved (e.g. another process won the race with a complete entry).
         if self._is_complete_result_dir(path, self.kernel.execution_backend):
             return
 
-        # Staging dir lives under TILELANG_CACHE_DIR (not the autotuner subdir) so that
-        # KernelCache._cleanup_stale_staging_dirs() can find and clean up stale entries.
-        staging_path = Path(env.TILELANG_CACHE_DIR) / f".staging_{Path(path).name}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        # Keep autotuner staging under the shared namespace staging root so stale cleanup
+        # never needs to scan the full cache directory.
+        staging_path = path.parent.parent / ".staging" / f"{Path(path).name}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         os.makedirs(staging_path)
-        # Ensure the parent of the final path exists (e.g. ~/.tilelang/cache/autotuner/)
+        # Ensure the parent of the final path exists (e.g. ~/.tilelang/cache/<namespace>/autotuner/)
         os.makedirs(Path(path).parent, exist_ok=True)
 
         try:

@@ -125,15 +125,17 @@ def run_tilelang_grouped_gemm_ptr(
     block_K,
     num_stages=2,
     threads=128,
-    backend="tvm_ffi",
     profile=False,
 ):
     device = torch.device("cuda")
     dtype = torch.float16
     program = grouped_gemm_ptr(batch_sizes_list, K, N, block_M, block_N, block_K, num_stages, threads)
+    # The ptr-backed grouped GEMM example is intended to exercise the regular CUDA
+    # execution path; CuTeDSL does not support these handle tensors.
     kernel = tl.compile(
         program,
-        execution_backend=backend,
+        target="cuda",
+        execution_backend="auto",
         pass_configs={"tl.disable_warp_specialized": True},
     )
     a_list, b_list, c_list, a_ptrs, b_ptrs, c_ptrs, batch_tile_offsets = construct_inputs(batch_sizes_list, K, N, block_M, device, dtype)
@@ -159,7 +161,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch_sizes", type=str, default="64,128,256", help="comma-separated per-group M sizes")
     parser.add_argument("--K", type=int, default=4096, help="reduce dim")
     parser.add_argument("--N", type=int, default=4096, help="output dim")
-    parser.add_argument("--backend", type=str, default="tvm_ffi", choices=["tvm_ffi", "cython"], help="execution backend")
     parser.add_argument("--profile", action="store_true", help="benchmark the kernel")
     args = parser.parse_args()
 
@@ -180,7 +181,6 @@ if __name__ == "__main__":
         block_K,
         num_stages=num_stages,
         threads=threads,
-        backend=args.backend,
         profile=args.profile,
     )
     print(f"End-to-end: {time.time() - t0:.3f} s")

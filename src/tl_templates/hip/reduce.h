@@ -87,13 +87,15 @@ struct SharedReduceWarp {
   }
 };
 
-template <class Reducer, int threads, int scale, int thread_offset = 0>
+template <class Reducer, int threads, int scale, int thread_offset = 0,
+          int batch_size = 1, int workspace_stride = 0>
 struct AllReduce {
   static_assert(threads == 1024 || threads == 512 || threads == 256 ||
                 threads == 128 || threads == 64 || threads == 32 ||
                 threads == 16 || threads == 8 || threads == 4 || threads == 2);
   static_assert(threads % scale == 0);
 
+  // Scalar interface (backward-compatible).
   template <typename T> static __device__ T run(T x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
     constexpr int warpSize = 64;
@@ -109,7 +111,38 @@ struct AllReduce {
     if constexpr (offset == scale) {
       return x;
     } else {
-      return AllReduce<Reducer, offset, scale, thread_offset>::run(x, red_buf);
+      return AllReduce<Reducer, offset, scale, thread_offset, batch_size,
+                       workspace_stride>::run(x, red_buf);
+    }
+  }
+
+  // Batch interface (named run_batch to avoid overload-resolution ambiguity).
+  template <typename T>
+  static __device__ void run_batch(T *x, T *red_buf = nullptr) {
+    constexpr int offset = threads / 2;
+    constexpr int warpSize = 64;
+
+    if constexpr (offset >= warpSize) {
+      __syncthreads();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
+      __syncthreads();
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        x[i] =
+            Reducer()(x[i], red_buf[((threadIdx.x - thread_offset) ^ offset) +
+                                    i * workspace_stride]);
+    } else {
+#pragma unroll
+      for (int i = 0; i < batch_size; i++)
+        x[i] = Reducer()(x[i], tl::shfl_xor(x[i], offset));
+    }
+    if constexpr (offset == scale) {
+      return;
+    } else {
+      AllReduce<Reducer, offset, scale, thread_offset, batch_size,
+                workspace_stride>::run_batch(x, red_buf);
     }
   }
 };
@@ -261,12 +294,34 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
 
 template <typename T, typename ReduceOp>
 TL_DEVICE T warp_reduce(T value, ReduceOp op) {
-  value = op(value, __shfl_xor(value, 32));
-  value = op(value, __shfl_xor(value, 16));
-  value = op(value, __shfl_xor(value, 8));
-  value = op(value, __shfl_xor(value, 4));
-  value = op(value, __shfl_xor(value, 2));
-  value = op(value, __shfl_xor(value, 1));
+  // 5-step butterfly reduction with width=32, matching CUDA's 32-lane warp
+  // semantics on CDNA (wave64) and RDNA (wave32) targets.
+  //
+  // On CDNA (wave64, 64-lane wavefronts) with threads=32 per block:
+  //   Only lanes 0-31 are active; lanes 32-63 hold uninitialised VGPRs.
+  //   The old step `__shfl_xor(value, 32)` without a width argument read
+  //   from those uninitialised lanes, producing NaN or garbage.
+  //   width=32 confines every shuffle to the [0,31] group, preventing this.
+  //
+  // On CDNA with threads=64 (one full wave64):
+  //   width=32 splits the wavefront into two independent 32-lane groups.
+  //   Lane 0 of each group holds the group partial sum, which is exactly what
+  //   kernels that assume logical warp_size=32 expect for their inter-warp
+  //   shared-memory reductions.
+  //
+  // On RDNA (wave32, 32-lane wavefronts):
+  //   width=32 equals the wavefront size, so behaviour is identical to
+  //   omitting the width argument.
+  //
+  // Note: this intentionally preserves 32-lane logical-warp semantics for
+  // backward compatibility.  Full wave64 utilisation (6-step, width=64) would
+  // require restructuring inter-warp shared-memory communication in all
+  // kernels and is deferred to a separate optimisation pass.
+  value = op(value, __shfl_xor(value, 16, 32));
+  value = op(value, __shfl_xor(value, 8, 32));
+  value = op(value, __shfl_xor(value, 4, 32));
+  value = op(value, __shfl_xor(value, 2, 32));
+  value = op(value, __shfl_xor(value, 1, 32));
   return value;
 }
 

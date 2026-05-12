@@ -16,13 +16,14 @@ namespace tl {
 
 using namespace tir;
 
-class GemmSPWarpPolicyNode : public GemmWarpPolicyNode {
+class GemmSPWarpPolicyNode : public Object {
 public:
-  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
-                                           Target target, GemmInst gemm_inst,
-                                           int bits) const;
+  mutable int m_warp{0};
+  mutable int n_warp{0};
+  int policy_type;
+
   TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmSPWarpPolicy", GemmSPWarpPolicyNode,
-                              GemmWarpPolicyNode);
+                              Object);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -31,6 +32,21 @@ public:
         .def_ro("m_warp", &GemmSPWarpPolicyNode::m_warp)
         .def_ro("n_warp", &GemmSPWarpPolicyNode::n_warp);
   }
+
+  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
+                                           Target target,
+                                           String gemm_inst) const;
+
+  bool isSquare() const {
+    return policy_type == int(GemmWarpPolicyType::kSquare);
+  }
+  bool isFullRow() const {
+    return policy_type == int(GemmWarpPolicyType::kFullRow);
+  }
+  bool isFullCol() const {
+    return policy_type == int(GemmWarpPolicyType::kFullCol);
+  }
+  bool isFree() const { return policy_type == int(GemmWarpPolicyType::kFree); }
 };
 
 class GemmSPWarpPolicy : public ObjectRef {
@@ -74,9 +90,9 @@ public:
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
   int wg_wait = 0;
-
-  // use GemmWarp Policy here as the atom size are flexible
-  mutable GemmWarpPolicy policy;
+  bool isWgmma_ = false;
+  bool isTcgen05_ = false;
+  mutable GemmSPWarpPolicy policy;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmSP", GemmSPNode, TileOperatorNode);
 
@@ -104,6 +120,8 @@ public:
         .def_ro("clear_accum", &GemmSPNode::clear_accum)
         .def_ro("kPack", &GemmSPNode::kPack)
         .def_ro("wg_wait", &GemmSPNode::wg_wait)
+        .def_ro("isWgmma", &GemmSPNode::isWgmma_)
+        .def_ro("isTcgen05", &GemmSPNode::isTcgen05_)
         .def_ro("policy", &GemmSPNode::policy);
   }
 
@@ -114,11 +132,32 @@ public:
 
   TileOperator Clone() const;
 
-  GemmInst GetGemmSPInst(int block_size, Target target) const;
+  // Target-specific GEMM SP instruction key.
+  String getGemmSPInstructionKey(int block_size, Target target) const;
+  String getGemmSPInstructionKind(int block_size, Target target) const;
 
 private:
   mutable bool completed_ = false;
 };
+
+using GemmSPTargetPredicate = bool (*)(Target target);
+
+struct GemmSPImpl {
+  const char *name;
+  GemmSPTargetPredicate match_target;
+
+  String (*select_inst)(const GemmSPNode &op, int block_size, Target target);
+
+  std::pair<int, int> (*compute_warp_partition)(
+      const GemmSPWarpPolicyNode &policy, int M, int N, int block_size,
+      Target target, String gemm_inst);
+
+  bool (*reuse_existing_shared_layout)(String gemm_inst);
+
+  String (*instruction_kind)(String gemm_inst);
+};
+
+void RegisterGemmSPImpl(GemmSPImpl impl);
 
 class GemmSP : public TileOperator {
 public:

@@ -4,7 +4,6 @@ import tilelang.testing
 import tilelang
 import torch
 import pytest
-from tilelang.utils.tensor import map_torch_type
 
 
 def matmul(
@@ -180,8 +179,8 @@ def run_gemm_jit_kernel(
 
     matmul_kernel = tilelang.compile(program, out_idx=-1, target="cutedsl")
 
-    in_dtype = map_torch_type(in_dtype)
-    out_dtype = map_torch_type(out_dtype)
+    in_dtype = T.dtype(in_dtype).as_torch()
+    out_dtype = T.dtype(out_dtype).as_torch()
 
     A = torch.randn(M, K, dtype=in_dtype).cuda()
     B = torch.randn(K, N, dtype=in_dtype).cuda()
@@ -282,8 +281,8 @@ def run_cutedsl_kernel_multi_stream(
     )
 
     matmul_kernel = tilelang.compile(program, target="cutedsl")
-    in_dtype = map_torch_type(in_dtype)
-    out_dtype = map_torch_type(out_dtype)
+    in_dtype = T.dtype(in_dtype).as_torch()
+    out_dtype = T.dtype(out_dtype).as_torch()
     tensor_a = torch.randn(M, K, dtype=in_dtype).cuda()
     tensor_b = torch.randn(K, N, dtype=in_dtype).cuda()
 
@@ -332,8 +331,8 @@ def run_cutedsl_dynamic_shape(
     if isinstance(K, T.Var):
         K = 768
 
-    in_dtype = map_torch_type(in_dtype)
-    out_dtype = map_torch_type(out_dtype)
+    in_dtype = T.dtype(in_dtype).as_torch()
+    out_dtype = T.dtype(out_dtype).as_torch()
 
     tensor_a = torch.randn(M, K, dtype=in_dtype).cuda()
     tensor_b = torch.randn(K, N, dtype=in_dtype).cuda()

@@ -1,4 +1,5 @@
 from tilelang import tvm as tvm
+from tilelang.tileop.gemm_sp.registry import resolve_gemm_sp_impl
 from tvm import tir
 from tvm.target import Target
 from tvm.ir.base import Node
@@ -7,9 +8,6 @@ from tvm.runtime import Scriptable
 import tvm_ffi
 from tilelang import _ffi_api
 from tilelang.tileop.base import GemmWarpPolicy
-from tilelang.tileop.gemm_sp.gemm_sp_mma import GemmSPMMA
-from tilelang.tileop.gemm_sp.gemm_sp_wgmma import GemmSPWGMMA
-from tilelang.tileop.gemm.inst import GemmInst
 
 
 @tvm_ffi.register_object("tl.GemmSP")
@@ -63,14 +61,8 @@ class GemmSP(Node, Scriptable):
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).lower(layout_map, target, thread_nums, thread_var)
 
-    def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
-        # NOTE: use dense counterpart to select instruction
-        return GemmInst(_ffi_api.GemmSPGetGemmSPInst(self, int(thread_nums), target))
+    def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
+        return str(_ffi_api.GemmSPGetGemmInstructionKey(self, int(thread_nums), target))
 
-    def _get_implementation_class(self, gemm_inst: GemmInst, target: Target):
-        if gemm_inst == GemmInst.MMA:
-            return GemmSPMMA
-        elif gemm_inst == GemmInst.WGMMA:
-            return GemmSPWGMMA
-        else:
-            raise ValueError(f"Unsupported gemm instruction: {gemm_inst} for target: {target}")
+    def _get_implementation_class(self, gemm_inst: str, target: Target):
+        return resolve_gemm_sp_impl(gemm_inst, target)

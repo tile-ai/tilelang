@@ -73,8 +73,8 @@ def _make_result(tmp_path, execution_backend: str = "cython"):
 
 def test_autotune_save_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
     result = _make_result(tmp_path)
-    path = cache_dirs / "autotune-entry"
-    path.mkdir()
+    path = cache_dirs / "test-namespace" / "autotuner" / "autotune-entry"
+    path.mkdir(parents=True)
     (path / "stale.txt").write_text("partial")
 
     result.save_to_disk(path)
@@ -94,8 +94,9 @@ def test_autotune_save_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
 
 def test_autotune_save_logs_write_oserror_instead_of_treating_it_as_race(cache_dirs, tmp_path, monkeypatch):
     result = _make_result(tmp_path)
-    path = cache_dirs / "autotune-error"
+    path = cache_dirs / "test-namespace" / "autotuner" / "autotune-error"
     logged = []
+    staging_root = path.parent.parent / ".staging"
 
     def raise_write_error(self, *args, **kwargs):
         raise OSError(errno.ENOSPC, "No space left on device")
@@ -110,14 +111,15 @@ def test_autotune_save_logs_write_oserror_instead_of_treating_it_as_race(cache_d
 
     assert not path.exists()
     assert "Error during atomic autotune result save" in logged
-    assert not any(child.name.startswith(".staging_") for child in cache_dirs.iterdir())
+    assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
 def test_autotune_save_does_not_publish_incomplete_dir_when_device_source_is_missing(cache_dirs, tmp_path, monkeypatch):
     result = _make_result(tmp_path)
     result.kernel.kernel_source = None
-    path = cache_dirs / "autotune-missing-device-source"
+    path = cache_dirs / "test-namespace" / "autotuner" / "autotune-missing-device-source"
     logged = []
+    staging_root = path.parent.parent / ".staging"
 
     def record_exception(message, *args, **kwargs):
         logged.append(message)
@@ -128,13 +130,13 @@ def test_autotune_save_does_not_publish_incomplete_dir_when_device_source_is_mis
 
     assert not path.exists()
     assert "Error during atomic autotune result save" in logged
-    assert not any(child.name.startswith(".staging_") for child in cache_dirs.iterdir())
+    assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
 def test_autotune_save_rewrites_nvrtc_dir_missing_launcher(cache_dirs, tmp_path):
     result = _make_result(tmp_path, execution_backend="nvrtc")
-    path = cache_dirs / "autotune-nvrtc-entry"
-    path.mkdir()
+    path = cache_dirs / "test-namespace" / "autotuner" / "autotune-nvrtc-entry"
+    path.mkdir(parents=True)
     (path / BEST_CONFIG_PATH).write_text("{}")
     (path / FUNCTION_PATH).write_bytes(b"old-func")
     (path / LATENCY_PATH).write_text('{"latency": 1.0, "ref_latency": 2.0}')

@@ -3,7 +3,6 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
 import tilelang.language as T
-from tilelang.utils import map_torch_type
 
 
 @tl.jit
@@ -39,9 +38,9 @@ def tensor_null_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_
 
 
 def run_test(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
-    a = torch.randn(M, K, device="cuda", dtype=map_torch_type(dtype))
-    b = torch.randn(N, K, device="cuda", dtype=map_torch_type(dtype))
-    c = torch.zeros(M, N, device="cuda", dtype=map_torch_type(accum_dtype))
+    a = torch.randn(M, K, device="cuda", dtype=dtype.as_torch())
+    b = torch.randn(N, K, device="cuda", dtype=dtype.as_torch())
+    c = torch.zeros(M, N, device="cuda", dtype=accum_dtype.as_torch())
     kernel = tensor_null_test(M, N, K, block_M, block_N, block_K, dtype, accum_dtype, with_bias=False)
     kernel(a, b, c, None)
 

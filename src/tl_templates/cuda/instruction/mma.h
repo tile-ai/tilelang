@@ -105,11 +105,15 @@ TL_DEFINE_MMA_DISPATCHER(kInt8, kInt8, kInt32, 16, 8, 32, false, true, false,
 TL_DEFINE_MMA_DISPATCHER(kUInt8, kUInt8, kInt32, 16, 8, 32, false, true, false,
                          cute::SM80_16x8x32_S32U8U8S32_TN)
 
-// INT4 inputs (k32)
+// INT4 inputs (k32, k64)
 TL_DEFINE_MMA_DISPATCHER(kInt4, kInt4, kInt32, 16, 8, 32, false, true, false,
                          cute::SM80_16x8x32_S32S4S4S32_TN)
+TL_DEFINE_MMA_DISPATCHER(kInt4, kInt4, kInt32, 16, 8, 64, false, true, false,
+                         cute::SM80_16x8x64_S32S4S4S32_TN)
 TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 32, false, true, false,
                          cute::SM80_16x8x32_S32U4U4S32_TN)
+TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 16, 8, 64, false, true, false,
+                         cute::SM80_16x8x64_S32U4U4S32_TN)
 
 // FP8 inputs (k32)
 TL_DEFINE_MMA_DISPATCHER(kFloat8_e4m3, kFloat8_e4m3, kFloat16, 16, 8, 32, false,
