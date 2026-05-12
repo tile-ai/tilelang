@@ -336,7 +336,7 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
                 T.copy(E[by * block_m, k * block_k // 8], E_shared)
                 T.copy(A_sparse[by * block_m, k * block_k // 2], A_shared)
                 T.copy(B[k * block_k, bx * block_n], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local, transpose_A=False, transpose_E=False, transpose_B=False)
 
             T.copy(C_local, C[by * block_m, bx * block_n])
 

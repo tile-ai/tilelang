@@ -44,7 +44,7 @@ def test_ws_keeps_full_producer_extent_for_lowered_simt_copy():
                 T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, False, False)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, transpose_A=False, transpose_E=False, transpose_B=False)
             T.copy(C_frag, C[by * block_M, bx * block_N])
 
     kernel = _compile_tvm_ffi(main)

@@ -57,7 +57,7 @@ def matmul(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B, trans_A)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_A, trans_B)
             T.copy(C_frag, C[by * block_M, bx * block_N])
 
     return main

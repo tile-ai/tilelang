@@ -76,8 +76,8 @@ void RegisterGemmSPImpl(GemmSPImpl impl) {
  *
  * @param args Positional serialized arguments produced by the TL frontend:
  *   expected layout is:
- *     [Aptr, Eptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
- *      trans_E (Bool), M (Int), N (Int), K (Int), policy (Int),
+ *     [Aptr, Eptr, Bptr, Cptr, trans_A (Bool), trans_E (Bool),
+ *      trans_B (Bool), M (Int), N (Int), K (Int), policy (Int),
  *      clear_accum (Bool), stride_A (Int), stride_B (Int),
  *      offset_A (Int), offset_B (Int),
  *      (optional) kPack (Int), (optional) wg_wait (Int)]
@@ -102,8 +102,8 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->C = node->cRegion_->buffer;
 
   node->trans_A = args[4].as<Bool>().value();
-  node->trans_B = args[5].as<Bool>().value();
-  node->trans_E = args[6].as<Bool>().value();
+  node->trans_E = args[5].as<Bool>().value();
+  node->trans_B = args[6].as<Bool>().value();
   node->M = args[7].as<IntImm>().value()->value;
   node->N = args[8].as<IntImm>().value()->value;
   node->K = args[9].as<IntImm>().value()->value;

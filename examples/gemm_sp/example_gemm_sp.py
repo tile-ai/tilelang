@@ -34,7 +34,7 @@ def matmul_sp_fp16(M, N, K, accum_dtype, e_dtype, block_M, block_N, block_K, num
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
                 T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False, False, policy=policy)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local, transpose_A=False, transpose_E=False, transpose_B=False, policy=policy)
 
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
