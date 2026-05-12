@@ -38,7 +38,7 @@ _TORCH_FLOAT8_DTYPES = _torch_float8_dtypes()
 
 
 def _maybe_export_rocm_float8_as_tvm_view(arg: Any, expected_dtype: dtype) -> Any:
-    if getattr(torch.version, "hip", None) is None or not isinstance(arg, torch.Tensor) or arg.dtype not in _TORCH_FLOAT8_DTYPES:
+    if not isinstance(arg, torch.Tensor) or arg.dtype not in _TORCH_FLOAT8_DTYPES:
         return arg
 
     # ROCm disables tvm-ffi's torch C DLPack path until the extension reliably
@@ -49,8 +49,12 @@ def _maybe_export_rocm_float8_as_tvm_view(arg: Any, expected_dtype: dtype) -> An
     return tvm_tensor._create_view(arg.shape, dtype=str(expected_dtype))
 
 
-def _prepare_tvm_ffi_runtime_args(args: list[Any], params: list[KernelParam]) -> list[Any]:
-    return [_maybe_export_rocm_float8_as_tvm_view(arg, param.dtype) for arg, param in zip(args, params)]
+def _rocm_float8_param_mask(params: list[KernelParam]) -> tuple[bool, ...] | None:
+    if getattr(torch.version, "hip", None) is None:
+        return None
+
+    mask = tuple(str(param.dtype).startswith("float8") for param in params)
+    return mask if any(mask) else None
 
 
 if sys.platform == "darwin":
@@ -211,6 +215,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         dynamic_symbolic_map = self._process_dynamic_symbolic()
         executable = self.executable
+        rocm_float8_param_mask = _rocm_float8_param_mask(self.params)
 
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
@@ -241,6 +246,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             # Stitch the full positional argument list expected by the TVM executable
             ins_idx: int = 0
             tensor_list: list[torch.Tensor] = []
+            runtime_args: list[Any] | None = [] if rocm_float8_param_mask is not None else None
 
             # Prepare input and output tensors
             for i in range(len(self.params)):
@@ -277,8 +283,16 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
-            runtime_args = _prepare_tvm_ffi_runtime_args(tensor_list, self.params)
-            executable(*runtime_args)
+                if runtime_args is not None:
+                    if rocm_float8_param_mask[i]:
+                        runtime_args.append(_maybe_export_rocm_float8_as_tvm_view(tensor, self.params[i].dtype))
+                    else:
+                        runtime_args.append(tensor)
+
+            if runtime_args is None:
+                executable(*tensor_list)
+            else:
+                executable(*runtime_args)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
