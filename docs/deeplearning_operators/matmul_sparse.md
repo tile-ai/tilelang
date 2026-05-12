@@ -55,167 +55,41 @@ A 2:4 sparse GEMM kernel is similar to its dense counterpart, except that it als
 The default metadata dtype for fp16/bf16 is `int16` with an E-factor of 16 (one `int16` value covers 16 K-elements). For int8/float8 the default is `int32` with E-factor 32.
 
 ```python
-from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
+import tilelang.language as T
+from tilelang.utils.sparse import get_e_factor
 
 def matmul_sp(
     M, N, K,
     block_M, block_N, block_K,
-    in_dtype, out_dtype, accum_dtype,
+    in_dtype, accum_dtype, e_dtype,
     num_stages, threads,
-    trans_A, trans_B,
+    policy=T.GemmWarpPolicy.Square,
 ):
-    is_8_bit = "8" in in_dtype
-    metadata_dtype = "int32" if is_8_bit else "int16"
-    E_factor = SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype]
-    A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
-    B_shape = (K, N) if not trans_B else (N, K)
-    A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
-    B_shared_shape = (block_K, block_N) if not trans_B else (block_N, block_K)
-
-    import tilelang.language as T
+    e_factor = get_e_factor(in_dtype, e_dtype)
 
     @T.prim_func
     def main(
-        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-        E: T.Tensor((M, K // E_factor), metadata_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor((M, K // 2), in_dtype),
+        E: T.Tensor((M, K // e_factor), e_dtype),
+        B: T.Tensor((K, N), in_dtype),
+        C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
-            C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.clear(C_frag)
+            A_shared = T.alloc_shared((block_M, block_K // 2), in_dtype)
+            B_shared = T.alloc_shared((block_K, block_N), in_dtype)
+            E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
+            T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
-                if trans_A:
-                    T.copy(A_sparse[k * block_K // 2, by * block_M], A_shared)
-                else:
-                    T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
-                if trans_B:
-                    T.copy(B[bx * block_N, k * block_K], B_shared)
-                else:
-                    T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)
-            T.copy(C_frag, C[by * block_M, bx * block_N])
+                T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
+                T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
+                T.copy(B[k * block_K, bx * block_N], B_shared)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local,
+                          transpose_A=False, transpose_E=False, transpose_B=False,
+                          policy=policy)
+            T.copy(C_local, C_shared)
+            T.copy(C_shared, C[by * block_M, bx * block_N])
 
     return main
-```
-
-## `T.gemm_sp` with a custom compressor
-
-`T.gemm_sp` lowers directly to PTX, removing the need for a fixed metadata layout. It can operate without `T.annotate_layout`, and supports user-defined layouts and compressors.
-
-The metadata is stored in a `(u)int8`/`(u)int16`/`(u)int32` tensor, where **each 4-bit chunk represents two 2-bit indices** of non-zero elements within four consecutive elements. Here, we start with an `int16` example, which is the **default dtype** for `bf16` and `fp16` on Ampere GPUs.
-
-Suppose we have the following row vector:
-```python
-t = tensor([[0, 7, 0, 3], [1, 5, 0, 0], [0, 0, 2, 4], [9, 0, 9, 0]], dtype=torch.float16).flatten()
-```
-
-The non-zero elements and their corresponding indices are:
-
-```python
-t_sp = tensor([[7, 3], [1, 5], [2, 4], [9, 9]], dtype=torch.float16).flatten()
-indices = tensor([[1, 3], [0, 1], [2, 3], [0, 2]], dtype=torch.float16).flatten()
-```
-
-The corresponding uint16 metadata is:
-```python
-# metadata_bits = tensor([0b1101, 0b0100, 0b1110, 0b1000])
-# Note: storage uses little-endian order: tensor(0b1000111001001101, dtype=torch.int16)
-# Note: the above code is not runnable in python as the interpreter won't take the binary
-#       as 2's complement
-metadata_int16 = tensor(-29107)
-```
-
-You can decode an int16 metadata tensor using the following utility:
-```python
-def decode_metadata(meta: torch.Tensor) -> torch.Tensor:
-    assert meta.dtype is torch.int16
-    groups_per_meta = 16 // 4
-    out = []
-    for g in range(groups_per_meta):
-        group_bits = (meta >> (g * 4)) & 0xF
-        idx0 = group_bits & 0x3
-        idx1 = (group_bits >> 2) & 0x3
-        out.append(torch.stack([idx0, idx1], dim=-1))
-    return torch.concat(out, dim=-1).view(meta.shape[0], -1)
-```
-
-The compressor can be implement at either `PyTorch`/`NumPy` level or kernel level.
-
-For example, `PyTorch` provides an Ampere compressor [here](https://github.com/pytorch/pytorch/blob/267d0197bfca0232488d51dd1ff735d619adc2cf/torch/sparse/_semi_structured_conversions.py#L47-L179). Note that in this implementation, a [permutation](https://github.com/pytorch/pytorch/blob/267d0197bfca0232488d51dd1ff735d619adc2cf/torch/sparse/_semi_structured_conversions.py#L173-L175) is applied to match CUTLASS’s metadata layout. If you do not annotate a metadata layout when using `gemm_sp`, your compressor should replicate the same behavior as the PyTorch example—but without using the `_calculate_meta_reordering_scatter_offsets` function.
-
-If you want to use a custom metadata layout in your kernel, one approach is to define the layout in `TileLang` and then apply the same layout to both your compressor kernel and the matmul_sp kernel.
-
-```python
-
-@tilelang.jit(out_idx=[1, 2], pass_configs={
-    tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
-})
-def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
-    e_factor, e_dtype = ARCH_INFO["8.0"]
-    e_K = K // e_factor
-    elem, group = 2, 4
-
-    assert M % block_M == 0, "M must be divisible by block_M"
-    assert K % block_K == 0, "K must be divisible by block_K"
-    assert K % e_factor == 0, "K must be divisible by e_factor"
-    assert block_K % e_factor == 0, "block_K must be divisible by e_factor"
-
-    @T.prim_func
-    def kernel(
-        A: T.Tensor((M, K), dtype),
-        A_sp: T.Tensor((M, K // 2), dtype),
-        E: T.Tensor((M, e_K), e_dtype),
-    ):
-        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(K, block_K), threads=block_M) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            A_sp_shared = T.alloc_shared((block_M, block_K // 2), dtype)
-            E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
-            if use_cutlass_layout:  # NOTE: Make sure compressor metadata layout
-                T.annotate_layout({ # is same with your computation kernel
-                    E:
-                        make_cutlass_metadata_layout(
-                            E, mma_dtype="float16", arch="8.0", block_k=block_K),
-                    E_shared:
-                        make_cutlass_metadata_layout(
-                            E_shared,
-                            mma_dtype="float16",
-                            arch="8.0",
-                            block_k=block_K),
-                })
-            T.clear(A_sp_shared)
-            T.clear(E_shared)
-            non_zero_cnt = T.alloc_local((1, ), dtype="uint8")
-            non_zero_elt_log_idx = T.alloc_local((elem, ), dtype="uint8")
-            T.copy(A[bx * block_M, by * block_K], A_shared)
-            for tm in T.Parallel(block_M):
-                for g_i in range(0, block_K // group):
-                    a_k = g_i * group
-                    T.clear(non_zero_cnt)
-                    T.clear(non_zero_elt_log_idx)
-                    for i in range(group):
-                        val = A_shared[tm, a_k + i]
-                        if val != 0.0:
-                            non_zero_elt_log_idx[non_zero_cnt[0]] = i
-                            A_sp_shared[tm, a_k // 2 + non_zero_cnt[0]] = val
-                            non_zero_cnt[0] += 1
-                    if non_zero_cnt[0] == 1 and non_zero_elt_log_idx[0] == 3:
-                        non_zero_elt_log_idx[0] = 0
-                        non_zero_elt_log_idx[1] = 3
-                        A_sp_shared[tm, a_k // 2 + 1] = A_sp_shared[tm, a_k // 2]
-                        A_sp_shared[tm, a_k // 2] = 0.0
-                    elif non_zero_cnt[0] == 1:
-                        A_sp_shared[tm, a_k // 2 + 1] = 0
-                        non_zero_elt_log_idx[1] = 3
-                    for i in T.serial(elem):
-                        val = non_zero_elt_log_idx[i]
-                        E_shared[tm, a_k // e_factor] |= T.shift_left(val, 4 * (g_i % (e_factor // group)) + 2 * i)
-            T.copy(A_sp_shared, A_sp[bx * block_M, by * block_K // 2])
-            T.copy(E_shared, E[bx * block_M, by * block_K // e_factor])
-
-    return kernel
 ```
