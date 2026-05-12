@@ -2647,29 +2647,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
     auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
 
-    // Derive MetaType from the buffer element dtype of the metadata arg.
-    auto meta_tvm_dtype = op->args[12]->dtype;
-    std::string MetaType;
-    if (meta_tvm_dtype == DataType::UInt(8)) {
-      MetaType = "uint8_t";
-    } else if (meta_tvm_dtype == DataType::UInt(16)) {
-      MetaType = "uint16_t";
-    } else if (meta_tvm_dtype == DataType::UInt(64)) {
-      MetaType = "uint64_t";
-    } else {
-      MetaType = "uint32_t";
-    }
-
     need_mma_sp_instruction_h_ = true;
     this->PrintIndent();
 
     std::string mma_call =
         "tl::mma_sp_sync<(AType), (BType), (CType), (M), (N), (K), (TransA), "
-        "(TransB), (SparseSel), (MetaType)>("
+        "(TransB), (SparseSel)>("
         "reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
         "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "
         "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)), "
-        "reinterpret_cast<const (MetaType)*>((E_ptr) + (E_offset)));\n";
+        "reinterpret_cast<const uint32_t*>((E_ptr) + (E_offset)));\n";
     tl::codegen::Replacer replacer;
 
     // TF32 workaround: float32 A/B in TF32 context maps to kTensorFloat32.
@@ -2702,7 +2689,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(SparseSel)", sparse_selector == 0
                                               ? "SM80::MMA::SparseSel::Zero"
                                               : "SM80::MMA::SparseSel::One");
-    replacer.register_rule("(MetaType)", MetaType);
     replacer.register_rule("(ARegType)", ARegType);
     replacer.register_rule("(BRegType)", BRegType);
     replacer.register_rule("(CRegType)",

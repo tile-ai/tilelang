@@ -62,16 +62,14 @@ TL_DEVICE void call_fma_sp(typename MmaSpImplTraits<Impl>::DReg *d,
 
 template <DataType AType, DataType BType, DataType CType, int M, int N, int K,
           bool TransA, bool TransB,
-          SM80::MMA::SparseSel spsel = SM80::MMA::SparseSel::Zero,
-          typename MetaType = uint32_t>
+          SM80::MMA::SparseSel spsel = SM80::MMA::SparseSel::Zero>
 struct MmaSpDispatcher {
   using CRegType = void;
   using ARegType = void;
   using BRegType = void;
-  using ERegType = MetaType;
 
   static TL_DEVICE void exec(CRegType *, const ARegType *, const BRegType *,
-                             const CRegType *, const ERegType *) {
+                             const CRegType *, const uint32_t *) {
     static_assert(always_false_v<std::integral_constant<int, M>>,
                   "tl::mma_sp_sync: unsupported configuration");
   }
@@ -80,22 +78,21 @@ struct MmaSpDispatcher {
 #define TL_DEFINE_MMA_SP_DISPATCHER(ATypeEnum, BTypeEnum, CTypeEnum, MValue,   \
                                     NValue, KValue, TransAValue, TransBValue,  \
                                     ImplTemplate)                              \
-  template <SM80::MMA::SparseSel spsel, typename MetaType>                     \
+  template <SM80::MMA::SparseSel spsel>                                        \
   struct MmaSpDispatcher<DataType::ATypeEnum, DataType::BTypeEnum,             \
                          DataType::CTypeEnum, MValue, NValue, KValue,          \
-                         TransAValue, TransBValue, spsel, MetaType> {          \
+                         TransAValue, TransBValue, spsel> {                    \
     using Impl = ImplTemplate<spsel>;                                          \
     using Traits = MmaSpImplTraits<Impl>;                                      \
     using CRegType = typename Traits::DReg;                                    \
     using ARegType = typename Traits::AReg;                                    \
     using BRegType = typename Traits::BReg;                                    \
-    using ERegType = MetaType;                                                 \
     static_assert(                                                             \
         std::is_same_v<typename Traits::DReg, typename Traits::CReg>,          \
         "tl::mma_sp_sync requires matching accumulator/output regs");          \
     static TL_DEVICE void exec(CRegType *d, const ARegType *a,                 \
                                const BRegType *b, const CRegType *c,           \
-                               const MetaType *e) {                            \
+                               const uint32_t *e) {                            \
       call_fma_sp<Impl>(d, a, b, c,                                            \
                         reinterpret_cast<const typename Traits::EReg *>(e));   \
     }                                                                          \
@@ -170,20 +167,17 @@ TL_DEFINE_MMA_SP_DISPATCHER(kFloat8_e5m2, kFloat8_e5m2, kFloat32, 16, 8, 64,
 
 template <DataType AType, DataType BType, DataType CType, int M, int N, int K,
           bool TransA, bool TransB,
-          SM80::MMA::SparseSel spsel = SM80::MMA::SparseSel::Zero,
-          typename MetaType = uint32_t>
+          SM80::MMA::SparseSel spsel = SM80::MMA::SparseSel::Zero>
 TL_DEVICE void mma_sp_sync(
     typename detail::MmaSpDispatcher<AType, BType, CType, M, N, K, TransA,
-                                     TransB, spsel, MetaType>::CRegType *c,
+                                     TransB, spsel>::CRegType *c,
     const typename detail::MmaSpDispatcher<AType, BType, CType, M, N, K, TransA,
-                                           TransB, spsel, MetaType>::ARegType
-        *a,
+                                           TransB, spsel>::ARegType *a,
     const typename detail::MmaSpDispatcher<AType, BType, CType, M, N, K, TransA,
-                                           TransB, spsel, MetaType>::BRegType
-        *b,
-    const MetaType *e) {
+                                           TransB, spsel>::BRegType *b,
+    const uint32_t *e) {
   using Dispatcher = detail::MmaSpDispatcher<AType, BType, CType, M, N, K,
-                                             TransA, TransB, spsel, MetaType>;
+                                             TransA, TransB, spsel>;
   static_assert(!std::is_void_v<typename Dispatcher::CRegType>,
                 "tl::mma_sp_sync: unsupported configuration");
   Dispatcher::exec(c, a, b, c, e);
