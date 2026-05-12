@@ -231,7 +231,7 @@ def test_gfx950_copy_async_gemm_pipelined(trans_A, trans_B, k_pack):
         (True, False),
     ],
 )
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_gfx950
 def test_gfx950_copy_async_gemm_no_pipeline(trans_A, trans_B):
     """Non-pipelined GEMM (num_stages=0) must also produce correct results."""
     prog = _matmul_kernel(
