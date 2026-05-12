@@ -5,6 +5,8 @@ import tilelang.testing
 from tilelang import language as T
 import torch
 
+from tilelang.utils.sparse import get_e_factor
+
 
 def _compile_tvm_ffi(func, pass_configs, **kwargs):
     tilelang.disable_cache()
@@ -318,22 +320,24 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     num_stages = 2
     threads = 128
 
+    e_factor = get_e_factor(T.float16, T.uint8)
+
     @T.prim_func
     def sparse_tensorcore_metadata_copy(
         A_sparse: T.Tensor((M, K // 2), T.float16),
-        E: T.Tensor((M, K // 8), T.int8),
+        E: T.Tensor((M, K // e_factor), T.uint8),
         B: T.Tensor((K, N), T.float16),
         C: T.Tensor((M, N), T.float16),
     ):
         with T.Kernel(T.ceildiv(N, block_n), T.ceildiv(M, block_m), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_m, block_k // 2), T.float16)
             B_shared = T.alloc_shared((block_k, block_n), T.float16)
-            E_shared = T.alloc_shared((block_m, block_k // 8), T.int8)
+            E_shared = T.alloc_shared((block_m, block_k // e_factor), T.uint8)
             C_local = T.alloc_fragment((block_m, block_n), T.float32)
 
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
-                T.copy(E[by * block_m, k * block_k // 8], E_shared)
+                T.copy(E[by * block_m, k * block_k // e_factor], E_shared)
                 T.copy(A_sparse[by * block_m, k * block_k // 2], A_shared)
                 T.copy(B[k * block_k, bx * block_n], B_shared)
                 T.gemm_sp(A_shared, E_shared, B_shared, C_local, transpose_A=False, transpose_E=False, transpose_B=False)
@@ -346,12 +350,10 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     src = kernel.get_kernel_source()
     producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
     consumer_idx = src.index("} else {", producer_idx)
-    metadata_copy_idx = src.index("*(uchar2*)(E +")
-    gemm_idx = src.index("tl::gemm_sp_ss<")
+    metadata_copy_idx = src.index("tl::tma_load(E_desc")
 
     assert producer_idx < metadata_copy_idx < consumer_idx
-    assert consumer_idx < gemm_idx
-    assert "*(uchar2*)(E +" not in src[consumer_idx:]
+    assert "tl::tma_load(E_desc" not in src[consumer_idx:]
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
