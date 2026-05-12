@@ -3,6 +3,8 @@ if(NOT USE_CUDA)
   return()
 endif()
 
+message(STATUS "CUDA Backend is enabled")
+
 set(CMAKE_CUDA_STANDARD 17)
 find_package(CUDAToolkit REQUIRED)
 if(CUDAToolkit_NVCC_EXECUTABLE)
@@ -49,7 +51,7 @@ if(TILELANG_USE_CUDA_STUBS)
   #   - cuModuleLoadData, cuLaunchKernel, cuMemsetD32_v2, etc.
   # These can be called directly without any wrapper macros.
   # ============================================================================
-  add_library(cuda_stub SHARED src/backend/cuda/codegen/stubs/cuda.cc)
+  add_library(cuda_stub SHARED src/backend/cuda/stubs/cuda.cc)
   target_include_directories(cuda_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   # Export symbols with visibility="default" when building
   target_compile_definitions(cuda_stub PRIVATE TILELANG_CUDA_STUB_EXPORTS)
@@ -77,7 +79,7 @@ if(TILELANG_USE_CUDA_STUBS)
   # The stub exports a minimal set of CUDA Runtime API entrypoints used by TVM
   # and lazily loads libcudart at runtime on first API call.
   # ============================================================================
-  add_library(cudart_stub SHARED src/backend/cuda/codegen/stubs/cudart.cc)
+  add_library(cudart_stub SHARED src/backend/cuda/stubs/cudart.cc)
   target_include_directories(cudart_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_compile_definitions(cudart_stub PRIVATE TILELANG_CUDART_STUB_EXPORTS
                                                  ${TILELANG_CUDA_TOOLKIT_VERSION_DEFINITIONS})
@@ -111,7 +113,7 @@ if(TILELANG_USE_CUDA_STUBS)
   # The stub exports a minimal set of NVRTC C API entrypoints used by TVM and
   # lazily loads libnvrtc at runtime on first API call.
   # ============================================================================
-  add_library(nvrtc_stub SHARED src/backend/cuda/codegen/stubs/nvrtc.cc)
+  add_library(nvrtc_stub SHARED src/backend/cuda/stubs/nvrtc.cc)
   target_include_directories(nvrtc_stub PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_compile_definitions(nvrtc_stub PRIVATE TILELANG_NVRTC_STUB_EXPORTS
                                                   ${TILELANG_CUDA_TOOLKIT_VERSION_DEFINITIONS})
@@ -137,7 +139,7 @@ if(TILELANG_USE_CUDA_STUBS)
 endif()
 
 file(GLOB TILE_LANG_CUDA_SRCS
-  src/runtime/runtime.cc
+  src/backend/cuda/runtime.cc
   src/backend/cuda/codegen/ptx.cc
   src/backend/cuda/codegen/codegen_cuda.cc
   src/backend/cuda/codegen/codegen_py.cc
@@ -156,8 +158,8 @@ link_directories(${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR}/stubs)
 
 # Register stubs for linking and install
 if(TILELANG_USE_CUDA_STUBS)
-  set(TILELANG_ACTIVE_BACKEND_STUB_LINK cuda_stub)
-  set(TILELANG_ACTIVE_BACKEND_STUB_TARGETS cuda_stub cudart_stub nvrtc_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK cuda_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_TARGETS cuda_stub cudart_stub nvrtc_stub)
 endif()
 
 # Register additional RPATH for CUDA toolkit lib directory

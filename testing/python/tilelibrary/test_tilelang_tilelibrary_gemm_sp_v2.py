@@ -3,7 +3,7 @@ from tilelang import tvm as tvm
 from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
 from tilelang.utils.tensor import torch_assert_close
 from tilelang.layout import make_cutlass_metadata_layout
-from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
+from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
 import tilelang.testing
 import torch
