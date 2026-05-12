@@ -25,7 +25,6 @@ from tilelang.language.dtypes import dtype
 
 COMPILE_ARGS = {}
 
-
 if sys.platform == "darwin":
     from torch.utils import cpp_extension
 
