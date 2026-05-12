@@ -206,6 +206,7 @@ class TensorCoreIntrinEmitter:
         A_buf = A_region.buffer
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
+        A_other = [r.min for r in A_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -222,7 +223,7 @@ class TensorCoreIntrinEmitter:
                 wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
                 for j in T.vectorized(local_size_a):
                     mi, mk = mma_load_layout(tx, j)
-                    A_local_buf[i * local_size_a + j] = A_buf[A_base0 + wi + mi, A_base1 + wk + mk]
+                    A_local_buf[i * local_size_a + j] = A_buf[tuple(A_other) + (A_base0 + wi + mi, A_base1 + wk + mk)]
 
         return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
@@ -243,6 +244,7 @@ class TensorCoreIntrinEmitter:
         B_buf = B_region.buffer
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
+        B_other = [r.min for r in B_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -265,10 +267,10 @@ class TensorCoreIntrinEmitter:
                 for j in T.vectorized(local_size_b):
                     if b_transposed:
                         mi, mk = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wi + mi, B_base1 + wk + mk]
+                        B_local_buf[i * local_size_b + j] = B_buf[tuple(B_other) + (B_base0 + wi + mi, B_base1 + wk + mk)]
                     else:
                         mk, mi = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] = B_buf[B_base0 + wk + mk, B_base1 + wi + mi]
+                        B_local_buf[i * local_size_b + j] = B_buf[tuple(B_other) + (B_base0 + wk + mk, B_base1 + wi + mi)]
 
         return _warp_ldmatrix_b(B_local_buf, B_region, ki, thread_binding, rk)
 
