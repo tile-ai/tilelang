@@ -133,4 +133,4 @@ def test_compress(dtype, meta_dtype):
 
 
 if __name__ == "__main__":
-    test_compress()
+    tilelang.testing.main()
