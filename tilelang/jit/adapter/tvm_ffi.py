@@ -37,14 +37,20 @@ def _torch_float8_dtypes() -> tuple[torch.dtype, ...]:
 _TORCH_FLOAT8_DTYPES = _torch_float8_dtypes()
 
 
-def _adapt_rocm_float8_tensor(arg: Any, expected_dtype: Any):
+def _maybe_export_rocm_float8_as_tvm_view(arg: Any, expected_dtype: dtype) -> Any:
     if getattr(torch.version, "hip", None) is None or not isinstance(arg, torch.Tensor) or arg.dtype not in _TORCH_FLOAT8_DTYPES:
         return arg
 
-    # PyTorch's legacy DLPack exporter cannot handle FP8 directly.  Export the
-    # byte storage and restore the TileLang dtype on the TVM view.
+    # ROCm disables tvm-ffi's torch C DLPack path until the extension reliably
+    # preserves GPU tensor metadata. The Python DLPack fallback cannot export
+    # FP8 tensors directly, so pass byte storage and restore the expected
+    # TileLang dtype on the TVM view used only for the runtime call.
     tvm_tensor = runtime.from_dlpack(torch.utils.dlpack.to_dlpack(arg.view(torch.int8)))
     return tvm_tensor._create_view(arg.shape, dtype=str(expected_dtype))
+
+
+def _prepare_tvm_ffi_runtime_args(args: list[Any], params: list[KernelParam]) -> list[Any]:
+    return [_maybe_export_rocm_float8_as_tvm_view(arg, param.dtype) for arg, param in zip(args, params)]
 
 
 if sys.platform == "darwin":
@@ -271,7 +277,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
-            executable(*(_adapt_rocm_float8_tensor(tensor, self.params[i].dtype) for i, tensor in enumerate(tensor_list)))
+            runtime_args = _prepare_tvm_ffi_runtime_args(tensor_list, self.params)
+            executable(*runtime_args)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
