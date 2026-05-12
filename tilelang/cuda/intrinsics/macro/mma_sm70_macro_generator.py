@@ -187,6 +187,7 @@ class TensorCoreIntrinEmitter:
             return lane_id, warp_n, warp_m
 
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
+        """Load matrix A fragments from shared memory into per-thread local storage."""
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -228,6 +229,7 @@ class TensorCoreIntrinEmitter:
         return _warp_ldmatrix_a(A_local_buf, A_region, ki, thread_binding, rk)
 
     def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
+        """Load matrix B fragments from shared memory into per-thread local storage."""
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -275,6 +277,7 @@ class TensorCoreIntrinEmitter:
         return _warp_ldmatrix_b(B_local_buf, B_region, ki, thread_binding, rk)
 
     def mma(self, A_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr | None = 0):
+        """Issue SM70 MMA operations using the loaded A/B fragments."""
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
