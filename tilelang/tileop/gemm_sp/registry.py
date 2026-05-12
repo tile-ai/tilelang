@@ -37,7 +37,6 @@ def register_gemm_sp_impl(
 
 def resolve_gemm_sp_impl(gemm_inst: str, target: Target) -> type:
     """Resolve the registered GEMM_SP implementation class for a target."""
-    print(f"{gemm_inst=}, {target=}")
     matches = [entry for entry in _GEMM_SP_IMPLS if entry.inst_name == gemm_inst and entry.predicate(target)]
     if not matches:
         raise ValueError(f"No GEMM_SP implementation registered for target {target}")

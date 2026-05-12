@@ -7,7 +7,7 @@ from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
 from tilelang import _ffi_api
-from tilelang.tileop.base import GemmWarpPolicy
+from tilelang.ir import GemmSPWarpPolicy
 
 
 @tvm_ffi.register_object("tl.GemmSP")
@@ -37,11 +37,10 @@ class GemmSP(Node, Scriptable):
     clear_accum: bool
     kPack: int
     wg_wait: int
-    policy: GemmWarpPolicy
+    policy: GemmSPWarpPolicy
 
     @tvm_ffi.register_global_func("tl.gemm_sp.infer_layout")
     def gemm_sp_infer_layout(self, target: Target, thread_bounds: Range):
-        print(f"{type(self.A)=}")
         thread_nums = thread_bounds.extent
         return self.infer_layout(target, thread_nums)
 
