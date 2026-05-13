@@ -249,8 +249,8 @@ if __name__ == "__main__":
         help="Use TMA store-add epilogue (default)",
     )
     parser.set_defaults(tma_epilogue=True)
-    parser.add_argument("--warmup", type=int, default=50)
-    parser.add_argument("--rep", type=int, default=50)
+    parser.add_argument("--warmup", type=int, default=20)
+    parser.add_argument("--rep", type=int, default=20)
     parser.add_argument("--atol", type=float, default=0.5)
     parser.add_argument("--rtol", type=float, default=1e-1)
     parser.add_argument("--check", action="store_true")
