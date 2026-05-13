@@ -20,18 +20,20 @@
 /*!
  * \file make_packed_api.cc Lower PrimFunc to use the packed function API.
  */
+#include <tvm/tirx/stmt.h>
 #include <tvm/ffi/extra/module.h>
-#include <tvm/ffi/function.h>
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
 #include <tvm/runtime/device_api.h>
 #include <tvm/runtime/module.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/buffer.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/ir/cast.h>
 
 #include <unordered_set>
 #include <utility>
@@ -45,7 +47,7 @@
 
 namespace tvm {
 namespace tl {
-using namespace tir;
+using namespace tirx;
 using namespace ffi;
 
 namespace {
@@ -89,17 +91,17 @@ private:
     // convert val's data type to FFI data type, return type code
     DataType dtype = val.dtype();
     if (dtype.is_bool()) {
-      info.type_index = ffi::TypeIndex::kTVMFFIBool;
+      info.type_index = TypeIndex::kTVMFFIBool;
       info.expr = Cast(DataType::Int(64), val);
 
     } else if (dtype.is_int() || dtype.is_uint()) {
-      info.type_index = ffi::TypeIndex::kTVMFFIInt;
+      info.type_index = TypeIndex::kTVMFFIInt;
       info.expr = Cast(DataType::Int(64), val);
     } else if (dtype.is_float()) {
-      info.type_index = ffi::TypeIndex::kTVMFFIFloat;
+      info.type_index = TypeIndex::kTVMFFIFloat;
       info.expr = Cast(DataType::Float(64), val);
     } else if (dtype.is_void()) {
-      info.type_index = ffi::TypeIndex::kTVMFFINone;
+      info.type_index = TypeIndex::kTVMFFINone;
       info.expr = val;
     } else {
       LOG(FATAL) << "data type " << dtype << " not supported yet";
@@ -110,20 +112,20 @@ private:
 
   Stmt WriteToOut(PrimExpr val) {
     auto info = ConvertForFFI(val);
-    Stmt store_tindex = tir::Evaluate(
-        tir::Call(DataType::Int(32), tir::builtin::tvm_struct_set(),
+    Stmt store_tindex = tirx::Evaluate(
+        tirx::Call(DataType::Int(32), tirx::builtin::tvm_struct_set(),
                   {ret_var_, IntImm(DataType::Int(32), 0),
-                   IntImm(DataType::Int(32), tir::builtin::kTVMFFIAnyTypeIndex),
+                   IntImm(DataType::Int(32), tirx::builtin::kTVMFFIAnyTypeIndex),
                    IntImm(DataType::Int(32), info.type_index)}));
-    Stmt store_zero_padding = tir::Evaluate(tir::Call(
-        DataType::Int(32), tir::builtin::tvm_struct_set(),
+    Stmt store_zero_padding = tirx::Evaluate(tirx::Call(
+        DataType::Int(32), tirx::builtin::tvm_struct_set(),
         {ret_var_, IntImm(DataType::Int(32), 0),
-         IntImm(DataType::Int(32), tir::builtin::kTVMFFIAnyZeroPadding),
+         IntImm(DataType::Int(32), tirx::builtin::kTVMFFIAnyZeroPadding),
          IntImm(DataType::Int(32), 0)}));
-    Stmt store_val = tir::Evaluate(tir::Call(
-        DataType::Int(32), tir::builtin::tvm_struct_set(),
+    Stmt store_val = tirx::Evaluate(tirx::Call(
+        DataType::Int(32), tirx::builtin::tvm_struct_set(),
         {ret_var_, IntImm(DataType::Int(32), 0),
-         IntImm(DataType::Int(32), tir::builtin::kTVMFFIAnyUnionValue),
+         IntImm(DataType::Int(32), tirx::builtin::kTVMFFIAnyUnionValue),
          info.expr}));
     Stmt ret_zero = Evaluate(tvm::ret(0));
     return SeqStmt({store_tindex, store_zero_padding, store_val, ret_zero});
@@ -135,8 +137,8 @@ private:
 
 class SubroutineCallRewriter : public StmtExprMutator {
 public:
-  static ffi::Optional<Stmt>
-  Apply(const ffi::Map<GlobalVar, ffi::String> &packed_func_methods,
+  static Optional<Stmt>
+  Apply(const Map<GlobalVar, String> &packed_func_methods,
         Stmt stmt) {
     SubroutineCallRewriter rewriter(packed_func_methods);
     stmt = rewriter.VisitStmt(stmt);
@@ -149,44 +151,46 @@ public:
 
 private:
   explicit SubroutineCallRewriter(
-      const ffi::Map<GlobalVar, ffi::String> &packed_func_methods)
+      const Map<GlobalVar, String> &packed_func_methods)
       : packed_func_methods(packed_func_methods) {}
 
   PrimExpr VisitExpr_(const CallNode *op) override {
     auto node = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
 
     if (auto *gvar_ptr = node->op.as<GlobalVarNode>()) {
-      auto gvar = ffi::GetRef<GlobalVar>(gvar_ptr);
+      auto gvar = GetRef<GlobalVar>(gvar_ptr);
       if (auto symbol = packed_func_methods.Get(gvar)) {
-        ffi::Array<PrimExpr> cpacked_args;
-        cpacked_args.push_back(tir::StringImm(symbol.value()));
+        Array<PrimExpr> cpacked_args;
+        cpacked_args.push_back(tirx::StringImm(symbol.value()));
         for (auto arg : node->args) {
           cpacked_args.push_back(arg);
         }
 
         // push an empty handle to be compatible with current cpacked convention
-        cpacked_args.push_back(tir::make_zero(DataType::Handle()));
+        cpacked_args.push_back(tirx::make_zero(DataType::Handle()));
         made_change_ = true;
-        return tir::Call(node->dtype, tir::builtin::tvm_call_cpacked(),
+        return tirx::Call(node->dtype, tirx::builtin::tvm_call_cpacked(),
                          cpacked_args);
       }
     }
 
     return node;
   }
-  const ffi::Map<GlobalVar, ffi::String> &packed_func_methods;
+  const Map<GlobalVar, String> &packed_func_methods;
   bool made_change_{false};
 };
 
 } // namespace
 
 inline Stmt MakeAssertEQ(PrimExpr lhs, PrimExpr rhs, std::string msg) {
-  return AssertStmt(lhs == rhs, tvm::tir::StringImm(msg), Evaluate(0));
+  return AssertStmt(lhs == rhs, tvm::tirx::StringImm("RuntimeError"),
+                    Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg)}));
 }
 
 inline Stmt MakeAssertNotNull(PrimExpr ptr, std::string msg) {
   Call isnull(DataType::Bool(), builtin::isnullptr(), {ptr});
-  return AssertStmt(!isnull, tvm::tir::StringImm(msg), Evaluate(0));
+  return AssertStmt(!isnull, tvm::tirx::StringImm("RuntimeError"),
+                    Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg)}));
 }
 
 /* \brief Return the global_symbol of the function, if it should be updated
@@ -271,7 +275,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // local function definitions
   // load i-th argument as type t
   auto f_load_arg_value = [&](DataType arg_type, int i) {
-    ffi::Array<PrimExpr> call_args{
+    Array<PrimExpr> call_args{
         v_packed_args, IntImm(DataType::Int(32), i),
         IntImm(DataType::Int(32), builtin::kTVMFFIAnyUnionValue)};
     // load 64 bit version
@@ -417,12 +421,12 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     PrimExpr arg_value;
     // type index checks
     Var type_index(param->name_hint + ".type_index", DataType::Int(32));
-    seq_init.push_back(LetStmt(
+    seq_init.push_back(SeqStmt({tirx::Bind(
         type_index,
-        tir::Call(DataType::Int(32), builtin::tvm_struct_get(),
+        tirx::Call(DataType::Int(32), builtin::tvm_struct_get(),
                   {v_packed_args, IntImm(DataType::Int(32), i),
-                   IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)}),
-        nop));
+                   IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)})),
+        nop}));
     DataType dtype = param.dtype();
     if (dtype.is_handle()) {
       std::ostringstream msg;
@@ -444,11 +448,12 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       msg << "kernel " << name_hint << " input " << display_name
           << " expected pointer or tensor handle";
       seq_init.emplace_back(
-          AssertStmt(type_index == ffi::TypeIndex::kTVMFFINone ||
-                         type_index == ffi::TypeIndex::kTVMFFIOpaquePtr ||
-                         type_index == ffi::TypeIndex::kTVMFFIDLTensorPtr ||
-                         type_index >= ffi::TypeIndex::kTVMFFIStaticObjectBegin,
-                     tvm::tir::StringImm(msg.str()), nop));
+          AssertStmt(type_index == TypeIndex::kTVMFFINone ||
+                         type_index == TypeIndex::kTVMFFIOpaquePtr ||
+                         type_index == TypeIndex::kTVMFFIDLTensorPtr ||
+                         type_index >= TypeIndex::kTVMFFIStaticObjectBegin,
+                     tvm::tirx::StringImm("RuntimeError"),
+                     Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
       // if type_index is Tensor, we need to add the offset of the DLTensor
       // header which always equals 16 bytes, this ensures that T.handle always
       // shows up as a DLTensor*
@@ -456,18 +461,19 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       static_assert(object_cell_offset == 24);
       arg_value = f_load_arg_value(param.dtype(), i);
       PrimExpr handle_from_tensor =
-          Call(DataType::Handle(), tir::builtin::handle_add_byte_offset(),
+          Call(DataType::Handle(), tirx::builtin::handle_add_byte_offset(),
                {arg_value, IntImm(DataType::Int(32), object_cell_offset)});
-      arg_value = Select(type_index == ffi::TypeIndex::kTVMFFITensor,
+      arg_value = Select(type_index == TypeIndex::kTVMFFITensor,
                          handle_from_tensor, arg_value);
     } else if (dtype.is_bool()) {
       std::ostringstream msg;
       msg << "kernel " << name_hint << " scalar " << param->name_hint
           << " expected boolean";
       seq_init.emplace_back(
-          AssertStmt(type_index == ffi::TypeIndex::kTVMFFIBool ||
-                         type_index == ffi::TypeIndex::kTVMFFIInt,
-                     tvm::tir::StringImm(msg.str()), nop));
+          AssertStmt(type_index == TypeIndex::kTVMFFIBool ||
+                         type_index == TypeIndex::kTVMFFIInt,
+                     tvm::tirx::StringImm("RuntimeError"),
+                     Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
       arg_value =
           Cast(DataType::Bool(), f_load_arg_value(DataType::Int(64), i));
 
@@ -476,9 +482,10 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       msg << "kernel " << name_hint << " scalar " << param->name_hint
           << " expected integer";
       seq_init.emplace_back(
-          AssertStmt(type_index == ffi::TypeIndex::kTVMFFIInt ||
-                         type_index == ffi::TypeIndex::kTVMFFIBool,
-                     tvm::tir::StringImm(msg.str()), nop));
+          AssertStmt(type_index == TypeIndex::kTVMFFIInt ||
+                         type_index == TypeIndex::kTVMFFIBool,
+                     tvm::tirx::StringImm("RuntimeError"),
+                     Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
       arg_value = f_load_arg_value(param.dtype(), i);
     } else {
       ICHECK(dtype.is_float());
@@ -486,13 +493,14 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       msg << "kernel " << name_hint << " scalar " << param->name_hint
           << " expected float";
       seq_init.emplace_back(
-          AssertStmt(type_index == ffi::TypeIndex::kTVMFFIFloat ||
-                         type_index == ffi::TypeIndex::kTVMFFIInt ||
-                         type_index == ffi::TypeIndex::kTVMFFIBool,
-                     tvm::tir::StringImm(msg.str()), nop));
+          AssertStmt(type_index == TypeIndex::kTVMFFIFloat ||
+                         type_index == TypeIndex::kTVMFFIInt ||
+                         type_index == TypeIndex::kTVMFFIBool,
+                     tvm::tirx::StringImm("RuntimeError"),
+                     Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
       // use select so we can also handle int conversion to bool
-      arg_value = tir::Select(
-          type_index == ffi::TypeIndex::kTVMFFIFloat,
+      arg_value = tirx::Select(
+          type_index == TypeIndex::kTVMFFIFloat,
           /* true_value = */ f_load_arg_value(param.dtype(), i),
           /* false_value = */
           Cast(param.dtype(), f_load_arg_value(DataType::Int(64), i)));
@@ -507,7 +515,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
 
   // signature: (void* handle, TVMFFIAny* packed_args, int num_args, TVMFFIAny*
   // v_result)
-  ffi::Array<Var> args{v_self_handle, v_packed_args, v_num_packed_args,
+  Array<Var> args{v_self_handle, v_packed_args, v_num_packed_args,
                        v_result};
 
   // Arg definitions are defined before buffer binding to avoid the use before
@@ -526,7 +534,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   for (const auto &[var, buffer] : buffer_def) {
     // Prefer buffer data var name in diagnostics to avoid exposing low-level
     // handle vars
-    arg_buffer_declarations.push_back(DeclBuffer(buffer, nop));
+    arg_buffer_declarations.push_back(DeclBuffer(buffer));
   }
 
   // reset global symbol to attach prefix
@@ -535,21 +543,21 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       {{tvm::attr::kCallingConv, static_cast<int>(CallingConv::kCPackedFunc)},
        {tvm::attr::kTarget, target_host},
        {tvm::attr::kGlobalSymbol,
-        ffi::symbol::tvm_ffi_symbol_prefix + global_symbol.value()}});
+        symbol::tvm_ffi_symbol_prefix + global_symbol.value()}});
 
   Stmt body = ReturnRewriter(v_result)(func_ptr->body);
-  body = AttrStmt(make_zero(DataType::Int(32)), tir::attr::compute_scope,
+  body = AttrStmt(make_zero(DataType::Int(32)), tirx::attr::compute_scope,
                   StringImm(name_hint + "_compute_"), body);
   // Set device context
   if (vmap.count(device_id.get())) {
-    ffi::Any node = ffi::String("default");
-    seq_check.push_back(AttrStmt(node, tir::attr::device_id, device_id, nop));
+    Any node = String("default");
+    seq_check.push_back(AttrStmt(node, tirx::attr::device_id, device_id, nop));
     seq_check.push_back(
-        AttrStmt(node, tir::attr::device_type, device_type, nop));
+        AttrStmt(node, tirx::attr::device_type, device_type, nop));
 
     if (runtime::DeviceAPI::NeedSetDevice(target_device_type)) {
       Stmt set_device =
-          Evaluate(Call(DataType::Int(32), tir::builtin::tvm_call_packed(),
+          Evaluate(Call(DataType::Int(32), tirx::builtin::tvm_call_packed(),
                         {StringImm(runtime::symbol::tvm_set_device),
                          device_type, device_id}));
       body = SeqStmt({set_device, body});
@@ -565,13 +573,13 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   func_ptr->body = body;
   func_ptr->params = args;
 
-  ffi::Array<Var> undefined = UndefinedVars(body, func_ptr->params);
+  Array<Var> undefined = UndefinedVars(body, func_ptr->params);
 
   ICHECK_EQ(undefined.size(), 0)
       << "In PrimFunc " << name_hint << " variables " << undefined
       << " are used, but are not passed in as API arguments";
 
-  func_ptr->buffer_map = ffi::Map<Var, Buffer>();
+  func_ptr->buffer_map = Map<Var, Buffer>();
   func_ptr->ret_type = PrimType(DataType::Int(32));
   // return the function.
   return func;
@@ -621,7 +629,7 @@ tvm::transform::Pass MakePackedAPI() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.MakePackedAPI",
                         []() { return MakePackedAPI(); });
 }

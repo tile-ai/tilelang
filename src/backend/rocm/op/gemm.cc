@@ -4,6 +4,8 @@
  */
 
 #include "op/gemm.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 #include "target/utils.h"
 
@@ -14,7 +16,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace rocm {
 
@@ -97,7 +99,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
 } // namespace
 
 struct Gemm {
-  static String SelectInst(const GemmNode &op, int block_size, Target target) {
+  static ffi::String SelectInst(const GemmNode &op, int block_size, Target target) {
     (void)op;
     (void)block_size;
 
@@ -113,18 +115,18 @@ struct Gemm {
 
   static std::pair<int, int>
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
-                       int block_size, Target target, String gemm_inst) {
+                       int block_size, Target target, ffi::String gemm_inst) {
     (void)gemm_inst;
     int num_warps = block_size / TargetGetWarpSize(target);
     return ComputeDefaultWarpPartition(policy, M, N, num_warps);
   }
 
-  static bool ReuseExistingSharedLayout(String gemm_inst) {
+  static bool ReuseExistingSharedLayout(ffi::String gemm_inst) {
     (void)gemm_inst;
     return false;
   }
 
-  static String InstructionKind(String gemm_inst) {
+  static ffi::String InstructionKind(ffi::String gemm_inst) {
     if (gemm_inst == kROCmMFMA) {
       return "mfma";
     }

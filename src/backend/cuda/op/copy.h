@@ -7,6 +7,7 @@
 #define TVM_TL_BACKEND_CUDA_OP_COPY_H_
 
 #include "op/copy.h"
+#include "support/check.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +17,8 @@ namespace tvm {
 namespace tl {
 namespace cuda {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 enum class CopyInst : uint8_t {
   kNormal = 0,

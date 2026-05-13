@@ -21,7 +21,7 @@ class TensorCorePolicy(DefaultPolicy):
     use_async_copy: bool = False
     block_reduction_depth: int | None = None
 
-    def _init_with_prim_func(self, func: tvm.tir.PrimFunc, name: str | None = None):
+    def _init_with_prim_func(self, func: tvm.tirx.PrimFunc, name: str | None = None):
         super()._init_with_prim_func(func, name)
         self._legalize_info()
         return self

@@ -3,11 +3,12 @@
  * \brief Legalize negative indices in buffer load/store expressions.
  */
 
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
 #include <tvm/runtime/logging.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
+#include <tvm/ir/cast.h>
 
 #include <unordered_map>
 #include <variant>
@@ -19,7 +20,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 using arith::IRVisitorWithAnalyzer;
 
 enum class IndexSignState { kNonNegative, kNegative, kUnknown };
@@ -35,8 +37,8 @@ public:
       : result_(result) {}
 
 private:
-  std::vector<IndexSignState> ProcessIdx(const ffi::Array<PrimExpr> &indices,
-                                         ffi::String buffer_name) {
+  std::vector<IndexSignState> ProcessIdx(const Array<PrimExpr> &indices,
+                                         String buffer_name) {
     std::vector<IndexSignState> states;
     states.reserve(indices.size());
 
@@ -163,13 +165,13 @@ private:
                         const LoadStore2StateMap &states)
       : arith::IRMutatorWithAnalyzer(analyzer), states_(states) {}
 
-  ffi::Array<PrimExpr> UpdateIdx(const ffi::Array<PrimExpr> &indices,
-                                 const ffi::Array<PrimExpr> &buffer_shape,
+  Array<PrimExpr> UpdateIdx(const Array<PrimExpr> &indices,
+                                 const Array<PrimExpr> &buffer_shape,
                                  const std::vector<IndexSignState> &state_vec) {
     ICHECK_EQ(state_vec.size(), indices.size())
         << "State vector size mismatch for buffer load/store indices ("
         << indices << ")";
-    ffi::Array<PrimExpr> new_indices = indices;
+    Array<PrimExpr> new_indices = indices;
     for (size_t i = 0; i < indices.size(); ++i) {
       if (state_vec[i] != IndexSignState::kNegative)
         continue;
@@ -222,7 +224,7 @@ PrimFunc LegalizeNegativeIndex(PrimFunc func) {
 }
 
 tvm::transform::Pass LegalizeNegativeIndexPass() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [](PrimFunc f, const IRModule &, PassContext) {
     return LegalizeNegativeIndex(std::move(f));
   };
@@ -230,7 +232,7 @@ tvm::transform::Pass LegalizeNegativeIndexPass() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LegalizeNegativeIndex",
                         LegalizeNegativeIndexPass);
 }

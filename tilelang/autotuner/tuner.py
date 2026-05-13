@@ -12,7 +12,7 @@ from tilelang import tvm as tvm
 from tilelang import env
 from tilelang.jit import JITImpl
 from tilelang.jit.kernel import JITKernel
-from tvm.tir import PrimFunc, Var
+from tvm.tirx import PrimFunc, Var
 from tvm.target import Target
 import inspect
 from functools import partial

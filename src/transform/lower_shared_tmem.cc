@@ -6,21 +6,23 @@
 #include "../op/builtin.h"
 #include "../target/utils.h"
 #include "tvm/ir/type.h"
-#include "tvm/tir/builtin.h"
-#include "tvm/tir/expr.h"
-#include "tvm/tir/stmt.h"
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 #include <unordered_set>
+#include <tvm/ir/cast.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 
@@ -39,13 +41,13 @@ static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
     return {{}, true};
 
   // Unwrap transparent wrapper nodes
-  if (auto *n = stmt.as<LetStmtNode>())
-    return CollectFallthroughDeallocs(n->body);
+  if (stmt.as<BindNode>())
+    return {{}, true};
   if (auto *n = stmt.as<AttrStmtNode>())
     return CollectFallthroughDeallocs(n->body);
-  if (auto *n = stmt.as<BlockNode>())
+  if (auto *n = stmt.as<SBlockNode>())
     return CollectFallthroughDeallocs(n->body);
-  if (auto *n = stmt.as<BlockRealizeNode>())
+  if (auto *n = stmt.as<SBlockRealizeNode>())
     return CollectFallthroughDeallocs(n->block->body);
   if (auto *n = stmt.as<ForNode>())
     return CollectFallthroughDeallocs(n->body);
@@ -84,7 +86,7 @@ static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
         ICHECK_EQ(call->args.size(), 1U);
         auto *buf = call->args[0].as<VarNode>();
         ICHECK(buf) << "tl.deallocate_tmem expects a buffer data Var";
-        return {{tvm::ffi::GetRef<Var>(buf)}, true};
+        return {{GetRef<Var>(buf)}, true};
       }
       if (call->op.same_as(builtin::thread_return())) {
         return {{}, false};
@@ -122,8 +124,8 @@ private:
     return num_cols_allocated;
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = tvm::ffi::GetRef<Block>(op);
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block = GetRef<SBlock>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     if (op->annotations.count(attr::kLayoutMap)) {
       auto layout_map = op->annotations.Get(attr::kLayoutMap);
@@ -403,7 +405,7 @@ private:
     return expr;
   }
   PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = tvm::ffi::GetRef<Var>(op);
+    Var var = GetRef<Var>(op);
     if (var_remap_.count(var)) {
       return var_remap_[var];
     }
@@ -411,7 +413,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
@@ -447,7 +449,7 @@ PrimFunc LowerSharedTmem(PrimFunc f) {
 }
 
 namespace transform {
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerSharedTmem() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
@@ -457,7 +459,7 @@ tvm::transform::Pass LowerSharedTmem() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerSharedTmem", LowerSharedTmem);
 }
 

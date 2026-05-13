@@ -7,13 +7,13 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_ASSUME_H_
 #define TVM_TL_TRANSFORM_COMMON_ASSUME_H_
 
-#include "tvm/tir/stmt.h"
+#include <tvm/tirx/stmt.h>
 #include <optional>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 // Get the expression inside an assume statement, if any. Returns nullopt if
 // the statement is not an assume statement.

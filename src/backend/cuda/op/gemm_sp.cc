@@ -4,21 +4,23 @@
  */
 
 #include "op/gemm_sp.h"
+#include "support/check.h"
 
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "target/utils.h"
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
 
 #include <sstream>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace cuda {
 

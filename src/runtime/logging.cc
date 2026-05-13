@@ -1,4 +1,5 @@
 #include <tvm/runtime/logging.h>
+#include "../support/check.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -64,7 +65,8 @@ void LogMessageImpl(const std::string &file, int lineno, int level,
 [[noreturn]] void LogFatalImpl(const std::string &file, int lineno,
                                const std::string &message) {
   LogMessageImpl(file, lineno, TVM_LOG_LEVEL_FATAL, message);
-  throw InternalError(file, lineno, message);
+  throw tvm::ffi::Error("InternalError", message,
+                   TVMFFIBacktrace(file.c_str(), lineno, "", 0));
 }
 
 /* static */

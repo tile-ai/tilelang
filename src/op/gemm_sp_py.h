@@ -11,16 +11,17 @@
 
 #include "gemm_sp.h"
 #include "operator.h"
+#include "support/check.h"
 
 namespace tvm {
 
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 class GemmSPPyNode : public TileOperatorNode {
 public:
-  tir::Buffer A, E, B, C;
+  tirx::Buffer A, E, B, C;
   // pointer to the A, E, B, C
   BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
   bool trans_A, trans_B, trans_E;
@@ -81,8 +82,8 @@ public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSPPy, TileOperator,
                                              GemmSPPyNode);
   TVM_DLL
-  GemmSPPy(Array<PrimExpr> args,
-           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  GemmSPPy(ffi::Array<PrimExpr> args,
+           ffi::Map<ffi::String, ffi::ObjectRef> annotations = ffi::Map<ffi::String, ffi::ObjectRef>());
   static const Op &Get();
 };
 

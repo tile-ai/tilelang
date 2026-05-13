@@ -16,7 +16,7 @@ from typing import Callable, Literal
 
 import cloudpickle
 from tvm.target import Target
-from tvm.tir import PrimFunc
+from tvm.tirx import PrimFunc
 from tvm.runtime import Executable
 from tilelang.engine.param import KernelParam
 from tilelang.utils.language import get_prim_func_name
@@ -67,7 +67,7 @@ class KernelCache:
     @staticmethod
     @functools.cache
     def _get_tilelang_lib_stamp() -> str | None:
-        """Return a content-based build-stamp for the TileLang runtime library.
+        """Return a content-based build-stamp for TileLang native libraries.
 
         The kernel cache key historically only depended on `tilelang.__version__`
         and the TIR script. During development, C++ pass changes can change the
@@ -91,19 +91,26 @@ class KernelCache:
         if sys.platform == "win32":
             lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
         elif sys.platform == "darwin":
-            lib_names = ["libtilelang.dylib", "libtilelang.so"]
+            lib_names = ["libtilelang.dylib", "libtilelang.so", "libtvm.dylib", "libtvm.so"]
         else:
-            lib_names = ["libtilelang.so"]
+            lib_names = ["libtilelang.so", "libtvm.so"]
 
+        stamps: list[str] = []
+        seen_names: set[str] = set()
         for lib_dir in lib_dirs:
             for name in lib_names:
+                if name in seen_names:
+                    continue
                 path = os.path.join(lib_dir, name)
                 if os.path.exists(path):
                     file_hash = sha256()
                     with open(path, "rb") as f:
                         for chunk in iter(lambda: f.read(1 << 20), b""):
                             file_hash.update(chunk)
-                    return f"{name}:{file_hash.hexdigest()}"
+                    stamps.append(f"{name}:{file_hash.hexdigest()}")
+                    seen_names.add(name)
+        if stamps:
+            return "|".join(stamps)
         return None
 
     @staticmethod

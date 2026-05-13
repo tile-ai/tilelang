@@ -7,6 +7,9 @@
 #define TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 
 #include "op/reduce.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/ir/cast.h>
 
 #include "layout/layout.h"
 #include "layout/utils.h"
@@ -16,9 +19,9 @@
 #include "transform/loop_partition.h"
 
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include <cmath>
 #include <cstdint>
@@ -32,7 +35,8 @@ namespace tvm {
 namespace tl {
 namespace backend {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace reduce {
 
@@ -339,7 +343,7 @@ template <typename Impl> struct ReduceLowerer {
         reduce_local = For(src_var_compressed[i]->var, 0,
                            src_var_compressed[i]->dom->extent,
                            ForKind::kUnrolled, reduce_local, std::nullopt,
-                           {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+                           {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
       }
       stmts.push_back(reduce_local);
 
@@ -357,10 +361,10 @@ template <typename Impl> struct ReduceLowerer {
                                   "constant output shape";
           N_total *= *p;
         }
-        CHECK_LE(batch, N_total)
+        ICHECK_LE(batch, N_total)
             << "ReduceOp: batch=" << batch
             << " exceeds per-thread output element count N=" << N_total;
-        CHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
+        ICHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
                                      << " must evenly divide N=" << N_total;
       }
 
@@ -497,8 +501,7 @@ template <typename Impl> struct ReduceLowerer {
 
         Stmt body = phases.size() > 1 ? SeqStmt(phases) : phases[0];
         if (need_duplicate) {
-          body = Allocate(clear_buffer->data, clear_buffer->dtype,
-                          clear_buffer->shape, const_true(), body);
+          body = SeqStmt({AllocBuffer(clear_buffer), body});
         }
         return body;
       }
@@ -577,8 +580,7 @@ template <typename Impl> struct ReduceLowerer {
       }
 
       if (need_duplicate) {
-        body = Allocate(clear_buffer->data, clear_buffer->dtype,
-                        clear_buffer->shape, const_true(), body);
+        body = SeqStmt({AllocBuffer(clear_buffer), body});
       }
       return body;
     }

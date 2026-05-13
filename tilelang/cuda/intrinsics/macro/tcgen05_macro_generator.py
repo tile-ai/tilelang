@@ -3,7 +3,7 @@ from enum import IntEnum
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
+from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tilelang.utils import is_tensor_memory
@@ -294,9 +294,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 buffer = buffer_load.buffer
                 for i, shape in enumerate(reversed(buffer.shape)):
                     indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, tvm.tir.Ramp):
+                    if isinstance(indice, tvm.tirx.Ramp):
                         offset += indice.base * stride
-                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                    elif isinstance(indice, (tvm.tirx.IntImm, tvm.tirx.PrimExpr)):
                         offset += indice * stride
                     else:
                         raise ValueError(f"Unsupported index type: {type(indice)}")
@@ -489,9 +489,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 buffer = buffer_load.buffer
                 for i, shape in enumerate(reversed(buffer.shape)):
                     indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, tvm.tir.Ramp):
+                    if isinstance(indice, tvm.tirx.Ramp):
                         offset += indice.base * stride
-                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                    elif isinstance(indice, (tvm.tirx.IntImm, tvm.tirx.PrimExpr)):
                         offset += indice * stride
                     else:
                         raise ValueError(f"Unsupported index type: {type(indice)}")
@@ -678,9 +678,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 buffer = buffer_load.buffer
                 for i, shape in enumerate(reversed(buffer.shape)):
                     indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                    if isinstance(indice, tvm.tir.Ramp):
+                    if isinstance(indice, tvm.tirx.Ramp):
                         offset += indice.base * stride
-                    elif isinstance(indice, (tvm.tir.IntImm, tvm.tir.PrimExpr)):
+                    elif isinstance(indice, (tvm.tirx.IntImm, tvm.tirx.PrimExpr)):
                         offset += indice * stride
                     else:
                         raise ValueError(f"Unsupported index type: {type(indice)}")
@@ -738,8 +738,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             )
 
             tmem_col_step = atom_n // (128 // atom_m_per_cta)
-            _sf_a = tvm.tir.const(sf_a_id, "int32") if isinstance(sf_a_id, int) else sf_a_id
-            _sf_b = tvm.tir.const(sf_b_id, "int32") if isinstance(sf_b_id, int) else sf_b_id
+            _sf_a = tvm.tirx.const(sf_a_id, "int32") if isinstance(sf_a_id, int) else sf_a_id
+            _sf_b = tvm.tirx.const(sf_b_id, "int32") if isinstance(sf_b_id, int) else sf_b_id
             runtime_instr_desc = base_instr_desc | (_sf_a << 29) | (_sf_b << 4)
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):

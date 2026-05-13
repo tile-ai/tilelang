@@ -84,7 +84,7 @@ def test_view_shape_mismatch():
 
 
 def test_view_subbyte_dtype_change():
-    A = tvm.tir.decl_buffer((16, 32), "float4_e2m1fn", name="A")
+    A = tvm.tirx.decl_buffer((16, 32), "float4_e2m1fn", name="A")
     A_viewed = T.view(A, (16, 16), dtype=T.uint8)
     assert str(A_viewed.dtype) == "uint8"
     assert tuple(int(dim) for dim in A_viewed.shape) == (16, 16)

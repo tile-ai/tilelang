@@ -4,23 +4,22 @@
  */
 
 #include "layout.h"
-#include <tvm/ffi/error.h>
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
 #include <tvm/runtime/logging.h>
+#include <tvm/ffi/extra/structural_equal.h>
 
 #include <tvm/arith/pattern.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "arith/pattern_match.h"
-#include "tvm/node/functor.h"
-#include "tvm/node/repr_printer.h"
 #include "utils.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -329,22 +328,22 @@ Layout::Layout(Array<IterVar> forward_var, Array<PrimExpr> forward_index) {
   Array<PrimExpr> input_size;
   for (size_t i = 0; i < forward_var.size(); i++) {
     vmap.Set(forward_var[i]->var, InputPlaceholder(i));
-    CHECK(is_zero(forward_var[i]->dom->min));
+    ICHECK(is_zero(forward_var[i]->dom->min));
     input_size.push_back(forward_var[i]->dom->extent);
   }
   forward_index =
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
-  auto n = tvm::ffi::make_object<LayoutNode>(input_size, forward_index);
+  auto n = make_object<LayoutNode>(input_size, forward_index);
   data_ = std::move(n);
 }
 
 Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
-  auto n = tvm::ffi::make_object<LayoutNode>(input_size, forward_index);
+  auto n = make_object<LayoutNode>(input_size, forward_index);
   data_ = std::move(n);
 }
 
 void LayoutNode::RegisterReflection() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::ObjectDef<LayoutNode>()
       .def_ro("input_size", &LayoutNode::input_size_)
       .def_ro("forward_index", &LayoutNode::forward_index_)
@@ -431,7 +430,7 @@ Layout LayoutNode::Repeat(int dim, int factor) const {
     TVM_FFI_THROW(ValueError) << "factor must be >= 1, got " << factor;
   }
   if (factor == 1) {
-    return ffi::GetRef<Layout>(this);
+    return GetRef<Layout>(this);
   }
 
   const int ndim = static_cast<int>(InputDim());
@@ -468,7 +467,7 @@ Layout LayoutNode::Repeat(int dim, int factor) const {
 
 Layout LayoutNode::Expand(const Array<PrimExpr> &leading_shape) const {
   if (leading_shape.empty()) {
-    return ffi::GetRef<Layout>(this);
+    return GetRef<Layout>(this);
   }
 
   for (size_t i = 0; i < leading_shape.size(); ++i) {
@@ -577,7 +576,7 @@ Fragment FragmentNode::DeReplicate() const {
     factor = arith::ZeroAwareGCD(*rep_size, *idx_size);
   }
   if (factor == 1)
-    return tvm::ffi::GetRef<Fragment>(this);
+    return GetRef<Fragment>(this);
 
   Map<Var, PrimExpr> vmap;
   vmap.Set(ReplicationPlaceholder(), ReplicationPlaceholder() * factor +
@@ -590,7 +589,7 @@ Fragment FragmentNode::DeReplicate() const {
 }
 
 Fragment FragmentNode::BindThreadRange(Range thread_range) const {
-  auto n = tvm::ffi::make_object<FragmentNode>(*this);
+  auto n = make_object<FragmentNode>(*this);
   n->thread_range_ = thread_range;
   return Fragment(n);
 }
@@ -656,7 +655,7 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
 
   // Fast path: if shape is the same, return the original layout
   if (StructuralEqual()(InputShape(), shape)) {
-    return ffi::GetRef<Layout>(this);
+    return GetRef<Layout>(this);
   }
 
   // Step 1. Prove the product relation holds under rescale:
@@ -714,7 +713,7 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
 
   // Fast path: identical input shape, return self
   if (StructuralEqual()(InputShape(), shape)) {
-    return ffi::GetRef<Fragment>(this);
+    return GetRef<Fragment>(this);
   }
 
   // 1) Prove total number of elements remains the same
@@ -811,7 +810,7 @@ Fragment::Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
   PrimExpr replicate_size = 1;
   for (size_t i = 0; i < forward_var.size(); i++) {
     vmap.Set(forward_var[i]->var, InputPlaceholder(i));
-    CHECK(is_zero(forward_var[i]->dom->min));
+    ICHECK(is_zero(forward_var[i]->dom->min));
     input_size.push_back(forward_var[i]->dom->extent);
   }
   if (thread_replicate.defined()) {
@@ -823,7 +822,7 @@ Fragment::Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
   forward_thread = Substitute(forward_thread, vmap);
 
-  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
+  auto n = make_object<FragmentNode>(input_size, forward_index,
                                                forward_thread, replicate_size);
   data_ = std::move(n);
 }
@@ -835,7 +834,7 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
     forward_thread = Substitute(
         forward_thread, {{replicate_var.value(), ReplicationPlaceholder()}});
   }
-  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
+  auto n = make_object<FragmentNode>(input_size, forward_index,
                                                forward_thread, replicate_size);
   data_ = std::move(n);
 }
@@ -1054,25 +1053,16 @@ bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
 }
 
 void FragmentNode::RegisterReflection() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::ObjectDef<FragmentNode>()
       .def_ro("forward_thread", &FragmentNode::forward_thread_)
       .def_ro("replicate_size", &FragmentNode::replicate_size_)
       .def("_DebugOutput", &FragmentNode::DebugOutput);
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<FragmentNode>([](const ObjectRef &obj, ReprPrinter *p) {
-      auto *node = static_cast<const FragmentNode *>(obj.get());
-      p->stream << node->DebugOutput();
-    })
-    .set_dispatch<LayoutNode>([](const ObjectRef &obj, ReprPrinter *p) {
-      auto *node = static_cast<const LayoutNode *>(obj.get());
-      p->stream << node->DebugOutput();
-    });
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef()
       .def_packed("tl.Layout",
                   [](PackedArgs args, Any *rv) {
@@ -1175,7 +1165,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   LayoutNode::RegisterReflection();
   FragmentNode::RegisterReflection();
 }

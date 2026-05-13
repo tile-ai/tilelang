@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 
 from tvm import IRModule
 from tvm.target import Target
-from tvm.tir.stmt_functor import post_order_visit
+from tvm.tirx.stmt_functor import post_order_visit
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
@@ -776,11 +776,11 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     # Utility Methods
     # =========================================================================
 
-    def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
+    def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         """Convert TVM expression to Python string."""
         return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="//")
 
-    def _cxx_expr(self, expr: tvm.tir.PrimExpr) -> str:
+    def _cxx_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         """Convert TVM expression to C++ string for generated launcher code."""
         return pythonic_expr(expr, self._CXX_TYPE_MAP)
 
@@ -802,7 +802,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 buffer = self.prim_func.buffer_map[param]
                 function_args.append({"name": buffer.data.name, "type": "buffer"})
                 buffer_args.append(buffer.data.name)
-            elif isinstance(param, tvm.tir.Var):
+            elif isinstance(param, tvm.tirx.Var):
                 function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
             else:
                 raise ValueError(f"Parameter {param} not in buffer map")
@@ -823,7 +823,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         function_args: list[dict],
         function_params: list,
         desc_name_map: dict[str, str] | None = None,
-        desc_name_var_map: dict[str, tvm.tir.Var] | None = None,
+        desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
     ) -> list[tuple[str, str]]:
         """Extract function call arguments from Python function declaration."""
 
@@ -1301,7 +1301,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     def generate_tma_descriptor_args(
         self,
         desc_name_map: dict[str, str],
-        desc_name_var_map: dict[str, tvm.tir.Var],
+        desc_name_var_map: dict[str, tvm.tirx.Var],
         tma_desc_code_map: dict[str, str],
     ) -> list[str]:
         """Generate TMA descriptor information for C++ code generation.
@@ -1399,7 +1399,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         for function_name, function_info in function_informations.items():
             declaration = extract_python_func_declaration(code, function_name)
             desc_name_map: dict[str, str] = {}
-            desc_name_var_map: dict[str, tvm.tir.Var] = {}
+            desc_name_var_map: dict[str, tvm.tirx.Var] = {}
             call_args = self._extract_func_call_args(
                 declaration,
                 function_args,
@@ -1483,8 +1483,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
             def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
                 nonlocal function_params
-                if isinstance(node, tvm.tir.Call):
-                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tir.tvm_call_packed")):
+                if isinstance(node, tvm.tirx.Call):
+                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tirx.tvm_call_packed")):
                         return
                     args = node.args
                     if not args or args[0] != fn:

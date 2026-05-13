@@ -8,14 +8,15 @@
 #define TVM_TL_LAYOUT_UTILS_H_
 
 #include <tvm/arith/iter_affine_map.h>
+#include "support/check.h"
 
-#include "../support/ffi_aliases.h"
 #include "layout.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class NormalizeIterException : public std::exception {
 public:

@@ -1,6 +1,7 @@
 #if defined(__linux__)
 #include <sys/stat.h>
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 #endif
 
 #include <hip/hip_runtime.h>
@@ -8,7 +9,6 @@
 
 #include "codegen_hip.h"
 #include "runtime/rocm/rocm_module.h"
-#include <tvm/ffi/function.h>
 
 #ifndef kTVMGridConstant
 #define kTVMGridConstant 130
@@ -17,14 +17,16 @@
 namespace tvm {
 namespace codegen {
 
+using namespace ffi;
+
 static std::unordered_map<std::string, runtime::FunctionInfo>
 ExtractFuncInfo(const IRModule &mod) {
   std::unordered_map<std::string, runtime::FunctionInfo> fmap;
 
   for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<tir::PrimFuncNode>())
+    ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
         << "Can only lower IR Module with PrimFuncs";
-    auto f = Downcast<tir::PrimFunc>(kv.second);
+    auto f = Downcast<tirx::PrimFunc>(kv.second);
 
     runtime::FunctionInfo info;
     for (size_t i = 0; i < f->params.size(); ++i) {
@@ -45,19 +47,19 @@ ExtractFuncInfo(const IRModule &mod) {
       info.launch_param_tags.push_back(
           runtime::launch_param::kUseCooperativeLaunch);
     }
-    if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
-            tir::attr::kKernelLaunchParams)) {
+    if (auto opt = f->GetAttr<Array<String>>(
+            tirx::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
         info.launch_param_tags.push_back(tag);
       }
     }
-    auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
+    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
     fmap[static_cast<std::string>(global_symbol.value())] = info;
   }
   return fmap;
 }
 
-ffi::Module BuildTileLangHIP(IRModule mod, Target target) {
+Module BuildTileLangHIP(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
@@ -75,7 +77,6 @@ ffi::Module BuildTileLangHIP(IRModule mod, Target target) {
   std::string code = cg.Finish();
 
   // Use the new FFI API to get registered functions
-  using ffi::Function;
   if (auto f = Function::GetGlobal("tilelang_callback_hip_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
@@ -94,7 +95,7 @@ ffi::Module BuildTileLangHIP(IRModule mod, Target target) {
   return ROCMModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code, std::string());
 }
 
-ffi::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
+Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
@@ -112,7 +113,6 @@ ffi::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   std::string code = cg.Finish();
 
   // Use the new FFI API to get registered functions
-  using ffi::Function;
   if (auto f = Function::GetGlobal("tilelang_callback_hip_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
@@ -122,7 +122,7 @@ ffi::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef()
       .def("target.build.tilelang_hip", BuildTileLangHIP)
       .def("target.build.tilelang_hip_without_compile",

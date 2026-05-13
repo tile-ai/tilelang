@@ -39,7 +39,7 @@ def test_pdl_trigger():
     N = 64
     program = kernels_with_pdl_trigger(N)
 
-    pdl_kernel = tilelang.compile(program, target="cuda -arch=sm_90")
+    pdl_kernel = tilelang.compile(program, target={"kind": "cuda", "arch": "sm_90"})
     code = pdl_kernel.get_kernel_source()
     assert "cudaTriggerProgrammaticLaunchCompletion" in code
 
@@ -48,7 +48,7 @@ def test_pdl_trigger():
 def test_pdl_sync():
     N = 64
     program = kernels_with_pdl_sync(N)
-    pdl_kernel = tilelang.compile(program, target="cuda -arch=sm_90")
+    pdl_kernel = tilelang.compile(program, target={"kind": "cuda", "arch": "sm_90"})
     code = pdl_kernel.get_kernel_source()
     assert "cudaGridDependencySynchronize" in code
     assert "__restrict__" not in code

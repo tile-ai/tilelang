@@ -4,21 +4,25 @@
  * operators
  */
 
+#include <tvm/tirx/stmt.h>
 #include "gemm_sp_py.h"
 #include "utils.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/ir/cast.h>
 
 #include "builtin.h"
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/transform.h>
 
-#include "tvm/ffi/string.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -49,7 +53,7 @@ using namespace tir;
  *       performed here.
  */
 GemmSPPy::GemmSPPy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<GemmSPPyNode> node = tvm::ffi::make_object<GemmSPPyNode>();
+  ObjectPtr<GemmSPPyNode> node = make_object<GemmSPPyNode>();
 
   auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
@@ -112,39 +116,39 @@ AccessRegions GemmSPPyNode::GetAccessRegions() const {
  * @return TileOperator A GemmSPPy operator that owns a copy of this node.
  */
 TileOperator GemmSPPyNode::Clone() const {
-  auto op = tvm::ffi::make_object<GemmSPPyNode>(*this);
+  auto op = make_object<GemmSPPyNode>(*this);
   return GemmSPPy(op);
 }
 
 Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp_py.lower")) {
+  if (const auto f = Function::GetGlobal("tl.gemm_sp_py.lower")) {
     auto prim_func =
-        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmSPPy>(this), T.target,
+        Downcast<PrimFunc>((*f)(GetRef<GemmSPPy>(this), T.target,
                                 T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
-    if (prim_func->body.as<BlockRealizeNode>()) {
-      BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
+    if (prim_func->body.as<SBlockRealizeNode>()) {
+      SBlockRealize block_realize = Downcast<SBlockRealize>(prim_func->body);
       auto block = block_realize->block;
       {
-        BlockNode *n = block.CopyOnWrite();
+        SBlockNode *n = block.CopyOnWrite();
         n->name_hint = global_symbol.value();
         n->annotations.Set(tl::attr::kLexicalAllocScope,
                            IntImm(DataType::Int(32), 1));
       }
-      return BlockRealize(block_realize->iter_values, block_realize->predicate,
+      return SBlockRealize(block_realize->iter_values, block_realize->predicate,
                           block);
     }
     // warp with block realize node
     Map<String, ObjectRef> block_annotations;
     block_annotations.Set(tl::attr::kLexicalAllocScope,
                           IntImm(DataType::Int(32), 1));
-    return BlockRealize(
+    return SBlockRealize(
         /*iter_values=*/Array<PrimExpr>(),
         /*predicate=*/const_true(),
         /*block=*/
-        Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+        SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
               /*name_hint=*/global_symbol.value(), prim_func->body,
               /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
               /*match_buffers=*/{}, /*annotations=*/block_annotations));
@@ -159,9 +163,9 @@ LayoutMap GemmSPPyNode::InferLayout(const LayoutInferArgs &T,
     return {};
   LayoutMap results;
 
-  if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp_py.infer_layout")) {
+  if (const auto f = Function::GetGlobal("tl.gemm_sp_py.infer_layout")) {
     results = Downcast<LayoutMap>(
-        (*f)(tvm::ffi::GetRef<GemmSPPy>(this), T.target, T.thread_bounds));
+        (*f)(GetRef<GemmSPPy>(this), T.target, T.thread_bounds));
   } else {
     LOG(FATAL) << "No infer layout function found for gemm_sp_py";
   }

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import tilelang.language as T
 from typing import Literal, Callable
-from tvm import DataType, tir
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
+from tvm import DataType, tirx
+from tvm.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.ir import Range
 from tvm.runtime import convert
 from ..layout.utils import (
@@ -497,7 +497,7 @@ class SparseTensorCoreIntrinEmitter:
         if isinstance(obj, BufferRegion):
             return obj
         if isinstance(obj, Buffer):
-            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            mins = [tirx.IntImm("int32", 0) for _ in obj.shape]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
             return BufferRegion(obj, ranges)
         if isinstance(obj, BufferLoad):
@@ -505,7 +505,7 @@ class SparseTensorCoreIntrinEmitter:
             if region is not None:
                 return region
             mins = [idx for idx in obj.indices]
-            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
@@ -641,7 +641,7 @@ class SparseTensorCoreIntrinEmitter:
 
         Parameters
         ----------
-        local_buf : tir.Buffer
+        local_buf : tirx.Buffer
             The local buffer representing a fragment of a matrix.
 
         Returns
@@ -770,7 +770,7 @@ class SparseTensorCoreIntrinEmitter:
 
         Parameters
         ----------
-        local_buf : tir.Buffer
+        local_buf : tirx.Buffer
             The local buffer representing a fragment of a matrix.
 
         Returns

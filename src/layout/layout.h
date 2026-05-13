@@ -9,16 +9,16 @@
 #include <exception>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/ffi/object.h>
-#include <tvm/tir/buffer.h>
+#include "support/check.h"
+#include <tvm/tirx/buffer.h>
 #include <utility>
 
-#include "../support/ffi_aliases.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 // Common layout-related exceptions
 class LayoutConflictException : public std::exception {

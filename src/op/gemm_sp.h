@@ -9,12 +9,14 @@
 
 #include "gemm.h"
 #include "operator.h"
+#include "support/check.h"
 
 namespace tvm {
 
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class GemmSPWarpPolicyNode : public GemmWarpPolicyNode {
 public:
@@ -25,11 +27,8 @@ public:
                               GemmWarpPolicyNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<GemmSPWarpPolicyNode>()
-        .def_ro("policy_type", &GemmSPWarpPolicyNode::policy_type)
-        .def_ro("m_warp", &GemmSPWarpPolicyNode::m_warp)
-        .def_ro("n_warp", &GemmSPWarpPolicyNode::n_warp);
+    namespace refl = reflection;
+    refl::ObjectDef<GemmSPWarpPolicyNode>();
   }
 };
 
@@ -39,19 +38,19 @@ public:
                                              GemmSPWarpPolicyNode);
 
   explicit GemmSPWarpPolicy(GemmWarpPolicyType policy_type) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
+    auto node = make_object<GemmSPWarpPolicyNode>();
     node->policy_type = (int)policy_type;
     data_ = std::move(node);
   }
 
   explicit GemmSPWarpPolicy(int policy_type) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
+    auto node = make_object<GemmSPWarpPolicyNode>();
     node->policy_type = policy_type;
     data_ = std::move(node);
   }
 
   explicit GemmSPWarpPolicy(int m_warp, int n_warp) {
-    auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();
+    auto node = make_object<GemmSPWarpPolicyNode>();
     node->m_warp = m_warp;
     node->n_warp = n_warp;
     node->policy_type = (int)GemmWarpPolicyType::kFree;
@@ -62,7 +61,7 @@ public:
 class GemmSPNode : public TileOperatorNode {
 public:
   BufferRegion aRegion_, bRegion_, cRegion_, eRegion_;
-  tir::Buffer a_, b_, c_, e_;
+  tirx::Buffer a_, b_, c_, e_;
   bool transA_, transB_;
   int m_, n_, k_;
   bool clearAccum_ = false;
@@ -81,7 +80,7 @@ public:
   TileOperator Clone() const;
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<GemmSPNode>()
         .def_ro("policy", &GemmSPNode::policy_)
         .def_ro("aRegion", &GemmSPNode::aRegion_)

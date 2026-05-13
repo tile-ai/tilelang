@@ -7,8 +7,9 @@
 #define TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 
 #include "op/finalize_reducer.h"
+#include "support/check.h"
 
-#include <tvm/tir/builtin.h>
+#include <tvm/tirx/builtin.h>
 
 #include <array>
 #include <cstdint>
@@ -18,7 +19,8 @@ namespace tvm {
 namespace tl {
 namespace backend {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 template <typename Impl> struct FinalizeReducerLowerer {
   static Stmt Lower(const FinalizeReducerOpNode &op, const LowerArgs &T,
@@ -64,10 +66,10 @@ template <typename Impl> struct FinalizeReducerLowerer {
     int64_t effective_batch = static_cast<int64_t>(op.batch);
 
     if (effective_batch > 1 && layout_batch_size > 0) {
-      CHECK_LE(effective_batch, layout_batch_size)
+      ICHECK_LE(effective_batch, layout_batch_size)
           << "finalize_reducer: batch (" << effective_batch
           << ") exceeds total output elements (" << layout_batch_size << ")";
-      CHECK_EQ(layout_batch_size % effective_batch, 0)
+      ICHECK_EQ(layout_batch_size % effective_batch, 0)
           << "finalize_reducer: batch (" << effective_batch
           << ") must evenly divide total output elements (" << layout_batch_size
           << ")";

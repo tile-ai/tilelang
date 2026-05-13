@@ -26,11 +26,12 @@
  * depend on the inferred memory layout.
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
+#include <tvm/ir/cast.h>
 
 #include "../backend/cuda/op/copy.h"
 #include "../op/builtin.h"
@@ -43,7 +44,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace {
 
@@ -99,7 +100,7 @@ public:
 private:
   // Track threadIdx.x extent for gemm instruction selection.
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         if (auto *int_imm = op->value.as<IntImmNode>()) {
@@ -162,7 +163,7 @@ private:
 // ---------------------------------------------------------------------------
 
 tvm::transform::Pass InstructionAnnotation() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return InstructionAnnotator::Annotate(std::move(f));
   };

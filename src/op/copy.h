@@ -9,12 +9,14 @@
 #include "builtin.h"
 #include "operator.h"
 #include "parallel.h"
+#include "support/check.h"
 
 #include <utility>
 
 namespace tvm {
 namespace tl {
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /*!
  * \brief Get TVM Op handle for Conv2DIm2Col.
@@ -41,7 +43,7 @@ public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Copy", CopyNode, TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<CopyNode>()
         .def_ro("src", &CopyNode::src)
         .def_ro("dst", &CopyNode::dst)
@@ -180,7 +182,7 @@ public:
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<Conv2DIm2ColOpNode>()
         .def_ro("srcRegion", &Conv2DIm2ColOpNode::srcRegion_)
         .def_ro("dstRegion", &Conv2DIm2ColOpNode::dstRegion_)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
-from tvm import tir
+from tvm import tirx
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -18,10 +18,10 @@ from tilelang._typing import BufferLikeType
 
 
 def gemm_sp(
-    A_sparse: BufferLikeType | tir.Var,
-    E: BufferLikeType | tir.Var,
-    B: BufferLikeType | tir.Var,
-    C: BufferLikeType | tir.Var,
+    A_sparse: BufferLikeType | tirx.Var,
+    E: BufferLikeType | tirx.Var,
+    B: BufferLikeType | tirx.Var,
+    C: BufferLikeType | tirx.Var,
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
@@ -35,10 +35,10 @@ def gemm_sp(
     The operation supports various warp policies and accumulation modes.
 
     Args:
-        A_sparse (Union[BufferLikeType, tir.Var]): First input matrix dense values
-        E (Union[BufferLikeType, tir.Var]): First input matrix sparse metadata
-        B (Union[BufferLikeType, tir.Var]): Second input matrix
-        C (Union[BufferLikeType, tir.Var]): Output matrix for results
+        A_sparse (Union[BufferLikeType, tirx.Var]): First input matrix dense values
+        E (Union[BufferLikeType, tirx.Var]): First input matrix sparse metadata
+        B (Union[BufferLikeType, tirx.Var]): Second input matrix
+        C (Union[BufferLikeType, tirx.Var]): Output matrix for results
         transpose_A (bool, optional): Whether to transpose matrix A. Defaults to False.
         transpose_B (bool, optional): Whether to transpose matrix B. Defaults to False.
         policy (GemmWarpPolicy, optional): Warp execution policy. Defaults to GemmWarpPolicy.Square.
@@ -47,41 +47,55 @@ def gemm_sp(
         wg_wait (int, optional): Warp group wait count. Defaults to 0.
 
     Returns:
-        tir.Call: A handle to the GEMM operation
+        tirx.Call: A handle to the GEMM operation
 
     Raises:
         AssertionError: If the K dimensions of matrices A and B don't match
     """
 
-    def legalize_arguments(arg: BufferLikeType | tir.Var):
+    def legalize_arguments(arg: BufferLikeType | tirx.Var):
         """Convert let-bound variables to their corresponding buffers.
 
         Args:
-            arg (Union[BufferLikeType, tir.Var]): Input argument to legalize
+            arg (Union[BufferLikeType, tirx.Var]): Input argument to legalize
 
         Returns:
-            Union[BufferLikeType, tir.Var]: The legalized argument
+            Union[BufferLikeType, tirx.Var]: The legalized argument
         """
-        if isinstance(arg, tir.Var) and T.has_let_value(arg):
+        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
         return arg
 
     A_sparse = legalize_arguments(A_sparse)
+    E = legalize_arguments(E)
     B = legalize_arguments(B)
     C = legalize_arguments(C)
-    M = C.shape[0]
-    N = C.shape[1]
-    K_A = A_sparse.shape[0] if transpose_A else A_sparse.shape[1]
-    K_B = B.shape[1] if transpose_B else B.shape[0]
+
+    A_region = to_buffer_region(A_sparse)
+    E_region = to_buffer_region(E)
+    B_region = to_buffer_region(B)
+    C_region = to_buffer_region(C)
+
+    A_shape = retrieve_shape(A_region)
+    E_shape = retrieve_shape(E_region)
+    B_shape = retrieve_shape(B_region)
+    C_shape = retrieve_shape(C_region)
+
+    M = C_shape[0]
+    N = C_shape[1]
+    K_A = A_shape[0] if transpose_A else A_shape[1]
+    K_B = B_shape[1] if transpose_B else B_shape[0]
     assert K_A * 2 == K_B, f"T.gemm_sp K shape check failed: K_A = {K_A}, K_B = {K_B}"
-    # Build tl.region descriptors for operands
-    A_arg = to_buffer_region(A_sparse, access_type="r")
-    E_arg = to_buffer_region(E, access_type="r")
-    B_arg = to_buffer_region(B, access_type="r")
-    C_arg = to_buffer_region(C, access_type="rw")
-    return tir.call_intrin(
+    # Build tl.region descriptors for operands.  Passing BufferRegion directly
+    # through call_intrin would force it through BufferRegionNode::ToPrimExpr(),
+    # which cannot represent multi-dimensional non-point regions as BufferLoad.
+    A_arg = buffer_region_to_tile_region(A_region, "r", list(A_shape))
+    E_arg = buffer_region_to_tile_region(E_region, "r", list(E_shape))
+    B_arg = buffer_region_to_tile_region(B_region, "r", list(B_shape))
+    C_arg = buffer_region_to_tile_region(C_region, "rw", list(C_shape))
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.gemm_sp"),
+        tirx.op.Op.get("tl.tileop.gemm_sp"),
         A_arg,
         E_arg,
         B_arg,
@@ -100,10 +114,10 @@ def gemm_sp(
 
 # experimental currently, for fast compilation
 def gemm_sp_v2(
-    A_sparse: BufferLikeType | tir.Var,
-    E: BufferLikeType | tir.Var,
-    B: BufferLikeType | tir.Var,
-    C: BufferLikeType | tir.Var,
+    A_sparse: BufferLikeType | tirx.Var,
+    E: BufferLikeType | tirx.Var,
+    B: BufferLikeType | tirx.Var,
+    C: BufferLikeType | tirx.Var,
     transpose_A: bool = False,
     transpose_B: bool = False,
     transpose_E: bool = False,
@@ -118,10 +132,10 @@ def gemm_sp_v2(
     The operation supports various warp policies and accumulation modes.
 
     Args:
-        A_sparse (Union[BufferLikeType, tir.Var]): First input matrix, contains only non-zero elements
-        E (Union[BufferLikeType, tir.Var]): The metadata of A_sparse, noted as E
-        B (Union[BufferLikeType, tir.Var]): Second input matrix
-        C (Union[BufferLikeType, tir.Var]): Output matrix for results
+        A_sparse (Union[BufferLikeType, tirx.Var]): First input matrix, contains only non-zero elements
+        E (Union[BufferLikeType, tirx.Var]): The metadata of A_sparse, noted as E
+        B (Union[BufferLikeType, tirx.Var]): Second input matrix
+        C (Union[BufferLikeType, tirx.Var]): Output matrix for results
         transpose_A (bool, optional): Whether to transpose matrix A. Defaults to False.
         transpose_B (bool, optional): Whether to transpose matrix B. Defaults to False.
         policy (GemmWarpPolicy, optional): Warp execution policy. Defaults to GemmWarpPolicy.Square.
@@ -130,22 +144,22 @@ def gemm_sp_v2(
         wg_wait (int, optional): Warp group wait count. Defaults to 0.
 
     Returns:
-        tir.Call: A handle to the GEMM operation
+        tirx.Call: A handle to the GEMM operation
 
     Raises:
         AssertionError: If the K dimensions of matrices A and B don't match
     """
 
-    def legalize_arguments(arg: BufferLikeType | tir.Var) -> BufferLikeType:
+    def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
 
         Args:
-            arg (Union[BufferLikeType, tir.Var]): Input argument to legalize
+            arg (Union[BufferLikeType, tirx.Var]): Input argument to legalize
 
         Returns:
-            Union[BufferLikeType, tir.Var]: The legalized argument
+            Union[BufferLikeType, tirx.Var]: The legalized argument
         """
-        if isinstance(arg, tir.Var) and T.has_let_value(arg):
+        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
         return arg
 
@@ -200,9 +214,9 @@ def gemm_sp_v2(
     E_arg = buffer_region_to_tile_region(E_region, "r", [r for r in E_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
-    return tir.call_intrin(
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.gemm_sp_py"),
+        tirx.op.Op.get("tl.tileop.gemm_sp_py"),
         A_arg,
         E_arg,
         B_arg,

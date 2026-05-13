@@ -1,5 +1,5 @@
 from tilelang import tvm as tvm
-from tvm import tir
+from tvm import tirx
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.ir import Range
@@ -16,7 +16,7 @@ def gemm_sp_py_infer_layout(gemm_sp_py, target: Target, thread_bounds: Range):
 
 
 @tvm_ffi.register_global_func("tl.gemm_sp_py.lower")
-def gemm_sp_py_lower(gemm_sp_py, target: Target, thread_bounds: Range, thread_var: tir.Var):
+def gemm_sp_py_lower(gemm_sp_py, target: Target, thread_bounds: Range, thread_var: tirx.Var):
     thread_nums = thread_bounds.extent
     stmt = gemm_sp_py.lower(target, thread_nums, thread_var)
     return stmt
@@ -24,15 +24,15 @@ def gemm_sp_py_lower(gemm_sp_py, target: Target, thread_bounds: Range, thread_va
 
 @tvm_ffi.register_object("tl.GemmSPPy")
 class GemmSPPy(Node, Scriptable):
-    A: tir.Buffer
-    E: tir.Buffer
-    B: tir.Buffer
-    C: tir.Buffer
+    A: tirx.Buffer
+    E: tirx.Buffer
+    B: tirx.Buffer
+    C: tirx.Buffer
 
-    APtr: tir.PrimExpr
-    EPtr: tir.PrimExpr
-    BPtr: tir.PrimExpr
-    CPtr: tir.PrimExpr
+    APtr: tirx.PrimExpr
+    EPtr: tirx.PrimExpr
+    BPtr: tirx.PrimExpr
+    CPtr: tirx.PrimExpr
 
     M: int
     N: int
@@ -54,6 +54,6 @@ class GemmSPPy(Node, Scriptable):
         impl_class = resolve_gemm_sp_impl(target)
         return impl_class(self).infer_layout(target, thread_nums)
 
-    def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
+    def lower(self, target: Target, thread_nums: int, thread_var: tirx.Var):
         impl_class = resolve_gemm_sp_impl(target)
         return impl_class(self).lower(target, thread_nums, thread_var)

@@ -5,9 +5,10 @@
  */
 
 #include "gemm_sp.h"
+#include "support/check.h"
 
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "utils.h"
 
@@ -15,6 +16,8 @@
 
 namespace tvm {
 namespace tl {
+
+using namespace ffi;
 
 namespace {
 
@@ -30,7 +33,7 @@ const GemmSPImpl &ResolveGemmSPImpl(Target target) {
     if (impl.match_target(target)) {
       ICHECK(matched_impl == nullptr)
           << "tl.gemm_sp found multiple target-specific implementations for "
-          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << target->str() << ": " << matched_impl->name << " and "
           << impl.name;
       matched_impl = &impl;
     }
@@ -38,7 +41,7 @@ const GemmSPImpl &ResolveGemmSPImpl(Target target) {
   ICHECK(matched_impl != nullptr)
       << "tl.gemm_sp requires a target-specific implementation, but no "
          "gemm_sp implementation is registered for "
-      << target->ToDebugString();
+      << target->str();
   return *matched_impl;
 }
 
@@ -83,7 +86,7 @@ std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(int M, int N,
  * @note An ICHECK failure is raised if a provided kPack is not 1 or 2.
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
+  ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
   auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
   auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
@@ -138,7 +141,7 @@ AccessRegions GemmSPNode::GetAccessRegions() const {
  * @return TileOperator A TileOperator holding a cloned GemmSPNode.
  */
 TileOperator GemmSPNode::Clone() const {
-  auto op = tvm::ffi::make_object<GemmSPNode>(*this);
+  auto op = make_object<GemmSPNode>(*this);
   return GemmSP(op);
 }
 
@@ -187,7 +190,7 @@ TVM_REGISTER_OP("tl.GemmSPWarpPolicy")
 TVM_FFI_STATIC_INIT_BLOCK() {
   GemmSPNode::RegisterReflection();
   GemmSPWarpPolicyNode::RegisterReflection();
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def(
       "tl.GemmSPWarpPolicyComputeWarpPartition",
       [](GemmSPWarpPolicy policy, int M, int N, int block_size, Target target,
