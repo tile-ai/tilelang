@@ -28,10 +28,7 @@ def _make_gemm_kernel(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, a
 
 
 def _assert_mma_sync_shape(source, a_type, c_type, m, n, k):
-    expected = (
-        f"tl::mma_sync<tl::DataType::{a_type}, tl::DataType::{a_type}, "
-        f"tl::DataType::{c_type}, {m}, {n}, {k}, false, true>"
-    )
+    expected = f"tl::mma_sync<tl::DataType::{a_type}, tl::DataType::{a_type}, tl::DataType::{c_type}, {m}, {n}, {k}, false, true>"
     assert expected in source
     assert "mma_sync_sm70" not in source
 

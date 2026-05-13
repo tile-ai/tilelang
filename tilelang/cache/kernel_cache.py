@@ -123,14 +123,10 @@ class KernelCache:
             roots.append((cuda_root, (".py",)))
 
         configured_template_root = env.TILELANG_TEMPLATE_PATH
-        if configured_template_root and os.path.isdir(
-            os.path.join(configured_template_root, "tl_templates")
-        ):
+        if configured_template_root and os.path.isdir(os.path.join(configured_template_root, "tl_templates")):
             template_root = os.path.join(configured_template_root, "tl_templates")
         else:
-            template_root = configured_template_root or os.path.join(
-                repo_root, "src", "tl_templates"
-            )
+            template_root = configured_template_root or os.path.join(repo_root, "src", "tl_templates")
         if template_root and os.path.isdir(template_root):
             roots.append((template_root, None))
 

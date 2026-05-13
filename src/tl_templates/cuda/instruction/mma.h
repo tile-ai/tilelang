@@ -60,9 +60,9 @@ struct SM75_8x8x32_S32S4S4S32_TN {
   using BRegisters = uint32_t[1];
   using CRegisters = uint32_t[2];
 
-  CUTE_HOST_DEVICE static void
-  fma(uint32_t &d0, uint32_t &d1, uint32_t const &a0,
-      uint32_t const &b0, uint32_t const &c0, uint32_t const &c1) {
+  CUTE_HOST_DEVICE static void fma(uint32_t &d0, uint32_t &d1,
+                                   uint32_t const &a0, uint32_t const &b0,
+                                   uint32_t const &c0, uint32_t const &c1) {
 #if defined(CUTE_ARCH_MMA_SM75_ENABLED)
     asm volatile("mma.sync.aligned.m8n8k32.row.col.satfinite.s32.s4.s4.s32"
                  "{%0, %1},"
@@ -85,9 +85,9 @@ struct SM75_8x8x32_S32U4U4S32_TN {
   using BRegisters = uint32_t[1];
   using CRegisters = uint32_t[2];
 
-  CUTE_HOST_DEVICE static void
-  fma(uint32_t &d0, uint32_t &d1, uint32_t const &a0,
-      uint32_t const &b0, uint32_t const &c0, uint32_t const &c1) {
+  CUTE_HOST_DEVICE static void fma(uint32_t &d0, uint32_t &d1,
+                                   uint32_t const &a0, uint32_t const &b0,
+                                   uint32_t const &c0, uint32_t const &c1) {
 #if defined(CUTE_ARCH_MMA_SM75_ENABLED)
     asm volatile("mma.sync.aligned.m8n8k32.row.col.satfinite.s32.u4.u4.s32"
                  "{%0, %1},"
