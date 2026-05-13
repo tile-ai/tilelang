@@ -1695,6 +1695,27 @@ private:
       return false;
     }
 
+    // If the thread constraints governing the two accesses are mutually
+    // exclusive (no single thread can satisfy both), no thread executes both
+    // accesses and there is no data race. This is the case for warp-specialized
+    // branches such as T.ws(0)/T.ws(1) where producer threads (e.g. tx>=128)
+    // and consumer threads (e.g. tx<128) access the same shared memory, but
+    // synchronize via mbarriers rather than __syncthreads().
+    {
+      PrimExpr prev_constr = prev.cset.ToConjunction();
+      PrimExpr curr_constr = curr.cset.ToConjunction();
+      arith::Analyzer analyzer;
+      for (const auto &iv : prev.threads) {
+        if (iv->dom.defined()) {
+          analyzer.Bind(iv->var, iv->dom);
+        }
+      }
+      if (analyzer.z3_prover.CanProve(
+              tir::Not(tir::And(prev_constr, curr_constr)))) {
+        return false;
+      }
+    }
+
     if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
       // They are not the same indices, should be conflict.
       return true;

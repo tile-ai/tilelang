@@ -2349,6 +2349,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << this->PrintExpr(op->args[0]);
     }
     this->stream << ");\n";
+  } else if (op->op.same_as(tl::named_barrier_arrive())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.named_barrier_arrive expects <barrier_id, thread_count>.";
+    auto barrier_id = op->args[0].as<IntImmNode>()->value;
+    auto thread_count = op->args[1].as<IntImmNode>()->value;
+    this->PrintIndent();
+    this->stream << "tl::__named_barrier_arrive<" << barrier_id << ", "
+                 << thread_count << ">();\n";
   } else if (op->op.same_as(tl::pdl_trigger())) {
     this->PrintIndent();
     this->stream << "cudaTriggerProgrammaticLaunchCompletion();\n";
