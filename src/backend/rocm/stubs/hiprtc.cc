@@ -213,9 +213,8 @@ hiprtcDestroyProgram(hiprtcProgram *prog) {
   return api->hiprtcDestroyProgram_(prog);
 }
 
-TILELANG_HIPRTC_STUB_API hiprtcResult
-hiprtcCompileProgram(hiprtcProgram prog, int numOptions,
-                     const char *const *options) {
+TILELANG_HIPRTC_STUB_API hiprtcResult hiprtcCompileProgram(
+    hiprtcProgram prog, int numOptions, const char *const *options) {
   auto *api = GetHIPRTCAPI();
   if (api->hiprtcCompileProgram_ == nullptr) {
     return MissingLibraryError();
