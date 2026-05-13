@@ -233,6 +233,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                 for i in T.unroll(num_inst_m):
                     self.ldmatrix_e(E_local, E_region, i, warp_m, ki, ki)
 
+            # NOTE: cutlass doesn't fence metadata, we follow the same here
             T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
 
@@ -375,6 +376,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                 for i in T.unroll(num_inst_m):
                     self.ldmatrix_e(E_local, E_region, i, warp_m, ki, ki)
 
+            # NOTE: cutlass doesn't fence metadata, we follow the same here
             T.warpgroup_fence_operand(A_buf, num_regs=a_regs)
             T.warpgroup_fence_operand(C_buf, num_regs=accum_regs)
             T.warpgroup_arrive()
