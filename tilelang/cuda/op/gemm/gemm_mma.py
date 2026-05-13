@@ -22,6 +22,7 @@ class GemmMMA(GemmBase):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
+        from tilelang.utils.target import target_is_turing
         emitter = TensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
             b_dtype=self.in_dtype,
@@ -33,6 +34,7 @@ class GemmMMA(GemmBase):
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
             chunk=self.chunk,
+            is_turing=target_is_turing(target),
             thread_var=thread_var,
         )
         return emitter

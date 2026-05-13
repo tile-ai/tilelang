@@ -1,9 +1,9 @@
 #pragma once
 
 #include "../common.h"
+#include <cute/arch/mma_sm75.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
-
 #ifndef __CUDACC_RTC__
 #include <type_traits>
 #include <utility>
@@ -94,6 +94,8 @@ TL_DEFINE_MMA_DISPATCHER(kFloat16, kFloat16, kFloat16, 16, 8, 16, false, true,
                          false, cute::SM80_16x8x16_F16F16F16F16_TN)
 TL_DEFINE_MMA_DISPATCHER(kFloat16, kFloat16, kFloat32, 16, 8, 16, false, true,
                          false, cute::SM80_16x8x16_F32F16F16F32_TN)
+TL_DEFINE_MMA_DISPATCHER(kFloat16, kFloat16, kFloat32, 16, 8, 8, false, true,
+                         false, cute::SM75_16x8x8_F32F16F16F32_TN)
 
 // BF16 inputs
 TL_DEFINE_MMA_DISPATCHER(kBFloat16, kBFloat16, kFloat32, 16, 8, 16, false, true,
@@ -104,6 +106,10 @@ TL_DEFINE_MMA_DISPATCHER(kInt8, kInt8, kInt32, 16, 8, 32, false, true, false,
                          cute::SM80_16x8x32_S32S8S8S32_TN)
 TL_DEFINE_MMA_DISPATCHER(kUInt8, kUInt8, kInt32, 16, 8, 32, false, true, false,
                          cute::SM80_16x8x32_S32U8U8S32_TN)
+
+// INT8 inputs (k16) for SM75
+TL_DEFINE_MMA_DISPATCHER(kInt8, kInt8, kInt32, 8, 8, 16, false, true, false,
+                         cute::SM75_8x8x16_S32S8S8S32_TN)
 
 // INT4 inputs (k32, k64)
 TL_DEFINE_MMA_DISPATCHER(kInt4, kInt4, kInt32, 16, 8, 32, false, true, false,
