@@ -947,7 +947,7 @@ def sync_threads(barrier_id: int = None, arrive_count: int = None):
     return tir.call_intrin("int32", "tir.tvm_storage_sync", "shared", *args)
 
 
-def named_barrier_arrive(barrier_id: int, thread_count: int):
+def named_barrier_arrive(barrier_id, thread_count):
     """CTA named barrier one-sided arrive (bar.arrive).
 
     Signals that the calling threads have arrived at the named barrier without
@@ -967,8 +967,9 @@ def named_barrier_arrive(barrier_id: int, thread_count: int):
         T.sync_threads(ready_barrier, total_threads)
 
     Args:
-        barrier_id:   Named barrier index (0–15, must be a compile-time integer).
+        barrier_id:   Named barrier index (0–15). May be a variable (PrimExpr).
         thread_count: Total number of CTA threads participating in the barrier.
+                      May be a variable (PrimExpr).
 
     Lowers to: ``asm volatile("bar.arrive %0, %1;" : : "r"(id), "r"(cnt));``
     """

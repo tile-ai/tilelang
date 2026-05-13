@@ -589,9 +589,9 @@ TL_DEVICE void __sync_thread_partial(int barrier_id = 0, int thread_count = 0) {
 // CTA named barrier one-sided arrive (bar.arrive).
 // Signals arrival at the named barrier without waiting for other participants.
 // Useful in warp-specialized pipelines where one warp group signals readiness
-// without blocking, while the other waits with bar.sync / __sync_thread_partial.
-template <int barrier_id = 0, int thread_count = 0>
-TL_DEVICE void __named_barrier_arrive() {
+// without blocking, while the other waits with bar.sync /
+// __sync_thread_partial.
+TL_DEVICE void __named_barrier_arrive(int barrier_id, int thread_count) {
   asm volatile("bar.arrive %0, %1;" : : "r"(barrier_id), "r"(thread_count));
 }
 
