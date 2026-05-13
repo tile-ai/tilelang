@@ -35,11 +35,11 @@ const char *hiprtcGetErrorString(hiprtcResult result);
 hiprtcResult hiprtcVersion(int *major, int *minor);
 hiprtcResult hiprtcCreateProgram(hiprtcProgram *prog, const char *src,
                                  const char *name, int numHeaders,
-                                 const char *const *headers,
-                                 const char *const *includeNames);
+                                 const char **headers,
+                                 const char **includeNames);
 hiprtcResult hiprtcDestroyProgram(hiprtcProgram *prog);
 hiprtcResult hiprtcCompileProgram(hiprtcProgram prog, int numOptions,
-                                  const char *const *options);
+                                  const char **options);
 hiprtcResult hiprtcGetCodeSize(hiprtcProgram prog, size_t *codeSizeRet);
 hiprtcResult hiprtcGetCode(hiprtcProgram prog, char *code);
 hiprtcResult hiprtcGetProgramLogSize(hiprtcProgram prog, size_t *logSizeRet);
@@ -195,7 +195,7 @@ TILELANG_HIPRTC_STUB_API hiprtcResult hiprtcVersion(int *major, int *minor) {
 
 TILELANG_HIPRTC_STUB_API hiprtcResult hiprtcCreateProgram(
     hiprtcProgram *prog, const char *src, const char *name, int numHeaders,
-    const char *const *headers, const char *const *includeNames) {
+    const char **headers, const char **includeNames) {
   auto *api = GetHIPRTCAPI();
   if (api->hiprtcCreateProgram_ == nullptr) {
     return MissingLibraryError();
@@ -214,7 +214,7 @@ hiprtcDestroyProgram(hiprtcProgram *prog) {
 }
 
 TILELANG_HIPRTC_STUB_API hiprtcResult hiprtcCompileProgram(
-    hiprtcProgram prog, int numOptions, const char *const *options) {
+    hiprtcProgram prog, int numOptions, const char **options) {
   auto *api = GetHIPRTCAPI();
   if (api->hiprtcCompileProgram_ == nullptr) {
     return MissingLibraryError();

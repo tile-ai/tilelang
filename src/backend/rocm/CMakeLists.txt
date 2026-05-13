@@ -10,6 +10,46 @@ include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
 find_rocm(${USE_ROCM})
 add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
 
+# Fallback for build hosts without a ROCm runtime install (e.g. an NV-only
+# machine producing a cross-target wheel). TVM's find_rocm() only succeeds
+# when libamdhip64 is present, but with TILELANG_USE_HIP_STUBS=ON we don't
+# need the runtime library at build time -- only the public HIP/HSA headers
+# (e.g. from `apt install hip-runtime-amd-dev hsa-rocr-dev`, which are
+# header packages and do not require an AMD GPU or driver).
+#
+# Set TILELANG_HIP_INCLUDE_DIR to a directory that contains hip/ and hsa/
+# subtrees, or rely on the default /opt/rocm/include if those headers are
+# installed there. Linking is satisfied by tilelang's hip_stub target.
+if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
+  set(_TL_HIP_INC "")
+  if(TILELANG_HIP_INCLUDE_DIR)
+    set(_TL_HIP_INC "${TILELANG_HIP_INCLUDE_DIR}")
+  elseif(DEFINED ENV{TILELANG_HIP_INCLUDE_DIR})
+    set(_TL_HIP_INC "$ENV{TILELANG_HIP_INCLUDE_DIR}")
+  elseif(IS_DIRECTORY "/opt/rocm/include")
+    set(_TL_HIP_INC "/opt/rocm/include")
+  endif()
+
+  if(_TL_HIP_INC AND IS_DIRECTORY "${_TL_HIP_INC}/hip" AND IS_DIRECTORY "${_TL_HIP_INC}/hsa")
+    message(STATUS
+      "ROCm runtime library not found on host; using HIP/HSA headers from "
+      "${_TL_HIP_INC} with hip_stub for linking. The resulting wheel still "
+      "requires a real ROCm runtime to be present at execution time.")
+    set(ROCM_FOUND TRUE)
+    set(ROCM_INCLUDE_DIRS "${_TL_HIP_INC}")
+    set(ROCM_HIPHCC_LIBRARY hip_stub CACHE STRING
+        "HIP runtime library to link against" FORCE)
+    set(ROCM_HSA_LIBRARY ROCM_HSA_LIBRARY-NOTFOUND CACHE STRING
+        "HSA runtime library to link against" FORCE)
+  else()
+    message(STATUS
+      "ROCm runtime library not found on host and HIP/HSA headers were not "
+      "found. Install hip-runtime-amd-dev and hsa-rocr-dev, or set "
+      "TILELANG_HIP_INCLUDE_DIR to a directory containing hip/ and hsa/.")
+  endif()
+  unset(_TL_HIP_INC)
+endif()
+
 if(TILELANG_USE_HIP_STUBS)
   if(WIN32 AND NOT CYGWIN)
     message(FATAL_ERROR "TILELANG_USE_HIP_STUBS=ON is not supported on Windows. "
@@ -65,41 +105,6 @@ if(TILELANG_USE_HIP_STUBS)
   # lazily when available.
   set(ROCM_HSA_LIBRARY ROCM_HSA_LIBRARY-NOTFOUND CACHE STRING
       "HSA runtime library to link against" FORCE)
-endif()
-
-# Fallback for build hosts without a ROCm runtime install (e.g. an NV-only
-# machine producing a cross-target wheel). TVM's find_rocm() only succeeds
-# when libamdhip64 is present, but with TILELANG_USE_HIP_STUBS=ON we don't
-# need the runtime library at build time -- only the public HIP/HSA headers
-# (e.g. from `apt install hip-runtime-amd-dev hsa-rocr-dev`, which are
-# header-only packages and do not require an AMD GPU or driver).
-#
-# Set TILELANG_HIP_INCLUDE_DIR to a directory that contains hip/ and hsa/
-# subtrees, or rely on the default /opt/rocm/include if those headers are
-# installed there. Linking is satisfied by tilelang's hip_stub target.
-if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
-  set(_TL_HIP_INC "")
-  if(TILELANG_HIP_INCLUDE_DIR)
-    set(_TL_HIP_INC "${TILELANG_HIP_INCLUDE_DIR}")
-  elseif(DEFINED ENV{TILELANG_HIP_INCLUDE_DIR})
-    set(_TL_HIP_INC "$ENV{TILELANG_HIP_INCLUDE_DIR}")
-  elseif(IS_DIRECTORY "/opt/rocm/include/hip")
-    set(_TL_HIP_INC "/opt/rocm/include")
-  endif()
-
-  if(_TL_HIP_INC AND IS_DIRECTORY "${_TL_HIP_INC}/hip")
-    message(STATUS
-      "ROCm runtime library not found on host; using HIP headers from "
-      "${_TL_HIP_INC} with hip_stub for linking. The resulting wheel still "
-      "requires a real ROCm runtime to be present at execution time.")
-    set(ROCM_FOUND TRUE)
-    set(ROCM_INCLUDE_DIRS "${_TL_HIP_INC}")
-    set(ROCM_HIPHCC_LIBRARY hip_stub CACHE STRING
-        "HIP runtime library to link against" FORCE)
-    set(ROCM_HSA_LIBRARY ROCM_HSA_LIBRARY-NOTFOUND CACHE STRING
-        "HSA runtime library to link against" FORCE)
-  endif()
-  unset(_TL_HIP_INC)
 endif()
 
 file(GLOB TILE_LANG_HIP_SRCS

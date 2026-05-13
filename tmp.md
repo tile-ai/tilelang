@@ -141,3 +141,7 @@ ls /path/to/site-packages/tilelang/lib/ | grep -E "stub|libhip|libcuda"
 - TVM ROCm runtime（需要 HIP/HSA headers 编译）：`3rdparty/tvm/src/runtime/rocm/*.cc`
 - HIP target attr 推断 (Python)：`/root/tilelang/tilelang/utils/target.py:44-89`
 - Wheel CI：`/root/tilelang/.github/workflows/dist.yml`
+
+
+
+success with: USE_CUDA=ON USE_ROCM=ON TILELANG_HIP_INCLUDE_DIR=/usr/local/lib/python3.12/dist-packages/triton/backends/amd/include pip wheel . -v
