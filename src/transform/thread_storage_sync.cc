@@ -1695,12 +1695,13 @@ private:
       return false;
     }
 
-    // If the thread constraints governing the two accesses are mutually
-    // exclusive (no single thread can satisfy both), no thread executes both
-    // accesses and there is no data race. This is the case for warp-specialized
-    // branches such as T.ws(0)/T.ws(1) where producer threads (e.g. tx>=128)
-    // and consumer threads (e.g. tx<128) access the same shared memory, but
-    // synchronize via mbarriers rather than __syncthreads().
+    // If thread constraints are mutually exclusive (e.g. tx>=128 vs tx<128),
+    // the two accesses belong to disjoint warp groups. Cross-group ordering
+    // is NOT ThreadSyncPlanner's responsibility: __syncthreads() serializes
+    // all threads and destroys pipeline overlap. The correct tool is mbarrier
+    // (T.mbarrier_arrive / T.mbarrier_wait_parity), which the caller is
+    // assumed to have placed. Analogous to is_async_copy: we trust the caller
+    // to manage synchronization between disjoint thread groups explicitly.
     {
       PrimExpr prev_constr = prev.cset.ToConjunction();
       PrimExpr curr_constr = curr.cset.ToConjunction();
