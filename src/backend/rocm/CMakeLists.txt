@@ -21,9 +21,11 @@ add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
 #   3. /opt/rocm/include (if a system ROCm install exists)
 #   4. 3rdparty/hip-headers/include (vendored, default fallback)
 #
-# HSA headers are intentionally not required: src/backend/rocm/stubs/hip.cc
-# already gates <hsa/hsa.h> behind __has_include and provides forward decls
-# for the two HSA symbols (hsa_init / hsa_shut_down) that we lazy-load.
+# A minimal hsa/hsa.h is vendored alongside the HIP headers because TVM's
+# src/runtime/rocm/rocm_device_api.cc unconditionally #includes <hsa/hsa.h>.
+# Only two HSA symbols (hsa_init / hsa_shut_down) are actually referenced;
+# both are exported by hip_stub and lazy-loaded from libhsa-runtime64 at run
+# time, so no HSA library is linked.
 if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
   set(_TL_VENDORED_HIP_INC "${CMAKE_SOURCE_DIR}/3rdparty/hip-headers/include")
   set(_TL_HIP_INC "")
