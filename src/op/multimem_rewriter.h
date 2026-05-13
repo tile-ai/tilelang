@@ -9,6 +9,7 @@
 
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
+#include <tvm/tir/expr_functor.h>
 #include <tvm/tir/stmt_functor.h>
 
 #include <sstream>
@@ -107,6 +108,30 @@ protected:
   }
 
 private:
+  class BufferLoadFinder : public ExprVisitor {
+  public:
+    explicit BufferLoadFinder(Buffer target) : target_(std::move(target)) {}
+
+    const BufferLoadNode *Find(const PrimExpr &expr) {
+      VisitExpr(expr);
+      return result_;
+    }
+
+  private:
+    Buffer target_;
+    const BufferLoadNode *result_{nullptr};
+
+    void VisitExpr_(const BufferLoadNode *op) override {
+      if (result_ != nullptr)
+        return;
+      if (op->buffer.same_as(target_)) {
+        result_ = op;
+        return;
+      }
+      ExprVisitor::VisitExpr_(op);
+    }
+  };
+
   Buffer mcast_buf_;
   MultimemMode mode_;
   int reduce_op_;
@@ -131,7 +156,13 @@ private:
     if (!store)
       return Stmt();
 
-    const BufferLoadNode *load = store->value.as<BufferLoadNode>();
+    PrimExpr store_value = store->value;
+    const BufferLoadNode *load = nullptr;
+    if (mode_ == MultimemMode::kLdReduce) {
+      load = BufferLoadFinder(mcast_buf_).Find(store_value);
+    } else {
+      load = store_value.as<BufferLoadNode>();
+    }
     if (!load)
       return Stmt();
 
@@ -222,7 +253,10 @@ private:
    */
   std::string MakeFuncName(int lanes, DataType dtype) const {
     std::string dtype_tag = DTypeToTag(dtype);
-    std::string reduce_op_str = GetReduceOpStr(reduce_op_);
+    std::string reduce_op_str;
+    if (mode_ != MultimemMode::kSt) {
+      reduce_op_str = GetReduceOpStr(reduce_op_);
+    }
 
     std::stringstream ss;
     switch (mode_) {

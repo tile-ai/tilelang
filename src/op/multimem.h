@@ -74,11 +74,15 @@ public:
 
 private:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
+  For MakeTransformedSIMTLoop(arith::Analyzer *analyzer) const;
   Array<IterVar> MakeIterVars() const;
   Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
   int GetCoalescedWidth() const;
+  bool IsPacked16BitMultimem() const;
+  Stmt LowerPacked16Bit(const LowerArgs &T,
+                        arith::Analyzer *analyzer) const;
   Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 };
 

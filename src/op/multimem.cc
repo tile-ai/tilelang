@@ -28,6 +28,99 @@ namespace tl {
 
 using namespace tir;
 
+namespace {
+
+std::string MultimemDTypeToTag(DataType dtype) {
+  if (dtype.is_float() && dtype.bits() == 32)
+    return "float";
+  if (dtype.is_float16())
+    return "half_t";
+  if (dtype.is_bfloat16())
+    return "bfloat16_t";
+  LOG(FATAL) << "Unsupported dtype for multimem: " << dtype;
+  return "";
+}
+
+std::string MultimemReduceOpToTag(int reduce_op) {
+  switch (reduce_op) {
+  case 0:
+    return "tl::multimem::ReduceOp::ADD";
+  case 1:
+    return "tl::multimem::ReduceOp::MIN";
+  case 2:
+    return "tl::multimem::ReduceOp::MAX";
+  default:
+    LOG(FATAL) << "Invalid reduce_op: " << reduce_op;
+    return "";
+  }
+}
+
+std::string MultimemFuncName(MultimemMode mode, int reduce_op, int lanes,
+                             DataType dtype) {
+  std::stringstream ss;
+  switch (mode) {
+  case MultimemMode::kLdReduce:
+    ss << "tl::multimem::LdReduceV" << lanes << "<"
+       << MultimemReduceOpToTag(reduce_op) << ", "
+       << MultimemDTypeToTag(dtype) << ">::run";
+    break;
+  case MultimemMode::kSt:
+    ss << "tl::multimem::StV" << lanes << "<" << MultimemDTypeToTag(dtype)
+       << ">::run";
+    break;
+  case MultimemMode::kRed:
+    ss << "tl::multimem::RedV" << lanes << "<"
+       << MultimemReduceOpToTag(reduce_op) << ", "
+       << MultimemDTypeToTag(dtype) << ">::run";
+    break;
+  default:
+    LOG(FATAL) << "Unsupported multimem mode for vector instruction: "
+               << static_cast<int>(mode);
+  }
+  return ss.str();
+}
+
+PrimExpr MakeAddressOf(const Buffer &buffer, const Array<PrimExpr> &indices) {
+  return Call(DataType::Handle(), builtin::address_of(),
+              {BufferLoad(buffer, indices)});
+}
+
+PrimExpr ProductExtent(const Array<Range> &ranges, size_t begin,
+                       size_t end) {
+  PrimExpr result = 1;
+  for (size_t i = begin; i < end; ++i) {
+    result = result * ranges[i]->extent;
+  }
+  return result;
+}
+
+PrimExpr FlattenIndices(const Array<PrimExpr> &indices,
+                        const Array<PrimExpr> &shape,
+                        arith::Analyzer *analyzer) {
+  ICHECK_EQ(indices.size(), shape.size());
+  PrimExpr flat = 0;
+  PrimExpr stride = 1;
+  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+    flat = flat + indices[i] * stride;
+    stride = stride * shape[i];
+  }
+  return analyzer->Simplify(flat);
+}
+
+Array<PrimExpr> UnflattenIndex(PrimExpr flat, const Array<PrimExpr> &shape,
+                               arith::Analyzer *analyzer) {
+  Array<PrimExpr> indices;
+  PrimExpr remaining = flat;
+  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+    indices.insert(indices.begin(),
+                   analyzer->Simplify(floormod(remaining, shape[i])));
+    remaining = analyzer->Simplify(floordiv(remaining, shape[i]));
+  }
+  return indices;
+}
+
+} // namespace
+
 // === MultimemOp Constructor ===
 // args[0]: src region (tl.region call), args[1]: dst region, args[2]: mode,
 // args[3]: reduce_op
@@ -100,7 +193,9 @@ MultimemOp::MultimemOp(Array<PrimExpr> args,
 // 128-bit per multimem instruction => width = 128 / dtype_bits
 int MultimemOpNode::GetCoalescedWidth() const {
   int bits = src->dtype.bits();
-  return 128 / bits; // f32->4, f16->8, bf16->8
+  // Match the native multimem instruction width used by the element type.
+  // fp32 has vector forms; fp16/bf16 use packed x2 instructions.
+  return bits == 32 ? 4 : 2; // f32->V4, f16/bf16->V2 packed x2 ops
 }
 
 // === MakeIterVars ===
@@ -226,9 +321,58 @@ For MultimemOpNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 // CopyNode::LowerNormalCopy)
 LayoutMap MultimemOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
-  // Multimem ops always go through the ParallelOp path during Lower.
-  // No standalone layout inference needed.
-  return {};
+  if (mode == MultimemMode::kTmaStore || mode == MultimemMode::kTmaRedStore) {
+    return {};
+  }
+  if (IsPacked16BitMultimem()) {
+    if (mode == MultimemMode::kLdReduce) {
+      return {};
+    }
+    Buffer local_buf = (mode == MultimemMode::kLdReduce) ? dst : src;
+    Buffer remapped_local = local_buf;
+    if (T.buffer_remap.count(remapped_local)) {
+      remapped_local = T.buffer_remap[remapped_local];
+    }
+    if (T.layout_map.count(remapped_local)) {
+      return {};
+    }
+
+    PrimExpr numel = 1;
+    const Array<Range> &local_range =
+        (mode == MultimemMode::kLdReduce) ? dst_range : src_range;
+    for (const auto &range : local_range) {
+      numel = numel * range->extent;
+    }
+    ICHECK(T.analyzer != nullptr);
+    PrimExpr thread_extent = T.thread_bounds->extent;
+    PrimExpr pair_width = IntImm(DataType::Int(32), 2);
+    PrimExpr replicate_extent = T.analyzer->Simplify(
+        floordiv(numel + thread_extent * pair_width - 1,
+                 thread_extent * pair_width) *
+        pair_width);
+    Array<PrimExpr> logical_indices;
+    for (size_t i = 0; i < remapped_local->shape.size(); ++i) {
+      logical_indices.push_back(InputPlaceholder(i));
+    }
+    PrimExpr logical =
+        FlattenIndices(logical_indices, remapped_local->shape, T.analyzer);
+    PrimExpr pair_id = floordiv(logical, pair_width);
+    PrimExpr local_offset = T.analyzer->Simplify(
+        FloorMod(logical, pair_width) +
+        pair_width * floordiv(pair_id, thread_extent));
+    PrimExpr thread = T.analyzer->Simplify(FloorMod(pair_id, thread_extent));
+
+    Fragment fragment =
+        Fragment(remapped_local->shape, {local_offset}, thread,
+                 replicate_extent, std::nullopt)
+            ->BindThreadRange(T.thread_bounds);
+    LayoutMap result;
+    result.Set(remapped_local, fragment);
+    return result;
+  }
+  arith::Analyzer analyzer;
+  auto par_op = ParallelOp(MakeTransformedSIMTLoop(&analyzer));
+  return par_op->InferLayout(T, level);
 }
 
 // === Lower ===
@@ -239,12 +383,12 @@ Stmt MultimemOpNode::Lower(const LowerArgs &T,
   if (mode == MultimemMode::kTmaStore || mode == MultimemMode::kTmaRedStore) {
     return LowerBulkCopy(T, analyzer);
   }
+  if (IsPacked16BitMultimem()) {
+    return LowerPacked16Bit(T, analyzer);
+  }
 
   // Step 1-2: Create SIMT loop and fuse/transform
-  auto simt_loop = MakeSIMTLoop(analyzer);
-  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  auto transformed_loop =
-      Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
+  auto transformed_loop = MakeTransformedSIMTLoop(analyzer);
 
   // Step 3: Create ParallelOp and run InferLayout at multiple levels
   auto par_op = ParallelOp(transformed_loop);
@@ -278,6 +422,118 @@ Stmt MultimemOpNode::Lower(const LowerArgs &T,
   }
   result = MultimemRewriter(mcast_buf, mode, reduce_op).Rewrite(result);
   return result;
+}
+
+For MultimemOpNode::MakeTransformedSIMTLoop(
+    arith::Analyzer *analyzer) const {
+  auto simt_loop = MakeSIMTLoop(analyzer);
+  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+  return Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
+}
+
+bool MultimemOpNode::IsPacked16BitMultimem() const {
+  if (mode == MultimemMode::kTmaStore || mode == MultimemMode::kTmaRedStore) {
+    return false;
+  }
+  return (src->dtype.is_float16() || src->dtype.is_bfloat16()) &&
+         src->dtype == dst->dtype;
+}
+
+Stmt MultimemOpNode::LowerPacked16Bit(const LowerArgs &T,
+                                      arith::Analyzer *analyzer) const {
+  Buffer local_buf = (mode == MultimemMode::kLdReduce) ? dst : src;
+  Buffer mcast_buf = (mode == MultimemMode::kLdReduce) ? src : dst;
+  Array<Range> local_range =
+      (mode == MultimemMode::kLdReduce) ? dst_range : src_range;
+  Array<Range> mcast_range =
+      (mode == MultimemMode::kLdReduce) ? src_range : dst_range;
+
+  ICHECK_EQ(local_range.size(), mcast_range.size())
+      << "multimem packed x2 lowering expects matching region rank";
+  ICHECK(!local_range.empty())
+      << "multimem packed x2 lowering expects a non-scalar region";
+  const size_t ndim = local_range.size();
+  ICHECK_EQ(local_buf->shape.size(), ndim)
+      << "multimem packed x2 lowering expects the local region rank to match "
+         "the buffer rank";
+  ICHECK_EQ(mcast_buf->shape.size(), ndim)
+      << "multimem packed x2 lowering expects the multicast region rank to "
+         "match the buffer rank";
+
+  for (size_t i = 0; i < ndim; ++i) {
+    ICHECK(analyzer->CanProve(local_range[i]->extent == mcast_range[i]->extent,
+                              arith::ProofStrength::kSymbolicBound))
+        << "multimem packed x2 lowering expects matching region extents";
+  }
+
+  const PrimExpr last_extent = analyzer->Simplify(local_range[ndim - 1]->extent);
+  if (auto *imm = last_extent.as<IntImmNode>()) {
+    ICHECK_EQ(imm->value % 2, 0)
+        << "multimem packed x2 lowering requires the last dimension extent to "
+           "be divisible by 2";
+  }
+
+  Buffer remapped_local = local_buf;
+  Buffer remapped_mcast = mcast_buf;
+  if (T.buffer_remap.count(remapped_local)) {
+    remapped_local = T.buffer_remap[remapped_local];
+  }
+  if (T.buffer_remap.count(remapped_mcast)) {
+    remapped_mcast = T.buffer_remap[remapped_mcast];
+  }
+
+  PrimExpr numel = ProductExtent(local_range, 0, ndim);
+  PrimExpr leading_elements = ProductExtent(local_range, 0, ndim - 1);
+  PrimExpr pairs_per_row = analyzer->Simplify(floordiv(last_extent, 2));
+  PrimExpr total_pairs = analyzer->Simplify(leading_elements * pairs_per_row);
+  PrimExpr thread_extent = T.thread_bounds->extent;
+  PrimExpr thread_offset = T.thread_var - T.thread_bounds->min;
+  PrimExpr trip_count =
+      analyzer->Simplify(floordiv(total_pairs + thread_extent - 1,
+                                  thread_extent));
+
+  Var loop_var("multimem_pair_iter", DataType::Int(32));
+  PrimExpr pair_id =
+      analyzer->Simplify(loop_var * thread_extent + thread_offset);
+  PrimExpr linear_leading = analyzer->Simplify(floordiv(pair_id, pairs_per_row));
+  PrimExpr last_pair =
+      analyzer->Simplify(pair_id - linear_leading * pairs_per_row);
+  PrimExpr local_offset = analyzer->Simplify(loop_var * 2);
+
+  auto make_indices = [&](const Array<Range> &ranges,
+                          const Buffer &buffer) -> Array<PrimExpr> {
+    Array<PrimExpr> indices;
+    PrimExpr remaining = linear_leading;
+    for (size_t i = 0; i + 1 < ndim; ++i) {
+      PrimExpr stride = ProductExtent(ranges, i + 1, ndim - 1);
+      PrimExpr coord = analyzer->Simplify(floordiv(remaining, stride));
+      remaining = analyzer->Simplify(remaining - coord * stride);
+      indices.push_back(analyzer->Simplify(ranges[i]->min + coord));
+    }
+    indices.push_back(
+        analyzer->Simplify(ranges[ndim - 1]->min + last_pair * 2));
+    ICHECK_EQ(indices.size(), buffer->shape.size());
+    return indices;
+  };
+
+  Array<PrimExpr> local_indices =
+      UnflattenIndex(local_offset, remapped_local->shape, analyzer);
+  Array<PrimExpr> mcast_indices = make_indices(mcast_range, remapped_mcast);
+
+  Array<PrimExpr> args;
+  args.push_back(
+      StringImm(MultimemFuncName(mode, reduce_op, 2, local_buf->dtype)));
+  if (mode == MultimemMode::kLdReduce) {
+    args.push_back(MakeAddressOf(remapped_local, local_indices));
+    args.push_back(MakeAddressOf(remapped_mcast, mcast_indices));
+  } else {
+    args.push_back(MakeAddressOf(remapped_mcast, mcast_indices));
+    args.push_back(MakeAddressOf(remapped_local, local_indices));
+  }
+  Stmt body =
+      Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
+  body = IfThenElse(pair_id < total_pairs, body);
+  return For(loop_var, 0, trip_count, ForKind::kSerial, body);
 }
 
 // === LowerBulkCopy ===

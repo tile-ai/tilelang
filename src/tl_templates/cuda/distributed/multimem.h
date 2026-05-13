@@ -65,6 +65,38 @@ template <> struct LdReduceV4<ReduceOp::MAX, float> {
   }
 };
 
+template <> struct LdReduceV4<ReduceOp::ADD, half_t> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    uint32_t *dst_u32 = reinterpret_cast<uint32_t *>(dst);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+      uint32_t ret;
+      asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.f16x2 %0, [%1];"
+                   : "=r"(ret)
+                   : "l"(mc + i * 4)
+                   : "memory");
+      dst_u32[i] = ret;
+    }
+  }
+};
+
+template <> struct LdReduceV4<ReduceOp::ADD, bfloat16_t> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    uint32_t *dst_u32 = reinterpret_cast<uint32_t *>(dst);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+      uint32_t ret;
+      asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.bf16x2 %0, [%1];"
+                   : "=r"(ret)
+                   : "l"(mc + i * 4)
+                   : "memory");
+      dst_u32[i] = ret;
+    }
+  }
+};
+
 // --- StV4: 128-bit store to multicast address ---
 
 template <typename DType> struct StV4 {
@@ -82,6 +114,34 @@ template <> struct StV4<float> {
                  : "l"(mcast_ptr), "r"(val.x), "r"(val.y), "r"(val.z),
                    "r"(val.w)
                  : "memory");
+  }
+};
+
+template <> struct StV4<half_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const uint32_t *src_u32 = reinterpret_cast<const uint32_t *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+      asm volatile("multimem.st.weak.global.f16x2 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(src_u32[i])
+                   : "memory");
+    }
+  }
+};
+
+template <> struct StV4<bfloat16_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const uint32_t *src_u32 = reinterpret_cast<const uint32_t *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+      asm volatile("multimem.st.weak.global.bf16x2 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(src_u32[i])
+                   : "memory");
+    }
   }
 };
 
@@ -136,6 +196,34 @@ template <> struct RedV4<ReduceOp::MAX, float> {
   }
 };
 
+template <> struct RedV4<ReduceOp::ADD, half_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const uint32_t *src_u32 = reinterpret_cast<const uint32_t *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+      asm volatile("multimem.red.release.sys.global.add.f16x2 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(src_u32[i])
+                   : "memory");
+    }
+  }
+};
+
+template <> struct RedV4<ReduceOp::ADD, bfloat16_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const uint32_t *src_u32 = reinterpret_cast<const uint32_t *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+      asm volatile("multimem.red.release.sys.global.add.bf16x2 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(src_u32[i])
+                   : "memory");
+    }
+  }
+};
+
 // === V2 variants (64-bit = 2×f32, implemented as 2 scalar ops) ===
 
 template <ReduceOp op, typename DType> struct LdReduceV2 {
@@ -181,6 +269,28 @@ template <> struct LdReduceV2<ReduceOp::MAX, float> {
   }
 };
 
+template <> struct LdReduceV2<ReduceOp::ADD, half_t> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    uint32_t ret;
+    asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.f16x2 %0, [%1];"
+                 : "=r"(ret)
+                 : "l"(mcast_ptr)
+                 : "memory");
+    *reinterpret_cast<uint32_t *>(dst) = ret;
+  }
+};
+
+template <> struct LdReduceV2<ReduceOp::ADD, bfloat16_t> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    uint32_t ret;
+    asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.bf16x2 %0, [%1];"
+                 : "=r"(ret)
+                 : "l"(mcast_ptr)
+                 : "memory");
+    *reinterpret_cast<uint32_t *>(dst) = ret;
+  }
+};
+
 template <typename DType> struct StV2 {
   TL_DEVICE static void run(void *, const void *) {
     static_assert(always_false_v<DType>,
@@ -194,6 +304,26 @@ template <> struct StV2<float> {
     asm volatile("multimem.st.relaxed.sys.global.v2.b32 [%0], {%1, %2};"
                  :
                  : "l"(mcast_ptr), "r"(val.x), "r"(val.y)
+                 : "memory");
+  }
+};
+
+template <> struct StV2<half_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    uint32_t val = *reinterpret_cast<const uint32_t *>(src);
+    asm volatile("multimem.st.weak.global.f16x2 [%0], %1;"
+                 :
+                 : "l"(mcast_ptr), "r"(val)
+                 : "memory");
+  }
+};
+
+template <> struct StV2<bfloat16_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    uint32_t val = *reinterpret_cast<const uint32_t *>(src);
+    asm volatile("multimem.st.weak.global.bf16x2 [%0], %1;"
+                 :
+                 : "l"(mcast_ptr), "r"(val)
                  : "memory");
   }
 };
@@ -245,6 +375,137 @@ template <> struct RedV2<ReduceOp::MAX, float> {
       asm volatile("multimem.red.relaxed.sys.global.max.f32 [%0], %1;"
                    :
                    : "l"(mc + i * 4), "r"(val)
+                   : "memory");
+    }
+  }
+};
+
+template <> struct RedV2<ReduceOp::ADD, half_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    uint32_t val = *reinterpret_cast<const uint32_t *>(src);
+    asm volatile("multimem.red.release.sys.global.add.f16x2 [%0], %1;"
+                 :
+                 : "l"(mcast_ptr), "r"(val)
+                 : "memory");
+  }
+};
+
+template <> struct RedV2<ReduceOp::ADD, bfloat16_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    uint32_t val = *reinterpret_cast<const uint32_t *>(src);
+    asm volatile("multimem.red.release.sys.global.add.bf16x2 [%0], %1;"
+                 :
+                 : "l"(mcast_ptr), "r"(val)
+                 : "memory");
+  }
+};
+
+// === V8 variants (128-bit = 8×fp16/bf16, implemented as 4 packed x2 ops) ===
+
+template <ReduceOp op, typename DType> struct LdReduceV8 {
+  TL_DEVICE static void run(void *, const void *) {
+    static_assert(always_false_v<DType>,
+                  "tl::multimem::LdReduceV8: unsupported dtype/op");
+  }
+};
+
+template <> struct LdReduceV8<ReduceOp::ADD, half_t> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    uint32_t *dst_u32 = reinterpret_cast<uint32_t *>(dst);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      uint32_t ret;
+      asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.f16x2 %0, [%1];"
+                   : "=r"(ret)
+                   : "l"(mc + i * 4)
+                   : "memory");
+      dst_u32[i] = ret;
+    }
+  }
+};
+
+template <> struct LdReduceV8<ReduceOp::ADD, bfloat16_t> {
+  TL_DEVICE static void run(void *dst, const void *mcast_ptr) {
+    uint32_t *dst_u32 = reinterpret_cast<uint32_t *>(dst);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      uint32_t ret;
+      asm volatile("multimem.ld_reduce.weak.global.add.acc::f32.bf16x2 %0, [%1];"
+                   : "=r"(ret)
+                   : "l"(mc + i * 4)
+                   : "memory");
+      dst_u32[i] = ret;
+    }
+  }
+};
+
+template <typename DType> struct StV8 {
+  TL_DEVICE static void run(void *, const void *) {
+    static_assert(always_false_v<DType>,
+                  "tl::multimem::StV8: unsupported dtype");
+  }
+};
+
+template <> struct StV8<half_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const uint32_t *src_u32 = reinterpret_cast<const uint32_t *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      asm volatile("multimem.st.weak.global.f16x2 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(src_u32[i])
+                   : "memory");
+    }
+  }
+};
+
+template <> struct StV8<bfloat16_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const uint32_t *src_u32 = reinterpret_cast<const uint32_t *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      asm volatile("multimem.st.weak.global.bf16x2 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(src_u32[i])
+                   : "memory");
+    }
+  }
+};
+
+template <ReduceOp op, typename DType> struct RedV8 {
+  TL_DEVICE static void run(void *, const void *) {
+    static_assert(always_false_v<DType>,
+                  "tl::multimem::RedV8: unsupported dtype/op");
+  }
+};
+
+template <> struct RedV8<ReduceOp::ADD, half_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const uint32_t *src_u32 = reinterpret_cast<const uint32_t *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      asm volatile("multimem.red.release.sys.global.add.f16x2 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(src_u32[i])
+                   : "memory");
+    }
+  }
+};
+
+template <> struct RedV8<ReduceOp::ADD, bfloat16_t> {
+  TL_DEVICE static void run(void *mcast_ptr, const void *src) {
+    const uint32_t *src_u32 = reinterpret_cast<const uint32_t *>(src);
+    const char *mc = reinterpret_cast<const char *>(mcast_ptr);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      asm volatile("multimem.red.release.sys.global.add.bf16x2 [%0], %1;"
+                   :
+                   : "l"(mc + i * 4), "r"(src_u32[i])
                    : "memory");
     }
   }
