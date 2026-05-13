@@ -322,13 +322,13 @@ option(TILELANG_USE_HIP_STUBS
        ${_TILELANG_USE_HIP_STUBS_DEFAULT})
 unset(_TILELANG_USE_HIP_STUBS_DEFAULT)
 
-# Optional path to HIP/HSA headers, used together with TILELANG_USE_HIP_STUBS=ON
+# Optional path to HIP headers, used together with TILELANG_USE_HIP_STUBS=ON
 # when the build host has no ROCm runtime installed (e.g. an NV-only machine
-# producing a cross-target wheel). The directory must contain `hip/` and `hsa/`
-# subtrees as shipped by the `hip-runtime-amd-dev` and `hsa-rocr-dev` packages.
-# When unset, /opt/rocm/include is auto-detected if present.
+# producing a cross-target wheel). The directory must contain a `hip/` subtree.
+# When unset, the resolution order is: $ENV{TILELANG_HIP_INCLUDE_DIR} ->
+# /opt/rocm/include -> 3rdparty/hip-headers/include (vendored default).
 set(TILELANG_HIP_INCLUDE_DIR "" CACHE PATH
-    "Path to HIP/HSA headers when building with USE_ROCM=ON on a host without a ROCm runtime")
+    "Path to HIP headers when building with USE_ROCM=ON on a host without a ROCm runtime")
 # Configs end
 
 include(cmake/load_tvm.cmake)

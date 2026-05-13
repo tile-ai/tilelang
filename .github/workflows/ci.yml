@@ -154,6 +154,11 @@ jobs:
           export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
 
           echo "USE_CUDA=ON" | tee -a "${GITHUB_ENV}"
+          # Also build the ROCm backend against the vendored HIP headers so a
+          # regression that breaks `USE_ROCM=ON` on an NV-only host (the dist
+          # wheel build scenario) is caught by regular PR CI, not just by the
+          # release-time dist workflow.
+          echo "USE_ROCM=ON" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION_MAJMIN=${CUDA_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"

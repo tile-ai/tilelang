@@ -13,26 +13,33 @@ add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
 # Fallback for build hosts without a ROCm runtime install (e.g. an NV-only
 # machine producing a cross-target wheel). TVM's find_rocm() only succeeds
 # when libamdhip64 is present, but with TILELANG_USE_HIP_STUBS=ON we don't
-# need the runtime library at build time -- only the public HIP/HSA headers
-# (e.g. from `apt install hip-runtime-amd-dev hsa-rocr-dev`, which are
-# header packages and do not require an AMD GPU or driver).
+# need the runtime library at build time -- only the public HIP headers.
 #
-# Set TILELANG_HIP_INCLUDE_DIR to a directory that contains hip/ and hsa/
-# subtrees, or rely on the default /opt/rocm/include if those headers are
-# installed there. Linking is satisfied by tilelang's hip_stub target.
+# Resolution order (first match wins):
+#   1. -DTILELANG_HIP_INCLUDE_DIR=<dir> (explicit override)
+#   2. $ENV{TILELANG_HIP_INCLUDE_DIR}
+#   3. /opt/rocm/include (if a system ROCm install exists)
+#   4. 3rdparty/hip-headers/include (vendored, default fallback)
+#
+# HSA headers are intentionally not required: src/backend/rocm/stubs/hip.cc
+# already gates <hsa/hsa.h> behind __has_include and provides forward decls
+# for the two HSA symbols (hsa_init / hsa_shut_down) that we lazy-load.
 if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
+  set(_TL_VENDORED_HIP_INC "${CMAKE_SOURCE_DIR}/3rdparty/hip-headers/include")
   set(_TL_HIP_INC "")
   if(TILELANG_HIP_INCLUDE_DIR)
     set(_TL_HIP_INC "${TILELANG_HIP_INCLUDE_DIR}")
   elseif(DEFINED ENV{TILELANG_HIP_INCLUDE_DIR})
     set(_TL_HIP_INC "$ENV{TILELANG_HIP_INCLUDE_DIR}")
-  elseif(IS_DIRECTORY "/opt/rocm/include")
+  elseif(IS_DIRECTORY "/opt/rocm/include/hip")
     set(_TL_HIP_INC "/opt/rocm/include")
+  elseif(IS_DIRECTORY "${_TL_VENDORED_HIP_INC}/hip")
+    set(_TL_HIP_INC "${_TL_VENDORED_HIP_INC}")
   endif()
 
-  if(_TL_HIP_INC AND IS_DIRECTORY "${_TL_HIP_INC}/hip" AND IS_DIRECTORY "${_TL_HIP_INC}/hsa")
+  if(_TL_HIP_INC AND IS_DIRECTORY "${_TL_HIP_INC}/hip")
     message(STATUS
-      "ROCm runtime library not found on host; using HIP/HSA headers from "
+      "ROCm runtime library not found on host; using HIP headers from "
       "${_TL_HIP_INC} with hip_stub for linking. The resulting wheel still "
       "requires a real ROCm runtime to be present at execution time.")
     set(ROCM_FOUND TRUE)
@@ -43,11 +50,13 @@ if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
         "HSA runtime library to link against" FORCE)
   else()
     message(STATUS
-      "ROCm runtime library not found on host and HIP/HSA headers were not "
-      "found. Install hip-runtime-amd-dev and hsa-rocr-dev, or set "
-      "TILELANG_HIP_INCLUDE_DIR to a directory containing hip/ and hsa/.")
+      "ROCm runtime library not found on host and no HIP headers could be "
+      "located. Set -DTILELANG_HIP_INCLUDE_DIR=<dir> to a directory "
+      "containing a `hip/` subtree, or restore the vendored headers under "
+      "3rdparty/hip-headers/include/hip.")
   endif()
   unset(_TL_HIP_INC)
+  unset(_TL_VENDORED_HIP_INC)
 endif()
 
 if(TILELANG_USE_HIP_STUBS)
