@@ -47,8 +47,7 @@ def ag_gemm_sm_specialized_kernel(
     k_blocks = T.ceildiv(K, block_K)
     comm_block_M = block_M * 2
     comm_block_K = block_K * 2
-    store_block_N = block_N // 2
-    store_n_blocks = block_N // store_block_N
+    store_block_M = block_M // 2
     comm_chunks = 2
     local_comm_m_blocks = T.ceildiv(M_per_rank, comm_block_M)
     comm_m_blocks = T.ceildiv(M, comm_block_M)
@@ -137,7 +136,10 @@ def ag_gemm_sm_specialized_kernel(
                     B_comp_shared = T.alloc_shared((block_K, block_N), dtype)
                     C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
                     if use_tma_store:
-                        C_shared = T.alloc_shared((block_M, store_block_N), dtype)
+                        # Stage one consumer warpgroup's rows at a time. A
+                        # 128x256 TMA epilogue would exceed Hopper SMEM budget
+                        # after auto warp-specialized input staging.
+                        C_shared = T.alloc_shared((store_block_M, block_N), dtype)
                         C_local_cast = T.alloc_fragment((block_M, block_N), dtype)
                     for w in T.serial(waves):
                         tile_id = bid + w * num_comp_sms
@@ -162,29 +164,18 @@ def ag_gemm_sm_specialized_kernel(
                             store_by, store_bx = materialized_global_tile_coords(tile_id, local_rank)
                             if use_tma_store:
                                 T.copy(C_local, C_local_cast)
-                                for i, j in T.Parallel(block_M, store_block_N):
-                                    C_shared[i, j] = C_local_cast[i, j]
-                                T.sync_threads()
-                                T.copy(
-                                    C_shared[:, :],
-                                    C[
-                                        store_by * block_M : (store_by + 1) * block_M,
-                                        store_bx * block_N : store_bx * block_N + store_block_N,
-                                    ],
-                                )
-                                T.sync_threads()
-
-                                for i, j in T.Parallel(block_M, store_block_N):
-                                    C_shared[i, j] = C_local_cast[i, store_block_N + j]
-                                T.sync_threads()
-                                T.copy(
-                                    C_shared[:, :],
-                                    C[
-                                        store_by * block_M : (store_by + 1) * block_M,
-                                        store_bx * block_N + store_block_N : (store_bx + 1) * block_N,
-                                    ],
-                                )
-                                T.sync_threads()
+                                for row_offset in T.serial(0, block_M, store_block_M):
+                                    for i, j in T.Parallel(store_block_M, block_N):
+                                        C_shared[i, j] = C_local_cast[row_offset + i, j]
+                                    T.sync_threads(0, threads)
+                                    T.copy(
+                                        C_shared[:, :],
+                                        C[
+                                            store_by * block_M + row_offset : store_by * block_M + row_offset + store_block_M,
+                                            store_bx * block_N : (store_bx + 1) * block_N,
+                                        ],
+                                    )
+                                    T.sync_threads(0, threads)
                             else:
                                 T.copy(C_local, C[store_by * block_M, store_bx * block_N,])
             else:
@@ -301,8 +292,14 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     # _allocate_mcast_tensor uses aligned bump allocation; keep room for padding
     # between the gathered A buffer and the signal buffer.
     mcast_bytes = M * K * dtype_bytes + signal_blocks * signal_bytes + 4096
+    regular_bytes = (
+        M_per_rank * K * dtype_bytes
+        + K * N_per_rank * dtype_bytes
+        + M * N_per_rank * dtype_bytes
+        + 2 * num_local_ranks * torch.tensor([], dtype=torch.int32).element_size()
+    )
     allocator = get_allocator(
-        size=2**30,
+        size=max(2**30, regular_bytes + 2**28),
         device=f"cuda:{local_rank}",
         is_distributed=True,
         local_rank=local_rank,
@@ -394,7 +391,10 @@ if __name__ == "__main__":
     parser.add_argument("--num-comm-sms", type=int, default=4)
     parser.add_argument("--group-size-m", type=int, default=12)
     parser.add_argument("--pipeline-stages", type=int, default=4)
-    parser.add_argument("--use-tma-store", action="store_true")
+    epilogue = parser.add_mutually_exclusive_group()
+    epilogue.add_argument("--use-tma-store", dest="use_tma_store", action="store_true")
+    epilogue.add_argument("--no-tma-store", dest="use_tma_store", action="store_false")
+    parser.set_defaults(use_tma_store=True)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--rep", type=int, default=10)
     parser.add_argument("--print-source", action="store_true")
