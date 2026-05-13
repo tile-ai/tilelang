@@ -36,6 +36,12 @@ def _assert_mma_sync_shape(source, a_type, c_type, m, n, k):
     assert "mma_sync_sm70" not in source
 
 
+def _pack_int4(tensor: torch.Tensor) -> torch.Tensor:
+    tensor_i16 = tensor.to(torch.int16)
+    packed = (tensor_i16[..., ::2] & 0x0F) | ((tensor_i16[..., 1::2] & 0x0F) << 4)
+    return packed.to(torch.int8).contiguous()
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(7, 5)
 def test_sm75_f16_gemm_uses_m16n8k8_and_matches_torch():
@@ -69,6 +75,25 @@ def test_sm75_int8_gemm_uses_m8n8k16_and_matches_torch():
     a = torch.randint(-8, 8, (M, K), device="cuda", dtype=torch.int8)
     b = torch.randint(-8, 8, (N, K), device="cuda", dtype=torch.int8)
     c = kernel(a, b)
+    ref = (a.cpu().to(torch.int32) @ b.cpu().to(torch.int32).T).to(device="cuda")
+
+    tilelang.testing.torch_assert_close(c, ref, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(7, 5)
+def test_sm75_int4_gemm_uses_m8n8k32_and_matches_torch():
+    M = N = K = 128
+    kernel = tilelang.compile(
+        _make_gemm_kernel(M, N, K, 64, 64, 64, T.int4, T.int32, T.int32),
+        target="cuda",
+        out_idx=[2],
+    )
+    _assert_mma_sync_shape(kernel.get_kernel_source(), "kInt4", "kInt32", 8, 8, 32)
+
+    a = torch.randint(-8, 8, (M, K), device="cuda", dtype=torch.int8)
+    b = torch.randint(-8, 8, (N, K), device="cuda", dtype=torch.int8)
+    c = kernel(_pack_int4(a), _pack_int4(b))
     ref = (a.cpu().to(torch.int32) @ b.cpu().to(torch.int32).T).to(device="cuda")
 
     tilelang.testing.torch_assert_close(c, ref, rtol=0, atol=0)

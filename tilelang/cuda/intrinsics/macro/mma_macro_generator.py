@@ -47,6 +47,7 @@ class TensorCoreIntrinEmitter:
         "float32": "fp32",
         "float64": "fp64",
         "int4": "int4",
+        "uint4": "uint4",
         "int8": "int8",
         "uint8": "uint8",
         "int32": "int32",
@@ -101,7 +102,7 @@ class TensorCoreIntrinEmitter:
             # Override default M/N dims for fp64 MMA
             self.M_DIM = 8
             # n_dim will be set to 8 in _initialize_micro_size via k_dim==4
-        elif self.is_turing and DataType(self.a_dtype).bits == 8:
+        elif self.is_turing and DataType(self.a_dtype).bits in (4, 8):
             self.M_DIM = 8
         self._initialize_micro_size(self.M_DIM, self.k_dim)
         self._initialize_local_size(self.M_DIM, self.n_dim, self.k_dim, self.WARP_SIZE)
@@ -123,7 +124,9 @@ class TensorCoreIntrinEmitter:
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         if self.is_turing:
-            if a_dtype.bits == 8:
+            if a_dtype.bits == 4:
+                self.k_dim = min(32, self.chunk)
+            elif a_dtype.bits == 8:
                 self.k_dim = min(16, self.chunk)
             elif a_dtype.bits == 16:
                 self.k_dim = min(8, self.chunk)
@@ -161,9 +164,13 @@ class TensorCoreIntrinEmitter:
                 # typically used for float16/bfloat16
                 self.mma_prefix = "m16n8k16"
         elif k_dim == 32:
-            # typically used for int8/fp8
-            # sometimes int4/uint4 is also supported
-            self.mma_prefix = "m16n8k32"
+            if self.is_turing:
+                # Turing int4/uint4 path
+                self.mma_prefix = "m8n8k32"
+            else:
+                # typically used for int8/fp8
+                # sometimes int4/uint4 is also supported
+                self.mma_prefix = "m16n8k32"
         elif k_dim == 64:
             # typically used for int4/uint4
             self.mma_prefix = "m16n8k64"
@@ -180,9 +187,9 @@ class TensorCoreIntrinEmitter:
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
         # For fp64 (k_dim==4), micro tile is 8x8, otherwise keep 16x{8|16}
-        if k_dim == 4 or (self.is_turing and k_dim == 16):
-            # fp64 or Turing int8 path: m_dim must be 8, n_dim 8
-            assert m_dim == 8, f"For fp64/Turing int8 MMA, m_dim must be 8, got {m_dim}"
+        if k_dim == 4 or (self.is_turing and k_dim in (16, 32)):
+            # fp64 or Turing integer path: m_dim must be 8, n_dim 8
+            assert m_dim == 8, f"For fp64/Turing integer MMA, m_dim must be 8, got {m_dim}"
             self.n_dim = 8
             self.micro_size_y = 8
             self.warp_rows = warp_row_tiles // m_dim

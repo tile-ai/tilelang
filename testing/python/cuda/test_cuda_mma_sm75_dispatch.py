@@ -66,6 +66,33 @@ def test_turing_int8_emitter_uses_sm75_m8n8k16_shape():
     assert emitter.get_store_index_map() is not None
 
 
+def test_turing_int4_emitter_uses_sm75_m8n8k32_shape():
+    emitter = TensorCoreIntrinEmitter(
+        a_dtype=T.int4,
+        b_dtype=T.int4,
+        accum_dtype=T.int32,
+        a_transposed=False,
+        b_transposed=True,
+        block_row_warps=2,
+        block_col_warps=2,
+        warp_row_tiles=32,
+        warp_col_tiles=32,
+        chunk=64,
+        is_turing=True,
+    )
+
+    assert emitter.mma_prefix == "m8n8k32"
+    assert emitter.micro_size_x == 8
+    assert emitter.micro_size_y == 8
+    assert emitter.micro_size_k == 32
+    assert emitter.local_size_a == 8
+    assert emitter.local_size_b == 8
+    assert emitter.local_size_out == 2
+    assert emitter.warp_rows == 4
+    assert emitter.warp_cols == 4
+    assert emitter.get_store_index_map() is not None
+
+
 def test_non_turing_int8_emitter_keeps_sm80_m16n8k32_shape():
     emitter = TensorCoreIntrinEmitter(
         a_dtype=T.int8,
