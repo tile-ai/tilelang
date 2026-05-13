@@ -56,7 +56,12 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
             # only on macosx_11_0_arm64, not necessary
             # backend = 'metal'
             pass
-        elif _read_cmake_bool(os.environ.get("USE_ROCM", "")):
+        elif _read_cmake_bool(os.environ.get("USE_ROCM", "")) and not _read_cmake_bool(
+                os.environ.get("USE_CUDA", "")):
+            # ROCm-only build. When USE_CUDA is also on (fat wheel), fall
+            # through and label as the CUDA backend so the wheel keeps the
+            # historical `+cuXXX.gitYYY` naming and remains a drop-in upgrade
+            # for existing CUDA-pinned installs.
             backend = "rocm"
         elif "USE_CUDA" in os.environ and not _read_cmake_bool(os.environ.get("USE_CUDA")):
             backend = "cpu"
