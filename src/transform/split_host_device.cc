@@ -50,8 +50,21 @@ namespace tir = tvm::tir;
 
 namespace {
 
+/*! \brief Rewrite the synthetic CPU fallback thread variable to a constant.
+ *
+ * Some CPU lowering paths materialize a degenerate `v_thread` variable to
+ * reuse thread-oriented transformations even though the generated CPU kernel
+ * has no real thread binding.  If that synthetic variable survives until
+ * host/device splitting, undefined-variable analysis may incorrectly treat it
+ * as a device-kernel parameter.
+ *
+ * This mutator canonicalizes that CPU-only fallback variable to `0` before
+ * device parameter inference so the generated `c` target kernel signature does
+ * not accidentally expose `v_thread`.
+ */
 class CPUFallbackThreadVarCanonicalizer : public tir::StmtExprMutator {
 public:
+  /*! \brief Apply the canonicalization to a statement tree. */
   static tir::Stmt Rewrite(tir::Stmt stmt) {
     CPUFallbackThreadVarCanonicalizer canonicalizer;
     return canonicalizer(std::move(stmt));
@@ -270,6 +283,10 @@ private:
     body = SourceKernelAttrExtractor::Extract(
         std::move(body), &code_block_source_, &code_block_entry_name_);
 
+    // CPU `c` kernels may still contain the synthetic fallback `v_thread`
+    // introduced by earlier lowering.  Canonicalize it before use-def analysis
+    // so split-device parameter inference does not promote it into the device
+    // kernel ABI.
     if (device_target->kind->name == "c") {
       body = CPUFallbackThreadVarCanonicalizer::Rewrite(std::move(body));
     }
