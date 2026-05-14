@@ -104,6 +104,15 @@ bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
 }
 
+PrimExpr GetThreadExtent(const CopyNode &op, const LowerArgs &T) {
+  if (auto val = op.annotations.Get("thread_extent")) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return IntImm(DataType::Int(32), int_val->value);
+    }
+  }
+  return T.thread_bounds->extent;
+}
+
 } // namespace
 
 namespace cuda {
@@ -1247,7 +1256,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
+    Stmt producer = IfThenElse(MakeTmaLeaderCondition(GetThreadExtent(op, T)),
                                SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
@@ -1262,7 +1271,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   }
 
   tma_copy =
-      IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
+      IfThenElse(MakeTmaLeaderCondition(GetThreadExtent(op, T)), tma_copy);
 
   return tma_copy;
 }
@@ -1391,7 +1400,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
       producer_seq.push_back(barrier_after_tma_stmt.value());
     }
 
-    Stmt producer = IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent),
+    Stmt producer = IfThenElse(MakeTmaLeaderCondition(GetThreadExtent(op, T)),
                                SeqStmt(producer_seq));
 
     if (GetIsTmaCopy(op)) {
@@ -1406,7 +1415,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   }
 
   tma_copy =
-      IfThenElse(MakeTmaLeaderCondition(T.thread_bounds->extent), tma_copy);
+      IfThenElse(MakeTmaLeaderCondition(GetThreadExtent(op, T)), tma_copy);
   return tma_copy;
 }
 
