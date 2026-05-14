@@ -17,6 +17,8 @@ from .analysis import (
 from tvm.target.target import Target
 from tvm.tir.stmt_functor import pre_order_visit
 from .arch import get_arch, is_tensorcore_supported_precision
+from .arch.rdna import _get_rdna_tuning_config
+from tilelang.utils.target import target_get_mcpu, target_is_rdna
 import logging
 
 logger = logging.getLogger(__name__)
@@ -540,13 +542,20 @@ def get_tensorized_func_and_tags(
         sm_version = arch.replace("sm_", "")
         return int(sm_version) if sm_version.isdigit() else -1
 
+    def is_cuda_tensorcore_target(target: Target) -> bool:
+        return target.kind.name == "cuda" and check_sm_version(target.arch) >= 70
+
+    def is_rdna_wmma_target(target: Target) -> bool:
+        return target.kind.name == "hip" and target_is_rdna(target)
+
     def analysis_tensorcore_tags(sch: tir.Schedule, block: BlockRV, target: Target) -> bool | dict:
         tags: dict[str, list[int] | int] = {}
         block_stmt = sch.get(block)
 
-        # Nvidia Only Support Tensor Core for
-        # devices greater than 70.
-        if check_sm_version(target.arch) < 70:
+        # Tensorized schedules are supported by NVIDIA Tensor Cores and by RDNA
+        # WMMA on HIP/gfx11+ targets.  Other targets fall back to the default
+        # Roller policy.
+        if not is_cuda_tensorcore_target(target) and not is_rdna_wmma_target(target):
             return False
         # analysis tensorcore axis
         # todo(lei): maybe we can remove this in the future
@@ -560,11 +569,13 @@ def get_tensorized_func_and_tags(
         if target.kind.name == "cuda" and check_sm_version(target.arch) in {80, 90}:
             # enable pipeline stage only for sm_80 devices
             tags["pipeline_stage"] = 2
+        elif is_rdna_wmma_target(target):
+            tags["pipeline_stage"] = _get_rdna_tuning_config(target_get_mcpu(target)).pipeline_stage
 
         # analysis async copy
         # todo(lei): maybe we can integrate this into policy in the future
         tags["use_async_copy"] = False
-        if tags["pipeline_stage"] == 2 and check_sm_version(target.arch) in {80, 90}:
+        if target.kind.name == "cuda" and tags["pipeline_stage"] == 2 and check_sm_version(target.arch) in {80, 90}:
             # async copy only works in software pipeline.
             tags["use_async_copy"] = True
 
@@ -593,7 +604,7 @@ def get_tensorized_func_and_tags(
         intrin_info["in_dtype"] = in_dtype
         intrin_info["out_dtype"] = out_dtype
 
-        if 70 <= check_sm_version(target.arch) < 80 and out_dtype == "int32":
+        if target.kind.name == "cuda" and 70 <= check_sm_version(target.arch) < 80 and out_dtype == "int32":
             # INT32 Accum TensorCore only supports SM Version > 32.
             return False
 
@@ -616,7 +627,7 @@ def get_tensorized_func_and_tags(
                 if isinstance(M, tir.IntImm) and M <= 128:
                     require_block_reduce = True
                 break
-        if require_block_reduce and check_sm_version(target.arch) == 80:
+        if target.kind.name == "cuda" and require_block_reduce and check_sm_version(target.arch) == 80:
             tags["block_reduction_depth"] = 2
         return tags
 
@@ -625,11 +636,16 @@ def get_tensorized_func_and_tags(
         return func, None
 
     block_stmt = sch.get(main_block)
-    if target.kind.name == "cuda" and check_sm_version(target.arch) >= 70:
+    if is_cuda_tensorcore_target(target) or is_rdna_wmma_target(target):
         in_dtype, out_dtype = get_in_out_dtypes(block_stmt)
-        if not is_tensorcore_supported_precision(in_dtype, out_dtype, arch=get_arch(target)):
-            logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by tensorcore")
-            return func, None
+        if is_cuda_tensorcore_target(target):
+            if not is_tensorcore_supported_precision(in_dtype, out_dtype, arch=get_arch(target)):
+                logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by tensorcore")
+                return func, None
+        elif is_rdna_wmma_target(target):
+            if (str(in_dtype), str(out_dtype)) not in {("float16", "float32")}:
+                logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by RDNA WMMA")
+                return func, None
 
         # reindex and transform functions
         # Normalize tensor functions to C[S, I, J] += A[S, I, K] * B[S, J, K]
