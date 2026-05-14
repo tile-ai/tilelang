@@ -48,6 +48,26 @@ namespace tl {
 using namespace ffi;
 namespace tir = tvm::tir;
 
+namespace {
+
+class CPUFallbackThreadVarCanonicalizer : public tir::StmtExprMutator {
+ public:
+  static tir::Stmt Rewrite(tir::Stmt stmt) {
+    CPUFallbackThreadVarCanonicalizer canonicalizer;
+    return canonicalizer(std::move(stmt));
+  }
+
+ private:
+  PrimExpr VisitExpr_(const tir::VarNode* op) final {
+    if (op != nullptr && op->name_hint == "v_thread") {
+      return tir::make_zero(op->dtype);
+    }
+    return tir::StmtExprMutator::VisitExpr_(op);
+  }
+};
+
+}  // namespace
+
 // This pass traverses the AST, split the target function into host part and
 // device part and copies all assume attribute statements to the device side.
 
@@ -249,6 +269,10 @@ private:
     code_block_entry_name_ = std::nullopt;
     body = SourceKernelAttrExtractor::Extract(
         std::move(body), &code_block_source_, &code_block_entry_name_);
+
+    if (device_target->kind->name == "c") {
+      body = CPUFallbackThreadVarCanonicalizer::Rewrite(std::move(body));
+    }
 
     // Normal kernels infer device parameters from use-def of the device body.
     // Source kernels have no meaningful DSL body, so their device signature
