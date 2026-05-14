@@ -30,7 +30,7 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def get_configs(args, kwargs):
+def get_configs(*args, **kwargs):
     """
     Generate a list of configuration dictionaries that will be used for tuning.
 
@@ -45,7 +45,14 @@ def get_configs(args, kwargs):
         Each configuration dict includes various block sizes, pipeline stages,
         thread numbers, and other parameters to explore during autotuning.
     """
-    M, N, K, with_roller = args[:4]
+    # Support both the current autotuner calling convention
+    #   get_configs(M, N, K, with_roller, ...)
+    # and the historical/manual helper style
+    #   get_configs((M, N, K, with_roller), kwargs)
+    if len(args) == 2 and isinstance(args[0], (tuple, list)) and isinstance(args[1], dict):
+        M, N, K, with_roller = args[0][:4]
+    else:
+        M, N, K, with_roller = args[:4]
 
     if with_roller:
         from tilelang.carver.template import MatmulTemplate
