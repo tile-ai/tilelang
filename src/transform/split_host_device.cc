@@ -51,14 +51,14 @@ namespace tir = tvm::tir;
 namespace {
 
 class CPUFallbackThreadVarCanonicalizer : public tir::StmtExprMutator {
- public:
+public:
   static tir::Stmt Rewrite(tir::Stmt stmt) {
     CPUFallbackThreadVarCanonicalizer canonicalizer;
     return canonicalizer(std::move(stmt));
   }
 
- private:
-  PrimExpr VisitExpr_(const tir::VarNode* op) final {
+private:
+  PrimExpr VisitExpr_(const tir::VarNode *op) final {
     if (op != nullptr && op->name_hint == "v_thread") {
       return tir::make_zero(op->dtype);
     }
@@ -66,7 +66,7 @@ class CPUFallbackThreadVarCanonicalizer : public tir::StmtExprMutator {
   }
 };
 
-}  // namespace
+} // namespace
 
 // This pass traverses the AST, split the target function into host part and
 // device part and copies all assume attribute statements to the device side.

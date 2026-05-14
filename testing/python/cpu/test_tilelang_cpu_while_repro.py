@@ -17,6 +17,7 @@ def test_cpu_kernel_source_generation_with_while() -> None:
     repository: success is defined by `tilelang.compile(..., target="c")`
     completing without raising an exception.
     """
+
     @T.prim_func
     def main(flag: T.Buffer((1,), "int32"), out: T.Buffer((1,), "int32")):
         with T.Kernel(1, is_cpu=True):
