@@ -149,13 +149,13 @@ struct AllReduce {
 
 template <int threads, bool reverse = false> struct CumSum1D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64);
-  template <typename T, int SEG = 64>
-  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int N) {
-    if (N <= 0)
-      return;
+                threads == 128 or threads == 64 or threads == 32);
 
+  // Run cumsum using a wavefront-sized scan segment.
+  // SEG must equal the hardware wavefront size (32 for RDNA, 64 for CDNA).
+  template <typename T, int SEG>
+  static TL_DEVICE void run_seg(const T *__restrict__ src, T *__restrict__ dst,
+                                int N) {
     const int tid = threadIdx.x;
     const int lane = tid % SEG;
 
@@ -212,15 +212,30 @@ template <int threads, bool reverse = false> struct CumSum1D {
       }
     }
   }
+
+  template <typename T>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int N) {
+    if (N <= 0)
+      return;
+    // Dispatch based on hardware wavefront size at compile time via
+    // __builtin_amdgcn_wavefrontsize().  RDNA targets compile with
+    // -mwavefrontsize32 so this resolves to 32; CDNA resolves to 64.
+    if (__builtin_amdgcn_wavefrontsize() == 32) {
+      run_seg<T, 32>(src, dst, N);
+    } else {
+      run_seg<T, 64>(src, dst, N);
+    }
+  }
 };
 
 template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64);
-  template <typename T, int SEG = 64>
-  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
-                            int H, int W) {
+                threads == 128 or threads == 64 or threads == 32);
 
+  template <typename T, int SEG>
+  static TL_DEVICE void run_seg(const T *__restrict__ src, T *__restrict__ dst,
+                                int H, int W) {
     constexpr int TILE_H = threads / SEG;
     const int num_blocks = (H + TILE_H - 1) / TILE_H;
     const int tid = threadIdx.x;
@@ -288,6 +303,16 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
           carry = tl::shfl(carry, SEG - 1);
         }
       }
+    }
+  }
+
+  template <typename T>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int H, int W) {
+    if (__builtin_amdgcn_wavefrontsize() == 32) {
+      run_seg<T, 32>(src, dst, H, W);
+    } else {
+      run_seg<T, 64>(src, dst, H, W);
     }
   }
 };
