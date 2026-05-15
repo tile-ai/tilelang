@@ -17,7 +17,7 @@ using namespace tir;
 namespace rocm {
 
 struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
-  static int WarpSize(Target) { return 64; }
+  static int WarpSize(Target target) { return TargetGetWarpSize(target); }
 
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,

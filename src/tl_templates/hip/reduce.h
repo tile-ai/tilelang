@@ -48,10 +48,9 @@ struct SharedReduceWarp {
                             T init_value) {
     if (total_dest <= 0 || reduce_extent <= 0)
       return;
-    constexpr int kWarpSize = 64;
-    static_assert(Threads % kWarpSize == 0,
-                  "SharedReduceWarp expects blockDim.x to be a multiple of "
-                  "wave size on HIP.");
+    // Use the actual hardware wavefront size so this works on both RDNA
+    // (wave32) and CDNA (wave64) targets.
+    const int kWarpSize = __builtin_amdgcn_wavefrontsize();
     const int tid = threadIdx.x;
     const int warp_id = tid / kWarpSize;
     const int lane = tid % kWarpSize;
@@ -98,9 +97,12 @@ struct AllReduce {
   // Scalar interface (backward-compatible).
   template <typename T> static __device__ T run(T x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
-    constexpr int warpSize = 64;
+    // Use the hardware wavefront size at compile time so that the correct
+    // synchronisation strategy is chosen for both RDNA (wave32) and CDNA
+    // (wave64) targets.
+    const int warpSize = __builtin_amdgcn_wavefrontsize();
 
-    if constexpr (offset >= warpSize) {
+    if (offset >= warpSize) {
       __syncthreads();
       red_buf[threadIdx.x] = x;
       __syncthreads();
@@ -120,9 +122,12 @@ struct AllReduce {
   template <typename T>
   static __device__ void run_batch(T *x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
-    constexpr int warpSize = 64;
+    // Use the hardware wavefront size at compile time so that the correct
+    // synchronisation strategy is chosen for both RDNA (wave32) and CDNA
+    // (wave64) targets.
+    const int warpSize = __builtin_amdgcn_wavefrontsize();
 
-    if constexpr (offset >= warpSize) {
+    if (offset >= warpSize) {
       __syncthreads();
 #pragma unroll
       for (int i = 0; i < batch_size; i++)
