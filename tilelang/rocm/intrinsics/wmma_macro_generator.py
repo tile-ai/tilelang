@@ -202,7 +202,9 @@ class WMMAIntrinEmitter:
                         row, col = T.meta_var(reverse_index_map(tx, local_id % local_size_a))
                         k_tile = local_id // local_size_a
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k), warp_m * warp_row_tiles + i * micro_size_x)
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + l + row + k_tile * micro_size_k, A_base1 + r + col)]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[
+                            tuple(A_other) + (A_base0 + l + row + k_tile * micro_size_k, A_base1 + r + col)
+                        ]
             else:
                 # A layout (M×K): row=M, col=K. K-offset added to r+col.
                 for i in T.serial(warp_rows):
@@ -210,7 +212,9 @@ class WMMAIntrinEmitter:
                         row, col = T.meta_var(reverse_index_map(tx, local_id % local_size_a))
                         k_tile = local_id // local_size_a
                         l, r = (warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * (k_pack * micro_size_k))
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[tuple(A_other) + (A_base0 + l + row, A_base1 + r + col + k_tile * micro_size_k)]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[
+                            tuple(A_other) + (A_base0 + l + row, A_base1 + r + col + k_tile * micro_size_k)
+                        ]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -248,7 +252,9 @@ class WMMAIntrinEmitter:
                         row, col = T.meta_var(reverse_index_map(tx, local_id % local_size_b))
                         k_tile = local_id // local_size_b
                         l, r = (warp_n * warp_col_tiles + j * micro_size_y, rk * chunk + ki * (k_pack * micro_size_k))
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + l + row, B_base1 + r + col + k_tile * micro_size_k)]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[
+                            tuple(B_other) + (B_base0 + l + row, B_base1 + r + col + k_tile * micro_size_k)
+                        ]
             else:
                 # B layout (K×N): row=K, col=N. K-offset added to l+row.
                 for j in T.serial(warp_cols):
@@ -256,7 +262,9 @@ class WMMAIntrinEmitter:
                         row, col = T.meta_var(reverse_index_map(tx, local_id % local_size_b))
                         k_tile = local_id // local_size_b
                         l, r = (rk * chunk + ki * (k_pack * micro_size_k), warp_n * warp_col_tiles + j * micro_size_y)
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[tuple(B_other) + (B_base0 + l + row + k_tile * micro_size_k, B_base1 + r + col)]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[
+                            tuple(B_other) + (B_base0 + l + row + k_tile * micro_size_k, B_base1 + r + col)
+                        ]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
