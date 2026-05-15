@@ -86,11 +86,11 @@ __device__ void decode_fp4_to_bf16_twiddling(T1 *B_local, T2 *B_local_decode, co
   };
   // Multiply two packed uint32 BF16x2 words element-wise.
   auto bf16x2_mul = [&](uint32_t a, uint32_t b) -> uint32_t {
-    uint16_t alo = (uint16_t)(a & 0xFFFFu), ahi = (uint16_t)(a >> 16u);
-    uint16_t blo = (uint16_t)(b & 0xFFFFu), bhi = (uint16_t)(b >> 16u);
-    uint16_t rlo = float_to_bf16(bf16_to_float(alo) * bf16_to_float(blo));
-    uint16_t rhi = float_to_bf16(bf16_to_float(ahi) * bf16_to_float(bhi));
-    return (uint32_t)rlo | ((uint32_t)rhi << 16u);
+    uint16_t a_lo = (uint16_t)(a & 0xFFFFu), a_hi = (uint16_t)(a >> 16u);
+    uint16_t b_lo = (uint16_t)(b & 0xFFFFu), b_hi = (uint16_t)(b >> 16u);
+    uint16_t r_lo = float_to_bf16(bf16_to_float(a_lo) * bf16_to_float(b_lo));
+    uint16_t r_hi = float_to_bf16(bf16_to_float(a_hi) * bf16_to_float(b_hi));
+    return (uint32_t)r_lo | ((uint32_t)r_hi << 16u);
   };
 
   #pragma unroll
