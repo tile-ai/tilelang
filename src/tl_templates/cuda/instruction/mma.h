@@ -64,7 +64,7 @@ struct SM75_8x8x32_S32S4S4S32_TN {
                                    uint32_t const &a0, uint32_t const &b0,
                                    uint32_t const &c0, uint32_t const &c1) {
 #if defined(CUTE_ARCH_MMA_SM75_ENABLED)
-    asm volatile("mma.sync.aligned.m8n8k32.row.col.satfinite.s32.s4.s4.s32"
+    asm volatile("mma.sync.aligned.m8n8k32.row.col.s32.s4.s4.s32"
                  "{%0, %1},"
                  "{%2},"
                  "{%3},"
@@ -89,7 +89,7 @@ struct SM75_8x8x32_S32U4U4S32_TN {
                                    uint32_t const &a0, uint32_t const &b0,
                                    uint32_t const &c0, uint32_t const &c1) {
 #if defined(CUTE_ARCH_MMA_SM75_ENABLED)
-    asm volatile("mma.sync.aligned.m8n8k32.row.col.satfinite.s32.u4.u4.s32"
+    asm volatile("mma.sync.aligned.m8n8k32.row.col.s32.u4.u4.s32"
                  "{%0, %1},"
                  "{%2},"
                  "{%3},"
@@ -163,9 +163,9 @@ TL_DEFINE_MMA_DISPATCHER(kInt8, kInt8, kInt32, 8, 8, 16, false, true, false,
 
 // INT4 inputs (k32) for SM75
 TL_DEFINE_MMA_DISPATCHER(kInt4, kInt4, kInt32, 8, 8, 32, false, true, false,
-                         SM75_8x8x32_S32S4S4S32_TN)
+                         tl::detail::SM75_8x8x32_S32S4S4S32_TN)
 TL_DEFINE_MMA_DISPATCHER(kUInt4, kUInt4, kInt32, 8, 8, 32, false, true, false,
-                         SM75_8x8x32_S32U4U4S32_TN)
+                         tl::detail::SM75_8x8x32_S32U4U4S32_TN)
 
 // INT4 inputs (k32, k64) for SM80+
 TL_DEFINE_MMA_DISPATCHER(kInt4, kInt4, kInt32, 16, 8, 32, false, true, false,

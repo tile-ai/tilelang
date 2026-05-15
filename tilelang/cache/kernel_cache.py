@@ -136,7 +136,8 @@ class KernelCache:
         file_hash = sha256()
         seen: set[str] = set()
         for root, suffixes in roots:
-            for dirpath, _, filenames in os.walk(root):
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames.sort()
                 for filename in sorted(filenames):
                     if suffixes is not None and not filename.endswith(suffixes):
                         continue

@@ -186,16 +186,12 @@ class TensorCoreIntrinEmitter:
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
-        # For fp64 (k_dim==4), micro tile is 8x8, otherwise keep 16x{8|16}
-        if k_dim == 4 or (self.is_turing and k_dim in (16, 32)):
-            # fp64 or Turing integer path: m_dim must be 8, n_dim 8
-            assert m_dim == 8, f"For fp64/Turing integer MMA, m_dim must be 8, got {m_dim}"
-            self.n_dim = 8
-            self.micro_size_y = 8
-            self.warp_rows = warp_row_tiles // m_dim
-            self.warp_cols = warp_col_tiles // 8
-        elif k_dim == 8 and self.is_turing:
-            # Turing fp16 path
+        # FP64 and Turing integer paths use m8n8; Turing FP16 uses m16n8.
+        use_m8n8 = k_dim == 4 or (self.is_turing and k_dim in (16, 32))
+        use_n8 = use_m8n8 or (self.is_turing and k_dim == 8)
+        if use_n8:
+            if use_m8n8:
+                assert m_dim == 8, f"For fp64/Turing integer MMA, m_dim must be 8, got {m_dim}"
             self.n_dim = 8
             self.micro_size_y = 8
             self.warp_rows = warp_row_tiles // m_dim
@@ -238,6 +234,7 @@ class TensorCoreIntrinEmitter:
 
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
         if DataType(self.accum_dtype).bits == 64 or local_size_c == 2:
+            # m8n8 MMA atoms (FP64 and SM75 integer) produce two C registers and share this lane map.
             index_map = IndexMap.from_func(mma_store_index_map_fp64, index_dtype=T.int32)
         else:
             index_map = IndexMap.from_func(mma_store_index_map, index_dtype=T.int32)
