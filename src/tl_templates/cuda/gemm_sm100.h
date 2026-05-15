@@ -341,21 +341,9 @@ struct MMA_Traits<SM100_MMA_F8F6F4_WS_SS, cute::float_e2m1_t,
 
 // MMA_Traits specialization for FP4 (float_e2m1_t) with SM100_MMA_F8F6F4_TS.
 // A operand comes from TMEM, B from SMEM. Same descriptor encoding fix as SS.
-// 你的理解接近正确，但还需要澄清一点：
-// 使用时其实不用再对 template 里面的参数“再次特化”，而是——
-// 1. 外层 template <...> 这部分负责声明参数列表，即让这个偏特化对所有可能的
-// <c_type, M, N, ...> 组合都有效。
-// 2. 内层 struct MMA_Traits<SM100_MMA_F8F6F4_TS<...>> 说明：只要模板参数匹配到
-// SM100_MMA_F8F6F4_TS 那一整组，
-//    就会自动选择这个偏特化的实现，不需要“再特化”。
-// 换句话说，你写一个 MMA_Traits<X>，如果 X 恰好能匹配 SM100_MMA_F8F6F4_TS<...>
-// 那一组参数， 这个特化版本就会被用到。比如：
-//     using Traits = MMA_Traits<SM100_MMA_F8F6F4_TS<float_e2m1_t, float_e2m1_t,
-//     float, 64, 32, ...>>;
-// Traits的内容就是匹配到此特化，无需再继续特化template参数。
-// 总结：外层 template 支持泛型匹配，struct MMA_Traits<...>
-// 实现具体特化，实际用时只需传入对应参数即可自动选中。
-
+// This partial specialization is selected automatically for TS atoms whose
+// operands are FP4. It keeps the runtime descriptor encoding in the f8f6f4
+// domain, where E2M1 is encoded as MXF8F6F4Format::E2M1 (=5).
 template <class c_type, int M, int N, UMMA::Major a_major, UMMA::Major b_major,
           UMMA::ScaleIn a_neg, UMMA::ScaleIn b_neg, UMMA::Saturate c_sat>
 struct MMA_Traits<

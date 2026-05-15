@@ -919,6 +919,15 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
   // Sub-byte types (FP4): use ALIGN16B unpacksmem layout.  TMA writes each
   // logical FP4 into an 8-bit SMEM container, matching tcgen05.mma consumption.
   if (element_size < 8) {
+    if (mat_stride % 8 == 0 && mat_continuous % 128 == 0) {
+      return MakeAlign16BSwizzleLayout2D(mat_stride, mat_continuous,
+                                         element_size);
+    }
+    int vector_size = 128 / element_size;
+    if (mat_continuous % vector_size == 0) {
+      return makeLinearLayout(
+          Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
+    }
     return MakeAlign16BSwizzleLayout2D(mat_stride, mat_continuous,
                                        element_size);
   }

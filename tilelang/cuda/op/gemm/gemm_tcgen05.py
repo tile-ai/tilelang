@@ -60,7 +60,7 @@ class GemmTCGEN5(GemmBase):
             try:
                 _pass_ctx = tvm.transform.PassContext.current()
                 disable_tma = _pass_ctx.config.get("tl.disable_tma_lower", False)
-            except Exception:
+            except (AttributeError, KeyError, TypeError):
                 disable_tma = False
             if disable_tma:
                 # Non-TMA path: SIMT copy writes packed-linear nibbles; use a

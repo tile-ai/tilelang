@@ -674,7 +674,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
         k_dim = self.chunk
         micro_size_k = self.micro_size_k
-        elems_in_bytes = (DataType(self.a_dtype).bits + 7) // 8
+        elems_in_bytes = (DataType(self.b_dtype).bits + 7) // 8
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)

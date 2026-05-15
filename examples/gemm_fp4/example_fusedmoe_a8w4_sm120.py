@@ -1,10 +1,9 @@
 """FP4 Fused MoE shared expert kernel on SM120 (A8W4 mode).
 
-Demonstrates the core MoE compute pattern with FP4 weights:
+Demonstrates the core MoE gate/up compute pattern with FP4 weights:
   1. Gate GEMM: input(FP8) x W_gate(FP4) -> gate logits
   2. Up GEMM:   input(FP8) x W_up(FP4)   -> up logits
   3. SiLU(gate) * up
-  4. Down GEMM: activated(FP8) x W_down(FP4) -> output
 
 Uses SM120 native kind::f8f6f4 MMA (FP8 x FP4 -> FP32).
 Expert weights are stored as unpacked uint8 (1 FP4 per byte, low nibble).
@@ -59,11 +58,10 @@ def moe_shared_expert_a8w4(
 
     @T.prim_func
     def main(
-        input: T.Tensor((num_tokens, d_hidden), "float8_e4m3fn"),
+        Input: T.Tensor((num_tokens, d_hidden), "float8_e4m3fn"),
         W_gate: T.Tensor((d_expert, d_hidden), "uint8"),
         W_up: T.Tensor((d_expert, d_hidden), "uint8"),
-        W_down: T.Tensor((d_hidden, d_expert), "uint8"),
-        output: T.Tensor((num_tokens, d_hidden), "float32"),
+        output: T.Tensor((num_tokens, d_expert), "float32"),
     ):
         # Step 1: Gate + Up GEMMs (fused in one kernel launch)
         with T.Kernel(
@@ -82,7 +80,7 @@ def moe_shared_expert_a8w4(
             T.clear(up_local)
 
             for k in T.Pipelined(T.ceildiv(d_hidden, block_hidden), num_stages=num_stages):
-                T.copy(input[bx * block_token, k * block_hidden], input_shared)
+                T.copy(Input[bx * block_token, k * block_hidden], input_shared)
                 T.copy(W_gate[by * block_expert, k * block_hidden], W_gate_shared)
                 T.copy(W_up[by * block_expert, k * block_hidden], W_up_shared)
                 T.gemm(input_shared, W_gate_shared, gate_local, transpose_B=True)
@@ -118,7 +116,7 @@ func = moe_shared_expert_a8w4(
 
 jit_kernel = tilelang.compile(
     func,
-    out_idx=[4],
+    out_idx=[3],
     target="cuda",
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
@@ -134,18 +132,16 @@ torch.manual_seed(42)
 input_fp8 = torch.randn(num_tokens, d_hidden, device="cuda", dtype=torch.float16).to(torch.float8_e4m3fn)
 W_gate_uint8 = torch.randint(0, 16, (d_expert, d_hidden), device="cuda", dtype=torch.uint8)
 W_up_uint8 = torch.randint(0, 16, (d_expert, d_hidden), device="cuda", dtype=torch.uint8)
-W_down_uint8 = torch.randint(0, 16, (d_hidden, d_expert), device="cuda", dtype=torch.uint8)
 
 # --- Test 1: zeros ---
 z_input = torch.zeros(num_tokens, d_hidden, device="cuda", dtype=torch.float8_e4m3fn)
 z_gate = torch.zeros(d_expert, d_hidden, device="cuda", dtype=torch.uint8)
 z_up = torch.zeros(d_expert, d_hidden, device="cuda", dtype=torch.uint8)
-z_down = torch.zeros(d_hidden, d_expert, device="cuda", dtype=torch.uint8)
-c_zero = jit_kernel(z_input, z_gate, z_up, z_down)
+c_zero = jit_kernel(z_input, z_gate, z_up)
 print(f"[{'PASS' if c_zero.abs().max().item() == 0.0 else 'FAIL'}] zeros in -> zeros out")
 
 # --- Test 2: numerical verification (gate+up only, no down GEMM in this kernel) ---
-out = jit_kernel(input_fp8, W_gate_uint8, W_up_uint8, W_down_uint8)
+out = jit_kernel(input_fp8, W_gate_uint8, W_up_uint8)
 
 # Reference
 input_f32 = input_fp8.to(torch.float32)
@@ -170,7 +166,7 @@ else:
 torch.cuda.synchronize()
 start = time.perf_counter()
 for _ in range(100):
-    jit_kernel(input_fp8, W_gate_uint8, W_up_uint8, W_down_uint8)
+    jit_kernel(input_fp8, W_gate_uint8, W_up_uint8)
 torch.cuda.synchronize()
 elapsed = (time.perf_counter() - start) / 100 * 1000
 total_flops = 2 * num_tokens * d_hidden * d_expert * 2  # 2 GEMMs

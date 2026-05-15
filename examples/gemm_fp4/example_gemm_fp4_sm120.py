@@ -122,8 +122,9 @@ jit_kernel = tilelang.compile(
 )
 
 print("Compilation succeeded!")
-with open(os.path.join(os.path.dirname(__file__), "gemm_fp4_sm120.cu"), "w") as f:
-    f.write(jit_kernel.get_kernel_source())
+if os.environ.get("TL_FP4_DUMP_CUDA", "0") != "0":
+    with open(os.path.join(os.path.dirname(__file__), "gemm_fp4_sm120.cu"), "w") as f:
+        f.write(jit_kernel.get_kernel_source())
 
 torch.manual_seed(42)
 
