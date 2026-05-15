@@ -804,7 +804,11 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
   // PrintType when a float4 type is encountered).
   // ---------------------------------------------------------------------------
   int fp4_lanes = from_ty.lanes();
-  bool fp4_pair_cast = (fp4_lanes == 2 || fp4_lanes == 4 || fp4_lanes == 8);
+  // Pairwise cast: process 2 FP4 lanes at a time via packed uint8_t byte.
+  // Supported lane widths: 2, 4, 8, 16, 32 (all even widths up to FP4x32).
+  bool fp4_pair_cast =
+      (fp4_lanes == 2 || fp4_lanes == 4 || fp4_lanes == 8 || fp4_lanes == 16 ||
+       fp4_lanes == 32);
 
   // FP4 -> float16 : use __tl_cvt_fp4x2_to_half2 per 2-element pair
   if (from_ty.is_float4_e2m1fn() && target_ty.is_float16() && fp4_pair_cast) {
@@ -815,16 +819,17 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     // Iterate over pairs: src is stored as fp4_e2_{lanes}_t; we access the
     // packed byte for each pair via reinterpret as uint8_t array.
+    // Materialize the uint1 result into a local variable to avoid taking the
+    // address of a prvalue (C++ UB).
     for (int i = 0; i < fp4_lanes; i += 2) {
-      std::ostringstream val;
-      val << "__tl_cvt_fp4x2_to_half2(((uint8_t*)&(" << src << "))[" << i / 2
-          << "])";
-      // Store both elements of the half2
-      std::ostringstream v0, v1;
-      v0 << "((half_t*)(&(" << val.str() << ")))[0]";
-      v1 << "((half_t*)(&(" << val.str() << ")))[1]";
-      PrintVecElemStore(sret, target_ty, i, v0.str());
-      PrintVecElemStore(sret, target_ty, i + 1, v1.str());
+      std::string tmp = name_supply_->FreshName("_fp4h2_");
+      this->PrintIndent();
+      stream << "uint1 " << tmp << " = __tl_cvt_fp4x2_to_half2(((uint8_t*)&("
+             << src << "))[" << i / 2 << "]);\n";
+      PrintVecElemStore(sret, target_ty, i,
+                        "((half_t*)(&(" + tmp + ")))[0]");
+      PrintVecElemStore(sret, target_ty, i + 1,
+                        "((half_t*)(&(" + tmp + ")))[1]");
     }
     os << sret;
     return;

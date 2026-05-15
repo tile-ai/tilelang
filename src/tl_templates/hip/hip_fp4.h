@@ -33,8 +33,8 @@ struct fp4_e2_t {
     uint32_t mant = bits & 0x1u;
     float result;
     if (exp == 0u) {
-      // Denormal: value = (-1)^s * 2^(-1) * (0 + m*0.5) = (-1)^s * m * 0.25
-      result = mant ? 0.25f : 0.0f;
+      // Denormal: value = (-1)^s * 0.5 * m  (mant==1 => 0.5, matching encoder nibble 1)
+      result = mant ? 0.5f : 0.0f;
     } else {
       // Normal: value = (-1)^s * 2^(e-1) * (1 + m*0.5)
       float mantissa = 1.0f + mant * 0.5f;

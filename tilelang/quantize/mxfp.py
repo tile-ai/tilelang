@@ -203,7 +203,8 @@ def get_mxfp_intrin_group(
             from tilelang.utils.target import target_is_gfx950
 
             _is_gfx950 = target_is_gfx950(target)
-        except Exception:
+        except (ImportError, ModuleNotFoundError, AttributeError):
+            # target_is_gfx950 unavailable in this build; assume non-gfx950.
             pass
 
     dtype_map = {T.float16: "f16", T.bfloat16: "bf16"}
