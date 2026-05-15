@@ -3,7 +3,7 @@ import tvm
 from tvm.target import Target
 from .arch_base import TileDevice
 from .cuda import TensorInstruction
-from tilelang.utils.target import target_get_mcpu, target_get_rdna_generation
+import tilelang.utils.target as _target_utils
 
 _RDNA_DEFAULT_LDS_SIZE = 64 * 1024
 _RDNA_TENSOR_INSTRUCTIONS = {
@@ -28,9 +28,9 @@ class RDNA(TileDevice):
         if isinstance(target, str):
             target = tvm.target.Target(target)
         self.target = target
-        self.rdna_generation = target_get_rdna_generation(target)
+        self.rdna_generation = _target_utils.target_get_rdna_generation(target)
         if self.rdna_generation not in (11, 12):
-            arch = target_get_mcpu(target) or str(target)
+            arch = _target_utils.target_get_mcpu(target) or str(target)
             raise ValueError(f"RDNA device model currently supports gfx11/gfx12 targets only, got {arch}.")
         device = tvm.runtime.rocm(0)
         if not device.exist:

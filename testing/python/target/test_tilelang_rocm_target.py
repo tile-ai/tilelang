@@ -95,12 +95,11 @@ def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
 
 
 def test_rdna_device_model_rejects_unknown_generation(monkeypatch):
-    import tilelang.carver.arch.rdna as rdna_mod
     from tilelang.carver.arch.rdna import RDNA
 
-    # Monkeypatch so RDNA.__init__ sees an unsupported generation number
-    # without relying on a non-existent mcpu string.
-    monkeypatch.setattr(rdna_mod, "target_get_rdna_generation", lambda t: 13)
+    # Monkeypatch the source module so RDNA.__init__ (which calls via _target_utils)
+    # sees an unsupported generation number without relying on a non-existent mcpu string.
+    monkeypatch.setattr(target_utils, "target_get_rdna_generation", lambda t: 13)
     with pytest.raises(ValueError, match="gfx11/gfx12 targets only"):
         RDNA(Target("hip -mcpu=gfx1201"))
 
