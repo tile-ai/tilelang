@@ -7,12 +7,12 @@ import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
 from tvm import DataType
-from tilelang.intrinsics.mma_layout import (
+from tilelang.cuda.intrinsics.layout.mma_layout import (
     make_mma_swizzle_layout as make_swizzle_layout,
 )
 import numpy as np
 
-from tilelang.intrinsics.mma_macro_generator import (
+from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     INT4TensorCoreIntrinEmitter,
 )
 from tilelang.transform import simplify_prim_func

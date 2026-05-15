@@ -22,6 +22,7 @@
 #include "../op/operator.h"
 #include "../op/region.h"
 #include "../op/utils.h"
+#include "../target/utils.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
 #include "support/utils.h"
@@ -35,6 +36,45 @@ using namespace ffi;
 namespace software_pipeline {
 
 namespace {
+
+bool GetBoolAnnotation(const CopyNode &op, const char *key) {
+  if (auto val = op.annotations.Get(key)) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value != 0;
+    }
+  }
+  return false;
+}
+
+bool GetIsTmaCopy(const CopyNode &op) {
+  return GetBoolAnnotation(op, "is_tma_copy");
+}
+
+bool GetIsAsyncCopy(const CopyNode &op) {
+  if (GetBoolAnnotation(op, "is_async_copy")) {
+    return true;
+  }
+  return GetBoolAnnotation(op, "force_cp_async");
+}
+
+bool CheckTargetIndependentAsyncCopyPreconditions(const CopyNode &op) {
+  if (!IsGlobalBuffer(op.src) || !IsSharedBuffer(op.dst)) {
+    return false;
+  }
+  if (op.src->dtype != op.dst->dtype) {
+    return false;
+  }
+  return true;
+}
+
+bool CheckPipelineManagedCPAsyncCopy(const CopyNode &op,
+                                     Optional<Target> target) {
+  if (GetIsTmaCopy(op) || GetIsAsyncCopy(op) ||
+      !CheckTargetIndependentAsyncCopyPreconditions(op)) {
+    return false;
+  }
+  return !target.defined() || TargetHasAsyncCopy(target.value());
+}
 
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
                  arith::Analyzer *analyzer) {
@@ -365,14 +405,10 @@ private:
     if (copy == nullptr) {
       return false;
     }
-    if (!target_.defined()) {
-      return copy->CheckPipelineManagedCPAsyncCopy();
-    }
-    return copy->CheckPipelineManagedCPAsyncCopy(target_.value(), &analyzer_);
+    return CheckPipelineManagedCPAsyncCopy(*copy, target_);
   }
 
   Optional<Target> target_;
-  mutable arith::Analyzer analyzer_;
 };
 
 class TileOpMbarPhaseAnnotator : public StmtExprMutator {

@@ -390,7 +390,17 @@ private:
     if (scope == "shared" || scope == "shared.dyn") {
       auto target = Target::Current();
       ICHECK(target.defined()) << "Target is not defined";
-      const int alignment = TargetIsHopper(target) ? 1024 : 16;
+      // TMA bulk-copy operands have stricter shared-memory alignment than
+      // ordinary scalar/shared accesses. Hopper keeps the existing 1024-byte
+      // alignment used by the WGMMA/TMA path, while Blackwell/SM120 also needs
+      // TMA sources at least 128-byte aligned to avoid misaligned-address
+      // launch failures.
+      int alignment = 16;
+      if (TargetIsHopper(target)) {
+        alignment = 1024;
+      } else if (TargetHasBulkCopy(target)) {
+        alignment = 128;
+      }
       shmem_alignment_map_[op] = alignment;
     }
   }
@@ -704,66 +714,100 @@ private:
       for (int i = 0, n = static_cast<int>(blocks_.size()); i < n; ++i) {
         size_t aligned = AlignUpSize(blocks_[i].offset, alignment);
         size_t head = aligned - blocks_[i].offset;
-        if (head <= blocks_[i].size && (blocks_[i].size - head) >= need) {
-          size_t waste = blocks_[i].size - head - need;
-          if (waste < best_waste) {
-            best_waste = waste;
-            best = i;
-          }
+        if (head > blocks_[i].size)
+          continue;
+        size_t usable = blocks_[i].size - head;
+        if (usable < need)
+          continue;
+        size_t waste = blocks_[i].size - need;
+        if (waste < best_waste) {
+          best_waste = waste;
+          best = i;
         }
       }
-      if (best < 0) {
+      if (best < 0)
         return std::nullopt;
-      }
-      FreeBlock blk = blocks_[best];
-      size_t aligned = AlignUpSize(blk.offset, alignment);
+      return CarveBlock(best, need, alignment);
+    }
+
+    // Try to allocate from the free block whose end touches arena_top.
+    // The block may be smaller than need; the caller grows the arena to
+    // cover the deficit.  Returns the aligned start offset on success.
+    std::optional<size_t> AllocateFromTail(size_t need, size_t alignment,
+                                           size_t arena_top) {
+      if (blocks_.empty())
+        return std::nullopt;
+      int tail_idx = static_cast<int>(blocks_.size()) - 1;
+      if (blocks_[tail_idx].offset + blocks_[tail_idx].size != arena_top)
+        return std::nullopt;
+
+      size_t aligned = AlignUpSize(blocks_[tail_idx].offset, alignment);
+      if (aligned >= arena_top)
+        return std::nullopt;
+
+      FreeBlock blk = blocks_[tail_idx];
       size_t head = aligned - blk.offset;
-      size_t tail = blk.size - head - need;
-      blocks_.erase(blocks_.begin() + best);
+
+      blocks_.erase(blocks_.begin() + tail_idx);
       if (head) {
-        blocks_.push_back({blk.offset, head});
+        InsertBlock(blk.offset, head);
       }
-      if (tail) {
-        blocks_.push_back({aligned + need, tail});
-      }
-      Normalize();
       return aligned;
     }
 
     void Free(size_t offset, size_t size) {
       if (size == 0)
         return;
-      blocks_.push_back({offset, size});
-      Normalize();
+      InsertBlock(offset, size);
     }
 
   private:
-    void Normalize() {
-      if (blocks_.empty())
-        return;
-      std::sort(blocks_.begin(), blocks_.end(),
-                [](const FreeBlock &a, const FreeBlock &b) {
-                  return a.offset < b.offset;
-                });
-      std::vector<FreeBlock> merged;
-      merged.reserve(blocks_.size());
-      for (const FreeBlock &blk : blocks_) {
-        if (merged.empty()) {
-          merged.push_back(blk);
-          continue;
-        }
-        FreeBlock &last = merged.back();
-        size_t last_end = last.offset + last.size;
-        if (blk.offset <= last_end) {
-          size_t blk_end = blk.offset + blk.size;
-          if (blk_end > last_end) {
-            last.size = blk_end - last.offset;
-          }
-        } else {
-          merged.push_back(blk);
+    // Insert a block at the correct sorted position and merge with adjacent
+    // neighbours so the sorted-and-coalesced invariant is preserved.
+    void InsertBlock(size_t offset, size_t size) {
+      FreeBlock entry{offset, size};
+      auto it = std::lower_bound(
+          blocks_.begin(), blocks_.end(), offset,
+          [](const FreeBlock &b, size_t off) { return b.offset < off; });
+      it = blocks_.insert(it, entry);
+
+      // Merge with the next neighbour.
+      auto next = std::next(it);
+      if (next != blocks_.end() && it->offset + it->size >= next->offset) {
+        size_t merged_end =
+            std::max(it->offset + it->size, next->offset + next->size);
+        it->size = merged_end - it->offset;
+        blocks_.erase(next);
+      }
+      // Merge with the previous neighbour.
+      if (it != blocks_.begin()) {
+        auto prev = std::prev(it);
+        if (prev->offset + prev->size >= it->offset) {
+          size_t merged_end =
+              std::max(prev->offset + prev->size, it->offset + it->size);
+          prev->size = merged_end - prev->offset;
+          blocks_.erase(it);
         }
       }
-      blocks_ = std::move(merged);
+    }
+
+    // Remove blocks_[idx], allocate `need` bytes at the aligned offset
+    // within it, and return any head/tail fragments to the free list.
+    size_t CarveBlock(int idx, size_t need, size_t alignment) {
+      FreeBlock blk = blocks_[idx];
+      blocks_.erase(blocks_.begin() + idx);
+
+      size_t aligned = AlignUpSize(blk.offset, alignment);
+      size_t head = aligned - blk.offset;
+      size_t tail = blk.size - head - need;
+
+      // InsertBlock uses lower_bound + coalesce, so insertion order is
+      // irrelevant for correctness.
+      if (tail)
+        InsertBlock(aligned + need, tail);
+      if (head)
+        InsertBlock(blk.offset, head);
+      return aligned;
     }
 
     std::vector<FreeBlock> blocks_;
@@ -790,8 +834,6 @@ private:
                 if (lhs.size_bytes != rhs.size_bytes) {
                   return lhs.size_bytes > rhs.size_bytes;
                 }
-                // Use name comparison for deterministic ordering instead of
-                // pointer comparison
                 return lhs.var->name_hint < rhs.var->name_hint;
               });
 
@@ -802,7 +844,6 @@ private:
     size_t arena_top = 0;
     std::unordered_map<const VarNode *, size_t> offsets;
 
-    // Expire intervals that end before or at program counter `pc`.
     auto retire = [&](int pc) {
       while (!active.empty() && active.top().end <= pc) {
         const ActiveInterval top = active.top();
@@ -814,13 +855,23 @@ private:
     for (const Interval &interval : intervals) {
       retire(interval.start);
       size_t offset = 0;
-      // Try to recycle previously freed memory first; fall back to bumping the
-      // arena.
+      // 1) Reuse a fully fitting free block (best-fit).
+      // 2) Extend the tail free block that touches arena_top.
+      // 3) Bump-allocate at arena_top (reclaim alignment gap).
       if (auto slot =
               freelist.Allocate(interval.size_bytes, interval.alignment)) {
         offset = slot.value();
+      } else if (auto tail_slot = freelist.AllocateFromTail(
+                     interval.size_bytes, interval.alignment, arena_top)) {
+        offset = tail_slot.value();
+        arena_top = offset + interval.size_bytes;
       } else {
         offset = AlignUpSize(arena_top, interval.alignment);
+        // Reclaim the alignment gap [arena_top, offset) so future small
+        // allocations can reuse it.
+        if (offset > arena_top) {
+          freelist.Free(arena_top, offset - arena_top);
+        }
         arena_top = offset + interval.size_bytes;
       }
       active.push(ActiveInterval{interval.end, offset, interval.size_bytes,
@@ -970,6 +1021,17 @@ private:
       }
     }
 
+    // Pending kill insertions are deferred until after the per-event loop
+    // below: ``event_map_[last_stmt_at_level].kill.push_back(...)`` may
+    // target the very same vector we are currently iterating, in which case
+    // the push_back can reallocate the underlying storage and invalidate
+    // ``it``. MSVC's debug iterator verification catches this on the next
+    // ``it != event.kill.end()`` check ("vector iterators incompatible");
+    // release builds silently dereference freed memory. Buffering the
+    // push-backs and applying them later removes the aliasing entirely.
+    std::vector<std::pair<const Object *, const VarNode *>>
+        pending_kill_inserts;
+
     for (auto &event_pair : event_map_) {
       const Object *stmt = event_pair.first;
       EventEntry &event = event_pair.second;
@@ -1059,13 +1121,22 @@ private:
             }
           }
           if (last_stmt_at_level) {
-            event_map_[last_stmt_at_level].kill.push_back(buffer);
+            // Defer: pushing into event.kill (the vector ``it`` iterates) or
+            // into any other event.kill while the outer ``event_map_`` range
+            // loop is live can invalidate iterators / dangling references.
+            pending_kill_inserts.emplace_back(last_stmt_at_level, buffer);
             visited_buffers.insert(buffer);
           }
         } else {
           ++it;
         }
       }
+    }
+
+    // Apply deferred kill insertions now that no iterator into ``event_map_``
+    // / ``event.kill`` is live.
+    for (const auto &insert : pending_kill_inserts) {
+      event_map_[insert.first].kill.push_back(insert.second);
     }
 
     std::vector<const Object *> stmt_keys;

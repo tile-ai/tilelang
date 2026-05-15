@@ -29,6 +29,10 @@ if sys.platform == "darwin":
     from torch.utils import cpp_extension
 
     COMPILE_ARGS["options"] = ["-x", "objective-c++", "-g", "-std=gnu++17"] + ["-I" + i for i in cpp_extension.include_paths()]
+elif sys.platform == "win32":
+    from tilelang.contrib.msvc import create_shared as _msvc_create_shared
+
+    COMPILE_ARGS["fcompile"] = _msvc_create_shared
 
 
 class TVMFFIKernelAdapter(BaseKernelAdapter):

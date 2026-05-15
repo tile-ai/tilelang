@@ -393,12 +393,20 @@ def dec_max_nreg(reg_count: int):
 
 def annotate_producer_reg_dealloc(reg_count: int = 24):
     """Annotate the producer reg dealloc."""
-    return dec_max_nreg(reg_count)
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.annotate_producer_reg_dealloc"),
+        reg_count,
+    )
 
 
 def annotate_consumer_reg_alloc(reg_count: int = 240):
     """Annotate the consumer reg alloc."""
-    return inc_max_nreg(reg_count)
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.annotate_consumer_reg_alloc"),
+        reg_count,
+    )
 
 
 def no_set_max_nreg():

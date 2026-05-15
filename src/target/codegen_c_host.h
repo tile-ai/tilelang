@@ -127,6 +127,13 @@ private:
   }
 };
 
+/*!
+ * \brief Build a TileLang C host module for the given IRModule and target.
+ * Also handles Metal target through is_in_metal_context flag in IR.
+ */
+::tvm::ffi::Module BuildTileLangCHost(::tvm::IRModule mod,
+                                      ::tvm::Target target);
+
 } // namespace tl
 } // namespace tvm
 

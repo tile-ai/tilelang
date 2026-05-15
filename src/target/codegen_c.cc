@@ -401,7 +401,7 @@ void CodeGenTileLangC::VisitExpr_(const CallNode *op,
     }
     this->PrintIndent();
     if (type == "arg_value") {
-      this->stream << "alignas(64) TVMFFIAny " << stack_name << "[" << size
+      this->stream << "alignas(128) TVMFFIAny " << stack_name << "[" << size
                    << "];\n";
     } else {
       this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";

@@ -61,25 +61,48 @@ def test_inject_set_max_nreg():
     mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tir.transform.LowerOpaqueBlock()(mod)
 
-    # Check that set_max_nreg calls are properly injected
-    main_func = mod["main"]
-    set_max_nreg_calls = []
+    script = mod.script()
+    producer_branch = script.index("if v_2 >= 128:")
+    consumer_branch = script.index("else:", producer_branch)
+    reg_dealloc = script.index("T.set_max_nreg(24, 0)")
+    reg_alloc = script.index("T.set_max_nreg(240, 1)")
 
-    def collect_set_max_nreg(stmt):
-        if (
-            isinstance(stmt, tvm.tir.Evaluate)
-            and hasattr(stmt.value, "op")
-            and hasattr(stmt.value.op, "name")
-            and stmt.value.op.name == "tl.set_max_nreg"
-        ):
-            set_max_nreg_calls.append(stmt.value)
-
-    tvm.tir.stmt_functor.post_order_visit(main_func.body, collect_set_max_nreg)
-
-    # We should have at least 2 set_max_nreg calls (one for producer, one for consumer)
-    assert len(set_max_nreg_calls) >= 2, f"Expected at least 2 set_max_nreg calls, got {len(set_max_nreg_calls)}"
+    assert producer_branch < reg_dealloc < consumer_branch
+    assert consumer_branch < reg_alloc
 
     print("InjectSetMaxNReg test passed!")
+
+
+def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
+    """Raw T.set_max_nreg should stay in place instead of being treated as annotation."""
+
+    @T.prim_func
+    def before(A: T.Tensor((512, 512), T.float16), B: T.Tensor((512, 512), T.float16)):
+        bx = T.launch_thread("blockIdx.x", 8)
+        v = T.launch_thread("threadIdx.x", 256)
+
+        with T.block(""):
+            T.reads(A[bx * 64, 0:64])
+            T.writes(B[bx * 64, 0:64])
+
+            A_shared = T.alloc_buffer((128,), T.float16, scope="shared")
+            T.attr([128, 128], "kWarpSpecializationScope", 0)
+
+            if v >= 128:
+                T.set_max_nreg(80, 0)
+                A_shared[v - 128] = A[bx * 64, v - 128]
+            else:
+                T.set_max_nreg(240, 1)
+                B[bx * 64, v] = A_shared[v]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
+    mod = tir.transform.LowerOpaqueBlock()(mod)
+
+    script = mod.script()
+    assert script.count("T.set_max_nreg(80, 0)") == 1
+    assert script.count("T.set_max_nreg(240, 1)") == 1
+    assert script.count("T.set_max_nreg(") == 2
 
 
 def test_inject_set_max_nreg_no_set_max_nreg():
@@ -113,25 +136,62 @@ def test_inject_set_max_nreg_no_set_max_nreg():
     mod = tl.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tir.transform.LowerOpaqueBlock()(mod)
 
-    # Check that no set_max_nreg calls are injected when no_set_max_nreg is present
-    main_func = mod["main"]
-    set_max_nreg_calls = []
-
-    def collect_set_max_nreg(stmt):
-        if (
-            isinstance(stmt, tvm.tir.Evaluate)
-            and hasattr(stmt.value, "op")
-            and hasattr(stmt.value.op, "name")
-            and stmt.value.op.name == "tl.set_max_nreg"
-        ):
-            set_max_nreg_calls.append(stmt.value)
-
-    tvm.tir.stmt_functor.post_order_visit(main_func.body, collect_set_max_nreg)
-
-    # Should have no set_max_nreg calls when no_set_max_nreg is present
-    assert len(set_max_nreg_calls) == 0, f"Expected 0 set_max_nreg calls when no_set_max_nreg is present, got {len(set_max_nreg_calls)}"
+    script = mod.script()
+    assert "T.set_max_nreg(" not in script
 
     print("InjectSetMaxNReg with no_set_max_nreg test passed!")
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_auto_ws_reg_hints_lower_into_matching_role_scopes():
+    """Producer/consumer reg hints should be emitted inside the auto-WS branches."""
+
+    M = N = K = 256
+    block_m = block_n = 128
+    block_k = 32
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((K, N), T.float16),
+        C: T.Tensor((M, N), T.float16),
+    ):
+        with T.Kernel(T.ceildiv(N, block_n), T.ceildiv(M, block_m), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_m, block_k), T.float16)
+            B_shared = T.alloc_shared((block_k, block_n), T.float16)
+            C_local = T.alloc_fragment((block_m, block_n), T.float32)
+
+            T.annotate_producer_reg_dealloc(40)
+            T.annotate_consumer_reg_alloc(232)
+
+            T.clear(C_local)
+            for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=3):
+                T.copy(A[by * block_m, ko * block_k], A_shared)
+                T.copy(B[ko * block_k, bx * block_n], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+
+            T.copy(C_local, C[by * block_m, bx * block_n])
+
+    pass_configs = {
+        tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+        tl.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+    }
+    tl.disable_cache()
+    try:
+        kernel_mod = tl.compile(kernel, target="cuda", pass_configs=pass_configs, out_idx=[-1])
+        src = kernel_mod.get_kernel_source()
+    finally:
+        tl.enable_cache()
+
+    producer_branch = src.index("if (128 <= ((int)threadIdx.x)) {")
+    consumer_branch = src.index("} else {", producer_branch)
+    reg_dealloc = src.index("tl::warpgroup_reg_dealloc<40>();")
+    reg_alloc = src.index("tl::warpgroup_reg_alloc<232>();")
+
+    assert "warpgroup_reg_dealloc" not in src[:producer_branch]
+    assert "warpgroup_reg_alloc" not in src[:producer_branch]
+    assert producer_branch < reg_dealloc < consumer_branch
+    assert consumer_branch < reg_alloc
 
 
 if __name__ == "__main__":

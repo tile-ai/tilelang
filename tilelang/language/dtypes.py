@@ -205,8 +205,8 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
         )
         return torch.float8_e8m0fnu
     elif dtype_str == "float4_e2m1fnx2":
-        assert hasattr(torch, "float4_e2m1fnx2"), (
-            "torch.float4_e2m1fnx2 is not supported in this version of torch. Please upgrade torch >= 2.8.0"
+        assert hasattr(torch, "float4_e2m1fn_x2"), (
+            "torch.float4_e2m1fn_x2 is not supported in this version of torch. Please upgrade torch >= 2.8.0"
         )
         return torch.float4_e2m1fn_x2
     elif dtype_str == "float4_e2m1fn":

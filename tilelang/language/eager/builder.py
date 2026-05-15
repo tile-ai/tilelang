@@ -849,7 +849,7 @@ def get_type_hints(func):
     # ```
     #
     # This is incomplete and buggy
-    #   the only bug scenario the function body doesn't use the the parameters
+    #   the only bug scenario the function body doesn't use the parameters
     #   but such define-no-use scenario is very rare in writing kernels
     #
     # ```py

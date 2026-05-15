@@ -19,6 +19,7 @@ import importlib
 import logging
 import os.path as osp
 import platform
+import sys
 import tempfile
 from types import ModuleType
 
@@ -185,25 +186,41 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
             __CUDACC_VER_MAJOR__ = cuda.CUDA_VERSION // 1000
 
-            # Determine target architecture
-            machine = platform.machine()
-            target_arch = "sbsa-linux" if machine in ("aarch64", "arm64") else "x86_64-linux"
+            # CUDA Toolkit include layout differs by platform:
+            # * Linux pip wheel ``nvidia-cuXX`` and system CUDA both expose
+            #   per-target trees under ``targets/{arch}-linux/include``.
+            # * Windows pip wheel ``nvidia-cuXX`` and the system CUDA Toolkit
+            #   ship a single flat ``include/`` directory — no ``targets/``
+            #   subtree exists. Hard-coding ``x86_64-linux`` there sends nvrtc
+            #   to a non-existent path so headers like ``nvrtc_std.h`` fail to
+            #   resolve.
+            cuda_include = osp.join(cuda_home, "include")
+            if sys.platform.startswith("win32"):
+                arch_include = cuda_include
+            else:
+                machine = platform.machine()
+                target_arch = "sbsa-linux" if machine in ("aarch64", "arm64") else "x86_64-linux"
+                arch_include = osp.join(cuda_home, "targets", target_arch, "include")
 
             options = [
                 f"-I{tl_template_path}",
                 f"-I{cutlass_path}",
-                f"-I{cuda_home}/include",
-                f"-I{cuda_home}/targets/{target_arch}/include",
-                f"-I{cuda_home}/targets/{target_arch}/include/cccl",
+                f"-I{cuda_include}",
+                f"-I{arch_include}",
+                f"-I{arch_include}/cccl",
                 f"-D__CUDACC_VER_MAJOR__={__CUDACC_VER_MAJOR__}",
             ]
 
-            # Add CUDA C++ standard library include path.
-            # CUDA 13+ uses the CCCL-based cuda::std layout, while older versions use the legacy path.
-            if __CUDACC_VER_MAJOR__ >= 13:
-                options += [f"-I{cuda_home}/targets/{target_arch}/include/cccl/cuda/std"]
-            else:
-                options += [f"-I{cuda_home}/targets/{target_arch}/include/cuda/std"]
+            # CUDA <13 keeps cuda::std at the legacy ``cuda/std`` path. CUDA 13
+            # moved it under CCCL (``cccl/cuda/std``) which is already reachable
+            # via the ``-I {arch_include}/cccl`` entry above as ``<cuda/std/*>``.
+            # Adding ``-I .../cccl/cuda/std`` would also expose CCCL's private
+            # ``__tuple_dir/structured_bindings.h`` at the include root, which
+            # collides ODR-style with cutlass's own ``tuple_size``/``tuple_element``
+            # forward declarations in ``cute/container/tuple.hpp`` under NVRTC
+            # (cute uses variadic packs, cccl uses a single ``_Tp``).
+            if __CUDACC_VER_MAJOR__ < 13:
+                options += [f"-I{arch_include}/cuda/std"]
 
             if self.compile_flags:
                 options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
