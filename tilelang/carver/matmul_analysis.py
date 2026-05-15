@@ -642,10 +642,9 @@ def get_tensorized_func_and_tags(
             if not is_tensorcore_supported_precision(in_dtype, out_dtype, arch=get_arch(target)):
                 logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by tensorcore")
                 return func, None
-        elif is_rdna_wmma_target(target):
-            if (str(in_dtype), str(out_dtype)) not in {("float16", "float32")}:
-                logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by RDNA WMMA")
-                return func, None
+        elif is_rdna_wmma_target(target) and (str(in_dtype), str(out_dtype)) not in {("float16", "float32")}:
+            logger.debug(f"The input and output dtype ({in_dtype}, {out_dtype})is not supported by RDNA WMMA")
+            return func, None
 
         # reindex and transform functions
         # Normalize tensor functions to C[S, I, J] += A[S, I, K] * B[S, J, K]
