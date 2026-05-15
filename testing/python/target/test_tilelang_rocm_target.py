@@ -86,19 +86,23 @@ def test_carver_routes_rdna_without_instantiating_device(monkeypatch):
 def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
     import tilelang.carver.arch as arch_mod
 
-    def fake_cdna(target):
-        return ("cdna", target)
+    # Simulate a future RDNA generation (e.g. 13) that the carver doesn't support yet.
+    # We monkeypatch both helpers so we don't depend on a non-existent mcpu string.
+    monkeypatch.setattr(arch_mod, "target_is_rdna", lambda t: True)
+    monkeypatch.setattr(arch_mod, "target_get_rdna_generation", lambda t: 13)
+    with pytest.raises(ValueError, match="gfx11/gfx12 targets only"):
+        arch_mod.get_arch(Target("hip -mcpu=gfx1201"))
 
-    monkeypatch.setattr(arch_mod, "CDNA", fake_cdna)
-    with pytest.raises(ValueError, match="gfx11 targets only"):
-        arch_mod.get_arch(Target("hip -mcpu=gfx1200"))
 
-
-def test_rdna_device_model_rejects_gfx12_before_device_probe():
+def test_rdna_device_model_rejects_unknown_generation(monkeypatch):
+    import tilelang.carver.arch.rdna as rdna_mod
     from tilelang.carver.arch.rdna import RDNA
 
-    with pytest.raises(ValueError, match="gfx11 targets only"):
-        RDNA(Target("hip -mcpu=gfx1200"))
+    # Monkeypatch so RDNA.__init__ sees an unsupported generation number
+    # without relying on a non-existent mcpu string.
+    monkeypatch.setattr(rdna_mod, "target_get_rdna_generation", lambda t: 13)
+    with pytest.raises(ValueError, match="gfx11/gfx12 targets only"):
+        RDNA(Target("hip -mcpu=gfx1201"))
 
 
 def test_rdna_tensor_instruction_lookup_is_generation_aware():
@@ -110,5 +114,5 @@ def test_rdna_tensor_instruction_lookup_is_generation_aware():
     assert isinstance(arch.available_tensor_instructions, list)
 
     arch.rdna_generation = 12
-    with pytest.raises(ValueError, match="Unsupported RDNA generation"):
-        arch.get_avaliable_tensorintrin_shapes()
+    assert arch.get_avaliable_tensorintrin_shapes() == [[16, 16]]
+    assert isinstance(arch.available_tensor_instructions, list)
