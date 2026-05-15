@@ -154,7 +154,12 @@ struct AllReduce {
 
 template <int threads, bool reverse = false> struct CumSum1D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64 or threads == 32);
+                threads == 128 or threads == 64 or threads == 32,
+                "CumSum1D: threads must be a power-of-two in [32, 1024].");
+  // threads == 32 is only safe on RDNA (wave32). On CDNA (wave64), threads
+  // must be >= 64 so that the wave-64 dispatch path has enough active lanes.
+  // We cannot check __builtin_amdgcn_wavefrontsize() at compile-time in a
+  // static_assert, but callers should ensure threads >= wavefront size.
 
   // Run cumsum using a wavefront-sized scan segment.
   // SEG must equal the hardware wavefront size (32 for RDNA, 64 for CDNA).
@@ -223,9 +228,11 @@ template <int threads, bool reverse = false> struct CumSum1D {
                             int N) {
     if (N <= 0)
       return;
-    // Dispatch based on hardware wavefront size at compile time via
-    // __builtin_amdgcn_wavefrontsize().  RDNA targets compile with
-    // -mwavefrontsize32 so this resolves to 32; CDNA resolves to 64.
+    // Dispatch based on hardware wavefront size.  RDNA compiles with
+    // -mwavefrontsize32 so __builtin_amdgcn_wavefrontsize() resolves to 32;
+    // CDNA resolves to 64.  Calling run_seg<T,32> on a wave64 device (or
+    // vice-versa) is undefined behaviour, so callers must ensure
+    // threads >= wavefront size when targeting CDNA.
     if (__builtin_amdgcn_wavefrontsize() == 32) {
       run_seg<T, 32>(src, dst, N);
     } else {
@@ -236,7 +243,11 @@ template <int threads, bool reverse = false> struct CumSum1D {
 
 template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64 or threads == 32);
+                threads == 128 or threads == 64 or threads == 32,
+                "CumSum2D: threads must be a power-of-two in [32, 1024].");
+  // threads == 32 is only safe on RDNA (wave32). On CDNA (wave64),
+  // TILE_H = threads / SEG would be 0 and cause incorrect behaviour.
+  // Callers must ensure threads >= wavefront size.
 
   template <typename T, int SEG>
   static TL_DEVICE void run_seg(const T *__restrict__ src, T *__restrict__ dst,
@@ -314,6 +325,9 @@ template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   template <typename T>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int H, int W) {
+    // On wave64 hardware with threads=32 the TILE_H derived inside run_seg
+    // would be zero, so this path must never be reached.  Callers are
+    // responsible for ensuring threads >= wavefront size.
     if (__builtin_amdgcn_wavefrontsize() == 32) {
       run_seg<T, 32>(src, dst, H, W);
     } else {

@@ -77,8 +77,8 @@ def test_jit2_gemm_ptr():
     # ROCm WMMA only supports float16/bfloat16 as input; skip float32 input on non-CUDA.
     try:
         _is_cuda = target_is_cuda(determine_target("auto", return_object=True))
-    except Exception:
-        _is_cuda = True
+    except (RuntimeError, ValueError):
+        _is_cuda = False
     in_dtypes = [T.float16, T.float32] if _is_cuda else [T.float16]
     prod = list(product(in_dtypes, [T.float32]))
     gemm_ptr.par_compile(
