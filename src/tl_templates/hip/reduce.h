@@ -154,7 +154,7 @@ struct AllReduce {
 
 template <int threads, bool reverse = false> struct CumSum1D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64 or threads == 32,
+                    threads == 128 or threads == 64 or threads == 32,
                 "CumSum1D: threads must be a power-of-two in [32, 1024].");
   // threads == 32 is only safe on RDNA (wave32). On CDNA (wave64), threads
   // must be >= 64 so that the wave-64 dispatch path has enough active lanes.
@@ -243,7 +243,7 @@ template <int threads, bool reverse = false> struct CumSum1D {
 
 template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64 or threads == 32,
+                    threads == 128 or threads == 64 or threads == 32,
                 "CumSum2D: threads must be a power-of-two in [32, 1024].");
   // threads == 32 is only safe on RDNA (wave32). On CDNA (wave64),
   // TILE_H = threads / SEG would be 0 and cause incorrect behaviour.
