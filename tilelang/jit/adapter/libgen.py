@@ -21,6 +21,8 @@ from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.utils.target import target_get_mcpu
 
+from tilelang.contrib.hip_resource_info import filter_and_record, hipcc_remark_flag
+
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
@@ -126,6 +128,10 @@ class LibraryGenerator:
                 f"--offload-arch={arch}",
                 "--shared",
                 src.name,
+                # Emit per-kernel resource-usage remarks; tilelang parses
+                # and strips them below before printing/raising so they
+                # don't pollute autotune logs.
+                hipcc_remark_flag(),
             ]
             command += [
                 "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
@@ -172,6 +178,12 @@ class LibraryGenerator:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
+        # On HIP we always capture stdio so the kernel-resource-usage
+        # remarks can be parsed + stripped before anything reaches the
+        # terminal; the filtered output still surfaces on error.
+        if is_hip_target(target):
+            run_kwargs.setdefault("stdout", subprocess.PIPE)
+            run_kwargs.setdefault("stderr", subprocess.STDOUT)
 
         try:
             if verbose:
@@ -180,9 +192,20 @@ class LibraryGenerator:
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
+        captured = ""
+        if ret.stdout is not None:
+            captured = ret.stdout.decode("utf-8", errors="replace")
+            if is_hip_target(target):
+                captured = filter_and_record(captured)
+
         if ret.returncode != 0:
-            captured = ret.stdout.decode("utf-8", errors="replace") if ret.stdout else ""
             raise RuntimeError(f"Compilation Failed! {command}\n{captured}\n{self.lib_code}")
+
+        # On HIP success, surface any real (non-remark) warnings only when
+        # the caller asked for verbose output, matching `compile_hip`'s
+        # behavior. Quiet by default so autotune logs stay clean.
+        if is_hip_target(target) and verbose and captured.strip():
+            print(captured)
 
         self.srcpath = src.name
         self.libpath = libpath

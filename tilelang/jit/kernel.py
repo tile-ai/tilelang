@@ -7,7 +7,8 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 
-from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target
+from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
+from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target
 from tvm.target import Target
 from tvm.tir import PrimFunc
 
@@ -243,6 +244,15 @@ class JITKernel(Generic[_P, _T]):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
             pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
 
+        # On HIP, open a recorder window so the kernel-resource-usage
+        # remarks emitted by hipcc get parsed into self._resource_usage
+        # (consumed by kernel.n_regs etc.). The window has to stay open
+        # past adapter construction: tvm_ffi runs hipcc inside lower()
+        # (enable_device_compile=True), but cython invokes it later from
+        # the adapter constructor.
+        capture_resources = is_hip_target(target)
+        if capture_resources:
+            reset_recorder()
         with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments), self.target:
             artifact = tilelang.lower(
                 tilelang_func,
@@ -331,6 +341,9 @@ class JITKernel(Generic[_P, _T]):
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
+
+        if capture_resources:
+            self._resource_usage = pop_recorded()
 
         return adapter
 
@@ -625,6 +638,40 @@ class JITKernel(Generic[_P, _T]):
     @property
     def host_source(self) -> str:
         return str(self.artifact.host_mod) if self.artifact else ""
+
+    @property
+    def resource_usage(self) -> dict[str, Any]:
+        """{kernel_name: KernelResourceUsage} parsed from clang's
+        kernel-resource-usage remarks. HIP only; empty for other
+        targets and for kernels loaded from cache (no compile happened).
+        """
+        return getattr(self, "_resource_usage", {}) or {}
+
+    def _primary_resource_usage(self):
+        usage = self.resource_usage
+        if not usage:
+            return None
+        gsym = None
+        if self.prim_func is not None and self.prim_func.attrs is not None:
+            gsym = self.prim_func.attrs.get("global_symbol")
+        if gsym is not None and str(gsym) in usage:
+            return usage[str(gsym)]
+        return next(iter(usage.values()))
+
+    @property
+    def n_regs(self) -> int | None:
+        info = self._primary_resource_usage()
+        return info.n_regs if info is not None else None
+
+    @property
+    def n_spills(self) -> int | None:
+        info = self._primary_resource_usage()
+        return info.n_spills if info is not None else None
+
+    @property
+    def n_max_threads(self) -> int | None:
+        info = self._primary_resource_usage()
+        return info.n_max_threads if info is not None else None
 
     def export_library(self, kernel_file: str) -> None:
         """
