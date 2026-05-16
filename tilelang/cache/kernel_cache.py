@@ -461,9 +461,7 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
 
-            # Persist parsed kernel-resource-usage remarks (HIP only;
-            # empty dict on other targets) so cache hits don't lose
-            # kernel.n_regs / n_spills / resource_usage.
+            # Persist HIP kernel-resource-usage remarks
             usage = getattr(kernel, "_resource_usage", None) or {}
             if usage:
                 dump_to_file(usage, os.path.join(staging_path, self.resource_usage_path))

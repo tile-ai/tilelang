@@ -244,12 +244,7 @@ class JITKernel(Generic[_P, _T]):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")  # Default dump path
             pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
 
-        # On HIP, open a recorder window so the kernel-resource-usage
-        # remarks emitted by hipcc get parsed into self._resource_usage
-        # (consumed by kernel.n_regs etc.). The window has to stay open
-        # past adapter construction: tvm_ffi runs hipcc inside lower()
-        # (enable_device_compile=True), but cython invokes it later from
-        # the adapter constructor.
+        # open a recorder window for kernel-resource-usage remarks
         capture_resources = is_hip_target(target)
         if capture_resources:
             reset_recorder()
@@ -641,10 +636,7 @@ class JITKernel(Generic[_P, _T]):
 
     @property
     def resource_usage(self) -> dict[str, Any]:
-        """{kernel_name: KernelResourceUsage} parsed from clang's
-        kernel-resource-usage remarks. HIP only; empty for other
-        targets and for kernels loaded from cache (no compile happened).
-        """
+        """HIP only now"""
         return getattr(self, "_resource_usage", {}) or {}
 
     def _primary_resource_usage(self):
