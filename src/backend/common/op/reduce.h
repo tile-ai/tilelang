@@ -19,6 +19,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
+#include <tvm/tir/stmt_functor.h>
 
 #include <cmath>
 #include <cstdint>
@@ -329,19 +330,150 @@ template <typename Impl> struct ReduceLowerer {
         src_var_compressed.push_back(var);
       }
 
-      Stmt reduce_local = BufferStore(
-          clear_buffer,
-          reduce::MakeReduce(op, BufferLoad(clear_buffer, red_indices),
-                             BufferLoad(src_buffer, src_indice_compressed)),
-          red_indices);
+      // K-way ILP extra accumulator buffers (populated below if applicable, then
+      // wrapped in their own Allocate nodes at the end alongside clear_buffer).
+      Array<Buffer> ilp_extra_bufs;
 
-      for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0; --i) {
-        reduce_local = For(src_var_compressed[i]->var, 0,
-                           src_var_compressed[i]->dom->extent,
-                           ForKind::kUnrolled, reduce_local, std::nullopt,
-                           {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+      // K-way ILP rewrite: when the innermost (per-thread) reduce loop has a
+      // large compile-time extent, split the single accumulator into K
+      // independent accumulators reducing K-strided slices. This breaks the
+      // length-N serial dep chain into K parallel chains of length N/K,
+      // unlocking ILP that ptxas otherwise can't recover (FP max/sum are
+      // associative but compilers conservatively keep the source order).
+      //
+      // Safe for max/min/absmax/sum/absSum/bitand/bitor/bitxor (all
+      // associative). Falls back to the single-acc form for unknown reducers,
+      // non-constant extents, or small loops.
+      const int kILP = 4;
+      const bool reducer_is_associative =
+          (op.type->isMax() || op.type->isMin() || op.type->isAbsMax() ||
+           op.type->isSum() || op.type->isAbsSum() ||
+           op.type->isBitAnd() || op.type->isBitOr() || op.type->isBitXor());
+      int innermost_idx = static_cast<int>(src_layout->OutputDim()) - 1;
+      const int64_t *innermost_extent_p =
+          (innermost_idx >= 0)
+              ? as_const_int(src_var_compressed[innermost_idx]->dom->extent)
+              : nullptr;
+      const bool can_ilp = reducer_is_associative && innermost_idx >= 0 &&
+                           innermost_extent_p != nullptr &&
+                           *innermost_extent_p >= 4 * kILP &&
+                           (*innermost_extent_p % kILP == 0);
+
+      if (can_ilp) {
+        // Allocate K-1 extra accumulator buffers (clear_buffer is acc[0]).
+        Array<Buffer> acc_bufs;
+        acc_bufs.push_back(clear_buffer);
+        for (int k = 1; k < kILP; ++k) {
+          Buffer b =
+              decl_buffer(red_layout->OutputShape(), clear_buffer->dtype,
+                          clear_buffer->name + "_ilp" + std::to_string(k),
+                          GetPtrStorageScope(clear_buffer->data));
+          acc_bufs.push_back(b);
+          ilp_extra_bufs.push_back(b);
+        }
+        for (int k = 1; k < kILP; ++k) {
+          stmts.push_back(BufferStore(acc_bufs[k], reduce::MakeInitValue(op),
+                                      red_indices));
+        }
+
+        Var orig_rv = src_var_compressed[innermost_idx]->var;
+        Var new_rv(orig_rv->name_hint + "_ilp", orig_rv->dtype);
+
+        // Optionally use the 3-input PTX `max.ftz.f32` to process 2 source
+        // elements per ILP slot per iter (halves the loop count). Only valid
+        // for fp32 max with extent divisible by 2*kILP and reducer = isMax().
+        bool use_max3 = op.type->isMax() && clear_buffer->dtype.is_float() &&
+                        clear_buffer->dtype.bits() == 32 &&
+                        (*innermost_extent_p % (2 * kILP) == 0);
+
+        int stride = use_max3 ? 2 * kILP : kILP;
+        Array<Stmt> ilp_body_stmts;
+        for (int k = 0; k < kILP; ++k) {
+          auto make_src_idx = [&](int offset) {
+            Map<Var, PrimExpr> subst;
+            subst.Set(orig_rv,
+                      make_const(orig_rv->dtype, stride) * new_rv +
+                          make_const(orig_rv->dtype, offset));
+            Array<PrimExpr> src_idx_k;
+            src_idx_k.reserve(src_indice_compressed.size());
+            for (const auto &idx_expr : src_indice_compressed) {
+              src_idx_k.push_back(tir::Substitute(idx_expr, subst));
+            }
+            return src_idx_k;
+          };
+
+          if (use_max3) {
+            Array<PrimExpr> src_idx_a = make_src_idx(2 * k);
+            Array<PrimExpr> src_idx_b = make_src_idx(2 * k + 1);
+            PrimExpr m3 =
+                Call(clear_buffer->dtype, tl::max3(),
+                     {BufferLoad(acc_bufs[k], red_indices),
+                      BufferLoad(src_buffer, src_idx_a),
+                      BufferLoad(src_buffer, src_idx_b)});
+            ilp_body_stmts.push_back(BufferStore(acc_bufs[k], m3, red_indices));
+          } else {
+            Array<PrimExpr> src_idx_k = make_src_idx(k);
+            ilp_body_stmts.push_back(BufferStore(
+                acc_bufs[k],
+                reduce::MakeReduce(op, BufferLoad(acc_bufs[k], red_indices),
+                                   BufferLoad(src_buffer, src_idx_k)),
+                red_indices));
+          }
+        }
+        Stmt ilp_body = ilp_body_stmts.size() == 1
+                            ? ilp_body_stmts[0]
+                            : Stmt(SeqStmt(ilp_body_stmts));
+        PrimExpr new_extent =
+            make_const(orig_rv->dtype, *innermost_extent_p / stride);
+        ilp_body = For(new_rv, make_const(orig_rv->dtype, 0), new_extent,
+                       ForKind::kUnrolled, ilp_body, std::nullopt,
+                       {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+
+        // Wrap with outer (non-innermost) loops, if any.
+        for (int i = innermost_idx - 1; i >= 0; --i) {
+          ilp_body = For(src_var_compressed[i]->var, 0,
+                         src_var_compressed[i]->dom->extent,
+                         ForKind::kUnrolled, ilp_body, std::nullopt,
+                         {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+        }
+        stmts.push_back(ilp_body);
+
+        // Tree-merge K accumulators into clear_buffer.
+        // clear_buffer (acc[0]) already has the running result; merge acc[1..K-1]
+        // pairwise then into acc[0] so the dep tree is balanced.
+        if (kILP >= 4) {
+          PrimExpr m01 = reduce::MakeReduce(
+              op, BufferLoad(acc_bufs[0], red_indices),
+              BufferLoad(acc_bufs[1], red_indices));
+          PrimExpr m23 = reduce::MakeReduce(
+              op, BufferLoad(acc_bufs[2], red_indices),
+              BufferLoad(acc_bufs[3], red_indices));
+          PrimExpr merged = reduce::MakeReduce(op, m01, m23);
+          stmts.push_back(BufferStore(clear_buffer, merged, red_indices));
+        } else {
+          PrimExpr merged = BufferLoad(clear_buffer, red_indices);
+          for (int k = 1; k < kILP; ++k) {
+            merged = reduce::MakeReduce(op, merged,
+                                        BufferLoad(acc_bufs[k], red_indices));
+          }
+          stmts.push_back(BufferStore(clear_buffer, merged, red_indices));
+        }
+      } else {
+        Stmt reduce_local = BufferStore(
+            clear_buffer,
+            reduce::MakeReduce(op, BufferLoad(clear_buffer, red_indices),
+                               BufferLoad(src_buffer, src_indice_compressed)),
+            red_indices);
+
+        for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0;
+             --i) {
+          reduce_local = For(src_var_compressed[i]->var, 0,
+                             src_var_compressed[i]->dom->extent,
+                             ForKind::kUnrolled, reduce_local, std::nullopt,
+                             {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+        }
+        stmts.push_back(reduce_local);
       }
-      stmts.push_back(reduce_local);
 
       auto src_thread = src_layout->ForwardThread(
           src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
@@ -496,6 +628,9 @@ template <typename Impl> struct ReduceLowerer {
         }
 
         Stmt body = phases.size() > 1 ? SeqStmt(phases) : phases[0];
+        for (const auto &b : ilp_extra_bufs) {
+          body = Allocate(b->data, b->dtype, b->shape, const_true(), body);
+        }
         if (need_duplicate) {
           body = Allocate(clear_buffer->data, clear_buffer->dtype,
                           clear_buffer->shape, const_true(), body);
@@ -576,6 +711,9 @@ template <typename Impl> struct ReduceLowerer {
         body = IfThenElse(guard, body);
       }
 
+      for (const auto &b : ilp_extra_bufs) {
+        body = Allocate(b->data, b->dtype, b->shape, const_true(), body);
+      }
       if (need_duplicate) {
         body = Allocate(clear_buffer->data, clear_buffer->dtype,
                         clear_buffer->shape, const_true(), body);

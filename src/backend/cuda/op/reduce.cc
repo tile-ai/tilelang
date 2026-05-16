@@ -21,6 +21,22 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return TargetIsCuda(target);
   }
 
+  // Derive a unique pair of barrier IDs per concurrent WG so two WGs doing
+  // inter-thread reductions don't collide on bar.sync. Each AllReduce uses
+  // TWO barriers (sync<barrier_id> and sync<barrier_id+1>), so per-WG IDs
+  // must be at least 2 apart. Map wg_idx -> 1 + 2*(wg_idx & 0x7): WG0 -> 1
+  // (uses 1,2), WG1 -> 3 (uses 3,4), ..., WG7 -> 15 (uses 15, 0 = __syncthreads
+  // which is fine because at most one WG can wrap onto 0). The mask keeps the
+  // result in 1..15 (hardware has 16 named barriers).
+  static int BarrierIdFor(PrimExpr thread_offset, int reducing_threads) {
+    auto offset_int = as_const_int(thread_offset);
+    if (offset_int == nullptr || reducing_threads <= 0) {
+      return 1;
+    }
+    int wg_idx = static_cast<int>(*offset_int / reducing_threads);
+    return 1 + 2 * (wg_idx & 0x7);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset,
@@ -30,7 +46,8 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", "
+         << BarrierIdFor(thread_offset, reducing_threads) << ">";
     } else {
       ss << ", tl::SyncThreadsBarrier";
     }
@@ -46,7 +63,8 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", "
+         << BarrierIdFor(thread_offset, reducing_threads) << ">";
     }
     ss << ">::run";
     return ss.str();

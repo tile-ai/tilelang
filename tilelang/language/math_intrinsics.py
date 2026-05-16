@@ -404,6 +404,16 @@ def min2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.min2"), x, y)
 
 
+def max3(a: PrimExpr, b: PrimExpr, c: PrimExpr) -> PrimExpr:
+    """3-input scalar max with FTZ. Emits `max.ftz.f32 d, a, b, c` (one
+    cycle) on SM_100+, falls back to nested fmax elsewhere. Used to halve
+    the dependency chain in reduce_max bodies."""
+    a = tir.convert(a)
+    b = tir.convert(b)
+    c = tir.convert(c)
+    return tir.call_intrin(a.dtype, tir.op.Op.get("tl.max3"), a, b, c)
+
+
 def abs2(x: PrimExpr) -> PrimExpr:
     """Packed element-wise absolute value."""
     x = tir.convert(x)
@@ -435,4 +445,5 @@ __all__ = [
     "max2",  # noqa: F401
     "min2",  # noqa: F401
     "abs2",  # noqa: F401
+    "max3",  # noqa: F401
 ]

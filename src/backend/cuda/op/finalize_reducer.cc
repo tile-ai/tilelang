@@ -19,6 +19,16 @@ namespace cuda {
 struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
   static int WarpSize(Target target) { return TargetGetWarpSize(target); }
 
+  // See reduce.cc::Reduce::BarrierIdFor for rationale (paired-ID scheme).
+  static int BarrierIdFor(PrimExpr thread_offset, int reducing_threads) {
+    auto offset_int = as_const_int(thread_offset);
+    if (offset_int == nullptr || reducing_threads <= 0) {
+      return 1;
+    }
+    int wg_idx = static_cast<int>(*offset_int / reducing_threads);
+    return 1 + 2 * (wg_idx & 0x7);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset,
@@ -28,7 +38,8 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", "
+         << BarrierIdFor(thread_offset, reducing_threads) << ">";
     } else {
       ss << ", tl::SyncThreadsBarrier";
     }
@@ -44,7 +55,8 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
     if (TargetHasSMVersionGE(target, 90)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << all_threads << ", "
+         << BarrierIdFor(thread_offset, reducing_threads) << ">";
     }
     ss << ">::run";
     return ss.str();

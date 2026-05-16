@@ -1520,6 +1520,48 @@ std::string PrintArriveBarrierAsm(const std::string &barrier) {
   return predicated_asm_code;
 }
 
+// Lane-0-only variant: only lane 0 of the executing warp actually decrements
+// the barrier. Lets the kernel keep a small ``arrive_count`` (one-per-warp)
+// without all 32 lanes underflowing the counter on an over-arrive — which on
+// SM100 traps with CUDA_ERROR_LAUNCH_FAILED.
+//
+// Implementation: full warp converges on a __syncwarp + a CTA-wide memory
+// fence so that *all 32 lanes'* SMEM writes are visible to other warps in
+// the block before lane 0 decrements the barrier. Then a PTX-level
+// predicated arrive (no host-level if) keeps the warp non-divergent.
+//
+// The warp-wide (count=32) variant doesn't need any of this — every lane
+// issues its own arrive, and each arrive contributes a release fence on the
+// issuing thread's writes. Lane-0-only doesn't have that property: only
+// lane 0's release fence orders its own writes. Without the explicit
+// __threadfence_block(), the consumer warp may read stale SMEM for the
+// data written by lanes 1..31.
+std::string PrintArriveBarrierLane0Asm(const std::string &barrier) {
+  std::string predicated_asm_code = R"(
+  {
+    __syncwarp();
+    __threadfence_block();
+    unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
+    __asm__ __volatile__(
+      "{                                                  \n\t"
+      "  .reg .pred  p;                                   \n\t"
+      "  .reg .b32   lane;                                \n\t"
+      "  .reg .b64   state;                               \n\t"
+      "  mov.u32     lane, %%laneid;                      \n\t"
+      "  setp.eq.u32 p, lane, 0;                          \n\t"
+      "  @p mbarrier.arrive.shared.b64 state, [%0];       \n\t"
+      "}"
+      :: "r"(barrier_addr_int)
+    );
+  }
+)";
+
+  Replacer replacer;
+  replacer.register_rule("{barrier}", "&" + barrier);
+  predicated_asm_code = replacer.rewrite(predicated_asm_code);
+  return predicated_asm_code;
+}
+
 std::string PrintArriveBarrierExpectTxAsm(const std::string &barrier,
                                           const std::string &byte_count) {
   std::string predicated_asm_code = R"(

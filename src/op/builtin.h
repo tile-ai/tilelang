@@ -261,6 +261,12 @@ TVM_DLL const Op &max2();
 TVM_DLL const Op &min2();
 TVM_DLL const Op &abs2();
 
+// Scalar 3-input max with FTZ (SM_100+ PTX `max.ftz.f32 d, a, b, c`).
+// One-cycle instruction vs 2 cycles for nested binary max — used by the FA4
+// reference's softmax reduce. Falls back to `fmax(a, fmax(b, c))` on targets
+// that don't support the 3-input form.
+TVM_DLL const Op &max3();
+
 // random op
 TVM_DLL const Op &rng_init();
 TVM_DLL const Op &rng_rand();
@@ -527,6 +533,15 @@ TVM_DLL const Op &annotate_consumer_reg_alloc();
  *
  */
 TVM_DLL const Op &no_set_max_nreg();
+
+/*!
+ * \brief Lane-0 only mbarrier arrive — gates the PTX inline-asm in a
+ *        ``if ((threadIdx.x & 31) == 0)`` so each warp contributes exactly
+ *        one decrement regardless of warp width. The arrive_count of the
+ *        target barrier should be set to ``num_warps`` accordingly. Argument
+ *        is the mbarrier buffer load (matches ``ptx_arrive_barrier``).
+ */
+TVM_DLL const Op &ptx_arrive_barrier_lane0();
 
 /*!
  * \brief Arrive at a warpgroup fence for WGMMA sequences

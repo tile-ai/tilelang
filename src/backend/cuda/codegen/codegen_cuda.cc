@@ -520,6 +520,37 @@ public:
   int64_t min_blocks_per_sm = 1; // default to 1
 };
 
+// Walks the prim_func body and returns the maximum register count requested
+// via any `T.set_max_nreg(N, ...)` call. Returns 0 if no such call exists.
+//
+// We need this in PrintExtraAttrs so we can emit `__maxnreg__(N)` on the
+// __global__ declaration. Without that attribute the host launch's
+// `cudaFuncAttributeMaxRegistersPerThread` setting (added in wrapper.py)
+// has no effect because ptxas already chose a tighter per-thread reg limit
+// at compile time. The two settings must agree for FA4-style warp-spec
+// register donation to actually grow math warps' register pools.
+class MaxNRegExtractor : public tir::StmtExprVisitor {
+public:
+  static int64_t Extract(const Stmt &body) {
+    MaxNRegExtractor v;
+    v(body);
+    return v.max_nreg_;
+  }
+
+private:
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::set_max_nreg()) && op->args.size() >= 1) {
+      if (const IntImmNode *n = op->args[0].as<IntImmNode>()) {
+        if (n->value > max_nreg_)
+          max_nreg_ = n->value;
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  int64_t max_nreg_ = 0;
+};
+
 class ClusterInfoExtractor : public tir::StmtVisitor {
 private:
   void VisitStmt(const PrimFunc &f) {
@@ -559,6 +590,17 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   PrimExpr threadIdx_ext =
       analyzer.Simplify(extractor.threadIdx_x_ext * extractor.threadIdx_y_ext *
                         extractor.threadIdx_z_ext);
+  // If the prim_func calls T.set_max_nreg(N, *) anywhere, emit
+  // __maxnreg__(N) so ptxas reserves enough register slots per math thread
+  // for the runtime setmaxnreg.inc to actually grow into. Without this the
+  // FA4-style warp-spec register donation has no effect.
+  //
+  // nvcc rejects "__launch_bounds__ and __maxnreg__ qualifiers cannot be
+  // applied to the same kernel" — they're mutually exclusive ways of
+  // controlling per-thread register count. When set_max_nreg is in use we
+  // prefer __maxnreg__ (it lets us choose any N up to 240); otherwise we
+  // keep emitting the old __launch_bounds__ form.
+  int64_t max_nreg = MaxNRegExtractor::Extract(f->body);
   if (const IntImmNode *const threadIdx_ext_int =
           threadIdx_ext.as<IntImmNode>()) {
     if (threadIdx_ext_int->value == 1) {
@@ -566,8 +608,14 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
-           << extractor.min_blocks_per_sm << ")";
+    if (max_nreg > 0) {
+      stream << " __maxnreg__(" << max_nreg << ")";
+    } else {
+      stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
+             << extractor.min_blocks_per_sm << ")";
+    }
+  } else if (max_nreg > 0) {
+    stream << " __maxnreg__(" << max_nreg << ")";
   }
 }
 
@@ -3186,6 +3234,25 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << PrintArriveBarrierAsm(barrier);
+  } else if (op->op.same_as(tl::ptx_arrive_barrier_lane0())) {
+    // Lane-0 only variant — see tl::ptx_arrive_barrier_lane0() in builtin.h.
+    // arg may be either an IntImm (after the builtin::ptx_arrive_barrier
+    // lowering substitution) or a BufferLoad on the mbarrier buffer. Support
+    // both forms so we can be called directly from the tilelang frontend.
+    need_cast_smem_ptr_to_int_ = true;
+    std::string barrier;
+    if (const auto *imm = op->args[0].as<IntImmNode>()) {
+      CHECK(imm->value < barrier_count_);
+      barrier = barrier_name_ + "[" + std::to_string(imm->value) + "]";
+    } else if (const auto *load = op->args[0].as<BufferLoadNode>()) {
+      barrier =
+          load->buffer->name + "[" + this->PrintExpr(load->indices[0]) + "]";
+    } else {
+      LOG(FATAL) << "tl.ptx_arrive_barrier_lane0 expects IntImm or "
+                    "BufferLoad as arg 0, got "
+                 << op->args[0]->GetTypeKey();
+    }
+    this->stream << PrintArriveBarrierLane0Asm(barrier);
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;
@@ -3764,6 +3831,22 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
     os << func_name << "(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ")";
+    return true;
+  } else if (op->op.same_as(tl::max3())) {
+    // Inline PTX `max.ftz.f32 d, a, b, c` for fp32 (one cycle on SM_100+).
+    // Falls back to nested fmax for other dtypes.
+    if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+        op->dtype.lanes() == 1) {
+      std::string a = PrintExpr(op->args[0]);
+      std::string b = PrintExpr(op->args[1]);
+      std::string c = PrintExpr(op->args[2]);
+      os << "([&]{float _r; asm(\"max.ftz.f32 %0, %1, %2, %3;\" : "
+         << "\"=f\"(_r) : \"f\"(" << a << "), \"f\"(" << b << "), \"f\"(" << c
+         << ")); return _r;}())";
+    } else {
+      os << "fmax(fmax(" << PrintExpr(op->args[0]) << ", "
+         << PrintExpr(op->args[1]) << "), " << PrintExpr(op->args[2]) << ")";
+    }
     return true;
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||

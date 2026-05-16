@@ -225,36 +225,57 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
     return buffer
 
 
-def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
+_tmem_alloc_counter = [0]
+
+
+def alloc_tmem(
+    shape: ShapeType,
+    dtype: DType,
+    *,
+    alias: Buffer | None = None,
+    col_offset: int = 0,
+) -> Buffer:
     """
-    Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
+    Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations.
 
-    TMEM is a dedicated on-chip memory introduced in Blackwell GPUs, designed to reduce register pressure and enable asynchronous, single-threaded MMA operations. It is organized as a 2D array of 512 columns by 128 rows (lanes), with each cell being 32 bits. Allocation is performed in units of columns, and every lane of a column is allocated together.
-
-    Key properties and requirements:
-        - The number of columns allocated must be a power of 2 and at least 32.
-        - TMEM allocations are dynamic. TileLang deallocates them automatically at
-          the end of the allocation block unless you call ``T.deallocate_tmem`` to
-          take manual control of the lifetime.
-        - Both allocation and deallocation must be performed by the same warp.
-        - The base address of the TMEM allocation is stored in shared memory and used as the offset for TCGEN5.MMA accumulator tensors.
-        - Only TCGEN5.MMA and specific TMEM load/store instructions can access TMEM; all pre-processing must occur before data is loaded into TMEM, and all post-processing after data is retrieved.
-        - The number of columns allocated should not increase between any two allocations in the execution order within the CTA.
+    TMEM is a dedicated on-chip memory introduced in Blackwell GPUs (128 lanes × 512
+    cols of 32-bit cells, 64KB total).
 
     Args:
-        num_cols (int): Number of columns to allocate in TMEM. Must be a power of 2 and >= 32 but less than or equal to 512.
-
-    Returns:
-        T.Buffer: A TVM buffer object allocated in TMEM scope, suitable for use as an accumulator or operand in TCGEN5.MMA operations.
-
-    Note:
-        - TMEM is only available on supported architectures (e.g., Blackwell and later).
-        - The buffer returned should be used according to TMEM access restrictions.
-          Use ``T.deallocate_tmem`` only when you need an earlier, explicit release.
+        shape: 2-D logical shape (M, N).
+        dtype: Element dtype.
+        alias: When supplied, the new buffer SHARES physical TMEM columns with
+            ``alias`` — no extra ``tcgen05.alloc`` is issued. Useful for the
+            FA4 trick where S (fp32) and P (bf16) overlap because S is dead
+            by the time P is written. The caller owns the lifetime contract;
+            tilelang does not verify it.
+        col_offset: TMEM column offset from the alias parent's base address.
+            Only meaningful with ``alias=...``. Must be a non-negative int.
     """
 
     assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"
-    return T.alloc_buffer(shape, dtype, scope="shared.tmem")
+    if alias is None and col_offset != 0:
+        raise ValueError("col_offset is only valid with alias=...")
+    if alias is not None and col_offset < 0:
+        raise ValueError(f"col_offset must be >= 0, got {col_offset}")
+    buf = T.alloc_buffer(shape, dtype, scope="shared.tmem")
+    if alias is not None:
+        # Stash the alias info on the enclosing block. The lower_shared_tmem
+        # C++ pass picks this up: it skips the tcgen05.alloc for `buf` and
+        # instead emits `buf_addr[0] = alias_addr[0] + col_offset` after the
+        # parent's init.
+        #
+        # The key/value use BUFFER objects (not their data Vars). Vars get
+        # replaced by upstream passes (their identity isn't preserved across
+        # pass boundaries), but Buffer instances are mutated in-place by the
+        # script parser — Namer::Name does `buffer->name = name` rather than
+        # creating a new Buffer node — so Buffer identity is stable.
+        block_attr({
+            "tmem_alias_buffers": {
+                buf: [alias, IntImm("int32", int(col_offset))]
+            }
+        })
+    return buf
 
 
 ReducerOp = Literal["sum", "max", "min"]

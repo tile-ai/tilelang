@@ -99,8 +99,12 @@ class GemmTCGEN5(GemmBase):
             }
         if self.is_gemm_ts():
             b_continuity = self.K if b_is_k_major else int(self.B.shape[-1])
+            # A operand is in TMEM with shape (M, K); column dim is K so we
+            # need atom_k for tiling, not atom_n. Without matrix="A" this
+            # path rejects any non-square GEMM (e.g. d=256 attention's
+            # P[128,128] @ V[128,256] = D[128,256] hits N=256 != A_cols=128).
             layouts = {
-                self.A: mma_emitter.make_mma_store_layout(self.A),
+                self.A: mma_emitter.make_mma_store_layout(self.A, matrix="A"),
                 self.B: self.infer_shared_layout(b_continuity)(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }

@@ -472,7 +472,7 @@ def mbarrier_wait_parity(mbarrier: BarrierType, parity: int | Var):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
+def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None, *, lane0: bool = False):
     """Arrive at memory barrier.
 
     Args:
@@ -481,13 +481,27 @@ def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
         cta_id: int | Var | None
             The peer CTA rank in cluster to arrive at. (Only valid for cluster barriers)
             If not provided, will arrive on current CTA's barrier.
+        lane0: bool
+            If True, only lane 0 of the executing warp actually arrives.
+            Each warp then contributes exactly one arrival regardless of how
+            many lanes are alive at the call site. Useful when a barrier was
+            initialized with ``arrive_count = num_warps`` (the FA4 pattern).
+            Without this flag, ``T.mbarrier_arrive`` is warp-wide — every
+            live lane decrements the barrier counter, so a count=1 barrier
+            over-arrives 31 times and underflows (CUDA_ERROR_LAUNCH_FAILED
+            on SM100). Lowered to a new ``tl.ptx_arrive_barrier_lane0`` op
+            whose CUDA codegen emits the inline-ASM block guarded by
+            ``if ((threadIdx.x & 31) == 0)``. Not valid with ``cta_id``.
     """
+    if lane0 and cta_id is not None:
+        raise ValueError("lane0=True is not supported with cta_id (use a per-CTA elect manually).")
     mbarrier = _mbar_to_buffer_load(mbarrier)
     if cta_id is not None:
         assert mbarrier.buffer.scope() == "shared.cluster_barrier", f"mbarrier must be a cluster barrier, but got {mbarrier.buffer.scope}"
         return ptx_arrive_cluster_barrier(mbarrier, cta_id)
-    else:
+    if not lane0:
         return ptx_arrive_barrier(mbarrier)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_arrive_barrier_lane0"), mbarrier)
 
 
 def mbarrier_expect_tx(mbarrier: BarrierType, tx: int):

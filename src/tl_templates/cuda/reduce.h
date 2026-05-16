@@ -109,14 +109,25 @@ struct BitXorOp {
 // Barrier policy: wraps __syncthreads().
 // The phase template parameter is ignored (all phases use the same barrier).
 struct SyncThreadsBarrier {
+  // Exposed for AllReduce; ignored because __syncthreads() takes no ID.
+  static constexpr int barrier_id = 0;
   template <int phase = 0> static TL_DEVICE void sync() { __syncthreads(); }
 };
 
 // Barrier policy: wraps named barrier (bar.sync) with compile-time phase IDs.
 // Used on Hopper and later architectures where __syncthreads() cannot be used
 // in certain contexts.
-template <int all_threads> struct NamedBarrier {
-  template <int phase = 1> static TL_DEVICE void sync() {
+// barrier_id selects which of the 16 hardware named barriers to use.
+// IDs 1 and 2 are kReduce_0 / kReduce_1 in thread_sync_types.h. When two
+// WGs in the same CTA do concurrent inter-thread reductions, they must use
+// DIFFERENT barrier IDs or the bar.sync waits on the wrong cohort and the
+// kernel deadlocks. The codegen passes a per-WG unique ID derived from the
+// thread_offset of the reduce.
+// AllReduce reads `barrier_id` and uses it for the first intra-reduce sync,
+// plus `barrier_id + 1` for the second; codegen must allocate IDs in pairs.
+template <int all_threads, int barrier_id_ = 1> struct NamedBarrier {
+  static constexpr int barrier_id = barrier_id_;
+  template <int phase = barrier_id_> static TL_DEVICE void sync() {
     asm volatile("bar.sync %0, %1;" : : "r"(phase), "r"(all_threads));
   }
 };
@@ -181,9 +192,9 @@ private:
   static TL_DEVICE T butterfly_reduce_scalar(T x, T *red_buf) {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
-      Barrier::template sync<1>();
+      Barrier::template sync<Barrier::barrier_id>();
       red_buf[threadIdx.x - thread_offset] = x;
-      Barrier::template sync<2>();
+      Barrier::template sync<Barrier::barrier_id + 1>();
       x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
     } else {
       x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
@@ -199,12 +210,12 @@ private:
   static TL_DEVICE void butterfly_reduce_batch(T *x, T *red_buf) {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
-      Barrier::template sync<1>();
+      Barrier::template sync<Barrier::barrier_id>();
 #pragma unroll
       for (int i = 0; i < batch_size; i++) {
         red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
       }
-      Barrier::template sync<2>();
+      Barrier::template sync<Barrier::barrier_id + 1>();
 #pragma unroll
       for (int i = 0; i < batch_size; i++) {
         x[i] =

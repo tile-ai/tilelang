@@ -130,6 +130,34 @@ private:
       ICHECK(layout_map) << "layout map is not defined";
       layout_map_ = layout_map->as<Map<Buffer, Layout>>().value();
     }
+    // Pick up the per-buffer alias map planted by Python alloc_tmem(alias=...).
+    // Each entry is: aliased_buffer -> [parent_buffer, col_offset].
+    // We key by Buffer identity (NodeRef pointer): the script parser's
+    // Namer mutates buffer->name in-place rather than constructing a new
+    // Buffer, so Buffer identity is preserved across pass boundaries
+    // (whereas Var identity is not — Vars get replaced by some passes).
+    // The annotation uses Buffer keys whose Namer-applied names survive
+    // pass boundaries (Var/Buffer pointer identity is NOT stable — by the
+    // time we get here, upstream passes have rebuilt the Buffer instances —
+    // but the buffer NAMES carry through because the Python-side annotation
+    // captures the Buffer node by reference, and Namer mutates name in
+    // place on whichever instance is current when assignment happens).
+    if (op->annotations.count("tmem_alias_buffers")) {
+      auto val = op->annotations.Get("tmem_alias_buffers");
+      auto opt_map = val ? val->as<Map<Buffer, Array<Any>>>() : std::nullopt;
+      if (opt_map.has_value()) {
+        for (const auto &kv : opt_map.value()) {
+          ICHECK_EQ(kv.second.size(), 2U)
+              << "tmem_alias_buffers entry must be [parent_buffer, col_offset]";
+          auto parent_buf = kv.second[0].try_cast<Buffer>();
+          auto col_offset = kv.second[1].try_cast<IntImm>();
+          ICHECK(parent_buf && col_offset)
+              << "tmem_alias_buffers entry has malformed payload";
+          tmem_alias_parent_name_[kv.first->name] = (*parent_buf)->name;
+          tmem_alias_col_offset_by_name_[kv.first->name] = (*col_offset)->value;
+        }
+      }
+    }
 
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : alloc_buffers) {
@@ -234,8 +262,14 @@ private:
     }
 
     // 3. create init & dealloc calls for new buffers
+    // Aliased buffers (alloc_tmem(alias=...)) get their base address copied
+    // from the parent's address slot + col_offset — no tcgen05.alloc is
+    // issued for them. The post-init `alias_buf[0] = parent_buf[0] +
+    // col_offset` stores are emitted into ``alias_addr_stores`` so they run
+    // after the parent's init (still under the warp-0 guard).
     std::vector<Stmt> init_mtmem_calls_;
     std::vector<Stmt> dealloc_tmem_calls_;
+    std::vector<Stmt> alias_addr_stores;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
       auto old_buffer = buffer_data_to_buffer_.at(data);
@@ -256,6 +290,32 @@ private:
 
       tmem_num_cols_allocated_.insert({data, num_cols_allocated});
       tmem_call_annotations_.insert({data, tmem_call_ann});
+
+      auto alias_it = tmem_alias_parent_name_.find(old_buffer->name);
+      if (alias_it != tmem_alias_parent_name_.end()) {
+        // Aliased: skip alloc/dealloc, store the parent's base addr + col
+        // offset into this buffer's address slot. Find the parent by NAME
+        // (since Buffer pointer identity isn't preserved across passes).
+        const std::string &parent_name = alias_it->second;
+        Buffer parent_new;
+        bool found = false;
+        for (const auto &kv : buffer_remap_) {
+          if (kv.first->name == parent_name) {
+            parent_new = kv.second;
+            found = true;
+            break;
+          }
+        }
+        ICHECK(found) << "tmem_alias parent '" << parent_name
+                       << "' not found among tmem buffers";
+        int col_off = tmem_alias_col_offset_by_name_.at(old_buffer->name);
+        // new_buffer[0] = parent_new[0] + col_offset
+        PrimExpr parent_addr = BufferLoad(parent_new, {IntImm(DataType::Int(32), 0)});
+        PrimExpr aliased_addr = parent_addr + IntImm(parent_new->dtype, col_off);
+        alias_addr_stores.push_back(
+            BufferStore(new_buffer, aliased_addr, {IntImm(DataType::Int(32), 0)}));
+        continue;
+      }
 
       auto new_buffer_access = new_buffer.access_ptr(1, DataType::Handle(), 1,
                                                      PrimExpr(0), PrimExpr(1));
@@ -279,6 +339,11 @@ private:
     };
     std::sort(init_mtmem_calls_.begin(), init_mtmem_calls_.end(),
               compare_by_buffer_name);
+    // Alias-base-address copies come AFTER the genuine tcgen05.alloc inits
+    // so the parent's address slot is already populated.
+    for (auto &s : alias_addr_stores) {
+      init_mtmem_calls_.push_back(s);
+    }
 
     Array<Stmt> new_body;
     ICHECK(target_.defined()) << "LowerSharedTmem requires a bound target";
@@ -437,6 +502,16 @@ private:
   std::unordered_map<Var, Map<String, ObjectRef>, ObjectPtrHash, ObjectPtrEqual>
       tmem_call_annotations_;
   Map<Buffer, Layout> layout_map_;
+  // Alias relationships planted by alloc_tmem(alias=..., col_offset=...).
+  // Keyed by buffer NAME (string): neither Var nor Buffer pointer identity
+  // is preserved across the TIR pass pipeline (some upstream pass rebuilds
+  // Buffer instances). But names ARE — the Python-side annotation captures
+  // the Buffer node, the script parser then renames it via Namer in place,
+  // and the annotation's stored Buffer reflects that rename. Names then
+  // carry through subsequent pass-driven Buffer reconstructions because
+  // each new Buffer copies the name field.
+  std::unordered_map<std::string, std::string> tmem_alias_parent_name_;
+  std::unordered_map<std::string, int> tmem_alias_col_offset_by_name_;
 };
 
 PrimFunc LowerSharedTmem(PrimFunc f) {
