@@ -96,8 +96,8 @@ def construct_inputs(batch_sizes_list, K, M, trans_b, padding_M, device, dtype):
         batch_offsets_list.append(batch_offsets_list[-1] + batch_sizes_list[i])
     for i in range(batch_count - 1):
         batch_padded_offsets_list.append(batch_padded_offsets_list[-1] + math.ceil((batch_sizes_list[i]) / padding_M) * padding_M)
-    A = torch.randn(batch_sum, K, device=device, dtype=dtype)
-    B = torch.randn(batch_count, K, M, device=device, dtype=dtype)
+    A = torch.randint(-3, 4, (batch_sum, K), device=device, dtype=dtype)
+    B = torch.randint(-3, 4, (batch_count, K, M), device=device, dtype=dtype)
     C = torch.empty(batch_sum, M, device=device, dtype=dtype)
     batch_sizes = torch.tensor(batch_sizes_list, device=device, dtype=torch.int32)
     batch_offsets = torch.tensor(batch_offsets_list, device=device, dtype=torch.int32)
