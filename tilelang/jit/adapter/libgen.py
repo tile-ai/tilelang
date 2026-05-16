@@ -20,7 +20,6 @@ from tilelang.contrib.nvcc import (
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.utils.target import target_get_mcpu
-
 from tilelang.contrib.hip_resource_info import filter_and_record
 
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
