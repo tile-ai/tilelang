@@ -282,10 +282,11 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
 
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
+    print(mod.script())
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
-    enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
-    mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
+    # enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
+    # mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=enable_aggressive_merge)(mod)
     # InjectFenceProxy is a no-op on targets that lack the TMA / async-proxy
     # programming model; the pass itself checks the PrimFunc's target.
     mod = tilelang.transform.InjectFenceProxy()(mod)
