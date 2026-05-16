@@ -1,5 +1,3 @@
-import re
-
 import tilelang
 import tilelang.testing
 from tilelang import language as T
