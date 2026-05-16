@@ -7,7 +7,6 @@ try:
 except ImportError:  # Python < 3.10
     from typing_extensions import ParamSpec
 
-from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target
 from tvm.target import Target
 from tvm.tir import PrimFunc
@@ -26,6 +25,7 @@ from tilelang.jit.adapter import (
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
+from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
 import logging
