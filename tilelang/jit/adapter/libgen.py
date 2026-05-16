@@ -114,7 +114,7 @@ class LibraryGenerator:
             ]
 
         elif is_hip_target(target):
-            from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
+            from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_HIP_SAVE_TEMP_FILES
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
@@ -132,6 +132,8 @@ class LibraryGenerator:
             command += [
                 "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
             ]
+            if TILELANG_HIP_SAVE_TEMP_FILES != "0":
+                command += ["--save-temps", "-g"]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
 

@@ -312,6 +312,7 @@ class Environment:
     TILELANG_CLEANUP_TEMP_FILES = EnvVar(
         "TILELANG_CLEANUP_TEMP_FILES", "0"
     )  # cleanup temporary compiler files/dirs after compilation (default: keep for debugging)
+    TILELANG_HIP_SAVE_TEMP_FILES = EnvVar("TILELANG_HIP_SAVE_TEMP_FILES", "0")  # save temporary files for HIP compilation
 
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
@@ -502,3 +503,4 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
 CUTLASS_INCLUDE_DIR = env.CUTLASS_INCLUDE_DIR
 COMPOSABLE_KERNEL_INCLUDE_DIR = env.COMPOSABLE_KERNEL_INCLUDE_DIR
 TILELANG_TEMPLATE_PATH = env.TILELANG_TEMPLATE_PATH
+TILELANG_HIP_SAVE_TEMP_FILES = env.TILELANG_HIP_SAVE_TEMP_FILES
