@@ -913,9 +913,31 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   };
-  if (op->op.same_as(builtin::ptx_cp_async())) {
+  if (op->op.same_as(tl::ptx_make_buffer_resource())) {
+    // Expression form: emits make_wave_buffer_resource((const void*)(ptr)).
+    // The enclosing LetStmt visitor recognises this Call and emits `auto x =`.
+    ICHECK(op->args.size() == 1)
+        << "ptx_make_buffer_resource expects 1 argument (global_ptr)";
+    std::string ptr = this->PrintExpr(op->args[0]);
+    os << "make_wave_buffer_resource((const void*)(" << ptr << "))";
+  } else if (op->op.same_as(tl::ptx_cp_async_lds_rsrc())) {
+    // args = [dst, src, bytes, rsrc_var, base_var]
+    ICHECK(op->args.size() == 5)
+        << "ptx_cp_async_lds_rsrc expects 5 arguments";
+    std::string dst = this->PrintExpr(op->args[0]);
+    std::string src = this->PrintExpr(op->args[1]);
+    std::string size = this->PrintExpr(op->args[2]);
+    std::string rsrc = this->PrintExpr(op->args[3]);
+    std::string base = this->PrintExpr(op->args[4]);
+    this->PrintIndent();
+    this->stream << "tl::cp_async_gs_lds_with_rsrc<" << size << ">("
+                 << dst << ", " << src << ", " << rsrc << ", " << base
+                 << ");\n";
+  } else if (op->op.same_as(builtin::ptx_cp_async()) ||
+             op->op.same_as(tl::ptx_cp_async_lds())) {
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
-    // args[3] = predicate (optional)
+    // args[3] = predicate (optional). ptx_cp_async_lds shares this shape but
+    // routes to the gs_lds (buffer_load ... lds) template instead.
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
         << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
            "src_access_ptr, bytes, [predicate])";
@@ -925,8 +947,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     if (op->args.size() == 3) {
       // Non-predicated version
-      this->stream << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src
-                   << ");\n";
+      bool use_lds = op->op.same_as(tl::ptx_cp_async_lds());
+      this->stream << (use_lds ? "tl::cp_async_gs_lds<" : "tl::cp_async_gs<")
+                   << size << ">(" << dst << ", " << src << ");\n";
     } else {
       // Predicated version
       std::string condition = this->PrintExpr(op->args[3]);
@@ -1437,7 +1460,32 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == tl::attr::kLexicalAllocScope) {
+  if (op->attr_key == "buffer_resource_var") {
+    // Hoisted resource descriptor from the HoistBufferResource Python pass.
+    // Emits: auto {rsrc_var} = make_wave_buffer_resource((const void*)({buf_var}));
+    auto rsrc_var = Downcast<Var>(op->node);
+    std::string rsrc_vid = AllocVarID(rsrc_var.get());
+    std::string buf_ptr = PrintExpr(op->value);
+    this->PrintIndent();
+    this->stream << "auto " << rsrc_vid
+                 << " = make_wave_buffer_resource((const void*)(" << buf_ptr
+                 << "));\n";
+    this->VisitStmt(op->body);
+    return;
+  } else if (op->attr_key == "buffer_base_var") {
+    // Hoisted readfirstlane base address from the HoistBufferResource pass.
+    // Emits: uint32_t {base_var} = __builtin_amdgcn_readfirstlane(
+    //            (uint32_t)(uintptr_t)({buf_var}));
+    auto base_var = Downcast<Var>(op->node);
+    std::string base_vid = AllocVarID(base_var.get());
+    std::string buf_ptr = PrintExpr(op->value);
+    this->PrintIndent();
+    this->stream << "uint32_t " << base_vid
+                 << " = __builtin_amdgcn_readfirstlane("
+                 << "(uint32_t)(uintptr_t)(" << buf_ptr << "));\n";
+    this->VisitStmt(op->body);
+    return;
+  } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
     PrintIndent();
     stream << "{\n";
     int scope = BeginScope();
@@ -1468,6 +1516,25 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
                  << panel_size << ">();\n";
     this->VisitStmt(op->body);
     return;
+  }
+  CodeGenC::VisitStmt_(op);
+}
+
+void CodeGenTileLangHIP::VisitStmt_(const LetStmtNode *op) {
+  // For LetStmt(var = ptx_make_buffer_resource(buf)), emit `auto x = ...;`
+  // instead of the C-typed declaration the base class would produce. The
+  // return type is int32x4_t and naming it explicitly is brittle across
+  // backends, so `auto` keeps the template lookup in make_wave_buffer_resource
+  // responsible for the type.
+  if (auto *call = op->value.as<CallNode>()) {
+    if (call->op.same_as(tl::ptx_make_buffer_resource())) {
+      std::string value = PrintExpr(op->value);
+      PrintIndent();
+      stream << "auto " << AllocVarID(op->var.get()) << " = " << value
+             << ";\n";
+      PrintStmt(op->body);
+      return;
+    }
   }
   CodeGenC::VisitStmt_(op);
 }
