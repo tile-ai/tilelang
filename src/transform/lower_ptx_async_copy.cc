@@ -531,17 +531,18 @@ private:
 
     // gfx950 routing: emit tl::ptx_cp_async_lds when the destination is a
     // 16-byte non-predicated shared-memory write whose LDS index is lane-
-    // contiguous (no XOR swizzle).  Note: arg 2 here is *byte width*, not
-    // logical element count, because the codegen handler for ptx_cp_async_lds
-    // prints arg 2 directly as the template width and the device template
-    // currently only specialises N == 16.
+    // contiguous (no XOR swizzle). Arg 2 carries the logical element count
+    // (same convention tl::ptx_cp_async uses) so the existing vec-loop
+    // folding in vectorize_loop.cc widens it correctly when the call sits
+    // inside a T.vectorized(k) loop. The codegen handler converts the
+    // logical count back to bytes via GetTileLangCPAsyncTransferBytes.
     if (enable_buffer_load_lds_ && !predicated && total_bytes == 16) {
       const std::string dst_scope = store->buffer.scope();
       const bool is_shared =
           dst_scope == "shared" || dst_scope == "shared.dyn";
       if (is_shared && IsLdsLaneContiguous(dst_check_index)) {
         ffi::Array<PrimExpr> lds_args = {dst_access_ptr, src_access_ptr,
-                                         PrimExpr(total_bytes)};
+                                         PrimExpr(num_elems)};
         return Evaluate(Call(store->buffer->dtype, tvm::tl::ptx_cp_async_lds(),
                              lds_args));
       }

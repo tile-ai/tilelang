@@ -685,7 +685,8 @@ public:
     if (op->op.same_as(builtin::ptx_cp_async())) {
       return scalar_count * 8;
     }
-    ICHECK(op->op.same_as(tl::ptx_cp_async()));
+    ICHECK(op->op.same_as(tl::ptx_cp_async()) ||
+           op->op.same_as(tl::ptx_cp_async_lds()));
     auto dst_elem_bits = GetAccessPtrElementBits(op->args[0]);
     auto src_elem_bits = GetAccessPtrElementBits(op->args[1]);
     if (!dst_elem_bits.has_value() || !src_elem_bits.has_value()) {
@@ -706,7 +707,8 @@ public:
   // the final codegen validate the derived PTX byte width.
   PrimExpr MutatePTXCPAsyncExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(builtin::ptx_cp_async()) ||
-           op->op.same_as(tl::ptx_cp_async()));
+           op->op.same_as(tl::ptx_cp_async()) ||
+           op->op.same_as(tl::ptx_cp_async_lds()));
     if (op->args.size() != 3 && op->args.size() != 4) {
       return tvm::ffi::GetRef<PrimExpr>(op);
     }

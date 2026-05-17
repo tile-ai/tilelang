@@ -445,7 +445,8 @@ private:
     if (node->op.same_as(builtin::ptx_cp_async())) {
       return count * 8;
     }
-    ICHECK(node->op.same_as(tl::ptx_cp_async()));
+    ICHECK(node->op.same_as(tl::ptx_cp_async()) ||
+           node->op.same_as(tl::ptx_cp_async_lds()));
     auto dst_elem_bits = GetAccessPtrElementBits(node->args[0]);
     auto src_elem_bits = GetAccessPtrElementBits(node->args[1]);
     if (!dst_elem_bits.has_value() || !src_elem_bits.has_value()) {
@@ -520,7 +521,8 @@ private:
       buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::ptx_cp_async()) ||
-               node->op.same_as(tl::ptx_cp_async())) {
+               node->op.same_as(tl::ptx_cp_async()) ||
+               node->op.same_as(tl::ptx_cp_async_lds())) {
       // builtin::ptx_cp_async stores bytes, while tl::ptx_cp_async stores
       // logical element counts. In both cases we pick the largest vector width
       // whose eventual PTX payload is one of {4, 8, 16} bytes.

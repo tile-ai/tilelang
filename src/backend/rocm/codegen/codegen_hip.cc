@@ -926,18 +926,34 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "ptx_cp_async_lds_rsrc expects 5 arguments";
     std::string dst = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
-    std::string size = this->PrintExpr(op->args[2]);
+    // arg 2 carries logical element count (inherited from the
+    // ptx_cp_async_lds call that HoistBufferResource rewrote into this
+    // rsrc form). Convert to bytes the same way the ptx_cp_async / lds
+    // handler does, by inspecting the access-ptr element type.
+    const auto *num_elems_imm = op->args[2].as<IntImmNode>();
+    ICHECK(num_elems_imm)
+        << "ptx_cp_async_lds_rsrc num_elems must be IntImm, but got "
+        << op->args[2];
+    auto dst_elem_type = GetAccessPtrElementType(op->args[0]);
+    ICHECK(dst_elem_type.has_value())
+        << "ptx_cp_async_lds_rsrc dst must be tvm_access_ptr / tl.access_ptr / "
+           "address_of(BufferLoad)";
+    int64_t total_bits = num_elems_imm->value *
+                         dst_elem_type.value().bits() *
+                         dst_elem_type.value().lanes();
+    ICHECK_EQ(total_bits % 8, 0)
+        << "ptx_cp_async_lds_rsrc requires byte-aligned transfer, got "
+        << total_bits << " bits";
+    int total_bytes = static_cast<int>(total_bits / 8);
+    std::string size = std::to_string(total_bytes);
     std::string rsrc = this->PrintExpr(op->args[3]);
     std::string base = this->PrintExpr(op->args[4]);
     this->PrintIndent();
     this->stream << "tl::cp_async_gs_lds_with_rsrc<" << size << ">("
                  << dst << ", " << src << ", " << rsrc << ", " << base
                  << ");\n";
-  } else if (op->op.same_as(builtin::ptx_cp_async()) ||
-             op->op.same_as(tl::ptx_cp_async_lds())) {
-    // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
-    // args[3] = predicate (optional). ptx_cp_async_lds shares this shape but
-    // routes to the gs_lds (buffer_load ... lds) template instead.
+  } else if (op->op.same_as(builtin::ptx_cp_async())) {
+    // builtin::ptx_cp_async stores byte width directly in arg 2.
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
         << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
            "src_access_ptr, bytes, [predicate])";
@@ -946,25 +962,29 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string size = this->PrintExpr(op->args[2]);
     this->PrintIndent();
     if (op->args.size() == 3) {
-      // Non-predicated version
-      bool use_lds = op->op.same_as(tl::ptx_cp_async_lds());
-      this->stream << (use_lds ? "tl::cp_async_gs_lds<" : "tl::cp_async_gs<")
-                   << size << ">(" << dst << ", " << src << ");\n";
+      this->stream << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src
+                   << ");\n";
     } else {
-      // Predicated version
       std::string condition = this->PrintExpr(op->args[3]);
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
                    << ", " << src << ", " << condition << ");\n";
     }
-  } else if (op->op.same_as(tl::ptx_cp_async())) {
+  } else if (op->op.same_as(tl::ptx_cp_async()) ||
+             op->op.same_as(tl::ptx_cp_async_lds())) {
+    // Both store logical element count in arg 2; convert to bytes via
+    // GetTileLangCPAsyncTransferBytes. ptx_cp_async_lds routes the
+    // non-predicated path to tl::cp_async_gs_lds<bytes> instead of
+    // tl::cp_async_gs<bytes>; predicated copies always fall back to the
+    // generic cp_async_gs_conditional template.
     int total_bytes = GetTileLangCPAsyncTransferBytes(op);
     std::string dst = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
     std::string size = std::to_string(total_bytes);
     this->PrintIndent();
     if (op->args.size() == 3) {
-      this->stream << "tl::cp_async_gs<" << size << ">(" << dst << ", " << src
-                   << ");\n";
+      bool use_lds = op->op.same_as(tl::ptx_cp_async_lds());
+      this->stream << (use_lds ? "tl::cp_async_gs_lds<" : "tl::cp_async_gs<")
+                   << size << ">(" << dst << ", " << src << ");\n";
     } else {
       std::string condition = this->PrintExpr(op->args[3]);
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst

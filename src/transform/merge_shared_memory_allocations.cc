@@ -600,7 +600,8 @@ private:
                   {op->args[0], merged_buf_var_, extra_offset + offset, extent,
                    op->args[4]});
     } else if (op->op.same_as(builtin::ptx_cp_async()) ||
-               op->op.same_as(tl::ptx_cp_async())) {
+               op->op.same_as(tl::ptx_cp_async()) ||
+               op->op.same_as(tl::ptx_cp_async_lds())) {
       ICHECK(op->args.size() == 3U || op->args.size() == 4U)
           << "ptx_cp_async expects 3 or 4 arguments (dst_access_ptr, "
              "src_access_ptr, count[, predicate])";
