@@ -21,6 +21,7 @@ from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
+from tilelang.utils.tensor import is_float8_dtype
 
 
 COMPILE_ARGS = {}
@@ -249,7 +250,22 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     ins_idx += 1
                 tensor_list.append(tensor)
 
-            executable(*tensor_list)
+            # PyTorch dlpack does not support FP8 tensors. Work around by viewing
+            # each FP8 torch.Tensor as int8, converting to a TVM NDArray via
+            # from_dlpack, then reinterpreting it as the original FP8 dtype
+            # using _create_view. The TVM FFI internally supports FP8 dtypes
+            # (DLDataType codes 10-13), so the reinterpreted array passes the
+            # dtype check inside the compiled kernel.
+            ffi_arg_list = []
+            for t in tensor_list:
+                if isinstance(t, torch.Tensor) and is_float8_dtype(t.dtype):
+                    fp8_dtype_str = str(t.dtype).split(".")[-1]  # e.g. "float8_e4m3fnuz"
+                    tvm_int8 = runtime.from_dlpack(t.view(torch.int8))
+                    ffi_arg_list.append(tvm_int8._create_view(t.shape, dtype=fp8_dtype_str))
+                else:
+                    ffi_arg_list.append(t)
+
+            executable(*ffi_arg_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:

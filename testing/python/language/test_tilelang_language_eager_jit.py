@@ -3,6 +3,7 @@ import tilelang
 import tilelang.language as T
 from itertools import product
 import torch
+from tilelang.utils.target import determine_target, target_is_cuda
 
 
 def test_jit2_gemm():
@@ -73,7 +74,13 @@ def test_jit2_gemm_ptr():
                 T.gemm(A_shared, B_shared, C_local)
             T.copy(C_local, C[bx * block_M, by * block_N])
 
-    prod = product([T.float16, T.float32], [T.float32])
+    # ROCm WMMA only supports float16/bfloat16 as input; skip float32 input on non-CUDA.
+    try:
+        _is_cuda = target_is_cuda(determine_target("auto", return_object=True))
+    except (RuntimeError, ValueError):
+        _is_cuda = False
+    in_dtypes = [T.float16, T.float32] if _is_cuda else [T.float16]
+    prod = list(product(in_dtypes, [T.float32]))
     gemm_ptr.par_compile(
         [
             {"A": T.ptr(), "B": T.ptr(), "C": T.ptr(), "M": 1024, "N": 1024, "K": 1024, "dtype": in_dtype, "out_dtype": out_dtype}
@@ -85,7 +92,7 @@ def test_jit2_gemm_ptr():
         out_dtype = out_dtype.as_torch()
         A = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
         B = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
-        C_ref = out_dtype(A @ B)
+        C_ref = (A @ B).to(out_dtype)
         C = torch.empty(1024, 1024, dtype=out_dtype, device="cuda")
         gemm_ptr(A, B, C, 1024, 1024, 1024, in_dtype, out_dtype)
         torch.testing.assert_close(C, C_ref, atol=1e-2, rtol=1e-2)
