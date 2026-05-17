@@ -465,6 +465,43 @@ TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 TVM_DLL const Op &ptx_cp_async();
 
 /*!
+ * \brief Truly async G2S copy via buffer_load_dwordx4 ... lds (gfx950+).
+ *
+ * Same signature as ptx_cp_async but lowers to cp_async_gs_lds<N> which
+ * uses the hardware buffer_load ... lds instruction (bypasses VGPRs).
+ * Only valid when LDS addresses are lane-contiguous; the swizzle-swap
+ * pass in lower_tile_op.cc moves the XOR swizzle from the LDS store side
+ * to the global load side to make this safe.
+ *
+ * ptx_cp_async_lds(dst_access_ptr, src_access_ptr, bytes)
+ */
+TVM_DLL const Op &ptx_cp_async_lds();
+
+/*!
+ * \brief Create a buffer resource descriptor for async G2S LDS copy (gfx950+).
+ *
+ * ptx_make_buffer_resource(global_ptr)
+ *
+ * Returns an int32x4_t buffer resource descriptor via
+ * make_wave_buffer_resource (defined in src/tl_templates/hip/copy.h).
+ */
+TVM_DLL const Op &ptx_make_buffer_resource();
+
+/*!
+ * \brief Truly async G2S copy with pre-computed buffer resource (gfx950+).
+ *
+ * Same as ptx_cp_async_lds but takes a pre-hoisted buffer resource
+ * descriptor + base address to avoid redundant readfirstlane /
+ * make_wave_buffer_resource calls inside unrolled loops. The
+ * HoistBufferResource Python pass rewrites ptx_cp_async_lds calls to this
+ * form once per kernel.
+ *
+ * ptx_cp_async_lds_rsrc(dst_access_ptr, src_access_ptr, bytes, rsrc_var,
+ *                       base_var)
+ */
+TVM_DLL const Op &ptx_cp_async_lds_rsrc();
+
+/*!
  * \brief Pack two b16 value into a b32 value
  *
  * int32 pack_b16(b16_value, b16_value)
