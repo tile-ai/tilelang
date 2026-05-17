@@ -183,6 +183,13 @@ private:
     std::string var_name;
     DataType dtype;
     int64_t size;
+    // Buffer variable handle so we can check which branches touch this alloc
+    // during outlining. Without this we conservatively re-declare every kernel-
+    // scope local in every outlined fn, forcing ptxas to keep dead `= {}`
+    // initializers alive and inflating register pressure (e.g. the math0
+    // outlined fn would declare S1_reg[128] + P1_cast[128] + O*_reg[128]
+    // even though it never touches them, costing >300 unused regs/thread).
+    const VarNode *buffer_var{nullptr};
   };
   std::vector<LocalAllocInfo> local_allocs_;
   // Barrier variable names declared as __shared__ (e.g., "mbar_s0")

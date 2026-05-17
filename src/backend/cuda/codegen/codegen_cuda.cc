@@ -591,16 +591,25 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   PrimExpr threadIdx_ext =
       analyzer.Simplify(extractor.threadIdx_x_ext * extractor.threadIdx_y_ext *
                         extractor.threadIdx_z_ext);
-  // If the prim_func calls T.set_max_nreg(N, *) anywhere, emit
-  // __maxnreg__(N) so ptxas reserves enough register slots per math thread
-  // for the runtime setmaxnreg.inc to actually grow into. Without this the
-  // FA4-style warp-spec register donation has no effect.
+  // Register allocation strategy:
   //
-  // nvcc rejects "__launch_bounds__ and __maxnreg__ qualifiers cannot be
-  // applied to the same kernel" — they're mutually exclusive ways of
-  // controlling per-thread register count. When set_max_nreg is in use we
-  // prefer __maxnreg__ (it lets us choose any N up to 240); otherwise we
-  // keep emitting the old __launch_bounds__ form.
+  //   * No set_max_nreg in the body: emit `__launch_bounds__(N, M)` where M
+  //     is tl.min_blocks_per_sm (default 1). ptxas allocates 64K/(N*M) regs
+  //     per thread, the standard uniform-occupancy path.
+  //
+  //   * set_max_nreg in the body AND total threads > one warpgroup: still
+  //     emit `__launch_bounds__(N, M)`. The FA4 register-donation idiom needs
+  //     per-warpgroup register counts that vary at runtime (math 184, mma
+  //     80, donor 80 …). ptxas reads the setmaxnreg.inc/dec instructions
+  //     directly and sizes each warpgroup's reg slice accordingly — but only
+  //     when the kernel has launch_bounds, NOT __maxnreg__ (which is a
+  //     uniform per-thread cap and mutually exclusive with launch_bounds).
+  //     Setting `tl.min_blocks_per_sm = 0` emits `__launch_bounds__(N, 0)`,
+  //     which tells ptxas "no minBlocks preference" so it can size around
+  //     the per-warp setmaxnreg requests instead of the 64K/N average.
+  //
+  //   * Degenerate single-thread launch: fall back to the legacy __maxnreg__
+  //     path (only useful when we can't recover thread extent statically).
   int64_t max_nreg = MaxNRegExtractor::Extract(f->body);
   if (const IntImmNode *const threadIdx_ext_int =
           threadIdx_ext.as<IntImmNode>()) {
@@ -609,7 +618,13 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    if (max_nreg > 0) {
+    // Prefer __maxnreg__ when the kernel actually calls T.set_max_nreg and
+    // the requested count exceeds what __launch_bounds__(N, 1) would allow
+    // (64K / N per thread). Below that threshold the two are equivalent and
+    // launch_bounds is the safer default (preserves min-blocks behavior).
+    int64_t lb_default = (max_nreg > 0)
+        ? (65536 / threadIdx_ext_int->value) : 0;
+    if (max_nreg > 0 && max_nreg > lb_default) {
       stream << " __maxnreg__(" << max_nreg << ")";
     } else {
       stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
@@ -713,6 +728,32 @@ std::string CodeGenTileLangCUDA::Finish() {
   return CodeGenC::Finish();
 }
 
+namespace {
+// Collects the VarNodes touched by BufferLoad / BufferStore (i.e. the
+// `buffer_var` of each access) inside a TIR statement. Used by the
+// outlining code paths to filter the kernel-scope local allocations down to
+// just the ones a given warp branch actually reads or writes — re-declaring
+// dead locals forces ptxas to keep their `= {}` initializers alive and
+// inflates per-warp register pressure (300+ regs/thread for FA kernels).
+class BufferVarTouchCollector : public tir::StmtExprVisitor {
+public:
+  std::unordered_set<const tir::VarNode *> touched;
+  void VisitExpr_(const tir::BufferLoadNode *op) final {
+    touched.insert(op->buffer->data.get());
+    StmtExprVisitor::VisitExpr_(op);
+  }
+  void VisitStmt_(const tir::BufferStoreNode *op) final {
+    touched.insert(op->buffer->data.get());
+    StmtExprVisitor::VisitStmt_(op);
+  }
+  // Variables can also surface through Call args (e.g., pointer params to
+  // tcgen05_ld/st intrinsics). Catch direct VarNode references too.
+  void VisitExpr_(const tir::VarNode *op) final {
+    touched.insert(op);
+  }
+};
+}  // namespace
+
 void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
   // Check if this for-loop contains a warp-spec IfThenElse that should be outlined.
   // If so, emit device functions containing the full loop and dispatch once.
@@ -758,8 +799,15 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
             << "  extern __shared__ __align__(1024) unsigned char "
                "buf_dyn_shmem[];\n";
 
-        // Re-declare local allocations (zero-initialized for safety)
+        // Re-declare local allocations (zero-initialized for safety),
+        // filtered to those this branch actually touches — see comment in
+        // EmitOutlinedDeviceFunction.
+        BufferVarTouchCollector touched;
+        touched(branch.body);
         for (const auto &alloc : local_allocs_) {
+          if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+            continue;
+          }
           outlined_fns_stream_ << "  ";
           std::ostringstream type_os;
           PrintType(alloc.dtype, type_os);
@@ -4389,7 +4437,9 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
         }
       }
       if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
-        local_allocs_.push_back({vid, op->dtype, static_cast<int64_t>(constant_size)});
+        local_allocs_.push_back({vid, op->dtype,
+                                 static_cast<int64_t>(constant_size),
+                                 op->buffer_var.get()});
       }
     } else if (scope == "local.var") {
       PrimExpr init = tir::make_const(op->dtype, 0);
@@ -5395,10 +5445,6 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   this->stream << "}\n\n";
 }
 
-// ---------------------------------------------------------------------------
-// Device function outlining for warp-specialized branches
-// ---------------------------------------------------------------------------
-
 bool CodeGenTileLangCUDA::IsThreadXComparison(const PrimExpr &cond) const {
   if (!thread_x_var_)
     return false;
@@ -5439,17 +5485,38 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
       "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
   outlined_fn_count_++;
 
+  // When this is invoked from VisitStmt_(IfThenElseNode) at the top level
+  // (no enclosing for-loop), there is no loop var to forward; the for-loop
+  // lives inside the branch body itself.
+  bool has_loop_var = !current_loop_var_name_.empty();
+
   // Build function signature
   outlined_fns_stream_ << "static __device__ __noinline__ void " << fn_name
-                       << "(\n    int " << current_loop_var_name_;
+                       << "(";
+  bool first_param = true;
+  auto emit_sep = [&]() {
+    if (first_param) {
+      outlined_fns_stream_ << "\n    ";
+      first_param = false;
+    } else {
+      outlined_fns_stream_ << ",\n    ";
+    }
+  };
+  if (has_loop_var) {
+    emit_sep();
+    outlined_fns_stream_ << "int " << current_loop_var_name_;
+  }
   for (const auto &bar : barrier_var_names_) {
-    outlined_fns_stream_ << ",\n    " << mbarrier_dtype_ << "* " << bar;
+    emit_sep();
+    outlined_fns_stream_ << mbarrier_dtype_ << "* " << bar;
   }
   for (const auto &tm : tmem_var_names_) {
-    outlined_fns_stream_ << ",\n    uint* " << tm;
+    emit_sep();
+    outlined_fns_stream_ << "uint* " << tm;
   }
   for (const auto &kp : kernel_param_infos_) {
-    outlined_fns_stream_ << ",\n    " << kp.type_str << "& " << kp.var_name;
+    emit_sep();
+    outlined_fns_stream_ << kp.type_str << "& " << kp.var_name;
   }
   outlined_fns_stream_ << "\n) {\n";
 
@@ -5457,8 +5524,18 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
   outlined_fns_stream_
       << "  extern __shared__ __align__(1024) unsigned char buf_dyn_shmem[];\n";
 
+  // Find which kernel-scope locals this branch actually touches; declaring
+  // the rest as `= {}` would force ptxas to keep dead initializers alive,
+  // inflating register pressure (the unused ones can add 300+ regs/thread
+  // for FA-style kernels with many per-warp fragments).
+  BufferVarTouchCollector touched;
+  touched(body);
+
   // Re-declare local allocations (each device fn gets its own register set)
   for (const auto &alloc : local_allocs_) {
+    if (alloc.buffer_var && !touched.touched.count(alloc.buffer_var)) {
+      continue;  // not used by this branch
+    }
     outlined_fns_stream_ << "  ";
     std::ostringstream type_os;
     PrintType(alloc.dtype, type_os);
@@ -5488,10 +5565,18 @@ std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
-  // Check if this is a warp-spec branch that should be outlined
+  // Check if this is a warp-spec branch that should be outlined.
+  // Two patterns are supported:
+  //   1. Inside a for-loop: the loop var is forwarded as the first arg so
+  //      the outlined function can reference it.
+  //   2. Top-level (no enclosing loop): each branch contains its own loop +
+  //      init + epilogue. No loop var is forwarded. This is what lets a
+  //      math warp's `-INF` init survive into the outlined function — the
+  //      init runs inside the branch body itself.
   if (outline_warp_spec_enabled_ && !in_outlined_fn_ &&
-      IsThreadXComparison(op->condition) &&
-      !current_loop_var_name_.empty()) {
+      IsThreadXComparison(op->condition)) {
+    bool has_loop_var = !current_loop_var_name_.empty();
+
     // Flatten nested if-else into branches
     std::vector<WarpBranch> branches;
     FlattenWarpBranches(op, &branches);
@@ -5518,15 +5603,27 @@ void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
       }
       int call_scope = BeginScope();
       PrintIndent();
-      stream << fn_names[i] << "(" << current_loop_var_name_;
+      stream << fn_names[i] << "(";
+      bool first_arg = true;
+      auto sep = [&]() {
+        if (first_arg) first_arg = false;
+        else stream << ", ";
+      };
+      if (has_loop_var) {
+        sep();
+        stream << current_loop_var_name_;
+      }
       for (const auto &bar : barrier_var_names_) {
-        stream << ", " << bar;
+        sep();
+        stream << bar;
       }
       for (const auto &tm : tmem_var_names_) {
-        stream << ", " << tm;
+        sep();
+        stream << tm;
       }
       for (const auto &kp : kernel_param_infos_) {
-        stream << ", " << kp.var_name;
+        sep();
+        stream << kp.var_name;
       }
       stream << ");\n";
       EndScope(call_scope);

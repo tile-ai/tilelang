@@ -76,7 +76,10 @@ def annotate_min_blocks_per_sm(n: int):
                 T.annotate_min_blocks_per_sm(2)
     ...         ...
     """
-    assert isinstance(n, int) and n > 0, "n must be a positive integer"
+    # n=0 emits `__launch_bounds__(N, 0)` which CUDA interprets as "no minBlocks
+    # constraint" — useful when one warpgroup needs more regs than the default
+    # 64K/N per-thread budget would allow (with setmaxnreg redistributing later).
+    assert isinstance(n, int) and n >= 0, "n must be non-negative"
     return attr(None, "tl.min_blocks_per_sm", n)
 
 
