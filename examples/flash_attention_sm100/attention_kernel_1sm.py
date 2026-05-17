@@ -425,9 +425,9 @@ def attention_kernel_1sm(
                 f"dim={dim}, block_N={block_N}. Use kq_stages=1 for d>block_N."
             )
 
-        # 512 needs the correction-warp split to move O_reg[128]+O0_reg[128]
-        # off mma_load (currently 256 regs/thread, fails ptxas's 128 cap).
-        # See Path A in the plan; for now we stay at 384.
+        # Chunked rescale keeps mma_load below the 128-reg cap, but math
+        # still uses S0_reg[128]+P0_cast[128]=192 regs/thread — over the cap
+        # at 512 threads. Holding at 384 until math is chunked too.
         kq2_threads = 384
         # Each block covers 2 Q-tiles = 2*block_M rows.
         kq2_block_M = block_M  # per-tile
@@ -512,8 +512,16 @@ def attention_kernel_1sm(
                 logsum1 = T.alloc_fragment([kq2_block_M], accum_dtype)
 
                 # mma_load WG fragments (tid in [256, 384))
+                # O_reg / O0_reg: FULL-tile fragments used by the post-loop
+                # epilogue (normalize O by 1/logsum and TMA-store). Bandwidth
+                # bound there, register pressure doesn't matter.
                 O0_reg = T.alloc_fragment([kq2_block_M, dim], accum_dtype)
                 O_reg = T.alloc_fragment([kq2_block_M, dim], accum_dtype)
+                # O_chunk: 16-column buffer used by the in-loop chunked
+                # rescale (avo's correction_warp_fn pattern). 16 elts/thread
+                # vs 128 for the full-tile fragment — this is what fits the
+                # 128-reg cap at 512 threads.
+                O_chunk = T.alloc_fragment([kq2_block_M, 32], accum_dtype)
                 mma_logsum0 = T.alloc_fragment([kq2_block_M], accum_dtype)
                 mma_logsum1 = T.alloc_fragment([kq2_block_M], accum_dtype)
                 # mma_load uses these for O rescale (between QK and PV)
@@ -553,9 +561,18 @@ def attention_kernel_1sm(
 
                         # k==0 init: zero TMEM, TMA load Q + first K/V.
                         if k == 0:
-                            T.fill(O0_reg, 0)
-                            T.copy(O0_reg, O0_tmem)
-                            T.copy(O0_reg, O1_tmem)
+                            # Chunked TMEM zero-init via O_chunk (32 regs/
+                            # thread) instead of full O0_reg (128 regs/thread)
+                            # — keeps mma_load below the 128-reg cap.
+                            T.fill(O_chunk, 0)
+                            T.copy(O_chunk, O0_tmem[:, 0:32])
+                            T.copy(O_chunk, O0_tmem[:, 32:64])
+                            T.copy(O_chunk, O0_tmem[:, 64:96])
+                            T.copy(O_chunk, O0_tmem[:, 96:128])
+                            T.copy(O_chunk, O1_tmem[:, 0:32])
+                            T.copy(O_chunk, O1_tmem[:, 32:64])
+                            T.copy(O_chunk, O1_tmem[:, 64:96])
+                            T.copy(O_chunk, O1_tmem[:, 96:128])
                             T.tma_copy(
                                 Q[bz, bx * kq2_total_M : bx * kq2_total_M + kq2_block_M, by, :],
                                 Q0_shared,
@@ -627,23 +644,51 @@ def attention_kernel_1sm(
                                 transpose_B=True, mbar=mbar_s1, clear_accum=True,
                             )
 
-                        # --- O rescale (overlaps with math's softmax) ---
+                        # --- O rescale (chunked, mirrors avo correction_warp_fn) ---
+                        # 16-col TMEM slices via direct slice expressions on
+                        # the parent O*_tmem (its layout comes from the
+                        # tcgen05_gemm calls above). Manually unrolled — the
+                        # prim_func parser rejects Python loops with range().
                         if k > 0:
                             T.mbarrier_wait_parity(mbar_scale0, k & 1)
                             T.copy(scores_scale0_shared, mma_scale0)
                             T.mbarrier_wait_parity(mbar_o0, (k - 1) & 1)
-                            T.copy(O0_tmem, O0_reg)
-                            for i, j in T.Parallel(kq2_block_M, dim):
-                                O0_reg[i, j] *= mma_scale0[i]
-                            T.copy(O0_reg, O0_tmem)
+                            T.copy(O0_tmem[:, 0:32], O_chunk)
+                            for i, j in T.Parallel(kq2_block_M, 32):
+                                O_chunk[i, j] *= mma_scale0[i]
+                            T.copy(O_chunk, O0_tmem[:, 0:32])
+                            T.copy(O0_tmem[:, 32:64], O_chunk)
+                            for i, j in T.Parallel(kq2_block_M, 32):
+                                O_chunk[i, j] *= mma_scale0[i]
+                            T.copy(O_chunk, O0_tmem[:, 32:64])
+                            T.copy(O0_tmem[:, 64:96], O_chunk)
+                            for i, j in T.Parallel(kq2_block_M, 32):
+                                O_chunk[i, j] *= mma_scale0[i]
+                            T.copy(O_chunk, O0_tmem[:, 64:96])
+                            T.copy(O0_tmem[:, 96:128], O_chunk)
+                            for i, j in T.Parallel(kq2_block_M, 32):
+                                O_chunk[i, j] *= mma_scale0[i]
+                            T.copy(O_chunk, O0_tmem[:, 96:128])
 
                             T.mbarrier_wait_parity(mbar_scale1, k & 1)
                             T.copy(scores_scale1_shared, mma_scale1)
                             T.mbarrier_wait_parity(mbar_o1, (k - 1) & 1)
-                            T.copy(O1_tmem, O_reg)
-                            for i, j in T.Parallel(kq2_block_M, dim):
-                                O_reg[i, j] *= mma_scale1[i]
-                            T.copy(O_reg, O1_tmem)
+                            T.copy(O1_tmem[:, 0:32], O_chunk)
+                            for i, j in T.Parallel(kq2_block_M, 32):
+                                O_chunk[i, j] *= mma_scale1[i]
+                            T.copy(O_chunk, O1_tmem[:, 0:32])
+                            T.copy(O1_tmem[:, 32:64], O_chunk)
+                            for i, j in T.Parallel(kq2_block_M, 32):
+                                O_chunk[i, j] *= mma_scale1[i]
+                            T.copy(O_chunk, O1_tmem[:, 32:64])
+                            T.copy(O1_tmem[:, 64:96], O_chunk)
+                            for i, j in T.Parallel(kq2_block_M, 32):
+                                O_chunk[i, j] *= mma_scale1[i]
+                            T.copy(O_chunk, O1_tmem[:, 64:96])
+                            T.copy(O1_tmem[:, 96:128], O_chunk)
+                            for i, j in T.Parallel(kq2_block_M, 32):
+                                O_chunk[i, j] *= mma_scale1[i]
+                            T.copy(O_chunk, O1_tmem[:, 96:128])
 
                         T.mbarrier_wait_parity(mbar_p0, k & 1)
                         T.mbarrier_wait_parity(mbar_p1, k & 1)
