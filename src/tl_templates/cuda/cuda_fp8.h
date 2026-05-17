@@ -13,7 +13,7 @@ using fp8_e5_t = tl::float_e5m2_t;
 using fp8_e8_t = __nv_fp8_e8m0;
 #define TL_HAS_FP8_E8M0 1
 #else
-// Placeholder for CUDA < 12.6
+// Placeholder for CUDA < 12.8
 struct fp8_e8_t {
   unsigned char data;
 };
