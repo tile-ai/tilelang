@@ -425,9 +425,11 @@ def attention_kernel_1sm(
                 f"dim={dim}, block_N={block_N}. Use kq_stages=1 for d>block_N."
             )
 
-        # Chunked rescale keeps mma_load below the 128-reg cap, but math
-        # still uses S0_reg[128]+P0_cast[128]=192 regs/thread — over the cap
-        # at 512 threads. Holding at 384 until math is chunked too.
+        # 512 still blocked: math's tcgen05_ld_32dp32bNx<128> for S_reg
+        # pins 128 regs at the load instruction (unspillable). With the
+        # surrounding live state ptxas needs 146+ — over the 128 cap at
+        # 512 threads. Fitting requires chunking the S load too (4 partial
+        # loads + per-chunk partial reductions). Not yet wired up.
         kq2_threads = 384
         # Each block covers 2 Q-tiles = 2*block_M rows.
         kq2_block_M = block_M  # per-tile
@@ -495,7 +497,12 @@ def attention_kernel_1sm(
 
                 # Math-WG-0 fragments (tid < 128)
                 S0_reg = T.alloc_fragment([kq2_block_M, block_N], accum_dtype)
-                P0_cast = T.alloc_fragment([kq2_block_M, block_N], dtype)
+                # P_cast is now a 32-col chunk (16 packed bf16 regs/thread)
+                # instead of the full [128, 128] (64 regs/thread). The full
+                # P_cast was unspillable (tcgen05_st source) and forced math
+                # to hold S0_reg+P0_cast=192 regs simultaneously; chunking
+                # P brings unspillable down to S_reg (128) + chunk slot.
+                P0_chunk = T.alloc_fragment([kq2_block_M, 32], dtype)
                 scores_max0 = T.alloc_fragment([kq2_block_M], accum_dtype)
                 scores_max_prev0 = T.alloc_fragment([kq2_block_M], accum_dtype)
                 scores_scale0 = T.alloc_fragment([kq2_block_M], accum_dtype)
@@ -504,7 +511,7 @@ def attention_kernel_1sm(
 
                 # Math-WG-1 fragments (tid in [128, 256))
                 S1_reg = T.alloc_fragment([kq2_block_M, block_N], accum_dtype)
-                P1_cast = T.alloc_fragment([kq2_block_M, block_N], dtype)
+                P1_chunk = T.alloc_fragment([kq2_block_M, 32], dtype)
                 scores_max1 = T.alloc_fragment([kq2_block_M], accum_dtype)
                 scores_max_prev1 = T.alloc_fragment([kq2_block_M], accum_dtype)
                 scores_scale1 = T.alloc_fragment([kq2_block_M], accum_dtype)
@@ -756,8 +763,20 @@ def attention_kernel_1sm(
                         for i in T.Parallel(kq2_block_M):
                             logsum0[i] = logsum0[i] * scores_scale0[i] + scores_sum0[i]
 
-                        T.copy(S0_reg, P0_cast)
-                        T.copy(P0_cast, P0_tmem)
+                        # Chunked S→P→TMEM. Keeps P unspillable footprint to
+                        # 16 packed bf16 regs (vs 64 for the full tile).
+                        for i, j in T.Parallel(kq2_block_M, 32):
+                            P0_chunk[i, j] = T.cast(S0_reg[i, j], dtype)
+                        T.copy(P0_chunk, P0_tmem[:, 0:32])
+                        for i, j in T.Parallel(kq2_block_M, 32):
+                            P0_chunk[i, j] = T.cast(S0_reg[i, 32 + j], dtype)
+                        T.copy(P0_chunk, P0_tmem[:, 32:64])
+                        for i, j in T.Parallel(kq2_block_M, 32):
+                            P0_chunk[i, j] = T.cast(S0_reg[i, 64 + j], dtype)
+                        T.copy(P0_chunk, P0_tmem[:, 64:96])
+                        for i, j in T.Parallel(kq2_block_M, 32):
+                            P0_chunk[i, j] = T.cast(S0_reg[i, 96 + j], dtype)
+                        T.copy(P0_chunk, P0_tmem[:, 96:128])
                         T.mbarrier_arrive(mbar_p0)
 
                         # k==K-1 epilogue: publish logsum0 to SMEM so the
@@ -810,8 +829,18 @@ def attention_kernel_1sm(
                         for i in T.Parallel(kq2_block_M):
                             logsum1[i] = logsum1[i] * scores_scale1[i] + scores_sum1[i]
 
-                        T.copy(S1_reg, P1_cast)
-                        T.copy(P1_cast, P1_tmem)
+                        for i, j in T.Parallel(kq2_block_M, 32):
+                            P1_chunk[i, j] = T.cast(S1_reg[i, j], dtype)
+                        T.copy(P1_chunk, P1_tmem[:, 0:32])
+                        for i, j in T.Parallel(kq2_block_M, 32):
+                            P1_chunk[i, j] = T.cast(S1_reg[i, 32 + j], dtype)
+                        T.copy(P1_chunk, P1_tmem[:, 32:64])
+                        for i, j in T.Parallel(kq2_block_M, 32):
+                            P1_chunk[i, j] = T.cast(S1_reg[i, 64 + j], dtype)
+                        T.copy(P1_chunk, P1_tmem[:, 64:96])
+                        for i, j in T.Parallel(kq2_block_M, 32):
+                            P1_chunk[i, j] = T.cast(S1_reg[i, 96 + j], dtype)
+                        T.copy(P1_chunk, P1_tmem[:, 96:128])
                         T.mbarrier_arrive(mbar_p1)
 
                         if k == kq2_loop_range - 1:
