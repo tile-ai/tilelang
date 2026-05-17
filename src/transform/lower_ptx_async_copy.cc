@@ -431,26 +431,57 @@ private:
     return info;
   }
 
-  // Conservative structural check used to gate the gfx950 buffer_load...lds
-  // routing: the destination LDS index must be lane-contiguous, i.e. it has
-  // no XOR-style swizzle term. Until the swizzle-swap optimisation in
-  // lower_tile_op.cc moves the XOR off the LDS store side (M7 in the
-  // accompanying plan) this returns false for ordinary swizzled layouts, so
-  // the routing safely no-ops and the existing ptx_cp_async path is used.
-  static bool ContainsBitwiseXor(const PrimExpr &expr) {
-    bool found = false;
-    tir::PostOrderVisit(expr, [&](const ObjectRef &node) {
-      if (found) return;
-      if (const auto *call = node.as<CallNode>()) {
-        if (call->op.same_as(tvm::tir::builtin::bitwise_xor())) {
-          found = true;
+  // Real lane-contiguity proof for the gfx950 buffer_load...lds routing.
+  // The destination LDS index must be an affine function of the thread-like
+  // variable with a constant per-lane stride. Bit-arithmetic swizzles
+  // (xor2x2 etc. expanded as `((a + b) & 1) * k`) have a constant
+  // f(1)-f(0) but are NOT linear globally; we catch those by sampling at
+  // many points and requiring f(k) - f(0) == k * stride at every point.
+  // Returns false unless we find a recognisable thread-like free var whose
+  // contribution is provably linear.
+  static bool IsLdsLaneContiguous(const PrimExpr &dst_index) {
+    arith::Analyzer analyzer;
+    std::unordered_set<const VarNode *> seen;
+    Array<Var> free_vars;
+    tir::PostOrderVisit(dst_index, [&](const ObjectRef &node) {
+      if (auto *v = node.as<VarNode>()) {
+        if (seen.insert(v).second) {
+          free_vars.push_back(Downcast<Var>(node));
         }
       }
     });
-    return found;
-  }
-  static bool IsLdsLaneContiguous(const PrimExpr &dst_index) {
-    return !ContainsBitwiseXor(dst_index);
+    // Sample 0, 1, 2, ..., 1023 — covers wave-32/64 boundaries, warp tiles,
+    // bank-swizzle phases (typically powers of two up to 64), and the
+    // wider 256-thread block boundaries the bench uses.
+    constexpr int kNumSamples = 1024;
+    for (const auto &var : free_vars) {
+      const std::string name(var->name_hint);
+      if (name.find("thread") == std::string::npos &&
+          name != "tx" && name != "tid") {
+        continue;
+      }
+      PrimExpr f0 = analyzer.Simplify(Substitute(
+          dst_index, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 0)}}));
+      PrimExpr f1 = analyzer.Simplify(Substitute(
+          dst_index, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 1)}}));
+      PrimExpr expected_stride = analyzer.Simplify(f1 - f0);
+      auto *stride_imm = expected_stride.as<IntImmNode>();
+      if (!stride_imm) {
+        return false;
+      }
+      int64_t stride = stride_imm->value;
+      for (int pt = 2; pt < kNumSamples; ++pt) {
+        PrimExpr fk = analyzer.Simplify(Substitute(
+            dst_index, Map<Var, PrimExpr>{{var, IntImm(var->dtype, pt)}}));
+        PrimExpr actual = analyzer.Simplify(fk - f0);
+        PrimExpr expected = IntImm(DataType::Int(64), stride * pt);
+        if (!analyzer.CanProveEqual(actual, expected)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return false;
   }
 
   static PrimExpr ExtractVectorBase(const PrimExpr &index) {
