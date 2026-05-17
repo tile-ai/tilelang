@@ -32,9 +32,11 @@ using namespace tir;
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
   explicit PTXAsyncCopyInjector(bool enable_auto_async_copy,
-                                bool async_without_async_commit_wait)
+                                bool async_without_async_commit_wait,
+                                bool enable_buffer_load_lds = false)
       : enable_auto_async_copy_(enable_auto_async_copy),
-        async_without_async_commit_wait_(async_without_async_commit_wait) {}
+        async_without_async_commit_wait_(async_without_async_commit_wait),
+        enable_buffer_load_lds_(enable_buffer_load_lds) {}
 
   bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
 
@@ -121,7 +123,9 @@ public:
           store,
           /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
           /*src_base_load=*/BufferLoad(load->buffer, load->indices),
-          /*num_elems=*/index_info->per_access_num_elems, predicated,
+          /*num_elems=*/index_info->per_access_num_elems,
+          /*total_bytes=*/index_info->total_bytes,
+          /*dst_check_index=*/index_info->dst_index, predicated,
           predicate_value);
     }
 
@@ -142,8 +146,9 @@ public:
         store,
         /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
         /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
-        /*num_elems=*/index_info->per_access_num_elems, predicated,
-        predicate_value);
+        /*num_elems=*/index_info->per_access_num_elems,
+        /*total_bytes=*/index_info->total_bytes,
+        /*dst_check_index=*/index_info->dst_index, predicated, predicate_value);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -298,6 +303,10 @@ private:
     PrimExpr dst_index;
     int index_lanes{1};
     int per_access_num_elems{0};
+    // Byte width of one vectorized transfer at the final PTX emission point.
+    // Already factors in `current_vectorized_lanes_`. Used by the gfx950
+    // buffer_load...lds routing to confirm the 16-byte gate.
+    int total_bytes{0};
   };
 
   // Synchronization state for injected cp.async runs carried across statements.
@@ -418,7 +427,30 @@ private:
     info.dst_index = dst_index;
     info.index_lanes = index_lanes;
     info.per_access_num_elems = effective_lanes;
+    info.total_bytes = total_bytes;
     return info;
+  }
+
+  // Conservative structural check used to gate the gfx950 buffer_load...lds
+  // routing: the destination LDS index must be lane-contiguous, i.e. it has
+  // no XOR-style swizzle term. Until the swizzle-swap optimisation in
+  // lower_tile_op.cc moves the XOR off the LDS store side (M7 in the
+  // accompanying plan) this returns false for ordinary swizzled layouts, so
+  // the routing safely no-ops and the existing ptx_cp_async path is used.
+  static bool ContainsBitwiseXor(const PrimExpr &expr) {
+    bool found = false;
+    tir::PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (found) return;
+      if (const auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(tvm::tir::builtin::bitwise_xor())) {
+          found = true;
+        }
+      }
+    });
+    return found;
+  }
+  static bool IsLdsLaneContiguous(const PrimExpr &dst_index) {
+    return !ContainsBitwiseXor(dst_index);
   }
 
   static PrimExpr ExtractVectorBase(const PrimExpr &index) {
@@ -486,15 +518,34 @@ private:
                  IntImm(DataType::Int(32), rw_mask)});
   }
 
-  static Optional<Stmt>
+  Optional<Stmt>
   MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
                            const BufferLoad &dst_base_load,
                            const BufferLoad &src_base_load, int num_elems,
+                           int total_bytes, const PrimExpr &dst_check_index,
                            bool predicated, const PrimExpr &predicate_value) {
     PrimExpr dst_access_ptr =
         MakeAccessPtrFromLoad(dst_base_load, num_elems, /*rw_mask=*/2);
     PrimExpr src_access_ptr =
         MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
+
+    // gfx950 routing: emit tl::ptx_cp_async_lds when the destination is a
+    // 16-byte non-predicated shared-memory write whose LDS index is lane-
+    // contiguous (no XOR swizzle).  Note: arg 2 here is *byte width*, not
+    // logical element count, because the codegen handler for ptx_cp_async_lds
+    // prints arg 2 directly as the template width and the device template
+    // currently only specialises N == 16.
+    if (enable_buffer_load_lds_ && !predicated && total_bytes == 16) {
+      const std::string dst_scope = store->buffer.scope();
+      const bool is_shared =
+          dst_scope == "shared" || dst_scope == "shared.dyn";
+      if (is_shared && IsLdsLaneContiguous(dst_check_index)) {
+        ffi::Array<PrimExpr> lds_args = {dst_access_ptr, src_access_ptr,
+                                         PrimExpr(total_bytes)};
+        return Evaluate(Call(store->buffer->dtype, tvm::tl::ptx_cp_async_lds(),
+                             lds_args));
+      }
+    }
 
     ffi::Array<PrimExpr> cp_async_args;
     if (predicated) {
@@ -614,7 +665,9 @@ private:
         return out;
       }
       if (call->op.same_as(builtin::ptx_cp_async()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
+          call->op.same_as(tl::ptx_cp_async()) ||
+          call->op.same_as(tl::ptx_cp_async_lds()) ||
+          call->op.same_as(tl::ptx_cp_async_lds_rsrc())) {
         return out;
       }
       if (call->op.same_as(builtin::ptx_commit_group())) {
@@ -687,6 +740,7 @@ private:
 
   bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
+  bool enable_buffer_load_lds_{false};
   int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
@@ -700,9 +754,11 @@ using namespace tir::transform;
 
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                   bool async_without_async_commit_wait) {
+                   bool async_without_async_commit_wait,
+                   bool enable_buffer_load_lds) {
   PTXAsyncCopyInjector injector(enable_auto_async_copy,
-                                async_without_async_commit_wait);
+                                async_without_async_commit_wait,
+                                enable_buffer_load_lds);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }

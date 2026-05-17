@@ -130,7 +130,9 @@ private:
     auto inject_result =
         InjectPTXAsyncCopy(lowered_loop, /*enable_auto_async_copy=*/true,
                            /*async_without_async_commit_wait=*/
-                           no_implicit_commit_wait || GetIsAsyncCopy(op));
+                           no_implicit_commit_wait || GetIsAsyncCopy(op),
+                           /*enable_buffer_load_lds=*/
+                           TargetIsGfx950(T.target));
     Stmt cp_async_loop = inject_result.stmt;
     if (!inject_result.injected_ptx_async_copy) {
       DLOG(WARNING) << "cp.async rewrite miss for copy src=" << op.src->name

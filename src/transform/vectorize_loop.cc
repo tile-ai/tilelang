@@ -797,7 +797,9 @@ public:
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       return MutateAccessPtrCall_(op);
     } else if (op->op.same_as(builtin::ptx_cp_async()) ||
-               op->op.same_as(tl::ptx_cp_async())) {
+               op->op.same_as(tl::ptx_cp_async()) ||
+               op->op.same_as(tl::ptx_cp_async_lds()) ||
+               op->op.same_as(tl::ptx_cp_async_lds_rsrc())) {
       return MutatePTXCPAsyncExpr_(op);
     }
     auto optional_op = op->op.as<Op>();
