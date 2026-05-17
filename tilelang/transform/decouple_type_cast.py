@@ -41,32 +41,32 @@ After:
 from __future__ import annotations
 
 from tvm import ir as tvm_ir
-from tvm import tir
+from tvm import tirx
 from tvm.ir import Op
-from tvm.tir import (
-    Allocate,
+from tvm.tirx import (
+    AllocBuffer,
     Buffer,
     BufferLoad,
     BufferStore,
     Call,
     Cast,
-    DeclBuffer,
     For,
     ForKind,
     IfThenElse,
     IntImm,
-    LetStmt,
+    Bind,
+    Evaluate,
     PrimFunc,
     PyStmtExprVisitor,
     SeqStmt,
     Stmt,
     Var,
 )
-from tvm.tir.stmt_functor import post_order_visit, substitute
-from tvm.tir.transform import prim_func_pass
+from tvm.tirx.stmt_functor import post_order_visit, substitute
+from tvm.tirx.transform import prim_func_pass
 
 # Cache the Op for if_then_else to avoid repeated lookups
-_IF_THEN_ELSE_OP = Op.get("tir.if_then_else")
+_IF_THEN_ELSE_OP = Op.get("tirx.if_then_else")
 
 from tilelang.utils.language import is_fragment, is_global, is_local, is_local_var, is_shared
 
@@ -90,7 +90,7 @@ def is_global_or_shared_buffer(buffer: Buffer) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@tir.functor.visitor
+@tirx.functor.visitor
 class _CastFinder(PyStmtExprVisitor):
     """Find Cast nodes in a statement, skipping BufferLoad/BufferStore indices.
 
@@ -138,7 +138,7 @@ def _contains_seq_stmt(stmt: Stmt) -> bool:
     return found
 
 
-def _expr_depends_on_var(expr: tir.PrimExpr, var: Var) -> bool:
+def _expr_depends_on_var(expr: tirx.PrimExpr, var: Var) -> bool:
     """Check if an expression references the given Var."""
     found = False
 
@@ -156,7 +156,7 @@ def _expr_depends_on_var(expr: tir.PrimExpr, var: Var) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@tir.functor.visitor
+@tirx.functor.visitor
 class MemoryAccessCollector(PyStmtExprVisitor):
     """Collect shared/global BufferStore and BufferLoad nodes.
 
@@ -206,30 +206,76 @@ class MemoryAccessCollector(PyStmtExprVisitor):
 # ---------------------------------------------------------------------------
 
 
-def inline_let_stmts(stmt: Stmt) -> Stmt:
-    """Inline all LetStmt bindings in *stmt* so that downstream visitors can
-    see the original BufferLoad nodes that were hidden behind Var references.
+BindEnv = dict[Var, tirx.PrimExpr]
 
-    Used before collecting memory accesses so that BufferLoads inside LetStmt
-    values are visible to ``MemoryAccessCollector``.
+
+def _substitute_bind_env(node, env: BindEnv):
+    """Apply the current flat-Bind environment to a statement or expression."""
+    result = node
+    for var, replacement in env.items():
+        result = substitute(result, {var: replacement})
+    return result
+
+
+def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
+    """Inline flat Bind statements according to sequential dominance.
+
+    ``Bind`` no longer has a body. A bind in ``SeqStmt`` dominates only later
+    sibling statements, while binds inside a branch or nested loop do not escape
+    that scope. This normalization exposes hidden BufferLoad/Cast nodes to the
+    decoupling analysis without treating Bind as a tree-shaped LetStmt.
     """
-    if isinstance(stmt, LetStmt):
-        body = inline_let_stmts(stmt.body)
-        return substitute(body, {stmt.var: stmt.value})
-    elif isinstance(stmt, IfThenElse):
-        then_case = inline_let_stmts(stmt.then_case)
-        else_case = inline_let_stmts(stmt.else_case) if stmt.else_case else None
-        if then_case is not stmt.then_case or else_case is not stmt.else_case:
-            return IfThenElse(stmt.condition, then_case, else_case)
-        return stmt
-    elif isinstance(stmt, SeqStmt):
-        new_seq = [inline_let_stmts(s) for s in stmt.seq]
-        return SeqStmt(new_seq)
-    else:
-        return stmt
+    if isinstance(stmt, Bind):
+        env[stmt.var] = _substitute_bind_env(stmt.value, env)
+        return None
+
+    if isinstance(stmt, SeqStmt):
+        local_env = dict(env)
+        result: list[Stmt] = []
+        for child in stmt.seq:
+            normalized = _normalize_flat_binds(child, local_env)
+            if normalized is not None:
+                result.append(normalized)
+        if not result:
+            return None
+        return SeqStmt(result) if len(result) > 1 else result[0]
+
+    if isinstance(stmt, IfThenElse):
+        condition = _substitute_bind_env(stmt.condition, env)
+        then_case = _normalize_flat_binds(stmt.then_case, dict(env))
+        else_case = _normalize_flat_binds(stmt.else_case, dict(env)) if stmt.else_case else None
+        normalized_else = None
+        if stmt.else_case:
+            normalized_else = else_case if else_case is not None else Evaluate(0)
+        return IfThenElse(
+            condition,
+            then_case if then_case is not None else Evaluate(0),
+            normalized_else,
+        )
+
+    if isinstance(stmt, For):
+        body = _normalize_flat_binds(stmt.body, dict(env))
+        return For(
+            stmt.loop_var,
+            _substitute_bind_env(stmt.min, env),
+            _substitute_bind_env(stmt.extent, env),
+            stmt.kind,
+            body if body is not None else Evaluate(0),
+            stmt.thread_binding,
+            stmt.annotations,
+            _substitute_bind_env(stmt.step, env),
+        )
+
+    return _substitute_bind_env(stmt, env)
 
 
-def extract_if_condition(stmt: Stmt) -> tuple[tir.PrimExpr | None, Stmt]:
+def normalize_flat_binds(stmt: Stmt) -> Stmt:
+    """Return ``stmt`` with dominating flat Bind values substituted into uses."""
+    normalized = _normalize_flat_binds(stmt, {})
+    return normalized if normalized is not None else stmt
+
+
+def extract_if_condition(stmt: Stmt) -> tuple[tirx.PrimExpr | None, Stmt]:
     """Extract IfThenElse condition from statement if present.
 
     Returns:
@@ -243,14 +289,14 @@ def extract_if_condition(stmt: Stmt) -> tuple[tir.PrimExpr | None, Stmt]:
 # Cast entry: (original buffer, original indices, cast buffer)
 # Each unique (buffer, indices) pair gets its own entry, so that accesses
 # like a[i] and a[i+32] from the same buffer are handled correctly.
-CastEntry = tuple[Buffer, list[tir.PrimExpr], Buffer]
+CastEntry = tuple[Buffer, list[tirx.PrimExpr], Buffer]
 
 
 def _buf_indices_match(
     buf_a: Buffer,
-    indices_a: list[tir.PrimExpr],
+    indices_a: list[tirx.PrimExpr],
     buf_b: Buffer,
-    indices_b: list[tir.PrimExpr],
+    indices_b: list[tirx.PrimExpr],
 ) -> bool:
     """Check if two (buffer, indices) pairs refer to the same access pattern."""
     if not buf_a.same_as(buf_b):
@@ -263,7 +309,7 @@ def _buf_indices_match(
 def _find_cast_entry(
     entries: list[CastEntry],
     buffer: Buffer,
-    indices: list[tir.PrimExpr],
+    indices: list[tirx.PrimExpr],
 ) -> Buffer | None:
     """Find the cast buffer for a given (buffer, indices) pair, or None."""
     for orig_buf, orig_indices, cast_buf in entries:
@@ -277,8 +323,8 @@ def _find_cast_entry(
 # ---------------------------------------------------------------------------
 
 
-@tir.functor.mutator
-class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
+@tirx.functor.mutator
+class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
     """Mutator that decouples type cast vectorization constraints.
 
     This mutator transforms vectorized loops that have mixed-precision
@@ -324,20 +370,23 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         if not isinstance(op.extent, IntImm):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
-        # Check if the body has any Cast nodes
-        if not _has_cast(new_body):
+        # Normalize flat Bind statements before all analysis. Bind is a
+        # sequential SSA definition, not a tree-shaped LetStmt with a body.
+        normalized_body = normalize_flat_binds(new_body)
+
+        # Check if the normalized body has any Cast nodes.
+        if not _has_cast(normalized_body):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
-        # Skip SeqStmt (multiple statements) — not supported yet
-        if _contains_seq_stmt(new_body):
+        # Skip SeqStmt (multiple statements) after inlining leading Bind nodes.
+        # A common frontend pattern is SeqStmt(Bind(...), BufferStore(...)),
+        # which is still a single compute statement after substitution.
+        if _contains_seq_stmt(normalized_body):
             return self._make_for(op, new_body) if new_body is not op.body else op
-
-        # Inline LetStmts for analysis so BufferLoads behind Vars are visible
-        inlined_body = inline_let_stmts(new_body)
 
         # Collect all shared/global stores and loads
         collector = MemoryAccessCollector(op.loop_var)
-        collector.visit_stmt(inlined_body)
+        collector.visit_stmt(normalized_body)
 
         if not collector.stores and not collector.loads:
             # Cast exists but no memory access → nothing to decouple
@@ -345,8 +394,8 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
         extent = op.extent.value
 
-        # Extract condition (from inlined body for correctness)
-        condition, _ = extract_if_condition(inlined_body)
+        # Extract condition (from normalized body for correctness)
+        condition, _ = extract_if_condition(normalized_body)
 
         # Create cast entries for stores and loads
         store_entries = self._create_cast_entries(collector.stores, extent)
@@ -370,13 +419,13 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
             condition=condition,
         )
 
-        # Build compute loop: replace stores and loads in the *inlined* body
-        # so that indices match what the collector saw (LetStmt vars are expanded).
+        # Build compute loop: replace stores and loads in the normalized body
+        # so that indices match what the collector saw (Bind vars are expanded).
         # For RMW (a load whose (buffer, indices) matches a store entry), the load
         # must be rewritten to the *same* cast buffer the store writes to, so we
         # feed both store and load entries into the load-replacement table.
         load_replacement_entries = store_entries + load_entries
-        compute_body = inlined_body
+        compute_body = normalized_body
         if store_entries or load_entries:
             compute_body = self._replace_access(compute_body, store_entries, load_replacement_entries, op.loop_var)
         compute_loop = self._make_vectorized_loop(op, compute_body)
@@ -413,7 +462,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
                 continue
 
             cache_name = self._make_unique_name(f"{access.buffer.name}_local_cast")
-            cast_buffer = tir.decl_buffer(
+            cast_buffer = tirx.decl_buffer(
                 shape=(extent,),
                 dtype=access.buffer.dtype,
                 name=cache_name,
@@ -441,7 +490,7 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         op: For,
         entries: list[CastEntry],
         direction: str,
-        condition: tir.PrimExpr | None = None,
+        condition: tirx.PrimExpr | None = None,
     ) -> list[For]:
         """Create vectorized copy loops between memory and cast buffers.
 
@@ -491,17 +540,11 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
 
     def _wrap_with_allocations(self, body: Stmt, entries: list[CastEntry]) -> Stmt:
         """Wrap statement with buffer declarations and allocations."""
-        result = body
+        alloc_stmts = []
         for _, _, cast_buffer in entries:
-            result = DeclBuffer(cast_buffer, result)
-            result = Allocate(
-                cast_buffer.data,
-                cast_buffer.dtype,
-                cast_buffer.shape,
-                tir.const(True),
-                result,
-            )
-        return result
+            alloc_stmts.append(AllocBuffer(cast_buffer))
+        alloc_stmts.append(body)
+        return SeqStmt(alloc_stmts)
 
     def _replace_access(self, stmt: Stmt, store_entries: list[CastEntry], load_entries: list[CastEntry], loop_var: Var) -> Stmt:
         """Replace memory accesses with cast buffer accesses."""
@@ -509,8 +552,8 @@ class DecoupleTypeCastMutator(tir.PyStmtExprMutator):
         return replacer.visit_stmt(stmt)
 
 
-@tir.functor.mutator
-class AccessReplacer(tir.PyStmtExprMutator):
+@tirx.functor.mutator
+class AccessReplacer(tirx.PyStmtExprMutator):
     """Mutator to replace memory BufferStores/BufferLoads with cast buffer accesses.
 
     Matches by both buffer and indices (structural equality) so that accesses
@@ -532,7 +575,7 @@ class AccessReplacer(tir.PyStmtExprMutator):
             return BufferStore(op.buffer, new_value, list(op.indices))
         return op
 
-    def visit_buffer_load_(self, op: BufferLoad) -> tir.PrimExpr:
+    def visit_buffer_load_(self, op: BufferLoad) -> tirx.PrimExpr:
         cast_buf = _find_cast_entry(self.load_entries, op.buffer, list(op.indices))
         if cast_buf is not None:
             return BufferLoad(cast_buf, [self.loop_var])

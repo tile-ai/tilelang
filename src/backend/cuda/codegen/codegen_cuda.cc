@@ -300,10 +300,6 @@ std::string GetTileLangFP4Type(DataType type) {
 
 CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
   restrict_keyword_ = "__restrict__";
-  vid_global_barrier_state_ =
-      name_supply_->FreshName("__tvm_global_barrier_state");
-  vid_global_barrier_expect_ = name_supply_->FreshName("__barrier_expect");
-  ICHECK_EQ(vid_global_barrier_state_, "__tvm_global_barrier_state");
 }
 
 void CodeGenTileLangCUDA::ReserveKeywordsAsUnique_() {
@@ -650,11 +646,6 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#ifdef ENABLE_BF16\n";
   decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
   decl_stream << "#endif\n";
-
-  if (need_global_barrier_) {
-    decl_stream << "__device__ unsigned " << vid_global_barrier_state_
-                << " = 0;\n";
-  }
   decl_stream << "\n";
 
   return CodeGenC::Finish();
@@ -1417,35 +1408,7 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
     this->PrintIndent();
     this->stream << "tl::cluster_sync();\n";
   } else if (sync == "global") {
-    if (!need_global_barrier_) {
-      need_global_barrier_ = true;
-    }
-    // global synchronizer
-    std::string is_load = PrintExpr(op->args[1]);
-    std::string num_blocks = PrintExpr(op->args[2]);
-    this->PrintIndent();
-    // In theory only threadfence is needed
-    // but we observed problems with only threadfence
-    this->stream << "__threadfence_system();\n";
-    this->PrintIndent();
-    this->stream << "if (" << is_load << ") {\n";
-    int wb = this->BeginScope();
-    this->PrintIndent();
-    this->stream << "atomicAdd(&" << vid_global_barrier_state_ << ", 1);\n";
-    this->PrintIndent();
-    std::string ptr = name_supply_->FreshName("pf");
-    this->stream << "volatile unsigned* " << ptr << " = &"
-                 << vid_global_barrier_state_ << ";\n";
-    this->PrintIndent();
-    this->stream << vid_global_barrier_expect_ << " += " << num_blocks << ";\n";
-    this->PrintIndent();
-    this->stream << "while (" << ptr << "[0] < " << vid_global_barrier_expect_
-                 << ");\n";
-    this->EndScope(wb);
-    this->PrintIndent();
-    this->stream << "}\n";
-    this->PrintIndent();
-    this->stream << "__syncthreads();\n";
+    LOG(FATAL) << "Global storage sync is no longer supported";
   }
 }
 
@@ -4158,17 +4121,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
   if (is_const_int(op->value))
     return;
   const CallNode *call = op->value.as<CallNode>();
-  if (call && call->op.as<OpNode>() &&
-      Downcast<Op>(call->op)->name == "tirx.tvm_global_barrier_kinit") {
-    PrintIndent();
-    stream << "__shared__ unsigned " << vid_global_barrier_expect_ << ";\n";
-    PrintIndent();
-    stream << "if (threadIdx.x == 0) {\n";
-    PrintIndent();
-    stream << "  " << vid_global_barrier_expect_ << " = 0;\n";
-    PrintIndent();
-    stream << "}\n";
-  }
   if (call && (call->op.same_as(tvm::tl::device_assert()))) {
     std::string cond = PrintExpr(call->args[0]);
     this->PrintIndent();

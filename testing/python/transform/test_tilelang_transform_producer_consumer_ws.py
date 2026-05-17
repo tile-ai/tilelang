@@ -114,6 +114,37 @@ def prelude_tma_wait_sink(block=64, iters=2, dtype="float16", threads=128):
     return main
 
 
+def prelude_tma_bound_index(block=64, iters=2, dtype="float16", threads=128):
+    """Pre-loop TMA load uses a scalar bind that is also consumed in the WS branch."""
+
+    @T.prim_func
+    def main(
+        Q: T.Buffer((iters * block, block), dtype),
+        K_in: T.Buffer((iters * block, block), dtype),
+        idx: T.Buffer((1,), "int32"),
+        O: T.Buffer((block, block), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            K_shared = T.alloc_shared((block, block), dtype)
+            q = T.alloc_shared((block, block), dtype)
+            acc = T.alloc_fragment((block, block), "float32")
+            out = T.alloc_fragment((block, block), "float32")
+
+            start = idx[0]
+            T.copy(K_in[start, 0], K_shared)
+            T.clear(out)
+            for ko in T.Pipelined(iters, num_stages=2):
+                T.copy(Q[ko * block, 0], q)
+                T.clear(acc)
+                T.gemm(K_shared, q, acc, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                for i, j in T.Parallel(block, block):
+                    out[i, j] += acc[i, j] + T.cast(start, "float32")
+
+            T.copy(out, O[0, 0])
+
+    return main
+
+
 def grouped_gemm_padded_pipelined(
     batch_sizes,
     K,
@@ -429,6 +460,22 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
 
     assert min(k_load, v_load, branch, first_wait) >= 0
     assert k_load < v_load < branch < first_wait
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
+    """Scalar binds used by common pre-loop TMA copies must stay before WS."""
+
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(prelude_tma_bound_index(), pass_configs, out_idx=[3])
+    src = kernel.get_kernel_source()
+
+    start_bind = _find_after(src, "int start =")
+    k_load = _find_after(src, "tl::tma_load(K_in_desc")
+    branch = _find_after(src, "if (128 <= ((int)threadIdx.x))")
+
+    assert start_bind < k_load < branch
 
 
 @tilelang.testing.requires_cuda

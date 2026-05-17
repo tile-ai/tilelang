@@ -88,12 +88,6 @@ private:
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
 
-  // Whether global barrier is needed.
-  bool need_global_barrier_{false};
-  // Global barrier state
-  std::string vid_global_barrier_state_;
-  // Global barrier expected node.
-  std::string vid_global_barrier_expect_;
   // Global curand state
   std::string curand_random_generator_state;
   std::string curand_random_generator_state_type;

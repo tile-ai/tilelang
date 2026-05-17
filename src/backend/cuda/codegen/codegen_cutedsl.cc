@@ -1956,10 +1956,6 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const EvaluateNode *op) {
   if (is_const_int(op->value))
     return;
   const CallNode *call = op->value.as<CallNode>();
-  if (call && call->op.as<OpNode>() &&
-      Downcast<Op>(call->op)->name == "tirx.tvm_global_barrier_kinit") {
-    LOG(FATAL) << "Currently unsupported op: " << call->op;
-  }
   if (call && (call->op.same_as(tvm::tl::device_assert()))) {
     std::string cond = RemoveOutermostParentheses(PrintExpr_(call->args[0]));
     PrintIndent();
