@@ -748,8 +748,18 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
          is_const_int(loop_vars[1]->dom->min) &&
          is_const_int(loop_vars[1]->dom->extent))
       << "Tensor memory copy requires loop bounds to be constant integers";
-  int64_t logical_row_min = *as_const_int(loop_vars[0]->dom->min);
-  int64_t logical_col_min = *as_const_int(loop_vars[1]->dom->min);
+  // The slice's starting indices on the tmem side. MakeIterVars always
+  // creates loop_vars with min=0, so we have to read the slice base from
+  // the original src/dst range arrays (which carry the BufferRegion start).
+  // Without this, `T.copy(O_tmem[:, 32:64], O_chunk)` would emit the
+  // tcgen05 instruction with addr offset 0 instead of 32, silently
+  // corrupting non-zero column slices used by chunked-rescale patterns.
+  const Array<Range> &tmem_range = is_ld ? op.src_range : op.dst_range;
+  ICHECK(is_const_int(tmem_range[0]->min) && is_const_int(tmem_range[1]->min))
+      << "Tensor memory copy requires the tmem-side slice base to be a "
+         "constant; got non-constant " << tmem_range;
+  int64_t logical_row_min = *as_const_int(tmem_range[0]->min);
+  int64_t logical_col_min = *as_const_int(tmem_range[1]->min);
 
   constexpr int WARP_SIZE = 32;
   constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
