@@ -299,6 +299,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectTcgen05Fence()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     # NOTE: LowerPTXAsyncCopy is applied earlier (before PipelinePlanning).
+    # Hoist buffer resource descriptors for the gfx950 buffer_load...lds path.
+    # No-op on non-gfx950 targets (pass guards on target_is_gfx950).
+    mod = tilelang.transform.HoistBufferResource()(mod)
     if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
