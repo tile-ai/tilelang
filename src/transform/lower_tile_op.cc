@@ -923,6 +923,76 @@ private:
       return call;
     }
 
+    // gfx950 swizzle-swap for buffer_load_dwordx4 ... lds. On this branch
+    // the BufferStores that feed A_shared/B_shared are consumed by
+    // InjectPTXAsyncCopy inside rocm::Copy::Lower before they reach the
+    // BufferStore visitor, so the swap has to happen on the resulting
+    // tl::ptx_cp_async_lds Call. We rewrite the dst access_ptr to use
+    // (Forward(idx) - delta) on the last dim against the remapped shared
+    // buffer (lane-contiguous LDS writes) and shift the global src
+    // access_ptr by +delta on the last dim (XOR is self-inverse, so net
+    // data movement is unchanged). Returning the rewritten Call directly
+    // prevents the default visitor from re-applying the swizzled layout.
+    if (op->op.same_as(tl::ptx_cp_async_lds()) &&
+        TargetIsRocm(target_) && op->args.size() == 3) {
+      auto resolve_load = [&](const PrimExpr &arg) -> const BufferLoadNode * {
+        const auto *call = arg.as<CallNode>();
+        if (!call || !call->op.same_as(tl::access_ptr())) return nullptr;
+        const auto *direct = call->args[0].as<BufferLoadNode>();
+        if (direct) return direct;
+        if (const auto *var = call->args[0].as<VarNode>()) {
+          auto it = let_bindings_.find(Downcast<Var>(call->args[0]));
+          if (it != let_bindings_.end()) {
+            return it->second.as<BufferLoadNode>();
+          }
+          (void)var;
+        }
+        return nullptr;
+      };
+      const auto *dst_ap = op->args[0].as<CallNode>();
+      const auto *src_ap = op->args[1].as<CallNode>();
+      const BufferLoadNode *dst_load = resolve_load(op->args[0]);
+      const BufferLoadNode *src_load = resolve_load(op->args[1]);
+      if (dst_ap && src_ap && dst_load && src_load &&
+          IsSharedBuffer(dst_load->buffer) &&
+          IsGlobalBuffer(src_load->buffer) &&
+          buffer_remap_.count(dst_load->buffer) &&
+          layout_map_.count(dst_load->buffer) &&
+          layout_map_[dst_load->buffer]->HasSwizzle() &&
+          dst_load->indices.size() > 0 && src_load->indices.size() > 0) {
+        Buffer new_dst_buf = buffer_remap_[dst_load->buffer];
+        layout_remap_.Set(new_dst_buf, layout_map_[dst_load->buffer]);
+        auto layout = layout_map_[dst_load->buffer];
+        auto swizzled = layout->Forward(dst_load->indices);
+        PrimExpr delta =
+            analyzer_->Simplify(layout->SwizzleDelta(dst_load->indices));
+
+        Array<PrimExpr> new_dst_indices(swizzled.begin(), swizzled.end());
+        int last_dst = static_cast<int>(new_dst_indices.size()) - 1;
+        new_dst_indices.Set(
+            last_dst,
+            analyzer_->Simplify(new_dst_indices[last_dst] - delta));
+
+        Array<PrimExpr> new_src_indices(src_load->indices.begin(),
+                                        src_load->indices.end());
+        int last_src = static_cast<int>(new_src_indices.size()) - 1;
+        new_src_indices.Set(
+            last_src,
+            analyzer_->Simplify(new_src_indices[last_src] + delta));
+
+        BufferLoad new_dst_load(new_dst_buf, new_dst_indices);
+        BufferLoad new_src_load(src_load->buffer, new_src_indices);
+        PrimExpr new_dst_ap =
+            Call(dst_ap->dtype, tl::access_ptr(),
+                 {new_dst_load, dst_ap->args[1], dst_ap->args[2]});
+        PrimExpr new_src_ap =
+            Call(src_ap->dtype, tl::access_ptr(),
+                 {new_src_load, src_ap->args[1], src_ap->args[2]});
+        return Call(op->dtype, op->op,
+                    {new_dst_ap, new_src_ap, op->args[2]});
+      }
+    }
+
     // Default: visit normally
     auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     return call;
