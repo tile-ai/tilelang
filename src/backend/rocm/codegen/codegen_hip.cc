@@ -994,6 +994,9 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
     int n = Downcast<IntImm>(op->args[0])->value;
+    // AMDGPU s_waitcnt vmcnt field is 6-bit (max 63); clamp to keep the
+    // "n"(cnt) immediate constraint in tl::cp_async_wait valid.
+    if (n > 63) n = 63;
     std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
     print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
