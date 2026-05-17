@@ -953,13 +953,26 @@ private:
       const auto *src_ap = op->args[1].as<CallNode>();
       const BufferLoadNode *dst_load = resolve_load(op->args[0]);
       const BufferLoadNode *src_load = resolve_load(op->args[1]);
-      if (dst_ap && src_ap && dst_load && src_load &&
-          IsSharedBuffer(dst_load->buffer) &&
-          IsGlobalBuffer(src_load->buffer) &&
-          buffer_remap_.count(dst_load->buffer) &&
-          layout_map_.count(dst_load->buffer) &&
-          layout_map_[dst_load->buffer]->HasSwizzle() &&
-          dst_load->indices.size() > 0 && src_load->indices.size() > 0) {
+      // Candidate gate: do we have everything we need to even attempt
+      // the swap? If not, fall through to "downgrade" below — we must
+      // NOT leave the call as ptx_cp_async_lds, because codegen would
+      // then emit the LDS template against the unmodified (swizzled)
+      // dst index and produce wrong addresses.
+      bool m9_candidate = dst_ap && src_ap && dst_load && src_load &&
+                          IsSharedBuffer(dst_load->buffer) &&
+                          IsGlobalBuffer(src_load->buffer) &&
+                          buffer_remap_.count(dst_load->buffer) &&
+                          layout_map_.count(dst_load->buffer) &&
+                          layout_map_[dst_load->buffer]->HasSwizzle() &&
+                          dst_load->indices.size() > 0 &&
+                          src_load->indices.size() > 0;
+      if (!m9_candidate) {
+        // Can't do the swap. Downgrade so codegen uses the safe
+        // synchronous cp_async_gs<N> path instead of buffer_load_lds.
+        Call downgraded(op->dtype, tl::ptx_cp_async(), op->args);
+        return IRMutatorWithAnalyzer::VisitExpr(downgraded);
+      }
+      {
         Buffer new_dst_buf = buffer_remap_[dst_load->buffer];
         layout_remap_.Set(new_dst_buf, layout_map_[dst_load->buffer]);
         auto layout = layout_map_[dst_load->buffer];
@@ -980,16 +993,85 @@ private:
             last_src,
             analyzer_->Simplify(new_src_indices[last_src] + delta));
 
-        BufferLoad new_dst_load(new_dst_buf, new_dst_indices);
-        BufferLoad new_src_load(src_load->buffer, new_src_indices);
-        PrimExpr new_dst_ap =
-            Call(dst_ap->dtype, tl::access_ptr(),
-                 {new_dst_load, dst_ap->args[1], dst_ap->args[2]});
-        PrimExpr new_src_ap =
-            Call(src_ap->dtype, tl::access_ptr(),
-                 {new_src_load, src_ap->args[1], src_ap->args[2]});
-        return Call(op->dtype, op->op,
-                    {new_dst_ap, new_src_ap, op->args[2]});
+        // Post-swap linearity guard: the single-dim subtract-delta swap
+        // only cancels the XOR when the layout's swizzle is confined to
+        // the last output dim. For layouts (e.g. B's matmul layout in
+        // some shapes) where the swizzle spreads across multiple output
+        // dims, the post-swap LDS index is NOT lane-contiguous and
+        // buffer_load_dwordx4...lds would write to wrong addresses.
+        // Detect by sampling each new_dst_indices[d] against a
+        // thread-like var and requiring an affine (constant or
+        // single-stride) dependence. If any dim is non-affine in tx
+        // (typical for bit-extract `(tx & m) >> s` terms), bail out so
+        // the call falls through to the safe ptx_cp_async path.
+        auto is_affine_in_thread_var = [&](const PrimExpr &e) -> bool {
+          arith::Analyzer post_analyzer;
+          std::unordered_set<const VarNode *> seen;
+          Array<Var> free_vars;
+          tir::PostOrderVisit(e, [&](const ObjectRef &node) {
+            if (auto *v = node.as<VarNode>()) {
+              if (seen.insert(v).second) {
+                free_vars.push_back(Downcast<Var>(node));
+              }
+            }
+          });
+          for (const auto &var : free_vars) {
+            const std::string name(var->name_hint);
+            if (name.find("thread") == std::string::npos && name != "tx" &&
+                name != "tid") {
+              continue;
+            }
+            PrimExpr f0 = post_analyzer.Simplify(tir::Substitute(
+                e, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 0)}}));
+            PrimExpr f1 = post_analyzer.Simplify(tir::Substitute(
+                e, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 1)}}));
+            PrimExpr stride = post_analyzer.Simplify(f1 - f0);
+            const auto *stride_imm = stride.as<IntImmNode>();
+            if (!stride_imm) return false;
+            for (int pt = 2; pt < 64; ++pt) {
+              PrimExpr fk = post_analyzer.Simplify(tir::Substitute(
+                  e, Map<Var, PrimExpr>{{var, IntImm(var->dtype, pt)}}));
+              PrimExpr actual = post_analyzer.Simplify(fk - f0);
+              PrimExpr expected =
+                  IntImm(DataType::Int(64), stride_imm->value * pt);
+              if (!post_analyzer.CanProveEqual(actual, expected)) {
+                return false;
+              }
+            }
+            return true;
+          }
+          // No thread-like var found: constant w.r.t. tx -> affine OK.
+          return true;
+        };
+        bool all_dims_affine = true;
+        for (const auto &idx : new_dst_indices) {
+          if (!is_affine_in_thread_var(idx)) {
+            all_dims_affine = false;
+            break;
+          }
+        }
+        if (!all_dims_affine) {
+          // The swap can't produce a lane-contiguous LDS dst for this
+          // layout. Downgrade the op from tl::ptx_cp_async_lds to
+          // tl::ptx_cp_async (same arg shape) so codegen emits the safe
+          // synchronous cp_async_gs<N> path rather than buffer_load_lds
+          // with a non-contiguous LDS index. Let the default visitor
+          // recurse from there so the access_ptr children still get the
+          // ordinary swizzled-layout treatment.
+          Call downgraded(op->dtype, tl::ptx_cp_async(), op->args);
+          return IRMutatorWithAnalyzer::VisitExpr(downgraded);
+        } else {
+          BufferLoad new_dst_load(new_dst_buf, new_dst_indices);
+          BufferLoad new_src_load(src_load->buffer, new_src_indices);
+          PrimExpr new_dst_ap =
+              Call(dst_ap->dtype, tl::access_ptr(),
+                   {new_dst_load, dst_ap->args[1], dst_ap->args[2]});
+          PrimExpr new_src_ap =
+              Call(src_ap->dtype, tl::access_ptr(),
+                   {new_src_load, src_ap->args[1], src_ap->args[2]});
+          return Call(op->dtype, op->op,
+                      {new_dst_ap, new_src_ap, op->args[2]});
+        }
       }
     }
 
