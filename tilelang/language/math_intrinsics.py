@@ -414,6 +414,14 @@ def max3(a: PrimExpr, b: PrimExpr, c: PrimExpr) -> PrimExpr:
     return tir.call_intrin(a.dtype, tir.op.Op.get("tl.max3"), a, b, c)
 
 
+def exp2_poly(x: PrimExpr) -> PrimExpr:
+    """Polynomial exp2 approximation using FMA units (degree-3 minimax).
+    Higher throughput than SFU exp2f when exp2 is the bottleneck on SM100+.
+    Accurate to ~20 bits on [-127, 127]."""
+    x = tir.convert(x)
+    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.exp2_poly"), x)
+
+
 def abs2(x: PrimExpr) -> PrimExpr:
     """Packed element-wise absolute value."""
     x = tir.convert(x)
@@ -446,4 +454,5 @@ __all__ = [
     "min2",  # noqa: F401
     "abs2",  # noqa: F401
     "max3",  # noqa: F401
+    "exp2_poly",  # noqa: F401
 ]

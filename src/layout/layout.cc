@@ -328,8 +328,12 @@ Layout::Layout(Array<IterVar> forward_var, Array<PrimExpr> forward_index) {
   Map<Var, PrimExpr> vmap;
   Array<PrimExpr> input_size;
   for (size_t i = 0; i < forward_var.size(); i++) {
-    vmap.Set(forward_var[i]->var, InputPlaceholder(i));
-    CHECK(is_zero(forward_var[i]->dom->min));
+    PrimExpr min_val = forward_var[i]->dom->min;
+    if (is_zero(min_val)) {
+      vmap.Set(forward_var[i]->var, InputPlaceholder(i));
+    } else {
+      vmap.Set(forward_var[i]->var, InputPlaceholder(i) + min_val);
+    }
     input_size.push_back(forward_var[i]->dom->extent);
   }
   forward_index =
@@ -810,8 +814,12 @@ Fragment::Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
   Array<PrimExpr> input_size;
   PrimExpr replicate_size = 1;
   for (size_t i = 0; i < forward_var.size(); i++) {
-    vmap.Set(forward_var[i]->var, InputPlaceholder(i));
-    CHECK(is_zero(forward_var[i]->dom->min));
+    PrimExpr min_val = forward_var[i]->dom->min;
+    if (is_zero(min_val)) {
+      vmap.Set(forward_var[i]->var, InputPlaceholder(i));
+    } else {
+      vmap.Set(forward_var[i]->var, InputPlaceholder(i) + min_val);
+    }
     input_size.push_back(forward_var[i]->dom->extent);
   }
   if (thread_replicate.defined()) {

@@ -176,6 +176,9 @@ static constexpr const char *kForceLetInline = "tl.force_let_inline";
 static constexpr const char *kDisableOutOfBoundWarning =
     "tl.disable_out_of_bound_warning";
 
+static constexpr const char *kOutlineWarpSpecBranches =
+    "tl.outline_warp_spec_branches";
+
 /*!
  * \brief Enable dumping IR during lowering between passes.
  *
@@ -266,6 +269,11 @@ TVM_DLL const Op &abs2();
 // reference's softmax reduce. Falls back to `fmax(a, fmax(b, c))` on targets
 // that don't support the 3-input form.
 TVM_DLL const Op &max3();
+
+// Polynomial exp2 approximation (degree-3 minimax on [0,1) + bit manipulation
+// for integer exponent). Higher throughput than SFU ex2.approx on SM100+ when
+// exp2 is the bottleneck (uses FMA units instead of limited SFU slots).
+TVM_DLL const Op &exp2_poly();
 
 // random op
 TVM_DLL const Op &rng_init();

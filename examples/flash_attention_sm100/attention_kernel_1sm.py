@@ -46,6 +46,7 @@ import tilelang.language as T
 PASS_CFG = {
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
+    "tl.disable_thread_storage_sync": True,
 }
 
 
@@ -465,16 +466,23 @@ def attention_kernel_1sm(
                 # Barriers
                 mbar_s0 = T.alloc_barrier(1)
                 mbar_s1 = T.alloc_barrier(1)
-                # math signals AFTER P write AND O rescale (one wait covers both).
+                # math signals P ready.
                 mbar_p0 = T.alloc_barrier(128)
                 mbar_p1 = T.alloc_barrier(128)
                 mbar_o0 = T.alloc_barrier(1)
                 mbar_o1 = T.alloc_barrier(1)
+                # Math → mma_load: scores_scale is written to SMEM.
+                mbar_scale0 = T.alloc_barrier(128)
+                mbar_scale1 = T.alloc_barrier(128)
                 # TMA-load completion barriers. Both K and V double-buffered.
                 mbar_q0_load = T.alloc_barrier(1)
                 mbar_q1_load = T.alloc_barrier(1)
                 mbar_k_load = T.alloc_barrier([1, 1])
                 mbar_v_load = T.alloc_barrier([1, 1])
+
+                # SMEM for math→mma_load scores_scale handoff
+                scores_scale0_shared = T.alloc_shared([kq2_block_M], accum_dtype)
+                scores_scale1_shared = T.alloc_shared([kq2_block_M], accum_dtype)
 
                 # Math-WG-0 fragments (tid < 128)
                 S0_reg = T.alloc_fragment([kq2_block_M, block_N], accum_dtype)
@@ -495,18 +503,13 @@ def attention_kernel_1sm(
                 logsum1 = T.alloc_fragment([kq2_block_M], accum_dtype)
 
                 # mma_load WG fragments (tid in [256, 384))
-                # Used for init (zeroing O_tmem) and epilogue (divide + store).
-                # Rescale moved to math WGs — no longer need mma_scale here.
                 O0_reg = T.alloc_fragment([kq2_block_M, dim], accum_dtype)
                 O_reg = T.alloc_fragment([kq2_block_M, dim], accum_dtype)
                 mma_logsum0 = T.alloc_fragment([kq2_block_M], accum_dtype)
                 mma_logsum1 = T.alloc_fragment([kq2_block_M], accum_dtype)
-
-                # Ballot-skip fragments (per math WG)
-                need_int0 = T.alloc_fragment([kq2_block_M], "int32")
-                need_red0 = T.alloc_fragment([1], "int32")
-                need_int1 = T.alloc_fragment([kq2_block_M], "int32")
-                need_red1 = T.alloc_fragment([1], "int32")
+                # mma_load uses these for O rescale (between QK and PV)
+                mma_scale0 = T.alloc_fragment([kq2_block_M], accum_dtype)
+                mma_scale1 = T.alloc_fragment([kq2_block_M], accum_dtype)
 
                 tid = T.get_thread_binding()
 
@@ -591,9 +594,9 @@ def attention_kernel_1sm(
                                     annotations={"emit_arrive": 1},
                                 )
 
-                        # Wait for this iter's K (parity = k>>1 because the
-                        # same barrier is reused every 2 iters).
+                        # Wait for this iter's K data.
                         T.mbarrier_wait_parity(mbar_k_load[stage], (k >> 1) & 1)
+                        # Issue QK GEMMs (S = Q @ K^T)
                         if stage == 0:
                             T.tcgen05_gemm(
                                 Q0_shared, K_shared_0, S0_tmem,
@@ -613,13 +616,31 @@ def attention_kernel_1sm(
                                 transpose_B=True, mbar=mbar_s1, clear_accum=True,
                             )
 
-                        # Math WGs signal mbar_p AFTER both P_tmem write AND
-                        # O rescale (if k>0) — one wait covers both.
+                        # --- O rescale (overlaps with math's softmax) ---
+                        # Read scores_scale from SMEM (math writes it early in softmax)
+                        # then rescale O before PV accumulates into it.
+                        if k > 0:
+                            T.mbarrier_wait_parity(mbar_scale0, k & 1)
+                            T.copy(scores_scale0_shared, mma_scale0)
+                            T.mbarrier_wait_parity(mbar_o0, (k - 1) & 1)
+                            T.copy(O0_tmem, O0_reg)
+                            for i, j in T.Parallel(kq2_block_M, dim):
+                                O0_reg[i, j] *= mma_scale0[i]
+                            T.copy(O0_reg, O0_tmem)
+
+                            T.mbarrier_wait_parity(mbar_scale1, k & 1)
+                            T.copy(scores_scale1_shared, mma_scale1)
+                            T.mbarrier_wait_parity(mbar_o1, (k - 1) & 1)
+                            T.copy(O1_tmem, O_reg)
+                            for i, j in T.Parallel(kq2_block_M, dim):
+                                O_reg[i, j] *= mma_scale1[i]
+                            T.copy(O_reg, O1_tmem)
+
+                        # Wait for P ready (from math) and V data.
                         T.mbarrier_wait_parity(mbar_p0, k & 1)
                         T.mbarrier_wait_parity(mbar_p1, k & 1)
-
-                        # V needed for PV MMA. Wait now.
                         T.mbarrier_wait_parity(mbar_v_load[stage], (k >> 1) & 1)
+                        # Issue PV GEMMs (O += P @ V)
                         if stage == 0:
                             T.tcgen05_gemm(
                                 P0_tmem, V_shared_0, O0_tmem,
@@ -638,8 +659,6 @@ def attention_kernel_1sm(
                                 P1_tmem, V_shared_1, O1_tmem,
                                 mbar=mbar_o1, clear_accum=(k == 0),
                             )
-                        # No wait_O here — deferred to next iter's rescale
-                        # block. Epilogue does its own final wait.
 
                     # ============================================================
                     # Math WG 0  --  tid in [0, 128)
@@ -672,6 +691,10 @@ def attention_kernel_1sm(
                             scores_scale0[i] = T.exp2(
                                 scores_max_prev0[i] * scale - scores_max0[i] * scale
                             )
+                        # Write scores_scale to SMEM for mma_load's O rescale
+                        T.copy(scores_scale0, scores_scale0_shared)
+                        T.mbarrier_arrive(mbar_scale0)
+
                         for i, j in T.Parallel(kq2_block_M, block_N):
                             S0_reg[i, j] = T.exp2(S0_reg[i, j] * scale - scores_max0[i] * scale)
                         T.reduce_sum(S0_reg, scores_sum0, dim=1)
@@ -679,23 +702,7 @@ def attention_kernel_1sm(
                             logsum0[i] = logsum0[i] * scores_scale0[i] + scores_sum0[i]
 
                         T.copy(S0_reg, P0_cast)
-                        # Start P_tmem store (async). S0_reg is now dead and
-                        # available for O reuse.
                         T.copy(P0_cast, P0_tmem)
-
-                        if k > 0:
-                            for i in T.Parallel(kq2_block_M):
-                                need_int0[i] = T.if_then_else(
-                                    scores_scale0[i] < 1.0, 1, 0
-                                )
-                            T.reduce_max(need_int0, need_red0, dim=0, clear=True)
-                            if need_red0[0] != 0:
-                                T.mbarrier_wait_parity(mbar_o0, (k - 1) & 1)
-                                T.copy(O0_tmem, S0_reg)
-                                for i, j in T.Parallel(kq2_block_M, dim):
-                                    S0_reg[i, j] *= scores_scale0[i]
-                                T.copy(S0_reg, O0_tmem)
-                        # Single arrive covers both P_tmem write and rescale (or skip).
                         T.mbarrier_arrive(mbar_p0)
 
                     # ============================================================
@@ -729,6 +736,10 @@ def attention_kernel_1sm(
                             scores_scale1[i] = T.exp2(
                                 scores_max_prev1[i] * scale - scores_max1[i] * scale
                             )
+                        # Write scores_scale to SMEM for mma_load's O rescale
+                        T.copy(scores_scale1, scores_scale1_shared)
+                        T.mbarrier_arrive(mbar_scale1)
+
                         for i, j in T.Parallel(kq2_block_M, block_N):
                             S1_reg[i, j] = T.exp2(S1_reg[i, j] * scale - scores_max1[i] * scale)
                         T.reduce_sum(S1_reg, scores_sum1, dim=1)
@@ -737,19 +748,6 @@ def attention_kernel_1sm(
 
                         T.copy(S1_reg, P1_cast)
                         T.copy(P1_cast, P1_tmem)
-
-                        if k > 0:
-                            for i in T.Parallel(kq2_block_M):
-                                need_int1[i] = T.if_then_else(
-                                    scores_scale1[i] < 1.0, 1, 0
-                                )
-                            T.reduce_max(need_int1, need_red1, dim=0, clear=True)
-                            if need_red1[0] != 0:
-                                T.mbarrier_wait_parity(mbar_o1, (k - 1) & 1)
-                                T.copy(O1_tmem, S1_reg)
-                                for i, j in T.Parallel(kq2_block_M, dim):
-                                    S1_reg[i, j] *= scores_scale1[i]
-                                T.copy(S1_reg, O1_tmem)
                         T.mbarrier_arrive(mbar_p1)
 
                 # ---- Epilogue ----
@@ -758,9 +756,7 @@ def attention_kernel_1sm(
                 elif tid >= 128 and tid < 256:
                     T.copy(logsum1, logsum1_shared)
                 elif tid >= 256:
-                    # Final wait for the last iter's PV completion (we deferred
-                    # the wait_O inside the loop). Parity matches the iter that
-                    # was last issued.
+                    # Final wait for the last iter's PV completion.
                     T.mbarrier_wait_parity(mbar_o0, (kq2_loop_range - 1) & 1)
                     T.mbarrier_wait_parity(mbar_o1, (kq2_loop_range - 1) & 1)
                     T.copy(logsum0_shared, mma_logsum0)

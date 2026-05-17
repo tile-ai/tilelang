@@ -1039,13 +1039,15 @@ private:
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
-      // Record workspace under the innermost block scope so its lifetime
-      // covers the statements that requested it and does not sink into
-      // subsequently created inner blocks (e.g., GEMM macro blocks).
+      // Place workspace at the outermost block scope so that its lifetime
+      // spans the entire kernel.  Under warp specialization the merge pass
+      // uses sequential liveness and cannot see that TMA concurrently
+      // writes shared buffers while math WGs use the workspace.  A narrow
+      // (innermost-scope) lifetime lets the merge pass alias workspace with
+      // live V/K buffers, causing corruption on large shapes.
       if (!workspace_stack_.empty()) {
-        workspace_stack_.back().push_back(workspace);
+        workspace_stack_.front().push_back(workspace);
       } else {
-        // Fallback: create a temporary frame (should be rare)
         workspace_stack_.emplace_back(Array<Buffer>{workspace});
       }
       return workspace.access_ptr(2); // write

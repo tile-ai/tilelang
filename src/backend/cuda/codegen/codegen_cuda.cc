@@ -6,6 +6,7 @@
 #include "target/codegen_utils.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
+#include <tvm/ir/transform.h>
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
@@ -703,10 +704,127 @@ std::string CodeGenTileLangCUDA::Finish() {
   }
   decl_stream << "\n";
 
+  // Emit outlined device functions (if any) before the kernel.
+  std::string outlined = outlined_fns_stream_.str();
+  if (!outlined.empty()) {
+    decl_stream << outlined << "\n";
+  }
+
   return CodeGenC::Finish();
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
+  // Check if this for-loop contains a warp-spec IfThenElse that should be outlined.
+  // If so, emit device functions containing the full loop and dispatch once.
+  if (outline_warp_spec_enabled_ && !in_outlined_fn_ &&
+      op->kind != tir::ForKind::kUnrolled) {
+    const auto *if_node = op->body.as<IfThenElseNode>();
+    if (if_node && IsThreadXComparison(if_node->condition)) {
+      // Flatten the branches
+      std::vector<WarpBranch> branches;
+      FlattenWarpBranches(if_node, &branches);
+
+      // Compute loop extent string
+      std::string extent =
+          PrintExpr(arith::Analyzer().Simplify(op->extent + op->min));
+      std::string start = PrintExpr(op->min);
+      std::string vid = AllocVarID(op->loop_var.get());
+
+      // For each branch: emit a device function containing the FULL for-loop
+      std::vector<std::string> fn_names;
+      for (const auto &branch : branches) {
+        std::string fn_name =
+            "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
+        outlined_fn_count_++;
+        fn_names.push_back(fn_name);
+
+        // Function signature
+        outlined_fns_stream_ << "static __device__ __noinline__ void "
+                             << fn_name << "(\n    int __loop_extent";
+        for (const auto &bar : barrier_var_names_) {
+          outlined_fns_stream_ << ",\n    " << mbarrier_dtype_ << "* " << bar;
+        }
+        for (const auto &tm : tmem_var_names_) {
+          outlined_fns_stream_ << ",\n    uint* " << tm;
+        }
+        for (const auto &kp : kernel_param_infos_) {
+          outlined_fns_stream_ << ",\n    " << kp.type_str << "& "
+                               << kp.var_name;
+        }
+        outlined_fns_stream_ << "\n) {\n";
+
+        // extern shared
+        outlined_fns_stream_
+            << "  extern __shared__ __align__(1024) unsigned char "
+               "buf_dyn_shmem[];\n";
+
+        // Re-declare local allocations (zero-initialized for safety)
+        for (const auto &alloc : local_allocs_) {
+          outlined_fns_stream_ << "  ";
+          std::ostringstream type_os;
+          PrintType(alloc.dtype, type_os);
+          outlined_fns_stream_ << type_os.str() << " " << alloc.var_name << "["
+                               << alloc.size << "] = {};\n";
+        }
+        outlined_fns_stream_ << "\n";
+
+        // Emit the for-loop containing just this branch's body
+        outlined_fns_stream_ << "  for (int " << vid << " = " << start << "; "
+                             << vid << " < __loop_extent; ++" << vid << ") {\n";
+
+        // Emit branch body
+        std::ostringstream saved_stream;
+        saved_stream.swap(stream);
+        in_outlined_fn_ = true;
+        current_loop_var_name_ = vid;
+        PrintStmt(branch.body);
+        current_loop_var_name_ = "";
+        in_outlined_fn_ = false;
+        outlined_fns_stream_ << stream.str();
+        stream.str("");
+        stream.clear();
+        saved_stream.swap(stream);
+
+        outlined_fns_stream_ << "  }\n";
+        outlined_fns_stream_ << "}\n\n";
+      }
+
+      // Emit dispatch in kernel (no loop)
+      for (size_t i = 0; i < branches.size(); i++) {
+        PrintIndent();
+        if (i == 0) {
+          stream << "if (";
+          PrintExpr(branches[i].condition, stream);
+          stream << ") {\n";
+        } else if (branches[i].condition.defined()) {
+          stream << "} else if (";
+          PrintExpr(branches[i].condition, stream);
+          stream << ") {\n";
+        } else {
+          stream << "} else {\n";
+        }
+        int call_scope = BeginScope();
+        PrintIndent();
+        stream << fn_names[i] << "(" << extent;
+        for (const auto &bar : barrier_var_names_) {
+          stream << ", " << bar;
+        }
+        for (const auto &tm : tmem_var_names_) {
+          stream << ", " << tm;
+        }
+        for (const auto &kp : kernel_param_infos_) {
+          stream << ", " << kp.var_name;
+        }
+        stream << ");\n";
+        EndScope(call_scope);
+      }
+      PrintIndent();
+      stream << "}\n";
+      return;
+    }
+  }
+
+  // Default for-loop emission
   if (op->kind == tir::ForKind::kUnrolled) {
     PrintIndent();
     if (unroll_factor.count(op->loop_var.get())) {
@@ -726,7 +844,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
   stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
          << "; ++" << vid << ") {\n";
   int for_scope = BeginScope();
+  std::string saved_loop_var = current_loop_var_name_;
+  current_loop_var_name_ = vid;
   PrintStmt(op->body);
+  current_loop_var_name_ = saved_loop_var;
   this->EndScope(for_scope);
   PrintIndent();
   stream << "}\n";
@@ -736,6 +857,9 @@ void CodeGenTileLangCUDA::BindThreadIndex(const IterVar &iv) {
   ICHECK(!var_idmap_.count(iv->var.get()));
   var_idmap_[iv->var.get()] =
       CastFromTo(iv->thread_tag, DataType::UInt(32), iv->var.dtype());
+  if (iv->thread_tag == "threadIdx.x") {
+    thread_x_var_ = iv->var.get();
+  }
 }
 
 void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
@@ -3848,6 +3972,28 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
          << PrintExpr(op->args[1]) << "), " << PrintExpr(op->args[2]) << ")";
     }
     return true;
+  } else if (op->op.same_as(tl::exp2_poly())) {
+    // Degree-3 minimax polynomial exp2 on CUDA cores (FA4 EXP2_POLY pattern).
+    // Uses FMA units instead of SFU for higher throughput when exp2 is the
+    // bottleneck. Accurate to ~20 bits on [-127, 127].
+    if (op->dtype.is_float() && op->dtype.bits() == 32 &&
+        op->dtype.lanes() == 1) {
+      std::string x = PrintExpr(op->args[0]);
+      os << "([&]{float _x = fmaxf(" << x << ", -127.0f);"
+         << "float _xr = _x + 12582912.0f; float _f = _x - (_xr - 12582912.0f);"
+         << "float _h = 0.0771190896630287f;"
+         << "_h = _h * _f + 0.227564394474030f;"
+         << "_h = _h * _f + 0.695146143436432f;"
+         << "_h = _h * _f + 1.0f;"
+         << "int _xi; asm(\"mov.b32 %0, %1;\" : \"=r\"(_xi) : \"f\"(_xr));"
+         << "int _hi; asm(\"mov.b32 %0, %1;\" : \"=r\"(_hi) : \"f\"(_h));"
+         << "_xi = _xi << 23; _hi = _xi + _hi;"
+         << "float _r; asm(\"mov.b32 %0, %1;\" : \"=f\"(_r) : \"r\"(_hi));"
+         << "return _r;}())";
+    } else {
+      os << "exp2f(" << PrintExpr(op->args[0]) << ")";
+    }
+    return true;
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
@@ -4131,6 +4277,15 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     const IntImmNode *factor = op->value.as<IntImmNode>();
     ICHECK(factor);
     unroll_factor[op->node.as<VarNode>()] = Downcast<IntImm>(factor);
+  } else if (op->attr_key == tl::attr::kWarpSpecializationScope) {
+    const auto *if_node = op->body.as<IfThenElseNode>();
+    if (if_node) {
+      // Delegate to VisitStmt_(IfThenElseNode*) which handles outlining
+      VisitStmt_(if_node);
+    } else {
+      PrintStmt(op->body);
+    }
+    return;
   }
 
   CodeGenC::VisitStmt_(op);
@@ -4179,6 +4334,9 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
 
   if (scope == "shared.dyn") {
     stream << ' ' << vid << "[];\n";
+    if (outline_warp_spec_enabled_) {
+      dyn_shmem_size_ = static_cast<int64_t>(op->ConstantAllocationSize());
+    }
   } else {
     size_t constant_size = op->ConstantAllocationSize();
     ICHECK_GT(constant_size, 0)
@@ -4195,12 +4353,21 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     }
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
+      if (outline_warp_spec_enabled_) {
+        // Track all shared variables for device function params
+        std::ostringstream type_os;
+        PrintType(op->dtype, type_os);
+        tmem_var_names_.push_back(vid);
+      }
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
       auto v_id_mem = vid + "_mem";
       stream << ' ' << v_id_mem << "[" << constant_size << "];\n";
       PrintIndent();
       stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
              << "*>(" << v_id_mem << ");\n";
+      if (outline_warp_spec_enabled_) {
+        barrier_var_names_.push_back(vid);
+      }
     } else if (scope == "local") {
       if (op->dtype == DataType::Int(4) || op->dtype == DataType::UInt(4)) {
         stream << "alignas(16) ";
@@ -4220,6 +4387,9 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
         } else {
           stream << ' ' << vid << '[' << constant_size << "];\n";
         }
+      }
+      if (outline_warp_spec_enabled_ && !in_outlined_fn_) {
+        local_allocs_.push_back({vid, op->dtype, static_cast<int64_t>(constant_size)});
       }
     } else if (scope == "local.var") {
       PrimExpr init = tir::make_const(op->dtype, 0);
@@ -5133,6 +5303,14 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   // reserve keywords
   ReserveKeywordsAsUnique_();
 
+  // Check if device function outlining is enabled via pass config
+  {
+    auto ctxt = tvm::transform::PassContext::Current();
+    outline_warp_spec_enabled_ =
+        ctxt->GetConfig(tl::kOutlineWarpSpecBranches, Optional<Bool>())
+            .value_or(Bool(false));
+  }
+
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
@@ -5174,8 +5352,13 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
       if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
         if (ptr->storage_scope == "grid_constant") {
           stream << "__grid_constant__ const ";
-          CodeGenC::PrintType(ptr->element_type, stream);
-          stream << ' ' << vid;
+          std::ostringstream type_os;
+          CodeGenC::PrintType(ptr->element_type, type_os);
+          stream << type_os.str() << ' ' << vid;
+          if (outline_warp_spec_enabled_) {
+            kernel_param_infos_.push_back(
+                {vid, "const " + type_os.str(), true});
+          }
           continue;
         }
       }
@@ -5210,6 +5393,169 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   this->EndScope(func_scope);
   this->PrintIndent();
   this->stream << "}\n\n";
+}
+
+// ---------------------------------------------------------------------------
+// Device function outlining for warp-specialized branches
+// ---------------------------------------------------------------------------
+
+bool CodeGenTileLangCUDA::IsThreadXComparison(const PrimExpr &cond) const {
+  if (!thread_x_var_)
+    return false;
+  auto check_var = [this](const PrimExpr &e) -> bool {
+    const auto *v = e.as<VarNode>();
+    return v && v == thread_x_var_;
+  };
+  if (const auto *ge = cond.as<GENode>())
+    return check_var(ge->a) || check_var(ge->b);
+  if (const auto *lt = cond.as<LTNode>())
+    return check_var(lt->a) || check_var(lt->b);
+  if (const auto *le = cond.as<LENode>())
+    return check_var(le->a) || check_var(le->b);
+  if (const auto *gt = cond.as<GTNode>())
+    return check_var(gt->a) || check_var(gt->b);
+  if (const auto *and_node = cond.as<AndNode>())
+    return IsThreadXComparison(and_node->a) || IsThreadXComparison(and_node->b);
+  return false;
+}
+
+void CodeGenTileLangCUDA::FlattenWarpBranches(
+    const IfThenElseNode *node, std::vector<WarpBranch> *branches) {
+  branches->push_back({node->condition, node->then_case});
+  if (node->else_case.defined()) {
+    const auto *nested = node->else_case.value().as<IfThenElseNode>();
+    if (nested && IsThreadXComparison(nested->condition)) {
+      FlattenWarpBranches(nested, branches);
+    } else {
+      // Terminal else branch — no condition needed for dispatch
+      // Use a "true" placeholder; dispatch will emit it as final else
+      branches->push_back({PrimExpr(), node->else_case.value()});
+    }
+  }
+}
+
+std::string CodeGenTileLangCUDA::EmitOutlinedDeviceFunction(const Stmt &body) {
+  std::string fn_name =
+      "__outlined_warp_fn_" + std::to_string(outlined_fn_count_);
+  outlined_fn_count_++;
+
+  // Build function signature
+  outlined_fns_stream_ << "static __device__ __noinline__ void " << fn_name
+                       << "(\n    int " << current_loop_var_name_;
+  for (const auto &bar : barrier_var_names_) {
+    outlined_fns_stream_ << ",\n    " << mbarrier_dtype_ << "* " << bar;
+  }
+  for (const auto &tm : tmem_var_names_) {
+    outlined_fns_stream_ << ",\n    uint* " << tm;
+  }
+  for (const auto &kp : kernel_param_infos_) {
+    outlined_fns_stream_ << ",\n    " << kp.type_str << "& " << kp.var_name;
+  }
+  outlined_fns_stream_ << "\n) {\n";
+
+  // extern shared for buf_dyn_shmem access
+  outlined_fns_stream_
+      << "  extern __shared__ __align__(1024) unsigned char buf_dyn_shmem[];\n";
+
+  // Re-declare local allocations (each device fn gets its own register set)
+  for (const auto &alloc : local_allocs_) {
+    outlined_fns_stream_ << "  ";
+    std::ostringstream type_os;
+    PrintType(alloc.dtype, type_os);
+    outlined_fns_stream_ << type_os.str() << " " << alloc.var_name << "["
+                         << alloc.size << "];\n";
+  }
+  outlined_fns_stream_ << "\n";
+
+  // Emit body: swap the main stream, print the body, capture output
+  std::ostringstream saved_stream;
+  saved_stream.swap(stream);
+
+  in_outlined_fn_ = true;
+  // Emit at base indent level (one level inside the function)
+  // PrintStmt will manage its own sub-scopes
+  PrintStmt(body);
+  in_outlined_fn_ = false;
+
+  // Capture the emitted body and restore
+  outlined_fns_stream_ << stream.str();
+  stream.str("");
+  stream.clear();
+  saved_stream.swap(stream);
+
+  outlined_fns_stream_ << "}\n\n";
+  return fn_name;
+}
+
+void CodeGenTileLangCUDA::VisitStmt_(const IfThenElseNode *op) {
+  // Check if this is a warp-spec branch that should be outlined
+  if (outline_warp_spec_enabled_ && !in_outlined_fn_ &&
+      IsThreadXComparison(op->condition) &&
+      !current_loop_var_name_.empty()) {
+    // Flatten nested if-else into branches
+    std::vector<WarpBranch> branches;
+    FlattenWarpBranches(op, &branches);
+
+    // Emit each branch as a separate device function
+    std::vector<std::string> fn_names;
+    for (const auto &branch : branches) {
+      fn_names.push_back(EmitOutlinedDeviceFunction(branch.body));
+    }
+
+    // Emit dispatch in kernel stream
+    for (size_t i = 0; i < branches.size(); i++) {
+      PrintIndent();
+      if (i == 0) {
+        stream << "if (";
+        PrintExpr(branches[i].condition, stream);
+        stream << ") {\n";
+      } else if (branches[i].condition.defined()) {
+        stream << "} else if (";
+        PrintExpr(branches[i].condition, stream);
+        stream << ") {\n";
+      } else {
+        stream << "} else {\n";
+      }
+      int call_scope = BeginScope();
+      PrintIndent();
+      stream << fn_names[i] << "(" << current_loop_var_name_;
+      for (const auto &bar : barrier_var_names_) {
+        stream << ", " << bar;
+      }
+      for (const auto &tm : tmem_var_names_) {
+        stream << ", " << tm;
+      }
+      for (const auto &kp : kernel_param_infos_) {
+        stream << ", " << kp.var_name;
+      }
+      stream << ");\n";
+      EndScope(call_scope);
+    }
+    PrintIndent();
+    stream << "}\n";
+    return;
+  }
+
+  // Default: emit inline if-else (same as CodeGenC base class)
+  std::string cond = PrintExpr(op->condition);
+  PrintIndent();
+  if (cond[0] == '(' && cond[cond.length() - 1] == ')') {
+    stream << "if " << cond << " {\n";
+  } else {
+    stream << "if (" << cond << ") {\n";
+  }
+  int then_scope = BeginScope();
+  PrintStmt(op->then_case);
+  this->EndScope(then_scope);
+  if (op->else_case.defined()) {
+    PrintIndent();
+    stream << "} else {\n";
+    int else_scope = BeginScope();
+    PrintStmt(op->else_case.value());
+    this->EndScope(else_scope);
+  }
+  PrintIndent();
+  stream << "}\n";
 }
 
 } // namespace codegen

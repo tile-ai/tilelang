@@ -59,6 +59,7 @@ public:
   void VisitStmt_(const EvaluateNode *op) final;
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
+  void VisitStmt_(const IfThenElseNode *op) final;
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
   void VisitStmt_(const BufferStoreNode *op) final;
 
@@ -158,6 +159,55 @@ private:
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
   // Map from VarNode to packed buffer variable name for fp4 packed storage
   std::unordered_map<const VarNode *, std::string> fp4_packed_buffers_;
+  // Stream for outlined __noinline__ device functions (emitted before kernel)
+  std::ostringstream outlined_fns_stream_;
+  // Track shared-memory barrier/TMEM declarations for device function params
+  // Each entry: (var_name, type_string) e.g. ("mbar_s0", "Barrier*")
+  std::vector<std::pair<std::string, std::string>> shared_state_vars_;
+  // Whether we're currently inside an outlined device function emission
+  bool in_outlined_fn_{false};
+  // Counter for unique device function names
+  int outlined_fn_count_{0};
+
+  // --- Device function outlining state ---
+  // The threadIdx.x Var node (set in BindThreadIndex)
+  const VarNode *thread_x_var_{nullptr};
+  // Total dynamic shared memory size (set when visiting shared.dyn AllocateNode)
+  int64_t dyn_shmem_size_{0};
+  // Whether outlining is enabled (read from pass config)
+  bool outline_warp_spec_enabled_{false};
+  // Innermost for-loop variable name (for passing to device functions)
+  std::string current_loop_var_name_;
+
+  struct LocalAllocInfo {
+    std::string var_name;
+    DataType dtype;
+    int64_t size;
+  };
+  std::vector<LocalAllocInfo> local_allocs_;
+  // Barrier variable names declared as __shared__ (e.g., "mbar_s0")
+  std::vector<std::string> barrier_var_names_;
+  // TMEM handle variable names declared as __shared__ (e.g., "S0_tmem")
+  std::vector<std::string> tmem_var_names_;
+  // Kernel function parameters (name, type_string) for device fn forwarding
+  struct KernelParamInfo {
+    std::string var_name;
+    std::string type_str;  // e.g. "const CUtensorMap"
+    bool is_grid_constant{false};
+  };
+  std::vector<KernelParamInfo> kernel_param_infos_;
+
+  // Helper: check if condition involves threadIdx.x comparison
+  bool IsThreadXComparison(const PrimExpr &cond) const;
+  // Helper: emit one outlined device function, returns the function name
+  std::string EmitOutlinedDeviceFunction(const Stmt &body);
+  // Helper: flatten nested if-else on threadIdx.x into branches
+  struct WarpBranch {
+    PrimExpr condition;
+    Stmt body;
+  };
+  void FlattenWarpBranches(const IfThenElseNode *node,
+                           std::vector<WarpBranch> *branches);
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
   void PrintWmmaScope(const std::string &scope, DataType t,

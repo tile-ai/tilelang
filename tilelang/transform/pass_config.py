@@ -171,6 +171,11 @@ class PassConfigKey(str, Enum):
     optimization in cases where manual synchronization is preferred or when
     synchronization is not needed. Default: False"""
 
+    TL_OUTLINE_WARP_SPEC_BRANCHES = "tl.outline_warp_spec_branches"
+    """Outline warp-specialized branches into separate static __device__
+    __noinline__ functions. Enables independent register allocation per warp
+    role via separate .func entries in PTX. Default: False"""
+
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
 
