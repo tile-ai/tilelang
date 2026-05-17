@@ -618,18 +618,16 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    // Prefer __maxnreg__ when the kernel actually calls T.set_max_nreg and
-    // the requested count exceeds what __launch_bounds__(N, 1) would allow
-    // (64K / N per thread). Below that threshold the two are equivalent and
-    // launch_bounds is the safer default (preserves min-blocks behavior).
-    int64_t lb_default = (max_nreg > 0)
-        ? (65536 / threadIdx_ext_int->value) : 0;
-    if (max_nreg > 0 && max_nreg > lb_default) {
-      stream << " __maxnreg__(" << max_nreg << ")";
-    } else {
-      stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
-             << extractor.min_blocks_per_sm << ")";
-    }
+    // Always emit __launch_bounds__ for multi-thread launches. The FA4
+    // register-donation idiom uses runtime setmaxnreg.inc/dec to give
+    // different warpgroups different register counts whose sum fits the
+    // 64K register file — ptxas reads those instructions and sizes each
+    // warpgroup's allocation accordingly, only when launch_bounds (not
+    // __maxnreg__) is in effect. __maxnreg__ caps every thread uniformly,
+    // so __maxnreg__(176) at 512 threads asks ptxas for 512*176=90K regs
+    // and is rejected.
+    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", "
+           << extractor.min_blocks_per_sm << ")";
   } else if (max_nreg > 0) {
     stream << " __maxnreg__(" << max_nreg << ")";
   }

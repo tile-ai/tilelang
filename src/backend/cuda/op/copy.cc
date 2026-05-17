@@ -748,18 +748,29 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
          is_const_int(loop_vars[1]->dom->min) &&
          is_const_int(loop_vars[1]->dom->extent))
       << "Tensor memory copy requires loop bounds to be constant integers";
-  // The slice's starting indices on the tmem side. MakeIterVars always
-  // creates loop_vars with min=0, so we have to read the slice base from
-  // the original src/dst range arrays (which carry the BufferRegion start).
-  // Without this, `T.copy(O_tmem[:, 32:64], O_chunk)` would emit the
-  // tcgen05 instruction with addr offset 0 instead of 32, silently
-  // corrupting non-zero column slices used by chunked-rescale patterns.
+  // Tmem addresses are in 32-bit *cells*, not in element units. For bf16
+  // (16-bit) two logical columns pack into one cell, so a slice starting
+  // at logical column N produces an address offset of N * dtype.bits / 32
+  // cells. MakeIterVars always sets loop_vars->dom->min = 0, so we read
+  // the slice base from the original src/dst range arrays (which carry
+  // the BufferRegion start), then divide by elements-per-cell. Without
+  // this, T.copy(O_tmem[:, 32:64], O_chunk) on a bf16 tmem would emit a
+  // tcgen05 with +32 cells (= +64 bf16 cols), trashing every chunk past
+  // the first.
+  Buffer tmem_buf_for_addr = is_ld ? src : dst;
+  int elems_per_cell = 32 / tmem_buf_for_addr->dtype.bits();
+  ICHECK(elems_per_cell >= 1)
+      << "Unexpected tmem dtype " << tmem_buf_for_addr->dtype;
   const Array<Range> &tmem_range = is_ld ? op.src_range : op.dst_range;
   ICHECK(is_const_int(tmem_range[0]->min) && is_const_int(tmem_range[1]->min))
       << "Tensor memory copy requires the tmem-side slice base to be a "
          "constant; got non-constant " << tmem_range;
   int64_t logical_row_min = *as_const_int(tmem_range[0]->min);
-  int64_t logical_col_min = *as_const_int(tmem_range[1]->min);
+  int64_t logical_col_elem_min = *as_const_int(tmem_range[1]->min);
+  ICHECK(logical_col_elem_min % elems_per_cell == 0)
+      << "Tmem slice column start " << logical_col_elem_min
+      << " is not aligned to elements_per_cell=" << elems_per_cell;
+  int64_t logical_col_min = logical_col_elem_min / elems_per_cell;
 
   constexpr int WARP_SIZE = 32;
   constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
