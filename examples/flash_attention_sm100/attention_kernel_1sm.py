@@ -47,6 +47,12 @@ PASS_CFG = {
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
     "tl.disable_thread_storage_sync": True,
+    # Outline each warp-role branch of the kq_stages=2 for-loop body into a
+    # separate __device__ __noinline__ function. Each device fn gets its own
+    # register-allocation budget from ptxas; without this, all 384 threads
+    # share one register pool. (kq_stages=1 also outlines via the same
+    # codegen path; it currently runs only one branch per role.)
+    "tl.outline_warp_spec_branches": True,
 }
 
 
@@ -419,6 +425,9 @@ def attention_kernel_1sm(
                 f"dim={dim}, block_N={block_N}. Use kq_stages=1 for d>block_N."
             )
 
+        # 512 needs the correction-warp split to move O_reg[128]+O0_reg[128]
+        # off mma_load (currently 256 regs/thread, fails ptxas's 128 cap).
+        # See Path A in the plan; for now we stay at 384.
         kq2_threads = 384
         # Each block covers 2 Q-tiles = 2*block_M rows.
         kq2_block_M = block_M  # per-tile
@@ -512,45 +521,6 @@ def attention_kernel_1sm(
                 mma_scale1 = T.alloc_fragment([kq2_block_M], accum_dtype)
 
                 tid = T.get_thread_binding()
-
-                # Initial state. Each role does its own setup; the mma_load WG
-                # zeros O0/O1_tmem and loads BOTH Q tiles.
-                if tid < 128:
-                    T.fill(scores_max0, -T.infinity(accum_dtype))
-                    T.fill(logsum0, 0)
-                elif tid >= 128 and tid < 256:
-                    T.fill(scores_max1, -T.infinity(accum_dtype))
-                    T.fill(logsum1, 0)
-                elif tid >= 256:
-                    T.fill(O0_reg, 0)
-                    T.copy(O0_reg, O0_tmem)
-                    T.copy(O0_reg, O1_tmem)
-                    T.tma_copy(
-                        Q[bz, bx * kq2_total_M : bx * kq2_total_M + kq2_block_M, by, :],
-                        Q0_shared,
-                        barrier=mbar_q0_load,
-                        annotations={"emit_arrive": 1},
-                    )
-                    T.tma_copy(
-                        Q[bz, bx * kq2_total_M + kq2_block_M : (bx + 1) * kq2_total_M, by, :],
-                        Q1_shared,
-                        barrier=mbar_q1_load,
-                        annotations={"emit_arrive": 1},
-                    )
-                    # Prefetch K[0] and V[0] into stage 0 (iter 0 picks them up).
-                    T.tma_copy(
-                        K[bz, 0 : block_N, by // groups, :], K_shared_0,
-                        barrier=mbar_k_load[0],
-                        annotations={"emit_arrive": 1},
-                    )
-                    T.tma_copy(
-                        V[bz, 0 : block_N, by // groups, :], V_shared_0,
-                        barrier=mbar_v_load[0],
-                        annotations={"emit_arrive": 1},
-                    )
-                    T.mbarrier_wait_parity(mbar_q0_load, 0)
-                    T.mbarrier_wait_parity(mbar_q1_load, 0)
-
                 kq2_loop_range = (
                     T.min(
                         T.ceildiv(seq_len, block_N),
@@ -560,6 +530,19 @@ def attention_kernel_1sm(
                     else T.ceildiv(seq_len, block_N)
                 )
 
+                # Outlining via `tl.outline_warp_spec_branches=True` only sees
+                # the for-loop body; each warp's per-iter branch becomes a
+                # __device__ __noinline__ function with its own register set.
+                # That means any locals initialized *outside* the for-loop in
+                # the kernel stay in the kernel's registers and are invisible
+                # to the outlined fn (which gets fresh `= {}` zero-init).
+                #
+                # To keep the math warps' `scores_max=-INF` / `logsum=0` init
+                # reaching the outlined fn, we fold init and the math
+                # epilogue into the loop body itself: init runs on k==0,
+                # math's logsum->SMEM publish runs on k==loop_range-1. Only
+                # the mma_load epilogue (which reads from TMEM/SMEM, not
+                # private registers) lives outside the loop.
                 for k in T.serial(kq2_loop_range):
                     # ============================================================
                     # mma_load WG  --  tid in [256, 384)
@@ -567,6 +550,36 @@ def attention_kernel_1sm(
                     if tid >= 256:
                         stage = k & 1
                         next_stage = (k + 1) & 1
+
+                        # k==0 init: zero TMEM, TMA load Q + first K/V.
+                        if k == 0:
+                            T.fill(O0_reg, 0)
+                            T.copy(O0_reg, O0_tmem)
+                            T.copy(O0_reg, O1_tmem)
+                            T.tma_copy(
+                                Q[bz, bx * kq2_total_M : bx * kq2_total_M + kq2_block_M, by, :],
+                                Q0_shared,
+                                barrier=mbar_q0_load,
+                                annotations={"emit_arrive": 1},
+                            )
+                            T.tma_copy(
+                                Q[bz, bx * kq2_total_M + kq2_block_M : (bx + 1) * kq2_total_M, by, :],
+                                Q1_shared,
+                                barrier=mbar_q1_load,
+                                annotations={"emit_arrive": 1},
+                            )
+                            T.tma_copy(
+                                K[bz, 0 : block_N, by // groups, :], K_shared_0,
+                                barrier=mbar_k_load[0],
+                                annotations={"emit_arrive": 1},
+                            )
+                            T.tma_copy(
+                                V[bz, 0 : block_N, by // groups, :], V_shared_0,
+                                barrier=mbar_v_load[0],
+                                annotations={"emit_arrive": 1},
+                            )
+                            T.mbarrier_wait_parity(mbar_q0_load, 0)
+                            T.mbarrier_wait_parity(mbar_q1_load, 0)
 
                         # Prefetch K[k+1] and V[k+1] into the OTHER stage,
                         # parallel with this iter's compute.
@@ -594,9 +607,7 @@ def attention_kernel_1sm(
                                     annotations={"emit_arrive": 1},
                                 )
 
-                        # Wait for this iter's K data.
                         T.mbarrier_wait_parity(mbar_k_load[stage], (k >> 1) & 1)
-                        # Issue QK GEMMs (S = Q @ K^T)
                         if stage == 0:
                             T.tcgen05_gemm(
                                 Q0_shared, K_shared_0, S0_tmem,
@@ -617,8 +628,6 @@ def attention_kernel_1sm(
                             )
 
                         # --- O rescale (overlaps with math's softmax) ---
-                        # Read scores_scale from SMEM (math writes it early in softmax)
-                        # then rescale O before PV accumulates into it.
                         if k > 0:
                             T.mbarrier_wait_parity(mbar_scale0, k & 1)
                             T.copy(scores_scale0_shared, mma_scale0)
@@ -636,11 +645,9 @@ def attention_kernel_1sm(
                                 O_reg[i, j] *= mma_scale1[i]
                             T.copy(O_reg, O1_tmem)
 
-                        # Wait for P ready (from math) and V data.
                         T.mbarrier_wait_parity(mbar_p0, k & 1)
                         T.mbarrier_wait_parity(mbar_p1, k & 1)
                         T.mbarrier_wait_parity(mbar_v_load[stage], (k >> 1) & 1)
-                        # Issue PV GEMMs (O += P @ V)
                         if stage == 0:
                             T.tcgen05_gemm(
                                 P0_tmem, V_shared_0, O0_tmem,
@@ -664,6 +671,10 @@ def attention_kernel_1sm(
                     # Math WG 0  --  tid in [0, 128)
                     # ============================================================
                     elif tid < 128:
+                        if k == 0:
+                            T.fill(scores_max0, -T.infinity(accum_dtype))
+                            T.fill(logsum0, 0)
+
                         T.mbarrier_wait_parity(mbar_s0, k & 1)
                         T.copy(S0_tmem, S0_reg)
 
@@ -691,7 +702,6 @@ def attention_kernel_1sm(
                             scores_scale0[i] = T.exp2(
                                 scores_max_prev0[i] * scale - scores_max0[i] * scale
                             )
-                        # Write scores_scale to SMEM for mma_load's O rescale
                         T.copy(scores_scale0, scores_scale0_shared)
                         T.mbarrier_arrive(mbar_scale0)
 
@@ -705,10 +715,20 @@ def attention_kernel_1sm(
                         T.copy(P0_cast, P0_tmem)
                         T.mbarrier_arrive(mbar_p0)
 
+                        # k==K-1 epilogue: publish logsum0 to SMEM so the
+                        # mma_load WG's post-loop epilogue (outside the for)
+                        # can read it.
+                        if k == kq2_loop_range - 1:
+                            T.copy(logsum0, logsum0_shared)
+
                     # ============================================================
                     # Math WG 1  --  tid in [128, 256)
                     # ============================================================
                     elif tid >= 128 and tid < 256:
+                        if k == 0:
+                            T.fill(scores_max1, -T.infinity(accum_dtype))
+                            T.fill(logsum1, 0)
+
                         T.mbarrier_wait_parity(mbar_s1, k & 1)
                         T.copy(S1_tmem, S1_reg)
 
@@ -736,7 +756,6 @@ def attention_kernel_1sm(
                             scores_scale1[i] = T.exp2(
                                 scores_max_prev1[i] * scale - scores_max1[i] * scale
                             )
-                        # Write scores_scale to SMEM for mma_load's O rescale
                         T.copy(scores_scale1, scores_scale1_shared)
                         T.mbarrier_arrive(mbar_scale1)
 
@@ -750,13 +769,12 @@ def attention_kernel_1sm(
                         T.copy(P1_cast, P1_tmem)
                         T.mbarrier_arrive(mbar_p1)
 
-                # ---- Epilogue ----
-                if tid < 128:
-                    T.copy(logsum0, logsum0_shared)
-                elif tid >= 128 and tid < 256:
-                    T.copy(logsum1, logsum1_shared)
-                elif tid >= 256:
-                    # Final wait for the last iter's PV completion.
+                        if k == kq2_loop_range - 1:
+                            T.copy(logsum1, logsum1_shared)
+
+
+                # ---- mma_load epilogue (outside the for-loop) ----
+                if tid >= 256:
                     T.mbarrier_wait_parity(mbar_o0, (kq2_loop_range - 1) & 1)
                     T.mbarrier_wait_parity(mbar_o1, (kq2_loop_range - 1) & 1)
                     T.copy(logsum0_shared, mma_logsum0)
@@ -810,6 +828,10 @@ def main():
     ap.add_argument("--dim", type=int, default=128)
     ap.add_argument("--causal", action="store_true")
     ap.add_argument("--bench", action="store_true")
+    ap.add_argument(
+        "--kq_stages", type=int, default=2,
+        help="1 = single Q-tile path; 2 = dual-Q-tile FA4 pattern (faster, default)",
+    )
     args = ap.parse_args()
 
     torch.manual_seed(0)
@@ -828,7 +850,10 @@ def main():
         args.dim,
         num_kv_heads=kv_h,
         is_causal=args.causal,
+        kq_stages=args.kq_stages,
     )
+    print(fn.get_kernel_source())
+    
     O = fn(Q, K, V)
     O_ref = reference_attention(Q, K, V, is_causal=args.causal)
 

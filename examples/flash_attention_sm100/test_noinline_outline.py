@@ -29,8 +29,10 @@ cutlass_inc = os.path.join(tl_3rdparty, 'cutlass', 'include')
 print(f"  TL templates: {tl_templates}")
 print(f"  CUTLASS: {cutlass_inc}")
 
-# Step 3: Compile the UNMODIFIED source first to verify the compile pipeline works
-cuda_path = '/usr/local/cuda'  # CUDA 13.1 with SM100a support
+# Step 3: Compile the UNMODIFIED source first to verify the compile pipeline works.
+# Must be CUDA 13+ for sm_100a tcgen05.* + 3-operand max.ftz.f32; /usr/local/cuda
+# on this box points at 12.8 which can't assemble the generated PTX.
+cuda_path = '/usr/local/cuda-13.1'
 nvcc = f'{cuda_path}/bin/nvcc'
 
 with tempfile.NamedTemporaryFile(suffix='.cu', mode='w', delete=False) as f:
@@ -42,7 +44,10 @@ tl_src = os.path.join(tl_root, 'src')  # parent of tl_templates/
 cmd = [
     nvcc, cu_file, '-o', so_file,
     '--shared', '-Xcompiler', '-fPIC',
-    '-arch=sm_100a',
+    # `-arch=sm_100a` alone lowers to compute_100 PTX, which ptxas then rejects
+    # for tcgen05.* / 3-op max.ftz.f32. Use the explicit gencode form so the
+    # virtual arch is sm_100a (where those instructions are legal).
+    '-gencode', 'arch=compute_100a,code=sm_100a',
     '-std=c++17',
     f'-I{tl_src}',
     f'-I{cutlass_inc}',
