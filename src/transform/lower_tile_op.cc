@@ -953,9 +953,58 @@ private:
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto buffer = store->buffer;
     if (buffer_remap_.count(buffer)) {
-      auto new_indices = layout_map_[buffer]->Forward(store->indices);
       auto new_buffer = buffer_remap_[store->buffer];
       layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
+
+      // gfx950 buffer_load_dwordx4 ... lds requires LDS destinations be
+      // lane-contiguous (no XOR). When the shared-buffer layout carries
+      // an XOR swizzle, move the XOR off the LDS store side and onto
+      // the global load side (XOR is self-inverse, so the net data
+      // movement is unchanged). Gated on: ROCm target, non-PTX path,
+      // shared destination, layout has a swizzle delta, and the store
+      // value is a direct global BufferLoad (the g2s shape the cp.async
+      // injector recognises).
+      if (TargetIsRocm(target_) && !is_ptx_ && IsSharedBuffer(buffer) &&
+          layout_map_[buffer]->HasSwizzle()) {
+        const BufferLoadNode *load_node = nullptr;
+        if (auto *load = store->value.as<BufferLoadNode>()) {
+          if (IsGlobalBuffer(load->buffer)) {
+            load_node = load;
+          }
+        }
+        if (load_node && is_one(layout_map_[buffer]->OutputShape()[0]) &&
+            load_node->indices.size() == store->indices.size()) {
+          auto swizzled_store = layout_map_[buffer]->Forward(store->indices);
+          PrimExpr delta = analyzer_->Simplify(
+              layout_map_[buffer]->SwizzleDelta(store->indices));
+
+          Array<PrimExpr> sequential_store(swizzled_store.begin(),
+                                           swizzled_store.end());
+          int last_out = static_cast<int>(sequential_store.size()) - 1;
+          sequential_store.Set(
+              last_out,
+              analyzer_->Simplify(sequential_store[last_out] - delta));
+
+          Array<PrimExpr> reflected(store->indices.begin(),
+                                    store->indices.end());
+          int last_in = static_cast<int>(reflected.size()) - 1;
+          reflected.Set(
+              last_in, analyzer_->Simplify(reflected[last_in] + delta));
+
+          Array<PrimExpr> new_load_indices;
+          for (size_t k = 0; k < load_node->indices.size(); ++k) {
+            PrimExpr base = analyzer_->Simplify(load_node->indices[k] -
+                                                store->indices[k]);
+            new_load_indices.push_back(
+                analyzer_->Simplify(base + reflected[k]));
+          }
+
+          BufferLoad rewritten_load(load_node->buffer, new_load_indices);
+          return BufferStore(new_buffer, rewritten_load, sequential_store);
+        }
+      }
+
+      auto new_indices = layout_map_[buffer]->Forward(store->indices);
       return BufferStore(new_buffer, store->value, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
