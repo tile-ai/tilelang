@@ -24,7 +24,9 @@ def _get_l2_cache_size_bytes(target: Target, device: tvm.runtime.Device) -> int:
 class CDNA(TileDevice):
     def __init__(self, target: Target | str):
         if isinstance(target, str):
-            target = tvm.target.Target(target)
+            from tilelang.utils.target import determine_target
+
+            target = determine_target(target, return_object=True)
         self.target = target
         device = tvm.runtime.rocm(0)
         if not device.exist:

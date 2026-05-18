@@ -124,7 +124,9 @@ class TensorInstruction:
 class CUDA(TileDevice):
     def __init__(self, target: Target | str):
         if isinstance(target, str):
-            target = tvm.target.Target(target)
+            from tilelang.utils.target import determine_target
+
+            target = determine_target(target, return_object=True)
         self.target = target
         self.sm_version = check_sm_version(self.target.attrs["arch"])
         device = tvm.runtime.cuda(0)
