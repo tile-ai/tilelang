@@ -341,6 +341,11 @@ endforeach()
 # tvm tries to detect gtest by default, but may fail if its header is not installed.
 set(USE_GTEST OFF)
 
+# TileLang is built as a separate shared library on POSIX and subclasses / calls
+# TVM C++ internals. TVM 0.25 defaults to hiding private symbols, which makes
+# those out-of-DSO references unresolved when libtilelang.so is dlopened.
+set(HIDE_PRIVATE_SYMBOLS OFF CACHE BOOL "Compile TVM with -fvisibility=hidden." FORCE)
+
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
 # Add TileLang's own src/ to include path so cross-directory includes

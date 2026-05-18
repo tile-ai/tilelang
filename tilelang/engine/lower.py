@@ -291,7 +291,7 @@ def lower_to_host_device_ir(
 
     target_host = canon_target_host(target, target_host)
 
-    target_host = tvm.target.Target.canon_target(target_host)
+    target_host = tvm.target.Target(target_host)
     target = tvm.target.Target(target, target_host)
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
