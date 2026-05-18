@@ -71,7 +71,8 @@ bool IsMbarrierWaitParity(const CallNode *call) {
 
 bool IsPlainBarrierArrive(const CallNode *call) {
   return call && (call->op.same_as(builtin::ptx_arrive_barrier()) ||
-                  call->op.same_as(ptx_arrive_cluster_barrier()));
+                  call->op.same_as(ptx_arrive_cluster_barrier()) ||
+                  call->op.same_as(ptx_arrive_barrier_lane0()));
 }
 
 bool IsBeforeFenceCall(const CallNode *call) {
