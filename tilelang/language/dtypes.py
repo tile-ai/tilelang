@@ -1,7 +1,7 @@
 from tilelang import tvm
 from tvm import ir
 import torch
-from typing import Generic, TypeVar, Union, TYPE_CHECKING
+from typing import Generic, TypeVar, TYPE_CHECKING
 from tvm import tir
 import tvm.script.ir_builder.tir._ffi_api as tb_ffi
 import numpy as np
@@ -20,13 +20,13 @@ if TYPE_CHECKING:
 else:
     dtype = tvm.DataType
 
-# Python 3.9 compatibility: avoid PEP 604 unions at runtime
-AnyDType = Union[ir.Type, str, type, torch.dtype, dtype]
+# Keep a typing alias separate from the tuple used by runtime checks.
+AnyDType = ir.Type | str | type | torch.dtype | dtype
 
 
 def _is_any_dtype(obj: object) -> bool:
     """Check if obj is a dtype-like value. Use instead of isinstance(obj, AnyDType)
-    because Union types cannot be used with isinstance in Python 3.9."""
+    to keep the runtime check explicit."""
     return isinstance(obj, (ir.Type, str, type, torch.dtype, dtype))
 
 

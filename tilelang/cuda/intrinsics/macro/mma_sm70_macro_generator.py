@@ -1,6 +1,7 @@
 from __future__ import annotations
 import tilelang.language as T
-from typing import Literal, Callable
+from typing import Literal
+from collections.abc import Callable
 from tvm import DataType
 from tvm import tir
 from tvm.ir import Range
