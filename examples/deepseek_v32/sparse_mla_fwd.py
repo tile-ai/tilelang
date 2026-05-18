@@ -1,5 +1,4 @@
 # ruff: noqa
-from doctest import debug
 import torch
 import tilelang
 from tilelang import language as T
