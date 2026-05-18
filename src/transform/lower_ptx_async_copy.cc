@@ -456,8 +456,8 @@ private:
     constexpr int kNumSamples = 1024;
     for (const auto &var : free_vars) {
       const std::string name(var->name_hint);
-      if (name.find("thread") == std::string::npos &&
-          name != "tx" && name != "tid") {
+      if (name.find("thread") == std::string::npos && name != "tx" &&
+          name != "tid") {
         continue;
       }
       PrimExpr f0 = analyzer.Simplify(Substitute(
@@ -549,12 +549,13 @@ private:
                  IntImm(DataType::Int(32), rw_mask)});
   }
 
-  Optional<Stmt>
-  MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
-                           const BufferLoad &dst_base_load,
-                           const BufferLoad &src_base_load, int num_elems,
-                           int total_bytes, const PrimExpr &dst_check_index,
-                           bool predicated, const PrimExpr &predicate_value) {
+  Optional<Stmt> MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
+                                          const BufferLoad &dst_base_load,
+                                          const BufferLoad &src_base_load,
+                                          int num_elems, int total_bytes,
+                                          const PrimExpr &dst_check_index,
+                                          bool predicated,
+                                          const PrimExpr &predicate_value) {
     PrimExpr dst_access_ptr =
         MakeAccessPtrFromLoad(dst_base_load, num_elems, /*rw_mask=*/2);
     PrimExpr src_access_ptr =
@@ -569,13 +570,12 @@ private:
     // logical count back to bytes via GetTileLangCPAsyncTransferBytes.
     if (enable_buffer_load_lds_ && !predicated && total_bytes == 16) {
       const std::string dst_scope = store->buffer.scope();
-      const bool is_shared =
-          dst_scope == "shared" || dst_scope == "shared.dyn";
+      const bool is_shared = dst_scope == "shared" || dst_scope == "shared.dyn";
       if (is_shared && IsLdsLaneContiguous(dst_check_index)) {
         ffi::Array<PrimExpr> lds_args = {dst_access_ptr, src_access_ptr,
                                          PrimExpr(num_elems)};
-        return Evaluate(Call(store->buffer->dtype, tvm::tl::ptx_cp_async_lds(),
-                             lds_args));
+        return Evaluate(
+            Call(store->buffer->dtype, tvm::tl::ptx_cp_async_lds(), lds_args));
       }
     }
 

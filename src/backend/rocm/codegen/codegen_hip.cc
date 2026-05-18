@@ -922,8 +922,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "make_wave_buffer_resource((const void*)(" << ptr << "))";
   } else if (op->op.same_as(tl::ptx_cp_async_lds_rsrc())) {
     // args = [dst, src, bytes, rsrc_var, base_var]
-    ICHECK(op->args.size() == 5)
-        << "ptx_cp_async_lds_rsrc expects 5 arguments";
+    ICHECK(op->args.size() == 5) << "ptx_cp_async_lds_rsrc expects 5 arguments";
     std::string dst = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
     // arg 2 carries logical element count (inherited from the
@@ -938,8 +937,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(dst_elem_type.has_value())
         << "ptx_cp_async_lds_rsrc dst must be tvm_access_ptr / tl.access_ptr / "
            "address_of(BufferLoad)";
-    int64_t total_bits = num_elems_imm->value *
-                         dst_elem_type.value().bits() *
+    int64_t total_bits = num_elems_imm->value * dst_elem_type.value().bits() *
                          dst_elem_type.value().lanes();
     ICHECK_EQ(total_bits % 8, 0)
         << "ptx_cp_async_lds_rsrc requires byte-aligned transfer, got "
@@ -949,9 +947,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string rsrc = this->PrintExpr(op->args[3]);
     std::string base = this->PrintExpr(op->args[4]);
     this->PrintIndent();
-    this->stream << "tl::cp_async_gs_lds_with_rsrc<" << size << ">("
-                 << dst << ", " << src << ", " << rsrc << ", " << base
-                 << ");\n";
+    this->stream << "tl::cp_async_gs_lds_with_rsrc<" << size << ">(" << dst
+                 << ", " << src << ", " << rsrc << ", " << base << ");\n";
   } else if (op->op.same_as(builtin::ptx_cp_async())) {
     // builtin::ptx_cp_async stores byte width directly in arg 2.
     ICHECK(op->args.size() == 3 || op->args.size() == 4)
@@ -996,7 +993,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     int n = Downcast<IntImm>(op->args[0])->value;
     // AMDGPU s_waitcnt vmcnt field is 6-bit (max 63); clamp to keep the
     // "n"(cnt) immediate constraint in tl::cp_async_wait valid.
-    if (n > 63) n = 63;
+    if (n > 63)
+      n = 63;
     std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
     print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
@@ -1485,7 +1483,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
 void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
   if (op->attr_key == "buffer_resource_var") {
     // Hoisted resource descriptor from the HoistBufferResource Python pass.
-    // Emits: auto {rsrc_var} = make_wave_buffer_resource((const void*)({buf_var}));
+    // Emits: auto {rsrc_var} = make_wave_buffer_resource((const
+    // void*)({buf_var}));
     auto rsrc_var = Downcast<Var>(op->node);
     std::string rsrc_vid = AllocVarID(rsrc_var.get());
     std::string buf_ptr = PrintExpr(op->value);
@@ -1553,8 +1552,7 @@ void CodeGenTileLangHIP::VisitStmt_(const LetStmtNode *op) {
     if (call->op.same_as(tl::ptx_make_buffer_resource())) {
       std::string value = PrintExpr(op->value);
       PrintIndent();
-      stream << "auto " << AllocVarID(op->var.get()) << " = " << value
-             << ";\n";
+      stream << "auto " << AllocVarID(op->var.get()) << " = " << value << ";\n";
       PrintStmt(op->body);
       return;
     }

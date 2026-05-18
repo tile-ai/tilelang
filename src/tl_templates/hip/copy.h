@@ -138,14 +138,15 @@ TL_DEVICE void cp_async_gs_conditional(void *lds_base_ptr,
   }
 }
 
-// gfx950 (CDNA4 / MI350) direct global→LDS copy via buffer_load_dwordx4 ... lds.
-// Bypasses VGPRs entirely. Only valid when LDS destination is lane-contiguous
-// (base + lane_id * N bytes); the swizzle-swap pass in LowerTileOp guarantees
-// this by moving the XOR swizzle from the LDS store side to the global load
-// side. The compiler is expected to emit this only for 16-byte copies; other
-// sizes fall back to cp_async_gs<N>.
+// gfx950 (CDNA4 / MI350) direct global→LDS copy via buffer_load_dwordx4 ...
+// lds. Bypasses VGPRs entirely. Only valid when LDS destination is
+// lane-contiguous (base + lane_id * N bytes); the swizzle-swap pass in
+// LowerTileOp guarantees this by moving the XOR swizzle from the LDS store side
+// to the global load side. The compiler is expected to emit this only for
+// 16-byte copies; other sizes fall back to cp_async_gs<N>.
 template <int N>
-TL_DEVICE void cp_async_gs_lds(void *lds_base_ptr, void const *global_base_ptr) {
+TL_DEVICE void cp_async_gs_lds(void *lds_base_ptr,
+                               void const *global_base_ptr) {
   if constexpr (N == 16) {
     auto rsrc = make_wave_buffer_resource(global_base_ptr);
     uint32_t my_lo =
@@ -156,7 +157,8 @@ TL_DEVICE void cp_async_gs_lds(void *lds_base_ptr, void const *global_base_ptr) 
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lds_base_ptr)));
     asm volatile("s_mov_b32 m0, %0; \n\t"
                  "buffer_load_dwordx4 %1, %2, 0 offen lds;\n\t"
-                 : : "s"(lds_cur), "v"(voffset), "s"(rsrc)
+                 :
+                 : "s"(lds_cur), "v"(voffset), "s"(rsrc)
                  : "memory");
   } else {
     cp_async_gs<N>(lds_base_ptr, global_base_ptr);
@@ -170,10 +172,9 @@ TL_DEVICE void cp_async_gs_lds(void *lds_base_ptr, void const *global_base_ptr) 
 // loop. rsrc_base_lo must equal readfirstlane((uint32_t)(uintptr_t)A) for
 // the same A passed to make_wave_buffer_resource that produced rsrc.
 template <int N>
-TL_DEVICE void cp_async_gs_lds_with_rsrc(void *lds_base_ptr,
-                                         void const *global_base_ptr,
-                                         int32x4_t rsrc,
-                                         uint32_t rsrc_base_lo) {
+TL_DEVICE void
+cp_async_gs_lds_with_rsrc(void *lds_base_ptr, void const *global_base_ptr,
+                          int32x4_t rsrc, uint32_t rsrc_base_lo) {
   if constexpr (N == 16) {
     uint32_t my_lo =
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(global_base_ptr));
@@ -182,7 +183,8 @@ TL_DEVICE void cp_async_gs_lds_with_rsrc(void *lds_base_ptr,
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lds_base_ptr)));
     asm volatile("s_mov_b32 m0, %0; \n\t"
                  "buffer_load_dwordx4 %1, %2, 0 offen lds;\n\t"
-                 : : "s"(lds_cur), "v"(voffset), "s"(rsrc)
+                 :
+                 : "s"(lds_cur), "v"(voffset), "s"(rsrc)
                  : "memory");
   } else {
     cp_async_gs<N>(lds_base_ptr, global_base_ptr);

@@ -523,12 +523,12 @@ PrimExpr LayoutNode::SwizzleDelta(const Array<PrimExpr> &input_indices) const {
   // Substitute the last InputDim() entries of input_indices into
   // swizzle_delta_, matching the convention Forward() uses.
   PrimExpr delta = swizzle_delta_.value();
-  size_t offset =
-      input_indices.size() >= InputDim() ? input_indices.size() - InputDim()
-                                         : 0;
+  size_t offset = input_indices.size() >= InputDim()
+                      ? input_indices.size() - InputDim()
+                      : 0;
   for (size_t i = 0; i < InputDim(); ++i) {
-    delta = Substitute(delta,
-                       {{InputPlaceholder(i), input_indices[offset + i]}});
+    delta =
+        Substitute(delta, {{InputPlaceholder(i), input_indices[offset + i]}});
   }
   return delta;
 }

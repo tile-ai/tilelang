@@ -933,13 +933,15 @@ private:
     // access_ptr by +delta on the last dim (XOR is self-inverse, so net
     // data movement is unchanged). Returning the rewritten Call directly
     // prevents the default visitor from re-applying the swizzled layout.
-    if (op->op.same_as(tl::ptx_cp_async_lds()) &&
-        TargetIsRocm(target_) && op->args.size() == 3) {
+    if (op->op.same_as(tl::ptx_cp_async_lds()) && TargetIsRocm(target_) &&
+        op->args.size() == 3) {
       auto resolve_load = [&](const PrimExpr &arg) -> const BufferLoadNode * {
         const auto *call = arg.as<CallNode>();
-        if (!call || !call->op.same_as(tl::access_ptr())) return nullptr;
+        if (!call || !call->op.same_as(tl::access_ptr()))
+          return nullptr;
         const auto *direct = call->args[0].as<BufferLoadNode>();
-        if (direct) return direct;
+        if (direct)
+          return direct;
         if (const auto *var = call->args[0].as<VarNode>()) {
           auto it = let_bindings_.find(Downcast<Var>(call->args[0]));
           if (it != let_bindings_.end()) {
@@ -983,15 +985,13 @@ private:
         Array<PrimExpr> new_dst_indices(swizzled.begin(), swizzled.end());
         int last_dst = static_cast<int>(new_dst_indices.size()) - 1;
         new_dst_indices.Set(
-            last_dst,
-            analyzer_->Simplify(new_dst_indices[last_dst] - delta));
+            last_dst, analyzer_->Simplify(new_dst_indices[last_dst] - delta));
 
         Array<PrimExpr> new_src_indices(src_load->indices.begin(),
                                         src_load->indices.end());
         int last_src = static_cast<int>(new_src_indices.size()) - 1;
         new_src_indices.Set(
-            last_src,
-            analyzer_->Simplify(new_src_indices[last_src] + delta));
+            last_src, analyzer_->Simplify(new_src_indices[last_src] + delta));
 
         // Post-swap linearity guard: the single-dim subtract-delta swap
         // only cancels the XOR when the layout's swizzle is confined to
@@ -1027,7 +1027,8 @@ private:
                 e, Map<Var, PrimExpr>{{var, IntImm(var->dtype, 1)}}));
             PrimExpr stride = post_analyzer.Simplify(f1 - f0);
             const auto *stride_imm = stride.as<IntImmNode>();
-            if (!stride_imm) return false;
+            if (!stride_imm)
+              return false;
             for (int pt = 2; pt < 64; ++pt) {
               PrimExpr fk = post_analyzer.Simplify(tir::Substitute(
                   e, Map<Var, PrimExpr>{{var, IntImm(var->dtype, pt)}}));
@@ -1069,8 +1070,7 @@ private:
           PrimExpr new_src_ap =
               Call(src_ap->dtype, tl::access_ptr(),
                    {new_src_load, src_ap->args[1], src_ap->args[2]});
-          return Call(op->dtype, op->op,
-                      {new_dst_ap, new_src_ap, op->args[2]});
+          return Call(op->dtype, op->op, {new_dst_ap, new_src_ap, op->args[2]});
         }
       }
     }
@@ -1140,13 +1140,13 @@ private:
           Array<PrimExpr> reflected(store->indices.begin(),
                                     store->indices.end());
           int last_in = static_cast<int>(reflected.size()) - 1;
-          reflected.Set(
-              last_in, analyzer_->Simplify(reflected[last_in] + delta));
+          reflected.Set(last_in,
+                        analyzer_->Simplify(reflected[last_in] + delta));
 
           Array<PrimExpr> new_load_indices;
           for (size_t k = 0; k < load_node->indices.size(); ++k) {
-            PrimExpr base = analyzer_->Simplify(load_node->indices[k] -
-                                                store->indices[k]);
+            PrimExpr base =
+                analyzer_->Simplify(load_node->indices[k] - store->indices[k]);
             new_load_indices.push_back(
                 analyzer_->Simplify(base + reflected[k]));
           }
