@@ -381,26 +381,17 @@ class LocalAccessCollector : public StmtExprVisitor {
 public:
   static LocalAccessSummary Collect(const Stmt &stmt,
                                     const BufferDataToBufferMap &buffer_map) {
-    LocalAccessCollector collector(buffer_map, false);
-    collector.VisitStmt(stmt);
-    return std::move(collector.summary_);
-  }
-
-  static LocalAccessSummary
-  CollectWithShared(const Stmt &stmt, const BufferDataToBufferMap &buffer_map) {
-    LocalAccessCollector collector(buffer_map, true);
+    LocalAccessCollector collector(buffer_map);
     collector.VisitStmt(stmt);
     return std::move(collector.summary_);
   }
 
 private:
-  explicit LocalAccessCollector(const BufferDataToBufferMap &buffer_map,
-                                bool track_shared)
-      : buffer_data_to_buffer_(buffer_map), track_shared_(track_shared) {}
+  explicit LocalAccessCollector(const BufferDataToBufferMap &buffer_map)
+      : buffer_data_to_buffer_(buffer_map) {}
 
-  bool IsTrackedBuffer(const Buffer &buffer) const {
-    return IsFragmentBuffer(buffer) || IsLocalBuffer(buffer, true) ||
-           (track_shared_ && IsSharedBuffer(buffer));
+  static bool IsBranchPrivateBuffer(const Buffer &buffer) {
+    return IsFragmentBuffer(buffer) || IsLocalBuffer(buffer, true);
   }
 
   void VisitStmt_(const LetStmtNode *op) final {
@@ -420,14 +411,14 @@ private:
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsTrackedBuffer(op->buffer)) {
+    if (IsBranchPrivateBuffer(op->buffer)) {
       summary_.read_buffers.insert(op->buffer);
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsTrackedBuffer(op->buffer)) {
+    if (IsBranchPrivateBuffer(op->buffer)) {
       summary_.write_buffers.insert(op->buffer);
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -445,10 +436,10 @@ private:
     if (auto tile_op = ParseOperator(ffi::GetRef<Call>(op));
         tile_op.defined()) {
       if (const auto *copy = tile_op.as<CopyNode>()) {
-        if (IsTrackedBuffer(copy->src)) {
+        if (IsBranchPrivateBuffer(copy->src)) {
           summary_.read_buffers.insert(copy->src);
         }
-        if (IsTrackedBuffer(copy->dst)) {
+        if (IsBranchPrivateBuffer(copy->dst)) {
           summary_.write_buffers.insert(copy->dst);
         }
         for (const auto &range : copy->src_range) {
@@ -462,7 +453,7 @@ private:
         return;
       }
       if (const auto *fill = tile_op.as<FillNode>()) {
-        if (IsTrackedBuffer(fill->dst)) {
+        if (IsBranchPrivateBuffer(fill->dst)) {
           summary_.write_buffers.insert(fill->dst);
         }
         VisitExpr(fill->value);
@@ -478,7 +469,7 @@ private:
       ICHECK_EQ(op->args.size(), 3);
       const auto *base_load = op->args[0].as<BufferLoadNode>();
       ICHECK(base_load);
-      if (IsTrackedBuffer(base_load->buffer)) {
+      if (IsBranchPrivateBuffer(base_load->buffer)) {
         int rw_mask = GetConstAccessMask(op->args[2]);
         if (rw_mask & 1) {
           summary_.read_buffers.insert(base_load->buffer);
@@ -499,7 +490,8 @@ private:
       const auto *var = op->args[1].as<VarNode>();
       ICHECK(var);
       auto it = buffer_data_to_buffer_.find(ffi::GetRef<Var>(var));
-      if (it != buffer_data_to_buffer_.end() && IsTrackedBuffer(it->second)) {
+      if (it != buffer_data_to_buffer_.end() &&
+          IsBranchPrivateBuffer(it->second)) {
         int rw_mask = GetConstAccessMask(op->args[4]);
         if (rw_mask & 1) {
           summary_.read_buffers.insert(it->second);
@@ -524,7 +516,6 @@ private:
   }
 
   const BufferDataToBufferMap &buffer_data_to_buffer_;
-  bool track_shared_;
   LocalAccessSummary summary_;
   VarSet bound_vars_;
 };
@@ -541,8 +532,7 @@ ClassifyPreludeStmt(const Stmt &stmt, const BufferDataToBufferMap &buffer_map,
                     const LocalLiveSet &shared_live_seed,
                     const LocalLiveSet &producer_live_seed,
                     const LocalLiveSet &consumer_live_seed) {
-  LocalAccessSummary summary =
-      LocalAccessCollector::CollectWithShared(stmt, buffer_map);
+  LocalAccessSummary summary = LocalAccessCollector::Collect(stmt, buffer_map);
   if (!summary.HasTrackedDefs()) {
     return PreludeStmtPlacement::kKeepSharedPrelude;
   }
@@ -2188,9 +2178,7 @@ private:
         LocalLiveSet producer_live = producer_prelude_live_seed_;
         LocalLiveSet consumer_live = consumer_prelude_live_seed_;
         for (int i = loop_idx - 1; i >= 0; --i) {
-          // Shared buffers can be private to one WS branch in the prelude
-          // dataflow, e.g. Bias -> Bias_shared -> C_local.
-          LocalAccessSummary summary = LocalAccessCollector::CollectWithShared(
+          LocalAccessSummary summary = LocalAccessCollector::Collect(
               seq->seq[i], buffer_data_to_buffer_);
           if (!summary.HasTrackedDefs())
             continue;
