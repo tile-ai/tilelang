@@ -6,7 +6,7 @@ so tuner.py can stay focused on orchestration.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from tilelang import tvm
 from tvm.tirx import PrimFunc
@@ -18,7 +18,7 @@ from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
 
-CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
+CompileUnitResult = tuple[int, dict[str, Any], Optional[JITKernel], Optional[Exception]]
 
 
 def compile_grouped_unit_tvm_ffi(

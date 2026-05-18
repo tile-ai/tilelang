@@ -321,6 +321,14 @@ option(TILELANG_USE_HIP_STUBS
        "Use POSIX dlopen-based HIP stub libraries (hip/hiprtc) for portable wheels"
        ${_TILELANG_USE_HIP_STUBS_DEFAULT})
 unset(_TILELANG_USE_HIP_STUBS_DEFAULT)
+
+# Optional path to HIP headers, used together with TILELANG_USE_HIP_STUBS=ON
+# when the build host has no ROCm runtime installed (e.g. an NV-only machine
+# producing a cross-target wheel). The directory must contain a `hip/` subtree.
+# When unset, the resolution order is: $ENV{TILELANG_HIP_INCLUDE_DIR} ->
+# /opt/rocm/include -> 3rdparty/hip-headers/include (vendored default).
+set(TILELANG_HIP_INCLUDE_DIR "" CACHE PATH
+    "Path to HIP headers when building with USE_ROCM=ON on a host without a ROCm runtime")
 # Configs end
 
 include(cmake/load_tvm.cmake)
@@ -389,19 +397,39 @@ endforeach()
 
 # Only auto-select a backend when the user didn't specify one explicitly.
 if(NOT TILELANG_BACKEND_USER_SELECTED)
-  if($ENV{USE_METAL})
-    set(USE_METAL ON)
-  elseif(APPLE)
-    message(STATUS "Enable Metal support by default.")
-    set(USE_METAL ON)
-  elseif($ENV{USE_ROCM})
-    set(USE_ROCM ON)
-  else()
+  set(_tilelang_backend_env_selected OFF)
+
+  if(DEFINED ENV{USE_CUDA})
+    set(_tilelang_backend_env_selected ON)
     if($ENV{USE_CUDA})
       set(USE_CUDA ON)
-    elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
-      # Build CPU-only when we explicitly disable CUDA
+    else()
       set(USE_CUDA OFF)
+    endif()
+  endif()
+
+  if(DEFINED ENV{USE_ROCM})
+    set(_tilelang_backend_env_selected ON)
+    if($ENV{USE_ROCM})
+      set(USE_ROCM ON)
+    else()
+      set(USE_ROCM OFF)
+    endif()
+  endif()
+
+  if(DEFINED ENV{USE_METAL})
+    set(_tilelang_backend_env_selected ON)
+    if($ENV{USE_METAL})
+      set(USE_METAL ON)
+    else()
+      set(USE_METAL OFF)
+    endif()
+  endif()
+
+  if(NOT _tilelang_backend_env_selected)
+    if(APPLE)
+      message(STATUS "Enable Metal support by default.")
+      set(USE_METAL ON)
     elseif(TILELANG_CUDA_TOOLKIT_AVAILABLE)
       message(STATUS "Enable CUDA support by default.")
       set(USE_CUDA ON)
@@ -410,6 +438,7 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
       set(USE_CUDA OFF)
     endif()
   endif()
+  unset(_tilelang_backend_env_selected)
 endif()
 
 # Backend-local CMake files own native source lists, stubs, include paths, and

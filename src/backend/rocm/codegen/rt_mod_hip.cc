@@ -5,7 +5,6 @@
 #endif
 
 #include <hip/hip_runtime.h>
-#include <hip/hiprtc.h>
 
 #include "codegen_hip.h"
 #include "runtime/pack_args.h"

@@ -139,6 +139,9 @@ include = [
     # Composable Kernel
     "3rdparty/composable_kernel/include",
     "3rdparty/composable_kernel/library",
+    # Vendored HIP headers (build-time only) so source builds work on hosts
+    # without a ROCm install. Not mapped into the wheel at runtime.
+    "3rdparty/hip-headers/include",
     "testing/**",
     "examples/**",
 ]
@@ -277,6 +280,13 @@ environment.PYTHONDEVMODE = "1"
 environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
+# Build a fat wheel that supports both CUDA and ROCm at runtime. ROCm sources
+# compile against the vendored HIP headers under 3rdparty/hip-headers/include
+# and link to libhip_stub (dlopen-based), so no ROCm runtime is required in
+# the cibuildwheel manylinux container. The resulting wheel still requires
+# a real ROCm runtime to be present at execution time on AMD hosts.
+environment.USE_CUDA = "ON"
+environment.USE_ROCM = "ON"
 manylinux-x86_64-image  = "manylinux_2_28"  # AlmaLinux 8
 manylinux-aarch64-image = "manylinux_2_34"  # Z3 requires
 # Install CUDA runtime and stub driver library

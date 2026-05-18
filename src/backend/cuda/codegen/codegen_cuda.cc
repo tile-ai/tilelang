@@ -1392,13 +1392,20 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
     if (args.size() == 1) {
       this->stream << "__syncthreads();\n";
     } else if (args.size() == 2) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ">();\n";
+      ICHECK(args[1].dtype().is_int())
+          << "storage_sync barrier_id must be integer type, got "
+          << args[1].dtype();
+      this->stream << "tl::__sync_thread_partial(" << PrintExpr(args[1])
+                   << ");\n";
     } else if (args.size() == 3) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      auto thread_count = args[2].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ", "
-                   << thread_count << ">();\n";
+      ICHECK(args[1].dtype().is_int())
+          << "storage_sync barrier_id must be integer type, got "
+          << args[1].dtype();
+      ICHECK(args[2].dtype().is_int())
+          << "storage_sync thread_count must be integer type, got "
+          << args[2].dtype();
+      this->stream << "tl::__sync_thread_partial(" << PrintExpr(args[1]) << ", "
+                   << PrintExpr(args[2]) << ");\n";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
