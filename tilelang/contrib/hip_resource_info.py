@@ -3,7 +3,6 @@
 JITKernel.
 
 clang emits a block like::
-
     remark: src.cc:9:0: Function Name: main_kernel [-Rpass-analysis=kernel-resource-usage]
     remark: src.cc:9:0:     TotalSGPRs: 16 [-Rpass-analysis=kernel-resource-usage]
     remark: src.cc:9:0:     VGPRs: 5 [-Rpass-analysis=kernel-resource-usage]
