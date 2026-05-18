@@ -29,7 +29,7 @@ def sparse_mla_fwd(
 ):
     assert dim == tilelang.math.next_power_of_2(dim), f"haven't check padding correctness yet, dim={dim}"
     assert tail_dim == tilelang.math.next_power_of_2(tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
-    assert is_causal == True, "non-casual is not supported"
+    assert is_causal, "non-casual is not supported"
     assert topk % block_I == 0, "otherwise will load some index=0 thus causing wrong kv to be loaded"
     if sm_scale is None:
         sm_scale = (1.0 / (dim + tail_dim)) ** 0.5 * 1.44269504  # log2(e)
@@ -46,7 +46,6 @@ def sparse_mla_fwd(
     dtype = T.bfloat16
     accum_dtype = T.float32
 
-    G = kv_group
     H = head_kv
     padded_H = max(tilelang.math.next_power_of_2(head_kv), 16)
     if padded_H != H:
@@ -349,7 +348,6 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, q_start_index_s, kv_stride=4, s
     v = kv[..., :dim]
 
     b, _, _, dim_v = v.shape
-    num_kv_per_index = 1
     g_index = g
     h_index = h // g
     compressed_casual_mask = torch.arange(q_start_index_s, sq + q_start_index_s, dtype=torch.int32, device="cuda").view(
