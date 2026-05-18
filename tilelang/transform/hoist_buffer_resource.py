@@ -67,7 +67,7 @@ def _is_async_load_call(stmt):
     if not isinstance(stmt, Evaluate) or not isinstance(stmt.value, Call):
         return False
     op = stmt.value.op
-    return op == _op_ptx_cp_async_lds or op == _op_ptx_cp_async_lds_rsrc
+    return op in (_op_ptx_cp_async_lds, _op_ptx_cp_async_lds_rsrc)
 
 
 def _is_commit_call(stmt):
@@ -176,14 +176,13 @@ def _collect_buffer_vars(body):
     buffer_vars = {}
 
     def _visit(stmt):
-        if isinstance(stmt, Evaluate) and isinstance(stmt.value, Call):
-            if stmt.value.op == _op_ptx_cp_async_lds:
-                # ptx_cp_async_lds args: (dst_access_ptr, src_access_ptr, bytes)
-                buf_var = _extract_buffer_var(stmt.value.args[1])
-                if buf_var is not None and buf_var not in buffer_vars:
-                    rsrc_var = Var("__rsrc_" + buf_var.name, dtype="handle")
-                    base_var = Var("__base_" + buf_var.name, dtype="uint32")
-                    buffer_vars[buf_var] = (rsrc_var, base_var)
+        if isinstance(stmt, Evaluate) and isinstance(stmt.value, Call) and stmt.value.op == _op_ptx_cp_async_lds:
+            # ptx_cp_async_lds args: (dst_access_ptr, src_access_ptr, bytes)
+            buf_var = _extract_buffer_var(stmt.value.args[1])
+            if buf_var is not None and buf_var not in buffer_vars:
+                rsrc_var = Var("__rsrc_" + buf_var.name, dtype="handle")
+                base_var = Var("__base_" + buf_var.name, dtype="uint32")
+                buffer_vars[buf_var] = (rsrc_var, base_var)
 
     stmt_functor.post_order_visit(body, _visit)
     return buffer_vars
@@ -193,23 +192,22 @@ def _rewrite_calls(body, buffer_vars):
     """Rewrite ptx_cp_async_lds -> ptx_cp_async_lds_rsrc with hoisted vars."""
 
     def _postorder(op):
-        if isinstance(op, Evaluate) and isinstance(op.value, Call):
-            if op.value.op == _op_ptx_cp_async_lds:
-                buf_var = _extract_buffer_var(op.value.args[1])
-                if buf_var is not None and buf_var in buffer_vars:
-                    rsrc_var, base_var = buffer_vars[buf_var]
-                    new_call = Call(
-                        op.value.dtype,
-                        _op_ptx_cp_async_lds_rsrc,
-                        [
-                            op.value.args[0],
-                            op.value.args[1],
-                            op.value.args[2],
-                            rsrc_var,
-                            base_var,
-                        ],
-                    )
-                    return Evaluate(new_call)
+        if isinstance(op, Evaluate) and isinstance(op.value, Call) and op.value.op == _op_ptx_cp_async_lds:
+            buf_var = _extract_buffer_var(op.value.args[1])
+            if buf_var is not None and buf_var in buffer_vars:
+                rsrc_var, base_var = buffer_vars[buf_var]
+                new_call = Call(
+                    op.value.dtype,
+                    _op_ptx_cp_async_lds_rsrc,
+                    [
+                        op.value.args[0],
+                        op.value.args[1],
+                        op.value.args[2],
+                        rsrc_var,
+                        base_var,
+                    ],
+                )
+                return Evaluate(new_call)
         return None
 
     return stmt_functor.ir_transform(body, None, _postorder, ["tir.Evaluate"])
