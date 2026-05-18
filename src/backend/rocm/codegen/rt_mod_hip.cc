@@ -8,32 +8,29 @@
 #include <hip/hiprtc.h>
 
 #include "codegen_hip.h"
-#include "runtime/rocm/rocm_module.h"
-
-#ifndef kTVMGridConstant
-#define kTVMGridConstant 130
-#endif
+#include "runtime/pack_args.h"
+#include "target/rocm/rocm_fallback_module.h"
 
 namespace tvm {
 namespace codegen {
 
 using namespace ffi;
 
-static std::unordered_map<std::string, runtime::FunctionInfo>
-ExtractFuncInfo(const IRModule &mod) {
-  std::unordered_map<std::string, runtime::FunctionInfo> fmap;
+static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
+  Map<String, runtime::FunctionInfo> fmap;
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
         << "Can only lower IR Module with PrimFuncs";
     auto f = Downcast<tirx::PrimFunc>(kv.second);
 
-    runtime::FunctionInfo info;
+    Array<DLDataType> arg_types;
+    Array<String> launch_param_tags;
     for (size_t i = 0; i < f->params.size(); ++i) {
       if (f->params[i]->dtype.is_handle()) {
         auto ptr = f->params[i]->type_annotation.as<PointerTypeNode>();
         if (ptr && ptr->storage_scope == "grid_constant") {
-          info.arg_types.push_back(DataType(kTVMGridConstant, 64, 1));
+          arg_types.push_back(DataType(runtime::kDLGridConstant, 64, 1));
           continue;
         }
       }
@@ -41,19 +38,20 @@ ExtractFuncInfo(const IRModule &mod) {
       // Device runtime cannot directly take bool arguments, map to int32.
       if (dtype.is_bool())
         dtype = DataType::Int(32);
-      info.arg_types.push_back(dtype);
+      arg_types.push_back(dtype);
     }
     if (f->HasNonzeroAttr("use_cooperative_groups")) {
-      info.launch_param_tags.push_back(
-          runtime::launch_param::kUseCooperativeLaunch);
+      launch_param_tags.push_back(runtime::launch_param::kUseCooperativeLaunch);
     }
     if (auto opt = f->GetAttr<Array<String>>(tirx::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
-        info.launch_param_tags.push_back(tag);
+        launch_param_tags.push_back(tag);
       }
     }
     auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-    fmap[static_cast<std::string>(global_symbol.value())] = info;
+    std::string name = static_cast<std::string>(global_symbol.value());
+    fmap.Set(String(name), runtime::FunctionInfo(String(name), arg_types,
+                                                 launch_param_tags, {}));
   }
   return fmap;
 }
@@ -91,7 +89,11 @@ Module BuildTileLangHIP(IRModule mod, Target target) {
     ICHECK(false) << "tilelang_callback_hip_compile is not set";
   }
 
-  return ROCMModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code, std::string());
+  Map<String, String> source_map;
+  source_map.Set("hip", code);
+  return target::ROCmModuleCreateWithFallback(Bytes(ptx.data(), ptx.size()),
+                                              String(fmt), ExtractFuncInfo(mod),
+                                              source_map);
 }
 
 Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
@@ -116,8 +118,12 @@ Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
     code = (*f)(code, target).cast<std::string>();
   }
 
-  return ROCMModuleCreate("ptx", "fmt", ExtractFuncInfo(mod), code,
-                          std::string());
+  Map<String, String> source_map;
+  source_map.Set("hip", code);
+  static constexpr const char kDummyPtx[] = "ptx";
+  return target::ROCmModuleCreateWithFallback(
+      Bytes(kDummyPtx, sizeof(kDummyPtx) - 1), String("ptx"),
+      ExtractFuncInfo(mod), source_map);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
