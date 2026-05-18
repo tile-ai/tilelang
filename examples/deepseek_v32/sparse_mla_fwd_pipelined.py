@@ -1,25 +1,14 @@
-# ruff: noqa
 import torch
 import tilelang
 from tilelang import language as T
-from tilelang.engine.callback import register_cuda_postproc_callback
 import argparse
 
 
 @tilelang.jit(
     out_idx=[-2, -1],
-    compile_flags=[
-        "-O3",
-        "-Wno-deprecated-declarations",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--ptxas-options=-v,--register-usage-level=10",
-        "-DNDEBUG",
-    ],
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def sparse_mla_fwd(
     batch,
@@ -114,14 +103,13 @@ def sparse_mla_fwd(
             m_i_prev = T.alloc_fragment([H_per_block], accum_dtype)
             indices_local = T.alloc_var(indices_dtype)
 
-            # TODO: Multi buffer
-            bar_q = T.alloc_barrier(arrive_count=384)
-            bar_k_0_ready = T.alloc_barrier(arrive_count=128)
-            bar_k_1_ready = T.alloc_barrier(arrive_count=128)
-            bar_k_0_free = T.alloc_barrier(arrive_count=256)
-            bar_k_1_free = T.alloc_barrier(arrive_count=256)
-            bar_sScale_and_sS_ready = T.alloc_barrier(arrive_count=256)
-            bar_sScale_and_sS_free = T.alloc_barrier(arrive_count=256)
+            bar_q = T.alloc_barrier(384)
+            bar_k_0_ready = T.alloc_barrier(128)
+            bar_k_1_ready = T.alloc_barrier(128)
+            bar_k_0_free = T.alloc_barrier(256)
+            bar_k_1_free = T.alloc_barrier(256)
+            bar_sScale_and_sS_ready = T.alloc_barrier(256)
+            bar_sScale_and_sS_free = T.alloc_barrier(256)
 
             b_i, g_i = by, bz
             s_i = (bx + (KV_stride - 1 if CP0 else 0)) if REPLICATE_H == 1 else (bx // REPLICATE_H + (KV_stride - 1 if CP0 else 0))
@@ -169,7 +157,7 @@ def sparse_mla_fwd(
                         alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
                         acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
-                    T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
+                    T.reduce_sum(acc_s, sumexp_i, dim=1)
                     for h_i in T.Parallel(H_per_block):
                         sumexp[h_i] = sumexp[h_i] * alpha_local[h_i] + sumexp_i[h_i]
                     for h_i, d_i in T.Parallel(H_per_block, D // 2):
@@ -414,17 +402,18 @@ def test_sparse_mla_fwd_pipelined(
             out[:, : KV_stride - 1, :, :] = 0
         return out, lse
 
-    tl_out, tl_lse = fn()
-    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+    if check_correctness:
+        tl_out, tl_lse = fn()
+        ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
 
-    torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
 
     from tilelang.profiler import do_bench
 
     ms = do_bench(
         fn,
-        rep=10,
         warmup=10,
+        rep=10,
     )
     print(f"Average time: {ms:.3f} ms")
     print(f"fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)

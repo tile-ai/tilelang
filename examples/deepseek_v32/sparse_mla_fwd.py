@@ -1,4 +1,5 @@
 # ruff: noqa
+from doctest import debug
 import torch
 import tilelang
 from tilelang import language as T
@@ -8,6 +9,7 @@ from utils import assert_tensors_similar
 @tilelang.jit(
     out_idx=[-2, -1],
     pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
+    debug_root_path='/home/wt/debug/sparsemla'
 )
 def sparse_mla_fwd(
     heads,
@@ -107,8 +109,11 @@ def sparse_mla_fwd(
             H0 = g_i * padded_H + (0 if REPLICATE_H == 1 else (bx % REPLICATE_H) * 64)
             H1 = H0 + H_per_block
 
-            T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared)
-            T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
+            barrier = T.alloc_barrier([256])
+            T.tma_copy(Q[b_i, s_i, H0:H1, :D], Q_shared, barrier=barrier)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared, barrier=barrier)
+            T.mbarrier_arrive(barrier)
+            T.mbarrier_wait_parity(barrier, 0)
 
             for i_i in T.Pipelined(NI, num_stages=num_stages):
                 for bi_i in T.Parallel(BI):
@@ -266,8 +271,8 @@ def test_sparse_mla_fwd(
 
     ms = do_bench(
         fn,
-        rep=100,
-        warmup=250,
+        warmup=100,
+        rep=250
     )
     print(f"Average time: {ms:.3f} ms")
     print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
