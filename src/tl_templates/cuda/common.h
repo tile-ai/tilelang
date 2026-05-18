@@ -790,7 +790,11 @@ TL_DEVICE __nv_bfloat162 fma2(__nv_bfloat162 a, __nv_bfloat162 b,
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
   return __hfma2(a, b, c);
 #else
-  return __nv_bfloat162{__hfma(a.x, b.x, c.x), __hfma(a.y, b.y, c.y)};
+  float a_x = __bfloat162float(a.x), a_y = __bfloat162float(a.y);
+  float b_x = __bfloat162float(b.x), b_y = __bfloat162float(b.y);
+  float c_x = __bfloat162float(c.x), c_y = __bfloat162float(c.y);
+  return __nv_bfloat162{__float2bfloat16(a_x * b_x + c_x),
+                        __float2bfloat16(a_y * b_y + c_y)};
 #endif
 }
 

@@ -1277,6 +1277,14 @@ private:
               has_non_local_store = true;
             }
           }
+        } else if (call->op.same_as(builtin::address_of())) {
+          // call_extern may pass address_of(non-local-buffer) pointers, and
+          // PostOrderVisit reaches the address_of call directly.
+          if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+            if (!IsLocalBuffer(load->buffer)) {
+              has_non_local_store = true;
+            }
+          }
         }
       }
     });

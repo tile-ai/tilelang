@@ -482,6 +482,58 @@ class TensorCoreIntrinEmitter:
     def mma(self, A_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr | None = 0):
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
+
+        @T.macro
+        def _warp_mma(A_local_buf, B_local_buf, C_local_buf):
+            for i, j in T.grid(warp_rows, warp_cols):
+                self.mma_atom(A_local_buf, B_local_buf, C_local_buf, i, j, k_inner)
+
+        return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
+
+    # ---- Atom-level interface ----
+
+    @property
+    def mma_num_inst_m(self) -> int:
+        """Number of MMA instruction atoms along the M dimension."""
+        return self.warp_rows
+
+    @property
+    def mma_num_inst_n(self) -> int:
+        """Number of MMA instruction atoms along the N dimension."""
+        return self.warp_cols
+
+    def mma_atom(
+        self,
+        A_local_buf: Buffer,
+        B_local_buf: Buffer,
+        C_local_buf: Buffer,
+        inst_m_idx: PrimExpr | int,
+        inst_n_idx: PrimExpr | int,
+        k_inner: PrimExpr | int = 0,
+    ):
+        """Emit a single MMA atom for tile (inst_m_idx, inst_n_idx).
+
+        This is the atomic building block of ``mma()``.  Calling this method
+        for every ``(i, j)`` in ``T.grid(mma_num_inst_m, mma_num_inst_n)``
+        produces identical TIR to a single ``mma()`` call.
+
+        Parameters
+        ----------
+        A_local_buf : Buffer
+            Fragment buffer for operand A.
+        B_local_buf : Buffer
+            Fragment buffer for operand B.
+        C_local_buf : Buffer
+            Accumulator fragment buffer.
+        inst_m_idx : int or PrimExpr
+            M-dimension atom index (0 .. mma_num_inst_m - 1).
+        inst_n_idx : int or PrimExpr
+            N-dimension atom index (0 .. mma_num_inst_n - 1).
+        k_inner : int or PrimExpr
+            K-inner step index used to offset A/B fragments.
+        """
+        warp_rows = self.warp_rows
+        warp_cols = self.warp_cols
         local_size_a = self.local_size_a
         local_size_b = self.local_size_b
         local_size_out = self.local_size_out
@@ -497,9 +549,29 @@ class TensorCoreIntrinEmitter:
         a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
         b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
 
+        A_offset = a_local_stride + inst_m_idx * local_size_a
+        B_offset = b_local_stride + inst_n_idx * local_size_b
+        C_offset = inst_m_idx * warp_cols * local_size_out + inst_n_idx * local_size_out
+
         @T.macro
-        def _warp_mma(A_local_buf, B_local_buf, C_local_buf):
-            for i, j in T.grid(warp_rows, warp_cols):
+        def _atom_mma(A_local_buf, B_local_buf, C_local_buf):
+            T.ptx_mma(
+                accum_dtype,
+                mma_prefix,
+                "row",
+                "col",
+                a_dtype_abbrv,
+                b_dtype_abbrv,
+                accum_dtype_abbrv,
+                A_local_buf.data,
+                A_offset,
+                B_local_buf.data,
+                B_offset,
+                C_local_buf.data,
+                C_offset,
+                T.bool(False),
+            )
+            if replicate_b:
                 T.ptx_mma(
                     accum_dtype,
                     mma_prefix,
@@ -509,32 +581,15 @@ class TensorCoreIntrinEmitter:
                     b_dtype_abbrv,
                     accum_dtype_abbrv,
                     A_local_buf.data,
-                    a_local_stride + i * local_size_a,
+                    A_offset,
                     B_local_buf.data,
-                    b_local_stride + j * local_size_b,
+                    B_offset + lift(local_size_b) // 2,
                     C_local_buf.data,
-                    i * warp_cols * local_size_out + j * local_size_out,
-                    T.bool(False),  # saturate
+                    C_offset + lift(local_size_out) // 2,
+                    T.bool(False),
                 )
-                if replicate_b:
-                    T.ptx_mma(
-                        accum_dtype,
-                        mma_prefix,
-                        "row",
-                        "col",
-                        a_dtype_abbrv,
-                        b_dtype_abbrv,
-                        accum_dtype_abbrv,
-                        A_local_buf.data,
-                        a_local_stride + i * local_size_a,
-                        B_local_buf.data,
-                        b_local_stride + j * local_size_b + lift(local_size_b) // 2,
-                        C_local_buf.data,
-                        i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
-                        T.bool(False),  # saturate
-                    )
 
-        return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
+        return _atom_mma(A_local_buf, B_local_buf, C_local_buf)
 
     def stmatrix(self, C_local_buf, C_buf, pid_m=None, pid_n=None):
         block_row_warps = self.block_row_warps
