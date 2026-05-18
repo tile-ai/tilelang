@@ -677,6 +677,39 @@ foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
   )
 endforeach()
 
+if(APPLE AND USE_Z3 AND USE_PYPI_Z3)
+  # PyPI z3-solver's macOS dylib uses the bare install name "libz3.dylib".
+  # dyld does not resolve bare install names through LC_RPATH, so build-tree
+  # test runs need the TVM dylib load command rewritten as well.
+  set(_tilelang_z3_build_rewrite_stamps)
+  foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+    if(target STREQUAL "tvm" OR target STREQUAL "tvm_compiler" OR target STREQUAL "tvm_runtime")
+      set(_stamp "${CMAKE_BINARY_DIR}/lib/.${target}_z3_install_name.stamp")
+      add_custom_command(
+        OUTPUT "${_stamp}"
+        COMMAND ${CMAKE_COMMAND}
+          -DTILELANG_DYLIB_PATH=$<TARGET_FILE:${target}>
+          -DTILELANG_DYLIB_FROM=libz3.dylib
+          -DTILELANG_DYLIB_TO=@loader_path/libz3.dylib
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/rewrite_dylib_dependency.cmake"
+        COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
+        DEPENDS ${target} $<TARGET_FILE:${target}>
+        VERBATIM
+      )
+      list(APPEND _tilelang_z3_build_rewrite_stamps "${_stamp}")
+    endif()
+  endforeach()
+  if(_tilelang_z3_build_rewrite_stamps)
+    add_custom_target(tilelang_rewrite_build_z3_install_names ALL
+      DEPENDS ${_tilelang_z3_build_rewrite_stamps}
+    )
+    if(TARGET tilelang)
+      add_dependencies(tilelang tilelang_rewrite_build_z3_install_names)
+    endif()
+  endif()
+  unset(_tilelang_z3_build_rewrite_stamps)
+endif()
+
 # Strip backend runtime dependencies for portable wheels
 if(DEFINED TILELANG_ACTIVE_BACKEND_PATCHELF_REMOVE AND PATCHELF_EXECUTABLE)
   foreach(_needed IN LISTS TILELANG_ACTIVE_BACKEND_PATCHELF_REMOVE)
