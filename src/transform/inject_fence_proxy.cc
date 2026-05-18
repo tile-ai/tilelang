@@ -3,16 +3,16 @@
  * \brief Inject proxy fences between generic and async proxies (sm90+)
  */
 
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include <cstdint>
 #include <utility>
@@ -421,7 +421,7 @@ private:
       iter_values.push_back(VisitExpr(v));
     }
     return SBlockRealize(iter_values, predicate,
-                        Downcast<SBlock>(block_res.stmt));
+                         Downcast<SBlock>(block_res.stmt));
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
@@ -550,8 +550,8 @@ tvm::transform::Pass InjectFenceProxy() {
     }
     return ProxyFenceRewriter::Apply(f);
   };
-  return tirx::transform::CreatePrimFuncPass(pass_func, 0, "tl.InjectFenceProxy",
-                                            {});
+  return tirx::transform::CreatePrimFuncPass(pass_func, 0,
+                                             "tl.InjectFenceProxy", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

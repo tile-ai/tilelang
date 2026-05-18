@@ -8,8 +8,8 @@
 
 #include "op/reduce.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "layout/layout.h"
 #include "layout/utils.h"
@@ -365,7 +365,7 @@ template <typename Impl> struct ReduceLowerer {
             << "ReduceOp: batch=" << batch
             << " exceeds per-thread output element count N=" << N_total;
         ICHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
-                                     << " must evenly divide N=" << N_total;
+                                      << " must evenly divide N=" << N_total;
       }
 
       bool use_batch = batch > 1;

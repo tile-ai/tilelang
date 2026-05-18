@@ -5,12 +5,12 @@
  */
 
 #include "./atomic_reduce.h"
+#include "support/check.h"
 #include "utils.h"
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
-#include "support/check.h"
-#include <tvm/ir/cast.h>
 
 #include "../layout/layout.h"
 

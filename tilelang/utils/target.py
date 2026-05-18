@@ -190,8 +190,7 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
                     Target(target)
                 except Exception as err:
                     raise AssertionError(
-                        f"Target {target} is not supported. Pass a valid target config dict, "
-                        "e.g. `{'kind': 'cuda', 'arch': 'sm_80'}`."
+                        f"Target {target} is not supported. Pass a valid target config dict, e.g. `{{'kind': 'cuda', 'arch': 'sm_80'}}`."
                     ) from err
                 return_var = target
             elif isinstance(target, str):

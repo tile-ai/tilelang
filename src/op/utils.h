@@ -9,10 +9,10 @@
 #include "./operator.h"
 #include "backend/cuda/stubs/cuda.h"
 #include "region.h"
+#include "support/check.h"
 #include "tvm/runtime/base.h"
 #include <tvm/tirx/buffer.h>
 #include <tvm/tirx/op.h>
-#include "support/check.h"
 
 namespace tvm {
 namespace tl {

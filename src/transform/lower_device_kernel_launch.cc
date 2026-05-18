@@ -22,14 +22,14 @@
  * \brief Split device function from host.
  */
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -139,10 +139,10 @@ private:
 
     auto extent = thread_extent.Get(launch_param);
     ICHECK(extent) << "Compute kernel requires launch parameter \""
-                  << launch_param
-                  << "\", but PrimFunc does not contain AttrStmt \""
-                  << tirx::attr::thread_extent
-                  << "\" defining this thread extent";
+                   << launch_param
+                   << "\", but PrimFunc does not contain AttrStmt \""
+                   << tirx::attr::thread_extent
+                   << "\" defining this thread extent";
     return extent.value();
   }
 
@@ -408,8 +408,8 @@ tvm::transform::Pass LowerDeviceKernelLaunch() {
       IRModule updates;
       for (const auto &[gvar, base_func] : mod->functions) {
         if (auto *ptr = base_func.as<PrimFuncNode>()) {
-          auto prim_func = mutator.RewriteKernelLaunchSite(
-              gvar, GetRef<PrimFunc>(ptr));
+          auto prim_func =
+              mutator.RewriteKernelLaunchSite(gvar, GetRef<PrimFunc>(ptr));
           if (!prim_func.same_as(base_func)) {
             updates->Add(gvar, prim_func);
           }
@@ -424,8 +424,8 @@ tvm::transform::Pass LowerDeviceKernelLaunch() {
       IRModule updates;
       for (const auto &[gvar, base_func] : mod->functions) {
         if (auto *ptr = base_func.as<PrimFuncNode>()) {
-          auto prim_func = mutator.UpdateKernelAttributes(
-              gvar, GetRef<PrimFunc>(ptr));
+          auto prim_func =
+              mutator.UpdateKernelAttributes(gvar, GetRef<PrimFunc>(ptr));
           if (!prim_func.same_as(base_func)) {
             updates->Add(gvar, prim_func);
           }

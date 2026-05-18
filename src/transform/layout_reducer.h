@@ -5,8 +5,8 @@
 #ifndef TVM_TL_TRANSFORM_LAYOUT_REDUCER_H_
 #define TVM_TL_TRANSFORM_LAYOUT_REDUCER_H_
 
-#include <tvm/tirx/op.h>
 #include "support/check.h"
+#include <tvm/tirx/op.h>
 
 #include "../layout/layout.h"
 

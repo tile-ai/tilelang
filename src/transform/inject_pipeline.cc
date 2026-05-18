@@ -3,17 +3,17 @@
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers
  */
-#include <tvm/arith/analyzer.h>
-#include <tvm/target/target.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/transform.h>
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
+#include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/analysis.h>
 #include <tvm/s_tir/stmt.h>
+#include <tvm/target/target.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/transform.h>
 
 #include <functional>
 #include <map>
@@ -209,8 +209,7 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
-    if (auto tile_op = ParseOperator(GetRef<Call>(op));
-        tile_op.defined()) {
+    if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       AccessRegions access = tile_op->GetAccessRegions();
       for (const auto &region : access.reads) {
         AddBuffer(region->buffer);
@@ -264,8 +263,7 @@ public:
 
 private:
   void VisitExpr_(const CallNode *op) final {
-    if (auto tile_op = ParseOperator(GetRef<Call>(op));
-        tile_op.defined()) {
+    if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       AccessRegions access = tile_op->GetAccessRegions();
       reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
       writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
@@ -291,7 +289,7 @@ private:
  * \return The result block.
  */
 SBlock MakeBlock(const Stmt &body,
-                const Map<Var, Buffer> &buffer_data_to_buffer) {
+                 const Map<Var, Buffer> &buffer_data_to_buffer) {
   SBlock block;
   if (const SBlockRealizeNode *block_realize = body.as<SBlockRealizeNode>()) {
     if (is_one(block_realize->predicate)) {
@@ -300,7 +298,7 @@ SBlock MakeBlock(const Stmt &body,
   }
   if (!block.defined()) {
     block = SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                  /*name_hint=*/"", /*body*/ body);
+                   /*name_hint=*/"", /*body*/ body);
   }
   Array<Array<BufferRegion>> access =
       GetSBlockReadWriteRegion(block, buffer_data_to_buffer);
@@ -901,8 +899,7 @@ private:
    * \return The resized buffer.
    */
   Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
-    ObjectPtr<BufferNode> new_buffer =
-        make_object<BufferNode>(*(buffer.get()));
+    ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
     if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
@@ -1405,7 +1402,7 @@ private:
           SBlock new_block = realize->block;
           new_block.CopyOnWrite()->body = inner;
           return SBlockRealize(realize->iter_values, realize->predicate,
-                              new_block, realize->span);
+                               new_block, realize->span);
         }
       }
       return stmt;
@@ -1509,7 +1506,7 @@ private:
           SBlock new_block = realize->block;
           new_block.CopyOnWrite()->body = new_body;
           return SBlockRealize(realize->iter_values, realize->predicate,
-                              new_block, realize->span);
+                               new_block, realize->span);
         }
       }
       return stmt;
@@ -1571,7 +1568,7 @@ private:
           SBlock new_block = realize->block;
           new_block.CopyOnWrite()->body = new_body;
           return SBlockRealize(realize->iter_values, realize->predicate,
-                              new_block, realize->span);
+                               new_block, realize->span);
         }
       }
       return stmt;
@@ -1711,7 +1708,7 @@ private:
           SBlock new_block = realize->block;
           new_block.CopyOnWrite()->body = new_body;
           return SBlockRealize(realize->iter_values, realize->predicate,
-                              new_block, realize->span);
+                               new_block, realize->span);
         }
       }
       return stmt;
@@ -1900,7 +1897,6 @@ private:
         }
       }
     }
-
   }
 
   std::vector<FinalStmtInfo> CompletePipelineLoopStatements(
@@ -2249,7 +2245,7 @@ private:
                      std::move(new_loop), std::nullopt, preserved_annotations);
     }
     Stmt result = SBlockRealize({}, Bool(true),
-                               MakeBlock(new_loop, buffer_data_to_buffer_));
+                                MakeBlock(new_loop, buffer_data_to_buffer_));
     if (pipeline_num_stages) {
       if (pipeline_num_stages.value()->value > 1) {
         result =
@@ -2284,11 +2280,12 @@ private:
  * source to the destination. \param[out] dep_dst2src Optional, a map to store
  * dependency edges from the destination to the source.
  */
-void BuildDependencyGraph(const Array<SBlock> &blocks,
-                          std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash,
-                                             ObjectPtrEqual> *dep_src2dst,
-                          std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash,
-                                             ObjectPtrEqual> *dep_dst2src) {
+void BuildDependencyGraph(
+    const Array<SBlock> &blocks,
+    std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
+        *dep_src2dst,
+    std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
+        *dep_dst2src) {
   std::unordered_map<Var, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
       buffer_writers;
 
@@ -2609,8 +2606,7 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   std::unordered_map<const BufferNode *, PrimExpr> old_shapes;
   for (const Buffer &buf : barriers) {
     old_shapes[buf.get()] = buf->shape[0];
-    ObjectPtr<BufferNode> new_node =
-        make_object<BufferNode>(*(buf.get()));
+    ObjectPtr<BufferNode> new_node = make_object<BufferNode>(*(buf.get()));
     new_node->shape = {PrimExpr(num_stages) * buf->shape[0]};
     Buffer new_buf(new_node);
     old_to_new[buf.get()] = new_buf;
@@ -2637,10 +2633,10 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
         auto it = old_to_new.find(ab.get());
         new_allocs.push_back(it != old_to_new.end() ? it->second : ab);
       }
-      SBlock new_block(old_block->iter_vars, old_block->reads, old_block->writes,
-                      old_block->name_hint, new_body, old_block->init,
-                      new_allocs, old_block->match_buffers,
-                      old_block->annotations);
+      SBlock new_block(old_block->iter_vars, old_block->reads,
+                       old_block->writes, old_block->name_hint, new_body,
+                       old_block->init, new_allocs, old_block->match_buffers,
+                       old_block->annotations);
       PipelineAnnotation anno = pipeline_info.at(old_block);
       pipeline_info.erase(old_block);
       pipeline_info.emplace(new_block, anno);
@@ -2727,9 +2723,9 @@ Buffer RewritePipelineTmaBarriers(
     Stmt new_body = rewriter(old_block->body);
 
     SBlock new_block(old_block->iter_vars, old_block->reads, old_block->writes,
-                    old_block->name_hint, new_body, old_block->init,
-                    old_block->alloc_buffers, old_block->match_buffers,
-                    old_block->annotations);
+                     old_block->name_hint, new_body, old_block->init,
+                     old_block->alloc_buffers, old_block->match_buffers,
+                     old_block->annotations);
 
     PipelineAnnotation anno = pipeline_info.at(old_block);
     pipeline_info.erase(old_block);
@@ -2764,9 +2760,9 @@ Buffer RewritePipelineTmaBarriers(
     Stmt new_body = SeqStmt(wait_stmts);
 
     SBlock new_block(old_block->iter_vars, old_block->reads, old_block->writes,
-                    old_block->name_hint, new_body, old_block->init,
-                    old_block->alloc_buffers, old_block->match_buffers,
-                    old_block->annotations);
+                     old_block->name_hint, new_body, old_block->init,
+                     old_block->alloc_buffers, old_block->match_buffers,
+                     old_block->annotations);
 
     PipelineAnnotation anno = pipeline_info.at(old_block);
     pipeline_info.erase(old_block);
@@ -2882,14 +2878,13 @@ private:
     std::vector<ScopedAllocation> old_allocated;
     std::vector<std::pair<size_t, size_t>> flat_alloc_indices;
 
-    auto register_buffer = [&](const Buffer &buffer, bool is_allocation)
-        -> std::optional<size_t> {
+    auto register_buffer = [&](const Buffer &buffer,
+                               bool is_allocation) -> std::optional<size_t> {
       old_bindings.emplace_back(buffer->data,
                                 buffer_data_to_buffer_.Get(buffer->data));
       buffer_data_to_buffer_.Set(buffer->data, buffer);
       if (is_allocation) {
-        old_allocated.push_back(
-            {buffer, allocated_buffers_.count(buffer) > 0});
+        old_allocated.push_back({buffer, allocated_buffers_.count(buffer) > 0});
         allocated_buffers_.insert(buffer);
         return old_allocated.size() - 1;
       }
@@ -3012,9 +3007,8 @@ private:
 
           const VarNode *loop_var = op->loop_var.get();
           bool condition_depends_on_loop =
-              UsesVar(if_then_else->condition, [loop_var](const VarNode *vn) {
-                return vn == loop_var;
-              });
+              UsesVar(if_then_else->condition,
+                      [loop_var](const VarNode *vn) { return vn == loop_var; });
 
           if (condition_depends_on_loop) {
             // If condition depends on loop variable, we need to push it inside
@@ -3290,8 +3284,8 @@ private:
     }
 
     PipelineRewriter rewriter(buffer_data_to_buffer_, pipeline_allocs,
-                              local_allocs, GetRef<For>(op),
-                              pipeline_info, target_, loop_var_if_wrappers);
+                              local_allocs, GetRef<For>(op), pipeline_info,
+                              target_, loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
     subtree_modified_ = true;
 
@@ -3396,8 +3390,8 @@ private:
         }
         pipeline = rewrap_outer_attrs(
             SBlockRealize(pipeline_realize->iter_values,
-                         pipeline_realize->predicate, pipeline_block,
-                         pipeline_realize->span),
+                          pipeline_realize->predicate, pipeline_block,
+                          pipeline_realize->span),
             outer_attrs);
       } else {
         pipeline = apply_wrappers(pipeline);
@@ -3461,7 +3455,7 @@ private:
           pending_layout_remapped_allocs_.end());
       auto ann = block->annotations;
       if (UpdateExpandedLayoutMapForRemappedAllocs(flat_remapped_allocs,
-                                                  &ann)) {
+                                                   &ann)) {
         block.CopyOnWrite()->annotations = std::move(ann);
         pending_layout_remapped_allocs_.erase(
             pending_layout_remapped_allocs_.begin() + layout_remap_mark,

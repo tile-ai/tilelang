@@ -326,7 +326,9 @@ def make_tensor_from_addr(
     return buffer(shape, dtype=dtype, data=pointer_var, strides=strides, scope=storage_scope)
 
 
-def make_tensor(ptr: Var | PrimExpr, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None) -> tirx.Buffer:
+def make_tensor(
+    ptr: Var | PrimExpr, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
+) -> tirx.Buffer:
     from tilelang.language.eager.builder import Builder
 
     if Builder.current() is None:

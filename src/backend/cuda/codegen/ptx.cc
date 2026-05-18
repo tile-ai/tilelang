@@ -753,12 +753,12 @@ void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b,
   case DataType::kFloat8_e4m3:
   case DataType::kFloat8_e5m2:
     ICHECK(dtype_b == DataType::kFloat8_e4m3 ||
-                   dtype_b == DataType::kFloat8_e5m2)
+           dtype_b == DataType::kFloat8_e5m2)
         << ab_not_match_err_str;
     break;
   default:
     ICHECK(false) << "Invalid multiplicand data types: "
-                          << DTypeToString(dtype_a) << DTypeToString(dtype_b);
+                  << DTypeToString(dtype_a) << DTypeToString(dtype_b);
   }
   // check a,b and c
   switch (dtype_a) {
@@ -796,8 +796,8 @@ void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b,
     break;
   default:
     ICHECK(false) << "Invalid multiplicand/accumulator data types: "
-                          << DTypeToString(dtype_a) << DTypeToString(dtype_b)
-                          << DTypeToString(dtype_c) << ".";
+                  << DTypeToString(dtype_a) << DTypeToString(dtype_b)
+                  << DTypeToString(dtype_c) << ".";
   }
 }
 
@@ -830,7 +830,7 @@ void CheckMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
   CheckMMADTypeCompatible(dtype_a, dtype_b, dtype_c);
   if (saturate) {
     ICHECK(dtype_a == DataType::kInt4 || dtype_a == DataType::kUInt4 ||
-                   dtype_a == DataType::kInt8 || dtype_a == DataType::kUInt8)
+           dtype_a == DataType::kInt8 || dtype_a == DataType::kUInt8)
         << "Output saturation only applicable to multiplicand type "
            "s4/u4/s8/u8.";
   }
@@ -838,7 +838,7 @@ void CheckMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
   if (!(m == 8 && n == 8 && k == 4 && dtype_a == ptx::DataType::kFloat16)) {
     // Only MMA on m8n8k4 for fp16 supports customized layouts.
     ICHECK(layout_a == LayoutType::kRowMajor &&
-                   layout_b == LayoutType::kColumnMajor)
+           layout_b == LayoutType::kColumnMajor)
         << "Invalid layout combination " << LayoutTypeToString(layout_a) << ","
         << LayoutTypeToString(layout_b) << ".";
   }
@@ -870,10 +870,10 @@ void CheckWGMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
     }
   }
   ICHECK(match) << "Cannot find matched WGMMA configurations for m " << m
-                        << " n " << n << " k " << k << " dtype_a "
-                        << DTypeToString(dtype_a) << " dtype_b "
-                        << DTypeToString(dtype_b) << " dtype_c "
-                        << DTypeToString(dtype_c) << " sparse " << sparse;
+                << " n " << n << " k " << k << " dtype_a "
+                << DTypeToString(dtype_a) << " dtype_b "
+                << DTypeToString(dtype_b) << " dtype_c "
+                << DTypeToString(dtype_c) << " sparse " << sparse;
 }
 /*!
  * \brief Fragment attributes
@@ -1375,7 +1375,7 @@ std::string PrintPredicatedCpAsyncAssembly(
     const std::string &global_ptr, const std::string &global_elem_offset,
     const std::string &bytes, const std::string &predicate_value) {
   ICHECK(bytes == "16" || bytes == "12" || bytes == "8" || bytes == "4" ||
-                 bytes == "2" || bytes == "1")
+         bytes == "2" || bytes == "1")
       << "Only support 16, 12, 8, 4, 2, 1 bytes for predicated cp.async";
   std::string predicated_asm_code = R"(
   {

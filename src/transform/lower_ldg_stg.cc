@@ -21,13 +21,13 @@
  */
 
 #include "support/check.h"
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
 
 #include "../op/builtin.h"
 #include "../op/utils.h"

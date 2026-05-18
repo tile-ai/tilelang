@@ -3,15 +3,15 @@
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
-#include <tvm/arith/analyzer.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/analysis.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <functional>
 #include <unordered_set>
@@ -153,8 +153,9 @@ public:
     }
 
     // Check reads from global
-    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ GetRef<Stmt>(op));
+    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                 /*name_hint=*/"",
+                 /*body*/ GetRef<Stmt>(op));
     auto access = GetSBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];
     Role role = Role::kProducer;
@@ -205,10 +206,16 @@ public:
   void VisitStmt_(const ForNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const BindNode *op) final { StmtVisitor::VisitStmt_(op); }
   void VisitStmt_(const AttrStmtNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const AssertStmtNode *op) final { StmtVisitor::VisitStmt_(op); }
+  void VisitStmt_(const AssertStmtNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+  }
   void VisitStmt_(const SBlockNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const AllocBufferNode *op) final { StmtVisitor::VisitStmt_(op); }
-  void VisitStmt_(const DeclBufferNode *op) final { StmtVisitor::VisitStmt_(op); }
+  void VisitStmt_(const AllocBufferNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const DeclBufferNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+  }
 
   bool HasProducer() { return has_simt_copy_ || has_bulk_copy_; }
 
@@ -282,7 +289,7 @@ private:
     for (const Stmt &stmt : pipeline_stmts) {
       marker(stmt);
       SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                  /*name_hint=*/"", /*body*/ stmt);
+                   /*name_hint=*/"", /*body*/ stmt);
       auto access = GetSBlockAccessRegion(block, buffer_data_to_buffer_);
       Array<BufferRegion> stmt_reads = access[0];
       Array<BufferRegion> stmt_writes = access[1];
@@ -308,8 +315,7 @@ private:
               for (const auto &arg : call->args) {
                 if (auto *region_call = arg.as<CallNode>()) {
                   if (region_call->op.same_as(RegionOp::Get())) {
-                    auto region_op =
-                        ParseOperator(GetRef<Call>(region_call));
+                    auto region_op = ParseOperator(GetRef<Call>(region_call));
                     if (auto *rn = region_op.as<RegionOpNode>()) {
                       int mask = rn->GetAccessMask();
                       auto br = BufferRegion(rn->GetBuffer(), rn->GetRanges());
@@ -401,8 +407,7 @@ private:
   }
 
   static Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
-    ObjectPtr<BufferNode> new_buffer =
-        make_object<BufferNode>(*(buffer.get()));
+    ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     if (buffer.scope() == "shared.barrier") {
       // Barrier buffers: expand first dimension to keep 1D shape.
       // (1,) -> (num_versions,) so lower_shared_barrier.cc still works.

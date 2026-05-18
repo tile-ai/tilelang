@@ -5,12 +5,12 @@
  */
 
 #include "./atomic_add.h"
+#include "support/check.h"
 #include "utils.h"
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
-#include "support/check.h"
-#include <tvm/ir/cast.h>
 
 #include "builtin.h"
 
@@ -75,7 +75,8 @@ void RegisterAtomicAddImpl(AtomicAddImpl impl) {
  * - The constructor checks that args[0] and args[1] are region-compatible.
  * - The constructed node is stored in this->data_.
  */
-AtomicAdd::AtomicAdd(ffi::Array<PrimExpr> args, ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
+AtomicAdd::AtomicAdd(ffi::Array<PrimExpr> args,
+                     ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
   ICHECK(args.size() >= 2)
       << "AtomicAdd expects at least 2 arguments (src, dst), got "
       << args.size();

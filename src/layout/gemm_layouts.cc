@@ -4,11 +4,11 @@
  *
  */
 
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
-#include "support/check.h"
-#include <tvm/runtime/logging.h>
-#include <tvm/ffi/extra/structural_equal.h>
 
 #include <cmath>
 

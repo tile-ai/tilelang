@@ -21,14 +21,14 @@
  * \file lower_opaque_block.cc
  */
 
-#include <tvm/s_tir/stmt.h>
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
 #include <tvm/ir/attrs.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 #include <string>
 #include <utility>
@@ -100,7 +100,8 @@ private:
           tuple.Set<0>(-1);
           allocate_aligns.push_back(tuple);
         }
-        allocate_annotations.Set(s_tir::attr::buffer_dim_align, allocate_aligns);
+        allocate_annotations.Set(s_tir::attr::buffer_dim_align,
+                                 allocate_aligns);
       }
       auto init_it = local_var_init_map_.find(buffer->data);
       if (init_it != local_var_init_map_.end()) {
@@ -112,7 +113,8 @@ private:
                        buffer->strides, buffer->elem_offset, buffer->name,
                        buffer->data_alignment, buffer->offset_factor,
                        buffer->buffer_type);
-      body = SeqStmt({AllocBuffer(alloc_buf, allocate_annotations), std::move(body)});
+      body = SeqStmt(
+          {AllocBuffer(alloc_buf, allocate_annotations), std::move(body)});
     }
     // Step 5. Materialize a lexical scope boundary only for blocks that were
     // explicitly marked by an earlier semantic lowering pass (for example
@@ -176,8 +178,7 @@ private:
   // Treat annotations as empty if they are truly empty or contain only
   // the unroll hint `pragma_unroll_explicit`. This allows unit-length
   // loops produced by unroll pragmas to be simplified away.
-  bool
-  IsEffectivelyEmptyAnnotation(const Map<String, Any> &annotations) const {
+  bool IsEffectivelyEmptyAnnotation(const Map<String, Any> &annotations) const {
     if (annotations.empty()) {
       return true;
     }

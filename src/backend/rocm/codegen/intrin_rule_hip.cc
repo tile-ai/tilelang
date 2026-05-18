@@ -2,10 +2,10 @@
  * \file intrin_rule_hip.cc
  * \brief HIP intrinsic rules.
  */
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op_attr_types.h>
 #include "support/check.h"
 #include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "target/intrin_rule.h"
 

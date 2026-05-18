@@ -264,8 +264,7 @@ void CodeGenTileLangC::AddFunction(const PrimFunc &f) {
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
   bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
   std::unordered_set<const VarNode *> non_restrict;
-  if (auto opt =
-          f->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
+  if (auto opt = f->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
     for (const tirx::Var &v : opt.value())
       non_restrict.insert(v.get());
   }

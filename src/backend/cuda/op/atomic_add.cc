@@ -5,9 +5,9 @@
 
 #include "op/atomic_add.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "backend/cuda/op/copy.h"
 #include "layout/layout.h"

@@ -3,11 +3,11 @@
  * \brief Implementation of General Matrix Multiplication (GEMM) operators
  */
 
-#include <tvm/tirx/stmt.h>
 #include "gemm.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/stmt.h>
 
 #include "builtin.h"
 #include <tvm/tirx/builtin.h>
@@ -190,12 +190,11 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
     // NOTE(wt): Decide the instruction key and compute warp partition on Python
     // side.
-    auto prim_func = Downcast<PrimFunc>(
-        (*f)(GetRef<Gemm>(this), T.layout_map, T.target,
-             T.thread_bounds, T.thread_var, mbar_phase));
+    auto prim_func =
+        Downcast<PrimFunc>((*f)(GetRef<Gemm>(this), T.layout_map, T.target,
+                                T.thread_bounds, T.thread_var, mbar_phase));
     ICHECK(prim_func->attrs.defined());
-    auto global_symbol =
-        prim_func->attrs.GetAttr<String>("global_symbol");
+    auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
     if (prim_func->body.as<SBlockRealizeNode>()) {
       SBlockRealize block_realize = Downcast<SBlockRealize>(prim_func->body);
@@ -207,7 +206,7 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                            IntImm(DataType::Int(32), 1));
       }
       return SBlockRealize(block_realize->iter_values, block_realize->predicate,
-                          block);
+                           block);
     }
     // wrap with block realize node
     Map<String, ObjectRef> block_annotations;
@@ -218,9 +217,9 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         /*predicate=*/const_true(),
         /*block=*/
         SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-              /*name_hint=*/global_symbol.value(), prim_func->body,
-              /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
-              /*match_buffers=*/{}, /*annotations=*/block_annotations));
+               /*name_hint=*/global_symbol.value(), prim_func->body,
+               /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
+               /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
     LOG(FATAL) << "No lower function found for gemm";
     return Stmt();

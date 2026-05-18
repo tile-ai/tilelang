@@ -306,7 +306,7 @@ tvm::transform::Pass InjectTcgen05Fence() {
     return f;
   };
   return tirx::transform::CreatePrimFuncPass(pass_func, 0,
-                                            "tl.InjectTcgen05Fence", {});
+                                             "tl.InjectTcgen05Fence", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

@@ -5,11 +5,11 @@
  */
 
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include "../op/builtin.h"
 
@@ -123,7 +123,7 @@ tvm::transform::Pass LowerAccessPtr() {
     return LowerAccessPtrPrimFunc(std::move(f));
   };
   return tvm::tirx::transform::CreatePrimFuncPass(pass_func, 0,
-                                                 "tl.LowerAccessPtr", {});
+                                                  "tl.LowerAccessPtr", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

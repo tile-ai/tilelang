@@ -17,8 +17,7 @@ using namespace ffi;
 
 // Return non-zero so that tvm_call_packed sites treat it as failure and return
 // -1.
-static int DTypeMismatch(const String &kernel_name,
-                         const String &buffer_name,
+static int DTypeMismatch(const String &kernel_name, const String &buffer_name,
                          int64_t actual_code, int64_t actual_bits,
                          int64_t actual_lanes, int64_t expect_code,
                          int64_t expect_bits, int64_t expect_lanes) {
@@ -60,54 +59,49 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   // Packed: __tvm_error_dtype_mismatch(kernel_name, buffer_name,
   //                                    actual_code, actual_bits, actual_lanes,
   //                                    expect_code, expect_bits, expect_lanes)
-  refl::GlobalDef().def_packed(
-      tl::tvm_error_dtype_mismatch,
-      [](PackedArgs args, Any *ret) {
-        ICHECK(args.size() == 8) << "Expected 8 args: kernel, buffer, "
-                                    "actual_code, actual_bits, actual_lanes, "
-                                 << "expect_code, expect_bits, expect_lanes";
+  refl::GlobalDef().def_packed(tl::tvm_error_dtype_mismatch, [](PackedArgs args,
+                                                                Any *ret) {
+    ICHECK(args.size() == 8) << "Expected 8 args: kernel, buffer, "
+                                "actual_code, actual_bits, actual_lanes, "
+                             << "expect_code, expect_bits, expect_lanes";
 
-        auto kernel_name = args[0].cast<String>();
-        auto buffer_name = args[1].cast<String>();
-        int64_t actual_code = args[2].cast<int64_t>();
-        int64_t actual_bits = args[3].cast<int64_t>();
-        int64_t actual_lanes = args[4].cast<int64_t>();
-        int64_t expect_code = args[5].cast<int64_t>();
-        int64_t expect_bits = args[6].cast<int64_t>();
-        int64_t expect_lanes = args[7].cast<int64_t>();
+    auto kernel_name = args[0].cast<String>();
+    auto buffer_name = args[1].cast<String>();
+    int64_t actual_code = args[2].cast<int64_t>();
+    int64_t actual_bits = args[3].cast<int64_t>();
+    int64_t actual_lanes = args[4].cast<int64_t>();
+    int64_t expect_code = args[5].cast<int64_t>();
+    int64_t expect_bits = args[6].cast<int64_t>();
+    int64_t expect_lanes = args[7].cast<int64_t>();
 
-        // Reuse the helper to format the message
-        (void)DTypeMismatch(kernel_name, buffer_name, actual_code, actual_bits,
-                            actual_lanes, expect_code, expect_bits,
-                            expect_lanes);
-        // Provide a return value for completeness, then signal the error
-        *ret = -1;
-        throw EnvErrorAlreadySet();
-      });
+    // Reuse the helper to format the message
+    (void)DTypeMismatch(kernel_name, buffer_name, actual_code, actual_bits,
+                        actual_lanes, expect_code, expect_bits, expect_lanes);
+    // Provide a return value for completeness, then signal the error
+    *ret = -1;
+    throw EnvErrorAlreadySet();
+  });
+
+  // kernel, buffer, expect:int64, got:int64
+  refl::GlobalDef().def_packed(tl::tvm_error_ndim_mismatch, [](PackedArgs args,
+                                                               Any *ret) {
+    ICHECK(args.size() == 4)
+        << "__tvm_error_ndim_mismatch(kernel, buffer, expect, got)";
+    auto kernel = args[0].cast<String>();
+    auto buffer = args[1].cast<String>();
+    int64_t expect = args[2].cast<int64_t>();
+    int64_t got = args[3].cast<int64_t>();
+    std::ostringstream os;
+    os << "kernel " << std::string(kernel) << " input " << std::string(buffer)
+       << " ndim expected " << expect << ", but got " << got;
+    TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
+    *ret = -1;
+    throw EnvErrorAlreadySet();
+  });
 
   // kernel, buffer, expect:int64, got:int64
   refl::GlobalDef().def_packed(
-      tl::tvm_error_ndim_mismatch,
-      [](PackedArgs args, Any *ret) {
-        ICHECK(args.size() == 4)
-            << "__tvm_error_ndim_mismatch(kernel, buffer, expect, got)";
-        auto kernel = args[0].cast<String>();
-        auto buffer = args[1].cast<String>();
-        int64_t expect = args[2].cast<int64_t>();
-        int64_t got = args[3].cast<int64_t>();
-        std::ostringstream os;
-        os << "kernel " << std::string(kernel) << " input "
-           << std::string(buffer) << " ndim expected " << expect << ", but got "
-           << got;
-        TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
-        *ret = -1;
-        throw EnvErrorAlreadySet();
-      });
-
-  // kernel, buffer, expect:int64, got:int64
-  refl::GlobalDef().def_packed(
-      tl::tvm_error_byte_offset_mismatch,
-      [](PackedArgs args, Any *ret) {
+      tl::tvm_error_byte_offset_mismatch, [](PackedArgs args, Any *ret) {
         ICHECK(args.size() == 4)
             << "__tvm_error_byte_offset_mismatch(kernel, buffer, expect, got)";
         auto kernel = args[0].cast<String>();
@@ -125,8 +119,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 
   // kernel, buffer, expect:int64, got:int64
   refl::GlobalDef().def_packed(
-      tl::tvm_error_device_type_mismatch,
-      [](PackedArgs args, Any *ret) {
+      tl::tvm_error_device_type_mismatch, [](PackedArgs args, Any *ret) {
         ICHECK(args.size() == 4)
             << "__tvm_error_device_type_mismatch(kernel, buffer, expect, got)";
         auto kernel = args[0].cast<String>();
@@ -147,27 +140,23 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       });
 
   // kernel, buffer, field:String
-  refl::GlobalDef().def_packed(
-      tl::tvm_error_null_ptr,
-      [](PackedArgs args, Any *ret) {
-        ICHECK(args.size() == 3)
-            << "__tvm_error_null_ptr(kernel, buffer, field)";
-        auto kernel = args[0].cast<String>();
-        auto buffer = args[1].cast<String>();
-        auto field = args[2].cast<String>();
-        std::ostringstream os;
-        os << "kernel " << std::string(kernel) << " input "
-           << std::string(buffer) << ' ' << std::string(field)
-           << " expected non-NULL, but got NULL";
-        TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
-        *ret = -1;
-        throw EnvErrorAlreadySet();
-      });
+  refl::GlobalDef().def_packed(tl::tvm_error_null_ptr, [](PackedArgs args,
+                                                          Any *ret) {
+    ICHECK(args.size() == 3) << "__tvm_error_null_ptr(kernel, buffer, field)";
+    auto kernel = args[0].cast<String>();
+    auto buffer = args[1].cast<String>();
+    auto field = args[2].cast<String>();
+    std::ostringstream os;
+    os << "kernel " << std::string(kernel) << " input " << std::string(buffer)
+       << ' ' << std::string(field) << " expected non-NULL, but got NULL";
+    TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
+    *ret = -1;
+    throw EnvErrorAlreadySet();
+  });
 
   // kernel, buffer, field:String, expect:int64, got:int64
   refl::GlobalDef().def_packed(
-      tl::tvm_error_expect_eq,
-      [](PackedArgs args, Any *ret) {
+      tl::tvm_error_expect_eq, [](PackedArgs args, Any *ret) {
         ICHECK(args.size() == 5)
             << "__tvm_error_expect_eq(kernel, buffer, field, expect, got)";
         auto kernel = args[0].cast<String>();
@@ -186,8 +175,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 
   // kernel, buffer, field:String [, reason:String]
   refl::GlobalDef().def_packed(
-      tl::tvm_error_constraint_violation,
-      [](PackedArgs args, Any *ret) {
+      tl::tvm_error_constraint_violation, [](PackedArgs args, Any *ret) {
         ICHECK(args.size() == 3 || args.size() == 4)
             << "__tvm_error_constraint_violation(kernel, buffer, field[, "
                "reason])";

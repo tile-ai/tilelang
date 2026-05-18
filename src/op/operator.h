@@ -8,6 +8,7 @@
 #define TVM_TL_OP_OP_H_
 
 // Dependencies for operators
+#include "support/check.h"
 #include <array>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
@@ -18,7 +19,6 @@
 #include <tvm/tirx/stmt.h>
 #include <utility>
 #include <vector>
-#include "support/check.h"
 
 #include "../layout/layout.h"
 

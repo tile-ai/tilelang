@@ -3,17 +3,17 @@
  * \brief Lower the tile op for further codegen.
  */
 
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/utils.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/s_tir/utils.h>
 #include <unordered_map>
 #include <vector>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -338,8 +338,9 @@ private:
           var_remap_.Set(buffer->data, new_var);
         }
         Buffer new_buf(new_var, buffer->dtype, buffer->shape, buffer->strides,
-                       buffer->elem_offset, buffer->name, buffer->data_alignment,
-                       buffer->offset_factor, buffer->buffer_type);
+                       buffer->elem_offset, buffer->name,
+                       buffer->data_alignment, buffer->offset_factor,
+                       buffer->buffer_type);
         buffer_remap_.Set(buffer, new_buf);
         block_ptr->alloc_buffers.Set(i, new_buf);
       }

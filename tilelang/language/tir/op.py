@@ -2756,10 +2756,7 @@ def round(x, rounding_mode="ties-to-even", span=None):
     if rounding_mode == "ties-away-from-zero":
         x = tvm.tirx.convert(x)
         return call_intrin(x.dtype, _tvm_op.Op.get("tl.round_ties_away_from_zero"), x, span=span)
-    raise ValueError(
-        "Unsupported T.round rounding_mode "
-        f"{rounding_mode!r}; expected 'ties-to-even' or 'ties-away-from-zero'."
-    )
+    raise ValueError(f"Unsupported T.round rounding_mode {rounding_mode!r}; expected 'ties-to-even' or 'ties-away-from-zero'.")
 
 
 def nearbyint(x, span=None):

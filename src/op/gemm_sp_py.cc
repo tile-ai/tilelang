@@ -4,19 +4,18 @@
  * operators
  */
 
-#include <tvm/tirx/stmt.h>
 #include "gemm_sp_py.h"
-#include "utils.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
+#include "utils.h"
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/stmt.h>
 
 #include "builtin.h"
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/transform.h>
-
 
 namespace tvm {
 namespace tl {
@@ -122,9 +121,8 @@ TileOperator GemmSPPyNode::Clone() const {
 
 Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (const auto f = Function::GetGlobal("tl.gemm_sp_py.lower")) {
-    auto prim_func =
-        Downcast<PrimFunc>((*f)(GetRef<GemmSPPy>(this), T.target,
-                                T.thread_bounds, T.thread_var));
+    auto prim_func = Downcast<PrimFunc>(
+        (*f)(GetRef<GemmSPPy>(this), T.target, T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
@@ -138,7 +136,7 @@ Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                            IntImm(DataType::Int(32), 1));
       }
       return SBlockRealize(block_realize->iter_values, block_realize->predicate,
-                          block);
+                           block);
     }
     // warp with block realize node
     Map<String, ObjectRef> block_annotations;
@@ -149,9 +147,9 @@ Stmt GemmSPPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         /*predicate=*/const_true(),
         /*block=*/
         SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-              /*name_hint=*/global_symbol.value(), prim_func->body,
-              /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
-              /*match_buffers=*/{}, /*annotations=*/block_annotations));
+               /*name_hint=*/global_symbol.value(), prim_func->body,
+               /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
+               /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
     LOG(FATAL) << "No lower function found for gemm_sp_py";
   }

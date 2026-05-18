@@ -6,9 +6,9 @@
 #ifndef TVM_TL_OP_PARALLEL_H_
 #define TVM_TL_OP_PARALLEL_H_
 
+#include "support/check.h"
 #include <tvm/target/target.h>
 #include <tvm/tirx/stmt_functor.h>
-#include "support/check.h"
 
 #include <unordered_map>
 

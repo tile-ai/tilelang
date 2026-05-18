@@ -21,16 +21,16 @@
  *  Lower allreduce to device implementable ir.
  * \file lower_thread_allreduce.cc
  */
-#include <tvm/s_tir/stmt.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/arith/analyzer.h>
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
+#include <tvm/ir/cast.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include <unordered_set>
 #include <utility>
@@ -77,7 +77,8 @@ public:
     StmtExprVisitor::VisitStmt_(op);
   }
   // The dynamic mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const AllocBufferNode *> dyn_shmem_allocs_;
+  std::unordered_map<const VarNode *, const AllocBufferNode *>
+      dyn_shmem_allocs_;
   // The static mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocBufferNode *>
       static_shmem_allocs_;
@@ -672,8 +673,7 @@ private:
 
     std::vector<Buffer> alloc_bufs;
     alloc_bufs.reserve(shared_bufs.size() + local_bufs.size());
-    alloc_bufs.insert(alloc_bufs.end(), shared_bufs.begin(),
-                      shared_bufs.end());
+    alloc_bufs.insert(alloc_bufs.end(), shared_bufs.begin(), shared_bufs.end());
     alloc_bufs.insert(alloc_bufs.end(), local_bufs.begin(), local_bufs.end());
     return {reduce_results, alloc_bufs};
   }

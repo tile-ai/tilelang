@@ -22,8 +22,8 @@
  * \brief Split device function from host.
  */
 #include "common/attr.h"
-#include "tir/transforms/ir_utils.h"
 #include "support/check.h"
+#include "tir/transforms/ir_utils.h"
 #include <tvm/ir/transform.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/builtin.h>

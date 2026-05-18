@@ -1,20 +1,20 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
 #define TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
 
+#include "support/check.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ir/expr.h"
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/var.h>
 #include <ostream>
-#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/var.h>
 
 namespace tvm::tl {
 

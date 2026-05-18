@@ -22,13 +22,13 @@
  * \file unroll_loop.cc
  */
 // Unrolls the loop as in Halide pipeline.
-#include <tvm/arith/analyzer.h>
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include <unordered_set>
 

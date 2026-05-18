@@ -5,9 +5,9 @@
  */
 
 #include "utils.h"
+#include "support/check.h"
 #include "tvm/arith/iter_affine_map.h"
 #include <tvm/ffi/extra/structural_equal.h>
-#include "support/check.h"
 #include <tvm/ffi/extra/structural_hash.h>
 
 #include <sstream>
@@ -201,7 +201,6 @@ struct IterExprPP {
     return os;
   }
 };
-
 
 // Heuristic: detect per-iterator gaps ("unused" pieces) even when the iterator
 // appears in fused forms across multiple index expressions. We first normalize

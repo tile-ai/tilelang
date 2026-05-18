@@ -6,8 +6,8 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_ATTR_H_
 #define TVM_TL_TRANSFORM_COMMON_ATTR_H_
 
-#include <tvm/tirx/stmt.h>
 #include <string>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {

@@ -23,13 +23,13 @@
  */
 
 #include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/s_tir/analysis.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <tvm/tirx/var.h>
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/analysis.h>
 
 #include "../op/utils.h"
 #include "tir/transforms/ir_utils.h"
@@ -39,9 +39,8 @@ namespace tvm {
 namespace tirx {
 using namespace ffi;
 
-Map<Var, Optional<Stmt>>
-DetectBufferVarAccessLCA(const PrimFunc &func);
-}
+Map<Var, Optional<Stmt>> DetectBufferVarAccessLCA(const PrimFunc &func);
+} // namespace tirx
 } // namespace tvm
 
 namespace tvm {
@@ -67,8 +66,8 @@ public:
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  /*! \brief Buffers that are allocated outside of the SBlockNode, and should not
-   * be moved by BufferAllocationLocator. */
+  /*! \brief Buffers that are allocated outside of the SBlockNode, and should
+   * not be moved by BufferAllocationLocator. */
   std::unordered_set<const VarNode *> managed_allocations;
 };
 
@@ -195,10 +194,8 @@ class BufferAllocationLocator : public StmtExprMutator {
 public:
   explicit BufferAllocationLocator(const PrimFunc &func) {
     // Use TVM's tir LCA detection implementation
-    Map<Buffer, Optional<Stmt>> buffer_lca =
-        tirx::DetectBufferAccessLCA(func);
-    Map<Var, Optional<Stmt>> var_lca =
-        tirx::DetectBufferVarAccessLCA(func);
+    Map<Buffer, Optional<Stmt>> buffer_lca = tirx::DetectBufferAccessLCA(func);
+    Map<Var, Optional<Stmt>> var_lca = tirx::DetectBufferVarAccessLCA(func);
 
     // The buffer_alloc_recorder Array is used to keep the buffer allocation
     // order since the buffer_lca Map is unordered.
@@ -407,12 +404,12 @@ private:
   Stmt InjectOpaqueBlock(Stmt body, const Array<Buffer> &alloc_buffers) {
     ICHECK(!alloc_buffers.empty());
     SBlock opaque_block(/*iter_vars=*/{},
-                       /*reads=*/{},
-                       /*writes=*/{},
-                       /*name_hint=*/"",
-                       /*body=*/std::move(body),
-                       /*init=*/std::nullopt,
-                       /*alloc_buffers=*/alloc_buffers);
+                        /*reads=*/{},
+                        /*writes=*/{},
+                        /*name_hint=*/"",
+                        /*body=*/std::move(body),
+                        /*init=*/std::nullopt,
+                        /*alloc_buffers=*/alloc_buffers);
     ObjectPtr<SBlockNode> n = CopyOnWrite(opaque_block.get());
     // Snapshot to a Var->Buffer map using the innermost binding for each Var.
     Map<Var, Buffer> var_map = SnapshotVarMap();
@@ -444,7 +441,8 @@ private:
       for_header_vars_;
   /*! \brief Stack of buffers per data var for scoping correctness. */
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
-  /*! \brief Buffers that are allocated within a SBlockNode, and may be moved. */
+  /*! \brief Buffers that are allocated within a SBlockNode, and may be moved.
+   */
   std::unordered_set<const VarNode *> managed_allocations_;
 
   static bool IsBarrierBuffer(const Buffer &buffer) {

@@ -3,15 +3,15 @@
  * \brief Lower Hopper intrinsics cuda GPU(sm90+)
  */
 
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
+#include <tvm/ffi/extra/structural_hash.h>
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ffi/extra/structural_hash.h>
-#include <tvm/ir/cast.h>
 
 #include <unordered_map>
 #include <vector>
@@ -141,7 +141,8 @@ public:
       return;
     }
     for (auto &desc_init : desc_inits_) {
-      if (!desc_init.emitted && desc_init.base_var == alloc->buffer->data.get()) {
+      if (!desc_init.emitted &&
+          desc_init.base_var == alloc->buffer->data.get()) {
         result->push_back(desc_init.stmt);
         desc_init.emitted = true;
       }

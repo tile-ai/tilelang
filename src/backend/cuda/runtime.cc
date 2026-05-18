@@ -18,7 +18,6 @@ namespace tl {
 
 using namespace ffi;
 
-
 #if 1
 // Thread-local storage for restoring the L2 persisting cache limit
 static thread_local size_t __tl_prev_persisting_l2_cache_size = 0;

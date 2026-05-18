@@ -253,7 +253,9 @@ def matmul(
             m_f4 = f4 & tirx.const(1, T.uint16)
             val_bf16 = tirx.reinterpret(
                 T.bfloat16,
-                ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16)) | (m_f4 << tirx.const(6, T.uint16))).astype(T.uint16),
+                ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16)) | (m_f4 << tirx.const(6, T.uint16))).astype(
+                    T.uint16
+                ),
             )
             return val_bf16
 

@@ -30,17 +30,17 @@
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/var.h>
+#include "support/check.h"
 #include <iostream>
 #include <optional>
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/var.h>
 #include <vector>
-#include "support/check.h"
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 namespace tvm {
 namespace tl {
@@ -920,9 +920,8 @@ int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer) {
   // 1. if var doesn't exist, it is independent
-  bool used_var = UsesVar(expr, [&](const VarNode *v) {
-    return GetRef<Var>(v).same_as(var);
-  });
+  bool used_var = UsesVar(
+      expr, [&](const VarNode *v) { return GetRef<Var>(v).same_as(var); });
   if (!used_var) {
     return true;
   }

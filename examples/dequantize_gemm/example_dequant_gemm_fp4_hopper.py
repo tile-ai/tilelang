@@ -22,7 +22,8 @@ def _tir_u8_to_f4_to_f16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtyp
     m_f4 = f4 & tirx.const(1, T.uint16)
     m_f16 = m_f4
     val_f16 = tirx.reinterpret(
-        T.float16, ((e_f16 | (s << tirx.const(5, T.uint16))) << tirx.const(10, T.uint16) | m_f16 << tirx.const(9, T.uint16)).astype(T.uint16)
+        T.float16,
+        ((e_f16 | (s << tirx.const(5, T.uint16))) << tirx.const(10, T.uint16) | m_f16 << tirx.const(9, T.uint16)).astype(T.uint16),
     )
     # return tirx.Select(e_f4 == tirx.const(0, "uint32"), tirx.const(0, T.float16), val_f16)
     return val_f16

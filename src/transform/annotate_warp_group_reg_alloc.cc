@@ -3,13 +3,13 @@
  * \brief Annotate warp group reg alloc for warp specialization
  */
 
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include "../op/builtin.h"
 #include "runtime/thread_storage_scope.h"
@@ -74,9 +74,9 @@ Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
       return stmt;
     }
     SBlock new_block(block->iter_vars, block->reads, block->writes,
-                    block->name_hint, new_body, block->init,
-                    block->alloc_buffers, block->match_buffers,
-                    block->annotations);
+                     block->name_hint, new_body, block->init,
+                     block->alloc_buffers, block->match_buffers,
+                     block->annotations);
     return SBlockRealize(realize->iter_values, realize->predicate, new_block);
   }
 
@@ -87,8 +87,8 @@ Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
       return stmt;
     }
     return SBlock(block->iter_vars, block->reads, block->writes,
-                 block->name_hint, new_body, block->init, block->alloc_buffers,
-                 block->match_buffers, block->annotations);
+                  block->name_hint, new_body, block->init, block->alloc_buffers,
+                  block->match_buffers, block->annotations);
   }
 
   return stmt;

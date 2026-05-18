@@ -276,6 +276,7 @@ _DEPRECATED_PASS_CONFIG_MESSAGES = {
     ),
 }
 
+
 def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) -> dict[str, Any]:
     """Canonicalize known pass-config keys and emit compatibility warnings."""
     if pass_configs is None:

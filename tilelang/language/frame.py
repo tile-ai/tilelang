@@ -1,7 +1,6 @@
 """Override the LetFrame to print a message when entering the frame."""
 
 from __future__ import annotations
-from tvm.ffi import register_object as _register_object
 from tvm.tirx import Var, PrimExpr, BufferLoad, BufferRegion
 from tvm.ir import Range
 from tvm import DataType

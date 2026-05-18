@@ -23,11 +23,11 @@
  */
 
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <tvm/tirx/var.h>
-#include <tvm/ir/cast.h>
 
 #include "../op/utils.h"
 #include "common/attr.h"

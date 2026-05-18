@@ -4,8 +4,8 @@
  *
  */
 
-#include <tvm/tirx/stmt_functor.h>
 #include "support/check.h"
+#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 

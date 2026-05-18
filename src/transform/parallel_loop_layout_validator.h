@@ -6,10 +6,10 @@
 #ifndef TVM_TL_TRANSFORM_PARALLEL_LOOP_LAYOUT_VALIDATOR_H_
 #define TVM_TL_TRANSFORM_PARALLEL_LOOP_LAYOUT_VALIDATOR_H_
 
-#include <tvm/tirx/stmt_functor.h>
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "../layout/layout.h"
 

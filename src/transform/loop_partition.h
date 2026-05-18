@@ -25,9 +25,9 @@
 #ifndef TVM_TL_LOOP_PARTITION_H_
 #define TVM_TL_LOOP_PARTITION_H_
 
+#include "support/check.h"
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
-#include "support/check.h"
 
 #include "../layout/layout.h"
 #include "../op/operator.h"
@@ -68,11 +68,11 @@ For PragmaUnrollLoop(For stmt);
  *        (default true)
  * \return The lowered statement.
  */
-Stmt LowerParallelLoop(For loop, const Fragment &loop_layout, Var thread_var,
-                       arith::Analyzer *analyzer,
-                       const LayoutMap &layout_map = {},
-                       ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
-                       bool parallel_loop = true, bool should_vectorize = true);
+Stmt LowerParallelLoop(
+    For loop, const Fragment &loop_layout, Var thread_var,
+    arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
+    ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
+    bool parallel_loop = true, bool should_vectorize = true);
 
 } // namespace tl
 } // namespace tvm

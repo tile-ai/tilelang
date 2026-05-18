@@ -24,13 +24,13 @@
  * shared memory allocations into one allocation.
  */
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/stmt.h>
 
 #include <algorithm>
 #include <functional>
@@ -85,7 +85,8 @@ public:
     StmtExprVisitor::VisitStmt_(op);
   }
   // The dynamic mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const AllocBufferNode *> dyn_shmem_allocs_;
+  std::unordered_map<const VarNode *, const AllocBufferNode *>
+      dyn_shmem_allocs_;
   // The static mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocBufferNode *>
       static_shmem_allocs_;
@@ -205,8 +206,9 @@ public:
       // would occur strictly inside a nested scope.  In practice the lowering
       // pipeline may materialise reads in the very same frame that owns the
       // allocation (e.g. when the buffer value is passed directly to a call),
-      // which used to trigger the invariant check.  Treat same-level accesses as valid so
-      // the merged allocator can reason about their lifetime correctly.
+      // which used to trigger the invariant check.  Treat same-level accesses
+      // as valid so the merged allocator can reason about their lifetime
+      // correctly.
       ICHECK_LE(it->second.level, scope_.size())
           << "Load memory in places other than store.";
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
@@ -488,8 +490,9 @@ private:
           auto alloc_it = shmem_allocs_.find(buffer_var_node);
           if (alloc_it != shmem_allocs_.end()) {
             const AllocBufferNode *alloc = alloc_it->second;
-            PrimExpr buffer_size_bytes =
-                alloc->buffer->shape[0] * alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes();
+            PrimExpr buffer_size_bytes = alloc->buffer->shape[0] *
+                                         alloc->buffer->dtype.bytes() *
+                                         alloc->buffer->dtype.lanes();
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
                        << " (Type: " << alloc->buffer->dtype << ")"
                        << ", Start Offset: " << byte_offset
@@ -509,8 +512,8 @@ private:
       Buffer merged_buf(merged_buf_var_, DataType::UInt(8),
                         {merged_alloc_size_}, {}, PrimExpr(),
                         merged_buf_var_->name_hint, 0, 0, kDefault);
-      Stmt new_body = SeqStmt({AllocBuffer(merged_buf),
-                               StmtExprMutator::VisitStmt(op->body)});
+      Stmt new_body = SeqStmt(
+          {AllocBuffer(merged_buf), StmtExprMutator::VisitStmt(op->body)});
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);
     }
     return StmtMutator::VisitStmt_(op);
@@ -663,7 +666,8 @@ private:
   }
 
   bool HasBufferOffset(const Var &buffer_var) {
-    return buffer_byte_offsets_.find(buffer_var.get()) != buffer_byte_offsets_.end();
+    return buffer_byte_offsets_.find(buffer_var.get()) !=
+           buffer_byte_offsets_.end();
   }
 
   bool IsManagedAllocation(const Var &buffer_var) {
@@ -1293,8 +1297,8 @@ private:
       }
 
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem =
-          static_cast<int64_t>(alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
+      int64_t bytes_per_elem = static_cast<int64_t>(
+          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
       DataType size_dtype = DataType::Int(32);
       if (!alloc->buffer->shape.empty()) {
         size_dtype = alloc->buffer->shape[0].dtype();

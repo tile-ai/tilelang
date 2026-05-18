@@ -1,12 +1,12 @@
+#include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "support/check.h"
-#include <tvm/tirx/builtin.h>
 #include "tir/transforms/ir_utils.h"
-#include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 namespace tvm {
 namespace tl {

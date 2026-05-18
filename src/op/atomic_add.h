@@ -68,7 +68,8 @@ public:
                                              AtomicAddNode);
   TVM_DLL
   AtomicAdd(ffi::Array<PrimExpr> args,
-            ffi::Map<ffi::String, ffi::ObjectRef> annotations = ffi::Map<ffi::String, ffi::ObjectRef>());
+            ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                ffi::Map<ffi::String, ffi::ObjectRef>());
   static const Op &Get();
 };
 

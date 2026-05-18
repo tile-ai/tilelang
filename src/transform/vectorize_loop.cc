@@ -21,18 +21,18 @@
  * \file vectorize_loop.cc
  */
 // Loop vectorizer as in Halide pipeline.
-#include <tvm/tirx/stmt.h>
-#include <tvm/arith/analyzer.h>
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 #include <optional>
 #include <unordered_map>

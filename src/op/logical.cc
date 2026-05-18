@@ -9,7 +9,6 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
-
 namespace tvm {
 namespace tl {
 using namespace tirx;
@@ -22,7 +21,7 @@ PrimExpr any_of_op(PrimExpr args) {
   PrimExpr buffer_address = arg[0];
   PrimExpr elems = arg[1];
   return tirx::Call(DataType::Bool(), tirx::builtin::call_extern(),
-                   {StringImm("tl::Any"), buffer_address, elems});
+                    {StringImm("tl::Any"), buffer_address, elems});
 }
 
 PrimExpr all_of_op(PrimExpr args) {
@@ -33,7 +32,7 @@ PrimExpr all_of_op(PrimExpr args) {
   PrimExpr buffer_address = arg[0];
   PrimExpr elems = arg[1];
   return tirx::Call(DataType::Bool(), tirx::builtin::call_extern(),
-                   {StringImm("tl::All"), buffer_address, elems});
+                    {StringImm("tl::All"), buffer_address, elems});
 }
 
 TVM_REGISTER_OP("tl.any_of")

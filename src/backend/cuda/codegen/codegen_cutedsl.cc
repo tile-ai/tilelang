@@ -4,15 +4,15 @@
 
 #include "codegen_cutedsl.h"
 #include "backend/cuda/codegen/ptx.h"
+#include "support/check.h"
 #include "target/codegen_utils.h"
 #include <tvm/arith/analyzer.h>
-#include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 #include <cmath>
 #include <cstdint>
@@ -247,7 +247,7 @@ std::string DTypeToString(DataType t) {
 void CodeGenTileLangCuTeDSL::PrintType(DataType t,
                                        std::ostream &os) { // NOLINT(*)
   ICHECK(t.is_scalar()) << "Should not print a non-scalar type in CuTeDSL: "
-                       << t;
+                        << t;
   os << DTypeToString(t);
 }
 
@@ -1081,8 +1081,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
                                  << op->args.size();
 
     auto op_instance = Downcast<StringImm>(op->args[0]);
-    PrintCallExtern_(GetType(GetRef<PrimExpr>(op)),
-                     op_instance->value, op->args, true, os);
+    PrintCallExtern_(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                     op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(tl::get_lane_idx())) {

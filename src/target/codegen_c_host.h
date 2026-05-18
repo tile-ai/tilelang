@@ -24,12 +24,12 @@
 #ifndef TVM_TL_CODEGEN_C_HOST_H_
 #define TVM_TL_CODEGEN_C_HOST_H_
 
+#include "support/check.h"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include "support/check.h"
 
 #include "target/source/codegen_c.h"
 #include "tvm/target/codegen.h"
@@ -85,13 +85,10 @@ public:
 
   void VisitStmt_(const tvm::tirx::AttrStmtNode *op) final; // NOLINT(*)
 
-  void GenerateForwardFunctionDeclarations(
-      String global_symbol,
-      const Array<tvm::Type> &arg_types,
-      const tvm::Type &ret_type) override;
-  Array<String> GetFunctionNames() {
-    return function_names_;
-  }
+  void GenerateForwardFunctionDeclarations(String global_symbol,
+                                           const Array<tvm::Type> &arg_types,
+                                           const tvm::Type &ret_type) override;
+  Array<String> GetFunctionNames() { return function_names_; }
 
 private:
   std::string module_name_;
@@ -134,8 +131,7 @@ private:
  * \brief Build a TileLang C host module for the given IRModule and target.
  * Also handles Metal target through is_in_metal_context flag in IR.
  */
-Module BuildTileLangCHost(::tvm::IRModule mod,
-                                      ::tvm::Target target);
+Module BuildTileLangCHost(::tvm::IRModule mod, ::tvm::Target target);
 
 } // namespace tl
 } // namespace tvm

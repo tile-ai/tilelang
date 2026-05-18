@@ -4,15 +4,15 @@
  * Compute layout for local.reducer buffers and lower them to local.fragment.
  */
 
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include "support/check.h"
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 #include "../layout/layout.h"
 #include "../op/fill.h"

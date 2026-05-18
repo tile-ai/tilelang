@@ -162,4 +162,5 @@ from .cluster import (
 def import_source(source: str | None = None):
     # source is the source code to be imported
     from tvm.tirx.script.builder.ir import sblock_attr
+
     return sblock_attr({"pragma_import_c": source}) if source is not None else None

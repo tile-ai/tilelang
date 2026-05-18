@@ -65,9 +65,9 @@ class FinalizeReducerOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerOp, TileOperator,
                                              FinalizeReducerOpNode);
-  TVM_DLL FinalizeReducerOp(
-      ffi::Array<PrimExpr> args,
-      ffi::Map<ffi::String, ffi::ObjectRef> annotations = ffi::Map<ffi::String, ffi::ObjectRef>());
+  TVM_DLL FinalizeReducerOp(ffi::Array<PrimExpr> args,
+                            ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                                ffi::Map<ffi::String, ffi::ObjectRef>());
   static const Op &Get();
 };
 

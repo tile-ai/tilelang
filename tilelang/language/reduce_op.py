@@ -137,7 +137,9 @@ def reduce(
     reduce_macro(buffer, out, reduce_type, dim, clear)
 
 
-def reduce_max(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, nan_propagate: bool = False) -> None:
+def reduce_max(
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, nan_propagate: bool = False
+) -> None:
     """Perform reduce max on input buffer, store the result to output buffer
 
     Parameters
@@ -164,7 +166,9 @@ def reduce_max(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool
     reduce(buffer, out, "max", dim, clear, batch=batch, nan_propagate=nan_propagate)
 
 
-def reduce_min(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, nan_propagate: bool = False) -> None:
+def reduce_min(
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, nan_propagate: bool = False
+) -> None:
     """Perform reduce min on input buffer, store the result to output buffer.
 
     Args:

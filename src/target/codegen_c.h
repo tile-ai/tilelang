@@ -24,12 +24,12 @@
 #ifndef TVM_TL_CODEGEN_C_H_
 #define TVM_TL_CODEGEN_C_H_
 
+#include "support/check.h"
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include "support/check.h"
 
 #include "target/source/codegen_c.h"
 #include "tvm/target/codegen.h"
@@ -71,8 +71,8 @@ public:
   void VisitExpr_(const MinNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const MaxNode *op, std::ostream &os) final; // NOLINT(*)
 
-  void VisitStmt_(const AssertStmtNode *op) final; // NOLINT(*)
-  void VisitStmt_(const AllocBufferNode *op) final;   // NOLINT(*)
+  void VisitStmt_(const AssertStmtNode *op) final;  // NOLINT(*)
+  void VisitStmt_(const AllocBufferNode *op) final; // NOLINT(*)
 
   void GenerateForwardFunctionDeclarations(ffi::String global_symbol,
                                            const ffi::Array<Type> &arg_types,

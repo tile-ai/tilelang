@@ -6,8 +6,8 @@
 #ifndef TVM_TL_CONFIG_H_
 #define TVM_TL_CONFIG_H_
 
-#include <tvm/ir/transform.h>
 #include <tvm/ffi/optional.h>
+#include <tvm/ir/transform.h>
 
 namespace tvm {
 namespace tl {

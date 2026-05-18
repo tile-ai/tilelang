@@ -6,13 +6,12 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
+#include "support/check.h"
 #include <exception>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
-#include "support/check.h"
 #include <tvm/tirx/buffer.h>
 #include <utility>
-
 
 namespace tvm {
 namespace tl {

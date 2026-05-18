@@ -23,18 +23,18 @@
  *  Re-write data access to enable memory sharing when possible.
  */
 #include "common/attr.h"
-#include <tvm/arith/analyzer.h>
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
 #include <tvm/ir/attrs.h>
+#include <tvm/ir/cast.h>
 #include <tvm/ir/type.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/stmt.h>
 
 #include <list>
 #include <map>
@@ -197,13 +197,9 @@ public:
     }
   }
 
-  void VisitStmt_(const EvaluateNode *op) final {
-    VisitLeafStmt(op);
-  }
+  void VisitStmt_(const EvaluateNode *op) final { VisitLeafStmt(op); }
 
-  void VisitStmt_(const BindNode *op) final {
-    VisitLeafStmt(op);
-  }
+  void VisitStmt_(const BindNode *op) final { VisitLeafStmt(op); }
 
   template <typename T> void VisitLeafStmt(const T *op) {
     scope_.push_back(StmtEntry());
@@ -589,7 +585,8 @@ public:
   Stmt VisitStmt_(const AllocBufferNode *op) final {
     // AllocBuffer combines allocation and buffer declaration.
     // Storage rewrite may merge this allocation with others.
-    if (auto it = alloc_map_.find(op->buffer->data.get()); it != alloc_map_.end()) {
+    if (auto it = alloc_map_.find(op->buffer->data.get());
+        it != alloc_map_.end()) {
       if (it->second->alloc_var.get() == op->buffer->data.get()) {
         // This is the "winner" allocation -- its AllocBuffer was already
         // hoisted by PrepareNewAlloc.  Strip this one.
@@ -755,7 +752,8 @@ private:
               }
               ExprDeepEqual expr_equal;
               for (size_t i = 0; i < op->buffer->shape.size(); i++) {
-                if (!expr_equal(op->buffer->shape[i], first->buffer->shape[i])) {
+                if (!expr_equal(op->buffer->shape[i],
+                                first->buffer->shape[i])) {
                   return false;
                 }
               }
@@ -765,8 +763,7 @@ private:
         if (all_allocs_identical) {
           // Emit AllocBuffer for the hoisted allocation.
           Buffer buf = RemapBuffer(e->allocs[0]->buffer, e->alloc_var);
-          Map<String, Any> annotations =
-              MakeAllocateAnnotations(e->alloc_var);
+          Map<String, Any> annotations = MakeAllocateAnnotations(e->alloc_var);
           e->alloc_nest.push_back(AllocBuffer(buf, annotations));
         } else {
           // Build a merged allocation
@@ -809,12 +806,10 @@ private:
             combo_size = combo_size + make_const(DataType::Int(32), 1);
           }
           combo_size = analyzer_.Simplify(combo_size);
-          Map<String, Any> annotations =
-              MakeAllocateAnnotations(e->alloc_var);
+          Map<String, Any> annotations = MakeAllocateAnnotations(e->alloc_var);
           Buffer buf(e->alloc_var, alloc_type, {combo_size}, {}, PrimExpr(),
                      e->alloc_var->name_hint, 0, 0, kDefault);
-          e->alloc_nest.push_back(
-              AllocBuffer(buf, std::move(annotations)));
+          e->alloc_nest.push_back(AllocBuffer(buf, std::move(annotations)));
         }
       }
     }
@@ -942,8 +937,8 @@ private:
           ICHECK(alloc_info.count(var));
           const AllocEntry &entry = alloc_info.at(var);
           const AllocBufferNode *alloc = entry.alloc;
-          auto storage_scope = StorageScope::Create(
-              GetPtrStorageScope(GetRef<Var>(var)));
+          auto storage_scope =
+              StorageScope::Create(GetPtrStorageScope(GetRef<Var>(var)));
           StorageEntry *dst_entry = nullptr;
           // inplace detection
           if (detect_inplace) {
@@ -958,13 +953,12 @@ private:
                         effective_scope(storage_scope) &&
                     src_entry->elem_type == alloc->buffer->dtype.element_of() &&
                     visitor.Check(s.stmt, var, src)) {
-                  int64_t const_size =
-                      GetRef<AllocBuffer>(alloc)
-                          .ConstantAllocationSize()
-                          .value_or(0);
-                  uint64_t const_nbits =
-                      static_cast<uint64_t>(const_size) *
-                      alloc->buffer->dtype.bits() * alloc->buffer->dtype.lanes();
+                  int64_t const_size = GetRef<AllocBuffer>(alloc)
+                                           .ConstantAllocationSize()
+                                           .value_or(0);
+                  uint64_t const_nbits = static_cast<uint64_t>(const_size) *
+                                         alloc->buffer->dtype.bits() *
+                                         alloc->buffer->dtype.lanes();
                   if (src_entry->const_nbits == const_nbits && !inplace_found) {
                     // successfully inplace
                     dst_entry = src_entry;
@@ -1067,11 +1061,11 @@ private:
     // skip plan for local variable,
     // compiler can do a better job with register allocation.
     const uint64_t match_range = 16;
-    uint64_t op_elem_bits = op->buffer->dtype.bits() * op->buffer->dtype.lanes();
+    uint64_t op_elem_bits =
+        op->buffer->dtype.bits() * op->buffer->dtype.lanes();
     int64_t const_size =
         GetRef<AllocBuffer>(op).ConstantAllocationSize().value_or(0);
-    uint64_t const_nbits =
-        static_cast<uint64_t>(const_size * op_elem_bits);
+    uint64_t const_nbits = static_cast<uint64_t>(const_size * op_elem_bits);
 
     // If the size of the array isn't known at compile-time, it must
     // have its own allocation with size determined at runtime.
@@ -1111,7 +1105,8 @@ private:
         // must check element type to avoid type mismatch in codegen
         if (e->elem_type != op->buffer->dtype.element_of())
           continue;
-        if (reuse_require_exact_matched_dtype && e->elem_type != op->buffer->dtype) {
+        if (reuse_require_exact_matched_dtype &&
+            e->elem_type != op->buffer->dtype) {
           continue;
         }
         e->const_nbits = std::max(const_nbits, e->const_nbits);
@@ -1128,7 +1123,8 @@ private:
           continue;
         if (e->elem_type != op->buffer->dtype.element_of())
           continue;
-        if (reuse_require_exact_matched_dtype && e->elem_type != op->buffer->dtype) {
+        if (reuse_require_exact_matched_dtype &&
+            e->elem_type != op->buffer->dtype) {
           continue;
         }
         e->const_nbits = std::max(const_nbits, e->const_nbits);
@@ -1912,10 +1908,10 @@ PrimFunc PointerValueTypeRewrite(
                                   rewrite_scalar_read_to_vector_shuffle);
   checker(f->body);
 
-  VectorTypeRewriter rewriter(
-      checker.info_map_, rewrite_params, rewrite_buffer_map,
-      rewrite_allocate_node, rewrite_indices, rewrite_pointer_binding,
-      rewrite_scalar_read_to_vector_shuffle);
+  VectorTypeRewriter rewriter(checker.info_map_, rewrite_params,
+                              rewrite_buffer_map, rewrite_allocate_node,
+                              rewrite_indices, rewrite_pointer_binding,
+                              rewrite_scalar_read_to_vector_shuffle);
   PrimFuncNode *n = f.CopyOnWrite();
   n->body = rewriter(std::move(n->body));
   rewriter.Finalize(&f);
@@ -1940,9 +1936,10 @@ Pass StorageRewrite() {
     }
     auto *n = f.CopyOnWrite();
     StoragePlanRewriter plan_rewriter;
-    n->body = plan_rewriter.Rewrite(
-        std::move(n->body), detect_inplace, enable_reuse,
-        /*reuse_require_exact_matched_dtype=*/false, std::move(local_var_init_map));
+    n->body =
+        plan_rewriter.Rewrite(std::move(n->body), detect_inplace, enable_reuse,
+                              /*reuse_require_exact_matched_dtype=*/false,
+                              std::move(local_var_init_map));
     // Parameters may not be rewritten, but internal allocations may.
     return PointerValueTypeRewrite(std::move(f), true, false, false, false,
                                    true, false);

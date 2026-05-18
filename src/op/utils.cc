@@ -4,10 +4,10 @@
  */
 
 #include "utils.h"
-#include <tvm/tirx/expr.h>
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/expr.h>
 
 #include <tvm/tirx/builtin.h>
 
@@ -114,7 +114,7 @@ PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
   // ptype and return handle
   PrimExpr ptype = tirx::TypeAnnotation(buf->dtype);
   ffi::Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
-                           IntImm(DataType::Int(32), rw_mask)};
+                                IntImm(DataType::Int(32), rw_mask)};
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
@@ -144,7 +144,7 @@ PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
   // Build access_ptr
   PrimExpr ptype = tirx::TypeAnnotation(buf->dtype);
   ffi::Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
-                           IntImm(DataType::Int(32), rw_mask)};
+                                IntImm(DataType::Int(32), rw_mask)};
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 

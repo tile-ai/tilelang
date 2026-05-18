@@ -20,9 +20,9 @@
 #include "builtin.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
+#include "utils.h"
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
-#include "utils.h"
 
 #include <sstream>
 #include <vector>

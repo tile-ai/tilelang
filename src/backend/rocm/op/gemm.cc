@@ -99,7 +99,8 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
 } // namespace
 
 struct Gemm {
-  static ffi::String SelectInst(const GemmNode &op, int block_size, Target target) {
+  static ffi::String SelectInst(const GemmNode &op, int block_size,
+                                Target target) {
     (void)op;
     (void)block_size;
 

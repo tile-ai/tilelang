@@ -3,14 +3,14 @@
  */
 
 #include "codegen_cuda.h"
+#include "support/check.h"
 #include "target/codegen_utils.h"
 #include <tvm/arith/analyzer.h>
-#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/stmt.h>
 
 #include <cmath>
 #include <cstdint>
@@ -3058,8 +3058,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // To store the 32x8 output back to a 16x16 tile in shared or global memory,
     // we invert this map to determine the output location for each 8 element.
 
-    const auto index_map_func = Function::GetGlobal(
-        "tir.index_map.shared_16x16_to_mma_32x8_layout");
+    const auto index_map_func =
+        Function::GetGlobal("tir.index_map.shared_16x16_to_mma_32x8_layout");
 
     IndexMap index_map;
     if (!index_map_func) {
@@ -3354,7 +3354,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // Handle float4_e2m1fn reinterpret
     if (!src_dtype.is_float4_e2m1fn() && !tgt_dtype.is_float4_e2m1fn()) {
       ICHECK_EQ(tgt_dtype.lanes() * tgt_dtype.bits(),
-               src_dtype.lanes() * src_dtype.bits())
+                src_dtype.lanes() * src_dtype.bits())
           << "reinterpret expects source and target to have the same number of "
              "bits";
 
@@ -3412,24 +3412,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       if (tgt_dtype.is_float4_e2m1fn()) {
         // We view the source as an uint16, and then extract bits of two fp4
         // numbers, and finally reinterpret the result as fp4x2.
-        value =
-            tirx::Call(DataType::UInt(16), tirx::builtin::reinterpret(), {value});
+        value = tirx::Call(DataType::UInt(16), tirx::builtin::reinterpret(),
+                           {value});
         tirx::Var temp_var("temp_var", DataType::UInt(16));
         value =
             tirx::Let(temp_var, value,
-                     tirx::Cast(DataType::UInt(8),
-                               (temp_var & IntImm(DataType::UInt(16), 0xF)) |
-                                   ((temp_var >> 4) &
-                                    IntImm(DataType::UInt(16), 0xF0))));
+                      tirx::Cast(DataType::UInt(8),
+                                 (temp_var & IntImm(DataType::UInt(16), 0xF)) |
+                                     ((temp_var >> 4) &
+                                      IntImm(DataType::UInt(16), 0xF0))));
       } else {
-        value = tirx::Cast(
-            DataType::UInt(16),
-            tirx::Call(DataType::UInt(8), tirx::builtin::reinterpret(), {value}));
+        value = tirx::Cast(DataType::UInt(16),
+                           tirx::Call(DataType::UInt(8),
+                                      tirx::builtin::reinterpret(), {value}));
         tirx::Var temp_var("temp_var", DataType::UInt(16));
         value =
             tirx::Let(temp_var, value,
-                     (temp_var & IntImm(DataType::UInt(16), 0xF)) |
-                         ((temp_var & IntImm(DataType::UInt(16), 0xF0)) << 4));
+                      (temp_var & IntImm(DataType::UInt(16), 0xF)) |
+                          ((temp_var & IntImm(DataType::UInt(16), 0xF0)) << 4));
       }
       os << PrintExpr(
           tirx::Call(tgt_dtype, tirx::builtin::reinterpret(), {value}));
@@ -3437,8 +3437,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       if (tgt_dtype.is_float4_e2m1fn()) {
         // We view the source as an uint32, and then extract bits of four fp4
         // numbers, and finally reinterpret the result as fp4x4.
-        value =
-            tirx::Call(DataType::UInt(32), tirx::builtin::reinterpret(), {value});
+        value = tirx::Call(DataType::UInt(32), tirx::builtin::reinterpret(),
+                           {value});
         tirx::Var temp_var("temp_var", DataType::UInt(32));
         value = tirx::Let(
             temp_var, value,
@@ -3450,8 +3450,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                     ((temp_var >> 12) & IntImm(DataType::UInt(32), 0xF000))));
       } else {
         value = tirx::Cast(DataType::UInt(32),
-                          tirx::Call(DataType::UInt(16),
-                                    tirx::builtin::reinterpret(), {value}));
+                           tirx::Call(DataType::UInt(16),
+                                      tirx::builtin::reinterpret(), {value}));
         tirx::Var temp_var("temp_var", DataType::UInt(32));
         value = tirx::Let(
             temp_var, value,
@@ -3474,8 +3474,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                                     "A_ptr, B_ptr, C_ptr>, but got "
                                  << op->args.size();
     auto op_instance = Downcast<StringImm>(op->args[0]);
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)),
-                          op_instance->value, op->args, true, os);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     ICHECK(op->args.size() == 5)
         << "tl_gemm_sp expects 5 arguments <op_instance, A_ptr, B_ptr, C_ptr, "
@@ -3483,8 +3483,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << op->args.size();
     auto op_instance = Downcast<StringImm>(op->args[0]);
     enable_sparse_gemm_ = true;
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)),
-                          op_instance->value, op->args, true, os);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
   } else if (op->op.same_as(tl::any_sync())) {
     ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
     os << "__any_sync(" << PrintExpr(op->args[0]) << ", "
@@ -4026,15 +4026,18 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   DataType alloc_dtype = op->buffer->dtype;
   if (scope.find("wmma.") == 0) {
     if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
-      ICHECK(alloc_dtype == DataType::Float(16) ||
-             alloc_dtype == DataType::Int(8) || alloc_dtype == DataType::UInt(8) ||
-             alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4) ||
-             alloc_dtype == DataType::Int(1) || alloc_dtype == DataType::BFloat(16))
+      ICHECK(
+          alloc_dtype == DataType::Float(16) ||
+          alloc_dtype == DataType::Int(8) || alloc_dtype == DataType::UInt(8) ||
+          alloc_dtype == DataType::Int(4) || alloc_dtype == DataType::UInt(4) ||
+          alloc_dtype == DataType::Int(1) ||
+          alloc_dtype == DataType::BFloat(16))
           << "Matrix_a and matrix_b only support half or char or unsigned char "
           << "or uint4 or int4 or int1 type for now";
     } else {
       ICHECK(alloc_dtype == DataType::Float(16) ||
-             alloc_dtype == DataType::Float(32) || alloc_dtype == DataType::Int(32))
+             alloc_dtype == DataType::Float(32) ||
+             alloc_dtype == DataType::Int(32))
           << "Accumulator only support half, float and int type for now";
     }
     PrintWmmaScope(scope, alloc_dtype, buffer, stream);
@@ -4109,8 +4112,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
       }
       stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
     } else if (scope.find("local.descriptor") != 0) {
-      ICHECK(false) << "Unsupported scope: " << scope
-                     << " for buffer " << op->buffer->data->name_hint;
+      ICHECK(false) << "Unsupported scope: " << scope << " for buffer "
+                    << op->buffer->data->name_hint;
     }
   }
 
@@ -4910,8 +4913,7 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   }
   // Read-only param indices attribute, if present.
   std::unordered_set<int> ro_param_indices;
-  if (auto opt =
-          func->GetAttr<Array<Integer>>("tl.readonly_param_indices")) {
+  if (auto opt = func->GetAttr<Array<Integer>>("tl.readonly_param_indices")) {
     for (const auto &idx : opt.value()) {
       ro_param_indices.insert(static_cast<int>(Downcast<Integer>(idx)->value));
     }
@@ -5008,8 +5010,7 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   // when kHasGridSync is set.
   bool has_cuda_pdl_sync = f->HasNonzeroAttr(tl::attr::kHasGridSync);
   std::unordered_set<const VarNode *> non_restrict;
-  if (auto opt =
-          f->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
+  if (auto opt = f->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
     for (const tirx::Var &v : opt.value())
       non_restrict.insert(v.get());
   }

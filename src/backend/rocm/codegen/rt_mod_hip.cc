@@ -1,6 +1,6 @@
 #if defined(__linux__)
-#include <sys/stat.h>
 #include "support/check.h"
+#include <sys/stat.h>
 #include <tvm/ir/cast.h>
 #endif
 
@@ -47,8 +47,7 @@ ExtractFuncInfo(const IRModule &mod) {
       info.launch_param_tags.push_back(
           runtime::launch_param::kUseCooperativeLaunch);
     }
-    if (auto opt = f->GetAttr<Array<String>>(
-            tirx::attr::kKernelLaunchParams)) {
+    if (auto opt = f->GetAttr<Array<String>>(tirx::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
         info.launch_param_tags.push_back(tag);
       }

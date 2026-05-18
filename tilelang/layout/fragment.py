@@ -1,7 +1,6 @@
 """Wrapping Layouts."""
 
 # pylint: disable=invalid-name, unsupported-binary-operation
-import tvm
 import tvm_ffi
 from tvm.ir import Range
 from tvm.tirx import IterVar, Var, PrimExpr, IndexMap

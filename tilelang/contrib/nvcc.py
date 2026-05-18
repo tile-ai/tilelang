@@ -421,8 +421,7 @@ def get_target_compute_version(target=None):
         return tvm.cuda(0).compute_version
 
     raise ValueError(
-        "No CUDA architecture was specified or GPU detected. "
-        "Specify it with a target config such as {'kind': 'cuda', 'arch': 'sm_90'}."
+        "No CUDA architecture was specified or GPU detected. Specify it with a target config such as {'kind': 'cuda', 'arch': 'sm_90'}."
     )
 
 

@@ -12,9 +12,9 @@
  */
 
 #include "region.h"
-#include <tvm/tirx/op.h>
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/tirx/op.h>
 
 namespace tvm {
 namespace tl {

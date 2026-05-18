@@ -7,8 +7,8 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_ASSUME_H_
 #define TVM_TL_TRANSFORM_COMMON_ASSUME_H_
 
-#include <tvm/tirx/stmt.h>
 #include <optional>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {

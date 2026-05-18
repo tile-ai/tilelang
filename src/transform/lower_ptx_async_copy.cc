@@ -3,6 +3,8 @@
  * \file lower_ptx_async_copy.cc
  */
 #include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -10,8 +12,6 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/s_tir/stmt.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -355,8 +355,7 @@ private:
   }
 
   static Optional<PrimExpr>
-  FlattenToLinearOffset(const Buffer &buf,
-                        const Array<PrimExpr> &indices) {
+  FlattenToLinearOffset(const Buffer &buf, const Array<PrimExpr> &indices) {
     // Convert N-D indices (potentially with axis_separators) into a single
     // row-major linear element offset.
     Array<PrimExpr> physical = buf.OffsetOf(indices);

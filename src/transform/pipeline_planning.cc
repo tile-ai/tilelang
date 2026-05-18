@@ -1,13 +1,13 @@
-#include <tvm/arith/analyzer.h>
 #include "support/check.h"
-#include <tvm/tirx/stmt.h>
+#include <tvm/arith/analyzer.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/stmt.h>
 
 #include "../op/builtin.h"
 #include "../op/copy.h"
@@ -372,8 +372,7 @@ private:
 
   void VisitExpr_(const CallNode *op) final {
     auto args = op->args;
-    if (auto tile_op = ParseOperator(GetRef<Call>(op));
-        tile_op.defined()) {
+    if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       HandleTileOp(tile_op);
       StmtExprVisitor::VisitExpr_(op);
       return;
@@ -853,9 +852,8 @@ private:
     }
   }
 
-  std::unordered_map<const VarNode *, int>
-  BuildScalarDefMap(const std::vector<PipelineStageInfo> &pipeline_stage_infos)
-      const {
+  std::unordered_map<const VarNode *, int> BuildScalarDefMap(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
     std::unordered_map<const VarNode *, int> scalar_def_to_stmt;
     for (int i = 0; i < static_cast<int>(pipeline_stage_infos.size()); ++i) {
       for (const VarNode *var : pipeline_stage_infos[i].scalar_defs) {
@@ -913,9 +911,8 @@ private:
         }
       }
       if (++iter_count > max_iterations) {
-        LOG(FATAL)
-            << "Pipeline planning: Exceeded maximum iterations while "
-               "propagating scalar producers for copy stages.";
+        LOG(FATAL) << "Pipeline planning: Exceeded maximum iterations while "
+                      "propagating scalar producers for copy stages.";
       }
     }
   }
@@ -1071,15 +1068,17 @@ private:
   PipelineStageInfo
   MakePipelineStageInfo(Stmt stmt, int idx,
                         AsyncDependencyChainBuilder &chain_builder) {
-    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ std::move(stmt));
+    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                 /*name_hint=*/"",
+                 /*body*/ std::move(stmt));
     auto collector =
         BufferRegionCollector(buffer_data_to_buffer_, chain_builder, target_);
     collector(block);
     PipelineStageInfo pinfo;
     pinfo.reads = std::move(collector.GetReads());
     pinfo.writes = std::move(collector.GetWrites());
-    auto [scalar_defs, scalar_uses] = ScalarUseDefCollector::Collect(block->body);
+    auto [scalar_defs, scalar_uses] =
+        ScalarUseDefCollector::Collect(block->body);
     pinfo.scalar_defs = std::move(scalar_defs);
     pinfo.scalar_uses = std::move(scalar_uses);
     pinfo.original_stmt_index = idx;
@@ -1177,8 +1176,7 @@ private:
           }
           LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
                      << "because it is not a SeqStmt, IfThenElse without else, "
-                     << "but got "
-                     << current->GetTypeKey();
+                     << "but got " << current->GetTypeKey();
         }
       }
       ICHECK(pipeline_body_seq != nullptr);
@@ -1244,8 +1242,7 @@ private:
         }
         LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
                    << "because it is not a SeqStmt, IfThenElse without else, "
-                   << "but got "
-                   << current->GetTypeKey();
+                   << "but got " << current->GetTypeKey();
       }
     }
     ICHECK(pipeline_body_seq != nullptr);
@@ -1721,7 +1718,7 @@ private:
             continue;
           }
           ICHECK_GT(pipeline_stage_infos[commit_stmt_idx].order,
-                   max_cp_async_order)
+                    max_cp_async_order)
               << "Pipeline planning error: cp.async commit is scheduled before "
                  "its cp.async calls. commit_stmt="
               << commit_stmt_idx << ", commit_order="
@@ -2102,8 +2099,10 @@ private:
       stages.push_back(pinfo.stage);
     }
 
-    annotations.Set(s_tir::attr::software_pipeline_stage, Array<Integer>(stages));
-    annotations.Set(s_tir::attr::software_pipeline_order, Array<Integer>(orders));
+    annotations.Set(s_tir::attr::software_pipeline_stage,
+                    Array<Integer>(stages));
+    annotations.Set(s_tir::attr::software_pipeline_order,
+                    Array<Integer>(orders));
 
     // Propagate per-statement TMA eligibility so InjectSoftwarePipeline can
     // rewrite TMA copies to use pipeline-level barrier management.
@@ -2205,9 +2204,9 @@ private:
       Stmt rebuilt_inner =
           RebuildBodyWrapper(block->body, pipeline_body_seq, new_body_seq);
       SBlock new_block(block->iter_vars, block->reads, block->writes,
-                      block->name_hint, rebuilt_inner, block->init,
-                      block->alloc_buffers, block->match_buffers,
-                      block->annotations);
+                       block->name_hint, rebuilt_inner, block->init,
+                       block->alloc_buffers, block->match_buffers,
+                       block->annotations);
       new_loop_body =
           SBlockRealize(realize->iter_values, realize->predicate, new_block);
     } else {

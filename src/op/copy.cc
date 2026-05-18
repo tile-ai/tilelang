@@ -8,10 +8,10 @@
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
-#include "utils.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
+#include "utils.h"
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "builtin.h"
 #include <tvm/tirx/analysis.h>
@@ -416,8 +416,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 // eviction_policy
 Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args,
                                Map<String, ObjectRef> annotations) {
-  ObjectPtr<Conv2DIm2ColOpNode> node =
-      make_object<Conv2DIm2ColOpNode>();
+  ObjectPtr<Conv2DIm2ColOpNode> node = make_object<Conv2DIm2ColOpNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
   node->srcRegion_ = src_access.region;

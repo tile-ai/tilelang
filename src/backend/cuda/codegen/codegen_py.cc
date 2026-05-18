@@ -2,10 +2,10 @@
  * \file codegen_py.cc
  */
 #include "codegen_py.h"
-#include "target/codegen_utils.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
+#include "target/codegen_utils.h"
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/name_supply.h>
@@ -56,8 +56,7 @@ void CodeGenTileLangPY::RegisterFunction_(const GlobalVar &gvar,
   }
 
   auto function_name = [&]() -> String {
-    if (auto global_symbol =
-            func->GetAttr<String>(tvm::attr::kGlobalSymbol)) {
+    if (auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol)) {
       auto name = global_symbol.value();
       ICHECK(!func_name_supply_->ContainsName(name))
           << "Function " << gvar << " must use global symbol " << name
@@ -82,9 +81,9 @@ void CodeGenTileLangPY::InitFuncState_(const PrimFunc &f) {
   ReserveKeywordsAsUnique_();
 }
 
-void CodeGenTileLangPY::PrintFunctionSignature_(
-    const String &function_name, const PrimFunc &func,
-    std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangPY::PrintFunctionSignature_(const String &function_name,
+                                                const PrimFunc &func,
+                                                std::ostream &os) { // NOLINT(*)
   os << "def " << function_name << "(";
   for (size_t i = 0; i < func->params.size(); ++i) {
     tirx::Var v = func->params[i];
@@ -371,8 +370,8 @@ void CodeGenTileLangPY::VisitExpr_(const CallNode *op,
                op->op.same_as(builtin_call_pure_extern_)) {
       ICHECK_GE(op->args.size(), 1U);
       auto func = Downcast<StringImm>(op->args[0]);
-      PrintCallExtern_(GetType(GetRef<PrimExpr>(op)), func->value,
-                       op->args, true, os);
+      PrintCallExtern_(GetType(GetRef<PrimExpr>(op)), func->value, op->args,
+                       true, os);
     } else if (op_attr_global_symbol_.count(call_op)) {
       // call extern if the op itself have a global symbol.
       PrintCallExtern_(GetType(GetRef<PrimExpr>(op)),
@@ -629,8 +628,7 @@ void CodeGenTileLangPY::PrintBinaryIntrinsic_(const CallNode *op,
   os << ')';
 }
 
-void CodeGenTileLangPY::PrintCallExtern_(Type ret_type,
-                                         String global_symbol,
+void CodeGenTileLangPY::PrintCallExtern_(Type ret_type, String global_symbol,
                                          const Array<PrimExpr> &args,
                                          bool skip_first_arg,
                                          std::ostream &os) { // NOLINT(*)

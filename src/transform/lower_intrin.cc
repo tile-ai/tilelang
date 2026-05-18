@@ -22,12 +22,12 @@
  * \file lower_intrin.cc
  */
 #include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 #include <limits>
 #include <unordered_set>
@@ -202,7 +202,7 @@ public:
         PrimExpr let_rdiv = tirx::Let(
             rdiv, truncdiv(op->a, op->b),
             tirx::Select((op->b >= 0 && rmod >= 0) || (op->b < 0 && rmod <= 0),
-                        rdiv, rdiv - make_const(dtype, 1)));
+                         rdiv, rdiv - make_const(dtype, 1)));
         return Let(rmod, truncmod(op->a, op->b), let_rdiv);
       }
     }

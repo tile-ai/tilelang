@@ -21,18 +21,17 @@
  * \file flatten_buffer.cc
  */
 
-#include <tvm/tirx/stmt.h>
+#include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "support/check.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
-#include "support/check.h"
 #include <tvm/ir/attrs.h>
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/analysis.h>
-#include "tir/transforms/ir_utils.h"
-#include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include <utility>
 

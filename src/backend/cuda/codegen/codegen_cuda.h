@@ -5,11 +5,11 @@
 #ifndef TVM_TL_TARGET_CODEGEN_CUDA_H_
 #define TVM_TL_TARGET_CODEGEN_CUDA_H_
 
+#include "support/check.h"
 #include <optional>
 #include <tvm/target/codegen.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
-#include "support/check.h"
 
 #include <string>
 #include <unordered_map>

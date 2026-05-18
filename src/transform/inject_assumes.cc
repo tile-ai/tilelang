@@ -6,9 +6,11 @@
 
 #include "common/assume.h"
 #include "common/attr.h"
+#include "support/check.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ir/expr.h"
 #include "tvm/ir/transform.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_hash.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -16,8 +18,6 @@
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include "support/check.h"
-#include <tvm/ffi/extra/structural_equal.h>
 
 #include <sstream>
 
@@ -52,9 +52,8 @@ private:
     void addExpr(PrimExpr e, Buffer buffer) {
       size_t h = sh(e);
       auto &bucket = buckets[h];
-      auto it = std::find_if(bucket.begin(), bucket.end(), [&](size_t y) {
-        return se(e, items[y].expr);
-      });
+      auto it = std::find_if(bucket.begin(), bucket.end(),
+                             [&](size_t y) { return se(e, items[y].expr); });
       if (it == bucket.end()) {
         auto index = items.size();
         items.push_back({e, {buffer}});
@@ -224,8 +223,8 @@ private:
     }
 
     return SBlock(op->iter_vars, op->reads, op->writes, op->name_hint,
-                 c.build(body), op->init, op->alloc_buffers, op->match_buffers,
-                 op->annotations, op->span);
+                  c.build(body), op->init, op->alloc_buffers, op->match_buffers,
+                  op->annotations, op->span);
   }
 
   PrimFunc f;

@@ -4,11 +4,11 @@
  */
 
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include <unordered_map>
 #include <variant>
@@ -166,8 +166,8 @@ private:
       : arith::IRMutatorWithAnalyzer(analyzer), states_(states) {}
 
   Array<PrimExpr> UpdateIdx(const Array<PrimExpr> &indices,
-                                 const Array<PrimExpr> &buffer_shape,
-                                 const std::vector<IndexSignState> &state_vec) {
+                            const Array<PrimExpr> &buffer_shape,
+                            const std::vector<IndexSignState> &state_vec) {
     ICHECK_EQ(state_vec.size(), indices.size())
         << "State vector size mismatch for buffer load/store indices ("
         << indices << ")";

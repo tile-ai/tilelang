@@ -3,13 +3,13 @@
  * \brief Lower L2 persistent annotation
  */
 
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include "op/builtin.h"
 

@@ -10,10 +10,10 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {

@@ -4,8 +4,8 @@
  */
 #include "arg_binder.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/runtime/device_api.h>
 #include <tvm/tirx/analysis.h>
@@ -192,7 +192,8 @@ bool ArgBinder::Bind_(const PrimExpr &arg, const PrimExpr &value,
       defs_.emplace_back(v_arg);
       if (with_lets) {
         (*def_map_)[v] = arg;
-        init_nest_.emplace_back(SeqStmt({tirx::Bind(v_arg, value), Evaluate(0)}));
+        init_nest_.emplace_back(
+            SeqStmt({tirx::Bind(v_arg, value), Evaluate(0)}));
       } else {
         (*def_map_)[v] = value;
       }
@@ -402,19 +403,19 @@ void ArgBinder::BindDLTensors(
 
     Var is_null_var(arg_name + "_is_null", DataType::Bool());
     init_nest_.emplace_back(
-        SeqStmt({tirx::Bind(is_null_var,
-                Call(DataType::Bool(), builtin::isnullptr(), {handle})), nop}));
+        SeqStmt({tirx::Bind(is_null_var, Call(DataType::Bool(),
+                                              builtin::isnullptr(), {handle})),
+                 nop}));
     const PrimExpr &is_null = is_used ? const_false() : is_null_var;
 
     is_null_map[arg_name] = is_null_var;
     is_null_expr_map[arg_name] = is_null;
 
     if (is_used) {
-      init_nest_.emplace_back(
-          AssertStmt(!is_null_var,
-                     tvm::tirx::StringImm("RuntimeError"),
-                     Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(
-                         arg_name + " is expected to have non-NULL pointer")})));
+      init_nest_.emplace_back(AssertStmt(
+          !is_null_var, tvm::tirx::StringImm("RuntimeError"),
+          Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(
+              arg_name + " is expected to have non-NULL pointer")})));
     }
   }
 
@@ -433,13 +434,13 @@ void ArgBinder::BindDLTensors(
     def_handle_dtype_.Set(buf_shape->data, make_const(tvm_shape_type, 0));
     // Use if_then_else for NULL guard on the shape pointer itself, avoiding
     // dereferencing TVMStructGet(handle, kDLTensorShape) when handle is NULL.
-    init_nest_.emplace_back(
-        SeqStmt({tirx::Bind(buf_shape->data,
-                tvm::if_then_else(
-                    Not(is_null),
-                    TVMArrayGet(DataType::Handle(), handle, builtin::kDLTensorShape),
-                    make_zero(DataType::Handle()))),
-                nop}));
+    init_nest_.emplace_back(SeqStmt(
+        {tirx::Bind(buf_shape->data,
+                    tvm::if_then_else(Not(is_null),
+                                      TVMArrayGet(DataType::Handle(), handle,
+                                                  builtin::kDLTensorShape),
+                                      make_zero(DataType::Handle()))),
+         nop}));
     init_nest_.emplace_back(DeclBuffer(buf_shape));
 
     // Save for later use in shape binding
@@ -453,7 +454,8 @@ void ArgBinder::BindDLTensors(
     const PrimExpr &is_null = is_null_expr_map[arg_name];
 
     // dimension checks
-    PrimExpr v_ndim = TVMArrayGet(tvm_ndim_type, handle, builtin::kDLTensorNDim);
+    PrimExpr v_ndim =
+        TVMArrayGet(tvm_ndim_type, handle, builtin::kDLTensorNDim);
 
     // Helper functions for shape/stride name formatting
     auto shape_handle_name = [&]() { return arg_name + ".shape"; };
@@ -740,7 +742,8 @@ void ArgBinder::BindDLTensors(
 
                 init_nest_.emplace_back(AssertStmt(
                     any_nonnull, tvm::tirx::StringImm("RuntimeError"),
-                    Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(err_msg.str())})));
+                    Array<tvm::tirx::StringImm>(
+                        {tvm::tirx::StringImm(err_msg.str())})));
               }
 
               // Build cascaded if_then_else: if !is_null_a then a.shape[k] else
@@ -843,11 +846,12 @@ void ArgBinder::BindDLTensors(
                               tirx::TypeAnnotation(tvm_shape_type));
         init_nest_.emplace_back(
             SeqStmt({tirx::Bind(buf_strides->data,
-                    tvm::if_then_else(Not(is_null),
-                                      TVMArrayGet(DataType::Handle(), handle,
-                                                  builtin::kDLTensorStrides),
-                                      make_zero(DataType::Handle()))),
-                    nop}));
+                                tvm::if_then_else(
+                                    Not(is_null),
+                                    TVMArrayGet(DataType::Handle(), handle,
+                                                builtin::kDLTensorStrides),
+                                    make_zero(DataType::Handle()))),
+                     nop}));
         init_nest_.emplace_back(DeclBuffer(buf_strides));
         PrimExpr v_strides_is_null =
             Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
@@ -888,13 +892,13 @@ void ArgBinder::BindDLTensors(
                       tvm_shape_type, arg_name + ".strides");
       def_handle_dtype_.Set(buf_strides->data,
                             tirx::TypeAnnotation(tvm_shape_type));
-      init_nest_.emplace_back(
-          SeqStmt({tirx::Bind(buf_strides->data,
-                  tvm::if_then_else(Not(is_null),
-                                    TVMArrayGet(DataType::Handle(), handle,
-                                                builtin::kDLTensorStrides),
-                                    make_zero(DataType::Handle()))),
-                  nop}));
+      init_nest_.emplace_back(SeqStmt(
+          {tirx::Bind(buf_strides->data,
+                      tvm::if_then_else(Not(is_null),
+                                        TVMArrayGet(DataType::Handle(), handle,
+                                                    builtin::kDLTensorStrides),
+                                        make_zero(DataType::Handle()))),
+           nop}));
       init_nest_.emplace_back(DeclBuffer(buf_strides));
       PrimExpr v_strides_is_null =
           Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});

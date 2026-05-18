@@ -22,7 +22,6 @@
 
 from typing import Callable
 
-from tvm import tirx
 from tvm.s_tir import Schedule
 from tvm.s_tir.schedule import SBlockRV
 from .utils import retrieve_func_from_module

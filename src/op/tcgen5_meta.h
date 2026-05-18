@@ -1,10 +1,10 @@
 #ifndef TVM_TL_OP_TCGEN5_META_H_
 #define TVM_TL_OP_TCGEN5_META_H_
 
+#include "support/check.h"
 #include <cstdint>
 #include <tvm/runtime/data_type.h>
 #include <tvm/runtime/logging.h>
-#include "support/check.h"
 
 #include <utility>
 #include <vector>

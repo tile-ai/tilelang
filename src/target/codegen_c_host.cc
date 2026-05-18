@@ -22,8 +22,8 @@
  */
 #include "codegen_c_host.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/ffi/extra/module.h>
 #include <tvm/target/codegen.h>
@@ -84,8 +84,7 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
 }
 
 void CodeGenCHost::InitGlobalContext() {
-  decl_stream << "void* " << symbol::tvm_ffi_library_ctx
-              << " = NULL;\n";
+  decl_stream << "void* " << symbol::tvm_ffi_library_ctx << " = NULL;\n";
 }
 
 void CodeGenCHost::DefineModuleName() {
@@ -100,8 +99,7 @@ void CodeGenCHost::AddFunction(const tvm::GlobalVar &gvar,
 void CodeGenCHost::AddFunction(const tvm::GlobalVar &gvar,
                                const tvm::tirx::PrimFunc &func,
                                bool emit_fwd_func_decl) {
-  auto global_symbol =
-      func->GetAttr<String>(tvm::attr::kGlobalSymbol);
+  auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
   if (global_symbol) {
     function_names_.push_back(global_symbol.value());
   }
@@ -285,8 +283,7 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
   } else {
     // directly use the original symbol
     ICHECK(op->op.same_as(builtin::tvm_call_cpacked_lowered()));
-    packed_func_name =
-        symbol::tvm_ffi_symbol_prefix + func_name->value;
+    packed_func_name = symbol::tvm_ffi_symbol_prefix + func_name->value;
   }
 
   std::string args_stack = PrintExpr(op->args[1]);
@@ -315,8 +312,7 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
 
     this->PrintLine("const id<MTLCommandBuffer> commandBuffer = "
                     "torch::mps::get_command_buffer();");
-    this->PrintLine(
-        "const auto f = Function::GetGlobal(\"metal.SetStream\");");
+    this->PrintLine("const auto f = Function::GetGlobal(\"metal.SetStream\");");
     this->PrintLine("(*f)(static_cast<TVMStreamHandle>(commandBuffer));");
   }
 
@@ -407,7 +403,8 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
   }
 }
 
-void CodeGenCHost::VisitStmt_(const tvm::tirx::AssertStmtNode *op) { // NOLINT(*)
+void CodeGenCHost::VisitStmt_(
+    const tvm::tirx::AssertStmtNode *op) { // NOLINT(*)
   if (emit_asserts_) {
     std::string cond = PrintExpr(op->condition);
     PrintIndent();
@@ -515,12 +512,9 @@ Module BuildTileLangCHost(IRModule mod, Target target) {
   bool emit_fwd_func_decl = true;
 
   std::unordered_set<std::string> devices;
-  if (mod->GetAttr<Map<GlobalVar, String>>(
-          "device_contexts") != nullptr) {
+  if (mod->GetAttr<Map<GlobalVar, String>>("device_contexts") != nullptr) {
     Map<GlobalVar, String> device_contexts =
-        mod->GetAttr<Map<GlobalVar, String>>(
-               "device_contexts")
-            .value();
+        mod->GetAttr<Map<GlobalVar, String>>("device_contexts").value();
     for (auto const &context : device_contexts) {
       devices.insert(context.second.data());
     }
@@ -561,8 +555,7 @@ Module BuildTileLangCHost(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  if (const auto f =
-          Function::GetGlobal("tilelang_callback_c_host_postproc")) {
+  if (const auto f = Function::GetGlobal("tilelang_callback_c_host_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
   return ::tvm::codegen::CSourceModuleCreate(code, "c", cg.GetFunctionNames());

@@ -1,7 +1,7 @@
 #include "codegen_cutedsl.h"
 #include "runtime/pack_args.h"
-#include "target/cuda/cuda_fallback_module.h"
 #include "support/check.h"
+#include "target/cuda/cuda_fallback_module.h"
 #include <tvm/ir/cast.h>
 
 namespace tvm {
@@ -9,8 +9,7 @@ namespace codegen {
 
 using namespace ffi;
 
-static Map<String, runtime::FunctionInfo>
-ExtractFuncInfo(const IRModule &mod) {
+static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
   Map<String, runtime::FunctionInfo> fmap;
 
   for (auto kv : mod->functions) {
@@ -30,8 +29,7 @@ ExtractFuncInfo(const IRModule &mod) {
       arg_types.push_back(f->params[i].dtype());
     }
     Array<String> launch_param_tags;
-    if (auto opt = f->GetAttr<Array<String>>(
-            tirx::attr::kKernelLaunchParams)) {
+    if (auto opt = f->GetAttr<Array<String>>(tirx::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
         launch_param_tags.push_back(tag);
       }
@@ -70,8 +68,8 @@ Module BuildTileLangCuTeDSLWithoutCompile(IRModule mod, Target target) {
   // is preserved in source_map for InspectSource/get_source.
   static constexpr const char kDummyPtx[] = "ptx";
   return target::CUDAModuleCreateWithFallback(
-      Bytes(kDummyPtx, sizeof(kDummyPtx) - 1), String("ptx"), ExtractFuncInfo(mod),
-      source_map);
+      Bytes(kDummyPtx, sizeof(kDummyPtx) - 1), String("ptx"),
+      ExtractFuncInfo(mod), source_map);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

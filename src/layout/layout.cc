@@ -5,8 +5,8 @@
 
 #include "layout.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/arith/pattern.h>
 #include <tvm/tirx/op.h>
@@ -822,8 +822,8 @@ Fragment::Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
   forward_thread = Substitute(forward_thread, vmap);
 
-  auto n = make_object<FragmentNode>(input_size, forward_index,
-                                               forward_thread, replicate_size);
+  auto n = make_object<FragmentNode>(input_size, forward_index, forward_thread,
+                                     replicate_size);
   data_ = std::move(n);
 }
 
@@ -834,8 +834,8 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
     forward_thread = Substitute(
         forward_thread, {{replicate_var.value(), ReplicationPlaceholder()}});
   }
-  auto n = make_object<FragmentNode>(input_size, forward_index,
-                                               forward_thread, replicate_size);
+  auto n = make_object<FragmentNode>(input_size, forward_index, forward_thread,
+                                     replicate_size);
   data_ = std::move(n);
 }
 
@@ -1059,7 +1059,6 @@ void FragmentNode::RegisterReflection() {
       .def_ro("replicate_size", &FragmentNode::replicate_size_)
       .def("_DebugOutput", &FragmentNode::DebugOutput);
 }
-
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;

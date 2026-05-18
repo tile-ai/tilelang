@@ -7,8 +7,8 @@
 #define TVM_TL_OP_REDUCE_H_
 
 #include "operator.h"
-#include <tvm/runtime/logging.h>
 #include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 namespace tvm {
 

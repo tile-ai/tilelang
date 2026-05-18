@@ -20,17 +20,17 @@
  *   - No pre-loop TMA prefetch / prologue optimizations
  */
 
-#include <tvm/tirx/stmt.h>
-#include <tvm/arith/analyzer.h>
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/ffi/extra/structural_equal.h>
-#include <tvm/ir/cast.h>
 
 #include "../backend/cuda/op/copy.h"
 #include "../op/builtin.h"
@@ -431,8 +431,7 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
-    if (auto tile_op = ParseOperator(GetRef<Call>(op));
-        tile_op.defined()) {
+    if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       if (const auto *copy = tile_op.as<CopyNode>()) {
         if (IsBranchPrivateBuffer(copy->src)) {
           summary_.read_buffers.insert(copy->src);
@@ -1218,14 +1217,13 @@ private:
                         loop_body_condition);
   }
 
-  Stmt
-  BuildWSBlock(const SBlockRealizeNode *orig_realize, const SBlock &orig_block,
-               const ForNode *pipeline_loop, int num_stages,
-               const Array<Stmt> &flat_stmts,
-               const std::vector<TileStmtKind> &kinds,
-               const std::vector<std::pair<Var, PrimExpr>> &outer_leading_bindings,
-               const std::vector<std::pair<Var, PrimExpr>> &inner_leading_bindings,
-               Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>()) {
+  Stmt BuildWSBlock(
+      const SBlockRealizeNode *orig_realize, const SBlock &orig_block,
+      const ForNode *pipeline_loop, int num_stages,
+      const Array<Stmt> &flat_stmts, const std::vector<TileStmtKind> &kinds,
+      const std::vector<std::pair<Var, PrimExpr>> &outer_leading_bindings,
+      const std::vector<std::pair<Var, PrimExpr>> &inner_leading_bindings,
+      Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>()) {
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_min = pipeline_loop->min;
     PrimExpr loop_extent = pipeline_loop->extent;
@@ -1389,8 +1387,8 @@ private:
     LocalLiveSet producer_body_live;
     for (size_t i = 0; i < flat_stmts.size(); ++i) {
       if (IsProducer(kinds[i])) {
-        producer_body_live.AddUses(
-            LocalAccessCollector::Collect(flat_stmts[i], buffer_data_to_buffer_));
+        producer_body_live.AddUses(LocalAccessCollector::Collect(
+            flat_stmts[i], buffer_data_to_buffer_));
       }
     }
     int compute_cursor = 0;
@@ -1420,7 +1418,8 @@ private:
         }
         for (int ci = wait_pos - 1; ci >= compute_cursor; --ci) {
           const LocalAccessSummary &summary = consumer_compute_summaries[ci];
-          const bool is_bind = consumer_compute_stmts[ci].as<BindNode>() != nullptr;
+          const bool is_bind =
+              consumer_compute_stmts[ci].as<BindNode>() != nullptr;
           if (!is_bind) {
             add_to_producer[ci] = true;
             moved_compute_stmts[ci] = true;
@@ -1442,7 +1441,8 @@ private:
         }
         for (int ci = compute_cursor; ci < wait_pos; ++ci) {
           if (add_to_producer[ci]) {
-            producer_loop_prefix_stmts[ti].push_back(consumer_compute_stmts[ci]);
+            producer_loop_prefix_stmts[ti].push_back(
+                consumer_compute_stmts[ci]);
           }
         }
       }
@@ -2170,8 +2170,7 @@ private:
         LocalLiveSet shared_live = shared_prelude_live_seed_;
         LocalLiveSet producer_live = producer_prelude_live_seed_;
         LocalLiveSet consumer_live = consumer_prelude_live_seed_;
-        for (int i = loop_idx + 1; i < static_cast<int>(seq->seq.size());
-             ++i) {
+        for (int i = loop_idx + 1; i < static_cast<int>(seq->seq.size()); ++i) {
           // Post-loop siblings are later sunk into the consumer branch by
           // SinkGuardedConsumerPostlude.  Keep scalar/index dependencies in
           // the enclosing prelude so existing shared-prelude index math stays

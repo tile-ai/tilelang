@@ -4,12 +4,12 @@
  *
  */
 
-#include <tvm/tirx/stmt.h>
 #include "./transform/common/attr.h"
 #include "op/builtin.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
 #include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/stmt.h>
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/script/ir_builder/tir/ir.h>
@@ -203,7 +203,8 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
       outer = SeqStmt({tirx::Bind(vars[i], idxs[i + 1]), outer});
     }
     outer = SeqStmt({tirx::Bind(vars[vars.size() - 1],
-                               idxs[0] * group_size + idxs[vars.size()]), outer});
+                                idxs[0] * group_size + idxs[vars.size()]),
+                     outer});
     return outer;
   };
 
@@ -243,7 +244,6 @@ public:
   }
 };
 
-
 /*!
  * \brief Managed reference to KernelLaunchFrameNode.
  *
@@ -263,8 +263,7 @@ public:
 KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
                                const Optional<Array<PrimExpr>> &block_size_opt,
                                const Map<String, Any> &attrs) {
-  ObjectPtr<KernelLaunchFrameNode> n =
-      make_object<KernelLaunchFrameNode>();
+  ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
 
   // If the kernel is a CPU kernel, we don't need to launch any threads.
   bool is_cpu_kernel_frame =
@@ -320,7 +319,8 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   auto empty_block = tvm::script::ir_builder::tirx::Block(DeviceMainBlockName);
   empty_block->reads = Array<tvm::tirx::BufferRegion>();
   empty_block->writes = Array<tvm::tirx::BufferRegion>();
-  Map<String, Any> block_annotations = attrs.defined() ? attrs : Map<String, Any>{};
+  Map<String, Any> block_annotations =
+      attrs.defined() ? attrs : Map<String, Any>{};
   empty_block->annotations = block_annotations;
   n->frames.push_back(empty_block);
 
@@ -378,8 +378,7 @@ public:
 WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
                                    const PrimExpr &thread_idx,
                                    int warp_group_size = 128) {
-  ObjectPtr<WarpSpecializeFrameNode> n =
-      make_object<WarpSpecializeFrameNode>();
+  ObjectPtr<WarpSpecializeFrameNode> n = make_object<WarpSpecializeFrameNode>();
   PrimExpr condition;
   std::vector<int> warp_groups;
   warp_groups.reserve(warp_group_ids.size());

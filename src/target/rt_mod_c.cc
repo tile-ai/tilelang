@@ -1,8 +1,7 @@
 #include "codegen_c.h"
-#include <tvm/ffi/extra/module.h>
 #include "support/check.h"
+#include <tvm/ffi/extra/module.h>
 #include <tvm/ir/cast.h>
-
 
 namespace tvm {
 namespace codegen {

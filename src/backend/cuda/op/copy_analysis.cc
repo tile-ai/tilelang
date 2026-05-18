@@ -4,9 +4,9 @@
  */
 
 #include "backend/cuda/op/copy.h"
-#include <tvm/runtime/logging.h>
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/runtime/logging.h>
 
 #include "op/builtin.h"
 #include "op/utils.h"

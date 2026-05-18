@@ -70,8 +70,9 @@ void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl) {
  *             `args[0]` is an access pointer identifying the reducer variable
  * and `args[1]` is an integer encoding a `ReducerOpType` (e.g., Sum/Max/Min).
  */
-FinalizeReducerOp::FinalizeReducerOp(ffi::Array<PrimExpr> args,
-                                     ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
+FinalizeReducerOp::FinalizeReducerOp(
+    ffi::Array<PrimExpr> args,
+    ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
   auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
   auto reducer_access = NormalizeToAccessRegion(args[0], kAccessReadWrite);
   reducer_access.region =

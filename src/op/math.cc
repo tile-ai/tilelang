@@ -5,11 +5,10 @@
  */
 
 #include "support/check.h"
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
-#include <tvm/runtime/logging.h>
-
 
 namespace tvm {
 namespace tl {
@@ -25,7 +24,7 @@ PrimExpr pow_of_int_op(PrimExpr args) {
   ffi::String pow_of_int_name =
       "tl::pow_of_int<" + std::to_string(exp.as<IntImmNode>()->value) + ">";
   return tirx::Call(base.dtype(), tirx::builtin::call_extern(),
-                   {StringImm(pow_of_int_name), base});
+                    {StringImm(pow_of_int_name), base});
 }
 
 TVM_REGISTER_OP("tl.pow_of_int")
@@ -71,7 +70,8 @@ PrimExpr round_ties_away_from_zero_op(PrimExpr args) {
   if (dtype.is_int() || dtype.is_uint() || dtype.is_bool()) {
     return call->args[0];
   }
-  ffi::String func_name = dtype.is_float() && dtype.bits() == 64 ? "round" : "roundf";
+  ffi::String func_name =
+      dtype.is_float() && dtype.bits() == 64 ? "round" : "roundf";
   return tirx::Call(dtype, tirx::builtin::call_pure_extern(),
                     {StringImm(func_name), call->args[0]}, call->annotations);
 }

@@ -3,15 +3,14 @@
  * \brief Plan the cluster for GPU(sm90+) blocks
  */
 
-#include <tvm/arith/analyzer.h>
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
+#include <tvm/ir/cast.h>
+#include <tvm/s_tir/analysis.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/analysis.h>
-
 
 namespace tvm {
 namespace tl {
@@ -28,8 +27,9 @@ public:
     for (const auto &[_, buffer] : f->buffer_map) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
-    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ f->body);
+    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                 /*name_hint=*/"",
+                 /*body*/ f->body);
     Array<Array<BufferRegion>> access =
         GetSBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];

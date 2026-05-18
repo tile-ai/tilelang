@@ -7,8 +7,8 @@
 #ifndef TVM_TL_LAYOUT_UTILS_H_
 #define TVM_TL_LAYOUT_UTILS_H_
 
-#include <tvm/arith/iter_affine_map.h>
 #include "support/check.h"
+#include <tvm/arith/iter_affine_map.h>
 
 #include "layout.h"
 

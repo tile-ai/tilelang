@@ -2,7 +2,6 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tvm import tirx
 
 
 def _collect_set_max_nreg(stmt):

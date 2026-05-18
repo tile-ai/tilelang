@@ -1,17 +1,17 @@
 #include "../op/utils.h"
 #include "common/constr_visitor.h"
 #include "layout_reducer.h"
+#include "support/check.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ir/expr.h"
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/var.h>
-#include "support/check.h"
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
+#include <tvm/tirx/var.h>
 
 namespace tvm::tl {
 

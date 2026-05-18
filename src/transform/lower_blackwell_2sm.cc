@@ -9,15 +9,15 @@
 
 // todo: consider mixture of 1cta/2cta tcgen5mma in the same kernel
 
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
 #include <tvm/ir/expr.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
 
 #include "../op/gemm.h"
 #include "../op/operator.h"

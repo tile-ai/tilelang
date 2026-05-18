@@ -14,13 +14,13 @@
  *   2. It does not read buffers written inside the loop
  */
 
-#include <tvm/tirx/stmt.h>
 #include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ffi/extra/structural_equal.h>
 
 #include "../op/builtin.h"
 
@@ -459,8 +459,7 @@ public:
       // First recursively collect Let-bound vars used in this binding's value
       VisitExpr(it->second);
       // Then add this binding (so dependencies come first)
-      used_let_bindings.push_back(
-          std::make_pair(GetRef<Var>(op), it->second));
+      used_let_bindings.push_back(std::make_pair(GetRef<Var>(op), it->second));
     }
   }
 };

@@ -8,11 +8,7 @@ def _collect_tvm_access_ptr_offsets(func: tvm.tirx.PrimFunc):
     offsets = []
 
     def _visit(node):
-        if (
-            isinstance(node, tvm.tirx.Call)
-            and isinstance(node.op, tvm.ir.Op)
-            and str(node.op.name) == "tirx.tvm_access_ptr"
-        ):
+        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name) == "tirx.tvm_access_ptr":
             offsets.append(node.args[2])
 
     tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)

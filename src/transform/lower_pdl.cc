@@ -6,16 +6,15 @@
 #include "../op/builtin.h"
 #include "../target/utils.h"
 #include "common/attr.h"
+#include "support/check.h"
 #include "tvm/ir/type.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
-#include "support/check.h"
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/runtime/logging.h>
 
 namespace tvm {
 namespace tl {

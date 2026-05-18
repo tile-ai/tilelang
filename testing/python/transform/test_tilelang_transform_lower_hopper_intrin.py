@@ -4,7 +4,6 @@ from tilelang.cuda import transform as cuda_transform
 from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
-from tvm import tirx
 
 auto_target = tvm.target.Target(determine_target("auto"))
 

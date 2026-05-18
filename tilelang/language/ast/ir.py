@@ -440,7 +440,6 @@ def block_attr(attrs: Dict[str, Any]) -> None:
     return _ffi_api.BlockAttrs(attrs)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
-
 def alloc_buffer(
     shape: ShapeType | PrimExpr | Integral,
     dtype: DType = _dtypes.float32,

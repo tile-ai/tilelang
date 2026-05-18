@@ -24,10 +24,10 @@
 #ifndef TVM_TL_TRANSFORM_ARG_BINDER_H_
 #define TVM_TL_TRANSFORM_ARG_BINDER_H_
 
+#include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/tirx/buffer.h>
 #include <tvm/tirx/expr.h>
-#include "support/check.h"
 // std::vector<Stmt> below requires Stmt to be a complete type when the
 // class layout is computed: clang-cl + MSVC's STL eagerly probes T's
 // is_trivially_destructible / sizeof / alignof during vector instantiation,

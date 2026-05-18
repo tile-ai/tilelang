@@ -5,6 +5,7 @@
 #ifndef TVM_TL_TARGET_CODEGEN_PY_H_
 #define TVM_TL_TARGET_CODEGEN_PY_H_
 
+#include "support/check.h"
 #include <tvm/ir/op.h>
 #include <tvm/target/codegen.h>
 #include <tvm/tirx/analysis.h>
@@ -14,7 +15,6 @@
 #include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
-#include "support/check.h"
 
 #include <string>
 #include <unordered_map>

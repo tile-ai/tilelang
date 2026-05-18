@@ -8,12 +8,12 @@
  * placement within the function body flexible for frontends.
  */
 #include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/ir/cast.h>
 
 #include "../op/builtin.h"
 

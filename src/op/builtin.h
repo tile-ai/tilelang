@@ -8,10 +8,10 @@
 #define TVM_TL_OP_BUILTIN_H_
 
 #include "operator.h"
-#include <tvm/ir/transform.h>
-#include <tvm/runtime/logging.h>
 #include "support/check.h"
 #include <tvm/ir/cast.h>
+#include <tvm/ir/transform.h>
+#include <tvm/runtime/logging.h>
 
 namespace tvm {
 /*!
@@ -67,8 +67,8 @@ static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 } // namespace attr
 
-inline ffi::Optional<PrimExpr>
-GetAnnotatedMbarPhaseExpr(const ffi::Map<ffi::String, ffi::ObjectRef> &annotations) {
+inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
+    const ffi::Map<ffi::String, ffi::ObjectRef> &annotations) {
   if (auto val = annotations.Get(attr::kPipelineMbarPhaseExpr)) {
     if (val.value()->IsInstance<PrimExprNode>()) {
       return Downcast<PrimExpr>(val.value());

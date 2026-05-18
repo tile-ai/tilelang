@@ -20,31 +20,31 @@
 /*!
  * \file thread_storage_sync.cc
  */
-#include "common/attr.h"
-#include <tvm/tirx/stmt.h>
 #include "../op/builtin.h"
 #include "./common/constr_visitor.h"
 #include "./common/thread_sync_types.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "common/attr.h"
 #include "runtime/thread_storage_scope.h"
+#include "support/check.h"
 #include "tir/transforms/ir_utils.h"
 #include <algorithm>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
-#include "support/check.h"
 #include <tvm/ir/attrs.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <tvm/runtime/logging.h>
-#include <tvm/ir/cast.h>
 
 namespace tvm {
 namespace tl {
@@ -230,6 +230,7 @@ public:
       return StmtExprMutator::VisitStmt(stmt);
     }
   }
+
 private:
   // data structure.
   StorageScope sync_scope_;
@@ -1049,8 +1050,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           // cannot find buffer map, use the default buffer
           buffer_ranges = {Range::FromMinExtent(offset, extent)};
         } else {
-          Buffer buffer =
-              buffer_data_to_buffer_.at(GetRef<Var>(buffer_var));
+          Buffer buffer = buffer_data_to_buffer_.at(GetRef<Var>(buffer_var));
           auto buffer_shape = buffer->shape;
           // convert 1d offset to multi-dimensional index
           auto linear_to_indices = [](PrimExpr offset,
