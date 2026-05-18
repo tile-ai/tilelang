@@ -9,7 +9,6 @@ from utils import assert_tensors_similar
 @tilelang.jit(
     out_idx=[-2, -1],
     pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True, tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
-    debug_root_path='/home/wt/debug/sparsemla'
 )
 def sparse_mla_fwd(
     heads,
@@ -269,11 +268,7 @@ def test_sparse_mla_fwd(
 
     from tilelang.profiler import do_bench
 
-    ms = do_bench(
-        fn,
-        warmup=100,
-        rep=250
-    )
+    ms = do_bench(fn, warmup=100, rep=250)
     print(f"Average time: {ms:.3f} ms")
     print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
     print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
