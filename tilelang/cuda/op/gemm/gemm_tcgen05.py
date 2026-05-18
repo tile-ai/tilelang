@@ -18,7 +18,7 @@ from tvm import tirx
 from tvm.target import Target
 from tvm.ir import Range
 from tvm.arith import Analyzer
-from typing import Callable
+from collections.abc import Callable
 
 
 _FLOAT8_DTYPES = {

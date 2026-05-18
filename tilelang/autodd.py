@@ -6,7 +6,9 @@ from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
-from typing import Callable, Literal, NamedTuple, override
+from typing import Literal, NamedTuple
+from collections.abc import Callable
+from typing_extensions import override
 from collections.abc import Sequence
 from collections.abc import Iterable
 import contextlib

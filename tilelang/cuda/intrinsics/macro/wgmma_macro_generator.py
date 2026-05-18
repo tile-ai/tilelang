@@ -2,7 +2,7 @@ from __future__ import annotations
 import tilelang.language as T
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable
+from collections.abc import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
 from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion

@@ -2,7 +2,6 @@ from __future__ import annotations
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
-import sys
 
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
@@ -19,15 +18,12 @@ from tvm.tirx import Buffer
 from tvm.script.ir_builder import tirx, IRBuilder
 
 from tvm.tirx.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
-from typing import TYPE_CHECKING, Callable, Any, Generic, TypeVar, ForwardRef, Union, Literal, get_origin
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, ForwardRef, Literal, get_origin, ParamSpec
+from collections.abc import Callable
+from typing_extensions import Self
 from collections.abc import Hashable
 from collections.abc import Sequence
 
-# Python 3.9 compatibility for ParamSpec and Self
-try:
-    from typing import ParamSpec, Self
-except ImportError:  # Python < 3.11 for Self, < 3.10 for ParamSpec
-    from typing_extensions import ParamSpec, Self
 from .. import dtypes as dt
 from . import utils
 from tilelang.jit.exceptions import JITNoBuilderError, EagerJITBuildError
@@ -138,10 +134,9 @@ class Ref:
 class UnrollForWithStep(SerialForWithStep): ...
 
 
-# Python 3.9 compatibility: avoid PEP 604 unions at runtime
-# Use tuple for isinstance checks and typing.Union for annotations/aliases
+# Runtime frame checks use tuple form; AnyFrame is kept as an annotation alias.
 ContinueOrBreak = (ContinueFrame, BreakFrame)
-AnyFrame = Union[tirx.frame.IRBuilderFrame, Frame]
+AnyFrame = tirx.frame.IRBuilderFrame | Frame
 
 TIR_CONTROL_FRAME = (
     tirx.frame.WhileFrame,
@@ -884,10 +879,7 @@ def get_type_hints(func):
                     continue
                 except Exception:
                     pass
-            if sys.version_info >= (3, 10):
-                value = ForwardRef(value, module=func.__module__)
-            else:
-                value = ForwardRef(value, is_argument=True)
+            value = ForwardRef(value, module=func.__module__)
             hints[name] = _eval_type(value, globalns=globalns, localns=localns)
         else:
             hints[name] = value

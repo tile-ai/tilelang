@@ -1,6 +1,6 @@
 from __future__ import annotations
 import inspect
-from typing import Callable
+from collections.abc import Callable
 
 import tvm.tirx.script.parser.entry as _tir_entry
 from tvm.tirx.function import PrimFunc
