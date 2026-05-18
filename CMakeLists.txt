@@ -754,15 +754,18 @@ if(APPLE AND USE_Z3 AND USE_PYPI_Z3)
           OUTPUT_VARIABLE _otool_output
           RESULT_VARIABLE _otool_result
         )
-        if(_otool_result EQUAL 0 AND _otool_output MATCHES "\n[ \t]*libz3\\.dylib \\(")
-          execute_process(
-            COMMAND /usr/bin/install_name_tool -change libz3.dylib @rpath/libz3.dylib "${_path}"
-            RESULT_VARIABLE _install_name_tool_result
-          )
-          if(NOT _install_name_tool_result EQUAL 0)
-            message(FATAL_ERROR "Failed to rewrite libz3.dylib install name in ${_path}")
+        foreach(_z3_name IN ITEMS libz3.dylib @loader_path/libz3.dylib)
+          string(REPLACE "." "\\." _z3_name_regex "${_z3_name}")
+          if(_otool_result EQUAL 0 AND _otool_output MATCHES "\n[ \t]*${_z3_name_regex} \\(")
+            execute_process(
+              COMMAND /usr/bin/install_name_tool -change "${_z3_name}" @rpath/libz3.dylib "${_path}"
+              RESULT_VARIABLE _install_name_tool_result
+            )
+            if(NOT _install_name_tool_result EQUAL 0)
+              message(FATAL_ERROR "Failed to rewrite ${_z3_name} install name in ${_path}")
+            endif()
           endif()
-        endif()
+        endforeach()
       endif()
     endforeach()
   ]])
