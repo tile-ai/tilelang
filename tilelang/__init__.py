@@ -106,9 +106,29 @@ if not env.is_light_import():
 del _init_logger
 
 
+def _disable_rocm_tvm_ffi_torch_c_dlpack(torch_module):
+    if getattr(torch_module.version, "hip", None) is None:
+        return
+
+    os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
+    try:
+        from tvm_ffi import _optional_torch_c_dlpack
+    except Exception:
+        return
+
+    # TVM Relax calls this loader directly while importing, bypassing the
+    # tvm-ffi module-level env guard.
+    def _disabled_torch_c_dlpack_extension(*_args, **_kwargs):
+        return None
+
+    _optional_torch_c_dlpack.load_torch_c_dlpack_extension = _disabled_torch_c_dlpack_extension
+
+
 @contextlib.contextmanager
 def _lazy_load_lib():
-    import torch  # noqa: F401 # preload torch to avoid dlopen errors
+    import torch  # preload torch to avoid dlopen errors
+
+    _disable_rocm_tvm_ffi_torch_c_dlpack(torch)
 
     if sys.platform.startswith("win32"):
         yield
@@ -186,5 +206,8 @@ if not env.is_light_import():
     from .math import *  # noqa: F403
     from . import ir  # noqa: F401
     from . import tileop  # noqa: F401
+    from . import cpu as cpu  # noqa: F401
+    from . import cuda as cuda  # noqa: F401
+    from . import rocm as rocm  # noqa: F401
 
 del _lazy_load_lib

@@ -5,7 +5,7 @@ from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
-from tilelang.backend.gemm import resolve_gemm_impl
+from .registry import resolve_gemm_impl
 from tilelang import _ffi_api
 
 
