@@ -312,7 +312,8 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
 
     this->PrintLine("const id<MTLCommandBuffer> commandBuffer = "
                     "torch::mps::get_command_buffer();");
-    this->PrintLine("const auto f = Function::GetGlobal(\"metal.SetStream\");");
+    this->PrintLine(
+        "const auto f = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
     this->PrintLine("(*f)(static_cast<TVMStreamHandle>(commandBuffer));");
   }
 
