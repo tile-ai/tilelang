@@ -602,23 +602,6 @@ if(DEFINED TILELANG_ACTIVE_BACKEND_STUB_LINK)
   endforeach()
 endif()
 
-if(APPLE AND USE_Z3 AND USE_PYPI_Z3)
-  # PyPI z3-solver's macOS dylib uses the bare install name
-  # "libz3.dylib".  dyld does not resolve bare install names through LC_RPATH,
-  # so rewrite TVM's load command to @rpath and let the z3 package rpath below
-  # locate the dependency inside site-packages/z3/{lib,bin}.
-  foreach(target IN ITEMS tvm_compiler tvm)
-    if(TARGET ${target})
-      add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND /bin/sh -c
-                "if otool -L \"$1\" | grep -q '^[[:space:]]*libz3\\.dylib '; then \"$2\" -change libz3.dylib @rpath/libz3.dylib \"$1\"; fi"
-                _ "$<TARGET_FILE:${target}>" "${CMAKE_INSTALL_NAME_TOOL}"
-        VERBATIM
-      )
-    endif()
-  endforeach()
-endif()
-
 # Append stub targets after the linking loop so they don't link to themselves
 if(DEFINED TILELANG_ACTIVE_BACKEND_STUB_TARGETS)
   list(APPEND TILELANG_OUTPUT_TARGETS ${TILELANG_ACTIVE_BACKEND_STUB_TARGETS})
@@ -684,3 +667,32 @@ install(
   RUNTIME DESTINATION tilelang/lib
   ARCHIVE DESTINATION tilelang/lib
 )
+
+if(APPLE AND USE_Z3 AND USE_PYPI_Z3)
+  # PyPI z3-solver's macOS dylib uses the bare install name
+  # "libz3.dylib".  dyld does not resolve bare install names through LC_RPATH,
+  # so rewrite TVM's installed load command to @rpath and let the z3 package
+  # rpath above locate the dependency inside site-packages/z3/{lib,bin}.
+  install(CODE [[
+    set(_tilelang_lib_dir "${CMAKE_INSTALL_PREFIX}/tilelang/lib")
+    foreach(_dylib IN ITEMS libtvm_compiler.dylib libtvm.dylib)
+      set(_path "${_tilelang_lib_dir}/${_dylib}")
+      if(EXISTS "${_path}")
+        execute_process(
+          COMMAND otool -L "${_path}"
+          OUTPUT_VARIABLE _otool_output
+          RESULT_VARIABLE _otool_result
+        )
+        if(_otool_result EQUAL 0 AND _otool_output MATCHES "\n[ \t]*libz3\\.dylib \\(")
+          execute_process(
+            COMMAND /usr/bin/install_name_tool -change libz3.dylib @rpath/libz3.dylib "${_path}"
+            RESULT_VARIABLE _install_name_tool_result
+          )
+          if(NOT _install_name_tool_result EQUAL 0)
+            message(FATAL_ERROR "Failed to rewrite libz3.dylib install name in ${_path}")
+          endif()
+        endif()
+      endif()
+    endforeach()
+  ]])
+endif()
