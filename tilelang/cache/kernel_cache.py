@@ -91,9 +91,14 @@ class KernelCache:
         if sys.platform == "win32":
             lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
         elif sys.platform == "darwin":
-            lib_names = ["libtilelang.dylib", "libtilelang.so", "libtvm.dylib", "libtvm.so"]
+            lib_names = [
+                "libtilelang.dylib",
+                "libtilelang.so",
+                "libtvm_runtime.dylib",
+                "libtvm_compiler.dylib",
+            ]
         else:
-            lib_names = ["libtilelang.so", "libtvm.so"]
+            lib_names = ["libtilelang.so", "libtvm_runtime.so", "libtvm_compiler.so"]
 
         stamps: list[str] = []
         seen_names: set[str] = set()

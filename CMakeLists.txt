@@ -377,8 +377,6 @@ list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
 )
 
-set(TILELANG_OUTPUT_TARGETS tilelang tvm)
-
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -466,9 +464,9 @@ endif()
 
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
 # since TVM_LOG_CUSTOMIZE=1 requires them to be supplied by the user.
-target_sources(tvm_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
+target_sources(tvm_runtime_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
 if(TILELANG_RELEASE_BUILD)
-  target_compile_definitions(tvm_objs PRIVATE TILELANG_RELEASE_BUILD=1)
+  target_compile_definitions(tvm_runtime_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
 # Resolve compile warnings in tvm
@@ -500,8 +498,8 @@ if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
-set(TILELANG_OUTPUT_TARGETS tvm)
 if(WIN32)
+  set(TILELANG_OUTPUT_TARGETS tvm)
   # On Windows, TileLang subclasses a large number of non-exported TVM C++
   # classes. Building those objects into tvm.dll avoids an otherwise fragile
   # cross-DLL ABI boundary while keeping Python-side registration semantics.
@@ -525,8 +523,9 @@ if(WIN32)
   # sure `ninja` (and `cmake --build`) actually builds it by default.
   set_property(TARGET tvm PROPERTY EXCLUDE_FROM_ALL FALSE)
 else()
+  set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-  target_link_libraries(tilelang PUBLIC tvm)
+  target_link_libraries(tilelang PUBLIC tvm_compiler)
 
   # Place dev build outputs under build/lib for consistency
   set_target_properties(tilelang PROPERTIES
@@ -630,7 +629,7 @@ elseif(UNIX)
   endif()
 endif()
 
-# Let libtilelang search for tvm in the same directory
+# Let TileLang and TVM split libraries find each other in the same directory
 foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
   set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
   set_target_properties(${target} PROPERTIES
