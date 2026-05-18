@@ -614,15 +614,20 @@ install(TARGETS tilelang_cython_wrapper
         RUNTIME DESTINATION tilelang/lib
         ARCHIVE DESTINATION tilelang/lib)
 
-# Copy libz3.so to build folder to workaround isolated build env issue
+# Copy libz3 into the build-tree library folder.  CI tests dlopen
+# build/lib/libtvm_compiler.so directly before the package is installed, so
+# INSTALL_RPATH cannot help that path find PyPI z3-solver's shared library.
 if(USE_Z3 AND USE_PYPI_Z3)
   get_target_property(Z3_LIBRARY_PATH z3::libz3 IMPORTED_LOCATION)
-  install(FILES "${Z3_LIBRARY_PATH}" DESTINATION "${CMAKE_BINARY_DIR}/lib")
-  if(APPLE)
-    set_target_properties(tvm PROPERTIES BUILD_RPATH "@loader_path")
-  else()
-    set_target_properties(tvm PROPERTIES BUILD_RPATH "\$ORIGIN")
+  get_filename_component(Z3_LIBRARY_DIR "${Z3_LIBRARY_PATH}" DIRECTORY)
+  file(GLOB Z3_RUNTIME_LIBS
+    "${Z3_LIBRARY_DIR}/libz3${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+    "${Z3_LIBRARY_DIR}/z3${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+  )
+  if(NOT Z3_RUNTIME_LIBS)
+    set(Z3_RUNTIME_LIBS "${Z3_LIBRARY_PATH}")
   endif()
+  file(COPY ${Z3_RUNTIME_LIBS} DESTINATION "${CMAKE_BINARY_DIR}/lib")
 endif()
 
 if(DEFINED TILELANG_ACTIVE_BACKEND_STUB_LINK)
@@ -638,13 +643,16 @@ endif()
 
 unset(PATCHELF_EXECUTABLE CACHE)
 
+set(TILELANG_BUILD_RPATH "")
 if(APPLE)
+  set(TILELANG_BUILD_RPATH "@loader_path")
   set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     # Some z3 is placed in lib/ and some in bin/, we add both in rpath
     string(APPEND TILELANG_INSTALL_RPATH ";@loader_path/../../z3/lib;@loader_path/../../z3/bin")
   endif()
 elseif(UNIX)
+  set(TILELANG_BUILD_RPATH "\$ORIGIN")
   set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
@@ -660,6 +668,7 @@ endif()
 
 # Let TileLang and TVM split libraries find each other in the same directory
 foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+  set_target_properties(${target} PROPERTIES BUILD_RPATH "${TILELANG_BUILD_RPATH}")
   set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
   set_target_properties(${target} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
