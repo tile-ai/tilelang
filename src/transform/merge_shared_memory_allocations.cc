@@ -337,7 +337,7 @@ public:
     const VarNode *buf = op->buffer->data.get();
     auto it = alloc_info_.find(buf);
     if (it != alloc_info_.end() && it->second.alloc) {
-      ICHECK_LT(it->second.level, scope_.size());
+      ICHECK_LE(it->second.level, scope_.size());
       if (IsAppropriateSharedMemory(tvm::ffi::GetRef<Var>(buf))) {
         // When accesses happen under an if/else tree, attributing them to the
         // innermost statement gives a much tighter approximation than pushing
@@ -347,11 +347,12 @@ public:
         bool use_innermost_scope =
             enable_aggressive_merge_ || if_scope_depth_ > 0;
         size_t access_level =
-            use_innermost_scope ? scope_.size() - 1 : it->second.level;
+            use_innermost_scope ? scope_.size() - 1
+                                : std::min(it->second.level, scope_.size() - 1);
         if (use_innermost_scope) {
           RecordAccess(scope_.size() - 1, buf, true, op);
         } else {
-          RecordAccess(it->second.level, buf, true, op);
+          RecordAccess(access_level, buf, true, op);
         }
         RecordPreciseAccess(access_level,
                             MakePreciseAccess(op->buffer, op->indices,
@@ -883,11 +884,27 @@ public:
       }
       auto live_out =
           epoch_graph::ComputePerEpochLiveness<const VarNode *>(eg, live_input);
+      loop_live_buffers_.clear();
       for (const auto &kv : live_out) {
         std::set<int> &dst = liveness_epochs_by_var_[kv.first];
         for (const auto &p : kv.second) {
           if (p.second.Live())
             dst.insert(p.first);
+        }
+        // If any live epoch belongs to a ForBody scope, mark the buffer as
+        // loop-live so the per-epoch relaxer is disabled for it.
+        for (int epoch_id : dst) {
+          if (epoch_id >= 0 && epoch_id < static_cast<int>(eg.epochs.size())) {
+            int scope_id = eg.epochs[epoch_id].scope_id;
+            if (scope_id >= 0 &&
+                scope_id < static_cast<int>(eg.scopes.size())) {
+              if (eg.scopes[scope_id].kind ==
+                  epoch_graph::ScopeKind::kForBody) {
+                loop_live_buffers_.insert(kv.first);
+                break;
+              }
+            }
+          }
         }
       }
 
@@ -4831,6 +4848,25 @@ private:
     for (auto &kv : segments_by_var) {
       std::sort(kv.second.begin(), kv.second.end());
     }
+    // Force-merge multiple segments for the same buffer into a single
+    // interval.  BuildLocalSegmentsFromCompressedCutpoints may split a
+    // buffer across scope boundaries (e.g. a read inside a loop and a
+    // write attributed to the outer scope sentinel), but the underlying
+    // AllocateNode has only one physical address.  Keeping one segment
+    // per buffer guarantees that LinearScanPack assigns exactly one
+    // offset and all accesses use it.
+    for (auto &kv : segments_by_var) {
+      if (kv.second.size() > 1) {
+        int min_start = kv.second.front().first;
+        int max_end = kv.second.back().second;
+        for (const auto &seg : kv.second) {
+          min_start = std::min(min_start, seg.first);
+          max_end = std::max(max_end, seg.second);
+        }
+        kv.second.clear();
+        kv.second.push_back({min_start, max_end});
+      }
+    }
 
     // Create a sorted vector of keys from shmem_allocs_ for deterministic
     // iteration
@@ -4924,7 +4960,8 @@ private:
         interval.segment_id = static_cast<int>(segment_id);
         auto live_it = liveness_epochs_by_var_.find(info.var);
         if (live_it != liveness_epochs_by_var_.end() &&
-            !live_it->second.empty()) {
+            !live_it->second.empty() &&
+            loop_live_buffers_.count(info.var) == 0) {
           interval.live_epochs = &live_it->second;
         }
         intervals.push_back(interval);
@@ -5164,6 +5201,10 @@ private:
   // two buffers with non-trivial *and* structurally distinct layouts must not
   // alias, even when their live-epoch sets are disjoint.
   std::unordered_map<const VarNode *, Layout> layout_sigs_;
+  // Buffers whose live epochs touch any ForBody scope.  The per-epoch relaxer
+  // is disabled for these buffers because pipelined loops may cause iteration
+  // overlap that the epoch-graph fixed-point does not capture.
+  std::unordered_set<const VarNode *> loop_live_buffers_;
   // Approximate statement position during rewrite.
   int stmt_visit_index_{0};
 };
