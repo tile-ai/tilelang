@@ -14,9 +14,6 @@ os.environ.setdefault("NCCL_DEBUG", "ERROR")
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE: True,
-    },
     compile_once=True,
 )
 def gemm_rs_specialized_kernel(
@@ -88,7 +85,7 @@ def gemm_rs_specialized_kernel(
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            C_shared = T.alloc_shared((store_block_M, block_N), dtype)
+            C_shared = T.alloc_shared((2, store_block_M, block_N), dtype)
 
             for w in T.serial(waves):
                 tile_id = bid + w * sm_num
@@ -105,7 +102,14 @@ def gemm_rs_specialized_kernel(
 
                     # Fused reduce-scatter
                     for row_offset in T.serial(0, block_M, store_block_M):
-                        T.copy(C_local[row_offset, 0], C_shared)
+                        store_stage = row_offset // store_block_M
+                        T.copy(
+                            C_local[
+                                row_offset : row_offset + store_block_M,
+                                0:block_N,
+                            ],
+                            C_shared[store_stage, :, :],
+                        )
                         if use_tma_epilogue:
                             # TMA store-add into peer C.
                             T.atomic_add(
@@ -113,8 +117,9 @@ def gemm_rs_specialized_kernel(
                                     local_by * block_M + row_offset : local_by * block_M + row_offset + store_block_M,
                                     bx * block_N : (bx + 1) * block_N,
                                 ],
-                                C_shared,
+                                C_shared[store_stage, :, :],
                                 use_tma=True,
+                                tma_wait=False,
                                 dst_pe=dst_rank,
                             )
                         else:
@@ -124,10 +129,11 @@ def gemm_rs_specialized_kernel(
                                 elem = idx * 2
                                 T.atomic_addx2(
                                     C[local_by * block_M + row_offset + elem // block_N, bx * block_N + elem % block_N],
-                                    C_shared[elem // block_N, elem % block_N],
+                                    C_shared[store_stage, elem // block_N, elem % block_N],
                                     dst_pe=dst_rank,
                                 )
-
+                    if use_tma_epilogue and T.get_thread_binding() == 0:
+                        T.tma_store_wait(0, True)
     return main
 
 
@@ -219,6 +225,9 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         rep=args.rep,
         post_fn=reset_output,
         group=group,
+        flush_l2=args.flush_l2,
+        barrier_comm_profiling=args.barrier_comm_profiling,
+        discard_first=args.discard_first,
     )
 
     if local_rank == 0:
@@ -248,9 +257,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Use TMA store-add epilogue (default)",
     )
+    epilogue.add_argument(
+        "--no-tma-epilogue",
+        dest="tma_epilogue",
+        action="store_false",
+        help="Use vectorized bf16x2 atomic add epilogue.",
+    )
     parser.set_defaults(tma_epilogue=True)
-    parser.add_argument("--warmup", type=int, default=20)
-    parser.add_argument("--rep", type=int, default=20)
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--rep", type=int, default=10)
+    parser.add_argument("--flush-l2", action="store_true")
+    parser.add_argument("--barrier-comm-profiling", action="store_true")
+    parser.add_argument("--discard-first", action="store_true")
     parser.add_argument("--atol", type=float, default=0.5)
     parser.add_argument("--rtol", type=float, default=1e-1)
     parser.add_argument("--check", action="store_true")

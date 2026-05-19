@@ -27,7 +27,6 @@ def ag_gemm_sm_specialized_kernel(
     N,
     K,
     num_ranks,
-    num_comm_sms: int,
     block_M: int,
     block_N: int,
     block_K: int,
@@ -38,7 +37,6 @@ def ag_gemm_sm_specialized_kernel(
     dtype=T.bfloat16,
 ):
     sm_num = driver.get_num_sms()
-    num_comp_sms = sm_num - num_comm_sms
     M_per_rank = M // num_ranks
     N_per_rank = N // num_ranks
     m_blocks = T.ceildiv(M, block_M)
@@ -47,16 +45,14 @@ def ag_gemm_sm_specialized_kernel(
     k_blocks = T.ceildiv(K, block_K)
     comm_block_M = block_M * 2
     comm_block_K = block_K * 2
-    store_block_M = block_M // 2
+    store_block_M = block_M if block_N <= 128 else block_M // 2
     comm_chunks = 2
     local_comm_m_blocks = T.ceildiv(M_per_rank, comm_block_M)
     comm_m_blocks = T.ceildiv(M, comm_block_M)
     comm_k_blocks = T.ceildiv(K, comm_block_K)
     comm_tasks_per_rank = local_comm_m_blocks * comm_k_blocks
     total_tiles = m_blocks * n_blocks
-    waves = T.ceildiv(total_tiles, num_comp_sms)
     accum_dtype = T.float32
-    comm_workers_per_signal = T.min(num_comm_sms * comm_chunks, comm_k_blocks)
     local_tiles = local_m_blocks * n_blocks
 
     def tile_coords(tile_id, local_rank):
@@ -126,9 +122,13 @@ def ag_gemm_sm_specialized_kernel(
         local_signal: T.Tensor((comm_m_blocks,), T.uint32),
         barriers: T.Tensor((2, num_ranks), T.int32),
         C: T.Tensor((M, N_per_rank), dtype),
+        num_comm_sms: T.int32,
     ):
         with T.Kernel(sm_num, threads=threads) as bid:
             local_rank = T.get_rank()
+            num_comp_sms = sm_num - num_comm_sms
+            waves = T.ceildiv(total_tiles, num_comp_sms)
+            comm_workers_per_signal = T.min(num_comm_sms * comm_chunks, comm_k_blocks)
             T.barrier_blocks(barriers[0, 0])
             if bid < num_comp_sms:
                 with T.sm_specialize_scope(auto_ws=True):
@@ -136,9 +136,10 @@ def ag_gemm_sm_specialized_kernel(
                     B_comp_shared = T.alloc_shared((block_K, block_N), dtype)
                     C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
                     if use_tma_store:
-                        # Stage one consumer warpgroup's rows at a time. A
-                        # 128x256 TMA epilogue would exceed Hopper SMEM budget
-                        # after auto warp-specialized input staging.
+                        # A 128x128 epilogue fits in SMEM; wider 128x256 tiles
+                        # are staged as two 64x256 TMA stores to stay within
+                        # Hopper SMEM budget after auto warp-specialized input
+                        # staging.
                         C_shared = T.alloc_shared((store_block_M, block_N), dtype)
                         C_local_cast = T.alloc_fragment((block_M, block_N), dtype)
                     for w in T.serial(waves):
@@ -314,7 +315,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         N,
         K,
         num_local_ranks,
-        num_comm_sms,
         block_M,
         block_N,
         block_K,
@@ -345,8 +345,8 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     torch.cuda.synchronize()
     dist.barrier(group)
 
-    def ag_gemm_op():
-        kernel(A, B, mcast_A, gathered_A, mcast_signal, local_signal, barriers, C)
+    def ag_gemm_op(comm_sms=num_comm_sms):
+        kernel(A, B, mcast_A, gathered_A, mcast_signal, local_signal, barriers, C, comm_sms)
         reset_kernel(local_signal, barriers, True)
         return C
 
@@ -365,14 +365,25 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(f"rank {local_rank} check failed. ❌")
         print(f"max_diff={max_diff}, ag_max_diff={ag_max_diff}")
 
-    tl_t = do_bench(
-        ag_gemm_op,
-        warmup=args.warmup,
-        rep=args.rep,
-        group=group,
-    )
-    if local_rank == 0:
-        print(f"tilelang specialized ag_gemm time: {tl_t:.2f} ms, TFLOPS: {2 * M * N * K / 1e9 / tl_t / num_local_ranks:.2f}")
+    if args.tune_comm_sms:
+        sms_values = [int(s) for s in args.tune_comm_sms.split(",") if s]
+    else:
+        sms_values = [num_comm_sms]
+
+    for sms in sms_values:
+        assert 0 < sms < driver.get_num_sms(), "num_comm_sms must leave at least one compute SM"
+        tl_t = do_bench(
+            lambda sms=sms: ag_gemm_op(sms),
+            warmup=args.warmup,
+            rep=args.rep,
+            group=group,
+        )
+        if local_rank == 0:
+            print(
+                f"tilelang specialized ag_gemm time: {tl_t:.2f} ms, "
+                f"TFLOPS: {2 * M * N * K / 1e9 / tl_t / num_local_ranks:.2f}, "
+                f"num_comm_sms: {sms}"
+            )
 
     allocator.close()
     dist.destroy_process_group()
@@ -389,6 +400,12 @@ if __name__ == "__main__":
     parser.add_argument("--block-k", type=int, default=64)
     parser.add_argument("--threads", type=int, default=256)
     parser.add_argument("--num-comm-sms", type=int, default=4)
+    parser.add_argument(
+        "--tune-comm-sms",
+        type=str,
+        default="",
+        help="Comma-separated num_comm_sms values to benchmark with one compiled kernel.",
+    )
     parser.add_argument("--group-size-m", type=int, default=12)
     parser.add_argument("--pipeline-stages", type=int, default=4)
     epilogue = parser.add_mutually_exclusive_group()

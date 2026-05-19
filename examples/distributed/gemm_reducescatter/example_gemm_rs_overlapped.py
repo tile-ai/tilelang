@@ -8,7 +8,7 @@ import torch.distributed as dist
 import torch.multiprocessing
 from tilelang.distributed import init_dist
 from tilelang.distributed import do_bench
-from reduce_scatter import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
+from reduce_scatter_utils import reduce_scatter_2d_op, create_reduce_scater_2d_ctx
 
 
 @tilelang.jit(compile_once=True)

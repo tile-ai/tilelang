@@ -1,10 +1,10 @@
 """BF16 GEMM + NVSwitch multimem allreduce.
 
-This is the stable TileLang version of the ThunderKittens GEMM-AR data flow:
-write each rank's GEMM partial into multicast-backed C, then allreduce C with
-multimem.ld_reduce + multimem.st. The allreduce is a separate kernel for now;
-that keeps the user-facing code simple and reuses the same robust primitive as
-the standalone allreduce example.
+This stable TileLang GEMM-AR path writes each rank's GEMM partial into
+multicast-backed C, then allreduces C with multimem.ld_reduce + multimem.st.
+The allreduce is a separate kernel for now; that keeps the user-facing code
+simple and reuses the same robust primitive as the standalone allreduce
+example.
 """
 
 import argparse
@@ -91,9 +91,6 @@ def multimem_allreduce_one_shot_kernel(total_elems, block_E, threads, dtype=T.bf
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE: True,
-    },
     compile_once=True,
 )
 def gemm_ar_sm_specialized_kernel(
@@ -101,7 +98,6 @@ def gemm_ar_sm_specialized_kernel(
     N,
     K,
     num_ranks,
-    num_comm_sms: int,
     block_M: int,
     block_N: int,
     block_K: int,
@@ -112,12 +108,10 @@ def gemm_ar_sm_specialized_kernel(
     dtype=T.bfloat16,
 ):
     sm_num = driver.get_num_sms()
-    num_comp_sms = sm_num - num_comm_sms
     m_blocks = T.ceildiv(M, block_M)
     n_blocks = T.ceildiv(N, block_N)
     k_blocks = T.ceildiv(K, block_K)
     total_tiles = m_blocks * n_blocks
-    waves = T.ceildiv(total_tiles, num_comp_sms)
     ar_rows = ar_block_e // block_N
     ar_row_chunks = block_M // ar_rows
     store_block_M = block_M // 2
@@ -159,9 +153,12 @@ def gemm_ar_sm_specialized_kernel(
         mcast_C: T.Tensor((M, N), dtype),
         mcast_signal: T.Tensor((total_tiles,), T.uint32),
         local_signal: T.Tensor((total_tiles,), T.uint32),
+        num_comm_sms: T.int32,
     ):
         with T.Kernel(sm_num, threads=threads) as bid:
             local_rank = T.get_rank()
+            num_comp_sms = sm_num - num_comm_sms
+            waves = T.ceildiv(total_tiles, num_comp_sms)
             if bid < num_comp_sms:
                 with T.sm_specialize_scope(auto_ws=True):
                     A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -177,10 +174,6 @@ def gemm_ar_sm_specialized_kernel(
                                 T.copy(A[by * block_M, k * block_K], A_shared)
                                 T.copy(B[k * block_K, bx * block_N], B_shared)
                                 T.gemm(A_shared, B_shared, C_local)
-                            # Match TK's store path: consumers materialize C in
-                            # shared memory, then use TMA stores before
-                            # signaling the communicator. Store half a tile at
-                            # a time to keep shared memory under the H100 limit.
                             for row_offset in T.serial(0, block_M, store_block_M):
                                 T.copy(C_local[row_offset, 0], C_shared)
                                 T.sync_threads()
@@ -307,7 +300,6 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             N,
             K,
             num_local_ranks,
-            args.num_comm_sms,
             block_M,
             block_N,
             block_K,
@@ -348,7 +340,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     def reset_output():
         # GEMM and allreduce overwrite the full output tile space. Keep reset
-        # aligned with TK's epilogue: only restore the inter-SM signal state.
+        # focused on the inter-SM signal state.
         if not args.two_kernel:
             reset_kernel(local_signal)
         torch.cuda.synchronize()
@@ -362,7 +354,7 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             ar_kernel(mcast_C_flat, output_flat)
         else:
             mcast_C = mcast_C_flat.view(M, N)
-            gemm_kernel(A, B, local_C, mcast_C, mcast_signal, local_signal)
+            gemm_kernel(A, B, local_C, mcast_C, mcast_signal, local_signal, args.num_comm_sms)
         return output
 
     reset_output()
@@ -379,32 +371,53 @@ def main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         dist.barrier(group)
 
     reset_output()
-    if args.include_reset_in_bench:
-        def bench_kernel():
-            run_kernel()
-            # Match TK's timed entrypoint: launch the main kernel followed by
-            # the device-side epilogue/reset kernel, without adding host
-            # synchronize or process-group barriers inside the measured body.
-            if reset_kernel is not None:
-                reset_kernel(local_signal)
-
-        tl_t = do_bench(
-            bench_kernel,
-            warmup=args.warmup,
-            rep=args.rep,
-            group=group,
-        )
+    include_reset_in_bench = getattr(args, "include_reset_in_bench", False)
+    tune_comm_sms = getattr(args, "tune_comm_sms", "")
+    if args.two_kernel:
+        sms_values = [args.num_comm_sms]
+    elif tune_comm_sms:
+        sms_values = [int(s) for s in tune_comm_sms.split(",") if s]
     else:
-        tl_t = do_bench(
-            run_kernel,
-            warmup=args.warmup,
-            rep=args.rep,
-            post_fn=reset_output,
-            group=group,
-        )
-    if local_rank == 0:
-        tflops = 2 * M * N * K / 1e9 / tl_t
-        print(f"tilelang gemm_ar time: {tl_t:.3f} ms, TFLOPS/GPU: {tflops:.2f}")
+        sms_values = [args.num_comm_sms]
+
+    for sms in sms_values:
+        if not args.two_kernel:
+            assert 0 < sms < driver.get_num_sms(), "num-comm-sms must leave at least one compute SM"
+
+        def run_kernel_with_sms(comm_sms=sms):
+            if args.two_kernel:
+                return run_kernel()
+            mcast_C = mcast_C_flat.view(M, N)
+            gemm_kernel(A, B, local_C, mcast_C, mcast_signal, local_signal, comm_sms)
+            return output
+
+        if include_reset_in_bench:
+            def bench_kernel():
+                run_kernel_with_sms()
+                # Launch the main kernel followed by the device-side reset
+                # kernel, without adding host synchronize or process-group
+                # barriers inside the measured body.
+                if reset_kernel is not None:
+                    reset_kernel(local_signal)
+
+            tl_t = do_bench(
+                bench_kernel,
+                warmup=args.warmup,
+                rep=args.rep,
+                group=group,
+            )
+        else:
+            tl_t = do_bench(
+                run_kernel_with_sms,
+                warmup=args.warmup,
+                rep=args.rep,
+                post_fn=reset_output,
+                group=group,
+            )
+        if local_rank == 0:
+            tflops = 2 * M * N * K / 1e9 / tl_t
+            suffix = "" if args.two_kernel else f", num_comm_sms: {sms}"
+            print(f"tilelang gemm_ar time: {tl_t:.3f} ms, TFLOPS/GPU: {tflops:.2f}{suffix}")
 
     allocator.close()
     dist.destroy_process_group()
@@ -423,6 +436,12 @@ if __name__ == "__main__":
     parser.add_argument("--pipeline-stages", type=int, default=4)
     parser.add_argument("--ar-block-e", type=int, default=4096)
     parser.add_argument("--num-comm-sms", type=int, default=16)
+    parser.add_argument(
+        "--tune-comm-sms",
+        type=str,
+        default="",
+        help="Comma-separated num_comm_sms values to benchmark with one compiled kernel.",
+    )
     parser.add_argument("--group-size-m", type=int, default=12)
     parser.add_argument("--two-kernel", action="store_true")
     parser.add_argument("--include-reset-in-bench", action="store_true")
