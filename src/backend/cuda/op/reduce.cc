@@ -21,6 +21,13 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return TargetIsCuda(target);
   }
 
+  static int GetPreferedVectorizedSize(DataType dt, Target target) {
+    if (!TargetIsCuda(target)) {
+      return 1;
+    }
+    return backend::reduce::GetPreferedVectorizedSize(dt);
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset,

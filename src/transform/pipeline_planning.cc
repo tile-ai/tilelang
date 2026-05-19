@@ -34,6 +34,10 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
+                                           ObjectPtrHash, ObjectPtrEqual>;
+
 /*!
  * \brief Check whether two regions have intersections.
  * \param region1 The first region.
@@ -91,11 +95,9 @@ public:
   AsyncDependencyChainBuilder(Map<Var, Buffer> buffer_data_to_buffer)
       : buffer_data_to_buffer_(buffer_data_to_buffer) {}
 
-  std::unordered_map<const BufferNode *, Array<BufferRegion>>
-      mbar_to_buffer_reads_;
+  BufferRegionMap mbar_to_buffer_reads_;
 
-  std::unordered_map<const BufferNode *, Array<BufferRegion>>
-      mbar_to_buffer_writes_;
+  BufferRegionMap mbar_to_buffer_writes_;
 
 private:
   Map<Var, Buffer> buffer_data_to_buffer_;
@@ -156,15 +158,15 @@ private:
         Buffer c_buf = tmem_collector.result;
 
         PrimExpr clear_accum = args[5];
-        mbar_to_buffer_reads_[mbar_buf.get()].push_back(
+        mbar_to_buffer_reads_[mbar_buf].push_back(
             BufferRegion::FullRegion(a_buf));
-        mbar_to_buffer_reads_[mbar_buf.get()].push_back(
+        mbar_to_buffer_reads_[mbar_buf].push_back(
             BufferRegion::FullRegion(b_buf));
-        mbar_to_buffer_writes_[mbar_buf.get()].push_back(
+        mbar_to_buffer_writes_[mbar_buf].push_back(
             BufferRegion::FullRegion(c_buf));
         auto analyzer = std::make_shared<arith::Analyzer>();
         if (!analyzer->CanProveEqual(clear_accum, Bool(true))) {
-          mbar_to_buffer_reads_[mbar_buf.get()].push_back(
+          mbar_to_buffer_reads_[mbar_buf].push_back(
               BufferRegion::FullRegion(c_buf));
         }
       }
@@ -199,12 +201,11 @@ private:
       // Link accumulated shared memory reads to mbar.
       if (!args.empty()) {
         if (auto mbar_buf = TryGetBufFromAccessPtr(args[0])) {
-          const BufferNode *mbar_key = mbar_buf.value().get();
           for (const auto &region : pending_tcgen05_smem_reads_) {
-            mbar_to_buffer_reads_[mbar_key].push_back(region);
+            mbar_to_buffer_reads_[mbar_buf.value()].push_back(region);
           }
           if (pending_tcgen05_c_buf_.defined()) {
-            mbar_to_buffer_writes_[mbar_key].push_back(
+            mbar_to_buffer_writes_[mbar_buf.value()].push_back(
                 BufferRegion::FullRegion(pending_tcgen05_c_buf_.value()));
           }
         } else if (!pending_tcgen05_smem_reads_.empty() ||
@@ -447,19 +448,16 @@ private:
       // barriers.
       if (auto *buf_load = args[0].as<BufferLoadNode>()) {
         Buffer mbar_buf = buf_load->buffer;
-        auto buffer_reads =
-            chain_builder_.mbar_to_buffer_reads_.find(mbar_buf.get());
+        auto buffer_reads = chain_builder_.mbar_to_buffer_reads_.find(mbar_buf);
         auto buffer_writes =
-            chain_builder_.mbar_to_buffer_writes_.find(mbar_buf.get());
+            chain_builder_.mbar_to_buffer_writes_.find(mbar_buf);
         if (buffer_reads != chain_builder_.mbar_to_buffer_reads_.end()) {
           reads_.insert(reads_.end(), buffer_reads->second.begin(),
                         buffer_reads->second.end());
         }
         if (buffer_writes != chain_builder_.mbar_to_buffer_writes_.end()) {
-          writes_.insert(
-              writes_.end(),
-              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).begin(),
-              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).end());
+          writes_.insert(writes_.end(), buffer_writes->second.begin(),
+                         buffer_writes->second.end());
         }
       }
     } else {
@@ -1149,7 +1147,7 @@ private:
                         Array<Integer>{0});
       }
       Stmt pipeline_body_root{nullptr};
-      const SeqStmtNode *pipeline_body_seq = nullptr;
+      Optional<SeqStmt> pipeline_body_seq;
       if (const auto *realize = loop->body.as<SBlockRealizeNode>()) {
         const auto &block = realize->block;
         for (const auto &buffer : block->alloc_buffers) {
@@ -1164,7 +1162,7 @@ private:
         Stmt current = pipeline_body_root;
         while (true) {
           if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-            pipeline_body_seq = seq_stmt;
+            pipeline_body_seq = tvm::ffi::GetRef<SeqStmt>(seq_stmt);
             break;
           }
           if (const auto *if_then_else = current.as<IfThenElseNode>()) {
@@ -1179,10 +1177,10 @@ private:
                      << "but got " << current->GetTypeKey();
         }
       }
-      ICHECK(pipeline_body_seq != nullptr);
-      MaybeAnnotateLegacyAsyncPipelineLoop(pipeline_body_root,
-                                           pipeline_body_seq->seq, order_array,
-                                           stage_array, &annotations);
+      ICHECK(pipeline_body_seq.defined());
+      MaybeAnnotateLegacyAsyncPipelineLoop(
+          pipeline_body_root, pipeline_body_seq.value()->seq, order_array,
+          stage_array, &annotations);
       auto for_node = GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
@@ -1225,12 +1223,12 @@ private:
     } else {
       pipeline_body_root = loop->body;
     }
-    const SeqStmtNode *pipeline_body_seq = nullptr;
+    Optional<SeqStmt> pipeline_body_seq;
     {
       Stmt current = pipeline_body_root;
       while (true) {
         if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-          pipeline_body_seq = seq_stmt;
+          pipeline_body_seq = tvm::ffi::GetRef<SeqStmt>(seq_stmt);
           break;
         }
         if (const auto *if_then_else = current.as<IfThenElseNode>()) {
@@ -1245,7 +1243,7 @@ private:
                    << "but got " << current->GetTypeKey();
       }
     }
-    ICHECK(pipeline_body_seq != nullptr);
+    ICHECK(pipeline_body_seq.defined());
 
     ICHECK(num_stages >= 1);
     ICHECK(loop->kind == ForKind::kSerial);
@@ -1264,8 +1262,8 @@ private:
         flat_stmts.push_back(s);
       }
     };
-    for (size_t i = 0; i < pipeline_body_seq->size(); i++) {
-      flatten_seq(pipeline_body_seq->seq[i]);
+    for (size_t i = 0; i < pipeline_body_seq.value()->size(); i++) {
+      flatten_seq(pipeline_body_seq.value()->seq[i]);
     }
 
     AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
@@ -1286,7 +1284,7 @@ private:
       int anchor_cp_async_stmt = -1;
       std::vector<int> cp_async_stmt_indices;
       std::vector<int> commit_stmt_indices;
-      std::unordered_set<const BufferNode *> written_buffers;
+      BufferSet written_buffers;
       int last_use_stmt_index = -1;
     };
     struct WaitDependencyInfo {
@@ -1321,7 +1319,7 @@ private:
           group.anchor_cp_async_stmt = static_cast<int>(i);
         }
         for (const auto &write : pinfo.writes) {
-          group.written_buffers.insert(write->buffer.get());
+          group.written_buffers.insert(write->buffer);
         }
       }
       if (pinfo.has_cp_async_commit()) {
@@ -1357,14 +1355,13 @@ private:
 
     const int pipeline_stmt_count =
         static_cast<int>(pipeline_stage_infos.size());
-    auto stmt_reads_buffer_set =
-        [&](int stmt_idx,
-            const std::unordered_set<const BufferNode *> &buffers) -> bool {
+    auto stmt_reads_buffer_set = [&](int stmt_idx,
+                                     const BufferSet &buffers) -> bool {
       if (buffers.empty() || stmt_idx < 0 || stmt_idx >= pipeline_stmt_count) {
         return false;
       }
       for (const BufferRegion &read : pipeline_stage_infos[stmt_idx].reads) {
-        if (buffers.count(read->buffer.get())) {
+        if (buffers.count(read->buffer)) {
           return true;
         }
       }
@@ -1373,7 +1370,7 @@ private:
 
     // Record earliest consumers for each cp.async group, and track all
     // cp.async-written buffers for wait remapping.
-    std::unordered_set<const BufferNode *> async_written_buffers;
+    BufferSet async_written_buffers;
     std::vector<int> cp_async_group_first_consumer(
         cp_async_groups.size(), std::numeric_limits<int>::max());
     for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
@@ -1768,7 +1765,7 @@ private:
       }
 
       int required_stage = pipeline_stage_infos[wait_dep.wait_stmt_index].stage;
-      std::unordered_set<const BufferNode *> waited_buffers;
+      BufferSet waited_buffers;
       for (int group_id : wait_dep.required_group_ids) {
         required_stage = std::max(required_stage, get_group_stage(group_id));
         if (group_id >= 0 &&
@@ -1790,7 +1787,7 @@ private:
           bool dependent_read = false;
           for (const BufferRegion &read :
                pipeline_stage_infos[stmt_idx].reads) {
-            if (waited_buffers.count(read->buffer.get())) {
+            if (waited_buffers.count(read->buffer)) {
               dependent_read = true;
               break;
             }
@@ -1951,7 +1948,7 @@ private:
           continue;
         }
 
-        std::unordered_set<const BufferNode *> waited_buffers;
+        BufferSet waited_buffers;
         for (int group_id : wait_dep.required_group_ids) {
           if (group_id < 0 ||
               group_id >= static_cast<int>(cp_async_groups.size())) {
@@ -1987,7 +1984,7 @@ private:
           bool dependent_read = false;
           for (const BufferRegion &read :
                pipeline_stage_infos[consumer_stmt_idx].reads) {
-            if (waited_buffers.count(read->buffer.get())) {
+            if (waited_buffers.count(read->buffer)) {
               dependent_read = true;
               break;
             }
@@ -2023,14 +2020,14 @@ private:
             }
             bool touches_waited_buffers = false;
             for (const BufferRegion &read : mid_stmt_info.reads) {
-              if (waited_buffers.count(read->buffer.get())) {
+              if (waited_buffers.count(read->buffer)) {
                 touches_waited_buffers = true;
                 break;
               }
             }
             if (!touches_waited_buffers) {
               for (const BufferRegion &write : mid_stmt_info.writes) {
-                if (waited_buffers.count(write->buffer.get())) {
+                if (waited_buffers.count(write->buffer)) {
                   touches_waited_buffers = true;
                   break;
                 }
@@ -2201,8 +2198,8 @@ private:
       const auto &block = realize->block;
       // Rebuild: body_root → ... → new_body_seq
       // We need to reconstruct the chain from block->body to the SeqStmt.
-      Stmt rebuilt_inner =
-          RebuildBodyWrapper(block->body, pipeline_body_seq, new_body_seq);
+      Stmt rebuilt_inner = RebuildBodyWrapper(
+          block->body, pipeline_body_seq.value(), new_body_seq);
       SBlock new_block(block->iter_vars, block->reads, block->writes,
                        block->name_hint, rebuilt_inner, block->init,
                        block->alloc_buffers, block->match_buffers,
@@ -2210,8 +2207,8 @@ private:
       new_loop_body =
           SBlockRealize(realize->iter_values, realize->predicate, new_block);
     } else {
-      new_loop_body =
-          RebuildBodyWrapper(loop->body, pipeline_body_seq, new_body_seq);
+      new_loop_body = RebuildBodyWrapper(loop->body, pipeline_body_seq.value(),
+                                         new_body_seq);
     }
 
     return For(loop->loop_var, loop->min, loop->extent, loop->kind,
@@ -2234,9 +2231,9 @@ private:
    *        between the loop body root and the inner SeqStmt, replacing
    *        the old SeqStmt with the new (flattened) one.
    */
-  Stmt RebuildBodyWrapper(const Stmt &current, const SeqStmtNode *old_seq,
+  Stmt RebuildBodyWrapper(const Stmt &current, const SeqStmt &old_seq,
                           const Stmt &new_seq) {
-    if (current.get() == old_seq) {
+    if (current.same_as(old_seq)) {
       return new_seq;
     }
     if (const auto *if_node = current.as<IfThenElseNode>()) {

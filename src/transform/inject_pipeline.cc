@@ -43,6 +43,15 @@ using namespace ffi;
 using tirx::GetSBlockReadWriteRegion;
 namespace software_pipeline {
 
+using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+using BufferMap =
+    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferShapeMap =
+    std::unordered_map<Buffer, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
+using BufferCommitGroupMap =
+    std::unordered_map<Buffer, int, ObjectPtrHash, ObjectPtrEqual>;
+
 namespace {
 
 bool GetBoolAnnotation(const CopyNode &op, const char *key) {
@@ -143,10 +152,10 @@ bool UpdateExpandedLayoutMapForRemappedAllocs(
   }
 
   Map<Var, Layout> updated_layout_map = layout_map.value();
-  std::unordered_set<const VarNode *> visited;
+  VarSet visited;
   bool changed = false;
   for (const auto &[old_buffer, new_buffer] : remapped_allocs) {
-    if (!visited.insert(old_buffer->data.get()).second ||
+    if (!visited.insert(old_buffer->data).second ||
         !updated_layout_map.count(old_buffer->data)) {
       continue;
     }
@@ -910,11 +919,11 @@ private:
   }
 
   struct AsyncStateGlobal {
-    std::unordered_set<const BufferNode *> dst_buffers;
+    BufferSet dst_buffers;
     Optional<PrimExpr> producer_head{PrimExpr(-1)};
 
     bool writes(const Buffer &buffer) const {
-      return dst_buffers.count(buffer.get()) > 0;
+      return dst_buffers.count(buffer) > 0;
     }
   };
 
@@ -926,7 +935,7 @@ private:
       bool valid() const { return wait_count.defined(); }
     };
 
-    std::unordered_set<const BufferNode *> seen;
+    BufferSet seen;
     Optional<PrimExpr> producer_head;
     Optional<PrimExpr> predicate;
     std::vector<std::vector<size_t>> commit_groups;
@@ -1809,16 +1818,15 @@ private:
     return seq;
   }
 
-  void PopulateWaitCounts(
-      const std::vector<RewrittenStmtInfo> &new_stmts,
-      arith::Analyzer *ana_normalized,
-      const std::unordered_map<const BufferNode *, int> &buffer_to_commit_group,
-      std::map<int, AsyncStateLocal> *async_states_local) {
+  void PopulateWaitCounts(const std::vector<RewrittenStmtInfo> &new_stmts,
+                          arith::Analyzer *ana_normalized,
+                          const BufferCommitGroupMap &buffer_to_commit_group,
+                          std::map<int, AsyncStateLocal> *async_states_local) {
     for (size_t i = 0; i < new_stmts.size(); ++i) {
       if (new_stmts[i].is_async) {
         for (const BufferRegion &write_region : new_stmts[i].writes) {
           (*async_states_local)[new_stmts[i].stage].seen.insert(
-              write_region->buffer.get());
+              write_region->buffer);
         }
         continue;
       }
@@ -1856,13 +1864,12 @@ private:
           if (!async_states_[producer_stage_idx].writes(read_region->buffer)) {
             continue;
           }
-          auto commit_group_id =
-              buffer_to_commit_group.at(read_region->buffer.get());
+          auto commit_group_id = buffer_to_commit_group.at(read_region->buffer);
           if (!need_wait_count[commit_group_id]) {
             continue;
           }
           dependent_commit_groups.push_back(commit_group_id);
-          if (!dep_local_state.seen.count(read_region->buffer.get())) {
+          if (!dep_local_state.seen.count(read_region->buffer)) {
             producer_head_per_commit.push_back(
                 dep_local_state.producer_head.value() - 1);
           } else {
@@ -2094,7 +2101,7 @@ private:
 
     std::vector<RewrittenStmtInfo> new_stmts;
     std::map<int, AsyncStateLocal> async_states_local;
-    std::unordered_map<const BufferNode *, int> buffer_to_commit_group;
+    BufferCommitGroupMap buffer_to_commit_group;
 
     for (const SBlock &block : ordered_stmts_) {
       const auto &pipeline_anno = pipeline_info_.at(block);
@@ -2165,8 +2172,8 @@ private:
         }
 
         for (const BufferRegion &write_region : new_block->writes) {
-          async_states_[stage].dst_buffers.insert(write_region->buffer.get());
-          buffer_to_commit_group[write_region->buffer.get()] = commit_group_id;
+          async_states_[stage].dst_buffers.insert(write_region->buffer);
+          buffer_to_commit_group[write_region->buffer] = commit_group_id;
         }
         async_states_[stage].producer_head = normalized_access_index;
         local_state.producer_head = normalized_access_index;
@@ -2381,8 +2388,8 @@ private:
   void VisitExpr_(const BufferLoadNode *op) final {
     if (op->buffer.scope() == "shared.barrier" ||
         op->buffer.scope() == "shared.cluster_barrier") {
-      if (!seen_.count(op->buffer.get())) {
-        seen_.insert(op->buffer.get());
+      if (!seen_.count(op->buffer)) {
+        seen_.insert(op->buffer);
         barriers_.push_back(op->buffer);
       }
     }
@@ -2392,8 +2399,8 @@ private:
   void VisitStmt_(const BufferStoreNode *op) final {
     if (op->buffer.scope() == "shared.barrier" ||
         op->buffer.scope() == "shared.cluster_barrier") {
-      if (!seen_.count(op->buffer.get())) {
-        seen_.insert(op->buffer.get());
+      if (!seen_.count(op->buffer)) {
+        seen_.insert(op->buffer);
         barriers_.push_back(op->buffer);
       }
     }
@@ -2406,8 +2413,8 @@ private:
       if (auto load = val.as<BufferLoadNode>()) {
         if (load->buffer.scope() == "shared.barrier" ||
             load->buffer.scope() == "shared.cluster_barrier") {
-          if (!seen_.count(load->buffer.get())) {
-            seen_.insert(load->buffer.get());
+          if (!seen_.count(load->buffer)) {
+            seen_.insert(load->buffer);
             barriers_.push_back(load->buffer);
           }
         }
@@ -2417,18 +2424,16 @@ private:
   }
 
   const Map<Var, Buffer> &buf_map_;
-  std::unordered_set<const BufferNode *> seen_;
+  BufferSet seen_;
   std::vector<Buffer> barriers_;
 };
 
 /// Rewrite barrier references: expand indices and rewrite parity.
 class BarrierIndexRewriter : public StmtExprMutator {
 public:
-  BarrierIndexRewriter(
-      const std::unordered_map<const BufferNode *, Buffer> &old_to_new,
-      const std::unordered_map<const BufferNode *, PrimExpr> &old_shapes,
-      PrimExpr stage_expr, PrimExpr parity_cycle, Var loop_var,
-      PrimExpr loop_min)
+  BarrierIndexRewriter(const BufferMap &old_to_new,
+                       const BufferShapeMap &old_shapes, PrimExpr stage_expr,
+                       PrimExpr parity_cycle, Var loop_var, PrimExpr loop_min)
       : old_to_new_(old_to_new), old_shapes_(old_shapes),
         stage_expr_(std::move(stage_expr)),
         parity_cycle_(std::move(parity_cycle)), loop_var_(std::move(loop_var)),
@@ -2436,10 +2441,10 @@ public:
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    auto it = old_to_new_.find(load->buffer.get());
+    auto it = old_to_new_.find(load->buffer);
     if (it != old_to_new_.end()) {
       auto *n = load.CopyOnWrite();
-      PrimExpr old_size = old_shapes_.at(load->buffer.get());
+      PrimExpr old_size = old_shapes_.at(load->buffer);
       n->buffer = it->second;
       n->indices.Set(0, stage_expr_ * old_size + n->indices[0]);
     }
@@ -2448,10 +2453,10 @@ public:
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    auto it = old_to_new_.find(store->buffer.get());
+    auto it = old_to_new_.find(store->buffer);
     if (it != old_to_new_.end()) {
       auto *n = store.CopyOnWrite();
-      PrimExpr old_size = old_shapes_.at(store->buffer.get());
+      PrimExpr old_size = old_shapes_.at(store->buffer);
       n->buffer = it->second;
       n->indices.Set(0, stage_expr_ * old_size + n->indices[0]);
     }
@@ -2466,9 +2471,9 @@ public:
     Map<String, ObjectRef> new_annos = call->annotations;
     for (const auto &[key, val] : call->annotations) {
       if (auto load = val.as<BufferLoadNode>()) {
-        auto it = old_to_new_.find(load->buffer.get());
+        auto it = old_to_new_.find(load->buffer);
         if (it != old_to_new_.end()) {
-          PrimExpr old_size = old_shapes_.at(load->buffer.get());
+          PrimExpr old_size = old_shapes_.at(load->buffer);
           auto new_load = BufferLoad(
               it->second, {stage_expr_ * old_size + load->indices[0]});
           new_annos.Set(key, new_load);
@@ -2485,10 +2490,9 @@ public:
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         // Check if the barrier ref (possibly already rewritten above)
         // targets one of our expanded barriers.
-        const BufferNode *target = load->buffer.get();
         bool is_expanded = false;
-        for (const auto &[old_buf, new_buf] : old_to_new_) {
-          if (new_buf.get() == target) {
+        for (const auto &kv : old_to_new_) {
+          if (load->buffer.same_as(kv.second)) {
             is_expanded = true;
             break;
           }
@@ -2516,8 +2520,8 @@ public:
   }
 
 private:
-  const std::unordered_map<const BufferNode *, Buffer> &old_to_new_;
-  const std::unordered_map<const BufferNode *, PrimExpr> &old_shapes_;
+  const BufferMap &old_to_new_;
+  const BufferShapeMap &old_shapes_;
   PrimExpr stage_expr_;
   PrimExpr parity_cycle_;
   Var loop_var_;
@@ -2549,21 +2553,21 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   // arrive barriers) — those should NOT be pipeline-expanded.
   // ISP-created pipeline_mbar is handled specially: it's always in
   // block_local_allocs and was just created, so include it too.
-  std::unordered_set<const BufferNode *> local_barrier_set;
+  BufferSet local_barrier_set;
   for (const Buffer &buf : block_local_allocs) {
     if (buf.scope() == "shared.barrier" ||
         buf.scope() == "shared.cluster_barrier")
-      local_barrier_set.insert(buf.get());
+      local_barrier_set.insert(buf);
   }
 
   // Find barriers that have explicit ptx_arrive_barrier calls.
   class ArriveBarrierDetector : public StmtExprVisitor {
   public:
-    std::unordered_set<const BufferNode *> arrived_;
+    BufferSet arrived_;
     void VisitExpr_(const CallNode *op) final {
       if (op->op.same_as(builtin::ptx_arrive_barrier()) && !op->args.empty()) {
         if (auto load = op->args[0].as<BufferLoadNode>()) {
-          arrived_.insert(load->buffer.get());
+          arrived_.insert(load->buffer);
         }
       }
       StmtExprVisitor::VisitExpr_(op);
@@ -2580,8 +2584,7 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   for (const Buffer &buf : all_referenced) {
     // Include if: (a) it's an ISP-created local barrier, OR
     //             (b) it has explicit ptx_arrive_barrier calls.
-    if (local_barrier_set.count(buf.get()) ||
-        arrive_det.arrived_.count(buf.get())) {
+    if (local_barrier_set.count(buf) || arrive_det.arrived_.count(buf)) {
       barriers.push_back(buf);
     }
   }
@@ -2602,14 +2605,14 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
   };
 
   // Create expanded buffer for each barrier.
-  std::unordered_map<const BufferNode *, Buffer> old_to_new;
-  std::unordered_map<const BufferNode *, PrimExpr> old_shapes;
+  BufferMap old_to_new;
+  BufferShapeMap old_shapes;
   for (const Buffer &buf : barriers) {
-    old_shapes[buf.get()] = buf->shape[0];
+    old_shapes[buf] = buf->shape[0];
     ObjectPtr<BufferNode> new_node = make_object<BufferNode>(*(buf.get()));
     new_node->shape = {PrimExpr(num_stages) * buf->shape[0]};
     Buffer new_buf(new_node);
-    old_to_new[buf.get()] = new_buf;
+    old_to_new[buf] = new_buf;
 
     // Update all maps and alloc arrays.
     buffer_data_to_buffer.Set(buf->data, new_buf);
@@ -2630,7 +2633,7 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
       // here).
       Array<Buffer> new_allocs;
       for (const Buffer &ab : old_block->alloc_buffers) {
-        auto it = old_to_new.find(ab.get());
+        auto it = old_to_new.find(ab);
         new_allocs.push_back(it != old_to_new.end() ? it->second : ab);
       }
       SBlock new_block(old_block->iter_vars, old_block->reads,
@@ -2646,13 +2649,8 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
 
   // Return the old→new mapping for outer block alloc_buffers update.
   Map<Buffer, Buffer> result;
-  for (const auto &[old_ptr, new_buf] : old_to_new) {
-    for (const Buffer &old_buf : barriers) {
-      if (old_buf.get() == old_ptr) {
-        result.Set(old_buf, new_buf);
-        break;
-      }
-    }
+  for (const auto &[old_buf, new_buf] : old_to_new) {
+    result.Set(old_buf, new_buf);
   }
   return result;
 }
@@ -2979,7 +2977,7 @@ private:
       pipeline_body_root = for_node->body;
     }
 
-    const SeqStmtNode *pipeline_body_seq = nullptr;
+    Optional<SeqStmt> pipeline_body_seq;
     std::vector<std::function<Stmt(Stmt)>> rewrap_fns;
     std::vector<IfWrapper> loop_var_if_wrappers;
     auto append_attr_wrapper = [&rewrap_fns](const AttrStmtNode *attr) {
@@ -2997,7 +2995,7 @@ private:
       Stmt current = pipeline_body_root;
       while (true) {
         if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-          pipeline_body_seq = seq_stmt;
+          pipeline_body_seq = GetRef<SeqStmt>(seq_stmt);
           break;
         }
         if (const auto *if_then_else = current.as<IfThenElseNode>()) {
@@ -3036,7 +3034,7 @@ private:
                    << "SeqStmt, got " << current->GetTypeKey();
       }
     }
-    ICHECK(pipeline_body_seq != nullptr);
+    ICHECK(pipeline_body_seq.defined());
 
     // In tirx flat IR, buffer declarations/allocations inside a block are
     // represented as standalone statements at the beginning of the SeqStmt.
@@ -3046,7 +3044,7 @@ private:
     {
       Array<Stmt> stage_stmts;
       bool filtered = false;
-      for (const Stmt &child : pipeline_body_seq->seq) {
+      for (const Stmt &child : pipeline_body_seq.value()->seq) {
         if (const auto *alloc = child.as<AllocBufferNode>()) {
           const Buffer &buffer = alloc->buffer;
           buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -3069,9 +3067,11 @@ private:
             << "ValueError: The body of the software pipeline has no stages "
                "after removing buffer declarations";
         filtered_pipeline_body = SeqStmt(stage_stmts);
-        pipeline_body_seq = filtered_pipeline_body.get();
+        pipeline_body_seq = filtered_pipeline_body;
       }
     }
+    SeqStmt pipeline_body = pipeline_body_seq.value();
+    const Array<Stmt> &pipeline_body_stmts = pipeline_body->seq;
 
     // Step 3: Blockize the components of the pipeline. Each child of the
     // pipelined loop will be converted into a block.
@@ -3081,8 +3081,8 @@ private:
     auto f_add_child = [&](const Stmt &child) {
       original_order.push_back(MakeBlock(child, buffer_data_to_buffer_));
     };
-    for (size_t i = 0; i < pipeline_body_seq->seq.size(); i++) {
-      const Stmt &child = pipeline_body_seq->seq[i];
+    for (size_t i = 0; i < pipeline_body_stmts.size(); i++) {
+      const Stmt &child = pipeline_body_stmts[i];
       const auto *nested_block_realize = child.as<SBlockRealizeNode>();
       if (nested_block_realize && is_one(nested_block_realize->predicate) &&
           nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
@@ -3101,7 +3101,7 @@ private:
     // This includes buffers allocated in outer blocks (like logits_smem) that
     // are used inside the pipeline loop.
     BufferUsageCollector collector(buffer_data_to_buffer_, allocated_buffers_);
-    pipeline_allocs = collector.Collect(SeqStmt(pipeline_body_seq->seq));
+    pipeline_allocs = collector.Collect(SeqStmt(pipeline_body_stmts));
 
     auto pipeline_stages = Downcast<Array<Integer>>(
         op->annotations.at(s_tir::attr::software_pipeline_stage));
@@ -3181,7 +3181,7 @@ private:
     ValidatePipelineBody(pipeline_info, original_order);
 
     if (!HasOverlappableStages(pipeline_info)) {
-      if (const auto *realize = op->body.as<SBlockRealizeNode>()) {
+      if (const auto *realize = for_node->body.as<SBlockRealizeNode>()) {
         const auto &block = realize->block;
         for (const auto &buffer : block->alloc_buffers) {
           buffer_data_to_buffer_.erase(buffer->data);
@@ -3234,7 +3234,8 @@ private:
               pipeline_barrier_buf = RewritePipelineTmaBarriers(
                   original_order, pipeline_info, tma_copies,
                   buffer_data_to_buffer_, allocated_buffers_,
-                  block_local_allocs, op->loop_var, op->min, pipeline_depth);
+                  block_local_allocs, for_node->loop_var, for_node->min,
+                  pipeline_depth);
             }
           }
         }
@@ -3261,8 +3262,8 @@ private:
       }
       Map<Buffer, Buffer> barrier_remap = ExpandPipelineBarriers(
           original_order, pipeline_info, buffer_data_to_buffer_,
-          allocated_buffers_, block_local_allocs, pipeline_allocs, op->loop_var,
-          op->min, barrier_depth);
+          allocated_buffers_, block_local_allocs, pipeline_allocs,
+          for_node->loop_var, for_node->min, barrier_depth);
       // Register expanded barriers for outer block alloc_buffers update.
       for (const auto &[old_buf, new_buf] : barrier_remap) {
         pending_buffer_remap_.Set(old_buf, new_buf);
@@ -3271,8 +3272,8 @@ private:
 
     Array<Buffer> local_allocs = block_local_allocs;
     // Add nested block allocs to local_allocs
-    for (size_t i = 0; i < pipeline_body_seq->seq.size(); i++) {
-      const Stmt &child = pipeline_body_seq->seq[i];
+    for (size_t i = 0; i < pipeline_body_stmts.size(); i++) {
+      const Stmt &child = pipeline_body_stmts[i];
       const auto *nested_block_realize = child.as<SBlockRealizeNode>();
       if (nested_block_realize && is_one(nested_block_realize->predicate) &&
           nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
@@ -3284,8 +3285,8 @@ private:
     }
 
     PipelineRewriter rewriter(buffer_data_to_buffer_, pipeline_allocs,
-                              local_allocs, GetRef<For>(op), pipeline_info,
-                              target_, loop_var_if_wrappers);
+                              local_allocs, for_node, pipeline_info, target_,
+                              loop_var_if_wrappers);
     Stmt pipeline = rewriter.BuildPipeline();
     subtree_modified_ = true;
 
@@ -3400,7 +3401,7 @@ private:
 
     pipeline = AsyncCommitWaitAttrLowerer::Lower(pipeline);
 
-    if (const auto *realize = op->body.as<SBlockRealizeNode>()) {
+    if (const auto *realize = for_node->body.as<SBlockRealizeNode>()) {
       const auto &block = realize->block;
       for (const auto &buffer : block->alloc_buffers) {
         buffer_data_to_buffer_.erase(buffer->data);
@@ -3520,17 +3521,17 @@ private:
       //    in this block or any nested block. This prevents
       //    downstream LCA analysis from seeing those vars at the
       //    outer scope and promoting them to kernel parameters.
-      std::unordered_set<const BufferNode *> local_bufs;
-      std::unordered_set<const VarNode *> local_data_vars;
+      BufferSet local_bufs;
+      VarSet local_data_vars;
       for (const auto &buf : block->alloc_buffers) {
-        local_bufs.insert(buf.get());
-        local_data_vars.insert(buf->data.get());
+        local_bufs.insert(buf);
+        local_data_vars.insert(buf->data);
       }
       // Also collect data vars from all nested blocks.
       PostOrderVisit(block->body, [&](const ObjectRef &obj) {
         if (auto *inner = obj.as<SBlockNode>()) {
           for (const auto &buf : inner->alloc_buffers) {
-            local_data_vars.insert(buf->data.get());
+            local_data_vars.insert(buf->data);
           }
         }
       });
@@ -3541,12 +3542,12 @@ private:
             if (found)
               return;
             if (auto *load = obj.as<BufferLoadNode>()) {
-              if (local_data_vars.count(load->buffer->data.get())) {
+              if (local_data_vars.count(load->buffer->data)) {
                 found = true;
               }
             }
             if (auto *var = obj.as<VarNode>()) {
-              if (local_data_vars.count(var)) {
+              if (local_data_vars.count(GetRef<Var>(var))) {
                 found = true;
               }
             }
@@ -3557,12 +3558,12 @@ private:
             if (found)
               return;
             if (auto *load = obj.as<BufferLoadNode>()) {
-              if (local_data_vars.count(load->buffer->data.get())) {
+              if (local_data_vars.count(load->buffer->data)) {
                 found = true;
               }
             }
             if (auto *var = obj.as<VarNode>()) {
-              if (local_data_vars.count(var)) {
+              if (local_data_vars.count(GetRef<Var>(var))) {
                 found = true;
               }
             }
@@ -3577,7 +3578,7 @@ private:
       auto sanitize = [&](const Array<BufferRegion> &regions) {
         Array<BufferRegion> out;
         for (const auto &br : regions) {
-          if (local_bufs.count(br->buffer.get())) {
+          if (local_bufs.count(br->buffer)) {
             continue; // drop block-local buffer
           }
           if (region_uses_local_var(br)) {
