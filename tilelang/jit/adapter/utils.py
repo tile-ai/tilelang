@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, Callable, Any
+from typing import Literal, Any
+from collections.abc import Callable
 from tilelang import tvm as tvm
 from tvm import IRModule, tir
 from tvm.target import Target

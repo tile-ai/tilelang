@@ -3,7 +3,7 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm import tir
 from tilelang.utils.language import is_shared, is_fragment
-from tilelang.tileop.base import GemmWarpPolicy
+from tilelang.ir import GemmSPWarpPolicy
 from tvm.ir.base import Node
 
 
@@ -127,5 +127,5 @@ class GemmSPBase:
         return self.gemm_sp_node.wg_wait
 
     @property
-    def policy(self) -> GemmWarpPolicy:
+    def policy(self) -> GemmSPWarpPolicy:
         return self.gemm_sp_node.policy

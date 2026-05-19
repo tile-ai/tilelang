@@ -112,3 +112,17 @@ def test_rdna_tensor_instruction_lookup_is_generation_aware():
     arch.rdna_generation = 12
     with pytest.raises(ValueError, match="Unsupported RDNA generation"):
         arch.get_avaliable_tensorintrin_shapes()
+
+
+def test_rdna_internal_tuning_config_allows_mcpu_overrides():
+    from tilelang.carver.arch.rdna import _get_rdna_tuning_config
+
+    default = _get_rdna_tuning_config("gfx1100")
+    gfx1151 = _get_rdna_tuning_config("gfx1151:sramecc+:xnack-")
+
+    assert default.preferred_warps_per_block == 4
+    assert default.pipeline_stage == 1
+    assert default.reduction_step_for_dtype_bits(16) == 32
+    assert gfx1151.preferred_warps_per_block == 4
+    assert gfx1151.pipeline_stage == 2
+    assert gfx1151.reduction_step_for_dtype_bits(16) == 32

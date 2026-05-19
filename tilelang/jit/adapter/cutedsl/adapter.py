@@ -1,7 +1,8 @@
 from __future__ import annotations
 import logging
 import weakref
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import torch
 from tvm import tir

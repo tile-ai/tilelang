@@ -1,6 +1,6 @@
 """Annotation helpers exposed on the TileLang language surface."""
 
-from typing import Callable
+from collections.abc import Callable
 
 from tilelang.layout import Fragment, Layout
 from tilelang.utils.language import is_fragment
