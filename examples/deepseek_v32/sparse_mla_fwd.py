@@ -107,8 +107,11 @@ def sparse_mla_fwd(
             H0 = g_i * padded_H + (0 if REPLICATE_H == 1 else (bx % REPLICATE_H) * 64)
             H1 = H0 + H_per_block
 
-            T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared)
-            T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
+            Q_loaded = T.alloc_barrier(256)
+            T.tma_copy(Q[b_i, s_i, H0:H1, :D], Q_shared, barrier=Q_loaded)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared, barrier=Q_loaded)
+            T.mbarrier_arrive(Q_loaded)
+            T.mbarrier_wait_parity(Q_loaded, 0)
 
             for i_i in T.Pipelined(NI, num_stages=num_stages):
                 for bi_i in T.Parallel(BI):
@@ -264,11 +267,7 @@ def test_sparse_mla_fwd(
 
     from tilelang.profiler import do_bench
 
-    ms = do_bench(
-        fn,
-        rep=100,
-        warmup=250,
-    )
+    ms = do_bench(fn, warmup=100, rep=250)
     print(f"Average time: {ms:.3f} ms")
     print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
     print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)

@@ -12,7 +12,8 @@ import threading
 import uuid
 import sys
 from hashlib import sha256
-from typing import Callable, Literal
+from typing import Literal
+from collections.abc import Callable
 
 import cloudpickle
 from tvm.target import Target

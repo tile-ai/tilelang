@@ -8,7 +8,8 @@ On non-CUDA builds, the stream/device fall back to 0/CPU semantics.
 
 from __future__ import annotations
 
-from typing import Callable, Any
+from typing import Any
+from collections.abc import Callable
 import sys
 
 import torch

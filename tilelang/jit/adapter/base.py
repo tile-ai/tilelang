@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
-from tilelang.engine.param import KernelParam
+from typing import Any
+
 import torch
+
+from tilelang.engine.param import KernelParam
 
 
 @dataclass(frozen=True)

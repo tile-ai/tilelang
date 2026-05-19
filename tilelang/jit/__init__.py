@@ -10,19 +10,15 @@ from dataclasses import dataclass
 import inspect
 from typing import (
     Any,
-    Callable,
     Generic,
     TypeVar,
     overload,
     Literal,
+    ParamSpec,
 )
+from collections.abc import Callable
 from collections.abc import Iterable
 
-# Python 3.9 compatibility for ParamSpec
-try:
-    from typing import ParamSpec
-except ImportError:  # Python < 3.10
-    from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
 from tilelang.language.eager import PrimFunc, prim_func, JITFunc
 from tvm.target import Target
