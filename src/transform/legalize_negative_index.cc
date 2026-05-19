@@ -173,7 +173,8 @@ private:
     int lanes = *as_const_int(ramp->lanes);
     ffi::Array<PrimExpr> values;
     ffi::Array<PrimExpr> shuffle_indices;
-    DataType dtype = value.dtype().element_of();
+    DataType dtype =
+        analyzer_->Simplify(buffer_extent + ramp->base).dtype().element_of();
     for (int lane_id = 0; lane_id < lanes; ++lane_id) {
       PrimExpr lane = analyzer_->Simplify(
           ramp->base + ramp->stride * IntImm(ramp->stride.dtype(), lane_id));

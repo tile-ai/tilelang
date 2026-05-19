@@ -209,6 +209,38 @@ def test_buffer_load_vector_index_mixed_sign_ramp():
     _check(before, after)
 
 
+def test_buffer_load_vector_index_mixed_sign_ramp_preserves_int64_extent():
+    """
+    Test mixed-sign ramp legalization preserves the buffer extent dtype.
+    """
+
+    @T.prim_func
+    def before(A: T.Tensor((T.int64(3000000000),), T.float32)):
+        vec = T.Ramp(T.int32(-2), T.int32(1), 4)
+        value = A[vec]
+        B = T.alloc_buffer((4,), T.float32)
+        B[T.Ramp(0, 1, 4)] = value
+
+    @T.prim_func
+    def after(A: T.Tensor((T.int64(3000000000),), T.float32)):
+        vec = T.Ramp(T.int32(-2), T.int32(1), 4)  # noqa: F841
+        value = A[
+            T.Shuffle(
+                [
+                    T.int64(2999999998),
+                    T.int64(2999999999),
+                    T.int64(0),
+                    T.int64(1),
+                ],
+                [0, 1, 2, 3],
+            )
+        ]
+        B = T.alloc_buffer((4,), T.float32)
+        B[T.Ramp(0, 1, 4)] = value
+
+    _check(before, after)
+
+
 def test_buffer_load_vector_index_mixed_sign_ramp_in_kernel():
     """
     Test a sliding-window KV-cache style vector load that crosses a ring-buffer
