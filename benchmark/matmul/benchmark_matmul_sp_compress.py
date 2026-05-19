@@ -1,5 +1,4 @@
 import argparse
-from typing import Optional
 
 import torch
 from tilelang.profiler import do_bench
@@ -34,7 +33,7 @@ def benchmark_compress(
     m: int,
     k: int,
     dtype: torch.dtype,
-    meta_dtype: Optional[torch.dtype] = None,  # noqa: FA100
+    meta_dtype: torch.dtype | None = None,  # noqa: FA100
 ):
     a0 = _generate_semi_sparse(m, k, dtype)
 
