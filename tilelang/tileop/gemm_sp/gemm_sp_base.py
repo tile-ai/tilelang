@@ -3,7 +3,7 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm import tirx
 from tilelang.utils.language import is_shared, is_fragment
-from tilelang.tileop.base import GemmWarpPolicy
+from tilelang.ir import GemmSPWarpPolicy
 from tvm.ir.base import Node
 
 
@@ -14,7 +14,7 @@ class GemmSPBase:
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
 
-    def lower(self, target: Target, thread_nums: int, thread_var: tirx.Var):
+    def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tirx.Var):
         raise NotImplementedError("lower is not implemented")
 
     def is_gemm_ss(self) -> bool:
@@ -127,5 +127,5 @@ class GemmSPBase:
         return self.gemm_sp_node.wg_wait
 
     @property
-    def policy(self) -> GemmWarpPolicy:
+    def policy(self) -> GemmSPWarpPolicy:
         return self.gemm_sp_node.policy
