@@ -3,8 +3,8 @@
  * \brief CUDA implementation for tl.gemm_sp instruction selection.
  */
 #include "op/gemm_sp.h"
-#include "support/check.h"
 #include "op/gemm.h"
+#include "support/check.h"
 
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"

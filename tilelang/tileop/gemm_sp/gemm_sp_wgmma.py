@@ -14,7 +14,7 @@ from tvm.target import Target
 from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
-from typing import Callable
+from collections.abc import Callable
 
 GEMM_SP_INST_WGMMA_SP = "cuda.wgmma.sp"
 

@@ -170,9 +170,9 @@ String GemmSPNode::getGemmSPInstructionKind(int block_size,
 
 Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (const auto f = Function::GetGlobal("tl.gemm_sp.lower")) {
-    auto prim_func = Downcast<PrimFunc>(
-        (*f)(GetRef<GemmSP>(this), T.target, T.layout_map, T.thread_bounds,
-             T.thread_var));
+    auto prim_func =
+        Downcast<PrimFunc>((*f)(GetRef<GemmSP>(this), T.target, T.layout_map,
+                                T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
