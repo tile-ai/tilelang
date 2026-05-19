@@ -734,15 +734,6 @@ template <typename Impl> struct ReduceLowerer {
         if (need_batch_pack_buffer) {
           body = SeqStmt({AllocBuffer(clear_batch_pack_buffer), body});
         }
-        if (need_pack_buffer) {
-          body = Allocate(clear_buffer_packed->data, clear_buffer_packed->dtype,
-                          clear_buffer_packed->shape, const_true(), body);
-        }
-        if (need_batch_pack_buffer) {
-          body = Allocate(clear_batch_pack_buffer->data,
-                          clear_batch_pack_buffer->dtype,
-                          clear_batch_pack_buffer->shape, const_true(), body);
-        }
         return body;
       }
 
@@ -824,10 +815,6 @@ template <typename Impl> struct ReduceLowerer {
       }
       if (need_pack_buffer) {
         body = SeqStmt({AllocBuffer(clear_buffer_packed), body});
-      }
-      if (need_pack_buffer) {
-        body = Allocate(clear_buffer_packed->data, clear_buffer_packed->dtype,
-                        clear_buffer_packed->shape, const_true(), body);
       }
       return body;
     }
