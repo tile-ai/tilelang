@@ -736,6 +736,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::sync_grid())) {
     PrintIndent();
     stream << "tl.sync_grid()\n";
+  } else if (op->op.same_as(tl::pdl_trigger())) {
+    PrintIndent();
+    stream << "tl.griddepcontrol_launch_dependents()\n";
+  } else if (op->op.same_as(tl::pdl_sync())) {
+    PrintIndent();
+    stream << "tl.griddepcontrol_wait()\n";
   } else if (op->op.same_as(tl::loop_break()) ||
              op->op.same_as(builtin::break_loop())) {
     if (in_break_loop_) {
