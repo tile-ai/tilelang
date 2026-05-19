@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tilelang.tileop.gemm.gemm_base import GemmBase
+from tilelang.tileop.gemm_sp.gemm_sp_base import GemmSPBase
 from tilelang.layout import (
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
@@ -8,36 +8,20 @@ from tilelang.layout import (
     make_linear_layout,
     Layout,
 )
-from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
-    TensorCoreIntrinEmitter,
-)
+from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
-from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
-from collections.abc import Callable
+from typing import Callable
+
+GEMM_SP_INST_WGMMA_SP = "cuda.wgmma.sp"
 
 
-GEMM_INST_WGMMA = "cuda.wgmma"
-
-
-class GemmWGMMA(GemmBase):
+class GemmSPWGMMA(GemmSPBase):
     def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
-        """Infer the swizzle layout for shared memory based on continuity.
-
-        WGMMA can directly use shared memory as input, so the swizzle layout must
-        match the tensor core's access pattern. The swizzle granularity is determined
-        by the continuous dimension size:
-          - 128B swizzle (Full):    continuity % (vectorized_size * 8) == 0
-          - 64B swizzle (Half):     continuity % (vectorized_size * 4) == 0
-          - 32B swizzle (Quarter):  continuity % (vectorized_size * 2) == 0
-          - Linear (no swizzle):    otherwise
-
-        See: https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html
-        """
         vectorized_size = 128 // self.in_dtype.bits
         if continuity % (vectorized_size * 8) == 0:
             return make_full_bank_swizzled_layout
@@ -49,24 +33,26 @@ class GemmWGMMA(GemmBase):
             return make_linear_layout
 
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WGMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_WGMMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
+        mma_emitter = WGSparseTensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
+            e_dtype=self.e_dtype,
             b_dtype=self.in_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
+            e_transposed=self.trans_E,
             block_row_warps=m_warp,
             block_col_warps=n_warp,
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
-            chunk=self.chunk,
+            warp_k=self.K,
         )
         a_is_k_major = not self.trans_A
         b_is_k_major = self.trans_B
-        a_continuity = self.K if a_is_k_major else mma_emitter.wgmma_inst_m
+        a_continuity = self.K // mma_emitter.SPARSE_FACTOR if a_is_k_major else mma_emitter.wgmma_inst_m
         b_continuity = self.K if b_is_k_major else mma_emitter.wgmma_inst_n
         if self.is_gemm_ss():
             return {
@@ -88,25 +74,26 @@ class GemmWGMMA(GemmBase):
         self,
         layout_map: dict,
         target: Target,
-        thread_bounds: Range,
+        thread_nums: Range,
         thread_var: tir.Var,
         mbar_phase_expr: tir.PrimExpr | None = None,
     ):
-        thread_nums = thread_bounds.extent
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WGMMA)
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_WGMMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
+        mma_emitter = WGSparseTensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
+            e_dtype=self.e_dtype,
             b_dtype=self.in_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
+            e_transposed=self.trans_E,
             block_row_warps=m_warp,
             block_col_warps=n_warp,
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
-            chunk=self.chunk,
+            warp_k=self.K,
             thread_var=thread_var,
         )
 
@@ -125,6 +112,7 @@ class GemmWGMMA(GemmBase):
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
+        E_region = self.ERegion
 
         clear_accum = self.clear_accum
         wg_wait = self.wg_wait
@@ -141,8 +129,9 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
+
                 # Perform Matrix Multiplication with offset consideration
-                mma_emitter.wgmma(A_region, B_region, C_region, clear_accum, wg_wait)
+                mma_emitter.wgmma_ss(A_region, E_region, B_region, C_region, clear_accum, wg_wait)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
@@ -151,15 +140,8 @@ class GemmWGMMA(GemmBase):
 
             @T.prim_func
             def _gemm_rsr() -> None:
-                """
-                The inner macro that loads data from shared buffers A_shared and
-                B_shared into local fragments, then issues Tensor Core mma ops,
-                accumulating into C_local.
-                """
-                mma_emitter.wgmma(A_region, B_region, C_region, clear_accum, wg_wait)
+                mma_emitter.wgmma_rs(A_region, E_region, B_region, C_region, clear_accum, wg_wait)
 
-            # Simplify to optimize the index computing
-            # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
         raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
 

@@ -5,7 +5,8 @@ import ctypes
 import logging
 import torch
 
-from typing import Callable, Any
+from typing import Any
+from collections.abc import Callable
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
