@@ -477,6 +477,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         kernel = self._kernel_cache.get(key, None)
         if kernel is None:
             frontend_key_data = None
+            # Frontend cache is only safe when lazy-mode parse_args leaves no
+            # runtime kernel_args; then _frontend_cache_key_data fully identifies
+            # the compiled kernel, assuming compile-time values have stable reprs.
             if self.mode == "lazy" and not kernel_args:
                 frontend_key_data = self._frontend_cache_key_data(key)
                 from tilelang.cache import load_frontend_cached

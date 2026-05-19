@@ -194,6 +194,48 @@ def test_kernel_cache_frontend_hit_loads_serialized_prim_func(cache_dirs, monkey
     assert captured["device_kernel_source_path"] == str(cache_path / cache.device_kernel_path)
 
 
+def test_kernel_cache_frontend_hit_round_trips_real_prim_func(cache_dirs, tmp_path, monkeypatch):
+    import tilelang.language as T
+    import tvm
+
+    @T.prim_func
+    def kernel():
+        T.evaluate(0)
+
+    cache = KernelCache()
+    key = "frontend-real-prim-func-key"
+    frontend_key = "frontend-real-prim-func"
+    cache_path = Path(cache._get_cache_path(key))
+
+    cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path), func=kernel)
+    cache.store_frontend_cache(frontend_key, key)
+
+    sentinel = object()
+    captured = {}
+
+    def fake_from_database(cls, **kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fake_from_database))
+
+    loaded = cache.load_frontend_cached(
+        frontend_key,
+        target="cuda",
+        target_host=None,
+        out_idx=[0],
+        execution_backend="tvm_ffi",
+        pass_configs=None,
+        compile_flags=None,
+    )
+
+    assert loaded is sentinel
+    assert (cache_path / cache.prim_func_path).exists()
+    assert isinstance(captured["func"], tvm.tir.PrimFunc)
+    assert tvm.ir.structural_equal(captured["func"], kernel)
+    assert str(captured["func"].attrs["global_symbol"]) == str(kernel.attrs["global_symbol"])
+
+
 def test_jit_frontend_cache_hit_skips_tir_elaboration(monkeypatch):
     import tilelang
     import tilelang.language as T

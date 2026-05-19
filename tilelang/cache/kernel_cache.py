@@ -377,7 +377,11 @@ class KernelCache:
 
         # Store in memory cache after compilation
         self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
-        self._memory_cache[key] = kernel
+        with self._lock:
+            existing = self._memory_cache.get(key)
+            if existing is not None:
+                return existing
+            self._memory_cache[key] = kernel
         return kernel
 
     def clear_cache(self):
@@ -411,8 +415,13 @@ class KernelCache:
         try:
             kernel._tilelang_cache_key = key
             kernel._tilelang_cache_path = cache_path
-        except Exception:
-            pass
+        except (AttributeError, TypeError):
+            logging.getLogger(__name__).debug(
+                "Could not tag kernel cache entry for key %s at %s",
+                key,
+                cache_path,
+                exc_info=True,
+            )
 
     @staticmethod
     def _load_binary(path: str):
