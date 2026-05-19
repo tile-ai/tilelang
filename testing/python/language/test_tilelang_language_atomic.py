@@ -215,6 +215,26 @@ def test_tma_atomic_add():
     assert kernel.get_kernel_source() == kernel_with_explicit_swizzle.get_kernel_source()
 
 
+@tilelang.jit
+def tma_atomic_add_manual_wait_program(out):
+    out: T.Tensor[(16, 16), T.float32]
+
+    with T.Kernel(1):
+        out_shared = T.alloc_shared((16, 16), dtype=T.float32)
+        T.fill(out_shared, 1)
+        T.atomic_add(out, out_shared, use_tma=True, tma_wait=False)
+        if T.get_thread_binding() == 0:
+            T.tma_store_wait(0, True)
+
+
+@tilelang.testing.requires_cuda
+def test_tma_atomic_add_manual_wait_codegen():
+    kernel = tma_atomic_add_manual_wait_program.compile(out=T.Tensor[(16, 16), T.float32])
+    source = kernel.get_kernel_source()
+    assert "tma_store_add" in source
+    assert source.count("tma_store_wait") == 1
+
+
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
     tilelang.disable_cache()
     kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
