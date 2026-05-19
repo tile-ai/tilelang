@@ -260,6 +260,8 @@ TVM_DLL const Op &fma2();
 TVM_DLL const Op &max2();
 TVM_DLL const Op &min2();
 TVM_DLL const Op &abs2();
+TVM_DLL const Op &max2_nan();
+TVM_DLL const Op &min2_nan();
 
 // random op
 TVM_DLL const Op &rng_init();

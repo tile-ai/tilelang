@@ -1,5 +1,4 @@
 import torch
-from typing import Optional
 import tilelang
 import tilelang.language as T
 from tilelang.language.dtypes import _TORCH_DTYPE_TO_STR, dtype
@@ -189,7 +188,7 @@ def _compress_fn(D, dtype, meta_dtype, block_M=_BLOCK_M, block_K=_BLOCK_K, elem_
         return compress_32bit_ordered_metadata
 
 
-def torch_compress(dense: torch.Tensor, meta_dtype: Optional[torch.dtype] = None) -> tuple[torch.Tensor, torch.Tensor]:  # noqa: FA100
+def torch_compress(dense: torch.Tensor, meta_dtype: torch.dtype | None = None) -> tuple[torch.Tensor, torch.Tensor]:  # noqa: FA100
     """
     Reference 2:4 sparse compressor in pure PyTorch with natural row-major metadata. Modified from https://github.com/pytorch/pytorch/blob/bfa6895a345f6568624a4769238af6a9225e3fb8/torch/sparse/_semi_structured_conversions.py#L47
 
@@ -251,9 +250,9 @@ def torch_compress(dense: torch.Tensor, meta_dtype: Optional[torch.dtype] = None
 
 def compress(
     A: torch.Tensor,
-    meta_dtype: Optional[torch.dtype] = None,  # noqa: FA100
-    block_m: Optional[int] = None,  # noqa: FA100
-    block_k: Optional[int] = None,  # noqa: FA100
+    meta_dtype: torch.dtype | None = None,  # noqa: FA100
+    block_m: int | None = None,  # noqa: FA100
+    block_k: int | None = None,  # noqa: FA100
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A.is_contiguous(), "Input must be contiguous"
     assert A.dim() == 2, "Input must be 2D"
