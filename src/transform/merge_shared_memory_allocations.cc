@@ -94,6 +94,98 @@ public:
       static_shmem_allocs_;
 };
 
+class SharedMemoryConflictCollector : public StmtExprVisitor {
+public:
+  using ConflictMap =
+      std::unordered_map<const VarNode *, std::unordered_set<const VarNode *>>;
+
+  static ConflictMap Collect(const Stmt &stmt) {
+    SharedMemoryConflictCollector collector;
+    collector(stmt);
+    return std::move(collector.conflicts_);
+  }
+
+private:
+  struct WarpSpecializationFrame {
+    std::unordered_set<const VarNode *> touched;
+    std::unordered_set<const VarNode *> tma_store_sources;
+  };
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == attr::kWarpSpecializationScope) {
+      ws_frames_.emplace_back();
+      StmtExprVisitor::VisitStmt_(op);
+
+      WarpSpecializationFrame frame = std::move(ws_frames_.back());
+      ws_frames_.pop_back();
+      for (const VarNode *src : frame.tma_store_sources) {
+        for (const VarNode *var : frame.touched) {
+          if (src == var) {
+            continue;
+          }
+          conflicts_[src].insert(var);
+          conflicts_[var].insert(src);
+        }
+      }
+      return;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (!ws_frames_.empty() && op->op.same_as(tl::tma_store()) &&
+        op->args.size() >= 2) {
+      CollectDynamicSharedVars(op->args[1]);
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const VarNode *op) final {
+    MarkDynamicSharedVar(op, /*is_tma_store_source=*/false);
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    MarkDynamicSharedVar(op->buffer->data.get(),
+                         /*is_tma_store_source=*/false);
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    MarkDynamicSharedVar(op->buffer->data.get(),
+                         /*is_tma_store_source=*/false);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void CollectDynamicSharedVars(const PrimExpr &expr) {
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (const auto *var = node.as<VarNode>()) {
+        MarkDynamicSharedVar(var, /*is_tma_store_source=*/true);
+      }
+    });
+  }
+
+  void MarkDynamicSharedVar(const VarNode *var, bool is_tma_store_source) {
+    if (ws_frames_.empty()) {
+      return;
+    }
+    if (!var->type_annotation.as<PointerTypeNode>()) {
+      return;
+    }
+    Var var_ref = tvm::ffi::GetRef<Var>(var);
+    if (GetPtrStorageScope(var_ref) != "shared.dyn") {
+      return;
+    }
+    ws_frames_.back().touched.insert(var);
+    if (is_tma_store_source) {
+      ws_frames_.back().tma_store_sources.insert(var);
+    }
+  }
+
+  std::vector<WarpSpecializationFrame> ws_frames_;
+  ConflictMap conflicts_;
+};
+
 // Find a linear pattern of storage access
 // Used for liveness analysis.
 // "linear" means fitting a complex access pattern into an array of StmtEntry
@@ -499,6 +591,10 @@ public:
     }
   }
 
+  void SetConflictMap(SharedMemoryConflictCollector::ConflictMap conflicts) {
+    conflict_map_ = std::move(conflicts);
+  }
+
   /*!
    * \brief plan the memory reuse for all the buffer allocated in the statement
    * \param stmt the statement
@@ -871,6 +967,7 @@ private:
     size_t size_bytes{0};
     int alignment{0};
     const VarNode *var{nullptr};
+    std::unordered_set<const VarNode *> conflicts;
   };
 
   // Result of a linear-scan arena packing.  Offsets contain the byte offset for
@@ -898,7 +995,9 @@ private:
 
   class FreeList {
   public:
-    std::optional<size_t> Allocate(size_t need, size_t alignment) {
+    std::optional<std::pair<int, size_t>>
+    Find(size_t need, size_t alignment,
+         const std::function<bool(size_t)> &is_allowed = nullptr) {
       // Best-fit search: pick the slot that wastes the least space after
       // alignment.
       int best = -1;
@@ -911,6 +1010,8 @@ private:
         size_t usable = blocks_[i].size - head;
         if (usable < need)
           continue;
+        if (is_allowed && !is_allowed(aligned))
+          continue;
         size_t waste = blocks_[i].size - need;
         if (waste < best_waste) {
           best_waste = waste;
@@ -919,14 +1020,14 @@ private:
       }
       if (best < 0)
         return std::nullopt;
-      return CarveBlock(best, need, alignment);
+      return std::make_pair(best, AlignUpSize(blocks_[best].offset, alignment));
     }
 
-    // Try to allocate from the free block whose end touches arena_top.
-    // The block may be smaller than need; the caller grows the arena to
-    // cover the deficit.  Returns the aligned start offset on success.
-    std::optional<size_t> AllocateFromTail(size_t need, size_t alignment,
-                                           size_t arena_top) {
+    size_t AllocateAt(int idx, size_t need, size_t alignment) {
+      return CarveBlock(idx, need, alignment);
+    }
+
+    std::optional<size_t> FindTail(size_t alignment, size_t arena_top) const {
       if (blocks_.empty())
         return std::nullopt;
       int tail_idx = static_cast<int>(blocks_.size()) - 1;
@@ -937,7 +1038,18 @@ private:
       if (aligned >= arena_top)
         return std::nullopt;
 
+      return aligned;
+    }
+
+    // Allocate from the free block whose end touches arena_top. The block may
+    // be smaller than need; the caller grows the arena to cover the deficit.
+    size_t AllocateFromTail(size_t need, size_t alignment, size_t arena_top) {
+      ICHECK(!blocks_.empty());
+      int tail_idx = static_cast<int>(blocks_.size()) - 1;
+      ICHECK_EQ(blocks_[tail_idx].offset + blocks_[tail_idx].size, arena_top);
       FreeBlock blk = blocks_[tail_idx];
+      size_t aligned = AlignUpSize(blk.offset, alignment);
+      ICHECK_LT(aligned, arena_top);
       size_t head = aligned - blk.offset;
 
       blocks_.erase(blocks_.begin() + tail_idx);
@@ -1035,6 +1147,27 @@ private:
     FreeList freelist;
     size_t arena_top = 0;
     std::unordered_map<const VarNode *, size_t> offsets;
+    std::unordered_map<const VarNode *, size_t> interval_sizes;
+
+    auto conflicts_with_existing = [&](const Interval &interval,
+                                       size_t candidate_offset) {
+      size_t candidate_end = candidate_offset + interval.size_bytes;
+      for (const VarNode *other : interval.conflicts) {
+        auto offset_it = offsets.find(other);
+        auto size_it = interval_sizes.find(other);
+        if (offset_it == offsets.end() || size_it == interval_sizes.end()) {
+          continue;
+        }
+        size_t other_offset = offset_it->second;
+        size_t other_end = other_offset + size_it->second;
+        bool overlaps =
+            !(candidate_end <= other_offset || other_end <= candidate_offset);
+        if (overlaps) {
+          return true;
+        }
+      }
+      return false;
+    };
 
     auto retire = [&](int pc) {
       while (!active.empty() && active.top().end <= pc) {
@@ -1050,12 +1183,25 @@ private:
       // 1) Reuse a fully fitting free block (best-fit).
       // 2) Extend the tail free block that touches arena_top.
       // 3) Bump-allocate at arena_top (reclaim alignment gap).
-      if (auto slot =
-              freelist.Allocate(interval.size_bytes, interval.alignment)) {
-        offset = slot.value();
-      } else if (auto tail_slot = freelist.AllocateFromTail(
-                     interval.size_bytes, interval.alignment, arena_top)) {
-        offset = tail_slot.value();
+      if (auto slot = freelist.Find(interval.size_bytes, interval.alignment,
+                                    [&](size_t candidate_offset) {
+                                      return !conflicts_with_existing(
+                                          interval, candidate_offset);
+                                    })) {
+        offset =
+            freelist.AllocateAt(slot->first, interval.size_bytes,
+                                interval.alignment);
+      } else if (auto tail_slot =
+                     freelist.FindTail(interval.alignment, arena_top);
+                 tail_slot && !conflicts_with_existing(interval, *tail_slot)) {
+        offset = freelist.AllocateFromTail(interval.size_bytes,
+                                           interval.alignment, arena_top);
+        arena_top = offset + interval.size_bytes;
+      } else if (tail_slot) {
+        offset = AlignUpSize(arena_top, interval.alignment);
+        if (offset > arena_top) {
+          freelist.Free(arena_top, offset - arena_top);
+        }
         arena_top = offset + interval.size_bytes;
       } else {
         offset = AlignUpSize(arena_top, interval.alignment);
@@ -1069,6 +1215,7 @@ private:
       active.push(ActiveInterval{interval.end, offset, interval.size_bytes,
                                  interval.var});
       offsets[interval.var] = offset;
+      interval_sizes[interval.var] = interval.size_bytes;
     }
 
     return ArenaPlan{arena_top, std::move(offsets)};
@@ -1489,6 +1636,10 @@ private:
           std::max<int64_t>(0, info.const_size_bytes.value()));
       interval.alignment = info.alignment;
       interval.var = info.var;
+      if (auto conflict_it = conflict_map_.find(info.var);
+          conflict_it != conflict_map_.end()) {
+        interval.conflicts = conflict_it->second;
+      }
       intervals.push_back(interval);
     }
 
@@ -1634,6 +1785,7 @@ private:
   // allocation. Some backends, such as WebGPU, cannot print handle-valued Bind
   // nodes and use the direct merged-buffer rewrite path instead.
   bool preserve_aliases_{true};
+  SharedMemoryConflictCollector::ConflictMap conflict_map_;
 };
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
@@ -1643,9 +1795,12 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool disable_reuse = false) {
   AllocateCollector collector;
   collector(stmt);
+  SharedMemoryConflictCollector::ConflictMap conflict_map =
+      SharedMemoryConflictCollector::Collect(stmt);
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
                                   align_bytes, preserve_aliases);
+    rewriter.SetConflictMap(conflict_map);
     rewriter.PlanReuse(stmt, true,
                        disable_reuse ? false : enable_aggressive_merge, false,
                        disable_reuse);
