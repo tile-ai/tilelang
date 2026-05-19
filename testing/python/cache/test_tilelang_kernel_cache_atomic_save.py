@@ -8,6 +8,7 @@ import pytest
 import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.env import env
+from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
 
 
@@ -100,10 +101,8 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     )
 
     assert loaded is sentinel
-    assert captured["host_kernel_source"] is None
-    assert captured["device_kernel_source"] is None
-    assert captured["host_kernel_source_path"] == str(cache_path / cache.host_kernel_path)
-    assert captured["device_kernel_source_path"] == str(cache_path / cache.device_kernel_path)
+    assert captured["host_kernel_source"] == CachedTextSource(path=str(cache_path / cache.host_kernel_path))
+    assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
     assert captured["kernel_lib_path"] == str(cache_path / cache.kernel_lib_path)
     assert captured["params"] == ["param"]
 
@@ -188,10 +187,8 @@ def test_kernel_cache_frontend_hit_loads_serialized_prim_func(cache_dirs, monkey
 
     assert loaded is sentinel
     assert captured["func"] == prim_func
-    assert captured["host_kernel_source"] is None
-    assert captured["device_kernel_source"] is None
-    assert captured["host_kernel_source_path"] == str(cache_path / cache.host_kernel_path)
-    assert captured["device_kernel_source_path"] == str(cache_path / cache.device_kernel_path)
+    assert captured["host_kernel_source"] == CachedTextSource(path=str(cache_path / cache.host_kernel_path))
+    assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
 
 
 def test_kernel_cache_frontend_hit_round_trips_real_prim_func(cache_dirs, tmp_path, monkeypatch):

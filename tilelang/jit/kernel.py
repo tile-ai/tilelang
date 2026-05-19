@@ -17,6 +17,7 @@ from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
     BaseKernelAdapter,
+    CachedTextSource,
     CythonKernelAdapter,
     CuTeDSLKernelAdapter,
     TVMFFIKernelAdapter,
@@ -148,8 +149,8 @@ class JITKernel(Generic[_P, _T]):
     def from_database(
         cls,
         func: PrimFunc,
-        host_kernel_source: str | None,
-        device_kernel_source: str | None,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         params: list[KernelParam],
         target: str | Target,
@@ -158,8 +159,6 @@ class JITKernel(Generic[_P, _T]):
         execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"],
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
-        host_kernel_source_path: str | None = None,
-        device_kernel_source_path: str | None = None,
     ):
         """
         Alternative constructor to create a TorchFunction directly from a database.
@@ -185,8 +184,6 @@ class JITKernel(Generic[_P, _T]):
             kernel_lib_path=kernel_lib_path,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
-            host_kernel_source_path=host_kernel_source_path,
-            device_kernel_source_path=device_kernel_source_path,
         )
         instance.torch_function = instance.adapter.func
         return instance
@@ -344,13 +341,11 @@ class JITKernel(Generic[_P, _T]):
         result_idx: list[int] | int,
         target: str | Target,
         func_or_mod: PrimFunc | tvm.runtime.Module,
-        host_kernel_source: str | None,
-        device_kernel_source: str | None,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
-        host_kernel_source_path: str | None = None,
-        device_kernel_source_path: str | None = None,
     ) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
@@ -367,8 +362,6 @@ class JITKernel(Generic[_P, _T]):
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
-                host_kernel_source_path=host_kernel_source_path,
-                device_kernel_source_path=device_kernel_source_path,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter.from_database(
@@ -380,8 +373,6 @@ class JITKernel(Generic[_P, _T]):
                 device_kernel_source=device_kernel_source,
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
-                host_kernel_source_path=host_kernel_source_path,
-                device_kernel_source_path=device_kernel_source_path,
             )
         elif execution_backend == "nvrtc":
             from tilelang.jit.adapter import NVRTCKernelAdapter
@@ -396,8 +387,6 @@ class JITKernel(Generic[_P, _T]):
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
-                host_kernel_source_path=host_kernel_source_path,
-                device_kernel_source_path=device_kernel_source_path,
             )
         elif execution_backend == "cutedsl":
             adapter = CuTeDSLKernelAdapter.from_database(
@@ -410,8 +399,6 @@ class JITKernel(Generic[_P, _T]):
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
-                host_kernel_source_path=host_kernel_source_path,
-                device_kernel_source_path=device_kernel_source_path,
             )
         else:
             # Handle invalid backend.

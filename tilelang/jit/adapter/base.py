@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Callable
 from tilelang.engine.param import KernelParam
 import torch
+
+
+@dataclass(frozen=True)
+class CachedTextSource:
+    text: str | None = None
+    path: str | None = None
 
 
 class BaseKernelAdapter(ABC):
@@ -94,6 +101,10 @@ class BaseKernelAdapter(ABC):
 
     def _post_init(self):
         self.func = self._convert_torch_func()
+
+    def _set_cached_text_source(self, source_attr: str, path_attr: str, source: CachedTextSource) -> None:
+        setattr(self, source_attr, source.text)
+        setattr(self, path_attr, source.path)
 
     def _load_cached_text_source(self, source_attr: str, path_attr: str) -> str | None:
         source = getattr(self, source_attr, None)

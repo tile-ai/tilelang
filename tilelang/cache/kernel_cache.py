@@ -22,6 +22,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
+from tilelang.jit.adapter.base import CachedTextSource
 from tilelang import __version__
 import platform
 
@@ -579,10 +580,8 @@ class KernelCache:
 
         kernel = self._build_kernel(
             func=func,
-            host_kernel_source=None,
-            device_kernel_source=None,
-            host_kernel_path=host_kernel_path,
-            device_kernel_path=device_kernel_path,
+            host_kernel_source=CachedTextSource(path=host_kernel_path),
+            device_kernel_source=CachedTextSource(path=device_kernel_path),
             kernel_lib_path=kernel_lib_path,
             kernel_params=kernel_params,
             target=target,
@@ -775,10 +774,8 @@ class KernelCache:
     def _build_kernel(
         self,
         func: Callable | None,
-        host_kernel_source: str | None,
-        device_kernel_source: str | None,
-        host_kernel_path: str | None,
-        device_kernel_path: str | None,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         kernel_params: list[KernelParam] | None,
         target: str | Target,
@@ -809,6 +806,4 @@ class KernelCache:
             execution_backend=execution_backend,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
-            host_kernel_source_path=host_kernel_path,
-            device_kernel_source_path=device_kernel_path,
         )

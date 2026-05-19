@@ -12,7 +12,7 @@ from tilelang.engine.param import KernelParam
 from tvm import tir
 from tvm.relax import TensorType
 
-from tilelang.jit.adapter.base import BaseKernelAdapter
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target, is_metal_target
@@ -155,23 +155,19 @@ class CythonKernelAdapter(BaseKernelAdapter):
         result_idx: list[int],
         target: str,
         func_or_mod: tir.PrimFunc | tvm.IRModule,
-        host_kernel_source: str | None,
-        device_kernel_source: str | None,
+        host_kernel_source: CachedTextSource,
+        device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
-        host_kernel_source_path: str | None = None,
-        device_kernel_source_path: str | None = None,
     ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter.host_kernel_source = host_kernel_source
-        adapter.device_kernel_source = device_kernel_source
-        adapter._host_kernel_source_path = host_kernel_source_path
-        adapter._device_kernel_source_path = device_kernel_source_path
-        adapter.kernel_global_source = device_kernel_source  # Set alias for compatibility
+        adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
+        adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
+        adapter.kernel_global_source = device_kernel_source.text  # Set alias for compatibility
         adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tir.PrimFunc):
