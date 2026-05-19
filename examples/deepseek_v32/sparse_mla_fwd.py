@@ -107,11 +107,11 @@ def sparse_mla_fwd(
             H0 = g_i * padded_H + (0 if REPLICATE_H == 1 else (bx % REPLICATE_H) * 64)
             H1 = H0 + H_per_block
 
-            barrier = T.alloc_barrier([256])
-            T.tma_copy(Q[b_i, s_i, H0:H1, :D], Q_shared, barrier=barrier)
-            T.tma_copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared, barrier=barrier)
-            T.mbarrier_arrive(barrier)
-            T.mbarrier_wait_parity(barrier, 0)
+            Q_loaded = T.alloc_barrier(256)
+            T.tma_copy(Q[b_i, s_i, H0:H1, :D], Q_shared, barrier=Q_loaded)
+            T.tma_copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared, barrier=Q_loaded)
+            T.mbarrier_arrive(Q_loaded)
+            T.mbarrier_wait_parity(Q_loaded, 0)
 
             for i_i in T.Pipelined(NI, num_stages=num_stages):
                 for bi_i in T.Parallel(BI):
