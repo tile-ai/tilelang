@@ -113,6 +113,53 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_guarded_pure_tma_pipeline_keeps_auto_warp_specialize():
+    """A pipeline loop nested under a runtime guard should still auto-WS."""
+
+    M, K = 8, 256
+    block_m, block_k = 4, 128
+    threads = 32
+
+    @T.prim_func
+    def guarded_copy_loop(
+        x: T.Tensor((M, K), T.float16),
+        y: T.Tensor((M, K), T.float16),
+        valid_m: T.int32,
+    ):
+        with T.Kernel(T.ceildiv(M, block_m), threads=threads) as pid_m:
+            x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
+            if pid_m * block_m < valid_m:
+                for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=1):
+                    T.copy(
+                        x[
+                            pid_m * block_m : (pid_m + 1) * block_m,
+                            ko * block_k : (ko + 1) * block_k,
+                        ],
+                        x_shared,
+                    )
+                    T.copy(
+                        x_shared,
+                        y[
+                            pid_m * block_m : (pid_m + 1) * block_m,
+                            ko * block_k : (ko + 1) * block_k,
+                        ],
+                    )
+
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(guarded_copy_loop, pass_configs, out_idx=[1])
+
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load" in src
+    assert "__launch_bounds__(160, 1)" in src
+    assert "if (32 <= ((int)threadIdx.x))" in src
+
+    x = torch.randn((M, K), device="cuda", dtype=torch.float16)
+    y = kernel(x, M)
+    torch.testing.assert_close(y, x)
+    torch.cuda.synchronize()
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
     """num_stages=0 should keep cp.async-only loops out of auto-WS."""
 
