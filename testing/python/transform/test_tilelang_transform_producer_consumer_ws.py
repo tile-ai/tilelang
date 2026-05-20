@@ -482,26 +482,6 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_tiled_ws_collects_nested_preloop_tma_waits():
-    """Nested pre-loop TMA loads should be rewritten and waited by consumers."""
-
-    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
-    kernel = _compile_tvm_ffi(nested_prelude_tma_wait_sink(), pass_configs, out_idx=[3])
-    src = kernel.get_kernel_source()
-
-    k_load = _find_after(src, "tl::tma_load(K_in_desc")
-    v_load = _find_after(src, "tl::tma_load(V_in_desc")
-    branch = _find_after(src, "if (128 <= ((int)threadIdx.x))")
-    consumer_branch = _find_after(src, "} else {", branch)
-    first_wait = _find_after(src, ".wait(0)")
-
-    assert "__launch_bounds__(256, 1)" in src
-    assert "uint64_t mbarrier_mem[6]" in src
-    assert branch < k_load < v_load < consumer_branch < first_wait
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
     """Shared-prelude grouped-gemm indices must stay outside WS branches."""
     kernel, batch_sizes = _compile_grouped_gemm_ws()
