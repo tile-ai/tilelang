@@ -34,19 +34,23 @@ def test_normalize_rocm_arch_strips_feature_suffix():
 def test_target_mcpu_helpers():
     target = _hip_target("gfx1151:sramecc+:xnack-")
     assert target_get_mcpu(target) == "gfx1151"
-    assert target_get_mcpu("hip -mcpu=gfx1151:sramecc+:xnack-") == "gfx1151"
 
 
 def test_determine_target_adds_rdna_thread_warp_size():
-    target = determine_target("hip -mcpu=gfx1151", return_object=True)
+    target = determine_target({"kind": "hip", "mcpu": "gfx1151"}, return_object=True)
     assert target_get_mcpu(target) == "gfx1151"
     assert int(target.attrs["thread_warp_size"]) == 32
 
 
 def test_determine_target_adds_known_gfx12_thread_warp_size():
-    target = determine_target("hip -mcpu=gfx1200", return_object=True)
+    target = determine_target({"kind": "hip", "mcpu": "gfx1200"}, return_object=True)
     assert target_get_mcpu(target) == "gfx1200"
     assert int(target.attrs["thread_warp_size"]) == 32
+
+
+def test_determine_target_rejects_legacy_option_string():
+    with pytest.raises(AssertionError, match="Pass target options as a dict"):
+        determine_target("hip -mcpu=gfx1151", return_object=True)
 
 
 def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit(monkeypatch):

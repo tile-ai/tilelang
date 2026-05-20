@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 
-import re
-import shlex
 from platform import mac_ver
 from typing import Literal
 
@@ -32,56 +30,6 @@ SUPPORTED_TARGETS: dict[str, str] = {
 ROCM_MTRIPLE = "amdgcn-amd-amdhsa-hcc"
 
 
-def _coerce_legacy_target_option(key: str, value: str | bool) -> object:
-    if not isinstance(value, str):
-        return value
-    if key in {"keys", "libs"}:
-        return [item for item in value.split(",") if item]
-    lowered = value.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    if re.fullmatch(r"[+-]?\d+", value):
-        return int(value)
-    return value
-
-
-def _parse_legacy_target_string(target: str) -> TargetConfig | None:
-    try:
-        tokens = shlex.split(target)
-    except ValueError:
-        return None
-    if len(tokens) <= 1:
-        return None
-    kind = tokens[0]
-    if kind == "auto" or kind not in SUPPORTED_TARGETS:
-        return None
-
-    config: TargetConfig = {"kind": kind}
-    for option in tokens[1:]:
-        if not option.startswith("-"):
-            return None
-        option = option.lstrip("-")
-        if not option:
-            return None
-        if "=" in option:
-            key, value = option.split("=", maxsplit=1)
-            if not key:
-                return None
-        else:
-            key, value = option, True
-        config[key] = _coerce_legacy_target_option(key, value)
-    return config
-
-
-def _target_from_string(target: str) -> Target:
-    target_config = _parse_legacy_target_string(target)
-    if target_config is not None:
-        return Target(target_config)
-    return Target(target)
-
-
 def normalize_rocm_arch(arch: str | None) -> str | None:
     if arch is None:
         return None
@@ -93,7 +41,7 @@ def target_get_mcpu(target: str | Target | None) -> str | None:
     if target is None:
         return None
     if isinstance(target, str):
-        target = _target_from_string(target)
+        target = Target(target)
     return normalize_rocm_arch(target.attrs.get("mcpu"))
 
 
@@ -217,6 +165,12 @@ def determine_torch_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> to
     return torch_dtype
 
 
+def _with_cutedsl_key(target: Target) -> Target:
+    target_dict = dict(target.export())
+    target_dict["keys"] = list(dict.fromkeys([*target_dict.get("keys", ()), "cutedsl"]))
+    return Target(target_dict)
+
+
 def normalize_cutedsl_target(target: TargetLike) -> Target | None:
     if isinstance(target, Target):
         if target.kind.name == "cuda" and "cutedsl" in target.keys:
@@ -224,6 +178,13 @@ def normalize_cutedsl_target(target: TargetLike) -> Target | None:
         return None
 
     if isinstance(target, dict):
+        if target.get("kind") == "cutedsl":
+            cuda_target = dict(target)
+            cuda_target["kind"] = "cuda"
+            try:
+                return _with_cutedsl_key(Target(cuda_target))
+            except Exception:
+                return None
         try:
             temp_target = Target(target)
         except Exception:
@@ -232,16 +193,9 @@ def normalize_cutedsl_target(target: TargetLike) -> Target | None:
             return temp_target
         return None
 
-    if target.startswith("cutedsl"):
-        cuda_target_str = target.replace("cutedsl", "cuda", 1)
-
+    if target.strip() == "cutedsl":
         try:
-            temp_target = _target_from_string(cuda_target_str)
-
-            target_dict = dict(temp_target.export())
-            target_dict["keys"] = list(set(target_dict.get("keys", [])) | {"cutedsl"})
-
-            return Target(target_dict)
+            return _with_cutedsl_key(Target("cuda"))
         except Exception:
             return None
 
@@ -324,9 +278,8 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
                 normalized_target = target.strip()
                 if not normalized_target:
                     raise AssertionError(f"Target {target} is not supported")
-                target_config = _parse_legacy_target_string(normalized_target)
                 try:
-                    parsed_target = Target(target_config if target_config is not None else normalized_target)
+                    parsed_target = Target(normalized_target)
                 except Exception as err:
                     examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
                     raise AssertionError(
@@ -335,8 +288,6 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
                     ) from err
                 if parsed_target.kind.name == "hip" and target_get_mcpu(parsed_target) is not None:
                     return_var = with_rocm_target_attrs(parsed_target)
-                elif target_config is not None:
-                    return_var = target_config
                 else:
                     return_var = normalized_target
             else:

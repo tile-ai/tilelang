@@ -303,7 +303,7 @@ def _lower_cutedsl_for_pdl(program):
 
     # PDL is an SM90/Hopper feature. Use an explicit arch so this codegen test
     # does not depend on the default CUDA device, which may be sm_80 on mixed-GPU hosts.
-    target = determine_target("cutedsl -arch=sm_90")
+    target = determine_target({"kind": "cutedsl", "arch": "sm_90"})
     with target:
         artifact = tilelang.lower(program, target=target)
     mod = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
@@ -344,7 +344,7 @@ def test_cutedsl_pdl_runtime_pipeline():
         _lower_cutedsl_for_pdl(kernels_with_pdl_pipeline(N, block_size=64))
         kernel = tilelang.compile(
             kernels_with_pdl_pipeline(N, block_size=64),
-            target="cutedsl -arch=sm_90",
+            target={"kind": "cutedsl", "arch": "sm_90"},
         )
         a = torch.randn(N, dtype=torch.float32, device=device)
         b = torch.empty_like(a)
@@ -379,7 +379,7 @@ def test_cutedsl_pdl_overlap_microbenchmark():
 
     _print_pdl_benchmark_environment(device)
     print("PDL microbenchmark config:")
-    print("  target=cutedsl -arch=sm_90")
+    print("  target=cutedsl sm_90")
     print(f"  num_blocks={num_blocks}")
     print(f"  block_size={block_size}")
     print(f"  work_iters={work_iters}")
@@ -389,11 +389,11 @@ def test_cutedsl_pdl_overlap_microbenchmark():
     with torch.cuda.device(device):
         serial_kernel = tilelang.compile(
             kernels_without_pdl_overlap_window(N, block_size=block_size, work_iters=work_iters),
-            target="cutedsl -arch=sm_90",
+            target={"kind": "cutedsl", "arch": "sm_90"},
         )
         pdl_kernel = tilelang.compile(
             kernels_with_pdl_overlap_window(N, block_size=block_size, work_iters=work_iters),
-            target="cutedsl -arch=sm_90",
+            target={"kind": "cutedsl", "arch": "sm_90"},
         )
         a = torch.randn(N, dtype=torch.float32, device=device)
         serial_outputs = [torch.empty_like(a) for _ in range(4)]
