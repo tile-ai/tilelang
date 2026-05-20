@@ -455,6 +455,16 @@ private:
           writes_.insert(writes_.end(), buffer_writes->second.begin(),
                          buffer_writes->second.end());
         }
+      } else {
+        // Handle-based mbarrier (e.g. get_mbarrier(id)): cannot resolve to a
+        // concrete Buffer.  Conservatively attach all known async buffer
+        // dependencies so the wait is not treated as dependency-free.
+        for (const auto &[_, regions] : chain_builder_.mbar_to_buffer_reads_) {
+          reads_.insert(reads_.end(), regions.begin(), regions.end());
+        }
+        for (const auto &[_, regions] : chain_builder_.mbar_to_buffer_writes_) {
+          writes_.insert(writes_.end(), regions.begin(), regions.end());
+        }
       }
     } else {
       StmtExprVisitor::VisitExpr_(op);

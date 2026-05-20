@@ -309,6 +309,14 @@ TVM_DLL const Op &tma_load();
 TVM_DLL const Op &tma_load_im2col();
 
 /*!
+ * \brief TMA multicast load from a tensor descriptor to cluster shared memory.
+ *
+ * tma_load_multicast(descriptor, mbarrier, smem_data, multicast_mask,
+ *                    coord_0, coord_1, ..., eviction_policy)
+ */
+TVM_DLL const Op &tma_load_multicast();
+
+/*!
  * \brief tvm intrinsics for storing data from shared memory to global tensor
  * descriptor
  *
@@ -1251,6 +1259,18 @@ TVM_DLL const Op &stg128();
  *    T.stg256(y, i, value)
  */
 TVM_DLL const Op &stg256();
+
+/*!
+ * \brief Elementwise shared::cluster store via cooperative groups.
+ */
+TVM_DLL const Op &ptx_cluster_store();
+
+/*!
+ * \brief Bulk async shared::cluster store to another CTA.
+ *
+ * tma_store_cluster(dst_ptr, src_ptr, dst_cta, size_bytes, bar_ref)
+ */
+TVM_DLL const Op &tma_store_cluster();
 
 } // namespace tl
 } // namespace tvm

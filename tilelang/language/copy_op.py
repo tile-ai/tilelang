@@ -120,6 +120,59 @@ def copy(
     return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
 
 
+def copy_cluster(
+    src: BufferLikeType,
+    dst: BufferLikeType,
+    *,
+    dst_block: int | tir.PrimExpr | None = None,
+    cluster_mask: int | None = None,
+    remote_barrier: tir.BufferLoad | None = None,
+    eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+) -> tir.PrimExpr | tir.Stmt:
+    """Cluster-aware copy for TMA multicast or SM-to-SM shared-memory copy.
+
+    Args:
+        src: Source memory region.
+        dst: Destination memory region.
+        dst_block: Destination CTA rank in the cluster for SM-to-SM copy.
+        cluster_mask: Bitmask of CTAs that participate in TMA multicast.
+        remote_barrier: Shared-memory mbarrier for asynchronous SM-to-SM copy
+            completion signalling.  The destination CTA should wait on its
+            local copy of this barrier.
+        eviction_policy: Cache eviction hint passed to the TMA instruction.
+            Only relevant for the TMA multicast path (``cluster_mask`` set).
+        coalesced_width: Vectorization width (in elements) for the SIMT loop
+            used on the SM-to-SM fallback path (``dst_block`` set, no fast
+            bulk-async route available).
+        loop_layout: Parallel loop layout hint (Fragment) for the SIMT loop on
+            the SM-to-SM fallback path. Incompatible with the TMA multicast
+            path (``cluster_mask`` set).
+
+    Returns:
+        tir.Call: A handle to the copy operation.
+    """
+    src, dst = _normalize_copy_regions(src, dst)
+
+    ann: dict = {}
+    if dst_block is not None:
+        ann["dst_block"] = dst_block
+    if cluster_mask is not None:
+        ann["cluster_mask"] = cluster_mask
+    if remote_barrier is not None:
+        ann["barrier"] = remote_barrier
+    if eviction_policy is not None:
+        eviction_policy_map = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
+        ann["eviction_policy"] = eviction_policy_map[eviction_policy]
+    if coalesced_width is not None:
+        ann["coalesced_width"] = coalesced_width
+    if loop_layout is not None:
+        ann["parallel_loop_layout"] = loop_layout
+
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
+
+
 def async_copy(
     src: BufferLikeType,
     dst: BufferLikeType,
