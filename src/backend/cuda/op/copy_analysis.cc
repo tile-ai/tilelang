@@ -493,8 +493,13 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   const LayoutMap &layout_map =
       ctx.layout_map != nullptr ? *ctx.layout_map : empty_layout_map;
   bool is_cutedsl = TargetIsCuTeDSL(ctx.target);
-  facts.layout_dependent_tma_available =
-      facts.has_layout_map && !is_cutedsl && !ctx.buffer_oob;
+  // Issue #2180: only the descriptor-based 2D TMA path needs the OOB gate.
+  // The 1D bulk-copy path emits `cp.async.bulk`, which has the same OOB
+  // semantics as plain T.copy(); gating it on `buffer_oob` causes
+  // InferLayout to fall through to the 2D path for dynamic-outer-shape
+  // tensors and install a swizzle-shaped shared layout, which then forces
+  // Lower() into LowerBulk and triggers the 256-element splitting.
+  facts.layout_dependent_tma_available = facts.has_layout_map && !is_cutedsl;
 
   if (facts.layout_dependent_tma_available) {
     facts.can_bulk_load_1d =
