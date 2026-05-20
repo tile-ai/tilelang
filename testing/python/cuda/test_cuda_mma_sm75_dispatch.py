@@ -3,6 +3,7 @@ import pytest
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter, TensorCoreIntrinEmitterWithLadderTransform
+from tilelang.cuda.intrinsics.macro.mma_sm75_macro_generator import TensorCoreIntrinEmitterSM75
 from tilelang.cuda.op.gemm.gemm_mma import GemmMMA
 from tilelang.cuda.op.gemm.gemm_mma_sm70 import GemmMMASm70
 from tilelang.tileop.gemm.registry import resolve_gemm_impl
@@ -15,8 +16,8 @@ def test_sm75_uses_regular_mma_gemm_impl():
     assert resolve_gemm_impl("cuda.mma", Target("cuda -arch=sm_75")) is GemmMMA
 
 
-def test_turing_fp16_emitter_uses_sm75_m16n8k8_shape():
-    emitter = TensorCoreIntrinEmitter(
+def test_sm75_fp16_emitter_uses_m16n8k8_shape():
+    emitter = TensorCoreIntrinEmitterSM75(
         a_dtype=T.float16,
         b_dtype=T.float16,
         accum_dtype=T.float32,
@@ -27,7 +28,6 @@ def test_turing_fp16_emitter_uses_sm75_m16n8k8_shape():
         warp_row_tiles=32,
         warp_col_tiles=32,
         chunk=32,
-        is_turing=True,
     )
 
     assert emitter.mma_prefix == "m16n8k8"
@@ -41,8 +41,8 @@ def test_turing_fp16_emitter_uses_sm75_m16n8k8_shape():
     assert emitter.warp_cols == 4
 
 
-def test_turing_int8_emitter_uses_sm75_m8n8k16_shape():
-    emitter = TensorCoreIntrinEmitter(
+def test_sm75_int8_emitter_uses_m8n8k16_shape():
+    emitter = TensorCoreIntrinEmitterSM75(
         a_dtype=T.int8,
         b_dtype=T.int8,
         accum_dtype=T.int32,
@@ -53,7 +53,6 @@ def test_turing_int8_emitter_uses_sm75_m8n8k16_shape():
         warp_row_tiles=32,
         warp_col_tiles=32,
         chunk=64,
-        is_turing=True,
     )
 
     assert emitter.mma_prefix == "m8n8k16"
@@ -68,8 +67,8 @@ def test_turing_int8_emitter_uses_sm75_m8n8k16_shape():
     assert emitter.get_store_index_map() is not None
 
 
-def test_turing_int4_emitter_uses_sm75_m8n8k32_shape():
-    emitter = TensorCoreIntrinEmitter(
+def test_sm75_int4_emitter_uses_m8n8k32_shape():
+    emitter = TensorCoreIntrinEmitterSM75(
         a_dtype=T.int4,
         b_dtype=T.int4,
         accum_dtype=T.int32,
@@ -80,7 +79,6 @@ def test_turing_int4_emitter_uses_sm75_m8n8k32_shape():
         warp_row_tiles=32,
         warp_col_tiles=32,
         chunk=64,
-        is_turing=True,
     )
 
     assert emitter.mma_prefix == "m8n8k32"
@@ -95,8 +93,8 @@ def test_turing_int4_emitter_uses_sm75_m8n8k32_shape():
     assert emitter.get_store_index_map() is not None
 
 
-def test_turing_m8n8_integer_emitter_uses_matching_store_lane_map():
-    emitter = TensorCoreIntrinEmitter(
+def test_sm75_m8n8_integer_emitter_uses_matching_store_lane_map():
+    emitter = TensorCoreIntrinEmitterSM75(
         a_dtype=T.int8,
         b_dtype=T.int8,
         accum_dtype=T.int32,
@@ -107,7 +105,6 @@ def test_turing_m8n8_integer_emitter_uses_matching_store_lane_map():
         warp_row_tiles=32,
         warp_col_tiles=32,
         chunk=64,
-        is_turing=True,
     )
 
     assert emitter.local_size_out == 2
@@ -126,7 +123,6 @@ def test_non_turing_int8_emitter_keeps_sm80_m16n8k32_shape():
         warp_row_tiles=32,
         warp_col_tiles=32,
         chunk=64,
-        is_turing=False,
     )
 
     assert emitter.mma_prefix == "m16n8k32"
@@ -140,7 +136,7 @@ def test_non_turing_int8_emitter_keeps_sm80_m16n8k32_shape():
 
 def test_uint4_mma_emitter_is_not_advertised_until_fragment_layouts_support_it():
     with pytest.raises(ValueError, match="Unsupported dtype: uint4"):
-        TensorCoreIntrinEmitter(
+        TensorCoreIntrinEmitterSM75(
             a_dtype="uint4",
             b_dtype="uint4",
             accum_dtype=T.int32,
@@ -151,7 +147,6 @@ def test_uint4_mma_emitter_is_not_advertised_until_fragment_layouts_support_it()
             warp_row_tiles=32,
             warp_col_tiles=32,
             chunk=64,
-            is_turing=True,
         )
 
 

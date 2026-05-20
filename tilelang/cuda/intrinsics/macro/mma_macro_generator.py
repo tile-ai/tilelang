@@ -81,7 +81,6 @@ class TensorCoreIntrinEmitter:
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
         is_m_first: bool | None = False,
-        is_turing: bool = False,
         thread_var: Var | None = None,
     ):
         self.a_dtype = a_dtype
@@ -95,15 +94,8 @@ class TensorCoreIntrinEmitter:
         self.warp_row_tiles = warp_row_tiles
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
-        self.is_turing = is_turing
         self._initialize_k_dim(self.a_dtype)
-        # For FP64, MMA shape is m8n8k4; adjust instance dims early
-        if DataType(self.a_dtype).bits == 64:
-            # Override default M/N dims for fp64 MMA
-            self.M_DIM = 8
-            # n_dim will be set to 8 in _initialize_micro_size via k_dim==4
-        elif self.is_turing and DataType(self.a_dtype).bits in (4, 8):
-            self.M_DIM = 8
+        self._initialize_m_dim(self.a_dtype)
         self._initialize_micro_size(self.M_DIM, self.k_dim)
         self._initialize_local_size(self.M_DIM, self.n_dim, self.k_dim, self.WARP_SIZE)
         self._initialize_abbrev(self.a_dtype, self.b_dtype, accum_dtype)
@@ -123,17 +115,14 @@ class TensorCoreIntrinEmitter:
     def _initialize_k_dim(self, a_dtype=T.float16):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        if self.is_turing:
-            if a_dtype.bits == 4:
-                self.k_dim = min(32, self.chunk)
-            elif a_dtype.bits == 8:
-                self.k_dim = min(16, self.chunk)
-            elif a_dtype.bits == 16:
-                self.k_dim = min(8, self.chunk)
-            else:
-                self.k_dim = min(256 // a_dtype.bits, self.chunk)
-        else:
-            self.k_dim = min(256 // a_dtype.bits, self.chunk)
+        self.k_dim = min(256 // a_dtype.bits, self.chunk)
+
+    def _initialize_m_dim(self, a_dtype=T.float16):
+        if isinstance(a_dtype, str):
+            a_dtype = DataType(a_dtype)
+        if a_dtype.bits == 64:
+            # FP64 MMA uses m8n8k4; n_dim is set by _initialize_micro_size.
+            self.M_DIM = 8
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size
@@ -155,22 +144,15 @@ class TensorCoreIntrinEmitter:
             # fp64
             self.mma_prefix = "m8n8k4"
         elif k_dim == 8:
-            # typically used for tfloat32 or turing fp16
+            # typically used for tfloat32
             self.mma_prefix = "m16n8k8"
         elif k_dim == 16:
-            if self.is_turing:
-                self.mma_prefix = "m8n8k16"
-            else:
-                # typically used for float16/bfloat16
-                self.mma_prefix = "m16n8k16"
+            # typically used for float16/bfloat16
+            self.mma_prefix = "m16n8k16"
         elif k_dim == 32:
-            if self.is_turing:
-                # Turing int4/uint4 path
-                self.mma_prefix = "m8n8k32"
-            else:
-                # typically used for int8/fp8
-                # sometimes int4/uint4 is also supported
-                self.mma_prefix = "m16n8k32"
+            # typically used for int8/fp8
+            # sometimes int4/uint4 is also supported
+            self.mma_prefix = "m16n8k32"
         elif k_dim == 64:
             # typically used for int4/uint4
             self.mma_prefix = "m16n8k64"
@@ -186,12 +168,8 @@ class TensorCoreIntrinEmitter:
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
-        # FP64 and Turing integer paths use m8n8; Turing FP16 uses m16n8.
-        use_m8n8 = k_dim == 4 or (self.is_turing and k_dim in (16, 32))
-        use_n8 = use_m8n8 or (self.is_turing and k_dim == 8)
-        if use_n8:
-            if use_m8n8:
-                assert m_dim == 8, f"For fp64/Turing integer MMA, m_dim must be 8, got {m_dim}"
+        if k_dim == 4:
+            assert m_dim == 8, f"For fp64 MMA, m_dim must be 8, got {m_dim}"
             self.n_dim = 8
             self.micro_size_y = 8
             self.warp_rows = warp_row_tiles // m_dim
@@ -230,7 +208,7 @@ class TensorCoreIntrinEmitter:
             return self.thread_var
 
     def _use_fp64_store_index_map(self) -> bool:
-        # m8n8 MMA atoms (FP64 and SM75 integer) produce two C registers and share this lane map.
+        # m8n8 MMA atoms produce two C registers and share the FP64 lane map.
         return DataType(self.accum_dtype).bits == 64 or self.local_size_out == 2
 
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
