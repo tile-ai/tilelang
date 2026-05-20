@@ -20,15 +20,16 @@
 # The code below is mostly copied from apache/tvm common_schedules.py in dlight.
 """Common schedule strategies for TIR."""
 
-from typing import Callable
+from collections.abc import Callable
 
-from tvm import tir
+from tvm.s_tir import Schedule
+from tvm.s_tir.schedule import SBlockRV
 from .utils import retrieve_func_from_module
 from .analysis import BlockInfo
 
 
 def get_block(
-    sch: tir.Schedule,
+    sch: Schedule,
     blocks: list[BlockInfo],
     name: str,
 ):
@@ -36,18 +37,18 @@ def get_block(
 
     Parameters
     ----------
-    sch : tir.Schedule
+    sch : tirx.Schedule
         The TIR schedule used to get target block.
     name : str
         The name of the target block.
 
     Returns
     -------
-    target_block : BlockRV
+    target_block : SBlockRV
         The target block.
     """
 
-    target_block: tir.BlockRV = None
+    target_block: SBlockRV = None
     for block_info in blocks:
         block = block_info.block_rv
         if sch.get(block).name_hint == name:
@@ -56,14 +57,14 @@ def get_block(
 
 
 def get_output_blocks(
-    sch: tir.Schedule,
+    sch: Schedule,
     blocks: list[BlockInfo],
 ):
     """Get the output blocks of a schedule.
 
     Parameters
     ----------
-    sch : tir.Schedule
+    sch : tirx.Schedule
         The TIR schedule used to get output blocks.
     blocks : List[BlockInfo]
         The blocks to be analyzed.
@@ -89,14 +90,14 @@ def get_output_blocks(
 
 
 def try_inline(
-    sch: tir.Schedule,
+    sch: Schedule,
     blocks: list[BlockInfo],
 ) -> list[BlockInfo]:
     """Try to inline as many blocks as possible, and return the remaining blocks.
 
     Parameters
     ----------
-    sch : tir.Schedule
+    sch : tirx.Schedule
         The TIR schedule used to inline blocks.
     blocks : List[BlockInfo]
         The blocks to be inlined.
@@ -127,14 +128,14 @@ def try_inline(
 
 
 def try_inline_contiguous_spatial(
-    sch: tir.Schedule,
+    sch: Schedule,
     block_infos: list[BlockInfo],
 ) -> list[BlockInfo]:
     """Try to inline contiguous spatial blocks in a schedule
 
     Parameters
     ----------
-    sch : tir.Schedule
+    sch : tirx.Schedule
         The TIR schedule used to inline blocks.
     block_infos : List[BlockInfo]
         The blocks to be try.

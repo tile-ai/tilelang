@@ -9,7 +9,7 @@ import tilelang.testing
 from tilelang import tvm
 
 
-CUDA_SM90_TARGET = "cuda -arch=sm_90"
+CUDA_SM90_TARGET = {"kind": "cuda", "arch": "sm_90"}
 
 
 def _compile_tvm_ffi(func, *, target=CUDA_SM90_TARGET, target_host="c", pass_configs=None):

@@ -1,25 +1,14 @@
-# ruff: noqa
 import torch
 import tilelang
 from tilelang import language as T
-from tilelang.engine.callback import register_cuda_postproc_callback
 import argparse
 
 
 @tilelang.jit(
     out_idx=[-2, -1],
-    compile_flags=[
-        "-O3",
-        "-Wno-deprecated-declarations",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--ptxas-options=-v,--register-usage-level=10",
-        "-DNDEBUG",
-    ],
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def sparse_mla_fwd(
     batch,
@@ -40,7 +29,7 @@ def sparse_mla_fwd(
 ):
     assert dim == tilelang.math.next_power_of_2(dim), f"haven't check padding correctness yet, dim={dim}"
     assert tail_dim == tilelang.math.next_power_of_2(tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
-    assert is_causal == True, "non-casual is not supported"
+    assert is_causal, "non-casual is not supported"
     assert topk % block_I == 0, "otherwise will load some index=0 thus causing wrong kv to be loaded"
     if sm_scale is None:
         sm_scale = (1.0 / (dim + tail_dim)) ** 0.5 * 1.44269504  # log2(e)
@@ -57,7 +46,6 @@ def sparse_mla_fwd(
     dtype = T.bfloat16
     accum_dtype = T.float32
 
-    G = kv_group
     H = head_kv
     padded_H = max(tilelang.math.next_power_of_2(head_kv), 16)
     if padded_H != H:
@@ -114,14 +102,13 @@ def sparse_mla_fwd(
             m_i_prev = T.alloc_fragment([H_per_block], accum_dtype)
             indices_local = T.alloc_var(indices_dtype)
 
-            # TODO: Multi buffer
-            bar_q = T.alloc_barrier(arrive_count=384)
-            bar_k_0_ready = T.alloc_barrier(arrive_count=128)
-            bar_k_1_ready = T.alloc_barrier(arrive_count=128)
-            bar_k_0_free = T.alloc_barrier(arrive_count=256)
-            bar_k_1_free = T.alloc_barrier(arrive_count=256)
-            bar_sScale_and_sS_ready = T.alloc_barrier(arrive_count=256)
-            bar_sScale_and_sS_free = T.alloc_barrier(arrive_count=256)
+            bar_q = T.alloc_barrier(384)
+            bar_k_0_ready = T.alloc_barrier(128)
+            bar_k_1_ready = T.alloc_barrier(128)
+            bar_k_0_free = T.alloc_barrier(256)
+            bar_k_1_free = T.alloc_barrier(256)
+            bar_sScale_and_sS_ready = T.alloc_barrier(256)
+            bar_sScale_and_sS_free = T.alloc_barrier(256)
 
             b_i, g_i = by, bz
             s_i = (bx + (KV_stride - 1 if CP0 else 0)) if REPLICATE_H == 1 else (bx // REPLICATE_H + (KV_stride - 1 if CP0 else 0))
@@ -169,7 +156,7 @@ def sparse_mla_fwd(
                         alpha_local[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
                         acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
-                    T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
+                    T.reduce_sum(acc_s, sumexp_i, dim=1)
                     for h_i in T.Parallel(H_per_block):
                         sumexp[h_i] = sumexp[h_i] * alpha_local[h_i] + sumexp_i[h_i]
                     for h_i, d_i in T.Parallel(H_per_block, D // 2):
@@ -361,7 +348,6 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, q_start_index_s, kv_stride=4, s
     v = kv[..., :dim]
 
     b, _, _, dim_v = v.shape
-    num_kv_per_index = 1
     g_index = g
     h_index = h // g
     compressed_casual_mask = torch.arange(q_start_index_s, sq + q_start_index_s, dtype=torch.int32, device="cuda").view(
@@ -414,21 +400,22 @@ def test_sparse_mla_fwd_pipelined(
             out[:, : KV_stride - 1, :, :] = 0
         return out, lse
 
-    tl_out, tl_lse = fn()
-    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+    if check_correctness:
+        tl_out, tl_lse = fn()
+        ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
 
-    torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
 
     from tilelang.profiler import do_bench
 
     ms = do_bench(
         fn,
-        rep=10,
         warmup=10,
+        rep=10,
     )
     print(f"Average time: {ms:.3f} ms")
-    print(f"fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
-    print(f"fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
+    print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
+    print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
 def run_regression_perf(B=1, S=4096, SKV=8192, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16, q_start_s_index=1024):

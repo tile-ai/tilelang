@@ -8,11 +8,13 @@
 
 #include "operator.h"
 #include "parallel.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /*!
  * \brief Base node class for atomic operations (add/max/min).
@@ -79,7 +81,7 @@ public:
   TileOperator Clone() const;
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<AtomicMaxNode>()
         .def_ro("src", &AtomicMaxNode::src)
         .def_ro("src_value", &AtomicMaxNode::src_value)
@@ -112,7 +114,7 @@ public:
   TileOperator Clone() const;
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<AtomicMinNode>()
         .def_ro("src", &AtomicMinNode::src)
         .def_ro("src_value", &AtomicMinNode::src_value)

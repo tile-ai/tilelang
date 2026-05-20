@@ -4,10 +4,10 @@ from collections.abc import Sequence
 import warnings
 
 import tilelang.language as T
-from tvm import tir
-from tvm.tir import PyStmtExprVisitor
+from tvm import tirx
+from tvm.tirx import PyStmtExprVisitor
 
-from tvm.tir.transform import prim_func_pass
+from tvm.tirx.transform import prim_func_pass
 from tilelang.tools.plot_layout import plot_layout
 
 
@@ -39,7 +39,7 @@ def print_fragment_format(layout: T.Fragment) -> None:
         raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
 
 
-@tir.functor.visitor
+@tirx.functor.visitor
 class _LayoutVisualVisitor(PyStmtExprVisitor):
     """
     User-friendly pass which visualizes fragment layouts inferred during compilation.
@@ -81,7 +81,7 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
             parsed = [str(f).strip() for f in formats if str(f).strip()]
         self.formats_list = [f for f in parsed if f != "txt"]
 
-    def visit_block_(self, op: tir.Block) -> None:
+    def visit_block_(self, op: tirx.SBlock) -> None:
         if "layout_map" in op.annotations:
             layout_map = op.annotations["layout_map"]
 
@@ -101,7 +101,7 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
 
 
 def LayoutVisual(formats: str | Sequence[str] = ""):
-    def pass_fn(func: tir.PrimFunc, mod, ctx):
+    def pass_fn(func: tirx.PrimFunc, mod, ctx):
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func
 

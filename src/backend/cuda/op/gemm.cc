@@ -4,14 +4,15 @@
  */
 
 #include "op/gemm.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
 #include "target/utils.h"
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace cuda {
 
@@ -345,7 +347,7 @@ const bool cuda_gemm_registered = RegisterCudaGemm();
 } // namespace
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def(
       "tl.get_tcgen5_mma_meta", [](int M, int N, int K, DataType ab_dtype,
                                    DataType c_dtype, bool disable_2cta) {

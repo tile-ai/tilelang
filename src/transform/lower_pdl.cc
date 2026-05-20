@@ -6,26 +6,26 @@
 #include "../op/builtin.h"
 #include "../target/utils.h"
 #include "common/attr.h"
+#include "support/check.h"
 #include "tvm/ir/type.h"
-#include "tvm/tir/builtin.h"
-#include "tvm/tir/expr.h"
-#include "tvm/tir/stmt.h"
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 // NVCC has issues with __ldg when using PDL (Programmatic Dependent Launch)
 // synchronization. Suppress the annotation when kHasGridSync is set.
 class CheckLDGCalls : public StmtExprVisitor {
 public:
-  void VisitExpr_(const tir::CallNode *op) final {
+  void VisitExpr_(const tirx::CallNode *op) final {
     if (op->op.same_as(tl::__ldg())) {
       LOG(FATAL) << "Cannot invoke __ldg function with pdl_sync";
     }
@@ -56,7 +56,7 @@ public:
     return new_f;
   }
 
-  PrimExpr VisitExpr_(const tir::CallNode *op) final {
+  PrimExpr VisitExpr_(const tirx::CallNode *op) final {
     if (op->op.same_as(tl::pdl_trigger())) {
       has_trigger_launch_ = true;
     } else if (op->op.same_as(tl::pdl_sync())) {
@@ -72,7 +72,7 @@ private:
   MarkCudaSyncCalls() = default;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass MarkCudaSyncCallsPass(bool support_pdl) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {

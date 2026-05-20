@@ -349,6 +349,11 @@ endforeach()
 # tvm tries to detect gtest by default, but may fail if its header is not installed.
 set(USE_GTEST OFF)
 
+# TileLang is built as a separate shared library on POSIX and subclasses / calls
+# TVM C++ internals. TVM 0.25 defaults to hiding private symbols, which makes
+# those out-of-DSO references unresolved when libtilelang.so is dlopened.
+set(HIDE_PRIVATE_SYMBOLS OFF CACHE BOOL "Compile TVM with -fvisibility=hidden." FORCE)
+
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
 # Add TileLang's own src/ to include path so cross-directory includes
@@ -379,8 +384,6 @@ file(GLOB TILE_LANG_SRCS
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
 )
-
-set(TILELANG_OUTPUT_TARGETS tilelang tvm)
 
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
@@ -490,9 +493,9 @@ endif()
 
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
 # since TVM_LOG_CUSTOMIZE=1 requires them to be supplied by the user.
-target_sources(tvm_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
+target_sources(tvm_runtime_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
 if(TILELANG_RELEASE_BUILD)
-  target_compile_definitions(tvm_objs PRIVATE TILELANG_RELEASE_BUILD=1)
+  target_compile_definitions(tvm_runtime_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
 # Resolve compile warnings in tvm
@@ -524,8 +527,8 @@ if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
-set(TILELANG_OUTPUT_TARGETS tvm)
 if(WIN32)
+  set(TILELANG_OUTPUT_TARGETS tvm)
   # On Windows, TileLang subclasses a large number of non-exported TVM C++
   # classes. Building those objects into tvm.dll avoids an otherwise fragile
   # cross-DLL ABI boundary while keeping Python-side registration semantics.
@@ -549,8 +552,9 @@ if(WIN32)
   # sure `ninja` (and `cmake --build`) actually builds it by default.
   set_property(TARGET tvm PROPERTY EXCLUDE_FROM_ALL FALSE)
 else()
+  set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-  target_link_libraries(tilelang PUBLIC tvm)
+  target_link_libraries(tilelang PUBLIC tvm_compiler)
 
   # Place dev build outputs under build/lib for consistency
   set_target_properties(tilelang PROPERTIES
@@ -610,15 +614,19 @@ install(TARGETS tilelang_cython_wrapper
         RUNTIME DESTINATION tilelang/lib
         ARCHIVE DESTINATION tilelang/lib)
 
-# Copy libz3.so to build folder to workaround isolated build env issue
-if(USE_Z3 AND USE_PYPI_Z3)
+# Copy libz3 into the build-tree library folder on platforms where the
+# PyPI Z3 finder does not already normalize a build-tree runtime copy.
+if(USE_Z3 AND USE_PYPI_Z3 AND NOT APPLE)
   get_target_property(Z3_LIBRARY_PATH z3::libz3 IMPORTED_LOCATION)
-  install(FILES "${Z3_LIBRARY_PATH}" DESTINATION "${CMAKE_BINARY_DIR}/lib")
-  if(APPLE)
-    set_target_properties(tvm PROPERTIES BUILD_RPATH "@loader_path")
-  else()
-    set_target_properties(tvm PROPERTIES BUILD_RPATH "\$ORIGIN")
+  get_filename_component(Z3_LIBRARY_DIR "${Z3_LIBRARY_PATH}" DIRECTORY)
+  file(GLOB Z3_RUNTIME_LIBS
+    "${Z3_LIBRARY_DIR}/libz3${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+    "${Z3_LIBRARY_DIR}/z3${CMAKE_SHARED_LIBRARY_SUFFIX}*"
+  )
+  if(NOT Z3_RUNTIME_LIBS)
+    set(Z3_RUNTIME_LIBS "${Z3_LIBRARY_PATH}")
   endif()
+  file(COPY ${Z3_RUNTIME_LIBS} DESTINATION "${CMAKE_BINARY_DIR}/lib")
 endif()
 
 if(DEFINED TILELANG_ACTIVE_BACKEND_STUB_LINK)
@@ -634,13 +642,16 @@ endif()
 
 unset(PATCHELF_EXECUTABLE CACHE)
 
+set(TILELANG_BUILD_RPATH "")
 if(APPLE)
+  set(TILELANG_BUILD_RPATH "@loader_path")
   set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     # Some z3 is placed in lib/ and some in bin/, we add both in rpath
     string(APPEND TILELANG_INSTALL_RPATH ";@loader_path/../../z3/lib;@loader_path/../../z3/bin")
   endif()
 elseif(UNIX)
+  set(TILELANG_BUILD_RPATH "\$ORIGIN")
   set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
@@ -654,8 +665,9 @@ elseif(UNIX)
   endif()
 endif()
 
-# Let libtilelang search for tvm in the same directory
+# Let TileLang and TVM split libraries find each other in the same directory
 foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
+  set_target_properties(${target} PROPERTIES BUILD_RPATH "${TILELANG_BUILD_RPATH}")
   set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
   set_target_properties(${target} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"

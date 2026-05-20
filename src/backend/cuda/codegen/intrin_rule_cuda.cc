@@ -2,17 +2,19 @@
  * \file intrin_rule_cuda.cc
  * \brief CUDA intrinsic rules.
  */
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op_attr_types.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op_attr_types.h>
 
-#include "support/ffi_aliases.h"
 #include "target/intrin_rule.h"
 
 namespace tvm {
 namespace codegen {
 namespace intrin {
 // Add float suffix to the intrinsics, CUDA fast math.
-using tir::FLowerIntrinsic;
+using tirx::FLowerIntrinsic;
+using namespace ffi;
 
 struct CUDAMath {
   std::string operator()(DataType t, std::string name) const {
@@ -106,19 +108,19 @@ struct CUDAPopcount {
 struct CUDAWarpIntrinsic {
   const Op operator()(DataType t, const Op &orig_op) const {
     if (orig_op.same_as(builtin::tvm_warp_shuffle())) {
-      return Op::Get("tir.cuda.__shfl_sync");
+      return Op::Get("tirx.cuda.__shfl_sync");
     } else if (orig_op.same_as(builtin::tvm_warp_shuffle_up())) {
-      return Op::Get("tir.cuda.__shfl_up_sync");
+      return Op::Get("tirx.cuda.__shfl_up_sync");
     } else {
       ICHECK(orig_op.same_as(builtin::tvm_warp_shuffle_down()));
-      return Op::Get("tir.cuda.__shfl_down_sync");
+      return Op::Get("tirx.cuda.__shfl_down_sync");
     }
   }
 };
 
 static PrimExpr DispatchCUDAWarpActiveMask(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
-  return Call(call->dtype, Op::Get("tir.cuda.__activemask"), call->args,
+  return Call(call->dtype, Op::Get("tirx.cuda.__activemask"), call->args,
               call->annotations);
 }
 
@@ -148,11 +150,11 @@ template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
               call->annotations);
 }
 
-TVM_REGISTER_OP("tir.rsqrt")
+TVM_REGISTER_OP("tirx.rsqrt")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
                                DispatchPureExtern<CUDAMath>);
 
-TVM_REGISTER_OP("tir.isfinite")
+TVM_REGISTER_OP("tirx.isfinite")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAIsFinite);
 
 } // namespace intrin

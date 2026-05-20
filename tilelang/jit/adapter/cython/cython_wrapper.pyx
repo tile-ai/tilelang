@@ -5,7 +5,7 @@ cimport cython
 import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
-from tvm import tir
+from tvm import tirx
 
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
@@ -39,10 +39,10 @@ cdef class CythonKernelWrapper:
         for param in params:
             native_shape = []
             for dim in param.shape:
-                if isinstance(dim, tir.IntImm):
+                if isinstance(dim, tirx.IntImm):
                     native_shape.append(int(dim))
-                elif isinstance(dim, tir.Var):
-                    native_shape.append(dim)  # Keep tir.Var for dynamic dimensions
+                elif isinstance(dim, tirx.Var):
+                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
                 else:
                     native_shape.append(dim)
             self.param_shapes.append(native_shape)
@@ -195,7 +195,7 @@ cdef class CythonKernelWrapper:
                 shape = []
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
-                    if isinstance(s, tir.Var):
+                    if isinstance(s, tirx.Var):
                         for key in self.dynamic_symbolic_map:
                             if(str(s) == str(key)):
                                 ref_id, ref_tensor_idx, ref_shape_idx, _stride_scale = self.dynamic_symbolic_map[key]

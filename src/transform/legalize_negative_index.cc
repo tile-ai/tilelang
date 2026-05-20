@@ -3,11 +3,12 @@
  * \brief Legalize negative indices in buffer load/store expressions.
  */
 
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <unordered_map>
 #include <variant>
@@ -19,7 +20,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 using arith::IRVisitorWithAnalyzer;
 
 enum class IndexSignState { kNonNegative, kNegative, kUnknown };
@@ -35,8 +37,8 @@ public:
       : result_(result) {}
 
 private:
-  std::vector<IndexSignState> ProcessIdx(const ffi::Array<PrimExpr> &indices,
-                                         ffi::String buffer_name) {
+  std::vector<IndexSignState> ProcessIdx(const Array<PrimExpr> &indices,
+                                         String buffer_name) {
     std::vector<IndexSignState> states;
     states.reserve(indices.size());
 
@@ -163,17 +165,54 @@ private:
                         const LoadStore2StateMap &states)
       : arith::IRMutatorWithAnalyzer(analyzer), states_(states) {}
 
+  PrimExpr TryRewriteMixedRamp(const PrimExpr &index,
+                               const PrimExpr &buffer_extent) {
+    PrimExpr value = analyzer_->Simplify(index);
+    const auto *ramp = value.as<RampNode>();
+    if (ramp == nullptr)
+      return PrimExpr();
+
+    int lanes = *as_const_int(ramp->lanes);
+    ffi::Array<PrimExpr> values;
+    ffi::Array<PrimExpr> shuffle_indices;
+    DataType dtype =
+        analyzer_->Simplify(buffer_extent + ramp->base).dtype().element_of();
+    for (int lane_id = 0; lane_id < lanes; ++lane_id) {
+      PrimExpr lane = analyzer_->Simplify(
+          ramp->base + ramp->stride * IntImm(ramp->stride.dtype(), lane_id));
+      if (analyzer_->CanProve(lane < 0))
+        lane = analyzer_->Simplify(buffer_extent + lane);
+      else if (!analyzer_->CanProve(lane >= 0))
+        return PrimExpr();
+      values.push_back(lane.dtype() == dtype ? lane : Cast(dtype, lane));
+      shuffle_indices.push_back(IntImm(DataType::Int(32), lane_id));
+    }
+    return analyzer_->Simplify(Shuffle(values, shuffle_indices, value->span));
+  }
+
+  BufferRegion UpdateRegion(BufferRegion region) {
+    for (const Range &range : region->region) {
+      if (analyzer_->CanProve(analyzer_->Simplify(range->min) < 0))
+        return BufferRegion::FullRegion(region->buffer);
+    }
+    return region;
+  }
+
   ffi::Array<PrimExpr> UpdateIdx(const ffi::Array<PrimExpr> &indices,
                                  const ffi::Array<PrimExpr> &buffer_shape,
                                  const std::vector<IndexSignState> &state_vec) {
     ICHECK_EQ(state_vec.size(), indices.size())
         << "State vector size mismatch for buffer load/store indices ("
         << indices << ")";
-    ffi::Array<PrimExpr> new_indices = indices;
+    Array<PrimExpr> new_indices = indices;
     for (size_t i = 0; i < indices.size(); ++i) {
-      if (state_vec[i] != IndexSignState::kNegative)
-        continue;
-      new_indices.Set(i, analyzer_->Simplify(buffer_shape[i] + indices[i]));
+      if (state_vec[i] == IndexSignState::kNegative) {
+        new_indices.Set(i, analyzer_->Simplify(buffer_shape[i] + indices[i]));
+      } else if (state_vec[i] == IndexSignState::kUnknown) {
+        PrimExpr rewritten = TryRewriteMixedRamp(indices[i], buffer_shape[i]);
+        if (rewritten.defined())
+          new_indices.Set(i, rewritten);
+      }
     }
     return new_indices;
   }
@@ -202,6 +241,17 @@ private:
     return BufferStore(store->buffer, store->value, indices, store->predicate);
   }
 
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block =
+        Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    SBlockNode *n = block.CopyOnWrite();
+    n->reads.MutateByApply(
+        [this](BufferRegion region) { return UpdateRegion(region); });
+    n->writes.MutateByApply(
+        [this](BufferRegion region) { return UpdateRegion(region); });
+    return block;
+  }
+
 private:
   const LoadStore2StateMap &states_;
 };
@@ -222,7 +272,7 @@ PrimFunc LegalizeNegativeIndex(PrimFunc func) {
 }
 
 tvm::transform::Pass LegalizeNegativeIndexPass() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [](PrimFunc f, const IRModule &, PassContext) {
     return LegalizeNegativeIndex(std::move(f));
   };
@@ -230,7 +280,7 @@ tvm::transform::Pass LegalizeNegativeIndexPass() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LegalizeNegativeIndex",
                         LegalizeNegativeIndexPass);
 }

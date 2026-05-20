@@ -6,8 +6,9 @@
 #ifndef TVM_TL_OP_PARALLEL_H_
 #define TVM_TL_OP_PARALLEL_H_
 
+#include "support/check.h"
 #include <tvm/target/target.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <unordered_map>
 
@@ -25,7 +26,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class ParallelOpNode;
 
@@ -77,7 +79,7 @@ public:
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<ParallelOpNode>()
         .def_ro("root", &ParallelOpNode::root_)
         .def_ro("loop_layout", &ParallelOpNode::loop_layout_)
@@ -194,7 +196,7 @@ public:
                                              ParallelOpNode);
 
   ParallelOp(const For &root) {
-    auto op = tvm::ffi::make_object<ParallelOpNode>(root);
+    auto op = make_object<ParallelOpNode>(root);
     data_ = std::move(op);
   }
 };

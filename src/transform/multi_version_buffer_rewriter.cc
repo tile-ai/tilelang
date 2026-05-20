@@ -3,11 +3,15 @@
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
+#include "support/check.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/ir/cast.h>
+#include <tvm/s_tir/analysis.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <functional>
 #include <unordered_set>
@@ -25,7 +29,9 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
+using tirx::GetSBlockReadWriteRegion;
 
 namespace {
 
@@ -132,7 +138,8 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+          call->op.same_as(tma_load_multicast())) {
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
@@ -147,9 +154,10 @@ public:
     }
 
     // Check reads from global
-    Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ tvm::ffi::GetRef<Stmt>(op));
-    auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                 /*name_hint=*/"",
+                 /*body*/ GetRef<Stmt>(op));
+    auto access = GetSBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];
     Role role = Role::kProducer;
     for (auto read : reads) {
@@ -186,7 +194,7 @@ public:
     SetRole(op, role);
   }
 
-  void VisitStmt_(const BlockRealizeNode *op) final {
+  void VisitStmt_(const SBlockRealizeNode *op) final {
     StmtVisitor::VisitStmt_(op);
     SetRole(op, GetRole(op->block));
   }
@@ -197,12 +205,18 @@ public:
   }
 
   void VisitStmt_(const ForNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const LetStmtNode *op) final { HandleBodyStmt(op); }
+  void VisitStmt_(const BindNode *op) final { StmtVisitor::VisitStmt_(op); }
   void VisitStmt_(const AttrStmtNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const AssertStmtNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const BlockNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const AllocateNode *op) final { HandleBodyStmt(op); }
-  void VisitStmt_(const DeclBufferNode *op) final { HandleBodyStmt(op); }
+  void VisitStmt_(const AssertStmtNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const SBlockNode *op) final { HandleBodyStmt(op); }
+  void VisitStmt_(const AllocBufferNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const DeclBufferNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+  }
 
   bool HasProducer() { return has_simt_copy_ || has_bulk_copy_; }
 
@@ -242,8 +256,7 @@ private:
         }
         return;
       }
-      if (const auto *let = stmt.as<LetStmtNode>()) {
-        collect_stmts(let->body);
+      if (const auto *let = stmt.as<BindNode>()) {
         return;
       }
       if (const auto *attr = stmt.as<AttrStmtNode>()) {
@@ -257,11 +270,11 @@ private:
         }
         return;
       }
-      if (const auto *block_realize = stmt.as<BlockRealizeNode>()) {
+      if (const auto *block_realize = stmt.as<SBlockRealizeNode>()) {
         collect_stmts(block_realize->block->body);
         return;
       }
-      if (const auto *block = stmt.as<BlockNode>()) {
+      if (const auto *block = stmt.as<SBlockNode>()) {
         collect_stmts(block->body);
         return;
       }
@@ -276,21 +289,21 @@ private:
     auto marker = WarpSpecializedRoleMarker_(buffer_data_to_buffer_);
     for (const Stmt &stmt : pipeline_stmts) {
       marker(stmt);
-      Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                  /*name_hint=*/"", /*body*/ stmt);
-      auto access = GetBlockAccessRegion(block, buffer_data_to_buffer_);
+      SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                   /*name_hint=*/"", /*body*/ stmt);
+      auto access = GetSBlockAccessRegion(block, buffer_data_to_buffer_);
       Array<BufferRegion> stmt_reads = access[0];
       Array<BufferRegion> stmt_writes = access[1];
 
       // Supplement with tile-op analysis.
-      // GetBlockAccessRegion misses buffer references that are encoded as
+      // GetSBlockAccessRegion misses buffer references that are encoded as
       // tl.tileop.region Call args or as plain BufferLoad args whose
       // semantic role (read vs write) is only known to the tile-op.
       // Let the tile-op report its own access regions, and fall back to
       // RegionOp scanning for any ops that still do not expose them.
       if (auto *eval = stmt.as<EvaluateNode>()) {
         if (auto *call = eval->value.as<CallNode>()) {
-          auto tile_op = ParseOperator(ffi::GetRef<Call>(call));
+          auto tile_op = ParseOperator(GetRef<Call>(call));
           if (tile_op.defined()) {
             AccessRegions access = tile_op->GetAccessRegions();
             if (!access.reads.empty() || !access.writes.empty()) {
@@ -303,8 +316,7 @@ private:
               for (const auto &arg : call->args) {
                 if (auto *region_call = arg.as<CallNode>()) {
                   if (region_call->op.same_as(RegionOp::Get())) {
-                    auto region_op =
-                        ParseOperator(ffi::GetRef<Call>(region_call));
+                    auto region_op = ParseOperator(GetRef<Call>(region_call));
                     if (auto *rn = region_op.as<RegionOpNode>()) {
                       int mask = rn->GetAccessMask();
                       auto br = BufferRegion(rn->GetBuffer(), rn->GetRanges());
@@ -396,8 +408,7 @@ private:
   }
 
   static Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
-    ObjectPtr<BufferNode> new_buffer =
-        tvm::ffi::make_object<BufferNode>(*(buffer.get()));
+    ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     if (buffer.scope() == "shared.barrier") {
       // Barrier buffers: expand first dimension to keep 1D shape.
       // (1,) -> (num_versions,) so lower_shared_barrier.cc still works.
@@ -417,11 +428,11 @@ private:
   Array<Stmt> GetPipelineTopLevelStmts(const Stmt &pipeline_body) const {
     Stmt current = pipeline_body;
     while (true) {
-      if (const auto *realize = current.as<BlockRealizeNode>()) {
+      if (const auto *realize = current.as<SBlockRealizeNode>()) {
         current = realize->block->body;
         continue;
       }
-      if (const auto *block = current.as<BlockNode>()) {
+      if (const auto *block = current.as<SBlockNode>()) {
         current = block->body;
         continue;
       }
@@ -459,10 +470,10 @@ private:
       }
     }
     for (auto it = stmt_stack_.rbegin(); it != stmt_stack_.rend(); ++it) {
-      if (!(*it)->IsInstance<BlockNode>()) {
+      if (!(*it)->IsInstance<SBlockNode>()) {
         continue;
       }
-      const auto *block = static_cast<const BlockNode *>(*it);
+      const auto *block = static_cast<const SBlockNode *>(*it);
       auto map_it = block_alloc_buffers_.find(block);
       const Array<Buffer> &buffers = map_it != block_alloc_buffers_.end()
                                          ? map_it->second
@@ -536,10 +547,10 @@ private:
     return parity_cycle_;
   }
 
-  Stmt VisitStmt_(const BlockRealizeNode *op) final {
-    BlockRealize block_realize =
-        Downcast<BlockRealize>(StmtExprMutator::VisitStmt_(op));
-    Block block = block_realize->block;
+  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
+    SBlockRealize block_realize =
+        Downcast<SBlockRealize>(StmtExprMutator::VisitStmt_(op));
+    SBlock block = block_realize->block;
     Array<Buffer> alloc_buffers;
     std::vector<std::pair<Buffer, Buffer>> remapped_allocs;
     for (auto buffer : block->alloc_buffers) {
@@ -603,7 +614,7 @@ private:
     return block_realize;
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     stmt_stack_.push_back(op);
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     stmt_stack_.pop_back();
@@ -794,8 +805,8 @@ private:
                 return pipeline_loop_min_;
               return Optional<PrimExpr>();
             };
-            init_orig = analyzer.Simplify(tir::Substitute(init_orig, subst));
-            init_cycle = analyzer.Simplify(tir::Substitute(init_cycle, subst));
+            init_orig = analyzer.Simplify(tirx::Substitute(init_orig, subst));
+            init_cycle = analyzer.Simplify(tirx::Substitute(init_cycle, subst));
           }
           PrimExpr offset =
               analyzer.Simplify(FloorMod(init_orig - init_cycle, 2));
@@ -863,7 +874,7 @@ private:
   Map<Buffer, Buffer> buffer_remap_;
   // Remember each block's alloc list so the loop can see buffers defined in
   // parents.
-  std::unordered_map<const BlockNode *, Array<Buffer>> block_alloc_buffers_;
+  std::unordered_map<const SBlockNode *, Array<Buffer>> block_alloc_buffers_;
 };
 
 PrimFunc ApplyMultiVersionBufferRewriter(PrimFunc f) {
