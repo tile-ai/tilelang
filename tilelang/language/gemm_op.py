@@ -6,7 +6,7 @@ from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
 from tilelang.layout import Layout
-from tvm import tir
+from tvm import tirx
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -32,22 +32,22 @@ def _gemm_impl(
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
-) -> tir.PrimExpr:
+) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
     Returns a call_intrin handle for the given op key.
     """
 
-    def legalize_arguments(arg: BufferLikeType | tir.Var) -> BufferLikeType:
+    def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
 
         Args:
-            arg (Union[tir.Buffer, tir.Var]): Input argument to legalize
+            arg (Union[tirx.Buffer, tirx.Var]): Input argument to legalize
 
         Returns:
-            Union[tir.Buffer, tir.Var]: The legalized argument
+            Union[tirx.Buffer, tirx.Var]: The legalized argument
         """
-        if isinstance(arg, tir.Var) and T.has_let_value(arg):
+        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
         return arg
 
@@ -107,8 +107,8 @@ def _gemm_impl(
     offset_b = B_offset[-1]
 
     if mbar is not None:
-        assert isinstance(mbar, (tir.Buffer, tir.BufferLoad)), (
-            f"mbar for tcgen5mma must be a tir.Buffer or tir.BufferLoad, but got {type(mbar)}"
+        assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
+            f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
         )
         mbar = to_buffer_region(mbar, access_type="rw")
     C_coords = [r.min for r in C_region.region]
@@ -119,10 +119,10 @@ def _gemm_impl(
     # When mbar is None, pass a placeholder constant (0).
     # The C++ side checks if arg 16 is a BufferLoadNode before using it,
     # so a non-BufferLoad value will be correctly ignored.
-    mbar_arg = mbar if mbar is not None else tir.const(0, dtype="int32")
-    return tir.call_intrin(
+    mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get(op_key),
+        tirx.op.Op.get(op_key),
         A_arg,
         B_arg,
         C_arg,
@@ -156,7 +156,7 @@ def gemm(
     clear_accum: bool = False,
     k_pack: int = 1,
     mbar: BarrierType | None = None,
-) -> tir.PrimExpr:
+) -> tirx.PrimExpr:
     """TileLang GEMM operator.
 
     This is the default synchronous GEMM interface. On Hopper, if the compiler
@@ -181,7 +181,7 @@ def gemm(
             Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
 
     Returns:
-        tir.Call: A handle to the GEMM operation.
+        tirx.Call: A handle to the GEMM operation.
     """
     return _gemm_impl(
         "tl.tileop.gemm",
@@ -206,7 +206,7 @@ def wgmma_gemm(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-) -> tir.PrimExpr:
+) -> tirx.PrimExpr:
     """Explicit Hopper WGMMA GEMM without an implicit wait.
 
     This is the explicit asynchronous Hopper WGMMA counterpart to the default
@@ -244,7 +244,7 @@ def tcgen05_gemm(
     *,
     mbar: BarrierType,
     use_2cta: bool = False,
-) -> tir.PrimExpr:
+) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 GEMM without an implicit wait.
 
     This is the explicit asynchronous Blackwell TCGEN5MMA counterpart to the
@@ -293,7 +293,7 @@ def tcgen05_gemm_blockscaled(
     sf_b_id: int = 0,
     *,
     use_2cta: bool = False,
-) -> tir.PrimExpr:
+) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 block-scaled GEMM without an implicit wait.
 
     This is the explicit asynchronous Blackwell TCGEN5MMA block-scaled
@@ -331,7 +331,7 @@ def tcgen05_gemm_blockscaled(
     # Re-read normalized regions below after let legalization.
 
     def legalize(arg):
-        if isinstance(arg, tir.Var) and T.has_let_value(arg):
+        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
         return arg
 
@@ -380,8 +380,8 @@ def tcgen05_gemm_blockscaled(
     offset_b = B_offset[-1]
 
     if mbar is not None:
-        assert isinstance(mbar, (tir.Buffer, tir.BufferLoad)), (
-            f"mbar for tcgen5mma must be a tir.Buffer or tir.BufferLoad, but got {type(mbar)}"
+        assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
+            f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
         )
         mbar = to_buffer_region(mbar, access_type="rw")
 
@@ -397,17 +397,17 @@ def tcgen05_gemm_blockscaled(
     assert mbar is not None, "mbar is required for tcgen05_gemm_blockscaled"
 
     # Ensure sf_a_id and sf_b_id are PrimExpr
-    if not isinstance(sf_a_id, tir.PrimExpr):
-        sf_a_id = tir.const(sf_a_id, dtype="int32")
-    if not isinstance(sf_b_id, tir.PrimExpr):
-        sf_b_id = tir.const(sf_b_id, dtype="int32")
+    if not isinstance(sf_a_id, tirx.PrimExpr):
+        sf_a_id = tirx.const(sf_a_id, dtype="int32")
+    if not isinstance(sf_b_id, tirx.PrimExpr):
+        sf_b_id = tirx.const(sf_b_id, dtype="int32")
 
     # Block-scaled always uses Square policy (1x1 warp partition)
     policy = GemmWarpPolicy.Square
 
-    return tir.call_intrin(
+    return tirx.call_intrin(
         "handle",
-        tir.op.Op.get("tl.tileop.gemm"),
+        tirx.op.Op.get("tl.tileop.gemm"),
         A_arg,
         B_arg,
         C_arg,
@@ -453,7 +453,7 @@ def make_blockscaled_gemm_layout(
     Returns:
         A Layout object for C's TMEM storage.
     """
-    from tilelang.intrinsics.tcgen05_macro_generator import TensorCoreIntrinEmitter
+    from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import TensorCoreIntrinEmitter
 
     C_region = to_buffer_region(C)
     A_region = to_buffer_region(A)
@@ -479,5 +479,5 @@ def make_blockscaled_gemm_layout(
         chunk=K,
     )
 
-    c_buf = C_region.buffer if isinstance(C_region, tir.BufferRegion) else C
+    c_buf = C_region.buffer if isinstance(C_region, tirx.BufferRegion) else C
     return emitter.make_mma_store_layout(c_buf)

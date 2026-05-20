@@ -21,7 +21,7 @@ from .utils import (
 import re
 import logging
 import textwrap
-from tvm.tir.stmt_functor import post_order_visit
+from tvm.tirx.stmt_functor import post_order_visit
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
@@ -260,7 +260,7 @@ class TLCUDASourceWrapper:
         self.libpath: str | None = None
         self.lib_code: str | None = self.update_lib_code(source)
 
-    def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
+    def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         # This wrapper generates C/CUDA source. C/C++ integer division uses '/',
         # and '//' is not a valid operator in C/C++.
         return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/")
@@ -292,7 +292,7 @@ class TLCUDASourceWrapper:
                         "type": self._lookup_type(buffer.dtype) + "* __restrict__",
                     }
                 )
-            elif isinstance(param, tvm.tir.Var):
+            elif isinstance(param, tvm.tirx.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
@@ -316,7 +316,7 @@ class TLCUDASourceWrapper:
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE
         desc_name_map: dict[str, str] = {}
-        desc_name_var_map: dict[str, tvm.tir.Var] = {}
+        desc_name_var_map: dict[str, tvm.tirx.Var] = {}
         for function_name, function_info in function_informations.items():
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
@@ -400,7 +400,7 @@ class TLCUDASourceWrapper:
 
         return init_l2_persistent_map
 
-    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
+    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tirx.Var]) -> str:
         tma_descriptor_init = ""
         if self.tma_descriptor_args is None:
             return tma_descriptor_init
@@ -538,7 +538,7 @@ class TLCUDASourceWrapper:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tir.Var):
+                    if isinstance(dim, tvm.tirx.Var):
                         unique_push_back(dim.name, str(dim.dtype))
 
         # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
@@ -546,7 +546,7 @@ class TLCUDASourceWrapper:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for stride in buffer.strides:
-                    if isinstance(stride, tvm.tir.Var):
+                    if isinstance(stride, tvm.tirx.Var):
                         unique_push_back(stride.name, str(stride.dtype))
 
         return list(dynamic_symbolic_set.items())
@@ -590,8 +590,8 @@ class TLCUDASourceWrapper:
 
             def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
                 nonlocal function_params
-                if isinstance(node, tvm.tir.Call):
-                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tir.tvm_call_packed")):
+                if isinstance(node, tvm.tirx.Call):
+                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tirx.tvm_call_packed")):
                         return
                     args = node.args
                     if not args or args[0] != fn:
@@ -801,7 +801,7 @@ class TLCPUSourceWrapper:
                         "type": self._lookup_type(buffer.dtype) + "*",
                     }
                 )
-            elif isinstance(param, tvm.tir.Var):
+            elif isinstance(param, tvm.tirx.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
@@ -863,7 +863,7 @@ class TLCPUSourceWrapper:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tir.Var) and (dim.name not in dynamic_symbolic_set):
+                    if isinstance(dim, tvm.tirx.Var) and (dim.name not in dynamic_symbolic_set):
                         dynamic_symbolic_set[dim.name] = str(dim.dtype)
         return list(dynamic_symbolic_set.items())
 

@@ -111,6 +111,56 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
+TL_DEVICE int tl_dp4a_fallback(const int a, const int b, int c) {
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int ai = static_cast<int8_t>((a >> (8 * i)) & 0xff);
+    const int bi = static_cast<int8_t>((b >> (8 * i)) & 0xff);
+    c += ai * bi;
+  }
+  return c;
+}
+
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) ||    \
+    defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__)
+#define TL_AMDGPU_HAS_SUDOT4 1
+#endif
+
+#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) ||       \
+    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) ||       \
+    defined(__gfx950__) || defined(__gfx1011__) || defined(__gfx1012__) ||     \
+    defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) ||    \
+    defined(__gfx1034__) || defined(__gfx1035__) ||                            \
+    defined(TL_AMDGPU_HAS_SUDOT4)
+#define TL_AMDGPU_HAS_SDOT4 1
+#endif
+
+TL_DEVICE int tl_dp4a(const int a, const int b, const int c) {
+#if defined(TL_AMDGPU_HAS_SUDOT4)
+  return __builtin_amdgcn_sudot4(true, a, true, b, c, false);
+#elif defined(TL_AMDGPU_HAS_SDOT4)
+  return __builtin_amdgcn_sdot4(a, b, c, false);
+#else
+  return tl_dp4a_fallback(a, b, c);
+#endif
+}
+
+template <typename InDatatype, typename OutDatatype>
+TL_DEVICE void DP4A(const InDatatype *a, const InDatatype *b, OutDatatype *c) {
+  static_assert(sizeof(InDatatype) == 1,
+                "DP4A expects a pointer to packed int8 lanes");
+  static_assert(sizeof(OutDatatype) == sizeof(int),
+                "DP4A expects 4-byte accumulator/output type");
+  int a_int;
+  int b_int;
+  int c_int;
+  __builtin_memcpy(&a_int, a, sizeof(a_int));
+  __builtin_memcpy(&b_int, b, sizeof(b_int));
+  __builtin_memcpy(&c_int, c, sizeof(c_int));
+  const int out = tl_dp4a(a_int, b_int, c_int);
+  __builtin_memcpy(c, &out, sizeof(out));
+}
+
 // __habs overloads for hip_bfloat16 and float16_t to resolve ambiguity on ROCm.
 // hip_bfloat16 != __hip_bfloat16, and float16_t != __half, so the standard
 // __habs overloads don't match exactly, causing ambiguous overload errors.

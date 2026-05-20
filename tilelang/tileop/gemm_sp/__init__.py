@@ -1,41 +1,26 @@
 from tilelang import tvm as tvm
-from tvm import tir
-from tilelang.utils.target import (
-    target_is_cuda,
-)
+from tilelang.tileop.gemm_sp.registry import resolve_gemm_sp_impl
+from tvm import tirx
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.ir import Range
 from tvm.runtime import Scriptable
 import tvm_ffi
-from tilelang.tileop.base import GemmWarpPolicy
-from .gemm_sp_mma import GemmSPMMA
+from tilelang import _ffi_api
+from tilelang.ir import GemmSPWarpPolicy
 
 
-@tvm_ffi.register_global_func("tl.gemm_sp_py.infer_layout")
-def gemm_sp_py_infer_layout(gemm_sp_py: GemmSPMMA, target: Target, thread_bounds: Range):
-    thread_nums = thread_bounds.extent
-    return gemm_sp_py.infer_layout(target, thread_nums)
+@tvm_ffi.register_object("tl.GemmSP")
+class GemmSP(Node, Scriptable):
+    A: tirx.Buffer
+    E: tirx.Buffer
+    B: tirx.Buffer
+    C: tirx.Buffer
 
-
-@tvm_ffi.register_global_func("tl.gemm_sp_py.lower")
-def gemm_sp_py_lower(gemm_sp_py: GemmSPMMA, target: Target, thread_bounds: Range, thread_var: tir.Var):
-    thread_nums = thread_bounds.extent
-    stmt = gemm_sp_py.lower(target, thread_nums, thread_var)
-    return stmt
-
-
-@tvm_ffi.register_object("tl.GemmSPPy")
-class GemmSPPy(Node, Scriptable):
-    A: tir.Buffer
-    E: tir.Buffer
-    B: tir.Buffer
-    C: tir.Buffer
-
-    APtr: tir.PrimExpr
-    EPtr: tir.PrimExpr
-    BPtr: tir.PrimExpr
-    CPtr: tir.PrimExpr
+    aRegion: tirx.BufferRegion
+    eRegion: tirx.BufferRegion
+    bRegion: tirx.BufferRegion
+    cRegion: tirx.BufferRegion
 
     M: int
     N: int
@@ -43,27 +28,44 @@ class GemmSPPy(Node, Scriptable):
 
     trans_A: bool
     trans_B: bool
+    trans_E: bool
 
     stride_A: int
     stride_B: int
     offset_A: int
     offset_B: int
     clear_accum: bool
-    k_pack: int
+    kPack: int
     wg_wait: int
-    policy: GemmWarpPolicy
+    policy: GemmSPWarpPolicy
+
+    @property
+    def k_pack(self):
+        return self.kPack
+
+    @tvm_ffi.register_global_func("tl.gemm_sp.infer_layout")
+    def gemm_sp_infer_layout(self, target: Target, thread_bounds: Range):
+        thread_nums = thread_bounds.extent
+        return self.infer_layout(target, thread_nums)
+
+    @tvm_ffi.register_global_func("tl.gemm_sp.lower")
+    def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_var: tirx.Var):
+        thread_nums = thread_bounds.extent
+        stmt = self.lower(target, layout_map, thread_nums, thread_var)
+        return stmt
 
     def infer_layout(self, target: Target, thread_nums: int):
-        if target_is_cuda(target):
-            # TODO(lei): Support more cuda architectures, now mma only
-            return GemmSPMMA(self).infer_layout(target, thread_nums)
-        else:
-            raise ValueError(f"Unsupported target: {target}")
+        gemm_inst = self._select_gemm_instruction(thread_nums, target)
+        impl_class = self._get_implementation_class(gemm_inst, target)
+        return impl_class(self).infer_layout(target, thread_nums)
 
-    def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
-        if target_is_cuda(target):
-            # TODO(lei): Support more cuda architectures, now mma only
-            # Now only implement ssr layout
-            return GemmSPMMA(self).lower(target, thread_nums, thread_var)
-        else:
-            raise ValueError(f"Unsupported target: {target}")
+    def lower(self, target: Target, layout_map: dict, thread_nums: int, thread_var: tirx.Var):
+        gemm_inst = self._select_gemm_instruction(thread_nums, target)
+        impl_class = self._get_implementation_class(gemm_inst, target)
+        return impl_class(self).lower(layout_map, target, thread_nums, thread_var)
+
+    def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
+        return str(_ffi_api.GemmSPGetGemmInstructionKey(self, int(thread_nums), target))
+
+    def _get_implementation_class(self, gemm_inst: str, target: Target):
+        return resolve_gemm_sp_impl(gemm_inst, target)

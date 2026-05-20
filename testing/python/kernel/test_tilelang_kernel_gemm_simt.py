@@ -4,7 +4,7 @@ import tilelang.testing
 from tilelang import tvm as tvm
 from tvm import DataType
 import tilelang.language as T
-from tilelang.intrinsics import get_swizzle_layout
+from tilelang.cuda.intrinsics import get_swizzle_layout
 from tilelang.transform import simplify_prim_func
 
 tilelang.testing.set_random_seed(0)

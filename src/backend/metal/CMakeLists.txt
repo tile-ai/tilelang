@@ -3,6 +3,8 @@ if(NOT USE_METAL)
   return()
 endif()
 
+message(STATUS "METAL Backend is enabled")
+
 if(NOT APPLE)
   # On non-Apple platforms USE_METAL=ON enables only codegen (Metal source
   # generation) without requiring the Metal/Foundation frameworks.

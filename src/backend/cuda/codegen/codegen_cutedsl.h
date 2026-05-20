@@ -5,9 +5,10 @@
 #ifndef TVM_TL_TARGET_CODEGEN_CUTEDSL_H_
 #define TVM_TL_TARGET_CODEGEN_CUTEDSL_H_
 
+#include "support/check.h"
 #include <tvm/target/codegen.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
 
 #include <string>
 #include <unordered_map>
@@ -44,7 +45,7 @@ protected:
                   std::ostream &os) override; // NOLINT(*)
 
   void VisitStmt_(const BufferStoreNode *op) override;
-  void VisitStmt_(const AllocateNode *op) override;
+  void VisitStmt_(const AllocBufferNode *op) override;
   void VisitStmt_(const AttrStmtNode *op) override;
   void VisitStmt_(const ForNode *op) override;
   void VisitStmt_(const IfThenElseNode *op) override;

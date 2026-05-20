@@ -10,14 +10,17 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace cpu {
 
 struct Copy {
   static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
                                InferLevel level) {
-    return op.InferSIMTLayout(T, level);
+    (void)op;
+    (void)T;
+    (void)level;
+    return {};
   }
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &T,

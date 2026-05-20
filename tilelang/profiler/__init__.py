@@ -1,7 +1,8 @@
 """The profiler and convert to torch utils"""
 
 from __future__ import annotations
-from typing import Callable, Any, Literal
+from typing import Any, Literal
+from collections.abc import Callable
 from functools import partial
 import torch
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
-from tvm import tir
+from tvm import tirx
 
 
 @dataclass
@@ -80,7 +81,7 @@ class Profiler:
         """
         new_shape = []
         for dim in param.shape:
-            if isinstance(dim, tir.Var):
+            if isinstance(dim, tirx.Var):
                 var_name = dim.name
                 if var_name in constraints:
                     new_shape.append(constraints[var_name])

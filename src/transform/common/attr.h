@@ -6,8 +6,8 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_ATTR_H_
 #define TVM_TL_TRANSFORM_COMMON_ATTR_H_
 
-#include "tvm/tir/stmt.h"
 #include <string>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -16,11 +16,11 @@ constexpr const char *HostMainBlockName = "root";
 
 constexpr const char *DeviceMainBlockName = "tilelang_root";
 
-inline bool IsHostMainBlock(const tir::BlockNode *node) {
+inline bool IsHostMainBlock(const tirx::SBlockNode *node) {
   return node->name_hint == HostMainBlockName;
 }
 
-inline bool IsDeviceMainBlock(const tir::BlockNode *node) {
+inline bool IsDeviceMainBlock(const tirx::SBlockNode *node) {
   return node->name_hint == DeviceMainBlockName;
 }
 
@@ -31,6 +31,11 @@ namespace attr {
 // Attributes to mark CUDA sync calls
 constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";
 constexpr const char *kHasGridSync = "has_cuda_pdl_sync";
+
+// TileLang-only AttrStmt keys.
+constexpr const char *volatile_scope = "volatile_scope";
+constexpr const char *coproc_scope = "coproc_scope";
+constexpr const char *pipeline_exec_scope = "pipeline_exec_scope";
 
 // Attributes to implement SourceCodeBlock
 constexpr const char *kCodeBlockSource = "code_block_source";

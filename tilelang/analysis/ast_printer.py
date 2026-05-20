@@ -1,7 +1,7 @@
-from tvm import tir
-from tvm.tir import PyStmtExprVisitor, PrimFunc, Stmt
+from tvm import tirx
+from tvm.tirx import PyStmtExprVisitor, PrimFunc, Stmt
 
-from tvm.tir.transform import prim_func_pass
+from tvm.tirx.transform import prim_func_pass
 
 
 _seq_field_key = "seq"
@@ -18,7 +18,7 @@ _normal_indent = " " * 4
 _seq_middle_indent = "|" + " " * 3
 
 
-@tir.functor.visitor
+@tirx.functor.visitor
 class _ASTPrintVisitor(PyStmtExprVisitor):
     def __init__(self) -> None:
         super().__init__()

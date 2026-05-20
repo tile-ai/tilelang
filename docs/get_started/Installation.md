@@ -5,7 +5,7 @@
 **Prerequisites for installation via wheel or PyPI:**
 
 - **glibc**: 2.28 (Ubuntu 20.04 or later)
-- **Python Version**: >= 3.9
+- **Python Version**: >= 3.10
 - **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
 
 The easiest way to install tilelang is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
@@ -37,7 +37,7 @@ python -c "import tilelang; print(tilelang.__version__)"
 **Prerequisites for building from source:**
 
 - **Operating System**: Linux or Windows
-- **Python Version**: >= 3.9
+- **Python Version**: >= 3.10
 - **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
 
 If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. The commands below use Ubuntu/Debian as the Linux example; Windows-specific notes are called out where they differ.

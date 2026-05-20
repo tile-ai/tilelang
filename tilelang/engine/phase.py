@@ -1,5 +1,5 @@
 from __future__ import annotations
-from tvm import tir, IRModule
+from tvm import tirx, s_tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
@@ -31,15 +31,8 @@ def module_has_tma(mod: IRModule) -> bool:
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    disable_vectorize = pass_ctx.config.get("tir.disable_vectorize", False)
+    disable_vectorize = pass_ctx.config.get("tirx.disable_vectorize", False)
     return not disable_vectorize
-
-
-def allow_global_thread_synchronization(pass_ctx: PassContext | None = None) -> bool:
-    if pass_ctx is None:
-        pass_ctx = tilelang.transform.get_pass_context()
-    enable_global_thread_sync = pass_ctx.config.get("tir.detect_global_barrier", False)
-    return enable_global_thread_sync
 
 
 def should_enable_aggressive_merge(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -163,7 +156,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     Returns:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """
-    mod = tir.transform.BindTarget(target)(mod)
+    mod = tirx.transform.BindTarget(target)(mod)
 
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
@@ -204,7 +197,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
-    mod = tilelang.transform.LowerL2Persistent()(mod)
+    mod = tilelang.cuda.transform.LowerL2Persistent()(mod)
     # Decouple type cast vectorization constraints before vectorization
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     # Legalize vectorized loops to ensure they are valid
@@ -241,23 +234,23 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tir.transform.NarrowDataType(32)(mod)
+    mod = tirx.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     # ConfigIndexBitwidth must be applied after FlattenBuffer
     # as it will flatten index computing
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tir.transform.Simplify()(mod)
+    mod = tirx.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tir.transform.Simplify()(mod)
-    mod = tir.transform.RemoveNoOp()(mod)
-    mod = tir.transform.HoistIfThenElse()(mod)
+    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.RemoveNoOp()(mod)
+    mod = s_tir.transform.HoistIfThenElse()(mod)
 
-    mod = tir.transform.VerifyMemory()(mod)
-    mod = tir.transform.AnnotateEntryFunc()(mod)
+    mod = tirx.transform.VerifyMemory()(mod)
+    mod = tirx.transform.AnnotateEntryFunc()(mod)
     # TODO(lei): This is a hack to make sure the
     # thread level allreduce pass can be applied
     # in TL. As Tl only use one thread dimension
@@ -267,20 +260,14 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # We can find a way better to create var instead
     # of putting the LowerThreadAllreduce before
     # the Legalization.
-    mod = tir.transform.InferFragment()(mod)
+    mod = s_tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerLDGSTG()(mod)
-    mod = tilelang.transform.LowerHopperIntrin()(mod)
-    # Global Barrier Synchronization must be applied before
-    # SplitHostDevice pass, as the global barrier
-    if allow_global_thread_synchronization():
-        mod = tilelang.transform.ThreadSync("global")(mod)
+    mod = tilelang.cuda.transform.LowerHopperIntrin()(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
-
     # Mark the function contains pdl_sync or pdl_trigger
     mod = tilelang.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
-
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
@@ -305,6 +292,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
 
     # Transform threadblock to persistent threadblock
-    mod = tilelang.transform.PersistThreadblock()(mod)
+    mod = tilelang.cuda.transform.PersistThreadblock()(mod)
 
     return mod

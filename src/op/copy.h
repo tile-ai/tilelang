@@ -9,12 +9,14 @@
 #include "builtin.h"
 #include "operator.h"
 #include "parallel.h"
+#include "support/check.h"
 
 #include <utility>
 
 namespace tvm {
 namespace tl {
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /*!
  * \brief Get TVM Op handle for Conv2DIm2Col.
@@ -29,9 +31,11 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
+  Optional<PrimExpr> dst_block;      // Destination block index for cluster copy
   Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
   // Common SIMT annotation keys:
   //   - "coalesced_width": IntImm, width for coalesced memory access.
+  //   - "dst_block": PrimExpr, destination CTA rank for cluster copy.
   //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
   //     layout hint applied to the outermost generated parallel loop of this
   //     copy's SIMT loop nest.
@@ -41,12 +45,13 @@ public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Copy", CopyNode, TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<CopyNode>()
         .def_ro("src", &CopyNode::src)
         .def_ro("dst", &CopyNode::dst)
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
+        .def_ro("dst_block", &CopyNode::dst_block)
         .def_ro("annotations", &CopyNode::annotations);
   }
 
@@ -180,7 +185,7 @@ public:
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<Conv2DIm2ColOpNode>()
         .def_ro("srcRegion", &Conv2DIm2ColOpNode::srcRegion_)
         .def_ro("dstRegion", &Conv2DIm2ColOpNode::dstRegion_)
