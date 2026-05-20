@@ -120,7 +120,7 @@ int MinRankInClusterMask(int64_t cluster_mask) {
 
 Optional<PrimExpr> GetBarrier(const CopyNode &op) {
   if (auto val = op.annotations.Get("barrier")) {
-    if (val->as<tir::BufferLoadNode>()) {
+    if (val->as<tirx::BufferLoadNode>()) {
       return Downcast<PrimExpr>(val.value());
     }
   }
@@ -782,7 +782,7 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &T,
 
     if (element_match && same_shape) {
       PrimExpr barrier_load = barrier_opt.value();
-      const auto *barrier_buf_load = barrier_load.as<tir::BufferLoadNode>();
+      const auto *barrier_buf_load = barrier_load.as<tirx::BufferLoadNode>();
       ICHECK(barrier_buf_load)
           << "LowerCluster: expected BufferLoad for barrier annotation";
       Var barrier_data_var = barrier_buf_load->buffer->data;
