@@ -94,18 +94,18 @@ struct Reduce {
     PrimExpr init_value = op.clear ? backend::reduce::MakeInitValue(op)
                                    : BufferLoad(dst_buffer, dst_indices);
     Stmt init = BufferStore(dst_buffer, init_value, dst_indices);
-    Stmt reduce_local = BufferStore(
-        dst_buffer,
-        backend::reduce::MakeReduce(
-            op, 1, BufferLoad(dst_buffer, dst_indices),
-            BufferLoad(src_buffer, src_indice_compressed))
-            .value(),
-        dst_indices);
+    Stmt reduce_local =
+        BufferStore(dst_buffer,
+                    backend::reduce::MakeReduce(
+                        op, 1, BufferLoad(dst_buffer, dst_indices),
+                        BufferLoad(src_buffer, src_indice_compressed))
+                        .value(),
+                    dst_indices);
     for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0; --i) {
-      reduce_local = For(src_var_compressed[i]->var, 0,
-                         src_var_compressed[i]->dom->extent, ForKind::kSerial,
-                         reduce_local, std::nullopt,
-                         {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
+      reduce_local =
+          For(src_var_compressed[i]->var, 0, src_var_compressed[i]->dom->extent,
+              ForKind::kSerial, reduce_local, std::nullopt,
+              {{tirx::attr::pragma_unroll_explicit, Bool(false)}});
     }
 
     Stmt body = SeqStmt({init, reduce_local});

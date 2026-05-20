@@ -524,8 +524,7 @@ private:
         alloc_extents = alloc->buffer->shape;
       }
       Buffer merged_buf(merged_buf_var_, alloc_dtype, alloc_extents, {},
-                        PrimExpr(),
-                        merged_buf_var_->name_hint, 0, 0, kDefault);
+                        PrimExpr(), merged_buf_var_->name_hint, 0, 0, kDefault);
       Stmt new_body = SeqStmt(
           {AllocBuffer(merged_buf), StmtExprMutator::VisitStmt(op->body)});
       return AttrStmt(op->node, op->attr_key, op->value, new_body, op->span);

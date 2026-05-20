@@ -285,10 +285,7 @@ def test_metal_codegen_int32():
 
 
 def test_metal_scalar_gemm_registry():
-    assert (
-        resolve_gemm_impl(GEMM_INST_METAL_SCALAR, tvm.target.Target("metal"))
-        is GemmMetalScalar
-    )
+    assert resolve_gemm_impl(GEMM_INST_METAL_SCALAR, tvm.target.Target("metal")) is GemmMetalScalar
 
 
 def test_t_gemm_metal_codegen_float32():

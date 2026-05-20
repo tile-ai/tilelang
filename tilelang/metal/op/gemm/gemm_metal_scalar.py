@@ -71,21 +71,13 @@ class GemmMetalScalar(GemmBase):
             for i, j in T.grid(M, N):
                 for k in T.Serial(K):
                     a_val = T.cast(
-                        A_buf[
-                            tuple(a_prefix)
-                            + (a0 + (k if trans_A else i), a1 + (i if trans_A else k))
-                        ],
+                        A_buf[tuple(a_prefix) + (a0 + (k if trans_A else i), a1 + (i if trans_A else k))],
                         accum_dtype,
                     )
                     b_val = T.cast(
-                        B_buf[
-                            tuple(b_prefix)
-                            + (b0 + (j if trans_B else k), b1 + (k if trans_B else j))
-                        ],
+                        B_buf[tuple(b_prefix) + (b0 + (j if trans_B else k), b1 + (k if trans_B else j))],
                         accum_dtype,
                     )
-                    C_buf[tuple(c_prefix) + (c0 + i, c1 + j)] = (
-                        C_buf[tuple(c_prefix) + (c0 + i, c1 + j)] + a_val * b_val
-                    )
+                    C_buf[tuple(c_prefix) + (c0 + i, c1 + j)] = C_buf[tuple(c_prefix) + (c0 + i, c1 + j)] + a_val * b_val
 
         return _gemm_metal_scalar
