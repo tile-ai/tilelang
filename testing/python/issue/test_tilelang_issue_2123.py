@@ -4,6 +4,8 @@ import tilelang
 import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
+from tvm import tirx
+from tvm.tirx import op
 from tilelang.engine.phase import LowerAndLegalize
 from tilelang.transform import LowerAccessPtr
 
@@ -35,18 +37,19 @@ def issue_2123_atomic_load_repro(num_tiles, threads=32):
 
 def _has_op_call(func, op_name):
     found = False
+    target_op = op.Op.get(op_name)
 
     def _visit(node):
         nonlocal found
-        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name:
+        if isinstance(node, tirx.Call) and node.op.same_as(target_op):
             found = True
 
-    tvm.tir.stmt_functor.post_order_visit(func.body, _visit)
+    tirx.stmt_functor.post_order_visit(func.body, _visit)
     return found
 
 
 def _assert_access_ptr_lowered(mod):
-    assert _has_op_call(mod["main"], "tir.tvm_access_ptr")
+    assert _has_op_call(mod["main"], "tirx.tvm_access_ptr")
     assert not _has_op_call(mod["main"], "tl.access_ptr")
 
 
