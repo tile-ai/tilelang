@@ -18,11 +18,13 @@ GEMM_INST_MMA = "cuda.mma"
 
 
 class GemmMMA(GemmBase):
+    intrin_emitter_cls = TensorCoreIntrinEmitter
+
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        emitter = TensorCoreIntrinEmitter(
+        emitter = self.intrin_emitter_cls(
             a_dtype=self.in_dtype,
             b_dtype=self.in_dtype,
             accum_dtype=self.accum_dtype,

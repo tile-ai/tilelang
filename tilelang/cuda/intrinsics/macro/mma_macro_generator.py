@@ -11,6 +11,7 @@ from tilelang import tvm as tvm
 from tvm.runtime import convert
 from ..layout.utils import (
     mma_store_index_map,
+    mma_store_index_map_fp64,
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment, get_buffer_region_from_load
@@ -95,11 +96,7 @@ class TensorCoreIntrinEmitter:
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
         self._initialize_k_dim(self.a_dtype)
-        # For FP64, MMA shape is m8n8k4; adjust instance dims early
-        if DataType(self.a_dtype).bits == 64:
-            # Override default M/N dims for fp64 MMA
-            self.M_DIM = 8
-            # n_dim will be set to 8 in _initialize_micro_size via k_dim==4
+        self._initialize_m_dim(self.a_dtype)
         self._initialize_micro_size(self.M_DIM, self.k_dim)
         self._initialize_local_size(self.M_DIM, self.n_dim, self.k_dim, self.WARP_SIZE)
         self._initialize_abbrev(self.a_dtype, self.b_dtype, accum_dtype)
@@ -120,6 +117,13 @@ class TensorCoreIntrinEmitter:
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
         self.k_dim = min(256 // a_dtype.bits, self.chunk)
+
+    def _initialize_m_dim(self, a_dtype=T.float16):
+        if isinstance(a_dtype, str):
+            a_dtype = DataType(a_dtype)
+        if a_dtype.bits == 64:
+            # FP64 MMA uses m8n8k4; n_dim is set by _initialize_micro_size.
+            self.M_DIM = 8
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size
@@ -165,9 +169,7 @@ class TensorCoreIntrinEmitter:
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
-        # For fp64 (k_dim==4), micro tile is 8x8, otherwise keep 16x{8|16}
         if k_dim == 4:
-            # fp64 path: m_dim must be 8, n_dim 8
             assert m_dim == 8, f"For fp64 MMA, m_dim must be 8, got {m_dim}"
             self.n_dim = 8
             self.micro_size_y = 8
@@ -206,11 +208,13 @@ class TensorCoreIntrinEmitter:
         else:
             return self.thread_var
 
-    def get_store_index_map(self, inverse: bool = False) -> IndexMap:
-        from ..layout.utils import mma_store_index_map, mma_store_index_map_fp64
+    def _use_fp64_store_index_map(self) -> bool:
+        # m8n8 MMA atoms produce two C registers and share the FP64 lane map.
+        return DataType(self.accum_dtype).bits == 64 or self.local_size_out == 2
 
+    def get_store_index_map(self, inverse: bool = False) -> IndexMap:
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
-        if DataType(self.accum_dtype).bits == 64:
+        if self._use_fp64_store_index_map():
             index_map = IndexMap.from_func(mma_store_index_map_fp64, index_dtype=T.int32)
         else:
             index_map = IndexMap.from_func(mma_store_index_map, index_dtype=T.int32)
@@ -607,6 +611,7 @@ class TensorCoreIntrinEmitter:
         assert C_buf_dims in {2, 4}, "C_buf should be 2D or 4D"
 
         thread_binding = self.get_thread_binding()
+        store_index_map = mma_store_index_map_fp64 if self._use_fp64_store_index_map() else mma_store_index_map
 
         # STS
         # MMA Store must be in simulated instead of TVM Intrins
@@ -619,7 +624,7 @@ class TensorCoreIntrinEmitter:
                 for local_id_o in T.serial(local_size_out // 2):
                     for local_id_i in T.vectorized(2):
                         local_id = local_id_o * 2 + local_id_i
-                        row, col = T.meta_var(mma_store_index_map(tx, local_id))
+                        row, col = T.meta_var(store_index_map(tx, local_id))
                         if C_buf_dims == 2:
                             C_buf[(warp_m * warp_rows + i) * M_DIM + row, (warp_n * warp_cols + j) * n_dim + col] = C_local_buf[
                                 i * (warp_cols * local_size_out) + j * local_size_out + local_id
@@ -636,7 +641,7 @@ class TensorCoreIntrinEmitter:
                 for local_id_o in T.serial(local_size_out // 2):
                     for local_id_i in T.vectorized(2):
                         local_id = local_id_o * 2 + local_id_i
-                        row, col = T.meta_var(mma_store_index_map(tx, local_id))
+                        row, col = T.meta_var(store_index_map(tx, local_id))
                         C_buf[
                             (pid_m * BLOCK_M + warp_m * warp_rows + i) * M_DIM + row,
                             (pid_n * BLOCK_N + warp_n * warp_cols + j) * n_dim + col,
@@ -937,9 +942,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         else:
             raise ValueError("Unsupported k_dim")
 
-    def _initialize_micro_size(self, m_dim=16, n_dim=16, k_dim=16):
+    def _initialize_micro_size(self, m_dim=16, k_dim=16):
         self.micro_size_x = m_dim
-        self.micro_size_y = n_dim
+        self.micro_size_y = self.n_dim
         self.micro_size_k = k_dim
 
     def _initialize_transform_kind(self, transform_kind_a, transform_kind_b):

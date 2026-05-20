@@ -18,13 +18,13 @@ TargetLike = str | TargetConfig | Target
 
 SUPPORTED_TARGETS: dict[str, str] = {
     "auto": "Auto-detect CUDA/HIP/Metal based on availability.",
-    "cuda": "CUDA GPU target.",
-    "hip": "ROCm HIP target.",
+    "cuda": "CUDA GPU target. Use dict options such as {'kind': 'cuda', 'arch': 'sm_90'}.",
+    "hip": "ROCm HIP target. Use dict options such as {'kind': 'hip', 'mcpu': 'gfx942'}.",
     "metal": "Apple Metal target for arm64 Macs.",
-    "llvm": "LLVM CPU target.",
+    "llvm": "LLVM CPU target. Use dict options such as {'kind': 'llvm', 'mcpu': 'native'}.",
     "webgpu": "WebGPU target for browser/WebGPU runtimes.",
     "c": "C source backend.",
-    "cutedsl": "CuTe DSL GPU target.",
+    "cutedsl": "CuTe DSL GPU target. Use dict options such as {'kind': 'cutedsl', 'arch': 'sm_90'}.",
 }
 
 ROCM_MTRIPLE = "amdgcn-amd-amdhsa-hcc"
