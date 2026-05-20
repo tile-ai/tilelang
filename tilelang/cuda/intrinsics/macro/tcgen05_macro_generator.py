@@ -10,6 +10,7 @@ from tilelang import _ffi_api
 from tilelang.utils import is_tensor_memory
 from tilelang.layout import (
     Layout,
+    make_align16b_swizzled_layout,
     make_full_bank_swizzled_layout,
     make_half_bank_swizzled_layout,
     make_quarter_bank_swizzled_layout,
@@ -158,13 +159,18 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     def _determinate_swizzle_mode(self, buffer: Buffer, layout: Layout) -> SwizzleMode:
         # same behavior to src/layout/gemm_layouts.cc::makeGemmABLayoutHopper
-        if layout is None or layout.is_equal(make_linear_layout(buffer)):
+        tir_buffer = buffer.buffer if isinstance(buffer, BufferRegion) else buffer
+        if layout is None or layout.is_equal(make_linear_layout(tir_buffer)):
             return SwizzleMode.NONE
-        elif layout.is_equal(make_quarter_bank_swizzled_layout(buffer)):
+        if DataType(tir_buffer.dtype).bits < 8:
+            if layout.is_equal(make_align16b_swizzled_layout(tir_buffer)):
+                return SwizzleMode.SWIZZLE_128B
+            raise ValueError(f"Unsupported sub-byte swizzle mode: {layout}")
+        elif layout.is_equal(make_quarter_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_32B
-        elif layout.is_equal(make_half_bank_swizzled_layout(buffer)):
+        elif layout.is_equal(make_half_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_64B
-        elif layout.is_equal(make_full_bank_swizzled_layout(buffer)):
+        elif layout.is_equal(make_full_bank_swizzled_layout(tir_buffer)):
             return SwizzleMode.SWIZZLE_128B
         else:
             raise ValueError(f"Unsupported swizzle mode: {layout}")
@@ -537,17 +543,57 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         self, atom_m: int, atom_n: int, atom_k: int, a_is_k_major: bool, b_is_k_major: bool, scale_in_a: int, scale_in_b: int
     ) -> PrimExpr:
         """Build the 64-bit instruction descriptor for a ``tcgen05.mma`` PTX call."""
-        desc = _ffi_api.get_tcgen5_instr_desc(
-            atom_m,
-            atom_n,
-            atom_k,
-            DataType(self.a_dtype),
-            DataType(self.accum_dtype),
-            a_is_k_major,
-            b_is_k_major,
-            scale_in_a,
-            scale_in_b,
-        )
+
+        def encode_dtype(dtype: str) -> int:
+            dtype = str(DataType(dtype))
+            if dtype == "float16":
+                return 0
+            if dtype == "bfloat16":
+                return 1
+            if dtype in ("float8_e4m3", "float8_e4m3fn", "float8_e4m3fnuz"):
+                return 0
+            if dtype in ("float8_e5m2", "float8_e5m2fnuz"):
+                return 1
+            if dtype == "float6_e2m3fn":
+                return 3
+            if dtype == "float6_e3m2fn":
+                return 4
+            if dtype == "float4_e2m1fn":
+                return 5
+            if dtype == "int8":
+                return 1
+            if dtype == "uint8":
+                return 0
+            raise ValueError(f"Unsupported dtype for TCGEN5MMA descriptor: {dtype}")
+
+        def set_bits(value: int, start: int, width: int) -> int:
+            return (value & ((1 << width) - 1)) << start
+
+        accum_dtype = str(DataType(self.accum_dtype))
+        if accum_dtype == "float16":
+            c_format = 0
+        elif accum_dtype == "float32":
+            c_format = 1
+        elif accum_dtype == "int32":
+            c_format = 2
+        else:
+            raise ValueError(f"Unsupported accumulator dtype for TCGEN5MMA descriptor: {accum_dtype}")
+
+        if atom_m % 16 != 0 or atom_n % 8 != 0 or atom_k not in (16, 32):
+            raise ValueError(f"Unsupported TCGEN5MMA atom shape: m={atom_m}, n={atom_n}, k={atom_k}")
+        if scale_in_a not in (1, -1) or scale_in_b not in (1, -1):
+            raise ValueError("scale_in_a and scale_in_b must be +/-1 for TCGEN5MMA")
+
+        desc = 0
+        desc |= set_bits(c_format, 4, 2)
+        desc |= set_bits(encode_dtype(self.a_dtype), 7, 3)
+        desc |= set_bits(encode_dtype(self.b_dtype), 10, 3)
+        desc |= set_bits(1 if scale_in_a == -1 else 0, 13, 1)
+        desc |= set_bits(1 if scale_in_b == -1 else 0, 14, 1)
+        desc |= set_bits(0 if a_is_k_major else 1, 15, 1)
+        desc |= set_bits(0 if b_is_k_major else 1, 16, 1)
+        desc |= set_bits(atom_n >> 3, 17, 6)
+        desc |= set_bits(atom_m >> 4, 24, 5)
         return lift(desc)
 
     # ---- Atom-level interface ----
@@ -628,7 +674,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         n_dim_per_cta = n_dim // 2 if enable_2cta else n_dim
         k_dim = self.chunk
         micro_size_k = self.micro_size_k
-        elems_in_bytes = (DataType(self.a_dtype).bits + 7) // 8
+        elems_in_bytes = (DataType(self.b_dtype).bits + 7) // 8
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)

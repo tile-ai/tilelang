@@ -147,11 +147,11 @@ PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
 
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 int to_CUtensorMapDataType(DataType dtype) {
-  // CUDA 13 adds packed U4 TensorMap formats. The vendored CUDA stub may lag
-  // the installed toolkit, so keep the enum value by CUDA's documented order.
-  constexpr int kTensorMapDataType16U4Align8B = 13;
+  // CUDA headers can lag the driver API enum additions for packed narrow TMA
+  // formats. Keep the numeric value in sync with runtime.cc validation.
+  constexpr int kTensorMapDataType16U4Align16B = 14;
   if (dtype.is_float4_e2m1fn()) {
-    return kTensorMapDataType16U4Align8B;
+    return kTensorMapDataType16U4Align16B;
   }
 
   CUtensorMapDataType tp;
