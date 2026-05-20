@@ -198,6 +198,36 @@ private:
   Map<Buffer, Buffer> buffer_remap_;
 };
 
+/*! \brief Rewrite the synthetic CPU fallback thread variable to a constant.
+ *
+ * CPU `c` kernels use a degenerate fallback thread variable while fragment and
+ * tile-op lowering still share thread-oriented helper code. After this pass has
+ * consumed that helper variable, it should not remain in lowered CPU TIR.
+ */
+class CPUFallbackThreadVarCanonicalizer : public StmtExprMutator {
+public:
+  static Stmt Rewrite(Stmt stmt, Var fallback_thread_var) {
+    CPUFallbackThreadVarCanonicalizer canonicalizer(
+        std::move(fallback_thread_var));
+    return canonicalizer(std::move(stmt));
+  }
+
+private:
+  explicit CPUFallbackThreadVarCanonicalizer(Var fallback_thread_var)
+      : fallback_thread_var_(std::move(fallback_thread_var)) {}
+
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    if (fallback_thread_var_.defined() &&
+        (op == fallback_thread_var_.get() ||
+         op->name_hint == fallback_thread_var_->name_hint)) {
+      return make_zero(op->dtype);
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  Var fallback_thread_var_;
+};
+
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -288,6 +318,14 @@ public:
       fptr->body = injector(fptr->body);
       ICHECK(injector.injected)
           << "Failed to find root BlockRealize for barrier injection";
+    }
+
+    if (TargetIsCPU(substituter.target_)) {
+      // TODO(#2226): Remove the underlying CPU fallback-thread placeholder
+      // shared by LayoutInference/LowerTileOp. Until then, canonicalize the
+      // synthetic fallback after fragment/tile lowering has consumed it.
+      fptr->body = CPUFallbackThreadVarCanonicalizer::Rewrite(
+          std::move(fptr->body), substituter.thread_var_->var);
     }
 
     return f;
@@ -1281,6 +1319,14 @@ private:
           }
         } else if (call->op.same_as(tl::access_ptr())) {
           // tl::access_ptr format: (BufferLoad, extent, rw_mask)
+          if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+            if (!IsLocalBuffer(load->buffer)) {
+              has_non_local_store = true;
+            }
+          }
+        } else if (call->op.same_as(builtin::address_of())) {
+          // call_extern may pass address_of(non-local-buffer) pointers, and
+          // PostOrderVisit reaches the address_of call directly.
           if (const auto *load = call->args[0].as<BufferLoadNode>()) {
             if (!IsLocalBuffer(load->buffer)) {
               has_non_local_store = true;

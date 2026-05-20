@@ -1,7 +1,8 @@
 from __future__ import annotations
 import ast
 import inspect
-from typing import Any, Callable, Literal
+from typing import Any, Literal
+from collections.abc import Callable
 from tilelang import env
 from hashlib import sha256
 from tvm import tir

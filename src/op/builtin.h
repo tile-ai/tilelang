@@ -260,6 +260,8 @@ TVM_DLL const Op &fma2();
 TVM_DLL const Op &max2();
 TVM_DLL const Op &min2();
 TVM_DLL const Op &abs2();
+TVM_DLL const Op &max2_nan();
+TVM_DLL const Op &min2_nan();
 
 // random op
 TVM_DLL const Op &rng_init();
@@ -376,6 +378,16 @@ TVM_DLL const Op &ptx_wgmma_ss();
  * bool scale_in_a, bool scale_in_b);
  */
 TVM_DLL const Op &ptx_wgmma_rs();
+
+/*!
+ * \brief tvm intrinsic for sparse ptx wgmma shared-shared instructions.
+ */
+TVM_DLL const Op &ptx_wgmma_sp_ss();
+
+/*!
+ * \brief tvm intrinsic for sparse ptx wgmma register-shared instructions.
+ */
+TVM_DLL const Op &ptx_wgmma_sp_rs();
 
 /*!
  * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.

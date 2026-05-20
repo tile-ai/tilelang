@@ -9,6 +9,7 @@ from ..node import PrimFuncNode
 from .common import coalesced_factor, factorize, get_all_factors
 from .default import DefaultPolicy
 from ..rasterization import NoRasterization, Rasterization2DColumn
+from ...arch import is_rdna_arch
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,9 @@ class TensorCorePolicy(DefaultPolicy):
         if pipleline_stage:
             self.pipeline_stage = pipleline_stage
         else:
-            if self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
+            if is_rdna_arch(self.arch):
+                self.pipeline_stage = self.arch.tuning.pipeline_stage
+            elif self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
                 self.pipeline_stage = 2
             else:
                 self.pipeline_stage = 1
@@ -88,6 +91,10 @@ class TensorCorePolicy(DefaultPolicy):
         # 512 bytes // type bits
         reduce_input_dtype = node.get_buffer_dtype(node.block_analyzer.get_input_buffers(node.reduction_block)[0])
         basic = (target_transaction * 8) // reduce_input_dtype.bits
+        if is_rdna_arch(self.arch):
+            rdna_basic = self.arch.tuning.reduction_step_for_dtype_bits(reduce_input_dtype.bits)
+            if rdna_basic is not None:
+                basic = rdna_basic
 
         result = {}
         for iter_info in node.raxis:
@@ -102,6 +109,13 @@ class TensorCorePolicy(DefaultPolicy):
         return result
 
     def _expand_reduce_axis(self, td: TileDict):
+        if is_rdna_arch(self.arch):
+            # RDNA WMMA benefits from considering wide output tiles such as
+            # 64x256 that only fit with smaller K tiles.  Start from the RDNA
+            # tuning default and then use the generic expansion pass to grow K
+            # only when shared-memory/occupancy limits allow it.
+            return super()._expand_reduce_axis(td)
+
         # For tensorcore program, if we got a small tilesize, we should consider expand the reduce axis
         # to improve compute efficiency.
         def _check_small_tile(td: TileDict):
@@ -212,6 +226,14 @@ class TensorCorePolicy(DefaultPolicy):
                     return False
         return super().check_tile_shape_isvalid(td)
 
+    def score_block_size(self, n):
+        base_score = super().score_block_size(n)
+        if is_rdna_arch(self.arch):
+            preferred_warps = self.arch.tuning.preferred_warps_per_block
+            warps = (n + self.arch.warp_size - 1) // self.arch.warp_size
+            return (0 if warps == preferred_warps else 1, abs(warps - preferred_warps), *base_score)
+        return base_score
+
     def _can_implement_layout(self, node: PrimFuncNode, td: TileDict):
         # Not implemented yet
         # This function is used to check whether we can implement swizzling
@@ -256,8 +278,11 @@ class TensorCorePolicy(DefaultPolicy):
         if tile[ax_m] < wmma_tile[ax_m] or tile[ax_n] < wmma_tile[ax_n]:
             # allow pad, otherwise, we can not get a valid tile shape
             return None
+        space_prod = int(np.prod(space))
+        if space_prod < warps or space_prod % warps != 0:
+            return None
 
-        factors = factorize(np.prod(space) // warps)
+        factors = factorize(space_prod // warps)
 
         def _score(node, warp_tile):  # small is better
             score = 0

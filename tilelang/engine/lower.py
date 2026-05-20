@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Callable
+from collections.abc import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -15,7 +15,7 @@ from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TIL
 from tilelang.transform import PassConfigKey
 from tilelang.transform.metal import MarkHostMetalContext
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.utils.target import determine_target
+from tilelang.utils.target import determine_target, target_get_mcpu
 from tilelang.engine.phase import (
     PreLowerSemanticCheck,
     LowerAndLegalize,
@@ -162,9 +162,11 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
 @tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
+    arch = target_get_mcpu(target)
     hsaco = hipcc.compile_hip(
         code,
         target_format="hsaco",
+        arch=arch,
         options=[
             "-std=c++17",
             "-I" + TILELANG_TEMPLATE_PATH,
@@ -270,20 +272,13 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     return device_mod
 
 
-def lower(
+def lower_to_host_device_ir(
     func_or_mod: tir.PrimFunc | tvm.IRModule,
     target: str | Target = "auto",
     target_host: str | Target | None = None,
-    runtime_only=False,
-    enable_host_codegen=False,
-    enable_device_compile=False,
-) -> CompiledArtifact:
-    """
-    enable_host_codegen: whether to enable host codegen, default is False, as we have our
-    own host codegen implementation in jit.
-    enable_device_compile: whether to enable device codegen, default is False, as we have our
-    own device codegen implementation in jit.
-    """
+    runtime_only: bool = False,
+) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
+    """Lower input TIR to split host/device IRModules without backend codegen."""
 
     mod = func_or_mod
     params = None
@@ -314,6 +309,32 @@ def lower(
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
+
+    return host_mod, device_mod, params, target, target_host
+
+
+def lower(
+    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
+    runtime_only=False,
+    enable_host_codegen=False,
+    enable_device_compile=False,
+) -> CompiledArtifact:
+    """
+    enable_host_codegen: whether to enable host codegen, default is False, as we have our
+    own host codegen implementation in jit.
+    enable_device_compile: whether to enable device codegen, default is False, as we have our
+    own device codegen implementation in jit.
+    """
+
+    host_mod, device_mod, params, target, target_host = lower_to_host_device_ir(
+        func_or_mod=func_or_mod,
+        target=target,
+        target_host=target_host,
+        runtime_only=runtime_only,
+    )
+
     codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
     kernel_source = codegen_mod.inspect_source()
 

@@ -6,7 +6,8 @@ import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 from tvm.target import Target
-from typing import Callable, Literal, Any
+from typing import Literal, Any
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import errno
@@ -62,6 +63,7 @@ class CompileArgs:
         return tilelang.compile(
             program,
             out_idx=self.out_idx,
+            execution_backend=self.execution_backend,
             target=self.target,
             target_host=self.target_host,
             verbose=self.verbose,
