@@ -1001,20 +1001,6 @@ class AutoTuner:
         if hasattr(self, "_prim_func_for_validation"):
             self._validate_input_supply_requirements(self._prim_func_for_validation, self.compile_args.out_idx)
 
-        # get the cpu count
-        available_cpu_count = get_available_cpu_count()
-        cpu_utilizations = float(env.TILELANG_AUTO_TUNING_CPU_UTILITIES)
-        cpu_counts = int(env.TILELANG_AUTO_TUNING_CPU_COUNTS)
-        max_cpu_count = int(env.TILELANG_AUTO_TUNING_MAX_CPU_COUNT)
-        if cpu_counts > 0:
-            num_workers = min(cpu_counts, available_cpu_count)
-            logger.info(f"Auto-tuning with {cpu_counts} CPU counts, {available_cpu_count} CPUs available, {num_workers} CPUs will be used")
-        else:
-            num_workers = max(1, int(available_cpu_count * cpu_utilizations))
-            logger.info(
-                f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used"
-            )
-
         # Launch compile tasks
         pool, futures, future_to_unit, compile_desc = self._prepare_compile_execution(
             config_args=config_args,
