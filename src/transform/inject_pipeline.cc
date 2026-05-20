@@ -711,6 +711,7 @@ public:
     for (const auto &[block, anno] : pipeline_info_) {
       ordered_stmts_.Set(anno.order, block);
     }
+    CollectScalarBindings();
 
     // Step 2: Emit the pipeline prologue, body and epilogue.
     Optional<Integer> pipeline_num_stages =
@@ -770,6 +771,127 @@ public:
   const Map<Buffer, Buffer> &GetBufferRemap() const { return buffer_remap_; }
 
 private:
+  struct ScalarBinding {
+    Var var;
+    PrimExpr value;
+    Span span;
+  };
+
+  using ScalarBindingMap =
+      std::unordered_map<Var, size_t, ObjectPtrHash, ObjectPtrEqual>;
+
+  void CollectScalarBindings() {
+    scalar_bindings_.clear();
+    scalar_binding_map_.clear();
+    for (const SBlock &block : ordered_stmts_) {
+      if (const auto *bind = block->body.as<BindNode>()) {
+        if (!scalar_binding_map_.count(bind->var)) {
+          scalar_binding_map_.emplace(bind->var, scalar_bindings_.size());
+          scalar_bindings_.push_back({bind->var, bind->value, bind->span});
+        }
+      }
+    }
+  }
+
+  VarSet FindScalarBindingUses(const Array<Var> &undefined_vars) const {
+    VarSet uses;
+    for (const Var &var : undefined_vars) {
+      if (scalar_binding_map_.count(var)) {
+        uses.insert(var);
+      }
+    }
+    return uses;
+  }
+
+  VarSet FindScalarBindingUses(const Stmt &stmt) const {
+    return FindScalarBindingUses(UndefinedVars(stmt, Array<Var>{}));
+  }
+
+  VarSet FindScalarBindingUses(const PrimExpr &expr) const {
+    return FindScalarBindingUses(UndefinedVars(expr));
+  }
+
+  void AppendScalarBinding(size_t binding_index, VarSet *emitted,
+                           VarSet *visiting,
+                           std::vector<size_t> *binding_indices) const {
+    const ScalarBinding &binding = scalar_bindings_[binding_index];
+    if (emitted->count(binding.var)) {
+      return;
+    }
+    ICHECK(!visiting->count(binding.var))
+        << "InjectSoftwarePipeline: cyclic scalar Bind dependency involving "
+        << binding.var;
+
+    visiting->insert(binding.var);
+    VarSet deps = FindScalarBindingUses(binding.value);
+    for (const ScalarBinding &candidate : scalar_bindings_) {
+      if (!deps.count(candidate.var)) {
+        continue;
+      }
+      auto it = scalar_binding_map_.find(candidate.var);
+      ICHECK(it != scalar_binding_map_.end());
+      AppendScalarBinding(it->second, emitted, visiting, binding_indices);
+    }
+    visiting->erase(binding.var);
+
+    emitted->insert(binding.var);
+    binding_indices->push_back(binding_index);
+  }
+
+  std::vector<size_t> RequiredScalarBindings(const Stmt &stmt) const {
+    std::vector<size_t> binding_indices;
+    if (scalar_bindings_.empty()) {
+      return binding_indices;
+    }
+
+    VarSet uses = FindScalarBindingUses(stmt);
+    if (uses.empty()) {
+      return binding_indices;
+    }
+
+    VarSet emitted;
+    VarSet visiting;
+    for (const ScalarBinding &binding : scalar_bindings_) {
+      if (!uses.count(binding.var)) {
+        continue;
+      }
+      auto it = scalar_binding_map_.find(binding.var);
+      ICHECK(it != scalar_binding_map_.end());
+      AppendScalarBinding(it->second, &emitted, &visiting, &binding_indices);
+    }
+    return binding_indices;
+  }
+
+  Stmt RewriteScalarBindingForAccess(size_t binding_index,
+                                     const PrimExpr &access_index) {
+    const ScalarBinding &binding = scalar_bindings_[binding_index];
+    Stmt bind = Bind(binding.var, binding.value, binding.span);
+    bind = PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
+                                pipeline_loop_, max_stage_ != 1)(bind);
+    bind = Substitute(bind, {{pipeline_loop_->loop_var, access_index}});
+    return bind;
+  }
+
+  SBlock ReplayScalarBindings(SBlock block, const PrimExpr &access_index) {
+    std::vector<size_t> binding_indices = RequiredScalarBindings(block->body);
+    if (binding_indices.empty()) {
+      return block;
+    }
+
+    Array<Stmt> seq;
+    for (size_t binding_index : binding_indices) {
+      seq.push_back(RewriteScalarBindingForAccess(binding_index, access_index));
+    }
+    for (const Stmt &stmt : FlattenTopLevelSeq(block->body)) {
+      seq.push_back(stmt);
+    }
+
+    SBlockNode *n = block.CopyOnWrite();
+    n->body = SeqStmt(seq);
+    return MakeBlock(SBlockRealize({}, Bool(true), block),
+                     buffer_data_to_buffer_);
+  }
+
   /*!
    * \brief Analyze accesses to the buffers in the software pipeline.
    *
@@ -2227,6 +2349,9 @@ private:
     BufferCommitGroupMap buffer_to_commit_group;
 
     for (const SBlock &block : ordered_stmts_) {
+      if (block->body.as<BindNode>()) {
+        continue;
+      }
       const auto &pipeline_anno = pipeline_info_.at(block);
       int stage = pipeline_anno.stage;
       PrimExpr inbound = Bool(true);
@@ -2259,6 +2384,7 @@ private:
       }
       new_block = Downcast<SBlock>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
+      new_block = ReplayScalarBindings(new_block, normalized_access_index);
 
       Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
       rewritten_stmt = WrapLoopDependentWrappers(std::move(rewritten_stmt),
@@ -2399,6 +2525,8 @@ private:
   Map<Buffer, Buffer> buffer_remap_;
   Optional<Target> target_;
   Array<SBlock> ordered_stmts_;
+  std::vector<ScalarBinding> scalar_bindings_;
+  ScalarBindingMap scalar_binding_map_;
   std::vector<IfWrapper> loop_var_if_wrappers_;
   std::map<int, AsyncStateGlobal> async_states_;
 };

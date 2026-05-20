@@ -512,5 +512,52 @@ def test_inject_software_pipeline_expands_annotated_layout():
     assert layout_map[shared.data].is_equal(layout.expand([2]))
 
 
+def test_inject_software_pipeline_replays_scalar_bind_per_stage_use():
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 0, 1],
+                    "software_pipeline_order": [1, 2, 0],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [0, 1, 0],
+                    "software_pipeline_async_producer_groups": [-1, 0, -1],
+                },
+            ):
+                base: T.int32 = i * 16
+                with T.sblock("copy"):
+                    T.reads(A[base + tx])
+                    T.writes(shared[tx])
+                    shared[tx] = A[base + tx]
+                with T.sblock("store"):
+                    T.reads(shared[tx])
+                    T.writes(B[base + tx])
+                    B[base + tx] = shared[tx]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_bind_blocks = {"copy": 0, "store": 0}
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.SBlock) or str(node.name_hint) not in leading_bind_blocks:
+            return
+        body = node.body
+        assert isinstance(body, tvm.tirx.SeqStmt), f"{node.name_hint} body should start with scalar Bind"
+        assert isinstance(body.seq[0], tvm.tirx.Bind), f"{node.name_hint} body should start with scalar Bind"
+        assert str(body.seq[0].var.name).startswith("base")
+        leading_bind_blocks[str(node.name_hint)] += 1
+
+    post_order_visit(mod["main"].body, _visit)
+
+    assert leading_bind_blocks["copy"] > 0
+    assert leading_bind_blocks["store"] > 0
+    assert "base = T.int32()" not in mod["main"].script()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
