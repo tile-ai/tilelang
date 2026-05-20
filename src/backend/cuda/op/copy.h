@@ -29,6 +29,8 @@ enum class CopyInst : uint8_t {
   kBulkStore1D = 7,
   kTMemLoad = 8,
   kTMemStore = 9,
+  kBulkLoadGather4 = 10,   // tma cp.async.bulk.tensor.tile::gather4 (sm_100a)
+  kBulkStoreScatter4 = 11, // tma cp.async.bulk.tensor.tile::scatter4 (sm_100a)
   kInvalid = 255,
 };
 
