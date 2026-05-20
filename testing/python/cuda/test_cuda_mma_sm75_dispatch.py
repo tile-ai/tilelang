@@ -2,6 +2,7 @@ import pytest
 
 import tilelang.language as T
 from tilelang import tvm
+import tilelang.testing
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter, TensorCoreIntrinEmitterWithLadderTransform
 from tilelang.cuda.intrinsics.macro.mma_sm75_macro_generator import TensorCoreIntrinEmitterSM75
 from tilelang.cuda.op.gemm.gemm_mma import GemmMMA
@@ -171,3 +172,7 @@ def test_ladder_transform_int8_micro_size_uses_actual_k_dim():
     assert emitter.local_size_a == 16
     assert emitter.local_size_b == 16
     assert emitter.local_size_out == 8
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

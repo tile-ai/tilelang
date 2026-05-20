@@ -94,3 +94,7 @@ def test_sm75_int4_gemm_uses_m8n8k32_and_matches_torch():
     ref = (a.cpu().to(torch.int32) @ b.cpu().to(torch.int32).T).to(device="cuda")
 
     tilelang.testing.torch_assert_close(c, ref, rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

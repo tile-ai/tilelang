@@ -108,63 +108,11 @@ class KernelCache:
 
     @staticmethod
     @functools.cache
-    def _get_codegen_stamp() -> str | None:
-        """Return a content hash for Python CUDA lowering code and templates.
-
-        Kernel cache keys use the pre-lowering TIR script, so Python lowering or
-        header-template edits can otherwise reuse stale generated CUDA kernels.
-        """
-        package_root = os.path.dirname(os.path.dirname(__file__))
-        repo_root = os.path.dirname(package_root)
-        roots: list[tuple[str, tuple[str, ...] | None]] = []
-
-        cuda_root = os.path.join(package_root, "cuda")
-        if os.path.isdir(cuda_root):
-            roots.append((cuda_root, (".py",)))
-
-        configured_template_root = env.TILELANG_TEMPLATE_PATH
-        if configured_template_root and os.path.isdir(os.path.join(configured_template_root, "tl_templates")):
-            template_root = os.path.join(configured_template_root, "tl_templates")
-        else:
-            template_root = configured_template_root or os.path.join(repo_root, "src", "tl_templates")
-        if template_root and os.path.isdir(template_root):
-            roots.append((template_root, None))
-
-        if not roots:
-            return None
-
-        file_hash = sha256()
-        seen: set[str] = set()
-        for root, suffixes in roots:
-            for dirpath, dirnames, filenames in os.walk(root):
-                dirnames.sort()
-                for filename in sorted(filenames):
-                    if suffixes is not None and not filename.endswith(suffixes):
-                        continue
-                    path = os.path.join(dirpath, filename)
-                    real_path = os.path.realpath(path)
-                    if real_path in seen or not os.path.isfile(path):
-                        continue
-                    seen.add(real_path)
-                    rel_path = os.path.relpath(path, root).replace(os.sep, "/")
-                    file_hash.update(rel_path.encode())
-                    file_hash.update(b"\0")
-                    with open(path, "rb") as f:
-                        for chunk in iter(lambda: f.read(1 << 20), b""):
-                            file_hash.update(chunk)
-
-        return file_hash.hexdigest()
-
-    @staticmethod
-    @functools.cache
     def _get_base_key() -> dict:
         base = {"version": __version__, "platform": platform.machine()}
         lib_stamp = KernelCache._get_tilelang_lib_stamp()
         if lib_stamp:
             base["tilelang_lib"] = lib_stamp
-        codegen_stamp = KernelCache._get_codegen_stamp()
-        if codegen_stamp:
-            base["tilelang_codegen"] = codegen_stamp
         if sys.platform == "darwin":
             import torch
 
