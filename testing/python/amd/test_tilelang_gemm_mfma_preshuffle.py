@@ -4,8 +4,8 @@ import tilelang
 import tilelang.testing
 from tilelang import tvm as tvm
 import tilelang.language as T
-from tilelang.intrinsics import make_mfma_swizzle_layout as make_swizzle_layout
-from tilelang.intrinsics.mfma_macro_generator import MatrixCorePreshuffleIntrinEmitter
+from tilelang.rocm.intrinsics import make_mfma_swizzle_layout as make_swizzle_layout
+from tilelang.rocm.intrinsics.mfma_macro_generator import MatrixCorePreshuffleIntrinEmitter
 from tilelang.transform import simplify_prim_func
 from tilelang.utils import determine_fp8_type
 
@@ -356,7 +356,7 @@ def assert_tl_matmul_correctness(
         (256, 256, 512, determine_fp8_type(), T.float32, T.float32, False, True, 1, True, True, False),
     ],
 )
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_cdna
 def test_assert_tl_matmul(
     M,
     N,
@@ -399,7 +399,7 @@ def test_assert_tl_matmul(
         (256, 256, 512, T.int8, T.int32, T.int32, True, 1, True, (32, 32, 32)),
     ],
 )
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_gfx950
 def test_assert_tl_matmul_extended_mfma(
     M,
     N,

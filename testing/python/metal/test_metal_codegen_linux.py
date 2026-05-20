@@ -8,6 +8,11 @@ import tilelang
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
+from tilelang.metal.op.gemm.gemm_metal_scalar import (
+    GEMM_INST_METAL_SCALAR,
+    GemmMetalScalar,
+)
+from tilelang.tileop.gemm.registry import resolve_gemm_impl
 
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float32, accum_dtype=T.float32):
@@ -246,7 +251,7 @@ def assert_t_gemm_metal_codegen(
 
 def assert_mixed_shared_merge_metal_codegen():
     func = mixed_dynamic_static_shared_merge()
-    with tvm.transform.PassContext(config={"tir.merge_static_smem": True}), tvm.target.Target("metal"):
+    with tvm.transform.PassContext(config={"tirx.merge_static_smem": True}), tvm.target.Target("metal"):
         artifact = tilelang.lower(func, target="metal")
 
     src_code = artifact.kernel_source
@@ -277,6 +282,13 @@ def test_metal_codegen_float16():
 
 def test_metal_codegen_int32():
     assert_metal_codegen(1024, 1024, 1024, 16, 16, 16, dtype=T.int32)
+
+
+def test_metal_scalar_gemm_registry():
+    assert (
+        resolve_gemm_impl(GEMM_INST_METAL_SCALAR, tvm.target.Target("metal"))
+        is GemmMetalScalar
+    )
 
 
 def test_t_gemm_metal_codegen_float32():

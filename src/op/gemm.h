@@ -8,12 +8,16 @@
 #define TVM_TL_OP_GEMM_H_
 
 #include "operator.h"
+#include "support/check.h"
+
+#include <utility>
 
 namespace tvm {
 
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 enum class GemmWarpPolicyType : uint8_t {
   kSquare = 0,
@@ -38,36 +42,6 @@ inline const char *GemmWarpPolicyTypeToString(GemmWarpPolicyType type) {
   }
 }
 
-// Target GEMM instruction
-enum class GemmInst : uint8_t {
-  kMMA,
-  kWGMMA,
-  kTCGEN5MMA,
-  kMFMA,
-  kScalar,
-  kWMMA
-};
-
-/// Convert GemmInst enum to string for debugging
-inline const char *GemmInstToString(GemmInst inst) {
-  switch (inst) {
-  case GemmInst::kMMA:
-    return "MMA";
-  case GemmInst::kWGMMA:
-    return "WGMMA";
-  case GemmInst::kTCGEN5MMA:
-    return "TCGEN5MMA";
-  case GemmInst::kMFMA:
-    return "MFMA";
-  case GemmInst::kScalar:
-    return "Scalar";
-  case GemmInst::kWMMA:
-    return "WMMA";
-  default:
-    return "Unknown";
-  }
-}
-
 class GemmWarpPolicyNode : public Object {
 public:
   mutable int m_warp{0};
@@ -77,7 +51,7 @@ public:
   TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmWarpPolicy", GemmWarpPolicyNode, Object);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<GemmWarpPolicyNode>()
         .def_ro("policy_type", &GemmWarpPolicyNode::policy_type)
         .def_ro("m_warp", &GemmWarpPolicyNode::m_warp)
@@ -86,7 +60,7 @@ public:
 
   std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
                                            Target target,
-                                           GemmInst gemm_inst) const;
+                                           String gemm_inst) const;
 
   bool isSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);
@@ -106,19 +80,19 @@ public:
                                              GemmWarpPolicyNode);
 
   explicit GemmWarpPolicy(GemmWarpPolicyType policy_type) {
-    auto node = tvm::ffi::make_object<GemmWarpPolicyNode>();
+    auto node = make_object<GemmWarpPolicyNode>();
     node->policy_type = (int)policy_type;
     data_ = std::move(node);
   }
 
   explicit GemmWarpPolicy(int policy_type) {
-    auto node = tvm::ffi::make_object<GemmWarpPolicyNode>();
+    auto node = make_object<GemmWarpPolicyNode>();
     node->policy_type = policy_type;
     data_ = std::move(node);
   }
 
   explicit GemmWarpPolicy(int m_warp, int n_warp) {
-    auto node = tvm::ffi::make_object<GemmWarpPolicyNode>();
+    auto node = make_object<GemmWarpPolicyNode>();
     node->m_warp = m_warp;
     node->n_warp = n_warp;
     node->policy_type = (int)GemmWarpPolicyType::kFree;
@@ -128,10 +102,7 @@ public:
 
 class GemmNode : public TileOperatorNode {
 public:
-  bool checkWgmma() const;
-  bool allowTcgen5Mma(Target target) const;
-  bool allowWgmma(int block_size, Target target) const;
-  tir::Buffer a_, b_, c_;
+  tirx::Buffer a_, b_, c_;
   // BufferRegion for A, B and C
   BufferRegion aRegion_, bRegion_, cRegion_;
   bool transA_, transB_;
@@ -139,7 +110,7 @@ public:
   int strideA_, strideB_;
   int offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
-  tir::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
+  tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
@@ -155,7 +126,7 @@ public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<GemmNode>()
         .def_ro("a", &GemmNode::a_)
         .def_ro("b", &GemmNode::b_)
@@ -194,12 +165,32 @@ public:
 
   TileOperator Clone() const;
 
-  // Target GEMM instruction
-  GemmInst getGemmInst(int block_size, Target target) const;
+  // Target-specific GEMM instruction key.
+  String getGemmInstructionKey(int block_size, Target target) const;
+  String getGemmInstructionKind(int block_size, Target target) const;
 
 private:
   mutable bool completed_ = false;
 };
+
+using GemmTargetPredicate = bool (*)(Target target);
+
+struct GemmImpl {
+  const char *name;
+  GemmTargetPredicate match_target;
+
+  String (*select_inst)(const GemmNode &op, int block_size, Target target);
+
+  std::pair<int, int> (*compute_warp_partition)(
+      const GemmWarpPolicyNode &policy, int M, int N, int block_size,
+      Target target, String gemm_inst);
+
+  bool (*reuse_existing_shared_layout)(String gemm_inst);
+
+  String (*instruction_kind)(String gemm_inst);
+};
+
+void RegisterGemmImpl(GemmImpl impl);
 
 class Gemm : public TileOperator {
 public:

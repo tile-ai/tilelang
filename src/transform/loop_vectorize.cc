@@ -30,19 +30,23 @@
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
-#include "tvm/tir/analysis.h"
-#include "tvm/tir/var.h"
+#include "support/check.h"
 #include <iostream>
 #include <optional>
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/var.h>
 #include <vector>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /*!
  * \brief Check if buffer strides represent a contiguous (row-major) layout.
@@ -376,7 +380,7 @@ private:
       // tiling size is always static.
       if (!extent_ptr) {
         loop_extent_vector_size_ = 1;
-        return ffi::GetRef<Stmt>(node);
+        return GetRef<Stmt>(node);
       }
       loop_extent_vector_size_ =
           arith::ZeroAwareGCD(initial_vector_size_, *extent_ptr);
@@ -552,7 +556,7 @@ private:
       if (!inner_for_)
         return true;
       bool all_invariant = true;
-      PostOrderVisit(ffi::GetRef<PrimExpr>(node), [&](const ObjectRef &obj) {
+      PostOrderVisit(GetRef<PrimExpr>(node), [&](const ObjectRef &obj) {
         if (!all_invariant)
           return;
         if (auto *load = obj.as<BufferLoadNode>()) {
@@ -622,7 +626,7 @@ private:
         << "tvm_access_ptr requires at least 3 args";
 
     // args[0] is TypeAnnotation(dtype[/lanes]); dtype() encodes the element
-    // type. See tvm::tir::Buffer::access_ptr implementation.
+    // type. See tvm::tirx::Buffer::access_ptr implementation.
     DataType dtype = node->args[0].dtype();
     Var data_var;
     if (auto data_var_node = node->args[1].as<VarNode>()) {
@@ -815,27 +819,24 @@ private:
         {buffer, buffer_vec_size, is_store, indices});
   }
 
-  // NOTE(wt): The base class IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*)
+  // NOTE(wt): The base class IRMutatorWithAnalyzer::VisitStmt_(BindNode*)
   // binds let variables, but this causes issues when the same variable name
   // appears multiple times with different values (e.g., in pipelined loops
   // where the body is duplicated). For this case, we allow the analyzer to
   // override the binding. Check the impl of
-  // IRMutatorWithAnalyzer::VisitStmt_(LetStmtNode*) in:
+  // IRMutatorWithAnalyzer::VisitStmt_(BindNode*) in:
   // tvm/src/arith/ir_mutator_with_analyzer.cc
-  Stmt VisitStmt_(const LetStmtNode *op) final {
+  Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
     if (SideEffect(value) <= CallEffectKind::kPure) {
       // Allow override to handle duplicated loop bodies in pipelined loops
       analyzer_->Bind(op->var, value, /*allow_override=*/true);
     }
-    // Continue visiting the body to collect vectorization info
-    Stmt body = this->VisitStmt(op->body);
-    if (value.same_as(op->value) && body.same_as(op->body)) {
-      return ffi::GetRef<Stmt>(op);
+    if (value.same_as(op->value)) {
+      return GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = std::move(value);
-      n->body = std::move(body);
       return Stmt(n);
     }
   }
@@ -919,9 +920,8 @@ int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer) {
   // 1. if var doesn't exist, it is independent
-  bool used_var = UsesVar(expr, [&](const VarNode *v) {
-    return tvm::ffi::GetRef<Var>(v).same_as(var);
-  });
+  bool used_var = UsesVar(
+      expr, [&](const VarNode *v) { return GetRef<Var>(v).same_as(var); });
   if (!used_var) {
     return true;
   }

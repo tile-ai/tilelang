@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 from typing import Any
-from tvm import tir
-from tvm.tir import IntImm
-import tvm.script.ir_builder.tir as tb_tir
+from tvm import tirx
+from tvm.tirx import IntImm
+import tvm.tirx.script.builder as tb_tir
 from .eager.builder import SerialForWithStep, UnrollForWithStep
 from tilelang import _ffi_api
-from tvm.script.ir_builder.tir import frame
+from tvm.tirx.script.builder import frame
 
 
 def Parallel(
-    *extents: int | tir.PrimExpr,
+    *extents: int | tirx.PrimExpr,
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
     prefer_async: bool | None = None,
@@ -88,30 +88,30 @@ def Parallel(
 
 
 def Persistent(
-    domain: list[tir.PrimExpr],
-    wave_size: tir.PrimExpr,
-    index: tir.PrimExpr,
-    group_size: tir.PrimExpr | int | None = 8,
+    domain: list[tirx.PrimExpr],
+    wave_size: tirx.PrimExpr,
+    index: tirx.PrimExpr,
+    group_size: tirx.PrimExpr | int | None = 8,
 ) -> frame.ForFrame:
     """Tools to construct persistent for loop.
 
     Parameters
     ----------
-    domain : List[tir.PrimExpr]
+    domain : List[tirx.PrimExpr]
         The list of dominators.
     wave_size : int
         The wave size.
     index : int
         The tile index in one wave.
-    group_size : tir.PrimExpr
+    group_size : tirx.PrimExpr
         The group size.
     """
     return _ffi_api.Persistent(domain, wave_size, index, group_size)
 
 
 def Pipelined(
-    start: tir.PrimExpr,
-    stop: tir.PrimExpr | None = None,
+    start: tirx.PrimExpr,
+    stop: tirx.PrimExpr | None = None,
     num_stages: int = 0,
     order: list[int] | None = None,
     stage: list[int] | None = None,
@@ -150,9 +150,9 @@ def Pipelined(
 
 
 def serial(
-    start: tir.PrimExpr,
-    stop: tir.PrimExpr | None = None,
-    step: tir.PrimExpr | None = None,
+    start: tirx.PrimExpr,
+    stop: tirx.PrimExpr | None = None,
+    step: tirx.PrimExpr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
@@ -191,9 +191,9 @@ def serial(
 
 
 def unroll(
-    start: tir.PrimExpr,
-    stop: tir.PrimExpr | None = None,
-    step: tir.PrimExpr | None = None,
+    start: tirx.PrimExpr,
+    stop: tirx.PrimExpr | None = None,
+    step: tirx.PrimExpr | None = None,
     *,
     explicit: bool = False,
     unroll_factor: int | None = None,
@@ -259,9 +259,9 @@ def unroll(
 
 
 def Serial(
-    start: tir.PrimExpr,
-    stop: tir.PrimExpr | None = None,
-    step: tir.PrimExpr | None = None,
+    start: tirx.PrimExpr,
+    stop: tirx.PrimExpr | None = None,
+    step: tirx.PrimExpr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
@@ -271,9 +271,9 @@ def Serial(
 
 
 def Unroll(
-    start: tir.PrimExpr,
-    stop: tir.PrimExpr | None = None,
-    step: tir.PrimExpr | None = None,
+    start: tirx.PrimExpr,
+    stop: tirx.PrimExpr | None = None,
+    step: tirx.PrimExpr | None = None,
     *,
     explicit: bool = False,
     unroll_factor: int | None = None,
@@ -285,8 +285,8 @@ def Unroll(
 
 
 def vectorized(
-    start: tir.PrimExpr,
-    stop: tir.PrimExpr | None = None,
+    start: tirx.PrimExpr,
+    stop: tirx.PrimExpr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
@@ -312,8 +312,8 @@ def vectorized(
 
 
 def Vectorized(
-    start: tir.PrimExpr,
-    stop: tir.PrimExpr | None = None,
+    start: tirx.PrimExpr,
+    stop: tirx.PrimExpr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:

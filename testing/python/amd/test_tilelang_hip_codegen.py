@@ -611,8 +611,10 @@ def test_sync_warp_inside_conditional():
 
 
 # ---------------------------------------------------------------------------
-# Fix 5 — src/target/codegen_hip.cc, src/target/rt_mod_hip.cc,
-#          src/target/stubs/hip.cc, src/target/stubs/hip.h
+# Fix 5 — src/backend/rocm/codegen/codegen_hip.cc,
+#          src/backend/rocm/codegen/rt_mod_hip.cc,
+#          src/backend/rocm/stubs/hip.cc,
+#          src/backend/rocm/stubs/hip.h
 #   T.sync_grid() → cooperative_groups::this_grid().sync()
 #
 # Symptom: tl::sync_grid() had no handler → same assertion / link failure.
@@ -685,30 +687,26 @@ def test_pipelined_no_lds_overflow(num_stages):
     M, K, blk = 32, 256, 64
 
     @tilelang.jit
-    def pipelined_rowsum(n_stages: int):
-        @T.prim_func
-        def kernel(
-            x: T.Tensor((M, K), T.float32),
-            out: T.Tensor((M,), T.float32),
-        ) -> None:
-            with T.Kernel(M, threads=64) as pid:
-                acc = T.alloc_fragment((1,), T.float32)
-                T.clear(acc)
-                for k in T.Pipelined(K // blk, num_stages=n_stages):
-                    xs = T.alloc_shared((blk,), T.float32)
-                    xl = T.alloc_fragment((blk,), T.float32)
-                    T.copy(x[pid, k * blk], xs, disable_tma=True)
-                    T.copy(xs, xl, disable_tma=True)
-                    s = T.alloc_fragment((1,), T.float32)
-                    T.reduce_sum(xl, s, dim=0)
-                    acc[0] = acc[0] + s[0]
-                out[pid] = acc[0]
-
-        return kernel
+    def kernel(
+        x: T.Tensor((M, K), T.float32),
+        out: T.Tensor((M,), T.float32),
+    ) -> None:
+        with T.Kernel(M, threads=64) as pid:
+            acc = T.alloc_fragment((1,), T.float32)
+            xs = T.alloc_shared((blk,), T.float32)
+            xl = T.alloc_fragment((blk,), T.float32)
+            s = T.alloc_fragment((1,), T.float32)
+            T.clear(acc)
+            for k in T.Pipelined(K // blk, num_stages=num_stages):
+                T.copy(x[pid, k * blk], xs, disable_tma=True)
+                T.copy(xs, xl, disable_tma=True)
+                T.reduce_sum(xl, s, dim=0)
+                acc[0] = acc[0] + s[0]
+            out[pid] = acc[0]
 
     x = torch.ones(M, K, dtype=torch.float32, device="cuda")
     out = torch.zeros(M, dtype=torch.float32, device="cuda")
-    pipelined_rowsum(num_stages)(x, out)
+    kernel(x, out)
     torch.cuda.synchronize()
     torch.testing.assert_close(out, torch.full((M,), float(K), device="cuda"), atol=1e-4, rtol=0)
 
@@ -725,30 +723,26 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
     bM, bN, bK = 64, 64, 32
 
     @tilelang.jit
-    def fp16_gemm(n_stages: int):
-        @T.prim_func
-        def kernel(
-            A: T.Tensor((M, K), T.float16),
-            B: T.Tensor((K, N), T.float16),
-            C: T.Tensor((M, N), T.float32),
-        ) -> None:
-            with T.Kernel(T.ceildiv(N, bN), T.ceildiv(M, bM), threads=128) as (bx, by):
-                A_s = T.alloc_shared((bM, bK), T.float16)
-                B_s = T.alloc_shared((bK, bN), T.float16)
-                C_l = T.alloc_fragment((bM, bN), T.float32)
-                T.clear(C_l)
-                for k in T.Pipelined(K // bK, num_stages=n_stages):
-                    T.copy(A[by * bM, k * bK], A_s)
-                    T.copy(B[k * bK, bx * bN], B_s)
-                    T.gemm(A_s, B_s, C_l)
-                T.copy(C_l, C[by * bM, bx * bN])
-
-        return kernel
+    def kernel(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((K, N), T.float16),
+        C: T.Tensor((M, N), T.float32),
+    ) -> None:
+        with T.Kernel(T.ceildiv(N, bN), T.ceildiv(M, bM), threads=128) as (bx, by):
+            A_s = T.alloc_shared((bM, bK), T.float16)
+            B_s = T.alloc_shared((bK, bN), T.float16)
+            C_l = T.alloc_fragment((bM, bN), T.float32)
+            T.clear(C_l)
+            for k in T.Pipelined(K // bK, num_stages=num_stages):
+                T.copy(A[by * bM, k * bK], A_s)
+                T.copy(B[k * bK, bx * bN], B_s)
+                T.gemm(A_s, B_s, C_l)
+            T.copy(C_l, C[by * bM, bx * bN])
 
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")
     B = torch.randn(K, N, dtype=torch.float16, device="cuda")
     C = torch.zeros(M, N, dtype=torch.float32, device="cuda")
-    fp16_gemm(num_stages)(A, B, C)
+    kernel(A, B, C)
     torch.cuda.synchronize()
     torch.testing.assert_close(C, A.float() @ B.float(), atol=1.0, rtol=5e-2)
 

@@ -22,13 +22,14 @@
  * \brief infer the fragment/shared memory layout
  */
 
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/s_tir/utils.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <queue>
 
@@ -40,7 +41,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 using arith::IRMutatorWithAnalyzer;
 
 // Class to legalize vectorized loops by transforming them appropriately
@@ -80,7 +81,7 @@ private:
 
 // Create a pass that legalizes vectorized loops in the IRModule
 tvm::transform::Pass LegalizeVectorizedLoop() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   // Define the transformation function to be applied
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);

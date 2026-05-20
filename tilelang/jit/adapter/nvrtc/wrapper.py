@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 
 from tvm import IRModule
 from tvm.target import Target
-from tvm.tir.stmt_functor import post_order_visit
+from tvm.tirx.stmt_functor import post_order_visit
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
@@ -281,7 +281,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         """Allow setting generated host function code."""
         self._generated_host_func = value
 
-    def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
+    def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         """Convert TVM expression to Python string, ignoring casts.
 
         Casts are noise in generated Python code - Python is dynamically typed.
@@ -324,7 +324,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                         "type": "ctypes.c_void_p",
                     }
                 )
-            elif isinstance(param, tvm.tir.Var):
+            elif isinstance(param, tvm.tirx.Var):
                 function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
@@ -346,7 +346,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 break
 
         desc_name_map: dict[str, str] = {}
-        desc_name_var_map: dict[str, tvm.tir.Var] = {}
+        desc_name_var_map: dict[str, tvm.tirx.Var] = {}
         device_index = 0
         kernel_launch_code = """"""
         if has_l2_persistent_map:
@@ -481,7 +481,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
         return PDL_SYNC_PY
 
-    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
+    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tirx.Var]) -> str:
         """Generate Python code to initialize TMA descriptors.
 
         TMA (Tensor Memory Accelerator) descriptors are opaque CUDA objects
@@ -572,8 +572,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
             def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
                 nonlocal function_params
-                if isinstance(node, tvm.tir.Call):
-                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tir.tvm_call_packed")):
+                if isinstance(node, tvm.tirx.Call):
+                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tirx.tvm_call_packed")):
                         return
                     args = node.args
                     if not args or args[0] != fn:

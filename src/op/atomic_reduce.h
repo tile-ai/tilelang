@@ -8,18 +8,19 @@
 
 #include "operator.h"
 #include "parallel.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /*!
  * \brief Base node class for atomic operations (add/max/min).
  *
- * This base class provides common functionality for all atomic
- * operations including buffer management, loop generation, and layout
- * inference.
+ * This base class stores the shared atomic operation data and dispatches
+ * lowering/layout inference to target-specific implementations.
  */
 class AtomicOpBaseNode : public TileOperatorNode {
 public:
@@ -34,10 +35,10 @@ public:
 
   mutable ParallelOp par_op_; ///< Associated parallel operation
 
-  /// Default Lower implementation for non-TMA atomic ops
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
+  /// Lower through the registered target implementation.
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
 
-  /// Default InferLayout implementation
+  /// Infer layout through the registered target implementation.
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
 
   /// Get memory order from annotations (default: relaxed = 0)
@@ -52,21 +53,22 @@ public:
 
   /// Get the element-wise operation Op (pure virtual, implemented by derived)
   virtual const Op &GetElemOp() const = 0;
-
-protected:
-  /// Create SIMT-style parallel loop structure
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
-
-  /// Generate iteration variables for loop nest
-  Array<IterVar> MakeIterVars() const;
-
-  /// Generate buffer indices from iteration variables
-  Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
-
-  /// Create boundary predicate for memory safety
-  PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
-                         Array<PrimExpr> extents, int src_dst) const;
 };
+
+using AtomicReduceTargetPredicate = bool (*)(Target target);
+
+struct AtomicReduceImpl {
+  const char *name;
+  AtomicReduceTargetPredicate match_target;
+
+  LayoutMap (*infer_layout)(const AtomicOpBaseNode &op,
+                            const LayoutInferArgs &T, InferLevel level);
+
+  Stmt (*lower)(const AtomicOpBaseNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterAtomicReduceImpl(AtomicReduceImpl impl);
 
 /// Node class for atomic maximum operations
 class AtomicMaxNode : public AtomicOpBaseNode {
@@ -79,7 +81,7 @@ public:
   TileOperator Clone() const;
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<AtomicMaxNode>()
         .def_ro("src", &AtomicMaxNode::src)
         .def_ro("src_value", &AtomicMaxNode::src_value)
@@ -112,7 +114,7 @@ public:
   TileOperator Clone() const;
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<AtomicMinNode>()
         .def_ro("src", &AtomicMinNode::src)
         .def_ro("src_value", &AtomicMinNode::src_value)

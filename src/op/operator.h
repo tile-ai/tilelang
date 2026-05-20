@@ -7,13 +7,16 @@
 #ifndef TVM_TL_OP_OP_H_
 #define TVM_TL_OP_OP_H_
 
+// Dependencies for operators
+#include "support/check.h"
+#include <array>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/buffer.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/stmt.h>
+#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt.h>
 #include <utility>
 #include <vector>
 
@@ -22,10 +25,12 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using AllocMBarrierCallback = std::function<int(int arrive_count)>;
+using UpdateBarrierArriveCallback = std::function<void(Var, PrimExpr)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
 
@@ -85,6 +90,7 @@ struct LowerArgs {
   Var thread_var;
   AddWorkspaceCallback AddWorkspace;
   AllocMBarrierCallback AllocMBarrier;
+  UpdateBarrierArriveCallback UpdateBarrierArrive;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
   // Map from LetStmt variable to its bound expression, for resolving
@@ -161,7 +167,7 @@ TileOperator ParseOperator(Call call);
 TileOperator ParseOperator(Stmt stmt);
 
 using OpBuilderFunc =
-    ffi::TypedFunction<TileOperator(Array<PrimExpr>, Map<String, ObjectRef>)>;
+    TypedFunction<TileOperator(Array<PrimExpr>, Map<String, ObjectRef>)>;
 
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \

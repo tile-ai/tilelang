@@ -1,22 +1,29 @@
 /*!
- * \file lower hopper intrin.cc
+ * \file tl/transform/lower_hopper_intrin.cc
  * \brief Lower Hopper intrinsics cuda GPU(sm90+)
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_hash.h>
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
-#include "../op/builtin.h"
-#include "../runtime/runtime.h"
+#include <unordered_map>
+#include <vector>
+
+#include "backend/cuda/runtime.h"
+#include "op/builtin.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 #if (CUDA_MAJOR_VERSION >= 12)
 class LowerHopperIntrin : public StmtExprMutator {
@@ -25,33 +32,16 @@ public:
     PrimFuncNode *fptr = f.CopyOnWrite();
     LowerHopperIntrin substituter(disable_shuffle_elect);
     fptr->body = substituter.VisitStmt(f->body);
-    Map<Var, Array<PrimExpr>> init_desc_arg_map;
     // Collect prologue/epilogue statements for host-side setup/teardown
     Array<Stmt> prologue_stmts;
     Array<Stmt> epilogue_stmts;
-    for (const auto &[call, var] : substituter.desc_map_) {
-      // Should allocate 128 bytes for TensorMap on stack
-      Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
-                             {StringImm("tvm_ffi_any"), 16});
-      Array<PrimExpr> init_desc_args;
-      if (call->op.same_as(create_tma_descriptor())) {
-        init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
-      } else if (call->op.same_as(create_tma_im2col_descriptor())) {
-        init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
-      } else {
-        CHECK(0) << call->op;
+    for (const auto &desc_init : substituter.desc_inits_) {
+      if (!desc_init.emitted) {
+        prologue_stmts.push_back(desc_init.stmt);
       }
-      init_desc_args.push_back(var);
-      init_desc_args.insert(init_desc_args.end(), call->args.begin(),
-                            call->args.end());
-      // add to function attribute
-      Call init_desc =
-          Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
-      // Accumulate TMA descriptor init into prologue
-      prologue_stmts.push_back(LetStmt(var, alloc_desc, Evaluate(init_desc)));
-      init_desc_arg_map.Set(var, init_desc_args);
     }
-    f = WithAttr(std::move(f), "tma_descriptor_args", init_desc_arg_map);
+    f = WithAttr(std::move(f), "tma_descriptor_args",
+                 substituter.init_desc_arg_map_);
 
     // Additionally, if L2 persistent cache annotations were lowered earlier,
     // materialize TVM FFI calls to set the stream access policy window.
@@ -126,8 +116,41 @@ public:
     return f;
   }
 
+  Stmt VisitStmt_(const SeqStmtNode *op) final {
+    Array<Stmt> visited;
+    visited.reserve(op->seq.size());
+    for (const Stmt &stmt : op->seq) {
+      visited.push_back(StmtExprMutator::VisitStmt(stmt));
+    }
+
+    Array<Stmt> result;
+    for (const Stmt &stmt : visited) {
+      result.push_back(stmt);
+      AppendDescInitsAfterAlloc(stmt, &result);
+    }
+    return SeqStmt(result);
+  }
+
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+  void AppendDescInitsAfterAlloc(const Stmt &stmt, Array<Stmt> *result) {
+    const auto *alloc = stmt.as<AllocBufferNode>();
+    if (alloc == nullptr) {
+      return;
+    }
+    for (auto &desc_init : desc_inits_) {
+      if (!desc_init.emitted &&
+          desc_init.base_var == alloc->buffer->data.get()) {
+        result->push_back(desc_init.stmt);
+        desc_init.emitted = true;
+      }
+    }
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         auto body = StmtExprMutator::VisitStmt(op->body);
@@ -159,14 +182,19 @@ public:
     if (call->op.same_as(create_tma_descriptor()) ||
         call->op.same_as(create_tma_im2col_descriptor())) {
       Var var;
-      auto iter = desc_map_.find(tvm::ffi::GetRef<Call>(call));
+      auto iter = desc_map_.find(GetRef<Call>(call));
       if (iter != desc_map_.end()) {
         var = iter->second;
       } else {
         String name = call->args[2].as<Var>().value()->name_hint;
         var = Var(name + "_desc",
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
-        desc_map_[tvm::ffi::GetRef<Call>(call)] = var;
+        Call call_ref = GetRef<Call>(call);
+        desc_map_[call_ref] = var;
+        Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
+        init_desc_arg_map_.Set(var, init_desc_args);
+        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
+                               MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
@@ -177,15 +205,72 @@ public:
     }
   }
 
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    Stmt new_stmt = StmtExprMutator::VisitStmt_(op);
+    if (const auto *if_node = new_stmt.as<IfThenElseNode>()) {
+      if (IsNoOp(if_node->then_case) && (!if_node->else_case.defined() ||
+                                         IsNoOp(if_node->else_case.value()))) {
+        return Evaluate(0);
+      }
+    }
+    return new_stmt;
+  }
+
+  bool IsNoOp(const Stmt &stmt) {
+    if (const auto *eval = stmt.as<EvaluateNode>()) {
+      return is_const_int(eval->value, 0);
+    } else if (const auto *seq = stmt.as<SeqStmtNode>()) {
+      for (const auto &s : seq->seq) {
+        if (!IsNoOp(s))
+          return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
 private:
+  struct DescInit {
+    const VarNode *base_var;
+    Stmt stmt;
+    bool emitted;
+  };
+
+  static Array<PrimExpr> MakeInitDescArgs(const Call &call, const Var &var) {
+    Array<PrimExpr> init_desc_args;
+    if (call->op.same_as(create_tma_descriptor())) {
+      init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
+    } else if (call->op.same_as(create_tma_im2col_descriptor())) {
+      init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
+    } else {
+      ICHECK(0) << call->op;
+    }
+    init_desc_args.push_back(var);
+    init_desc_args.insert(init_desc_args.end(), call->args.begin(),
+                          call->args.end());
+    return init_desc_args;
+  }
+
+  static Stmt MakeInitDescStmt(const Var &var,
+                               const Array<PrimExpr> &init_desc_args) {
+    // Should allocate 128 bytes for TensorMap on stack.
+    Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
+                           {StringImm("tvm_ffi_any"), 16});
+    Call init_desc =
+        Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
+    return SeqStmt({tirx::Bind(var, alloc_desc), Evaluate(init_desc)});
+  }
+
   Array<Stmt> prefetch_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
+  std::vector<DescInit> desc_inits_;
+  Map<Var, Array<PrimExpr>> init_desc_arg_map_;
   LowerHopperIntrin(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
   bool disable_shuffle_elect_;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerHopperIntrin() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
@@ -197,7 +282,7 @@ tvm::transform::Pass LowerHopperIntrin() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerHopperIntrin", LowerHopperIntrin);
 }
 #endif // (CUDA_MAJOR_VERSION >= 12)

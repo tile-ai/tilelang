@@ -4,9 +4,13 @@
  */
 
 #include "parallel.h"
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include <algorithm>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/op.h>
 
 #include "../layout/layout.h"
 #include "arith/int_operator.h"
@@ -20,7 +24,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -105,11 +110,12 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
                        IterVar(Range(op->min, op->extent), op->loop_var,
                                IterVarType::kOrdered));
   p->analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-  auto reducer_info_map =
-      op->annotations.Get(attr::kReducerInfo)->as<Map<Var, ReducerInfo>>();
-  if (reducer_info_map) {
-    for (auto &&[buffer, info] : reducer_info_map.value())
-      p->reducer_info_map_.Set(buffer, info);
+  if (auto reducer_info_ref = op->annotations.Get(attr::kReducerInfo)) {
+    if (auto reducer_info_map =
+            reducer_info_ref.value().as<Map<Var, ReducerInfo>>()) {
+      for (auto &&[buffer, info] : reducer_info_map.value())
+        p->reducer_info_map_.Set(buffer, info);
+    }
   }
   StmtExprVisitor::VisitStmt_(op);
 }
@@ -159,7 +165,7 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
 }
 
 TileOperator ParallelOpNode::Clone() const {
-  auto op = tvm::ffi::make_object<ParallelOpNode>(*this);
+  auto op = make_object<ParallelOpNode>(*this);
   return ParallelOp(op);
 }
 
@@ -176,7 +182,7 @@ void ParallelOpNode::ExpandLetBindings(
           RecordBufferAccess(bl->buffer, bl->indices, /*is_write=*/false);
         }
       } else if (auto var_node = node.as<VarNode>()) {
-        auto var = tvm::ffi::GetRef<Var>(var_node);
+        auto var = GetRef<Var>(var_node);
         if (let_var_to_expr.count(var)) {
           expand(let_var_to_expr[var]);
         }
@@ -680,7 +686,7 @@ ParallelOpNode::ComputeLoopLayoutFromBuffer(const Buffer &buffer,
     try {
       result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
                    ->BindThreadRange(T.thread_bounds);
-    } catch (const tvm::runtime::Error &err) {
+    } catch (const Error &err) {
       std::ostringstream msg;
       msg << "Layout inference for buffer `" << buffer->name
           << "` failed inside `T.parallel` loop.";

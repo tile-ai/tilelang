@@ -3,12 +3,15 @@
  * \brief legalize safe memory access
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <utility>
 
@@ -21,7 +24,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 using arith::IRMutatorWithAnalyzer;
 
 // SafeMemChecker for a BufferLoad/BufferStore node:
@@ -39,7 +43,7 @@ struct SafeMemChecker : public StmtExprVisitor {
     disableOOBWarning =
         tvm::transform::PassContext::Current()
             ->GetConfig(kDisableOutOfBoundWarning, Optional<Bool>())
-            .value_or(false);
+            .value_or(true);
   }
   void VisitExpr_(const BufferLoadNode *op) final {
     // If the buffer is in global scope, we will check its indices and add
@@ -120,19 +124,35 @@ struct SafeMemChecker : public StmtExprVisitor {
       try {
         can_prove_upper = analyzer_->CanProve(
             upper_bound_cond, arith::ProofStrength::kSymbolicBound);
-      } catch (const Error &e) {
+      } catch (const std::exception &e) {
         // Some layout-lowered sparse/global indices contain arithmetic that
         // defeats interval reasoning.  Safe-memory legalization should remain
         // conservative in that case and emit an explicit runtime guard instead
         // of hard-failing compilation.
         can_prove_upper = false;
       }
+
+      if (!can_prove_upper) {
+        // Fallback: use const_int_bound directly.
+        // CanProve's kSymbolicBound strategy uses int_set, which only tracks
+        // Var-keyed constraints. const_int_bound tracks PrimExpr-keyed
+        // constraints (including BufferLoad), so it can leverage bounds
+        // from an enclosing if-condition like `if bin_id < N`.
+        arith::ConstIntBound index_bound = analyzer_->const_int_bound(index);
+        arith::ConstIntBound shape_bound =
+            analyzer_->const_int_bound(shape_dim);
+        if (index_bound->max_value < shape_bound->min_value) {
+          can_prove_upper = true;
+        }
+      }
+
       if (!can_prove_upper) {
         if (throw_warning) {
           LOG(WARNING) << "Index access may exceed buffer bounds: " << index
                        << " >= " << shape_dim
                        << "; Buffer name: " << buffer->name;
-        } else {
+        }
+        if (IsGlobalBuffer(buffer)) {
           _conditions.push_back(upper_bound_cond);
         }
       }
@@ -142,14 +162,24 @@ struct SafeMemChecker : public StmtExprVisitor {
       try {
         can_prove_lower = analyzer_->CanProve(
             lower_bound_cond, arith::ProofStrength::kSymbolicBound);
-      } catch (const Error &e) {
+      } catch (const std::exception &e) {
         can_prove_lower = false;
       }
+
+      if (!can_prove_lower) {
+        // Same fallback as above for the lower bound.
+        arith::ConstIntBound index_bound = analyzer_->const_int_bound(index);
+        if (index_bound->min_value >= 0) {
+          can_prove_lower = true;
+        }
+      }
+
       if (!can_prove_lower) {
         if (throw_warning) {
           LOG(WARNING) << "Index access may be negative: " << index << " < 0"
                        << "; Buffer name: " << buffer->name;
-        } else {
+        }
+        if (IsGlobalBuffer(buffer)) {
           _conditions.push_back(lower_bound_cond);
         }
       }
@@ -355,7 +385,7 @@ private:
     ICHECK(!conditions.empty());
     PrimExpr combined = conditions[0];
     for (size_t i = 1; i < conditions.size(); ++i) {
-      combined = tir::And(combined, conditions[i]);
+      combined = tirx::And(combined, conditions[i]);
     }
     return analyzer_->Simplify(combined);
   }
@@ -395,7 +425,7 @@ private:
     // store.
     if (analyzer_->CanProveEqual(safe_value, make_zero(dst_dtype))) {
       PrimExpr predicate = existing_predicate.defined()
-                               ? analyzer_->Simplify(tir::And(
+                               ? analyzer_->Simplify(tirx::And(
                                      existing_predicate.value(), combined))
                                : combined;
       Array<PrimExpr> new_args{call->args[0], call->args[1], call->args[2]};
@@ -452,7 +482,7 @@ private:
     return evaluate;
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     for (auto buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
@@ -490,7 +520,7 @@ private:
 
 // Create a pass that legalizes vectorized loops in the IRModule
 tvm::transform::Pass LegalizeSafeMemoryAccess() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   // Define the transformation function to be applied
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_safe_memory_legalize =
@@ -506,7 +536,7 @@ tvm::transform::Pass LegalizeSafeMemoryAccess() {
 
 // Register the pass globally so it can be used in the compilation pipeline
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LegalizeSafeMemoryAccess",
                         LegalizeSafeMemoryAccess);
 }

@@ -4,14 +4,14 @@ from tilelang import tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tvm.tir.stmt_functor import post_order_visit
+from tvm.tirx.stmt_functor import post_order_visit
 
 
-def _count_calls(func: tvm.tir.PrimFunc):
+def _count_calls(func: tvm.tirx.PrimFunc):
     counts = {}
 
     def _visit(node):
-        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op):
+        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op):
             name = str(node.op.name)
             counts[name] = counts.get(name, 0) + 1
 
@@ -19,11 +19,11 @@ def _count_calls(func: tvm.tir.PrimFunc):
     return counts
 
 
-def _count_calls_in_stmt(stmt: tvm.tir.Stmt):
+def _count_calls_in_stmt(stmt: tvm.tirx.Stmt):
     counts = {}
 
     def _visit(node):
-        if isinstance(node, tvm.tir.Call) and isinstance(node.op, tvm.ir.Op):
+        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op):
             name = str(node.op.name)
             counts[name] = counts.get(name, 0) + 1
 
@@ -44,7 +44,7 @@ def test_lower_ptx_async_copy_rewrites_plain_parallel_copy():
             S[i] = A[i]
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
@@ -52,8 +52,8 @@ def test_lower_ptx_async_copy_rewrites_plain_parallel_copy():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) > 0
-    assert calls.get("tir.ptx_wait_group", 0) > 0
+    assert calls.get("tirx.ptx_commit_group", 0) > 0
+    assert calls.get("tirx.ptx_wait_group", 0) > 0
 
 
 def test_lower_ptx_async_copy_respects_explicit_async_scope():
@@ -70,7 +70,7 @@ def test_lower_ptx_async_copy_respects_explicit_async_scope():
                 S[i] = A[i]
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
@@ -78,8 +78,8 @@ def test_lower_ptx_async_copy_respects_explicit_async_scope():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) == 0
-    assert calls.get("tir.ptx_wait_group", 0) == 0
+    assert calls.get("tirx.ptx_commit_group", 0) == 0
+    assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
 def test_lower_ptx_async_copy_supports_multi_dim_indices():
@@ -95,7 +95,7 @@ def test_lower_ptx_async_copy_supports_multi_dim_indices():
             S[i, j] = A[i, j]
         B[0, 0] = S[0, 0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
@@ -103,8 +103,8 @@ def test_lower_ptx_async_copy_supports_multi_dim_indices():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) > 0
-    assert calls.get("tir.ptx_wait_group", 0) > 0
+    assert calls.get("tirx.ptx_commit_group", 0) > 0
+    assert calls.get("tirx.ptx_wait_group", 0) > 0
 
 
 def test_lower_ptx_async_copy_rewrites_vectorized_float16_loop():
@@ -121,7 +121,7 @@ def test_lower_ptx_async_copy_rewrites_vectorized_float16_loop():
                 S[i * 8 + v] = A[i * 8 + v]
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
@@ -129,8 +129,8 @@ def test_lower_ptx_async_copy_rewrites_vectorized_float16_loop():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) > 0
-    assert calls.get("tir.ptx_wait_group", 0) > 0
+    assert calls.get("tirx.ptx_commit_group", 0) > 0
+    assert calls.get("tirx.ptx_wait_group", 0) > 0
 
 
 def test_lower_ptx_async_copy_hoists_sync_out_of_predicated_block():
@@ -143,35 +143,35 @@ def test_lower_ptx_async_copy_hoists_sync_out_of_predicated_block():
     ):
         S = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
         for i in T.serial(4):
-            with T.block("copy"):
+            with T.sblock("copy"):
                 vi = T.axis.spatial(4, i)
                 T.where(vi < 3)
                 S[vi] = A[vi]
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) > 0
-    assert calls.get("tir.ptx_wait_group", 0) > 0
+    assert calls.get("tirx.ptx_commit_group", 0) > 0
+    assert calls.get("tirx.ptx_wait_group", 0) > 0
 
     # Ensure we didn't introduce commit/wait *inside* the serial loop body.
     loop = None
 
     def _find_for(node):
         nonlocal loop
-        if loop is None and isinstance(node, tvm.tir.For):
+        if loop is None and isinstance(node, tvm.tirx.For):
             loop = node
 
     post_order_visit(mod["main"].body, _find_for)
     assert loop is not None
     inner_calls = _count_calls_in_stmt(loop.body)
-    assert inner_calls.get("tir.ptx_commit_group", 0) == 0
-    assert inner_calls.get("tir.ptx_wait_group", 0) == 0
+    assert inner_calls.get("tirx.ptx_commit_group", 0) == 0
+    assert inner_calls.get("tirx.ptx_wait_group", 0) == 0
 
 
 def test_lower_ptx_async_copy_respects_enable_async_copy_config():
@@ -187,7 +187,7 @@ def test_lower_ptx_async_copy_respects_enable_async_copy_config():
             S[i] = A[i]
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
@@ -196,8 +196,8 @@ def test_lower_ptx_async_copy_respects_enable_async_copy_config():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) == 0
-    assert calls.get("tir.ptx_commit_group", 0) == 0
-    assert calls.get("tir.ptx_wait_group", 0) == 0
+    assert calls.get("tirx.ptx_commit_group", 0) == 0
+    assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
 def test_lower_ptx_async_copy_does_not_duplicate_existing_sync():
@@ -215,7 +215,7 @@ def test_lower_ptx_async_copy_does_not_duplicate_existing_sync():
         T.ptx_wait_group(0)
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
@@ -223,8 +223,8 @@ def test_lower_ptx_async_copy_does_not_duplicate_existing_sync():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) == 1
-    assert calls.get("tir.ptx_wait_group", 0) == 1
+    assert calls.get("tirx.ptx_commit_group", 0) == 1
+    assert calls.get("tirx.ptx_wait_group", 0) == 1
 
 
 def test_lower_ptx_async_copy_inserts_commit_before_existing_wait():
@@ -241,7 +241,7 @@ def test_lower_ptx_async_copy_inserts_commit_before_existing_wait():
         T.ptx_wait_group(0)
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
@@ -249,8 +249,8 @@ def test_lower_ptx_async_copy_inserts_commit_before_existing_wait():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) == 1
-    assert calls.get("tir.ptx_wait_group", 0) == 1
+    assert calls.get("tirx.ptx_commit_group", 0) == 1
+    assert calls.get("tirx.ptx_wait_group", 0) == 1
 
 
 def test_lower_ptx_async_copy_keeps_sync_out_of_inner_unrolled_loops_in_pipelined_loop():
@@ -267,21 +267,21 @@ def test_lower_ptx_async_copy_keeps_sync_out_of_inner_unrolled_loops_in_pipeline
                 S[ko * 4 + i] = A[ko * 4 + i]
             B[ko] = S[ko]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tir.ptx_commit_group", 0) > 0
-    assert calls.get("tir.ptx_wait_group", 0) > 0
+    assert calls.get("tirx.ptx_commit_group", 0) > 0
+    assert calls.get("tirx.ptx_wait_group", 0) > 0
 
     pipelined_loop = None
 
     def _find_pipelined_for(node):
         nonlocal pipelined_loop
-        if pipelined_loop is None and isinstance(node, tvm.tir.For) and "num_stages" in node.annotations:
+        if pipelined_loop is None and isinstance(node, tvm.tirx.For) and "num_stages" in node.annotations:
             pipelined_loop = node
 
     post_order_visit(mod["main"].body, _find_pipelined_for)
@@ -292,14 +292,14 @@ def test_lower_ptx_async_copy_keeps_sync_out_of_inner_unrolled_loops_in_pipeline
 
     def _find_unrolled(node):
         nonlocal inner_unrolled
-        if inner_unrolled is None and isinstance(node, tvm.tir.For) and node.kind == tvm.tir.ForKind.UNROLLED:
+        if inner_unrolled is None and isinstance(node, tvm.tirx.For) and node.kind == tvm.tirx.ForKind.UNROLLED:
             inner_unrolled = node
 
     post_order_visit(pipelined_loop.body, _find_unrolled)
     assert inner_unrolled is not None
     inner_calls = _count_calls_in_stmt(inner_unrolled.body)
-    assert inner_calls.get("tir.ptx_commit_group", 0) == 0
-    assert inner_calls.get("tir.ptx_wait_group", 0) == 0
+    assert inner_calls.get("tirx.ptx_commit_group", 0) == 0
+    assert inner_calls.get("tirx.ptx_wait_group", 0) == 0
 
 
 def test_lower_ptx_async_copy_from_vectorized_loop():
@@ -315,7 +315,7 @@ def test_lower_ptx_async_copy_from_vectorized_loop():
             S[i] = A[i]
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
@@ -338,15 +338,15 @@ def test_lower_ptx_async_copy_skips_vectorized_broadcast_source():
                 S[i * 4 + v] = A[i * 4]
         B[0] = S[0]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 
     mod = tl.transform.LowerPTXAsyncCopy()(mod)
     calls = _count_calls(mod["main"])
     assert calls.get("tl.ptx_cp_async", 0) == 0
-    assert calls.get("tir.ptx_commit_group", 0) == 0
-    assert calls.get("tir.ptx_wait_group", 0) == 0
+    assert calls.get("tirx.ptx_commit_group", 0) == 0
+    assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
 def test_lower_ptx_async_copy_from_ramp():
@@ -361,7 +361,7 @@ def test_lower_ptx_async_copy_from_ramp():
         S[0:4] = A[0:4]
         B[0:4] = S[0:4]
 
-    target = tvm.target.Target("cuda -arch=sm_80")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     func = before.with_attr("global_symbol", "main").with_attr("target", target)
     mod = tvm.IRModule.from_expr(func)
 

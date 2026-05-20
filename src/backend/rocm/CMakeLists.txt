@@ -3,10 +3,63 @@ if(NOT USE_ROCM)
   return()
 endif()
 
+message(STATUS "ROCM Backend is enabled")
+
 set(CMAKE_HIP_STANDARD 17)
 include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
 find_rocm(${USE_ROCM})
 add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
+
+# Fallback for build hosts without a ROCm runtime install (e.g. an NV-only
+# machine producing a cross-target wheel). TVM's find_rocm() only succeeds
+# when libamdhip64 is present, but with TILELANG_USE_HIP_STUBS=ON we don't
+# need the runtime library at build time -- only the public HIP headers.
+#
+# Resolution order (first match wins):
+#   1. -DTILELANG_HIP_INCLUDE_DIR=<dir> (explicit override)
+#   2. $ENV{TILELANG_HIP_INCLUDE_DIR}
+#   3. /opt/rocm/include (if a system ROCm install exists)
+#   4. 3rdparty/hip-headers/include (vendored, default fallback)
+#
+# A minimal hsa/hsa.h is vendored alongside the HIP headers because TVM's
+# src/runtime/rocm/rocm_device_api.cc unconditionally #includes <hsa/hsa.h>.
+# Only two HSA symbols (hsa_init / hsa_shut_down) are actually referenced;
+# both are exported by hip_stub and lazy-loaded from libhsa-runtime64 at run
+# time, so no HSA library is linked.
+if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
+  set(_TL_VENDORED_HIP_INC "${CMAKE_SOURCE_DIR}/3rdparty/hip-headers/include")
+  set(_TL_HIP_INC "")
+  if(TILELANG_HIP_INCLUDE_DIR)
+    set(_TL_HIP_INC "${TILELANG_HIP_INCLUDE_DIR}")
+  elseif(DEFINED ENV{TILELANG_HIP_INCLUDE_DIR})
+    set(_TL_HIP_INC "$ENV{TILELANG_HIP_INCLUDE_DIR}")
+  elseif(IS_DIRECTORY "/opt/rocm/include/hip")
+    set(_TL_HIP_INC "/opt/rocm/include")
+  elseif(IS_DIRECTORY "${_TL_VENDORED_HIP_INC}/hip")
+    set(_TL_HIP_INC "${_TL_VENDORED_HIP_INC}")
+  endif()
+
+  if(_TL_HIP_INC AND IS_DIRECTORY "${_TL_HIP_INC}/hip")
+    message(STATUS
+      "ROCm runtime library not found on host; using HIP headers from "
+      "${_TL_HIP_INC} with hip_stub for linking. The resulting wheel still "
+      "requires a real ROCm runtime to be present at execution time.")
+    set(ROCM_FOUND TRUE)
+    set(ROCM_INCLUDE_DIRS "${_TL_HIP_INC}")
+    set(ROCM_HIPHCC_LIBRARY hip_stub CACHE STRING
+        "HIP runtime library to link against" FORCE)
+    set(ROCM_HSA_LIBRARY ROCM_HSA_LIBRARY-NOTFOUND CACHE STRING
+        "HSA runtime library to link against" FORCE)
+  else()
+    message(STATUS
+      "ROCm runtime library not found on host and no HIP headers could be "
+      "located. Set -DTILELANG_HIP_INCLUDE_DIR=<dir> to a directory "
+      "containing a `hip/` subtree, or restore the vendored headers under "
+      "3rdparty/hip-headers/include/hip.")
+  endif()
+  unset(_TL_HIP_INC)
+  unset(_TL_VENDORED_HIP_INC)
+endif()
 
 if(TILELANG_USE_HIP_STUBS)
   if(WIN32 AND NOT CYGWIN)
@@ -23,7 +76,7 @@ if(TILELANG_USE_HIP_STUBS)
   # It also provides minimal HSA wrappers (hsa_init / hsa_shut_down) to avoid a
   # hard DT_NEEDED dependency on libhsa-runtime64 in ROCm-enabled wheels.
   # ============================================================================
-  add_library(hip_stub SHARED src/target/stubs/hip.cc)
+  add_library(hip_stub SHARED src/backend/rocm/stubs/hip.cc)
   target_include_directories(hip_stub PRIVATE ${ROCM_INCLUDE_DIRS})
   target_compile_definitions(hip_stub PRIVATE TILELANG_HIP_STUB_EXPORTS)
   target_link_libraries(hip_stub PRIVATE ${CMAKE_DL_LIBS})
@@ -40,7 +93,7 @@ if(TILELANG_USE_HIP_STUBS)
   # This library provides a minimal HIPRTC API surface and lazily loads
   # libhiprtc.so at runtime.
   # ============================================================================
-  add_library(hiprtc_stub SHARED src/target/stubs/hiprtc.cc)
+  add_library(hiprtc_stub SHARED src/backend/rocm/stubs/hiprtc.cc)
   target_include_directories(hiprtc_stub PRIVATE ${ROCM_INCLUDE_DIRS})
   target_compile_definitions(hiprtc_stub PRIVATE TILELANG_HIPRTC_STUB_EXPORTS)
   target_link_libraries(hiprtc_stub PRIVATE ${CMAKE_DL_LIBS})
@@ -66,14 +119,15 @@ if(TILELANG_USE_HIP_STUBS)
 endif()
 
 file(GLOB TILE_LANG_HIP_SRCS
-  src/target/codegen_hip.cc
-  src/target/rt_mod_hip.cc
+  src/backend/rocm/codegen/codegen_hip.cc
+  src/backend/rocm/codegen/rt_mod_hip.cc
+  src/backend/rocm/op/*.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_HIP_SRCS})
 list(APPEND TILE_LANG_INCLUDES ${ROCM_INCLUDE_DIRS})
 
 # Register stubs for linking and install
 if(TILELANG_USE_HIP_STUBS)
-  set(TILELANG_ACTIVE_BACKEND_STUB_LINK hip_stub)
-  set(TILELANG_ACTIVE_BACKEND_STUB_TARGETS hip_stub hiprtc_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK hip_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_TARGETS hip_stub hiprtc_stub)
 endif()

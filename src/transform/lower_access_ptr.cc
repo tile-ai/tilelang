@@ -4,18 +4,20 @@
  * `tir.builtin.tvm_access_ptr`.
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -92,7 +94,7 @@ public:
     PrimExpr extent = call->args[1];
     PrimExpr rw_mask = call->args[2];
 
-    PrimExpr ptype = tir::TypeAnnotation(buffer->dtype);
+    PrimExpr ptype = tirx::TypeAnnotation(buffer->dtype);
     PrimExpr data = buffer->data;
     PrimExpr offset = LinearOffsetFromLoad(base_load);
 
@@ -120,12 +122,12 @@ tvm::transform::Pass LowerAccessPtr() {
                       const tvm::transform::PassContext &ctx) {
     return LowerAccessPtrPrimFunc(std::move(f));
   };
-  return tvm::tir::transform::CreatePrimFuncPass(pass_func, 0,
-                                                 "tl.LowerAccessPtr", {});
+  return tvm::tirx::transform::CreatePrimFuncPass(pass_func, 0,
+                                                  "tl.LowerAccessPtr", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerAccessPtr", LowerAccessPtr);
 }
 

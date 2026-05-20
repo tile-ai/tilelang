@@ -14,11 +14,13 @@
  *   2. It does not read buffers written inside the loop
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 
@@ -28,7 +30,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /*!
  * \brief Collect buffer data vars that are written in a statement
@@ -312,11 +315,11 @@ bool IsSideEffectFreeStmt(const Stmt &stmt) {
     return true;
   }
 
-  if (const auto *op = stmt.as<LetStmtNode>()) {
+  if (const auto *op = stmt.as<BindNode>()) {
     if (SideEffect(op->value) > CallEffectKind::kReadState) {
       return false;
     }
-    return IsSideEffectFreeStmt(op->body);
+    return true;
   }
 
   if (const auto *op = stmt.as<IfThenElseNode>()) {
@@ -424,11 +427,11 @@ public:
     return StmtExprMutator::VisitStmt_(op);
   }
 
-  Stmt VisitStmt_(const LetStmtNode *op) final {
+  Stmt VisitStmt_(const BindNode *op) final {
     // Remove LetStmts for hoisted variables (they are now bound outside the
     // loop)
     if (hoisted_vars.count(op->var.get())) {
-      return VisitStmt(op->body);
+      return Evaluate(Integer(0));
     }
     return StmtExprMutator::VisitStmt_(op);
   }
@@ -456,8 +459,7 @@ public:
       // First recursively collect Let-bound vars used in this binding's value
       VisitExpr(it->second);
       // Then add this binding (so dependencies come first)
-      used_let_bindings.push_back(
-          std::make_pair(ffi::GetRef<Var>(op), it->second));
+      used_let_bindings.push_back(std::make_pair(GetRef<Var>(op), it->second));
     }
   }
 };
@@ -483,7 +485,7 @@ public:
       : loop_var(loop_var), written_vars(written_vars),
         disallowed_vars(disallowed_vars) {}
 
-  void VisitStmt_(const LetStmtNode *op) final {
+  void VisitStmt_(const BindNode *op) final {
     // Track ALL Let bindings to detect when a condition uses a variable
     // that is defined inside the loop with a loop-variant value.
     // This is necessary because variables like i_s may be bound to expressions
@@ -491,8 +493,6 @@ public:
     // conditions using such variables should not be hoisted.
     let_bindings_[op->var.get()] = op->value;
     StmtVisitor::VisitStmt_(op);
-    // Remove the binding when leaving scope
-    let_bindings_.erase(op->var.get());
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
@@ -551,7 +551,7 @@ public:
     Stmt result;
     if (!finder.found) {
       if (body.same_as(op->body)) {
-        result = ffi::GetRef<Stmt>(op);
+        result = GetRef<Stmt>(op);
       } else {
         result = For(op->loop_var, op->min, op->extent, op->kind, body,
                      op->thread_binding, op->annotations);
@@ -571,7 +571,7 @@ public:
     call_checker(body);
     if (call_checker.has_call) {
       if (body.same_as(op->body)) {
-        result = ffi::GetRef<Stmt>(op);
+        result = GetRef<Stmt>(op);
       } else {
         result = For(op->loop_var, op->min, op->extent, op->kind, body,
                      op->thread_binding, op->annotations);
@@ -619,7 +619,7 @@ public:
     // outermost)
     for (auto it = finder.hoisted_let_bindings.rbegin();
          it != finder.hoisted_let_bindings.rend(); ++it) {
-      result = LetStmt(it->first, it->second, result);
+      result = SeqStmt({tirx::Bind(it->first, it->second), result});
     }
 
     if (pushed_thread_idx) {
@@ -638,7 +638,7 @@ Stmt ApplyLoopUnswitching(Stmt stmt, bool allow_non_trivial_else) {
   return LoopUnswitcher(allow_non_trivial_else)(std::move(stmt));
 }
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LoopUnswitching() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
@@ -658,7 +658,7 @@ tvm::transform::Pass LoopUnswitching() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LoopUnswitching", LoopUnswitching);
 }
 
