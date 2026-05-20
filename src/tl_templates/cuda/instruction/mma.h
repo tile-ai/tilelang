@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common.h"
+#include <cute/arch/mma_sm120.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm89.hpp>
 
@@ -68,9 +69,9 @@ struct MmaDispatcher {
   }
 };
 
-#define TL_DEFINE_MMA_DISPATCHER(ATypeEnum, BTypeEnum, CTypeEnum, MValue,      \
-                                 NValue, KValue, TransAValue, TransBValue,     \
-                                 SaturateValue, ImplType)                      \
+#define TL_DEFINE_MMA_DISPATCHER_IMPL(                                         \
+    ATypeEnum, BTypeEnum, CTypeEnum, MValue, NValue, KValue, TransAValue,      \
+    TransBValue, SaturateValue, ShiftAValue, ShiftBValue, ImplType)            \
   template <>                                                                  \
   struct MmaDispatcher<DataType::ATypeEnum, DataType::BTypeEnum,               \
                        DataType::CTypeEnum, MValue, NValue, KValue,            \
@@ -83,11 +84,45 @@ struct MmaDispatcher {
     static_assert(                                                             \
         std::is_same_v<typename Traits::DReg, typename Traits::CReg>,          \
         "tl::mma_sync requires matching accumulator/output regs");             \
+    template <bool Shift, class Reg>                                           \
+    static TL_DEVICE Reg maybe_shift_fp4_reg(Reg reg) {                        \
+      if constexpr (Shift) {                                                   \
+        return reg << 2;                                                       \
+      } else {                                                                 \
+        return reg;                                                            \
+      }                                                                        \
+    }                                                                          \
     static TL_DEVICE void exec(CRegType *d, const ARegType *a,                 \
                                const BRegType *b, const CRegType *c) {         \
-      call_fma<Impl>(d, a, b, c);                                              \
+      if constexpr (ShiftAValue || ShiftBValue) {                              \
+        ARegType as[Traits::kARegs];                                           \
+        BRegType bs[Traits::kBRegs];                                           \
+        _Pragma("unroll") for (int i = 0; i < Traits::kARegs; ++i) {           \
+          as[i] = maybe_shift_fp4_reg<ShiftAValue>(a[i]);                      \
+        }                                                                      \
+        _Pragma("unroll") for (int i = 0; i < Traits::kBRegs; ++i) {           \
+          bs[i] = maybe_shift_fp4_reg<ShiftBValue>(b[i]);                      \
+        }                                                                      \
+        call_fma<Impl>(d, as, bs, c);                                          \
+      } else {                                                                 \
+        call_fma<Impl>(d, a, b, c);                                            \
+      }                                                                        \
     }                                                                          \
   };
+
+#define TL_DEFINE_MMA_DISPATCHER(ATypeEnum, BTypeEnum, CTypeEnum, MValue,      \
+                                 NValue, KValue, TransAValue, TransBValue,     \
+                                 SaturateValue, ImplType)                      \
+  TL_DEFINE_MMA_DISPATCHER_IMPL(ATypeEnum, BTypeEnum, CTypeEnum, MValue,       \
+                                NValue, KValue, TransAValue, TransBValue,      \
+                                SaturateValue, false, false, ImplType)
+
+#define TL_DEFINE_MMA_DISPATCHER_WITH_FP4_SHIFT(                               \
+    ATypeEnum, BTypeEnum, CTypeEnum, MValue, NValue, KValue, TransAValue,      \
+    TransBValue, SaturateValue, ShiftAValue, ShiftBValue, ImplType)            \
+  TL_DEFINE_MMA_DISPATCHER_IMPL(                                               \
+      ATypeEnum, BTypeEnum, CTypeEnum, MValue, NValue, KValue, TransAValue,    \
+      TransBValue, SaturateValue, ShiftAValue, ShiftBValue, ImplType)
 
 // FP16 inputs (TN layout: A row-major, B column-major)
 TL_DEFINE_MMA_DISPATCHER(kFloat16, kFloat16, kFloat16, 16, 8, 16, false, true,
@@ -146,7 +181,26 @@ TL_DEFINE_MMA_DISPATCHER(kTensorFloat32, kTensorFloat32, kFloat32, 16, 8, 8,
 TL_DEFINE_MMA_DISPATCHER(kFloat64, kFloat64, kFloat64, 8, 8, 4, false, true,
                          false, cute::SM80_8x8x4_F64F64F64F64_TN)
 
+// SM120 FP4/F8F6F4 inputs (k32)
+using SM120_FP4_FP4_F32_TN =
+    cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e2m1_t, float>;
+using SM120_FP8_FP4_F32_TN =
+    cute::SM120_16x8x32_TN<cute::float_e4m3_t, cute::float_e2m1_t, float>;
+using SM120_FP4_FP8_F32_TN =
+    cute::SM120_16x8x32_TN<cute::float_e2m1_t, cute::float_e4m3_t, float>;
+TL_DEFINE_MMA_DISPATCHER_WITH_FP4_SHIFT(kFloat4_e2m1fn, kFloat4_e2m1fn,
+                                        kFloat32, 16, 8, 32, false, true, false,
+                                        true, true, SM120_FP4_FP4_F32_TN)
+TL_DEFINE_MMA_DISPATCHER_WITH_FP4_SHIFT(kFloat8_e4m3, kFloat4_e2m1fn, kFloat32,
+                                        16, 8, 32, false, true, false, false,
+                                        true, SM120_FP8_FP4_F32_TN)
+TL_DEFINE_MMA_DISPATCHER_WITH_FP4_SHIFT(kFloat4_e2m1fn, kFloat8_e4m3, kFloat32,
+                                        16, 8, 32, false, true, false, true,
+                                        false, SM120_FP4_FP8_F32_TN)
+
+#undef TL_DEFINE_MMA_DISPATCHER_WITH_FP4_SHIFT
 #undef TL_DEFINE_MMA_DISPATCHER
+#undef TL_DEFINE_MMA_DISPATCHER_IMPL
 
 } // namespace detail
 

@@ -7,6 +7,8 @@ from .mma_layout import (
     ldmatrix_trans_32x8_to_shared_16x16_layout,
     ldmatrix_32x16_to_shared_16x32_layout_a,
     ldmatrix_32x16_to_shared_16x32_layout_b,
+    ldmatrix_32x16_to_shared_16x32_fp4_layout_a,
+    ldmatrix_32x16_to_shared_16x32_fp4_layout_b,
     mma_store_32x8_to_shared_16x16_layout,
     mma_store_32x2_to_shared_8x8_layout_fp64,
 )
@@ -22,11 +24,13 @@ def get_ldmatrix_offset(
     row_idx,
     col_idx,
     stride,
-    dtype: Literal["float16", "int8", "int4"] = "float16",
+    dtype: Literal["float16", "int8", "int4", "float4_e2m1fn"] = "float16",
     transposed: bool = False,
 ):
     assert matrix in ["A", "B"], "matrix should be either A or B"
-    dtype_bits = DataType(dtype).bits
+    dtype_obj = DataType(dtype)
+    dtype_bits = dtype_obj.bits
+    is_fp4_e2m1fn = dtype_bits == 4 and str(dtype_obj) == "float4_e2m1fn"
     if dtype_bits == 32:
         if matrix == "B" and transposed:
             transform_func = ldmatrix_32x4_to_shared_16x8_layout_b
@@ -47,6 +51,19 @@ def get_ldmatrix_offset(
         else:
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
             return new_row_idx, new_col_idx
+    elif is_fp4_e2m1fn:
+        # FP4 uses the SM120 b4x16_p64 layout. Keep int4/uint4 on the generic
+        # sub-byte path below; they have different packed-byte offsets.
+        if matrix == "B" and transposed:
+            transform_func = ldmatrix_32x16_to_shared_16x32_fp4_layout_b
+            new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
+            return new_row_idx, new_col_idx
+        elif matrix == "A" and not transposed:
+            transform_func = ldmatrix_32x16_to_shared_16x32_fp4_layout_a
+            new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
+            return new_row_idx, new_col_idx
+        else:
+            raise ValueError("ldmatrix only supports B transposed and A non-transposed for float4_e2m1fn")
     elif dtype_bits <= 8:
         if matrix == "B" and transposed:
             transform_func = ldmatrix_32x16_to_shared_16x32_layout_b
@@ -61,7 +78,7 @@ def get_ldmatrix_offset(
         else:
             raise ValueError("ldmatrix only supports B transposed and A non-transposed for int8")
     else:
-        raise ValueError(f"Unsupported dtype {dtype}")
+        raise ValueError(f"Unsupported dtype {dtype_obj}")
 
 
 def shared_16x16_to_mma_32x8_layout(i, j):

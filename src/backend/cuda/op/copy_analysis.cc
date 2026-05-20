@@ -258,11 +258,20 @@ bool CheckBulkStore1D(const CopyNode &op, Target target,
 }
 
 bool CheckLDSMCopy(const CopyNode &op, Target target) {
-  return TargetHasLdmatrix(target) && IsSharedBuffer(op.src) &&
-         IsFragmentBuffer(op.dst);
+  if (!TargetHasLdmatrix(target) || !IsSharedBuffer(op.src) ||
+      !IsFragmentBuffer(op.dst)) {
+    return false;
+  }
+  if (op.src->dtype.is_float4_e2m1fn() || op.dst->dtype.is_float4_e2m1fn()) {
+    return TargetIsSM120(target) && op.src->dtype == op.dst->dtype;
+  }
+  return true;
 }
 
 bool CheckSTSMCopy(const CopyNode &op, Target target) {
+  if (op.src->dtype.is_float4_e2m1fn() || op.dst->dtype.is_float4_e2m1fn()) {
+    return false;
+  }
   return TargetHasStmatrix(target) && IsFragmentBuffer(op.src) &&
          IsSharedBuffer(op.dst);
 }
