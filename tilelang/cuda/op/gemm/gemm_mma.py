@@ -5,7 +5,6 @@ from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     TensorCoreIntrinEmitter,
 )
-from tilelang.cuda.intrinsics.macro.mma_sm75_macro_generator import TensorCoreIntrinEmitterSM75
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -13,19 +12,19 @@ from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
-from tilelang.utils.target import target_is_turing
 
 
 GEMM_INST_MMA = "cuda.mma"
 
 
 class GemmMMA(GemmBase):
+    intrin_emitter_cls = TensorCoreIntrinEmitter
+
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tir.Var | None = None):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        emitter_cls = TensorCoreIntrinEmitterSM75 if target_is_turing(target) else TensorCoreIntrinEmitter
-        emitter = emitter_cls(
+        emitter = self.intrin_emitter_cls(
             a_dtype=self.in_dtype,
             b_dtype=self.in_dtype,
             accum_dtype=self.accum_dtype,
