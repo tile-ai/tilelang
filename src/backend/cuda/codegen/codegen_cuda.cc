@@ -601,11 +601,17 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_wgmma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
   }
+  if (need_wgmma_sp_instruction_h_) {
+    decl_stream << "#include <tl_templates/cuda/instruction/wgmma_sp.h>\n";
+  }
   if (need_tcgen05mma_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/tcgen05mma.h>\n";
   }
   if (need_mma_sm70_instruction_h_) {
     decl_stream << "#include <tl_templates/cuda/instruction/mma_sm70.h>\n";
+  }
+  if (need_mma_sp_instruction_h_) {
+    decl_stream << "#include <tl_templates/cuda/instruction/mma_sp.h>\n";
   }
   if (need_tcgen05_common_h_) {
     decl_stream << "#include <tl_templates/cuda/tcgen_05.h>\n";
@@ -1033,6 +1039,10 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         tl_func = "min2";
       else if (op == "max")
         tl_func = "max2";
+      else if (op == "min_nan")
+        tl_func = "min2_nan";
+      else if (op == "max_nan")
+        tl_func = "max2_nan";
 
       if (!tl_func.empty()) {
         // Decompose into lanes/2 independent x2 packed operations.
@@ -1399,13 +1409,20 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
     if (args.size() == 1) {
       this->stream << "__syncthreads();\n";
     } else if (args.size() == 2) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ">();\n";
+      ICHECK(args[1].dtype().is_int())
+          << "storage_sync barrier_id must be integer type, got "
+          << args[1].dtype();
+      this->stream << "tl::__sync_thread_partial(" << PrintExpr(args[1])
+                   << ");\n";
     } else if (args.size() == 3) {
-      auto barrier_id = args[1].as<IntImmNode>()->value;
-      auto thread_count = args[2].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ", "
-                   << thread_count << ">();\n";
+      ICHECK(args[1].dtype().is_int())
+          << "storage_sync barrier_id must be integer type, got "
+          << args[1].dtype();
+      ICHECK(args[2].dtype().is_int())
+          << "storage_sync thread_count must be integer type, got "
+          << args[2].dtype();
+      this->stream << "tl::__sync_thread_partial(" << PrintExpr(args[1]) << ", "
+                   << PrintExpr(args[2]) << ");\n";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
@@ -2632,16 +2649,70 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string b_offset = this->PrintExpr(op->args[9]);
     std::string c_ref = this->PrintExpr(op->args[10]);
     std::string c_offset = this->PrintExpr(op->args[11]);
-    std::string metadata = this->PrintExpr(op->args[12]);
-    std::string metadata_offset = this->PrintExpr(op->args[13]);
-    std::string sparse_selector = this->PrintExpr(op->args[14]);
-    bool saturate = Downcast<Bool>(op->args[15])->value;
+    std::string e_ref = this->PrintExpr(op->args[12]);
+    std::string e_offset = this->PrintExpr(op->args[13]);
+    int64_t sparse_selector = Downcast<IntImm>(op->args[14])->value;
+
+    auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
+    auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
+    auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+
+    need_mma_sp_instruction_h_ = true;
     this->PrintIndent();
-    std::string asm_code = PrintMMAAssembly(
-        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_offset,
-        b_ref, b_offset, c_ref, c_offset, metadata, metadata_offset,
-        sparse_selector, "", true, saturate);
-    this->stream << asm_code;
+
+    std::string mma_call =
+        "tl::mma_sp_sync<(AType), (BType), (CType), (M), (N), (K), (TransA), "
+        "(TransB), (SparseSel)>("
+        "reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
+        "reinterpret_cast<const (ARegType)*>((A_ptr) + (A_offset)), "
+        "reinterpret_cast<const (BRegType)*>((B_ptr) + (B_offset)), "
+        "reinterpret_cast<const uint32_t*>((E_ptr) + (E_offset)));\n";
+    tl::codegen::Replacer replacer;
+
+    // TF32 workaround: float32 A/B in TF32 context maps to kTensorFloat32.
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(dtype_a_enum);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(dtype_b_enum);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+    std::string ARegType = tl::codegen::GetMMARegisterType(dtype_a_enum);
+    if (ARegType == "float") {
+      ARegType = "uint32_t";
+    }
+    std::string BRegType = tl::codegen::GetMMARegisterType(dtype_b_enum);
+    if (BRegType == "float") {
+      BRegType = "uint32_t";
+    }
+
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(TransA)", A_layout == "row" ? "false" : "true");
+    replacer.register_rule("(TransB)", B_layout == "row" ? "false" : "true");
+    replacer.register_rule("(SparseSel)", sparse_selector == 0
+                                              ? "SM80::MMA::SparseSel::Zero"
+                                              : "SM80::MMA::SparseSel::One");
+    replacer.register_rule("(ARegType)", ARegType);
+    replacer.register_rule("(BRegType)", BRegType);
+    replacer.register_rule("(CRegType)",
+                           tl::codegen::GetMMARegisterType(dtype_c_enum));
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", a_offset);
+    replacer.register_rule("(B_ptr)", b_ref);
+    replacer.register_rule("(B_offset)", b_offset);
+    replacer.register_rule("(C_ptr)", c_ref);
+    replacer.register_rule("(C_offset)", c_offset);
+    replacer.register_rule("(E_ptr)", e_ref);
+    replacer.register_rule("(E_offset)", e_offset);
+    this->stream << replacer.rewrite(mma_call);
   } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
     // arg 0: dtype
     // arg 1: shape
@@ -2786,6 +2857,143 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(scale_out)", scale_out);
     wgmma_call = replacer.rewrite(wgmma_call);
     this->stream << wgmma_call;
+  } else if (op->op.same_as(tl::ptx_wgmma_sp_ss())) {
+    ICHECK_EQ(op->args.size(), 18U) << "ptx_wgmma_sp_ss args is " << op->args;
+    std::string wgmma_prefix = Downcast<StringImm>(op->args[0])->value;
+    bool a_is_k_major = Downcast<Bool>(op->args[1])->value;
+    bool b_is_k_major = Downcast<Bool>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_desc = this->PrintExpr(op->args[6]);
+    std::string A_offset = this->PrintExpr(op->args[7]);
+    std::string e_data = this->PrintExpr(op->args[8]);
+    std::string E_offset = this->PrintExpr(op->args[9]);
+    std::string sparse_selector = this->PrintExpr(op->args[10]);
+    std::string b_desc = this->PrintExpr(op->args[11]);
+    std::string B_offset = this->PrintExpr(op->args[12]);
+    std::string c_data = this->PrintExpr(op->args[13]);
+    std::string C_offset = this->PrintExpr(op->args[14]);
+    std::string scale_out = this->PrintExpr(op->args[15]);
+    bool scale_in_a = Downcast<Bool>(op->args[16])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[17])->value;
+
+    this->PrintIndent();
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(wgmma_prefix);
+    need_wgmma_sp_instruction_h_ = true;
+    int sparse_sel_val_ss = Downcast<IntImm>(op->args[10])->value;
+    std::string spsel_ss = (sparse_sel_val_ss == 0)
+                               ? "cute::SM90::GMMA::SparseSel::Zero"
+                               : "cute::SM90::GMMA::SparseSel::One";
+    std::string wgmma_sp_asm_code =
+        "tl::wgmma_sp_ss<(AType), (BType), (CType), (M), (N), (K), (tnspA), "
+        "(tnspB), (scaleA), (scaleB), (spsel)>(uint64_t((desc_a) + "
+        "(A_offset)), "
+        "uint64_t((desc_b) + (B_offset)), "
+        "reinterpret_cast<uint32_t*>((C_data)) "
+        "+ (C_offset), (scale_out), *reinterpret_cast<uint32_t*>((e_data) + "
+        "(E_offset)));\n";
+
+    tl::codegen::Replacer replacer;
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(C_dtype));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(tnspA)", a_is_k_major ? "false" : "true");
+    replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
+    replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
+    replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
+    replacer.register_rule("(spsel)", spsel_ss);
+    replacer.register_rule("(desc_a)", a_desc);
+    replacer.register_rule("(A_offset)", A_offset);
+    replacer.register_rule("(e_data)", e_data);
+    replacer.register_rule("(E_offset)", E_offset);
+    replacer.register_rule("(desc_b)", b_desc);
+    replacer.register_rule("(B_offset)", B_offset);
+    replacer.register_rule("(C_data)", c_data);
+    replacer.register_rule("(C_offset)", C_offset);
+    replacer.register_rule("(scale_out)", scale_out);
+    wgmma_sp_asm_code = replacer.rewrite(wgmma_sp_asm_code);
+    this->stream << wgmma_sp_asm_code;
+  } else if (op->op.same_as(tl::ptx_wgmma_sp_rs())) {
+    ICHECK_EQ(op->args.size(), 17U) << "ptx_wgmma_sp_rs args is " << op->args;
+    std::string wgmma_prefix = Downcast<StringImm>(op->args[0])->value;
+    bool b_is_k_major = Downcast<Bool>(op->args[1])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[2])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string a_ref = this->PrintExpr(op->args[5]);
+    std::string A_offset = this->PrintExpr(op->args[6]);
+    std::string e_data = this->PrintExpr(op->args[7]);
+    std::string E_offset = this->PrintExpr(op->args[8]);
+    std::string sparse_selector = this->PrintExpr(op->args[9]);
+    std::string b_desc = this->PrintExpr(op->args[10]);
+    std::string B_offset = this->PrintExpr(op->args[11]);
+    std::string c_data = this->PrintExpr(op->args[12]);
+    std::string C_offset = this->PrintExpr(op->args[13]);
+    std::string scale_out = this->PrintExpr(op->args[14]);
+    bool scale_in_a = Downcast<Bool>(op->args[15])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[16])->value;
+
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(wgmma_prefix);
+    need_wgmma_sp_instruction_h_ = true;
+    this->PrintIndent();
+    int sparse_sel_val_rs = Downcast<IntImm>(op->args[9])->value;
+    std::string spsel_rs = (sparse_sel_val_rs == 0)
+                               ? "cute::SM90::GMMA::SparseSel::Zero"
+                               : "cute::SM90::GMMA::SparseSel::One";
+    std::string wgmma_sp_rs_asm_code =
+        "tl::wgmma_sp_rs<(AType), (BType), (CType), (M), (N), (K), false, "
+        "(tnspB), (scaleA), (scaleB), (spsel)>(reinterpret_cast<const "
+        "uint32_t*>((A_ptr) + "
+        "(A_offset)), uint64_t((desc_b) + (B_offset)), "
+        "reinterpret_cast<uint32_t*>((C_data)) + (C_offset), (scale_out), "
+        "*reinterpret_cast<uint32_t*>((e_data) + (E_offset)));\n";
+
+    tl::codegen::Replacer replacer;
+    std::string AType = tl::codegen::ptx::DTypeEnumToString(A_dtype);
+    if (AType == "tl::DataType::kFloat32") {
+      AType = "tl::DataType::kTensorFloat32";
+    }
+    std::string BType = tl::codegen::ptx::DTypeEnumToString(B_dtype);
+    if (BType == "tl::DataType::kFloat32") {
+      BType = "tl::DataType::kTensorFloat32";
+    }
+
+    replacer.register_rule("(AType)", AType);
+    replacer.register_rule("(BType)", BType);
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(C_dtype));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
+    replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
+    replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
+    replacer.register_rule("(spsel)", spsel_rs);
+    replacer.register_rule("(A_ptr)", a_ref);
+    replacer.register_rule("(A_offset)", A_offset);
+    replacer.register_rule("(e_data)", e_data);
+    replacer.register_rule("(E_offset)", E_offset);
+    replacer.register_rule("(desc_b)", b_desc);
+    replacer.register_rule("(B_offset)", B_offset);
+    replacer.register_rule("(C_data)", c_data);
+    replacer.register_rule("(C_offset)", C_offset);
+    replacer.register_rule("(scale_out)", scale_out);
+    wgmma_sp_rs_asm_code = replacer.rewrite(wgmma_sp_rs_asm_code);
+    this->stream << wgmma_sp_rs_asm_code;
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
     ICHECK_EQ(op->args.size(), 15U)
         << "ptx_tcgen05_mma_ss args is " << op->args;
@@ -3768,6 +3976,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
   } else if (op->op.same_as(tl::add2()) || op->op.same_as(tl::sub2()) ||
              op->op.same_as(tl::mul2()) || op->op.same_as(tl::fma2()) ||
              op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
+             op->op.same_as(tl::max2_nan()) || op->op.same_as(tl::min2_nan()) ||
              op->op.same_as(tl::abs2())) {
     // Packed x2 element-wise math intrinsics.
     //
@@ -3790,6 +3999,10 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
       op_name = "max2";
     else if (op->op.same_as(tl::min2()))
       op_name = "min2";
+    else if (op->op.same_as(tl::max2_nan()))
+      op_name = "max2_nan";
+    else if (op->op.same_as(tl::min2_nan()))
+      op_name = "min2_nan";
     else
       op_name = "abs2";
 
@@ -4427,10 +4640,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
       os << "uint1{__pack_nv_bfloat162(" << e0 << ", " << e1 << ")}";
     } else {
       enable_fp16_ = true;
-      // __pack_half2 returns __half2 which is 32-bit.
-      // Reinterpret via aggregate initialisation.
-      os << "uint1{*(unsigned*)&(__pack_half2((__half)(" << e0 << "), (__half)("
-         << e1 << ")))}";
+      os << "uint1{tl::pack_half2(" << e0 << ", " << e1 << ")}";
+    }
+    return;
+  }
+  // Handle ExtractElement: extract a scalar lane from a bfloat16x2 / float16x2
+  // vector (produced by packed reduction, etc.). The vector is stored as an
+  // opaque uint1 in the lowered code, but semantically it is a packed pair.
+  DataType vec_t =
+      op->vectors.size() == 1 ? op->vectors[0].dtype() : DataType();
+  bool vec_is_bf16x2 = vec_t.is_bfloat16() && vec_t.lanes() == 2;
+  bool vec_is_fp16x2 = vec_t.is_float16() && vec_t.lanes() == 2;
+  if ((vec_is_bf16x2 || vec_is_fp16x2) && op->vectors.size() == 1 &&
+      op->indices.size() == 1) {
+    int lane = Downcast<IntImm>(op->indices[0])->value;
+    std::string vec = PrintExpr(op->vectors[0]);
+    if (vec_is_bf16x2) {
+      enable_bf16_ = true;
+      os << "bfloat16_t(((nv_bfloat162*)(&(" << vec << ")))->"
+         << (lane == 0 ? "x" : "y") << ")";
+    } else {
+      enable_fp16_ = true;
+      os << "half_t(((half2*)(&(" << vec << ")))->" << (lane == 0 ? "x" : "y")
+         << ")";
     }
     return;
   }

@@ -166,8 +166,14 @@ using BufferDataToBufferMap =
     std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-using BufferNodeMap = std::unordered_map<const BufferNode *, Buffer>;
-using VarExprMap = std::unordered_map<const VarNode *, PrimExpr>;
+using BufferMap =
+    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using VarExprMap =
+    std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
+using StmtRewriteMap =
+    std::unordered_map<Stmt, Stmt, ObjectPtrHash, ObjectPtrEqual>;
+using BufferLayoutMap = std::unordered_map<Var, std::pair<Buffer, Layout>,
+                                           ObjectPtrHash, ObjectPtrEqual>;
 
 struct LocalAccessSummary {
   BufferSet read_buffers;
@@ -229,7 +235,7 @@ static Buffer CloneBranchPrivateBuffer(const Buffer &buffer,
 
 class BufferRemapper : public StmtExprMutator {
 public:
-  static Stmt Rewrite(const Stmt &stmt, const BufferNodeMap &buffer_remap) {
+  static Stmt Rewrite(const Stmt &stmt, const BufferMap &buffer_remap) {
     if (buffer_remap.empty()) {
       return stmt;
     }
@@ -238,15 +244,15 @@ public:
   }
 
 private:
-  explicit BufferRemapper(const BufferNodeMap &buffer_remap)
+  explicit BufferRemapper(const BufferMap &buffer_remap)
       : buffer_remap_(buffer_remap) {
     for (const auto &[old_buf, new_buf] : buffer_remap_) {
-      var_remap_.emplace(old_buf->data.get(), new_buf->data);
+      var_remap_.emplace(old_buf->data, new_buf->data);
     }
   }
 
   Buffer RemapBuffer(const Buffer &buffer) const {
-    auto it = buffer_remap_.find(buffer.get());
+    auto it = buffer_remap_.find(buffer);
     if (it != buffer_remap_.end()) {
       return it->second;
     }
@@ -254,7 +260,7 @@ private:
   }
 
   PrimExpr VisitExpr_(const VarNode *op) final {
-    auto it = var_remap_.find(op);
+    auto it = var_remap_.find(ffi::GetRef<Var>(op));
     if (it != var_remap_.end()) {
       return it->second;
     }
@@ -280,7 +286,7 @@ private:
     return store;
   }
 
-  const BufferNodeMap &buffer_remap_;
+  const BufferMap &buffer_remap_;
   VarExprMap var_remap_;
 };
 
@@ -886,7 +892,6 @@ struct BufferDataAccessInfo {
 
 struct PreludeTmaLoadPlan {
   Stmt stmt;
-  const StmtNode *stmt_node{nullptr};
   int wait_pos{-1};
 };
 
@@ -971,9 +976,9 @@ AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
 }
 
 static bool CollectPreludeStmtsToPipelineLoop(const Stmt &stmt,
-                                              const ForNode *pipeline_loop,
+                                              const For &pipeline_loop,
                                               Array<Stmt> *prelude_stmts) {
-  if (stmt.get() == pipeline_loop) {
+  if (stmt.same_as(pipeline_loop)) {
     return true;
   }
   if (const auto *seq = stmt.as<SeqStmtNode>()) {
@@ -1022,6 +1027,24 @@ static bool CollectPreludeStmtsToPipelineLoop(const Stmt &stmt,
     return CollectPreludeStmtsToPipelineLoop(attr->body, pipeline_loop,
                                              prelude_stmts);
   }
+  if (const auto *if_stmt = stmt.as<IfThenElseNode>()) {
+    Array<Stmt> nested_prelude;
+    if (CollectPreludeStmtsToPipelineLoop(if_stmt->then_case, pipeline_loop,
+                                          &nested_prelude)) {
+      prelude_stmts->insert(prelude_stmts->end(), nested_prelude.begin(),
+                            nested_prelude.end());
+      return true;
+    }
+    if (if_stmt->else_case.defined()) {
+      nested_prelude.clear();
+      if (CollectPreludeStmtsToPipelineLoop(if_stmt->else_case.value(),
+                                            pipeline_loop, &nested_prelude)) {
+        prelude_stmts->insert(prelude_stmts->end(), nested_prelude.begin(),
+                              nested_prelude.end());
+        return true;
+      }
+    }
+  }
   return false;
 }
 
@@ -1045,6 +1068,67 @@ static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
     }
   }
   return Optional<Var>();
+}
+
+static int
+FindFirstAsyncProducerConsumerRead(const Stmt &producer_stmt,
+                                   const Array<Stmt> &consumer_compute_stmts,
+                                   const BufferDataToBufferMap &buffer_map) {
+  int earliest_read = static_cast<int>(consumer_compute_stmts.size());
+  auto update_earliest_read = [&](const Var &buffer_data) {
+    for (size_t ci = 0; ci < static_cast<size_t>(earliest_read); ++ci) {
+      BufferDataAccessInfo access = AnalyzeBufferDataAccess(
+          consumer_compute_stmts[ci], buffer_data, buffer_map);
+      if (access.read) {
+        earliest_read = static_cast<int>(ci);
+        return;
+      }
+    }
+  };
+  if (Optional<Var> write_buffer_data =
+          ExtractProducerWriteBufferData(producer_stmt)) {
+    update_earliest_read(write_buffer_data.value());
+  }
+  PostOrderVisit(producer_stmt, [&](const ObjectRef &obj) {
+    if (earliest_read == 0) {
+      return;
+    }
+    if (const auto *store = obj.as<BufferStoreNode>()) {
+      if (IsSharedBuffer(store->buffer)) {
+        update_earliest_read(store->buffer->data);
+      }
+      return;
+    }
+    const auto *call = obj.as<CallNode>();
+    if (!call || !(call->op.same_as(builtin::ptx_cp_async()) ||
+                   call->op.same_as(tl::ptx_cp_async()))) {
+      return;
+    }
+    PostOrderVisit(call->args[0], [&](const ObjectRef &ptr_obj) {
+      if (earliest_read == 0) {
+        return;
+      }
+      if (const auto *load = ptr_obj.as<BufferLoadNode>()) {
+        if (IsSharedBuffer(load->buffer)) {
+          update_earliest_read(load->buffer->data);
+        }
+        return;
+      }
+      const auto *ptr_call = ptr_obj.as<CallNode>();
+      if (!ptr_call || !ptr_call->op.same_as(builtin::tvm_access_ptr())) {
+        return;
+      }
+      const auto *var = ptr_call->args[1].as<VarNode>();
+      if (!var) {
+        return;
+      }
+      auto it = buffer_map.find(ffi::GetRef<Var>(var));
+      if (it != buffer_map.end() && IsSharedBuffer(it->second)) {
+        update_earliest_read(it->second->data);
+      }
+    });
+  });
+  return earliest_read;
 }
 
 static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
@@ -1146,9 +1230,10 @@ private:
     const Block &orig_block = op->block;
 
     // Find the pipelined loop.
-    const ForNode *pipeline_loop = FindPipelineLoop(orig_block->body);
-    if (!pipeline_loop)
+    Optional<For> pipeline_loop_opt = FindPipelineLoop(orig_block->body);
+    if (!pipeline_loop_opt.defined())
       return StmtExprMutator::VisitStmt_(op);
+    For pipeline_loop = pipeline_loop_opt.value();
 
     auto num_stages_anno = pipeline_loop->annotations.Get("num_stages");
     if (!num_stages_anno)
@@ -1221,7 +1306,7 @@ private:
 
   Stmt
   BuildWSBlock(const BlockRealizeNode *orig_realize, const Block &orig_block,
-               const ForNode *pipeline_loop, int num_stages,
+               const For &pipeline_loop, int num_stages,
                const Array<Stmt> &flat_stmts,
                const std::vector<TileStmtKind> &kinds,
                const std::vector<std::pair<Var, PrimExpr>> &outer_let_bindings,
@@ -1326,7 +1411,7 @@ private:
       if (first_read < 0) {
         continue;
       }
-      prelude_tma_plans.push_back({stmt, stmt.get(), first_read});
+      prelude_tma_plans.push_back({stmt, first_read});
     }
 
     int total_barriers = num_fwd + num_bp + prelude_tma_plans.size();
@@ -1367,6 +1452,27 @@ private:
         }
       }
       ++access_group_idx;
+    }
+
+    // --- Adjust wait positions for SIMT/cp.async producers ---
+    // SIMT and cp.async producers tie their completion to all forward barriers.
+    // If a consumer reads any such shared destination before the first TMA
+    // read, pull all waits earlier so the async producer is also covered.
+    if (has_simt_producer || has_cp_async_producer) {
+      int earliest_async_read = static_cast<int>(consumer_compute_stmts.size());
+      for (size_t i = 0; i < flat_stmts.size(); ++i) {
+        if (kinds[i] != TileStmtKind::kSimtProducer &&
+            kinds[i] != TileStmtKind::kCpAsyncProducer) {
+          continue;
+        }
+        int first_read = FindFirstAsyncProducerConsumerRead(
+            flat_stmts[i], consumer_compute_stmts, buffer_data_to_buffer_);
+        earliest_async_read = std::min(earliest_async_read, first_read);
+      }
+      // Pull all wait positions earlier if needed.
+      for (int g = 0; g < num_producer_groups; ++g) {
+        wait_insert_pos[g] = std::min(wait_insert_pos[g], earliest_async_read);
+      }
     }
 
     // --- Determine if TMA barriers can be merged ---
@@ -1476,10 +1582,10 @@ private:
     int prelude_barrier_base = num_fwd + num_bp;
     for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
       PrimExpr barrier_id = IntImm(DataType::Int(32), prelude_barrier_base + i);
-      common_prelude_rewrites_.emplace(
-          prelude_tma_plans[i].stmt_node,
-          RewritePreludeTmaProducerStmt(prelude_tma_plans[i].stmt, barrier_buf,
-                                        barrier_id));
+      Stmt rewritten_prelude = RewritePreludeTmaProducerStmt(
+          prelude_tma_plans[i].stmt, barrier_buf, barrier_id);
+      common_prelude_rewrites_.emplace(prelude_tma_plans[i].stmt,
+                                       rewritten_prelude);
       int wait_pos = prelude_tma_plans[i].wait_pos;
       ICHECK_GE(wait_pos, 0);
       ICHECK_LT(wait_pos, static_cast<int>(consumer_compute_stmts.size()));
@@ -1780,12 +1886,12 @@ private:
     // LayoutInference: a single fragment layout cannot represent both thread
     // ranges. Clone every branch-private buffer touched by the producer so
     // LayoutInference can infer an independent producer-side thread range.
-    BufferNodeMap producer_buffer_remap;
+    BufferMap producer_buffer_remap;
     Array<Buffer> producer_private_buffers;
     {
-      std::unordered_set<const BufferNode *> block_alloc_buffers;
+      BufferSet block_alloc_buffers;
       for (const auto &buffer : orig_block->alloc_buffers) {
-        block_alloc_buffers.insert(buffer.get());
+        block_alloc_buffers.insert(buffer);
       }
       LocalAccessSummary producer_access = LocalAccessCollector::Collect(
           rewritten_producer, buffer_data_to_buffer_);
@@ -1797,12 +1903,12 @@ private:
       auto maybe_clone = [&](const Buffer &buffer) {
         if (!buffer.defined() ||
             !(IsFragmentBuffer(buffer) || IsLocalBuffer(buffer)) ||
-            !block_alloc_buffers.count(buffer.get()) ||
-            producer_buffer_remap.count(buffer.get())) {
+            !block_alloc_buffers.count(buffer) ||
+            producer_buffer_remap.count(buffer)) {
           return;
         }
         Buffer cloned = CloneBranchPrivateBuffer(buffer, "_producer_ws");
-        producer_buffer_remap.emplace(buffer.get(), cloned);
+        producer_buffer_remap.emplace(buffer, cloned);
         producer_private_buffers.push_back(cloned);
       };
       for (const auto &buffer : producer_access.read_buffers) {
@@ -1859,9 +1965,8 @@ private:
       // extracted_consumer_init_ is already empty (stmts were removed
       // from the prelude in the first pass result).
       // We need to replace in the ALREADY-modified body from pass 1.
-      // But ReplacePipelineLoopInStmt finds the pipeline_loop by
-      // pointer comparison, which won't match in the modified tree.
-      // Instead, just substitute the dummy_ws in the replaced result.
+      // The pipeline loop has already been replaced by dummy_ws in that
+      // tree, so do a direct substitution of the placeholder WS body.
       // Since dummy_ws appears exactly once in replaced.stmt, do a
       // simple statement replacement on the full placeholder stmt.
       class SubstWsBody : public StmtExprMutator {
@@ -1925,43 +2030,31 @@ private:
     return new_realize;
   }
 
-  // --- Find the first For loop with num_stages annotation ---
-  const ForNode *FindPipelineLoop(const Stmt &stmt) {
-    if (auto *for_node = stmt.as<ForNode>()) {
-      if (for_node->annotations.Get("num_stages")) {
-        return for_node;
+  class PipelineLoopFinder : public StmtExprVisitor {
+  public:
+    static Optional<For> Find(const Stmt &stmt) {
+      PipelineLoopFinder finder;
+      finder(stmt);
+      return finder.pipeline_loop_;
+    }
+
+  private:
+    void VisitStmt_(const ForNode *op) final {
+      if (pipeline_loop_.defined()) {
+        return;
       }
-      return FindPipelineLoop(for_node->body);
-    }
-    // Walk through SeqStmt, LetStmt, etc.
-    if (auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const Stmt &s : seq->seq) {
-        if (auto *result = FindPipelineLoop(s)) {
-          return result;
-        }
+      if (op->annotations.Get("num_stages")) {
+        pipeline_loop_ = ffi::GetRef<For>(op);
+        return;
       }
+      StmtExprVisitor::VisitStmt_(op);
     }
-    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
-      if (auto *result = FindPipelineLoop(if_stmt->then_case)) {
-        return result;
-      }
-      if (if_stmt->else_case.defined()) {
-        return FindPipelineLoop(if_stmt->else_case.value());
-      }
-    }
-    if (auto *let = stmt.as<LetStmtNode>()) {
-      return FindPipelineLoop(let->body);
-    }
-    if (auto *realize = stmt.as<BlockRealizeNode>()) {
-      return FindPipelineLoop(realize->block->body);
-    }
-    if (auto *block = stmt.as<BlockNode>()) {
-      return FindPipelineLoop(block->body);
-    }
-    if (auto *attr = stmt.as<AttrStmtNode>()) {
-      return FindPipelineLoop(attr->body);
-    }
-    return nullptr;
+
+    Optional<For> pipeline_loop_;
+  };
+
+  Optional<For> FindPipelineLoop(const Stmt &stmt) {
+    return PipelineLoopFinder::Find(stmt);
   }
 
   bool CollectEnclosingForLoops(const Stmt &stmt, const ForNode *target,
@@ -2043,7 +2136,7 @@ private:
         return false;
       }
       const auto *lhs = ge->a.as<VarNode>();
-      if (!lhs || lhs != thread_var_.get()) {
+      if (!lhs || !ffi::GetRef<Var>(lhs).same_as(thread_var_)) {
         return false;
       }
       if (!SameExpr(ge->b, consumer_extent_)) {
@@ -2080,7 +2173,7 @@ private:
         return false;
       }
       const auto *lhs = lt->a.as<VarNode>();
-      if (!lhs || lhs != thread_var_.get()) {
+      if (!lhs || !ffi::GetRef<Var>(lhs).same_as(thread_var_)) {
         return false;
       }
       if (!SameExpr(lt->b, consumer_extent_)) {
@@ -2398,10 +2491,10 @@ private:
   }
 
   ReplaceResult ReplacePipelineLoopInStmt(const Stmt &stmt,
-                                          const ForNode *pipeline_loop,
+                                          const For &pipeline_loop,
                                           const Stmt &ws_body,
                                           PrimExpr consumer_extent) {
-    if (stmt.get() == pipeline_loop) {
+    if (stmt.same_as(pipeline_loop)) {
       return {ws_body, true};
     }
     if (auto *seq = stmt.as<SeqStmtNode>()) {
@@ -2462,7 +2555,7 @@ private:
           extracted_consumer_init_.push_back(seq->seq[i]);
           break;
         case PreludeStmtPlacement::kKeepSharedPrelude:
-          if (auto it = common_prelude_rewrites_.find(seq->seq[i].get());
+          if (auto it = common_prelude_rewrites_.find(seq->seq[i]);
               it != common_prelude_rewrites_.end()) {
             new_seq.push_back(it->second);
           } else {
@@ -2563,6 +2656,27 @@ private:
       new_attr.CopyOnWrite()->body = result.stmt;
       return {new_attr, true};
     }
+    if (auto *if_stmt = stmt.as<IfThenElseNode>()) {
+      ReplaceResult then_result = ReplacePipelineLoopInStmt(
+          if_stmt->then_case, pipeline_loop, ws_body, consumer_extent);
+      Optional<Stmt> new_else = if_stmt->else_case;
+      bool found = then_result.found;
+      if (!found && if_stmt->else_case.defined()) {
+        ReplaceResult else_result =
+            ReplacePipelineLoopInStmt(if_stmt->else_case.value(), pipeline_loop,
+                                      ws_body, consumer_extent);
+        if (else_result.found) {
+          new_else = else_result.stmt;
+          found = true;
+        }
+      }
+      if (!found) {
+        return {stmt, false};
+      }
+      Stmt new_then = then_result.found ? then_result.stmt : if_stmt->then_case;
+      return {IfThenElse(if_stmt->condition, new_then, new_else, if_stmt->span),
+              true};
+    }
     return {stmt, false};
   }
 
@@ -2583,7 +2697,7 @@ private:
           thread_extent_(std::move(thread_extent)) {}
 
     PrimExpr VisitExpr_(const VarNode *var) final {
-      if (var == thread_var_.get()) {
+      if (ffi::GetRef<Var>(var).same_as(thread_var_)) {
         return replaced_;
       }
       return StmtExprMutator::VisitExpr_(var);
@@ -2600,7 +2714,7 @@ private:
   Optional<PrimExpr> num_threads_; // total (consumer + producer)
   bool ws_transformed_{false};
   BufferDataToBufferMap buffer_data_to_buffer_;
-  std::unordered_map<const StmtNode *, Stmt> common_prelude_rewrites_;
+  StmtRewriteMap common_prelude_rewrites_;
   LocalLiveSet shared_prelude_live_seed_;
   LocalLiveSet producer_prelude_live_seed_;
   LocalLiveSet consumer_prelude_live_seed_;
@@ -2706,11 +2820,11 @@ private:
           if (auto l = val.as<Layout>(); l.has_value())
             layout = l.value();
           if (auto buf = key.as<Buffer>(); buf.has_value()) {
-            layout_map_[buf.value()->data.get()] = {buf.value(), layout};
+            layout_map_[buf.value()->data] = {buf.value(), layout};
           } else if (auto var = key.as<Var>(); var.has_value()) {
             for (const auto &buf : op->alloc_buffers) {
               if (buf->data.same_as(var.value())) {
-                layout_map_[buf->data.get()] = {buf, layout};
+                layout_map_[buf->data] = {buf, layout};
                 break;
               }
             }
@@ -2724,7 +2838,7 @@ private:
   /// A copy destination is TMA-compatible if it has no layout annotation,
   /// or its annotated layout is a recognised swizzle / linear layout.
   bool HasTmaCompatibleLayout(const Buffer &dst) const {
-    auto it = layout_map_.find(dst->data.get());
+    auto it = layout_map_.find(dst->data);
     if (it == layout_map_.end()) {
       return true; // no annotation → identity layout → TMA OK
     }
@@ -2739,8 +2853,8 @@ private:
   bool in_pipeline_{false};
   bool has_pipeline_loop_{false};
   bool has_tma_tile_op_{false};
-  // Map from buffer data Var pointer → (Buffer, Layout) for layout_map entries.
-  std::unordered_map<const Object *, std::pair<Buffer, Layout>> layout_map_;
+  // Map from buffer data Var to (Buffer, Layout) for layout_map entries.
+  BufferLayoutMap layout_map_;
 };
 
 } // namespace

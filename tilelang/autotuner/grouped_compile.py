@@ -6,7 +6,8 @@ so tuner.py can stay focused on orchestration.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from tilelang import tvm
 from tvm.tir import PrimFunc

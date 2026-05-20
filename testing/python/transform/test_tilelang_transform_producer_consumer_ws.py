@@ -114,39 +114,30 @@ def prelude_tma_wait_sink(block=64, iters=2, dtype="float16", threads=128):
     return main
 
 
-def nested_prelude_tma_wait_sink(block=64, outer_iters=2, inner_iters=2, dtype="float16", threads=128):
-    """Nested tiled-WS kernel with pre-loop TMA loads before the inner pipeline."""
+def explicit_cp_async_wait_position(iters=4, block=16, cp_elems=8, dtype="float16", threads=128):
+    """A mixed TMA + explicit cp.async pipeline with cp.async consumed first."""
 
     @T.prim_func
     def main(
-        Q: T.Buffer((outer_iters * inner_iters * block, block), dtype),
-        K_in: T.Buffer((block, block), dtype),
-        V_in: T.Buffer((block, block), dtype),
-        O: T.Buffer((block, block), dtype),
+        A: T.Buffer((iters, block), dtype),
+        B: T.Buffer((iters, cp_elems), dtype),
+        B_out: T.Buffer((iters,), dtype),
+        A_out: T.Buffer((iters, block), dtype),
     ):
         with T.Kernel(1, threads=threads) as _:
-            K_shared = T.alloc_shared((block, block), dtype)
-            V_shared = T.alloc_shared((block, block), dtype)
-            q = T.alloc_shared((block, block), dtype)
-            acc0 = T.alloc_fragment((block, block), "float32")
-            acc1 = T.alloc_fragment((block, block), "float32")
-            out = T.alloc_fragment((block, block), "float32")
+            A_shared = T.alloc_shared((block,), dtype)
+            B_shared = T.alloc_shared((cp_elems,), dtype)
 
-            T.clear(out)
-            for outer in T.serial(outer_iters):
-                T.copy(K_in[0, 0], K_shared)
-                T.copy(V_in[0, 0], V_shared)
-                for inner in T.Pipelined(inner_iters, num_stages=2):
-                    q_idx = (outer * inner_iters + inner) * block
-                    T.copy(Q[q_idx, 0], q)
-                    T.clear(acc0)
-                    T.gemm(K_shared, q, acc0, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                    T.clear(acc1)
-                    T.gemm(V_shared, q, acc1, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                    for i, j in T.Parallel(block, block):
-                        out[i, j] = out[i, j] + acc0[i, j] + acc1[i, j]
-
-            T.copy(out, O[0, 0])
+            for ko in T.Pipelined(iters, num_stages=2):
+                T.ptx_cp_async(
+                    T.access_ptr(B_shared[0], "w", cp_elems),
+                    T.access_ptr(B[ko, 0], "r", cp_elems),
+                    cp_elems,
+                )
+                T.copy(A[ko, 0], A_shared)
+                B_out[ko] = B_shared[0]
+                for i in T.Parallel(block):
+                    A_out[ko, i] = A_shared[i]
 
     return main
 
@@ -468,6 +459,27 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
     assert k_load < v_load < branch < first_wait
 
 
+def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
+    """Explicit cp.async destinations must pull the consumer wait earlier."""
+
+    func = explicit_cp_async_wait_position().with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    mod = tvm.tir.transform.BindTarget(tvm.target.Target("cuda -arch=sm_90"))(mod)
+    mod = tilelang.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" in script
+    assert "T.ptx_cp_async" in script
+    assert "T.tma_copy" in script
+
+    consumer_branch = _find_after(script, "else:")
+    wait = _find_after(script, "T.mbarrier_wait_parity", consumer_branch)
+    cp_async_read = _find_after(script, "B_out[ko] = B_shared[0]", consumer_branch)
+    tma_read = _find_after(script, "A_out[ko, i] = A_shared", consumer_branch)
+
+    assert wait < cp_async_read < tma_read
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_collects_nested_preloop_tma_waits():
@@ -525,5 +537,6 @@ if __name__ == "__main__":
     test_tiled_ws_swizzled_layout_allows_ws()
     test_tiled_ws_incompatible_layout_blocks_ws()
     test_tiled_ws_sinks_preloop_tma_waits_into_consumer()
+    test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read()
     test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm()
     test_tiled_ws_does_not_clone_local_var_into_producer_branch()

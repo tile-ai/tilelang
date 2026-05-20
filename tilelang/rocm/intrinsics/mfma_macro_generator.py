@@ -8,7 +8,8 @@ from tvm.target import Target
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.runtime import convert
 from .utils import mfma_store_index_map
-from typing import Literal, Callable
+from typing import Literal
+from collections.abc import Callable
 import warnings
 
 from tilelang.utils.target import target_is_gfx950, determine_target

@@ -18,7 +18,7 @@ from tvm.ir import Range
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
-from typing import Callable
+from collections.abc import Callable
 
 
 GEMM_INST_WGMMA = "cuda.wgmma"

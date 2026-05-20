@@ -1,7 +1,7 @@
 """Analysis on TIR blocks, loops and functions."""
 
 from __future__ import annotations
-from typing_extensions import Literal
+from typing import Literal
 
 from tvm import ir, tir, DataType
 from tvm.ffi import get_global_func
