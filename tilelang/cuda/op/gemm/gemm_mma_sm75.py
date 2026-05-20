@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from tilelang.cuda.intrinsics.macro.mma_sm75_macro_generator import TensorCoreIntrinEmitterSM75
 
 from .gemm_mma import GemmMMA
