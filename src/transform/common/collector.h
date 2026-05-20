@@ -43,6 +43,10 @@ private:
       if (!thread_tag.empty() && is_y_or_z && !is_one(iter_var->dom->extent)) {
         is_valid_ = false;
       }
+      // Also capture threadIdx.x for GetThreadVar
+      if (thread_tag == "threadIdx.x") {
+        thread_var_ = iter_var;
+      }
     }
     StmtExprVisitor::VisitStmt_(op);
   }
