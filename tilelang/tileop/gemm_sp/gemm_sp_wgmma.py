@@ -1,0 +1,157 @@
+from __future__ import annotations
+
+from tilelang.tileop.gemm_sp.gemm_sp_base import GemmSPBase
+from tilelang.tileop.gemm.inst import GemmInst
+from tilelang.layout import (
+    make_full_bank_swizzled_layout,
+    make_half_bank_swizzled_layout,
+    make_quarter_bank_swizzled_layout,
+    make_linear_layout,
+    Layout,
+)
+from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
+from tilelang.utils.language import is_shared, is_fragment
+from tvm.target import Target
+from tvm.ir import Range
+from tvm import tir
+from tilelang import language as T
+from tilelang.transform.simplify import _Simplify
+from collections.abc import Callable
+
+
+class GemmSPWGMMA(GemmSPBase):
+    def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
+        vectorized_size = 128 // self.in_dtype.bits
+        if continuity % (vectorized_size * 8) == 0:
+            return make_full_bank_swizzled_layout
+        elif continuity % (vectorized_size * 4) == 0:
+            return make_half_bank_swizzled_layout
+        elif continuity % (vectorized_size * 2) == 0:
+            return make_quarter_bank_swizzled_layout
+        else:
+            return make_linear_layout
+
+    def infer_layout(self, target: Target, thread_nums: int):
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
+        warp_row_tiles = int(self.M // m_warp)
+        warp_col_tiles = int(self.N // n_warp)
+        mma_emitter = WGSparseTensorCoreIntrinEmitter(
+            a_dtype=self.in_dtype,
+            e_dtype=self.e_dtype,
+            b_dtype=self.in_dtype,
+            accum_dtype=self.accum_dtype,
+            a_transposed=self.trans_A,
+            b_transposed=self.trans_B,
+            e_transposed=self.trans_E,
+            block_row_warps=m_warp,
+            block_col_warps=n_warp,
+            warp_row_tiles=warp_row_tiles,
+            warp_col_tiles=warp_col_tiles,
+            warp_k=self.K,
+        )
+        a_is_k_major = not self.trans_A
+        b_is_k_major = self.trans_B
+        a_continuity = self.K // mma_emitter.SPARSE_FACTOR if a_is_k_major else mma_emitter.wgmma_inst_m
+        b_continuity = self.K if b_is_k_major else mma_emitter.wgmma_inst_n
+        if self.is_gemm_ss():
+            return {
+                # WGMMA does not support padding
+                self.A: self.infer_shared_layout(a_continuity)(self.A),
+                self.B: self.infer_shared_layout(b_continuity)(self.B),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
+            }
+        elif self.is_gemm_rs():
+            return {
+                self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
+                self.B: self.infer_shared_layout(b_continuity)(self.B),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
+            }
+        else:
+            raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_nums: Range,
+        thread_var: tir.Var,
+        mbar_phase_expr: tir.PrimExpr | None = None,
+    ):
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GemmInst.WGMMA)
+        warp_row_tiles = int(self.M // m_warp)
+        warp_col_tiles = int(self.N // n_warp)
+        mma_emitter = WGSparseTensorCoreIntrinEmitter(
+            a_dtype=self.in_dtype,
+            e_dtype=self.e_dtype,
+            b_dtype=self.in_dtype,
+            accum_dtype=self.accum_dtype,
+            a_transposed=self.trans_A,
+            b_transposed=self.trans_B,
+            e_transposed=self.trans_E,
+            block_row_warps=m_warp,
+            block_col_warps=n_warp,
+            warp_row_tiles=warp_row_tiles,
+            warp_col_tiles=warp_col_tiles,
+            warp_k=self.K,
+            thread_var=thread_var,
+        )
+
+        if self.A in layout_map:
+            mma_emitter._assign_a_shared_layout(layout_map[self.A])
+        if self.B in layout_map:
+            mma_emitter._assign_b_shared_layout(layout_map[self.B])
+
+        # Get base offsets from regions
+        # All dimensions may have offsets, including the matrix dimensions
+        # However, for WGMMA, we pass the Buffer directly and handle offsets
+        # through proper indexing in the access_ptr call or buffer slicing
+
+        # We use region for memory input to support strided gemm
+        # T.gemm(A_shared[0:128, :], B_shared, C_local)
+        A_region = self.ARegion
+        B_region = self.BRegion
+        C_region = self.CRegion
+        E_region = self.ERegion
+
+        clear_accum = self.clear_accum
+        wg_wait = self.wg_wait
+
+        if self.is_gemm_ss():
+            # For WGMMA, we need to handle buffer region offsets
+            # If there are offsets, we create a BufferLoad inside the prim_func
+            # to properly generate offset access
+
+            @T.prim_func
+            def _gemm_ssr() -> None:
+                """
+                The inner macro that loads data from shared buffers A_shared and
+                B_shared into local fragments, then issues Tensor Core mma ops,
+                accumulating into C_local.
+                """
+
+                # Perform Matrix Multiplication with offset consideration
+                mma_emitter.wgmma_ss(A_region, E_region, B_region, C_region, clear_accum, wg_wait)
+
+            # Simplify to optimize the index computing
+            # Must inline let statements to simplify the analysis
+            return _Simplify(_gemm_ssr, inline_let=True)
+        elif self.is_gemm_rs():
+
+            @T.prim_func
+            def _gemm_rsr() -> None:
+                mma_emitter.wgmma_rs(A_region, E_region, B_region, C_region, clear_accum, wg_wait)
+
+            return _Simplify(_gemm_rsr, inline_let=True)
+        raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+
+    def is_gemm_ss(self) -> bool:
+        return is_shared(self.A) and is_shared(self.B)
+
+    def is_gemm_sr(self) -> bool:
+        return is_shared(self.A) and is_fragment(self.B)
+
+    def is_gemm_rs(self) -> bool:
+        return is_fragment(self.A) and is_shared(self.B)
+
+    def is_gemm_rr(self) -> bool:
+        return is_fragment(self.A) and is_fragment(self.B)

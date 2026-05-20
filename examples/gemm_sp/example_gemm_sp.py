@@ -3,64 +3,15 @@ import argparse
 import tilelang
 import tilelang.language as T
 
-from tilelang.layout import make_cutlass_metadata_layout
-from tilelang.utils.sparse import compress, randn_semi_sparse
-from tilelang.contrib import nvcc
+from tilelang.utils.sparse import compress, randn_semi_sparse, get_e_factor
 from tilelang.profiler import do_bench
 
 import torch
 
-arch = nvcc.get_target_compute_version()
-
-DEFAULT_CONFIG = {  # take best config from autotune script
-    "4090": {
-        T.float: {
-            "block_M": 128,
-            "block_N": 64,
-            "block_K": 64,
-            "num_stages": 1,
-            "thread_num": 128,
-            "policy": T.GemmWarpPolicy.Square,
-            "enable_rasterization": True,
-        },
-        T.float16: {
-            "block_M": 256,
-            "block_N": 128,
-            "block_K": 64,
-            "num_stages": 2,
-            "thread_num": 128,
-            "policy": T.GemmWarpPolicy.Square,
-            "enable_rasterization": True,
-        },
-    },
-    "h20": {
-        T.float: {
-            "block_M": 128,
-            "block_N": 64,
-            "block_K": 128,
-            "num_stages": 3,
-            "thread_num": 128,
-            "policy": T.GemmWarpPolicy.Square,
-            "enable_rasterization": True,
-        },
-        T.float16: {
-            "block_M": 128,
-            "block_N": 64,
-            "block_K": 128,
-            "num_stages": 3,
-            "thread_num": 128,
-            "policy": T.GemmWarpPolicy.Square,
-            "enable_rasterization": True,
-        },
-    },
-}
-
-ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
-
 
 @tilelang.jit(out_idx=[-1])
-def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasterization):
-    e_factor, e_dtype = ARCH_INFO[arch]
+def matmul_sp_fp16(M, N, K, accum_dtype, e_dtype, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasterization):
+    e_factor = get_e_factor(T.float16, e_dtype)
 
     @T.prim_func
     def gemm_sp_fp16(
@@ -79,17 +30,11 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
             T.clear(C_local)
             T.disable_warp_group_reg_alloc()
             T.use_swizzle(panel_size=10, enable=enable_rasterization)
-            T.annotate_layout(
-                {
-                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, block_k=block_K, arch=arch),
-                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, block_k=block_K, arch=arch),
-                }
-            )
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
                 T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False, policy=policy)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local, transpose_A=False, transpose_E=False, transpose_B=False, policy=policy)
 
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
@@ -97,13 +42,26 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
     return gemm_sp_fp16
 
 
-def main(M=1024, N=1024, K=1024, accum_dtype=T.float, cfg="h20"):
-    kernel = matmul_sp_fp16(M, N, K, accum_dtype, **DEFAULT_CONFIG[cfg][accum_dtype])
+def main(
+    M=1024,
+    N=1024,
+    K=1024,
+    accum_dtype=T.float,
+    e_dtype=T.int16,
+    block_M=128,
+    block_N=128,
+    block_K=64,
+    num_stages=2,
+    thread_num=128,
+    policy=T.GemmWarpPolicy.Square,
+    enable_rasterization=True,
+):
+    kernel = matmul_sp_fp16(M, N, K, accum_dtype, e_dtype, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasterization)
 
     a = randn_semi_sparse(M, K, device="cuda", dtype=torch.half)
     b = torch.randn(K, N, device="cuda", dtype=torch.half)
 
-    a_sparse, e = compress(a, transposed=False, block_k=DEFAULT_CONFIG[cfg][accum_dtype]["block_K"], arch=arch)
+    a_sparse, e = compress(a, meta_dtype=e_dtype.as_torch())
     c = kernel(a_sparse, e, b)
 
     ref_c = a @ b
@@ -123,11 +81,32 @@ def main(M=1024, N=1024, K=1024, accum_dtype=T.float, cfg="h20"):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
+    parser = argparse.ArgumentParser(description="Sparse FP16 MatMul Example")
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument("--accum_dtype", type=str, default=T.float, choices=[T.float, T.float16], help="Accumulation datatype")
-    parser.add_argument("--cfg", type=str, choices=["4090", "h20"], default="4090")
+    parser.add_argument(
+        "--e_dtype",
+        default=T.int16,
+        choices=[T.int8, T.int16, T.int32],
+        help="Data type for metadata E, which controls the sparsity pattern. Note that int8 and int32 are only supported on sm90+",
+    )
+    parser.add_argument("--accum_dtype", default=T.float, choices=[T.float, T.float16], help="Accumulation datatype")
+    parser.add_argument("--block_M", type=int, default=128)
+    parser.add_argument("--block_N", type=int, default=256)
+    parser.add_argument("--block_K", type=int, default=128)
+    parser.add_argument("--num_stages", type=int, default=2)
+    parser.add_argument("--thread_num", type=int, default=256)
     args = parser.parse_args()
-    main(M=args.m, N=args.n, K=args.k, accum_dtype=args.accum_dtype, cfg=args.cfg)
+    main(
+        M=args.m,
+        N=args.n,
+        K=args.k,
+        accum_dtype=args.accum_dtype,
+        e_dtype=args.e_dtype,
+        block_M=args.block_M,
+        block_N=args.block_N,
+        block_K=args.block_K,
+        num_stages=args.num_stages,
+        thread_num=args.thread_num,
+    )

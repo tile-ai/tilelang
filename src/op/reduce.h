@@ -125,15 +125,19 @@ public:
   AccessRegions GetAccessRegions() const override;
   static const Op &Get();
   TileOperator Clone() const;
-
-private:
-  /// Generate initial value for reduction
-  PrimExpr MakeInitValue() const;
-  /// Generate reduction expression
-  PrimExpr MakeReduce(const PrimExpr &acc, const PrimExpr &b) const;
-  /// Generate codegen reducer string
-  std::string MakeCodegenReducer() const;
 };
+
+using ReduceTargetPredicate = bool (*)(Target target);
+
+struct ReduceImpl {
+  const char *name;
+  ReduceTargetPredicate match_target;
+
+  Stmt (*lower)(const ReduceOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterReduceImpl(ReduceImpl impl);
 
 /// Wrapper class for reduction operations
 class ReduceOp : public TileOperator {
@@ -174,6 +178,18 @@ public:
   static const Op &Get();
   TileOperator Clone() const;
 };
+
+using CumSumTargetPredicate = bool (*)(Target target);
+
+struct CumSumImpl {
+  const char *name;
+  CumSumTargetPredicate match_target;
+
+  Stmt (*lower)(const CumSumOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterCumSumImpl(CumSumImpl impl);
 
 /// Wrapper class for cumulative sum operations
 class CumSumOp : public TileOperator {

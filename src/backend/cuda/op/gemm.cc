@@ -297,7 +297,8 @@ struct Gemm {
     if (gemm_inst == kCudaWGMMA) {
       return ComputeWgmmaWarpPartition(policy, M, N, num_warps);
     }
-    int k_n_per_warp = TargetIsVolta(target) ? 16 : 8;
+    int k_n_per_warp =
+        (TargetIsVolta(target) || TargetIsTuring(target)) ? 16 : 8;
     return ComputeDefaultWarpPartition(policy, M, N, num_warps, k_n_per_warp);
   }
 

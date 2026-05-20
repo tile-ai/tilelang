@@ -198,6 +198,36 @@ private:
   Map<Buffer, Buffer> buffer_remap_;
 };
 
+/*! \brief Rewrite the synthetic CPU fallback thread variable to a constant.
+ *
+ * CPU `c` kernels use a degenerate fallback thread variable while fragment and
+ * tile-op lowering still share thread-oriented helper code. After this pass has
+ * consumed that helper variable, it should not remain in lowered CPU TIR.
+ */
+class CPUFallbackThreadVarCanonicalizer : public StmtExprMutator {
+public:
+  static Stmt Rewrite(Stmt stmt, Var fallback_thread_var) {
+    CPUFallbackThreadVarCanonicalizer canonicalizer(
+        std::move(fallback_thread_var));
+    return canonicalizer(std::move(stmt));
+  }
+
+private:
+  explicit CPUFallbackThreadVarCanonicalizer(Var fallback_thread_var)
+      : fallback_thread_var_(std::move(fallback_thread_var)) {}
+
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    if (fallback_thread_var_.defined() &&
+        (op == fallback_thread_var_.get() ||
+         op->name_hint == fallback_thread_var_->name_hint)) {
+      return make_zero(op->dtype);
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  Var fallback_thread_var_;
+};
+
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -290,6 +320,14 @@ public:
           << "Failed to find root BlockRealize for barrier injection";
     }
 
+    if (TargetIsCPU(substituter.target_)) {
+      // TODO(#2226): Remove the underlying CPU fallback-thread placeholder
+      // shared by LayoutInference/LowerTileOp. Until then, canonicalize the
+      // synthetic fallback after fragment/tile lowering has consumed it.
+      fptr->body = CPUFallbackThreadVarCanonicalizer::Rewrite(
+          std::move(fptr->body), substituter.thread_var_->var);
+    }
+
     return f;
   }
 
@@ -346,6 +384,33 @@ private:
       }
       workspace_stack_.pop_back();
     }
+
+    // Apply arrive-count overrides before LowerSharedBarrier consumes them.
+    if (!barrier_arrive_updates_.empty() &&
+        block->annotations.count("barrier_init")) {
+      auto barrier_init_map = Downcast<Map<Var, Array<PrimExpr>>>(
+          block->annotations.Get("barrier_init").value());
+      bool updated = false;
+      for (auto it = barrier_arrive_updates_.begin();
+           it != barrier_arrive_updates_.end();) {
+        if (barrier_init_map.count(it->first)) {
+          auto old_counts = barrier_init_map.at(it->first);
+          Array<PrimExpr> new_counts;
+          for (size_t i = 0; i < old_counts.size(); i++) {
+            new_counts.push_back(it->second);
+          }
+          barrier_init_map.Set(it->first, new_counts);
+          updated = true;
+          it = barrier_arrive_updates_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      if (updated) {
+        block_ptr->annotations.Set("barrier_init", barrier_init_map);
+      }
+    }
+
     return block;
   }
 
@@ -720,6 +785,7 @@ private:
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_load_multicast()) ||
         op->op.same_as(tl::tma_store())) {
       // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
@@ -727,6 +793,12 @@ private:
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
       in_tma_context_ = false;
       return call;
+    }
+    if (op->op.same_as(tl::tma_store_cluster())) {
+      // SM-to-SM bulk async copy does not use a tensor-map descriptor, so
+      // shared-memory swizzle must still be reflected in pointer/index
+      // remapping.
+      return Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
 
     if (is_ptx_) {
@@ -1068,15 +1140,20 @@ private:
       return id;
     };
 
-    auto lowered =
-        tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_->var,
-                                 callback, mbarrier_callback, layout_map_,
-                                 buffer_remap_, let_var_to_expr,
-                                 loop_mbar_phase_stack_.empty()
-                                     ? PrimExpr(IntImm(DataType::Int(32), 0))
-                                     : loop_mbar_phase_stack_.back(),
-                                 &mbarrier_buffer_, cluster_size_},
-                       analyzer_);
+    UpdateBarrierArriveCallback barrier_arrive_callback = [this](Var data_var,
+                                                                 PrimExpr n) {
+      barrier_arrive_updates_[data_var] = n;
+    };
+
+    auto lowered = tile_op->Lower(
+        LowerArgs{target_, thread_bounds, thread_var_->var, callback,
+                  mbarrier_callback, barrier_arrive_callback, layout_map_,
+                  buffer_remap_, let_var_to_expr,
+                  loop_mbar_phase_stack_.empty()
+                      ? PrimExpr(IntImm(DataType::Int(32), 0))
+                      : loop_mbar_phase_stack_.back(),
+                  &mbarrier_buffer_, cluster_size_},
+        analyzer_);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
@@ -1247,6 +1324,14 @@ private:
               has_non_local_store = true;
             }
           }
+        } else if (call->op.same_as(builtin::address_of())) {
+          // call_extern may pass address_of(non-local-buffer) pointers, and
+          // PostOrderVisit reaches the address_of call directly.
+          if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+            if (!IsLocalBuffer(load->buffer)) {
+              has_non_local_store = true;
+            }
+          }
         }
       }
     });
@@ -1380,6 +1465,9 @@ private:
   // without recomputing indices, since swizzle is encoded in TMA descriptor
   // parameters rather than in memory indices.
   bool in_tma_context_{false};
+  // Pending barrier arrive-count overrides from multi-TMA cluster copies.
+  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+      barrier_arrive_updates_;
 };
 
 namespace transform {

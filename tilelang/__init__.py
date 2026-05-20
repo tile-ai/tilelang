@@ -106,9 +106,33 @@ if not env.is_light_import():
 del _init_logger
 
 
+def _disable_rocm_tvm_ffi_torch_c_dlpack(torch_module):
+    if getattr(torch_module.version, "hip", None) is None:
+        return
+
+    os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
+    try:
+        from tvm_ffi import _optional_torch_c_dlpack
+    except Exception:
+        return
+
+    # TVM Relax calls this loader directly while importing, bypassing the
+    # tvm-ffi module-level env guard.
+    def _disabled_torch_c_dlpack_extension(*_args, **_kwargs):
+        return None
+
+    _optional_torch_c_dlpack.load_torch_c_dlpack_extension = _disabled_torch_c_dlpack_extension
+
+
 @contextlib.contextmanager
 def _lazy_load_lib():
-    import torch  # noqa: F401 # preload torch to avoid dlopen errors
+    import torch  # preload torch to avoid dlopen errors
+
+    _disable_rocm_tvm_ffi_torch_c_dlpack(torch)
+
+    if sys.platform.startswith("win32"):
+        yield
+        return
 
     old_flags = sys.getdlopenflags()
     old_init = ctypes.CDLL.__init__
@@ -128,20 +152,27 @@ def _lazy_load_lib():
 # Skip heavy imports in light import mode
 if not env.is_light_import():
     with _lazy_load_lib():
-        from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
+        from .env import (  # noqa: F401
+            enable_cache,
+            disable_cache,
+            is_cache_enabled,
+            get_windows_runtime_dll_dirs,
+            prepend_dll_search_path,
+        )
+        from . import libinfo
+
+        if sys.platform.startswith("win32"):
+            # Make sibling-package DLLs (tvm_ffi, z3) discoverable via PATH,
+            # then register tilelang + CUDA dirs with the secure DLL loader.
+            prepend_dll_search_path(get_windows_runtime_dll_dirs())
+            _dll_handles = [os.add_dll_directory(p) for p in libinfo.get_dll_directories()]
 
         import tvm
         import tvm.base  # noqa: F401
         from tvm import DataType  # noqa: F401
 
-        # Setup tvm search path before importing tvm
-        from . import libinfo
-
         def _load_tile_lang_lib():
             """Load Tile Lang lib"""
-            if sys.platform.startswith("win32") and sys.version_info >= (3, 8):
-                for path in libinfo.get_dll_directories():
-                    os.add_dll_directory(path)
             lib_path = libinfo.find_lib_path("tilelang")
             return ctypes.CDLL(lib_path), lib_path
 
@@ -175,5 +206,8 @@ if not env.is_light_import():
     from .math import *  # noqa: F403
     from . import ir  # noqa: F401
     from . import tileop  # noqa: F401
+    from . import cpu as cpu  # noqa: F401
+    from . import cuda as cuda  # noqa: F401
+    from . import rocm as rocm  # noqa: F401
 
 del _lazy_load_lib

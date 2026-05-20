@@ -7,6 +7,8 @@
 #ifndef TVM_TL_OP_OP_H_
 #define TVM_TL_OP_OP_H_
 
+// Dependencies for operators
+#include <array>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
@@ -26,6 +28,7 @@ using namespace tir;
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using AllocMBarrierCallback = std::function<int(int arrive_count)>;
+using UpdateBarrierArriveCallback = std::function<void(Var, PrimExpr)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
 
@@ -85,6 +88,7 @@ struct LowerArgs {
   Var thread_var;
   AddWorkspaceCallback AddWorkspace;
   AllocMBarrierCallback AllocMBarrier;
+  UpdateBarrierArriveCallback UpdateBarrierArrive;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
   // Map from LetStmt variable to its bound expression, for resolving

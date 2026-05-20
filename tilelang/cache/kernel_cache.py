@@ -12,7 +12,8 @@ import threading
 import uuid
 import sys
 from hashlib import sha256
-from typing import Callable, Literal
+from typing import Literal
+from collections.abc import Callable
 
 import cloudpickle
 from tvm.target import Target
@@ -52,6 +53,11 @@ class KernelCache:
     @staticmethod
     @functools.cache
     def _get_compile_args() -> dict:
+        if sys.platform == "win32":
+            from tilelang.contrib.msvc import create_shared as msvc_create_shared
+
+            return {"fcompile": msvc_create_shared}
+
         if sys.platform != "darwin":
             return {}
 
@@ -84,7 +90,7 @@ class KernelCache:
             pass
 
         if sys.platform == "win32":
-            lib_names = ["tilelang.dll", "libtilelang.dll"]
+            lib_names = ["tilelang.dll", "libtilelang.dll", "tvm.dll", "tvm_ffi.dll"]
         elif sys.platform == "darwin":
             lib_names = ["libtilelang.dylib", "libtilelang.so"]
         else:

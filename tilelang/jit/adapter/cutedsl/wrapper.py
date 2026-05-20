@@ -177,6 +177,43 @@ CPP_KERNEL_LAUNCH_TEMPLATE = """\
   }}
 """
 
+# Kernel launch template with CUDA Programmatic Dependent Launch enabled.
+CPP_PDL_KERNEL_LAUNCH_TEMPLATE = """\
+  // Launch kernel {kernel_idx}: {kernel_name} (PDL)
+  {{
+    // Get the kernel for current device
+    auto kernels_it = g_device_kernels.find(device_id);
+    if (kernels_it == g_device_kernels.end()) {{
+      std::cerr << "Kernels not initialized for device " << device_id << "\\n";
+      return CUDA_ERROR_NOT_INITIALIZED;
+    }}
+    const std::vector<CUfunction>& kernels = kernels_it->second;
+
+    void* args[] = {{{kernel_args}}};
+    CUlaunchAttribute attrs[1];
+    attrs[0].id = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+    attrs[0].value.programmaticStreamSerializationAllowed = 1;
+
+    CUlaunchConfig config = {{}};
+    config.gridDimX = {grid_x};
+    config.gridDimY = {grid_y};
+    config.gridDimZ = {grid_z};
+    config.blockDimX = {block_x};
+    config.blockDimY = {block_y};
+    config.blockDimZ = {block_z};
+    config.sharedMemBytes = {smem_size};
+    config.hStream = stream;
+    config.attrs = attrs;
+    config.numAttrs = 1;
+
+    result = cuLaunchKernelEx(&config, kernels[{kernel_idx}], args, nullptr);
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to launch PDL kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+  }}
+"""
+
 # Cooperative kernel launch template (for sync_grid / cooperative groups)
 # Uses cuLaunchCooperativeKernel which guarantees all thread blocks are resident
 CPP_COOPERATIVE_KERNEL_LAUNCH_TEMPLATE = """\
@@ -522,6 +559,7 @@ CUBIN_KERNEL_LAUNCH_TEMPLATE = """\
       block=[{block_x}, {block_y}, {block_z}],
       smem={smem_size},
       stream=stream,
+      use_pdl={use_pdl},
     )"""
 
 # Fake tensor creation template
@@ -549,7 +587,7 @@ CUBIN_GEN_CODE_TEMPLATE = """\
     _kernel_wrapper = cute.compile(
         kernel_wrapper,
         {compile_args},
-        options=f"--enable-tvm-ffi --keep-cubin --dump-dir={{_staging_dir.as_posix()}}",
+        options=f"--enable-tvm-ffi --keep-cubin --gpu-arch={target_arch} --dump-dir={{_staging_dir.as_posix()}}",
     )
 
     # CuTeDSL generates a long, mangled cubin filename that includes argument/type info,
@@ -612,6 +650,7 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.float8_e4m3fnuz": cutlass.Float8E4M3FN,
       "torch.float8_e4m3fn": cutlass.Float8E4M3FN,
       "torch.float8_e5m2": cutlass.Float8E5M2,
+      "torch.float4_e2m1fn_x2": cutlass.Float4E2M1FN,
       "torch.float64": cutlass.Float64,
       "torch.int64": cutlass.Int64,
       "torch.int32": cutlass.Int32,
@@ -779,6 +818,11 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
         """Convert TVM expression to Python string."""
         return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="//")
+
+    def _target_arch(self) -> str:
+        """Return the CUDA SM architecture requested by the TileLang target."""
+        arch = self.target.attrs.get("arch") if self.target is not None else None
+        return str(arch) if arch is not None else "sm_80"
 
     def _cxx_expr(self, expr: tvm.tir.PrimExpr) -> str:
         """Convert TVM expression to C++ string for generated launcher code."""
@@ -1070,10 +1114,16 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         block = function_info["block_info"]
         smem_size = function_info["dynamic_smem_buf"] or 0
 
-        # Choose launch template based on cooperative groups requirement
+        # Choose launch template based on cooperative groups / PDL requirements
         function_name = kernel_meta["function_name"]
         use_cooperative = self.use_cooperative_groups.get(function_name, False)
-        template = CPP_COOPERATIVE_KERNEL_LAUNCH_TEMPLATE if use_cooperative else CPP_KERNEL_LAUNCH_TEMPLATE
+        use_pdl = function_name in self.pdl_sync_map
+        if use_cooperative:
+            template = CPP_COOPERATIVE_KERNEL_LAUNCH_TEMPLATE
+        elif use_pdl:
+            template = CPP_PDL_KERNEL_LAUNCH_TEMPLATE
+        else:
+            template = CPP_KERNEL_LAUNCH_TEMPLATE
 
         return template.format(
             kernel_idx=kernel_idx,
@@ -1208,6 +1258,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 block_y=self._pythonic_expr(km["function_info"]["block_info"][1]),
                 block_z=self._pythonic_expr(km["function_info"]["block_info"][2]),
                 smem_size=km["function_info"]["dynamic_smem_buf"] or 0,
+                use_pdl=str(km["function_name"] in self.pdl_sync_map),
             )
             for km in kernel_metadata_list
         )
@@ -1245,6 +1296,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             fake_tensor_code=fake_tensor_code,
             fake_tma_tensor_code=fake_tma_tensor_code,
             compile_args=", ".join(fake_inner_args),
+            target_arch=self._target_arch(),
             primary_name=kernel_metadata_list[0]["function_name"],
         )
 

@@ -79,6 +79,7 @@ private:
   // Handle volatile loads
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
+  bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
@@ -124,6 +125,10 @@ private:
   bool need_tcgen05mma_instruction_h_{false};
   // whether need tl mma_sm70 instruction header
   bool need_mma_sm70_instruction_h_{false};
+  // whether need tl mma_sp instruction header
+  bool need_mma_sp_instruction_h_{false};
+  // whether need tl wgmma_sp instruction header
+  bool need_wgmma_sp_instruction_h_{false};
   // whether need tcgen_05 common header
   bool need_tcgen05_common_h_{false};
   // whether need cast_smem_ptr_to_int helper function

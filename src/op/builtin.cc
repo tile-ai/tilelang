@@ -10,7 +10,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "backend/cuda/codegen/stubs/cuda.h"
+#include "backend/cuda/stubs/cuda.h"
 #include "target/utils.h"
 
 namespace tvm {
@@ -145,6 +145,12 @@ TIR_DEFINE_TL_BUILTIN(min2).set_num_inputs(2).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(abs2).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(max2_nan).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(min2_nan).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(rng_init).set_num_inputs(4).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
@@ -170,6 +176,11 @@ TIR_DEFINE_TL_BUILTIN(tma_load).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(tma_load_im2col)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tma_load_multicast)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -214,6 +225,16 @@ TIR_DEFINE_TL_BUILTIN(ptx_wgmma_ss)
 
 TIR_DEFINE_TL_BUILTIN(ptx_wgmma_rs)
     .set_num_inputs(15)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_wgmma_sp_ss)
+    .set_num_inputs(18)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_wgmma_sp_rs)
+    .set_num_inputs(17)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -720,6 +741,16 @@ TIR_DEFINE_TL_BUILTIN(stg128).set_num_inputs(-1).set_attr<TCallEffectKind>(
 // Global memory store with 256-bit vector width
 TIR_DEFINE_TL_BUILTIN(stg256).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(ptx_cluster_store)
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tma_store_cluster)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
 } // namespace tl
 } // namespace tvm

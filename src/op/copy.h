@@ -29,9 +29,11 @@ class CopyNode : public TileOperatorNode {
 public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
+  Optional<PrimExpr> dst_block;      // Destination block index for cluster copy
   Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
   // Common SIMT annotation keys:
   //   - "coalesced_width": IntImm, width for coalesced memory access.
+  //   - "dst_block": PrimExpr, destination CTA rank for cluster copy.
   //   - attr::kParallelLoopLayout ("parallel_loop_layout"): Fragment, loop
   //     layout hint applied to the outermost generated parallel loop of this
   //     copy's SIMT loop nest.
@@ -47,6 +49,7 @@ public:
         .def_ro("dst", &CopyNode::dst)
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
+        .def_ro("dst_block", &CopyNode::dst_block)
         .def_ro("annotations", &CopyNode::annotations);
   }
 

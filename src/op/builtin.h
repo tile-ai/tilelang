@@ -260,6 +260,8 @@ TVM_DLL const Op &fma2();
 TVM_DLL const Op &max2();
 TVM_DLL const Op &min2();
 TVM_DLL const Op &abs2();
+TVM_DLL const Op &max2_nan();
+TVM_DLL const Op &min2_nan();
 
 // random op
 TVM_DLL const Op &rng_init();
@@ -305,6 +307,14 @@ TVM_DLL const Op &tma_load();
  *
  */
 TVM_DLL const Op &tma_load_im2col();
+
+/*!
+ * \brief TMA multicast load from a tensor descriptor to cluster shared memory.
+ *
+ * tma_load_multicast(descriptor, mbarrier, smem_data, multicast_mask,
+ *                    coord_0, coord_1, ..., eviction_policy)
+ */
+TVM_DLL const Op &tma_load_multicast();
 
 /*!
  * \brief tvm intrinsics for storing data from shared memory to global tensor
@@ -393,6 +403,16 @@ TVM_DLL const Op &ptx_wgmma_ss();
  * bool scale_in_a, bool scale_in_b);
  */
 TVM_DLL const Op &ptx_wgmma_rs();
+
+/*!
+ * \brief tvm intrinsic for sparse ptx wgmma shared-shared instructions.
+ */
+TVM_DLL const Op &ptx_wgmma_sp_ss();
+
+/*!
+ * \brief tvm intrinsic for sparse ptx wgmma register-shared instructions.
+ */
+TVM_DLL const Op &ptx_wgmma_sp_rs();
 
 /*!
  * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
@@ -1264,6 +1284,18 @@ TVM_DLL const Op &stg128();
  *    T.stg256(y, i, value)
  */
 TVM_DLL const Op &stg256();
+
+/*!
+ * \brief Elementwise shared::cluster store via cooperative groups.
+ */
+TVM_DLL const Op &ptx_cluster_store();
+
+/*!
+ * \brief Bulk async shared::cluster store to another CTA.
+ *
+ * tma_store_cluster(dst_ptr, src_ptr, dst_cta, size_bytes, bar_ref)
+ */
+TVM_DLL const Op &tma_store_cluster();
 
 } // namespace tl
 } // namespace tvm

@@ -292,7 +292,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
       // For CuTeDSL, use Python's float.fromhex() with hexfloat for full
       // precision
       PrintType(op->dtype, temp);
-      temp << "(float.fromhex('" << std::hexfloat << op->value << "'))";
+      temp << "(float.fromhex('" << FlexibleHexFormat(op->value) << "'))";
     }
     MarkConst(temp.str());
     os << temp.str();
@@ -736,6 +736,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::sync_grid())) {
     PrintIndent();
     stream << "tl.sync_grid()\n";
+  } else if (op->op.same_as(tl::pdl_trigger())) {
+    PrintIndent();
+    stream << "tl.griddepcontrol_launch_dependents()\n";
+  } else if (op->op.same_as(tl::pdl_sync())) {
+    PrintIndent();
+    stream << "tl.griddepcontrol_wait()\n";
   } else if (op->op.same_as(tl::loop_break()) ||
              op->op.same_as(builtin::break_loop())) {
     if (in_break_loop_) {
@@ -2383,25 +2389,19 @@ void CodeGenTileLangCuTeDSL::PrintStorageSync_(const CallNode *op) {
     if (args.size() == 1) {
       stream << "tl.sync_threads()\n";
     } else if (args.size() == 2) {
-      auto barrier_id_ptr = args[1].as<IntImmNode>();
-      ICHECK(barrier_id_ptr)
-          << "storage_sync barrier_id (args[1]) must be IntImm, got "
-          << args[1]->GetTypeKey();
-      auto barrier_id = barrier_id_ptr->value;
-      stream << "tl.sync_thread_partial(" << barrier_id << ")\n";
+      ICHECK(args[1].dtype().is_int())
+          << "storage_sync barrier_id must be integer type, got "
+          << args[1].dtype();
+      stream << "tl.sync_thread_partial(" << PrintExpr_(args[1]) << ")\n";
     } else if (args.size() == 3) {
-      auto barrier_id_ptr = args[1].as<IntImmNode>();
-      ICHECK(barrier_id_ptr)
-          << "storage_sync barrier_id (args[1]) must be IntImm, got "
-          << args[1]->GetTypeKey();
-      auto thread_count_ptr = args[2].as<IntImmNode>();
-      ICHECK(thread_count_ptr)
-          << "storage_sync thread_count (args[2]) must be IntImm, got "
-          << args[2]->GetTypeKey();
-      auto barrier_id = barrier_id_ptr->value;
-      auto thread_count = thread_count_ptr->value;
-      stream << "tl.sync_thread_partial(" << barrier_id << ", " << thread_count
-             << ")\n";
+      ICHECK(args[1].dtype().is_int())
+          << "storage_sync barrier_id must be integer type, got "
+          << args[1].dtype();
+      ICHECK(args[2].dtype().is_int())
+          << "storage_sync thread_count must be integer type, got "
+          << args[2].dtype();
+      stream << "tl.sync_thread_partial(" << PrintExpr_(args[1]) << ", "
+             << PrintExpr_(args[2]) << ")\n";
     } else {
       LOG(FATAL) << "Invalid number of arguments for storage sync: "
                  << args.size();
