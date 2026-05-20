@@ -4886,7 +4886,20 @@ private:
     for (const VarNode *var : sorted_vars) {
       auto seg_it = segments_by_var.find(var);
       if (seg_it == segments_by_var.end() || seg_it->second.empty()) {
-        continue;
+        // Liveness analysis did not record any segment for this buffer.
+        // Fallback to structural_segments_by_var which uses VarNode* as key
+        // and therefore does not suffer from name-collision issues that can
+        // occur when planner_segments are matched by string name_hint.
+        auto struct_it = structural_segments_by_var.find(var);
+        if (struct_it != structural_segments_by_var.end() &&
+            !struct_it->second.empty()) {
+          segments_by_var[var] = struct_it->second;
+        } else {
+          // No recorded accesses at all: place at the very end so it can
+          // reuse space freed by every other buffer.
+          segments_by_var[var] = {{seq_len, seq_len + 1}};
+        }
+        seg_it = segments_by_var.find(var);
       }
 
       BufInfo info;
