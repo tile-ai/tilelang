@@ -3,16 +3,19 @@
 
 cmake_minimum_required(VERSION 3.26)
 
-project(TILE_LANG C CXX)
-
 # Detect CUDA toolkit: tries host installation first, then falls back to
 # pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect).
-# Must be included before any enable_language(CUDA) so CMAKE_CUDA_COMPILER is set.
+# Must be included before project() so CMAKE_CUDA_COMPILER is set.
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
 
 # Capture this CMakeLists.txt's directory once so `function()` bodies below
-# can reference files shipped with the project.
+# can reference files shipped with the project. CMake 4.x resolves
+# CMAKE_CURRENT_LIST_DIR inside a function() to the caller's listfile, which
+# breaks resource paths when helpers are invoked from included Find modules
+# (e.g. cmake/pypi-z3/FindZ3.cmake).
 set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
+project(TILE_LANG C CXX)
 
 # MSVC-specific build configuration. Must run after project() so MSVC is
 # defined, but before add_subdirectory(${TVM_SOURCE}) below so subprojects
