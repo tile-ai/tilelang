@@ -59,6 +59,15 @@ bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
 }
 
+int64_t GetClusterMask(const CopyNode &op) {
+  if (auto val = op.annotations.Get("cluster_mask")) {
+    if (auto int_val = val->as<IntImmNode>()) {
+      return int_val->value;
+    }
+  }
+  return 0;
+}
+
 bool GetIsAsyncCopy(const CopyNode &op) {
   if (GetBoolAnnotation(op, "is_async_copy")) {
     return true;
@@ -323,6 +332,10 @@ const char *CopyInstToString(CopyInst inst) {
     return "TMemLoad";
   case CopyInst::kTMemStore:
     return "TMemStore";
+  case CopyInst::kBulkLoadGather4:
+    return "BulkLoadGather4";
+  case CopyInst::kBulkStoreScatter4:
+    return "BulkStoreScatter4";
   case CopyInst::kInvalid:
     return "Invalid";
   default:
@@ -348,6 +361,7 @@ struct CopyFacts {
   bool explicit_cp_async = false;
   bool no_implicit_async_commit_wait = false;
   bool disable_tma = false;
+  int64_t cluster_mask = 0;
   bool can_bulk_load_1d = false;
   bool can_bulk_store_1d = false;
   bool can_bulk_load = false;
@@ -460,6 +474,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.explicit_cp_async = GetIsAsyncCopy(op);
   facts.no_implicit_async_commit_wait = GetNoImplicitAsyncCommitWait(op);
   facts.disable_tma = GetDisableTMA(op);
+  facts.cluster_mask = GetClusterMask(op);
   facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
   facts.async_unavailable_reason = MakeAsyncUnavailableReason(op, ctx.target);
   facts.pass_context_disables_tma =
@@ -492,6 +507,9 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 
   if (facts.can_bulk_load_1d) {
     facts.can_bulk_load_ignore_last_dim = true;
+    facts.can_bulk_load =
+        CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
+                      ctx.emit_diagnostics);
   } else {
     facts.can_bulk_load_ignore_last_dim =
         CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/false,
@@ -503,6 +521,9 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 
   if (facts.can_bulk_store_1d) {
     facts.can_bulk_store_ignore_last_dim = true;
+    facts.can_bulk_store =
+        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/true,
+                       ctx.emit_diagnostics);
   } else {
     facts.can_bulk_store_ignore_last_dim =
         CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/false,
@@ -524,7 +545,30 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx) {
+  // tile::gather4 / scatter4 markers take precedence over generic TMA paths.
+  // The IR carries explicit row indices via annotations and must always be
+  // lowered through LowerBulkCopyGather4 (no fallback path makes sense).
+  if (GetBoolAnnotation(op, "is_gather4")) {
+    return Supported(CopyInst::kBulkLoadGather4);
+  }
+  if (GetBoolAnnotation(op, "is_scatter4")) {
+    return Supported(CopyInst::kBulkStoreScatter4);
+  }
+
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
+  if (facts.cluster_mask != 0) {
+    if (facts.can_bulk_load) {
+      return Supported(CopyInst::kBulkLoad);
+    }
+    std::ostringstream oss;
+    oss << "cluster_mask=0x" << std::hex << facts.cluster_mask
+        << " requires descriptor-based TMA (kBulkLoad), but the copy does not "
+           "meet TMA bulk-load constraints. src="
+        << op.src->name << " (scope=" << op.src.scope()
+        << "), dst=" << op.dst->name << " (scope=" << op.dst.scope() << ").";
+    return Unsupported(oss.str());
+  }
+
   if (facts.explicit_tma) {
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
@@ -561,6 +605,10 @@ std::string ClassifyCopyForInstructionAnnotation(const CopyNode &op,
     return "sync";
   }
 
+  if (facts.cluster_mask != 0) {
+    return facts.can_bulk_load ? "tma" : "sync";
+  }
+
   if (facts.explicit_tma) {
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
@@ -587,6 +635,11 @@ CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return Supported(CopyInst::kNormal);
+  }
+
+  if (facts.cluster_mask != 0) {
+    return facts.can_bulk_load ? Supported(CopyInst::kBulkLoad)
+                               : Unsupported(facts.tma_unavailable_reason);
   }
 
   if (facts.explicit_tma) {

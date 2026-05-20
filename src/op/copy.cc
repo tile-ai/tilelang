@@ -172,6 +172,15 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->SetAccessRegions({src_access, dst_access});
   // Copy annotations from the Call node
   node->annotations = annotations;
+  if (auto dst_block = node->annotations.Get("dst_block")) {
+    if (auto int_imm = dst_block->as<IntImmNode>()) {
+      if (int_imm->value != -1) {
+        node->dst_block = Integer(int_imm->value);
+      }
+    } else {
+      node->dst_block = Downcast<PrimExpr>(dst_block.value());
+    }
+  }
   data_ = std::move(node);
 }
 

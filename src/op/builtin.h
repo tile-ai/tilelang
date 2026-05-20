@@ -312,6 +312,14 @@ TVM_DLL const Op &tma_load();
 TVM_DLL const Op &tma_load_im2col();
 
 /*!
+ * \brief TMA multicast load from a tensor descriptor to cluster shared memory.
+ *
+ * tma_load_multicast(descriptor, mbarrier, smem_data, multicast_mask,
+ *                    coord_0, coord_1, ..., eviction_policy)
+ */
+TVM_DLL const Op &tma_load_multicast();
+
+/*!
  * \brief tvm intrinsics for storing data from shared memory to global tensor
  * descriptor
  *
@@ -319,6 +327,31 @@ TVM_DLL const Op &tma_load_im2col();
  *
  */
 TVM_DLL const Op &tma_store();
+
+/*!
+ * \brief tvm intrinsics for tile::gather4 TMA load (sm_90+).
+ *
+ * Loads four rows from a 2D global tensor (described by a tiled CUtensorMap)
+ * into a shared memory tile. The four rows can be at arbitrary indices.
+ *
+ *   tma_load_gather4(descriptor, mbarrier, smem_data, col,
+ *                    row0, row1, row2, row3, eviction_policy)
+ *
+ * The descriptor must be encoded with rank=2 and box dim along axis 1 = 1
+ * (the four-row pack is implicit in the gather4 PTX mode).
+ */
+TVM_DLL const Op &tma_load_gather4();
+
+/*!
+ * \brief tvm intrinsics for tile::scatter4 TMA store (sm_90+).
+ *
+ * Stores four shared-memory rows back to four arbitrary rows of a 2D global
+ * tensor (described by a tiled CUtensorMap).
+ *
+ *   tma_store_scatter4(descriptor, smem_data, col,
+ *                      row0, row1, row2, row3, eviction_policy)
+ */
+TVM_DLL const Op &tma_store_scatter4();
 
 /*!
  * \brief tvm intrinsics for barrier initialization fence
@@ -1254,6 +1287,18 @@ TVM_DLL const Op &stg128();
  *    T.stg256(y, i, value)
  */
 TVM_DLL const Op &stg256();
+
+/*!
+ * \brief Elementwise shared::cluster store via cooperative groups.
+ */
+TVM_DLL const Op &ptx_cluster_store();
+
+/*!
+ * \brief Bulk async shared::cluster store to another CTA.
+ *
+ * tma_store_cluster(dst_ptr, src_ptr, dst_cta, size_bytes, bar_ref)
+ */
+TVM_DLL const Op &tma_store_cluster();
 
 } // namespace tl
 } // namespace tvm

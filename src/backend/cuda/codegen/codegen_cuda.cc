@@ -2222,6 +2222,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     ss << ");\n";
     this->PrintIndent();
     this->stream << ss.str();
+  } else if (op->op.same_as(tl::tma_load_multicast())) {
+    std::ostringstream ss;
+    ICHECK_GE(op->args.size(), 5)
+        << "tma_load_multicast requires at least 5 args";
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_load_multicast<tl::CacheHintSm90::" << eviction_policy
+         << ">(";
+    } else {
+      ss << "tl::tma_load_multicast(";
+    }
+    ss << this->PrintExpr(op->args[0]) << ", ";
+    ss << this->PrintExpr(op->args[1]) << ", ";
+    ss << this->PrintExpr(op->args[2]) << ", ";
+    ss << "(uint16_t)(" << this->PrintExpr(op->args[3]) << ")";
+    for (size_t i = 4; i < op->args.size() - 1; i++) {
+      ss << ", " << this->PrintExpr(op->args[i]);
+    }
+    ss << ");\n";
+    this->PrintIndent();
+    this->stream << ss.str();
   } else if (op->op.same_as(tl::tma_load_im2col())) {
     std::stringstream ss;
     auto eviction_policy =
@@ -2249,6 +2272,38 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       ss << "tl::tma_store";
     }
     print_extern_call_stmt(ss.str(), 0, 2);
+  } else if (op->op.same_as(tl::tma_load_gather4())) {
+    std::ostringstream ss;
+    ICHECK_EQ(op->args.size(), 9u)
+        << "tma_load_gather4 expects 9 args (desc, mbar, smem, col, "
+           "r0..r3, eviction_policy), got "
+        << op->args.size();
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_load_gather4<tl::CacheHintSm90::" << eviction_policy
+         << ">";
+    } else {
+      ss << "tl::tma_load_gather4";
+    }
+    print_extern_call_stmt(ss.str(), 0, 1);
+  } else if (op->op.same_as(tl::tma_store_scatter4())) {
+    std::ostringstream ss;
+    ICHECK_EQ(op->args.size(), 8u)
+        << "tma_store_scatter4 expects 8 args (desc, smem, col, r0..r3, "
+           "eviction_policy), got "
+        << op->args.size();
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_store_scatter4<tl::CacheHintSm90::" << eviction_policy
+         << ">";
+    } else {
+      ss << "tl::tma_store_scatter4";
+    }
+    print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
@@ -2519,6 +2574,40 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
+  } else if (op->op.same_as(tl::tma_store_cluster())) {
+    ICHECK_EQ(op->args.size(), 5U) << "tma_store_cluster requires 5 args";
+    this->PrintIndent();
+    this->stream << "tl::tma_store_cluster(";
+    this->stream << this->PrintExpr(op->args[0]) << ", ";
+    this->stream << this->PrintExpr(op->args[1]) << ", ";
+    this->stream << "(int)(" << this->PrintExpr(op->args[2]) << "), ";
+    this->stream << "(uint32_t)(" << this->PrintExpr(op->args[3]) << "), ";
+    this->stream << this->PrintExpr(op->args[4]) << ");\n";
+
+  } else if (op->op.same_as(tl::ptx_cluster_store())) {
+    ICHECK_EQ(op->args.size(), 4U);
+    std::string buffer_var = this->PrintExpr(op->args[0]);
+    std::string value = this->PrintExpr(op->args[1]);
+    std::string dst_block = this->PrintExpr(op->args[2]);
+    std::string index = this->PrintExpr(op->args[3]);
+
+    this->need_cooperative_groups_ = true;
+    this->PrintIndent();
+    this->stream << "{\n";
+    int cluster_scope = this->BeginScope();
+    this->PrintIndent();
+    this->stream << "namespace cg = cooperative_groups;\n";
+    this->PrintIndent();
+    this->stream << "cg::cluster_group cluster = cg::this_cluster();\n";
+    this->PrintIndent();
+    this->stream << "auto* dst_ptr = cluster.map_shared_rank(&" << buffer_var
+                 << "[" << index << "], " << dst_block << ");\n";
+    this->PrintIndent();
+    this->stream << "*dst_ptr = " << value << ";\n";
+    this->EndScope(cluster_scope);
+    this->PrintIndent();
+    this->stream << "}\n";
+
   } else if (op->op.same_as(tl::ptx_mma_sm70())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
