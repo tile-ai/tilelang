@@ -1,11 +1,11 @@
 from tvm.ir import Op
-from tvm.tir import (
+from tvm.tirx import (
     PyStmtExprMutator,
     functor,
     Evaluate,
     AttrStmt,
 )
-from tvm.tir.transform import prim_func_pass
+from tvm.tirx.transform import prim_func_pass
 
 """
 Transformation pass to mark host-side kernel calls for Metal/MPS synchronization.
@@ -22,7 +22,7 @@ signals the downstream host C codegen to inject specific runtime logic that:
 """
 
 
-tvm_call_packed_lowered = Op.get("tir.tvm_call_packed_lowered")
+tvm_call_packed_lowered = Op.get("tirx.tvm_call_packed_lowered")
 
 
 @functor.mutator

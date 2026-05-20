@@ -3,12 +3,15 @@
  * \brief Lower the tile op for further codegen.
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 #include <unordered_map>
 #include <vector>
 
@@ -31,7 +34,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
@@ -100,8 +104,8 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
-  Stmt VisitStmt_(const BlockNode *op) final {
-    auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    auto block = Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     if (op->annotations.count(attr::kLayoutMap)) {
       block.CopyOnWrite()->annotations.Set(attr::kLayoutMap, layout_remap_);
     }
@@ -129,26 +133,21 @@ public:
   static Stmt Substitute(const Stmt &stmt, Map<Buffer, Buffer> buffer_remap) {
     arith::Analyzer analyzer;
     RemapBufferRewriter substituter(&analyzer);
-    substituter.buffer_remap_ = std::move(buffer_remap);
+    substituter.remap_ = std::move(buffer_remap);
     return substituter.VisitStmt(stmt);
   }
 
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     if (op->annotations.count(attr::kSafeValueMap)) {
       return RewritePaddingMap(op);
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  /*!
-   * \brief Rewrite the padding map annotation of a block.
-   * \param op The block node to rewrite.
-   * \return The rewritten block.
-   */
-  Stmt RewritePaddingMap(const BlockNode *op) {
+  Stmt RewritePaddingMap(const SBlockNode *op) {
     auto safe_value_map = op->annotations.Get(attr::kSafeValueMap);
     if (!safe_value_map) {
       LOG(FATAL) << "Padding map annotation is missing";
@@ -158,30 +157,20 @@ private:
     Map<Var, PrimExpr> new_safe_value_map = RemapPaddingMap(
         Downcast<Map<Var, PrimExpr>>(safe_value_map.value()), var_remap);
 
-    auto block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
     block_ptr->annotations.Set(attr::kSafeValueMap, new_safe_value_map);
     return block;
   }
 
-  /*!
-   * \brief Create a mapping from old variables to new variables based on buffer
-   * remapping. \return A map from old variables to new variables.
-   */
   Map<Var, Var> CreateVarRemap() const {
     Map<Var, Var> var_remap;
-    for (const auto &[buffer, buffer_remap] : buffer_remap_) {
-      var_remap.Set(buffer->data, buffer_remap->data);
+    for (const auto &[buffer, remapped] : remap_) {
+      var_remap.Set(buffer->data, remapped->data);
     }
     return var_remap;
   }
 
-  /*!
-   * \brief Remap the padding map using the variable remapping.
-   * \param safe_value_map The original padding map.
-   * \param var_remap The variable remapping.
-   * \return The remapped padding map.
-   */
   Map<Var, PrimExpr> RemapPaddingMap(const Map<Var, PrimExpr> &safe_value_map,
                                      const Map<Var, Var> &var_remap) const {
     Map<Var, PrimExpr> new_safe_value_map;
@@ -195,7 +184,7 @@ private:
     return new_safe_value_map;
   }
 
-  Map<Buffer, Buffer> buffer_remap_;
+  Map<Buffer, Buffer> remap_;
 };
 
 /*! \brief Rewrite the synthetic CPU fallback thread variable to a constant.
@@ -280,7 +269,7 @@ public:
       for (auto c : substituter.mbarrier_arrive_counts_)
         counts.push_back(IntImm(DataType::Int(32), c));
 
-      // Walk the body to find the inner "tilelang_root" BlockRealize
+      // Walk the body to find the inner "tilelang_root" SBlockRealize
       // (inside the threadIdx.x scope) and inject the barrier buffer
       // + barrier_init annotation.
       struct RootBlockInjector : public StmtMutator {
@@ -288,14 +277,14 @@ public:
         Array<PrimExpr> arrive_counts;
         bool injected{false};
 
-        Stmt VisitStmt_(const BlockRealizeNode *op) final {
+        Stmt VisitStmt_(const SBlockRealizeNode *op) final {
           if (injected)
             return StmtMutator::VisitStmt_(op);
           if (op->block->name_hint == "root") {
             return StmtMutator::VisitStmt_(op);
           }
           injected = true;
-          Block block = op->block;
+          SBlock block = op->block;
           auto block_ptr = block.CopyOnWrite();
           block_ptr->alloc_buffers.push_back(barrier_buf);
           Map<Var, Array<PrimExpr>> barrier_init_map;
@@ -305,7 +294,7 @@ public:
           }
           barrier_init_map.Set(barrier_buf->data, arrive_counts);
           block_ptr->annotations.Set("barrier_init", barrier_init_map);
-          auto realize = tvm::ffi::GetRef<BlockRealize>(op);
+          auto realize = GetRef<SBlockRealize>(op);
           auto realize_ptr = realize.CopyOnWrite();
           realize_ptr->block = block;
           return realize;
@@ -317,7 +306,7 @@ public:
       injector.arrive_counts = counts;
       fptr->body = injector(fptr->body);
       ICHECK(injector.injected)
-          << "Failed to find root BlockRealize for barrier injection";
+          << "Failed to find root SBlockRealize for barrier injection";
     }
 
     if (TargetIsCPU(substituter.target_)) {
@@ -334,7 +323,7 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
       buffer_map_.insert({buffer->data, buffer});
@@ -369,12 +358,29 @@ private:
     // Begin a new workspace collection frame for this block scope
     workspace_stack_.emplace_back();
 
-    auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto block = Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
     for (size_t i = 0; i < block->alloc_buffers.size(); i++) {
       auto buffer = block->alloc_buffers[i];
       if (buffer_remap_.count(buffer)) {
         block_ptr->alloc_buffers.Set(i, buffer_remap_[buffer]);
+      } else if (IsFragmentBuffer(buffer)) {
+        const auto *ptr_type =
+            TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
+        Type new_type = PointerType(ptr_type->element_type, "local");
+        Var new_var;
+        if (var_remap_.count(buffer->data)) {
+          new_var = var_remap_[buffer->data];
+        } else {
+          new_var = Var(buffer->data->name_hint, new_type);
+          var_remap_.Set(buffer->data, new_var);
+        }
+        Buffer new_buf(new_var, buffer->dtype, buffer->shape, buffer->strides,
+                       buffer->elem_offset, buffer->name,
+                       buffer->data_alignment, buffer->offset_factor,
+                       buffer->buffer_type);
+        buffer_remap_.Set(buffer, new_buf);
+        block_ptr->alloc_buffers.Set(i, new_buf);
       }
     }
     // Attach any workspaces requested within this block to its alloc_buffers
@@ -415,7 +421,7 @@ private:
   }
 
   int CheckAndGetBufferRowSize(const Buffer &buffer) {
-    CHECK(buffer->shape.size() >= 2)
+    ICHECK(buffer->shape.size() >= 2)
         << "The dimension of Buffer \"" << buffer->name << "\" with shape "
         << buffer->shape << " should be at least 2";
 
@@ -436,7 +442,7 @@ private:
     AccessPtrResult result{access_ptr, false};
     // The 2th arg of T.tvm_access_ptr call is offset, we set it to 0 and
     // accumulate it to smem_offset
-    CHECK(access_ptr->IsInstance<CallNode>())
+    ICHECK(access_ptr->IsInstance<CallNode>())
         << "Invalid access ptr for permuted layout: " << access_ptr;
     auto access_ptr_call = Downcast<Call>(access_ptr);
     if (access_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
@@ -538,7 +544,7 @@ private:
       Array<PrimExpr> indices = load->indices;
       Array<PrimExpr> old_shape = load->buffer->shape;
 
-      CHECK_EQ(indices.size(), old_shape.size())
+      ICHECK_EQ(indices.size(), old_shape.size())
           << "Indices size and shape size must match for general N-dimensional "
              "buffer "
           << "but got indices size: " << indices.size()
@@ -643,7 +649,7 @@ private:
       Array<PrimExpr> indices = load->indices;
       Array<PrimExpr> old_shape = load->buffer->shape;
 
-      CHECK_EQ(indices.size(), old_shape.size())
+      ICHECK_EQ(indices.size(), old_shape.size())
           << "Indices size and shape size must match for general N-dimensional "
              "buffer "
           << "but got indices size: " << indices.size()
@@ -735,7 +741,7 @@ private:
       return expr;
     }
     if (const auto *var_node = expr.as<VarNode>()) {
-      Var var = tvm::ffi::GetRef<Var>(var_node);
+      Var var = GetRef<Var>(var_node);
       auto it = let_bindings_.find(var);
       if (it != let_bindings_.end()) {
         return it->second;
@@ -782,7 +788,7 @@ private:
     return Optional<Layout>();
   }
 
-  PrimExpr VisitExpr_(const tir::CallNode *op) final {
+  PrimExpr VisitExpr_(const tirx::CallNode *op) final {
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
         op->op.same_as(tl::tma_load_multicast()) ||
@@ -1049,7 +1055,7 @@ private:
     return var;
   }
 
-  Stmt VisitStmt_(const LetStmtNode *op) final {
+  Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
     bool recorded = false;
     if (value->IsInstance<BufferLoadNode>()) {
@@ -1059,16 +1065,11 @@ private:
     if (SideEffect(value) <= CallEffectKind::kPure) {
       analyzer_->Bind(op->var, value);
     }
-    Stmt body = this->VisitStmt(op->body);
-    if (recorded) {
-      let_bindings_.erase(op->var);
-    }
-    if (value.same_as(op->value) && body.same_as(op->body)) {
-      return tvm::ffi::GetRef<Stmt>(op);
+    if (value.same_as(op->value)) {
+      return GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = value;
-      n->body = body;
       return Stmt(n);
     }
   }
@@ -1099,13 +1100,42 @@ private:
    * @return Stmt The (possibly transformed) statement after lowering or base
    * visitor processing.
    */
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
+    auto buffer = op->buffer;
+    if (buffer_remap_.count(buffer)) {
+      auto node = Downcast<AllocBuffer>(IRMutatorWithAnalyzer::VisitStmt_(op));
+      node.CopyOnWrite()->buffer = buffer_remap_[buffer];
+      return std::move(node);
+    }
+    if (IsFragmentBuffer(buffer)) {
+      const auto *ptr_type =
+          TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
+      Type new_type = PointerType(ptr_type->element_type, "local");
+      Var new_var;
+      if (var_remap_.count(buffer->data)) {
+        new_var = var_remap_[buffer->data];
+      } else {
+        new_var = Var(buffer->data->name_hint, new_type);
+        var_remap_.Set(buffer->data, new_var);
+      }
+      Buffer new_buf(new_var, buffer->dtype, buffer->shape, buffer->strides,
+                     buffer->elem_offset, buffer->name, buffer->data_alignment,
+                     buffer->offset_factor, buffer->buffer_type);
+      buffer_remap_.Set(buffer, new_buf);
+      auto node = Downcast<AllocBuffer>(IRMutatorWithAnalyzer::VisitStmt_(op));
+      node.CopyOnWrite()->buffer = new_buf;
+      return std::move(node);
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const CallNode *call = op->value.as<CallNode>();
     // Do not analysis the call node to the global function.
     if (call && call->op.as<GlobalVarNode>())
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
-    auto tile_op = ParseOperator(tvm::ffi::GetRef<Stmt>(op));
+    auto tile_op = ParseOperator(GetRef<Stmt>(op));
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
@@ -1162,7 +1192,7 @@ private:
     if (op->attr_key == kPipelineContextNumStages) {
       return VisitStmt(op->body);
     }
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
       if (iv->thread_tag == "threadIdx.x") {
@@ -1283,7 +1313,7 @@ private:
       }
     }
 
-    auto root = tvm::ffi::GetRef<For>(op);
+    auto root = GetRef<For>(op);
 
     // Check if the loop writes to any non-local buffer.
     // Thread partitioning is unnecessary when all stores target local buffers.
@@ -1311,7 +1341,7 @@ private:
           // tvm_access_ptr format: (dtype, data, offset, extent, rw_mask)
           auto buffer_var = call->args[1].as<VarNode>();
           if (buffer_var) {
-            Var var = tvm::ffi::GetRef<Var>(buffer_var);
+            Var var = GetRef<Var>(buffer_var);
             auto it = buffer_map_.find(var);
             if (it != buffer_map_.end() && !IsLocalBuffer(it->second)) {
               has_non_local_store = true;
@@ -1472,7 +1502,7 @@ private:
 
 namespace transform {
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass LowerTileOp() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
@@ -1482,7 +1512,7 @@ tvm::transform::Pass LowerTileOp() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
 }
 } // namespace transform

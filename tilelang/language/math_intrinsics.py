@@ -1,7 +1,7 @@
 """Common math intrinsics exposed on the TileLang language surface."""
 
-from tvm import tir
-from tvm.tir import PrimExpr
+from tvm import tirx
+from tvm.tirx import PrimExpr
 
 
 def _validate_rounding_mode(rounding_mode):
@@ -25,8 +25,8 @@ def __log(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log"), x)
 
 
 def __log2(x: PrimExpr) -> PrimExpr:
@@ -42,8 +42,8 @@ def __log2(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log2"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log2"), x)
 
 
 def __log10(x: PrimExpr) -> PrimExpr:
@@ -59,8 +59,8 @@ def __log10(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log10"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log10"), x)
 
 
 def __tan(x: PrimExpr) -> PrimExpr:
@@ -76,8 +76,8 @@ def __tan(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__tan"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__tan"), x)
 
 
 def __cos(x: PrimExpr) -> PrimExpr:
@@ -93,8 +93,8 @@ def __cos(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__cos"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__cos"), x)
 
 
 def __sin(x: PrimExpr) -> PrimExpr:
@@ -110,8 +110,8 @@ def __sin(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__sin"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__sin"), x)
 
 
 def __exp10(x: PrimExpr) -> PrimExpr:
@@ -127,8 +127,8 @@ def __exp10(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp10"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp10"), x)
 
 
 def __exp(x: PrimExpr) -> PrimExpr:
@@ -144,8 +144,8 @@ def __exp(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp"), x)
 
 
 # IEEE-compliant operations
@@ -169,10 +169,10 @@ def ieee_add(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tir.convert(x)
-    y = tir.convert(y)
-    rounding_mode = tir.convert(rounding_mode)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_add"), x, y, rounding_mode)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
+    rounding_mode = tirx.convert(rounding_mode)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_add"), x, y, rounding_mode)
 
 
 def ieee_sub(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -193,10 +193,10 @@ def ieee_sub(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tir.convert(x)
-    y = tir.convert(y)
-    rounding_mode = tir.convert(rounding_mode)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_sub"), x, y, rounding_mode)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
+    rounding_mode = tirx.convert(rounding_mode)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_sub"), x, y, rounding_mode)
 
 
 def ieee_mul(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -217,10 +217,10 @@ def ieee_mul(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tir.convert(x)
-    y = tir.convert(y)
-    rounding_mode = tir.convert(rounding_mode)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_mul"), x, y, rounding_mode)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
+    rounding_mode = tirx.convert(rounding_mode)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_mul"), x, y, rounding_mode)
 
 
 def ieee_fmaf(x: PrimExpr, y: PrimExpr, z: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -243,11 +243,11 @@ def ieee_fmaf(x: PrimExpr, y: PrimExpr, z: PrimExpr, rounding_mode="rn") -> Prim
         The result of x * y + z.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tir.convert(x)
-    y = tir.convert(y)
-    z = tir.convert(z)
-    rounding_mode = tir.convert(rounding_mode)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_fmaf"), x, y, z, rounding_mode)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
+    z = tirx.convert(z)
+    rounding_mode = tirx.convert(rounding_mode)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_fmaf"), x, y, z, rounding_mode)
 
 
 def ieee_frcp(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -266,9 +266,9 @@ def ieee_frcp(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result of 1/x.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tir.convert(x)
-    rounding_mode = tir.convert(rounding_mode)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_frcp"), x, rounding_mode)
+    x = tirx.convert(x)
+    rounding_mode = tirx.convert(rounding_mode)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_frcp"), x, rounding_mode)
 
 
 def ieee_fsqrt(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -287,9 +287,9 @@ def ieee_fsqrt(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result of sqrt(x).
     """
     _validate_rounding_mode(rounding_mode)
-    x = tir.convert(x)
-    rounding_mode = tir.convert(rounding_mode)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_fsqrt"), x, rounding_mode)
+    x = tirx.convert(x)
+    rounding_mode = tirx.convert(rounding_mode)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_fsqrt"), x, rounding_mode)
 
 
 def ieee_frsqrt(x: PrimExpr) -> PrimExpr:
@@ -305,8 +305,8 @@ def ieee_frsqrt(x: PrimExpr) -> PrimExpr:
     result : PrimExpr
         The result of 1/sqrt(x).
     """
-    x = tir.convert(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_frsqrt"), x)
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_frsqrt"), x)
 
 
 def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -327,10 +327,10 @@ def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result of x/y.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tir.convert(x)
-    y = tir.convert(y)
-    rounding_mode = tir.convert(rounding_mode)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.ieee_fdiv"), x, y, rounding_mode)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
+    rounding_mode = tirx.convert(rounding_mode)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.ieee_fdiv"), x, y, rounding_mode)
 
 
 _PACKED_X2_DTYPES = frozenset({"float32x2", "bfloat16x2", "float16x2"})
@@ -357,58 +357,58 @@ def _validate_packed_x2_args(*args: PrimExpr) -> None:
 
 def add2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise add (x + y)."""
-    x = tir.convert(x)
-    y = tir.convert(y)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
     _validate_packed_x2_args(x, y)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.add2"), x, y)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.add2"), x, y)
 
 
 def sub2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise subtract (x - y)."""
-    x = tir.convert(x)
-    y = tir.convert(y)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
     _validate_packed_x2_args(x, y)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.sub2"), x, y)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.sub2"), x, y)
 
 
 def mul2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise multiply (x * y)."""
-    x = tir.convert(x)
-    y = tir.convert(y)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
     _validate_packed_x2_args(x, y)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.mul2"), x, y)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.mul2"), x, y)
 
 
 def fma2(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
     """Packed fused multiply-add (x * y + z)."""
-    x = tir.convert(x)
-    y = tir.convert(y)
-    z = tir.convert(z)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
+    z = tirx.convert(z)
     _validate_packed_x2_args(x, y, z)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.fma2"), x, y, z)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.fma2"), x, y, z)
 
 
 def max2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise maximum."""
-    x = tir.convert(x)
-    y = tir.convert(y)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
     _validate_packed_x2_args(x, y)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.max2"), x, y)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.max2"), x, y)
 
 
 def min2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise minimum."""
-    x = tir.convert(x)
-    y = tir.convert(y)
+    x = tirx.convert(x)
+    y = tirx.convert(y)
     _validate_packed_x2_args(x, y)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.min2"), x, y)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.min2"), x, y)
 
 
 def abs2(x: PrimExpr) -> PrimExpr:
     """Packed element-wise absolute value."""
-    x = tir.convert(x)
+    x = tirx.convert(x)
     _validate_packed_x2_args(x)
-    return tir.call_intrin(x.dtype, tir.op.Op.get("tl.abs2"), x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.abs2"), x)
 
 
 __all__ = [

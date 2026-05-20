@@ -4,12 +4,15 @@
  */
 
 #include "backend/cuda/op/copy.h"
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/runtime/logging.h>
 
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "target/utils.h"
 
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/transform.h>
 
 #include <sstream>
 #include <utility>
@@ -18,7 +21,8 @@ namespace tvm {
 namespace tl {
 namespace cuda {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 

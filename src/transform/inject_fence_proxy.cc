@@ -3,14 +3,16 @@
  * \brief Inject proxy fences between generic and async proxies (sm90+)
  */
 
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <cstdint>
 #include <utility>
@@ -24,7 +26,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 using runtime::StorageRank;
 using runtime::StorageScope;
 using tvm::transform::PassContext;
@@ -152,7 +155,7 @@ bool CallMayWriteSharedMemory(const CallNode *call) {
   }
 
   bool writes_shared = false;
-  PostOrderVisit(tvm::ffi::GetRef<Call>(call), [&](const ObjectRef &node) {
+  PostOrderVisit(GetRef<Call>(call), [&](const ObjectRef &node) {
     if (writes_shared) {
       return;
     }
@@ -389,8 +392,8 @@ private:
     return stmt;
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = tvm::ffi::GetRef<Block>(op);
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block = GetRef<SBlock>(op);
     auto *n = block.CopyOnWrite();
     // Block executes init (if any) before body.
     if (op->init.defined()) {
@@ -400,7 +403,7 @@ private:
     return block;
   }
 
-  Stmt VisitStmt_(const BlockRealizeNode *op) final {
+  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
     // A block realize is conditional on its predicate.
     ProxyStateSet entry = current_state_;
     auto block_res = RewriteWithState(op->block, entry);
@@ -417,8 +420,8 @@ private:
     for (const PrimExpr &v : op->iter_values) {
       iter_values.push_back(VisitExpr(v));
     }
-    return BlockRealize(iter_values, predicate,
-                        Downcast<Block>(block_res.stmt));
+    return SBlockRealize(iter_values, predicate,
+                         Downcast<SBlock>(block_res.stmt));
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
@@ -547,12 +550,12 @@ tvm::transform::Pass InjectFenceProxy() {
     }
     return ProxyFenceRewriter::Apply(f);
   };
-  return tir::transform::CreatePrimFuncPass(pass_func, 0, "tl.InjectFenceProxy",
-                                            {});
+  return tirx::transform::CreatePrimFuncPass(pass_func, 0,
+                                             "tl.InjectFenceProxy", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.InjectFenceProxy", InjectFenceProxy);
 }
 

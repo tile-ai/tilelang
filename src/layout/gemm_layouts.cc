@@ -4,8 +4,11 @@
  *
  */
 
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 
@@ -21,6 +24,8 @@
 
 namespace tvm {
 namespace tl {
+
+using namespace ffi;
 
 IterVar make_itervar(std::string name, PrimExpr dom) {
   Var var = Var(name, dom->dtype);

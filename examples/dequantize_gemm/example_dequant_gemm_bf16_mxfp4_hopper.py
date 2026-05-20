@@ -2,12 +2,12 @@ import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
 from tvm import DataType
-from tvm import tir
+from tvm import tirx
 import torch
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
 
-def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr, dtype: str):
+def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, scale: tirx.PrimExpr, dtype: str):
     """
     Convert a 4-bit field packed in a uint8 into a bfloat16 value, applying an exponent scale.
 
@@ -17,13 +17,13 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
 
     Parameters:
         nbit (int): Number of bits in the packed field (must be 4).
-        val (tir.PrimExpr): Packed input value of dtype `uint8` containing one or more 4-bit fields.
-        pos (tir.PrimExpr): Index of the nibble within `val` (used to shift/extract the 4-bit field).
-        scale (tir.PrimExpr): Per-element exponent adjustment added to the extracted exponent (uint-like).
+        val (tirx.PrimExpr): Packed input value of dtype `uint8` containing one or more 4-bit fields.
+        pos (tirx.PrimExpr): Index of the nibble within `val` (used to shift/extract the 4-bit field).
+        scale (tirx.PrimExpr): Per-element exponent adjustment added to the extracted exponent (uint-like).
         dtype (str): Destination dtype string (must be T.bfloat16).
 
     Returns:
-        tir.PrimExpr: The resulting value reinterpreted as `bfloat16`.
+        tirx.PrimExpr: The resulting value reinterpreted as `bfloat16`.
 
     Notes:
     - Preconditions are enforced via assertions: nbit == 4, dtype == T.bfloat16, and val.dtype == T.uint8.
@@ -32,19 +32,19 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
     assert nbit == 4
     assert dtype == T.bfloat16
     assert val.dtype == T.uint8
-    mask = tir.const((1 << nbit) - 1, T.uint16)
-    f4 = (val >> (pos.astype(T.uint16) * tir.const(nbit, T.uint16))) & mask
-    s = f4 >> tir.const(3, T.uint16)
-    e_f4 = (f4 & tir.const(6, T.uint16)) >> tir.const(1, T.uint16)
+    mask = tirx.const((1 << nbit) - 1, T.uint16)
+    f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
+    s = f4 >> tirx.const(3, T.uint16)
+    e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
     # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
-    e_bf16 = e_f4 + tir.const(126, T.uint16)
+    e_bf16 = e_f4 + tirx.const(126, T.uint16)
     # Scale is the exponential part, within the representation of uint8
     # To handle the overflow, we may use the min function to limit the exponential part to 8 bits
-    # e_bf16 = T.min(e_bf16 + scale, tir.const((1 << 8) - 1, "uint16"))
-    m_f4 = f4 & tir.const(1, T.uint16)
-    val_bf16 = tir.reinterpret(
+    # e_bf16 = T.min(e_bf16 + scale, tirx.const((1 << 8) - 1, "uint16"))
+    m_f4 = f4 & tirx.const(1, T.uint16)
+    val_bf16 = tirx.reinterpret(
         T.bfloat16,
-        ((((s << tir.const(8, T.uint16)) | e_bf16) << tir.const(7, T.uint16)) | (m_f4 << tir.const(6, T.uint16))).astype(T.uint16),
+        ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16)) | (m_f4 << tirx.const(6, T.uint16))).astype(T.uint16),
     )
     return val_bf16
 

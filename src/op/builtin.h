@@ -8,7 +8,10 @@
 #define TVM_TL_OP_BUILTIN_H_
 
 #include "operator.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
+#include <tvm/runtime/logging.h>
 
 namespace tvm {
 /*!
@@ -47,7 +50,7 @@ static constexpr const char *kPipelineMbarPhaseExpr =
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
 // A PrimFunc-level attribute carrying a list of handle Vars
 // that must NOT be marked with the restrict qualifier in codegen.
-// Type: Array<tir::Var>
+// Type: ffi::Array<tirx::Var>
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 // A PrimFunc-level attribute carrying the minimum number of thread blocks
 // per SM (multiprocessor).  When present it is emitted as the second
@@ -64,8 +67,8 @@ static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 } // namespace attr
 
-inline Optional<PrimExpr>
-GetAnnotatedMbarPhaseExpr(const Map<String, ObjectRef> &annotations) {
+inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
+    const ffi::Map<ffi::String, ffi::ObjectRef> &annotations) {
   if (auto val = annotations.Get(attr::kPipelineMbarPhaseExpr)) {
     if (val.value()->IsInstance<PrimExprNode>()) {
       return Downcast<PrimExpr>(val.value());
@@ -74,7 +77,7 @@ GetAnnotatedMbarPhaseExpr(const Map<String, ObjectRef> &annotations) {
                << "` expects a PrimExpr value, but got "
                << val.value().GetTypeKey();
   }
-  return Optional<PrimExpr>();
+  return ffi::Optional<PrimExpr>();
 }
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =

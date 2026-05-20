@@ -14,9 +14,9 @@ from tilelang.tileop.gemm.registry import resolve_gemm_impl
 def test_sm75_uses_sm75_mma_gemm_impl():
     Target = tvm.target.Target
 
-    assert resolve_gemm_impl("cuda.mma", Target("cuda -arch=sm_70")) is GemmMMASm70
-    assert resolve_gemm_impl("cuda.mma", Target("cuda -arch=sm_75")) is GemmMMASm75
-    assert resolve_gemm_impl("cuda.mma", Target("cuda -arch=sm_80")) is GemmMMA
+    assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_70"})) is GemmMMASm70
+    assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_75"})) is GemmMMASm75
+    assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_80"})) is GemmMMA
 
 
 def test_sm75_fp16_emitter_uses_m16n8k8_shape():

@@ -3,7 +3,7 @@
 from __future__ import annotations
 from tilelang._typing import ShapeType, DType
 import tilelang.language as T
-from tvm.tir import PrimExpr, Buffer, op
+from tvm.tirx import PrimExpr, Buffer, op
 from tilelang.utils.language import bits_product, prim_expr_equal
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
 

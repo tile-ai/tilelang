@@ -4,6 +4,10 @@
  */
 
 #include "op/copy.h"
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "backend/cuda/op/copy.h"
 #include "layout/tcgen05_layout.h"
@@ -15,11 +19,11 @@
 #include "transform/loop_vectorize.h"
 #include "transform/ptx_async_copy_injector.h"
 
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <cstdint>
 #include <sstream>
@@ -29,7 +33,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -115,7 +120,7 @@ int MinRankInClusterMask(int64_t cluster_mask) {
 
 Optional<PrimExpr> GetBarrier(const CopyNode &op) {
   if (auto val = op.annotations.Get("barrier")) {
-    if (val->as<tir::BufferLoadNode>()) {
+    if (val->as<tirx::BufferLoadNode>()) {
       return Downcast<PrimExpr>(val.value());
     }
   }
@@ -393,7 +398,7 @@ void Copy::CollectFragmentLayouts(const PrimExpr &expr,
         result_map.Set(bl->buffer, f->BindThreadRange(thread_bounds));
       }
     } else if (auto var_node = node.as<VarNode>()) {
-      auto var = tvm::ffi::GetRef<Var>(var_node);
+      auto var = GetRef<Var>(var_node);
       if (let_var_to_expr.count(var)) {
         CollectFragmentLayouts(let_var_to_expr[var], let_var_to_expr,
                                existing_layouts, thread_extent, thread_bounds,
@@ -777,7 +782,7 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &T,
 
     if (element_match && same_shape) {
       PrimExpr barrier_load = barrier_opt.value();
-      const auto *barrier_buf_load = barrier_load.as<tir::BufferLoadNode>();
+      const auto *barrier_buf_load = barrier_load.as<tirx::BufferLoadNode>();
       ICHECK(barrier_buf_load)
           << "LowerCluster: expected BufferLoad for barrier annotation";
       Var barrier_data_var = barrier_buf_load->buffer->data;
@@ -1079,8 +1084,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &T,
   if (src.scope() != "shared.tmem" && dst.scope() != "shared.tmem") {
     return Stmt();
   }
-  ICHECK(TargetHasTmem(T.target)) << "Target " << T.target->ToDebugString()
-                                  << " does not support tensor memory copy";
+  ICHECK(TargetHasTmem(T.target))
+      << "Target " << T.target->str() << " does not support tensor memory copy";
 
   bool is_ld = false;
   bool is_st = false;

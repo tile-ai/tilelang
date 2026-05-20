@@ -1,17 +1,19 @@
 /*!
  * \file tl/backend/cuda/op/gemm_sp.cc
  * \brief CUDA implementation for tl.gemm_sp instruction selection.
- */                                                                            \
+ */
 #include "op/gemm_sp.h"
 #include "op/gemm.h"
+#include "support/check.h"
 
 #include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
 #include "target/utils.h"
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +24,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace cuda {
 

@@ -6,6 +6,19 @@ import torch
 import pytest
 
 
+def _is_cutedsl_available():
+    try:
+        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+
+        check_cutedsl_available()
+        return True
+    except (ImportError, AssertionError):
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _is_cutedsl_available(), reason="CuTeDSL not installed")
+
+
 def matmul(
     M,
     N,

@@ -2,10 +2,10 @@ from __future__ import annotations
 from tilelang import tvm as tvm
 import tilelang.language as T
 from tvm import DataType
-from tvm import tir
+from tvm import tirx
 from tvm.ir import Range
 from tvm.target import Target
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
+from tvm.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tvm.runtime import convert
 from .utils import mfma_store_index_map
 from typing import Literal
@@ -567,7 +567,7 @@ class MatrixCoreIntrinEmitter:
 
         Parameters
         ----------
-        local_buf : tir.Buffer
+        local_buf : tirx.Buffer
             The local buffer representing a fragment of a matrix.
 
         Returns
@@ -702,7 +702,7 @@ class MatrixCoreIntrinEmitter:
 
         Parameters
         ----------
-        local_buf : tir.Buffer
+        local_buf : tirx.Buffer
             The local buffer representing a fragment of a matrix.
 
         Returns
@@ -778,7 +778,7 @@ class MatrixCoreIntrinEmitter:
         if isinstance(obj, BufferRegion):
             return obj
         if isinstance(obj, Buffer):
-            mins = [tir.IntImm("int32", 0) for _ in obj.shape]
+            mins = [tirx.IntImm("int32", 0) for _ in obj.shape]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
             return BufferRegion(obj, ranges)
         if isinstance(obj, BufferLoad):
@@ -787,7 +787,7 @@ class MatrixCoreIntrinEmitter:
                 return region
             # Fallback: scalar load -> 1-sized ranges at indices
             mins = [idx for idx in obj.indices]
-            ones = [tir.IntImm("int32", 1) for _ in obj.indices]
+            ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
             return BufferRegion(obj.buffer, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")

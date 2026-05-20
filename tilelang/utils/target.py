@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 
-import torch
-
 from platform import mac_ver
 from typing import Literal
+
+import torch
+
 from tilelang import tvm as tvm
 from tilelang import language as T
 from tilelang import _ffi_api
@@ -12,15 +13,18 @@ from tvm.target import Target
 from tvm.contrib import rocm
 from tilelang.contrib import nvcc
 
+TargetConfig = dict[str, object]
+TargetLike = str | TargetConfig | Target
+
 SUPPORTED_TARGETS: dict[str, str] = {
     "auto": "Auto-detect CUDA/HIP/Metal based on availability.",
-    "cuda": "CUDA GPU target (supports options such as `cuda -arch=sm_80`).",
-    "hip": "ROCm HIP target (supports options like `hip -mcpu=gfx90a`).",
+    "cuda": "CUDA GPU target. Use dict options such as {'kind': 'cuda', 'arch': 'sm_90'}.",
+    "hip": "ROCm HIP target. Use dict options such as {'kind': 'hip', 'mcpu': 'gfx942'}.",
     "metal": "Apple Metal target for arm64 Macs.",
-    "llvm": "LLVM CPU target (accepts standard TVM LLVM options).",
+    "llvm": "LLVM CPU target. Use dict options such as {'kind': 'llvm', 'mcpu': 'native'}.",
     "webgpu": "WebGPU target for browser/WebGPU runtimes.",
     "c": "C source backend.",
-    "cutedsl": "CuTe DSL GPU target.",
+    "cutedsl": "CuTe DSL GPU target. Use dict options such as {'kind': 'cutedsl', 'arch': 'sm_90'}.",
 }
 
 ROCM_MTRIPLE = "amdgcn-amd-amdhsa-hcc"
@@ -161,46 +165,61 @@ def determine_torch_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> to
     return torch_dtype
 
 
-def normalize_cutedsl_target(target: str | Target) -> Target | None:
+def _with_cutedsl_key(target: Target) -> Target:
+    target_dict = dict(target.export())
+    target_dict["keys"] = list(dict.fromkeys([*target_dict.get("keys", ()), "cutedsl"]))
+    return Target(target_dict)
+
+
+def normalize_cutedsl_target(target: TargetLike) -> Target | None:
     if isinstance(target, Target):
         if target.kind.name == "cuda" and "cutedsl" in target.keys:
             return target
         return None
 
-    if target.startswith("cutedsl"):
-        cuda_target_str = target.replace("cutedsl", "cuda", 1)
-
+    if isinstance(target, dict):
+        if target.get("kind") == "cutedsl":
+            cuda_target = dict(target)
+            cuda_target["kind"] = "cuda"
+            try:
+                return _with_cutedsl_key(Target(cuda_target))
+            except Exception:
+                return None
         try:
-            temp_target = Target(cuda_target_str)
+            temp_target = Target(target)
+        except Exception:
+            return None
+        if temp_target.kind.name == "cuda" and "cutedsl" in temp_target.keys:
+            return temp_target
+        return None
 
-            target_dict = dict(temp_target.export())
-            target_dict["keys"] = list(set(target_dict["keys"]) | {"cutedsl"})
-
-            return Target(target_dict)
+    if target.strip() == "cutedsl":
+        try:
+            return _with_cutedsl_key(Target("cuda"))
         except Exception:
             return None
 
     return None
 
 
-def determine_target(target: str | Target | Literal["auto"] = "auto", return_object: bool = False) -> str | Target:
+def determine_target(target: TargetLike | Literal["auto"] = "auto", return_object: bool = False) -> str | TargetConfig | Target:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
     Args:
-        target (Union[str, Target, Literal["auto"]]): User-specified target.
+        target (Union[str, dict, Target, Literal["auto"]]): User-specified target.
             - If "auto", the system will automatically detect whether CUDA or HIP is available.
-            - If a string or Target, it is directly validated.
+            - If a string, dict, or Target, it is directly validated.
 
     Returns:
-        Union[str, Target]: The selected target ("cuda", "hip", or a valid Target object).
+        Union[str, dict, Target]: The selected target ("cuda", "hip", a config dict, or a Target object).
 
     Raises:
         ValueError: If no CUDA or HIP is available and the target is "auto".
         AssertionError: If the target is invalid.
     """
 
-    return_var: str | Target = target
+    return_var: str | TargetConfig | Target = target
 
     if target == "auto":
         target = tvm.target.Target.current(allow_none=True)
@@ -244,6 +263,17 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
             # Validate the target if it's not "auto"
             if isinstance(target, Target):
                 return_var = with_rocm_target_attrs(target)
+            elif isinstance(target, dict):
+                try:
+                    parsed_target = Target(target)
+                except Exception as err:
+                    raise AssertionError(
+                        f"Target {target} is not supported. Pass a valid target config dict, e.g. `{{'kind': 'cuda', 'arch': 'sm_80'}}`."
+                    ) from err
+                if parsed_target.kind.name == "hip" and target_get_mcpu(parsed_target) is not None:
+                    return_var = with_rocm_target_attrs(parsed_target)
+                else:
+                    return_var = target
             elif isinstance(target, str):
                 normalized_target = target.strip()
                 if not normalized_target:
@@ -254,7 +284,7 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
                     examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
                     raise AssertionError(
                         f"Target {target} is not supported. Supported targets include: {examples}. "
-                        "Pass additional options after the base name, e.g. `cuda -arch=sm_80`."
+                        "Pass target options as a dict, e.g. `{'kind': 'cuda', 'arch': 'sm_80'}`."
                     ) from err
                 if parsed_target.kind.name == "hip" and target_get_mcpu(parsed_target) is not None:
                     return_var = with_rocm_target_attrs(parsed_target)

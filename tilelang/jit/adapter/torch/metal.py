@@ -3,7 +3,7 @@ from functools import wraps
 from collections.abc import Callable
 
 import torch
-from tvm import tir
+from tvm import tirx
 
 from tilelang import tvm as tvm
 
@@ -17,7 +17,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int],
         #  target: Union[str, Target],
-        func_or_mod: tir.PrimFunc | tvm.IRModule,
+        func_or_mod: tirx.PrimFunc | tvm.IRModule,
         #  host_mod: Optional[tvm.IRModule] = None,
         device_mod: tvm.IRModule | None = None,
         kernel_global_source: str | None = None,
@@ -26,7 +26,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         #  compile_flags: Optional[List[str]] = None
     ):
         self.kernel_global_source = kernel_global_source
-        if isinstance(func_or_mod, tir.PrimFunc):
+        if isinstance(func_or_mod, tirx.PrimFunc):
             func_name = func_or_mod.attrs["global_symbol"]
         else:
             func_name = func_or_mod.__name__

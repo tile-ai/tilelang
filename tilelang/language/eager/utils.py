@@ -5,7 +5,7 @@ from typing import Any, Literal
 from collections.abc import Callable
 from tilelang import env
 from hashlib import sha256
-from tvm import tir
+from tvm import tirx
 import linecache
 
 
@@ -93,7 +93,7 @@ def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool = True) -> t
     for s in shape[::-1]:
         strides.append(stride)
         stride *= s
-        if not allow_prim_expr and isinstance(stride, tir.PrimExpr):
+        if not allow_prim_expr and isinstance(stride, tirx.PrimExpr):
             raise ValueError("Cannot construct strides with PrimExpr when allow_prim_expr is False.")
     strides = tuple(reversed(strides))
     return strides

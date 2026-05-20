@@ -15,7 +15,7 @@ from tilelang.utils.language import is_shared, is_fragment
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
-from tvm import tir
+from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from collections.abc import Callable
@@ -25,7 +25,7 @@ GEMM_INST_WGMMA = "cuda.wgmma"
 
 
 class GemmWGMMA(GemmBase):
-    def infer_shared_layout(self, continuity: int) -> Callable[[tir.Buffer], Layout]:
+    def infer_shared_layout(self, continuity: int) -> Callable[[tirx.Buffer], Layout]:
         """Infer the swizzle layout for shared memory based on continuity.
 
         WGMMA can directly use shared memory as input, so the swizzle layout must
@@ -89,8 +89,8 @@ class GemmWGMMA(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tir.Var,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_var: tirx.Var,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WGMMA)

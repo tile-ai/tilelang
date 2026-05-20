@@ -163,9 +163,12 @@ if not env.is_light_import():
 
         if sys.platform.startswith("win32"):
             # Make sibling-package DLLs (tvm_ffi, z3) discoverable via PATH,
-            # then register tilelang + CUDA dirs with the secure DLL loader.
-            prepend_dll_search_path(get_windows_runtime_dll_dirs())
-            _dll_handles = [os.add_dll_directory(p) for p in libinfo.get_dll_directories()]
+            # then register all native dependency dirs with the secure DLL
+            # loader used by Python 3.8+ for absolute-path DLL loads.
+            runtime_dll_dirs = get_windows_runtime_dll_dirs()
+            prepend_dll_search_path(runtime_dll_dirs)
+            dll_dirs = dict.fromkeys([*libinfo.get_dll_directories(), *runtime_dll_dirs])
+            _dll_handles = [os.add_dll_directory(p) for p in dll_dirs]
 
         import tvm
         import tvm.base  # noqa: F401

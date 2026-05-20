@@ -9,7 +9,7 @@ from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
-from tvm import tir
+from tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
@@ -71,7 +71,7 @@ class GemmWMMA(GemmBase):
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def lower(
-        self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var, mbar_phase_expr: tir.PrimExpr | None = None
+        self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tirx.Var, mbar_phase_expr: tirx.PrimExpr | None = None
     ):
         thread_nums = thread_bounds.extent
         wmma_emitter = self._make_emitter(target, thread_nums, thread_var=thread_var)

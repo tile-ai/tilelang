@@ -1,13 +1,14 @@
 #include "codegen_c.h"
+#include "support/check.h"
 #include <tvm/ffi/extra/module.h>
-#include <tvm/ffi/reflection/registry.h>
-
-#include "../support/ffi_aliases.h"
+#include <tvm/ir/cast.h>
 
 namespace tvm {
 namespace codegen {
 
-ffi::Module BuildTileLangC(IRModule mod, Target target) {
+using namespace ffi;
+
+Module BuildTileLangC(IRModule mod, Target target) {
   bool output_ssa = false;
   bool emit_asserts = false;
   bool emit_fwd_func_decl = true;
@@ -71,7 +72,7 @@ ffi::Module BuildTileLangC(IRModule mod, Target target) {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("target.build.tilelang_c", BuildTileLangC);
 }
 

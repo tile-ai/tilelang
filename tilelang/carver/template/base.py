@@ -11,7 +11,7 @@ from ..arch import (  # Import architecture-related utilities and classes
 )
 from ..roller.hint import Hint  # Import the Hint class
 from ..roller.node import OutputNode  # Import the OutputNode class
-from tvm.tir import PrimFunc  # Import PrimFunc for handling tensor IR functions
+from tvm.tirx import PrimFunc  # Import PrimFunc for handling tensor IR functions
 
 
 @dataclass
@@ -23,7 +23,7 @@ class BaseTemplate(ABC):
     """
 
     # The architecture of the device, inferred automatically unless explicitly set
-    _arch: TileDevice = field(default=auto_infer_current_arch(), init=False, repr=False)
+    _arch: TileDevice = field(default_factory=auto_infer_current_arch, init=False, repr=False)
 
     # The function associated with this template, initially None
     _func: PrimFunc = field(default=None, init=False, repr=False)

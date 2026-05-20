@@ -8,12 +8,15 @@
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "support/check.h"
 #include "utils.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include "builtin.h"
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include <limits>
 #include <sstream>
@@ -22,7 +25,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
                      arith::Analyzer *analyzer) {
@@ -41,7 +45,7 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &T,
       // conflict.
       bool dst_depends_on_thread = false;
       for (const auto &range : op.dst_range) {
-        if (tir::UsesVar(range->min, [&](const VarNode *v) {
+        if (tirx::UsesVar(range->min, [&](const VarNode *v) {
               return v == T.thread_var.get();
             })) {
           dst_depends_on_thread = true;
@@ -96,7 +100,7 @@ const CopyImpl &ResolveCopyImpl(Target target) {
   ICHECK(best_impl != nullptr)
       << "tl.copy requires a target-specific implementation, but no copy "
          "implementation is registered for "
-      << target->ToDebugString();
+      << target->str();
   return *best_impl;
 }
 
@@ -128,7 +132,7 @@ const Conv2DIm2ColImpl &ResolveConv2DIm2ColImpl(Target target) {
   ICHECK(best_impl != nullptr)
       << "Conv2D im2col requires a target-specific implementation, but no "
          "implementation is registered for "
-      << target->ToDebugString();
+      << target->str();
   return *best_impl;
 }
 
@@ -158,7 +162,7 @@ void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl) {
 // args[0]: source region, args[1]: destination region
 // annotations: Map containing common SIMT hints and backend-specific metadata.
 Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
+  ObjectPtr<CopyNode> node = make_object<CopyNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
   node->src = src_access.region->buffer;
@@ -182,7 +186,7 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
 
 // Creates a shallow clone of this CopyNode.
 TileOperator CopyNode::Clone() const {
-  auto op = tvm::ffi::make_object<CopyNode>(*this);
+  auto op = make_object<CopyNode>(*this);
   if (par_op_.defined()) {
     op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
   }
@@ -421,8 +425,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 // eviction_policy
 Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args,
                                Map<String, ObjectRef> annotations) {
-  ObjectPtr<Conv2DIm2ColOpNode> node =
-      tvm::ffi::make_object<Conv2DIm2ColOpNode>();
+  ObjectPtr<Conv2DIm2ColOpNode> node = make_object<Conv2DIm2ColOpNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
   node->srcRegion_ = src_access.region;
@@ -443,7 +446,7 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args,
 
 // Creates a shallow copy of this Conv2DIm2ColOpNode.
 TileOperator Conv2DIm2ColOpNode::Clone() const {
-  auto op = tvm::ffi::make_object<Conv2DIm2ColOpNode>(*this);
+  auto op = make_object<Conv2DIm2ColOpNode>(*this);
   return Conv2DIm2ColOp(op);
 }
 

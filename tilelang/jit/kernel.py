@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target
 from tvm.target import Target
-from tvm.tir import PrimFunc
+from tvm.tirx import PrimFunc
 
 import tilelang
 from tilelang import tvm
@@ -72,7 +72,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        func : tvm.tir.PrimFunc, optional
+        func : tvm.tirx.PrimFunc, optional
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
@@ -206,7 +206,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        tilelang_func : tvm.tir.PrimFunc
+        tilelang_func : tvm.tirx.PrimFunc
             The TileLang (TVM TIR) function to compile.
 
         Returns
@@ -407,7 +407,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        tilelang_func : tvm.tir.PrimFunc
+        tilelang_func : tvm.tirx.PrimFunc
             The TileLang (TVM TIR) function to compile.
         **kwargs : dict
             Additional keyword arguments to pass to the constructor.

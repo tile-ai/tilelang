@@ -3,13 +3,16 @@
  * \brief infer the fragment/shared memory layout
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/index_map.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/utils.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/index_map.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <deque>
@@ -36,7 +39,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -80,7 +84,7 @@ Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
 class ThreadBindingCollector : public StmtExprVisitor {
 public:
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       thread_binding_[iv->var.get()] = iv;
     }
@@ -91,7 +95,7 @@ public:
   std::unordered_map<const VarNode *, IterVar> thread_binding_;
 };
 
-using namespace tir;
+using namespace tirx;
 using arith::IRMutatorWithAnalyzer;
 using arith::IRVisitorWithAnalyzer;
 
@@ -543,7 +547,7 @@ private:
     if (op->op.as<GlobalVarNode>())
       return;
 
-    auto p = ParseOperator(tvm::ffi::GetRef<Call>(op));
+    auto p = ParseOperator(GetRef<Call>(op));
     if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
@@ -591,7 +595,7 @@ private:
       }
 
       // Add the tile operator to infer_list_
-      infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
+      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
     }
   }
@@ -657,7 +661,7 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
-      auto infer = ParallelOp(tvm::ffi::GetRef<For>(op));
+      auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
         addToUseList(buffer);
       }
@@ -726,7 +730,7 @@ private:
           }
         }
       });
-      infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
+      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
       thread_var_vec_.push_back(thread_var_);
       thread_bounds_vec_.push_back(CurrentThreadBounds());
@@ -737,7 +741,7 @@ private:
     }
   }
 
-  void VisitStmt_(const BlockNode *op) final {
+  void VisitStmt_(const SBlockNode *op) final {
     for (auto buffer : op->alloc_buffers) {
       if (buffer_data_to_buffers_.count(buffer->data)) {
         auto buffers = buffer_data_to_buffers_[buffer->data];
@@ -790,7 +794,7 @@ private:
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
@@ -800,7 +804,7 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
-  void VisitStmt_(const LetStmtNode *op) final {
+  void VisitStmt_(const BindNode *op) final {
     // Record Let variable to its bound expression.
     // This enables tracking fragment buffer accesses through let bindings.
     let_var_to_expr_.Set(op->var, op->value);
@@ -816,7 +820,7 @@ private:
           addToUseList(bl->buffer);
         }
       } else if (auto var_node = node.as<VarNode>()) {
-        auto var = tvm::ffi::GetRef<Var>(var_node);
+        auto var = GetRef<Var>(var_node);
         if (let_var_to_expr_.count(var)) {
           CollectFragmentBuffersFromExpr(let_var_to_expr_[var]);
         }
@@ -930,7 +934,7 @@ private:
             floating_buffers_(floating_buffers) {}
 
       void VisitStmt_(const AttrStmtNode *op) final {
-        if (op->attr_key == tir::attr::thread_extent) {
+        if (op->attr_key == tirx::attr::thread_extent) {
           IterVar iv = Downcast<IterVar>(op->node);
           if (iv->thread_tag == "threadIdx.x") {
             thread_var_ = iv;
@@ -1215,8 +1219,8 @@ private:
    * @return Stmt The (possibly modified) Block statement with the layout-map
    * annotation set.
    */
-  Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     for (auto buffer : block->alloc_buffers) {
       if (buffer.scope() == "local.framgent") {
@@ -1244,12 +1248,12 @@ private:
    * @return The For statement with layout annotations attached
    */
   Stmt VisitStmt_(const ForNode *op) final {
-    if (!result_.for_map.count(tvm::ffi::GetRef<For>(op))) {
+    if (!result_.for_map.count(GetRef<For>(op))) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
 
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    auto root = tvm::ffi::GetRef<For>(op);
+    auto root = GetRef<For>(op);
 
     auto loop_layout = result_.for_map[root];
 
@@ -1271,7 +1275,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
+    if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
@@ -1282,7 +1286,7 @@ private:
 };
 
 tvm::transform::Pass LayoutInference() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     ThreadBindingCollector collector;
     collector(f->body);
@@ -1297,7 +1301,7 @@ tvm::transform::Pass LayoutInference() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LayoutInference", LayoutInference);
 }
 

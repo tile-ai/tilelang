@@ -2,14 +2,16 @@
  * \brief Lower eligible global->shared copies into PTX cp.async
  * \file lower_ptx_async_copy.cc
  */
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -22,12 +24,13 @@
 #include "../target/utils.h"
 #include "ptx_async_copy_injector.h"
 #include "tir/ir/buffer_common.h"
-#include "tvm/tir/stmt.h"
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
@@ -55,7 +58,7 @@ public:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::async_scope) {
+    if (op->attr_key == s_tir::attr::async_scope) {
       ++explicit_async_scope_depth_;
       Stmt body = this->VisitStmt(op->body);
       --explicit_async_scope_depth_;
@@ -253,7 +256,7 @@ public:
 
     if (then_case.same_as(op->then_case) &&
         (!else_case.defined() || else_case.same_as(op->else_case))) {
-      return tvm::ffi::GetRef<Stmt>(op);
+      return GetRef<Stmt>(op);
     }
     return IfThenElse(op->condition, then_case, else_case);
   }
@@ -352,11 +355,10 @@ private:
   }
 
   static Optional<PrimExpr>
-  FlattenToLinearOffset(const Buffer &buf,
-                        const ffi::Array<PrimExpr> &indices) {
+  FlattenToLinearOffset(const Buffer &buf, const Array<PrimExpr> &indices) {
     // Convert N-D indices (potentially with axis_separators) into a single
     // row-major linear element offset.
-    ffi::Array<PrimExpr> physical = buf.OffsetOf(indices);
+    Array<PrimExpr> physical = buf.OffsetOf(indices);
     Buffer flattened_buf = buf.GetFlattenedBuffer();
     if (physical.size() != flattened_buf->shape.size() || physical.empty()) {
       return Optional<PrimExpr>();
@@ -451,7 +453,7 @@ private:
         return PrimExpr();
       }
       if (const auto *rhs_broadcast = rhs.as<BroadcastNode>()) {
-        return tir::Add(lhs_ramp->base, rhs_broadcast->value);
+        return tirx::Add(lhs_ramp->base, rhs_broadcast->value);
       }
     }
     if (const auto *rhs_ramp = rhs.as<RampNode>()) {
@@ -459,7 +461,7 @@ private:
         return PrimExpr();
       }
       if (const auto *lhs_broadcast = lhs.as<BroadcastNode>()) {
-        return tir::Add(rhs_ramp->base, lhs_broadcast->value);
+        return tirx::Add(rhs_ramp->base, lhs_broadcast->value);
       }
     }
     return PrimExpr();
@@ -496,7 +498,7 @@ private:
     PrimExpr src_access_ptr =
         MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
 
-    ffi::Array<PrimExpr> cp_async_args;
+    Array<PrimExpr> cp_async_args;
     if (predicated) {
       cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems),
                        predicate_value};
@@ -628,8 +630,10 @@ private:
       out.is_pure_copy_region = false;
       return out;
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return AnalyzeCopyRegion(let->body);
+    if (stmt.as<BindNode>()) {
+      CopyRegionAnalysis out;
+      out.is_pure_copy_region = false;
+      return out;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       return AnalyzeCopyRegion(attr->body);
@@ -637,7 +641,7 @@ private:
     if (const auto *loop = stmt.as<ForNode>()) {
       return AnalyzeCopyRegion(loop->body);
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
+    if (const auto *block = stmt.as<SBlockNode>()) {
       if (block->init.defined()) {
         out = MergeCopyRegionAnalysis(out,
                                       AnalyzeCopyRegion(block->init.value()));
@@ -645,11 +649,11 @@ private:
       out = MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(block->body));
       return out;
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
       // Treat the predicate as pure control flow (no side effects). We only
       // care whether the realized body is a pure copy region so we can hoist
       // the final commit+wait out of sequential loop nests.
-      const BlockNode *block = realize->block.get();
+      const SBlockNode *block = realize->block.get();
       if (block->init.defined()) {
         out = MergeCopyRegionAnalysis(out,
                                       AnalyzeCopyRegion(block->init.value()));
@@ -696,7 +700,7 @@ private:
   bool uncommitted_sync_copies_{false};
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 PTXAsyncCopyInjectResult
 InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
@@ -737,7 +741,7 @@ tvm::transform::Pass LowerPTXAsyncCopy() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerPTXAsyncCopy", LowerPTXAsyncCopy);
 }
 

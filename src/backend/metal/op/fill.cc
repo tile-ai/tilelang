@@ -4,6 +4,7 @@
  */
 
 #include "op/fill.h"
+#include <tvm/runtime/logging.h>
 
 #include "op/utils.h"
 #include "target/utils.h"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tilelang
 from tilelang import tvm as tvm
-from tvm.tir import PrimFunc
+from tvm.tirx import PrimFunc
 from tvm.target import Target
 from typing import Literal, Any
 from collections.abc import Callable
@@ -466,7 +466,7 @@ class AutotuneResult:
         from tilelang.utils.target import determine_target as _determine_target
         from tilelang.jit.execution_backend import resolve_execution_backend
 
-        norm_target = Target(_determine_target(compile_args.target)) if isinstance(compile_args.target, str) else compile_args.target
+        norm_target = _determine_target(compile_args.target, return_object=True)
         requested_backend = compile_args.execution_backend
         resolved_backend = resolve_execution_backend(requested_backend, norm_target)
         # load best config

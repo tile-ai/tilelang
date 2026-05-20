@@ -20,4 +20,4 @@
 
 import tvm.ffi
 
-tvm.ffi._init_api("script.ir_builder.tir", __name__)  # pylint: disable=protected-access
+tvm.ffi._init_api("script.ir_builder.tirx", __name__)  # pylint: disable=protected-access
