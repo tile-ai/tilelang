@@ -52,6 +52,7 @@ public:
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
+  void VisitStmt_(const BufferStoreNode *op) final;
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const PrimFunc &f);
@@ -82,6 +83,10 @@ private:
   bool need_wmma_h_{false};
   // whether need fp8.h
   bool enable_fp8_{false};
+  // whether need hip_fp4.h (gfx950 only)
+  bool enable_fp4_{false};
+  // Map from FP4 buffer VarNode* to packed buffer variable name (gfx950)
+  std::unordered_map<const tir::VarNode *, std::string> fp4_packed_buffers_;
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // whether need mma.h
