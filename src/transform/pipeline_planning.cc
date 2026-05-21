@@ -290,8 +290,8 @@ private:
         is_global_copy_pattern_ = true;
       }
     }
-    // Conv2D im2col always uses TMA on Hopper.
-    if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+    // Im2Col always uses TMA on Hopper.
+    if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
       if (IsGlobalLikeBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
         is_global_copy_pattern_ = true;
         if (TargetIsHopper(target_)) {
@@ -724,7 +724,7 @@ private:
         }
         return;
       }
-      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
         saw_copy = true;
       } else {
         saw_non_copy_tile_op = true;
@@ -752,7 +752,7 @@ private:
       if (tile_op.as<RegionOpNode>()) {
         return;
       }
-      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
         if (copy_tile_op.defined()) {
           saw_multiple_copy_ops = true;
           copy_tile_op = Optional<TileOperator>();
@@ -805,7 +805,7 @@ private:
       return;
     }
 
-    if (const auto *im2col = copy_tile_op.value().as<Conv2DIm2ColOpNode>()) {
+    if (const auto *im2col = copy_tile_op.value().as<Im2ColOpNode>()) {
       if (!IsGlobalLikeBuffer(im2col->src_) || !IsSharedBuffer(im2col->dst_)) {
         return;
       }

@@ -114,32 +114,132 @@ Stmt LowerCopyForTarget(const CopyNode &op, const LowerArgs &T,
   return ResolveCopyImpl(T.target).lower(op, T, analyzer);
 }
 
-std::vector<Conv2DIm2ColImpl> &Conv2DIm2ColImplRegistry() {
-  static std::vector<Conv2DIm2ColImpl> registry;
+std::vector<Im2ColImpl> &Im2ColImplRegistry() {
+  static std::vector<Im2ColImpl> registry;
   return registry;
 }
 
-const Conv2DIm2ColImpl &ResolveConv2DIm2ColImpl(Target target) {
-  const auto &registry = Conv2DIm2ColImplRegistry();
-  const Conv2DIm2ColImpl *best_impl = nullptr;
+const Im2ColImpl &ResolveIm2ColImpl(Target target) {
+  const auto &registry = Im2ColImplRegistry();
+  const Im2ColImpl *best_impl = nullptr;
   int best_priority = std::numeric_limits<int>::min();
-  for (const Conv2DIm2ColImpl &impl : registry) {
+  for (const Im2ColImpl &impl : registry) {
     if (impl.match_target(target) && impl.priority >= best_priority) {
       best_impl = &impl;
       best_priority = impl.priority;
     }
   }
   ICHECK(best_impl != nullptr)
-      << "Conv2D im2col requires a target-specific implementation, but no "
+      << "Im2Col requires a target-specific implementation, but no "
          "implementation is registered for "
       << target->str();
   return *best_impl;
 }
 
-Stmt LowerConv2DIm2ColForTarget(const Conv2DIm2ColOpNode &op,
-                                const LowerArgs &T, arith::Analyzer *analyzer) {
-  return ResolveConv2DIm2ColImpl(T.target).lower(op, T, analyzer);
+Stmt LowerIm2ColForTarget(const Im2ColOpNode &op, const LowerArgs &T,
+                          arith::Analyzer *analyzer) {
+  return ResolveIm2ColImpl(T.target).lower(op, T, analyzer);
 }
+
+bool MatchAnyIm2ColTarget(Target /*target*/) { return true; }
+
+Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &T,
+                     arith::Analyzer *analyzer) {
+  const Buffer &src = op.src_;
+  const Buffer &dst = op.dst_;
+  const BufferRegion &dst_region = op.dstRegion_;
+
+  ICHECK(src->shape.size() == 4);
+  ICHECK(src->dtype == dst->dtype);
+
+  size_t ndim = dst_region->region.size();
+  ICHECK(ndim >= 2) << "im2col dstRegion must have at least 2 dims";
+
+  PrimExpr block_m = dst_region->region[ndim - 2]->extent;
+  PrimExpr block_k = dst_region->region[ndim - 1]->extent;
+  Var i("i", block_m.dtype());
+  Var j("j", block_k.dtype());
+  analyzer->Bind(i, Range::FromMinExtent(make_zero(i.dtype()), block_m));
+  analyzer->Bind(j, Range::FromMinExtent(make_zero(j.dtype()), block_k));
+
+  PrimExpr h_dim = src->shape[1];
+  PrimExpr w_dim = src->shape[2];
+  PrimExpr c_dim = src->shape[3];
+  PrimExpr out_h =
+      FloorDiv(h_dim + 2 * op.padding_ - (op.kernel_ - 1) * op.dilation_ - 1,
+               op.stride_) +
+      1;
+  PrimExpr out_w =
+      FloorDiv(w_dim + 2 * op.padding_ - (op.kernel_ - 1) * op.dilation_ - 1,
+               op.stride_) +
+      1;
+  PrimExpr out_hw = out_h * out_w;
+
+  PrimExpr k = op.c_step_ * block_k + j;
+  PrimExpr m = op.nhw_step_ * block_m + i;
+  PrimExpr access_h = FloorDiv(FloorMod(m, out_hw), out_w) * op.stride_ +
+                      FloorDiv(k, op.kernel_ * c_dim) * op.dilation_ -
+                      op.padding_;
+  PrimExpr access_w = FloorMod(m, out_w) * op.stride_ +
+                      FloorMod(FloorDiv(k, c_dim), op.kernel_) * op.dilation_ -
+                      op.padding_;
+
+  PrimExpr in_bound = And(And(access_h >= make_zero(access_h.dtype()),
+                              access_w >= make_zero(access_w.dtype())),
+                          And(access_h < h_dim, access_w < w_dim));
+
+  PrimExpr value = BufferLoad(
+      src, {FloorDiv(m, out_hw), access_h, access_w, FloorMod(k, c_dim)});
+  value = if_then_else(in_bound, value, make_zero(dst->dtype));
+
+  Array<PrimExpr> dst_indices;
+  dst_indices.reserve(ndim);
+  for (size_t dim = 0; dim < ndim; ++dim) {
+    const Range &range = dst_region->region[dim];
+    if (dim == ndim - 2) {
+      dst_indices.push_back(range->min + i);
+    } else if (dim == ndim - 1) {
+      dst_indices.push_back(range->min + j);
+    } else {
+      dst_indices.push_back(range->min);
+    }
+  }
+
+  Stmt body = BufferStore(dst, value, dst_indices);
+  body = For(j, make_zero(j.dtype()), block_k, ForKind::kParallel, body);
+  body = For(i, make_zero(i.dtype()), block_m, ForKind::kParallel, body);
+
+  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(Downcast<For>(body)));
+  auto par_op = ParallelOp(fused_loop);
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  for (auto level : levels) {
+    par_op->InferLayout({T.target,
+                         T.thread_bounds,
+                         T.layout_map,
+                         analyzer,
+                         false,
+                         T.buffer_remap,
+                         {}},
+                        level);
+  }
+  auto loop_layout = par_op->GetLoopLayout();
+  return LowerParallelLoop(par_op->GetRoot(), loop_layout, T.thread_var,
+                           analyzer, T.layout_map,
+                           par_op->GetPredicate(T.thread_var));
+}
+
+bool RegisterDefaultIm2Col() {
+  RegisterIm2ColImpl(Im2ColImpl{
+      "default.Im2Col",
+      MatchAnyIm2ColTarget,
+      0,
+      LowerIm2ColSIMT,
+  });
+  return true;
+}
+
+const bool default_im2col_registered = RegisterDefaultIm2Col();
 
 } // namespace
 
@@ -151,11 +251,11 @@ void RegisterCopyImpl(CopyImpl impl) {
   CopyImplRegistry().push_back(impl);
 }
 
-void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl) {
+void RegisterIm2ColImpl(Im2ColImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
   ICHECK(impl.lower != nullptr);
-  Conv2DIm2ColImplRegistry().push_back(impl);
+  Im2ColImplRegistry().push_back(impl);
 }
 
 // Constructs a Copy operator node from call arguments and annotations.
@@ -420,12 +520,11 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return LowerCopyForTarget(*this, T, analyzer);
 }
 
-// Constructs a Conv2DIm2ColOp node from call arguments.
+// Constructs an Im2ColOp node from call arguments.
 // args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
 // eviction_policy
-Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args,
-                               Map<String, ObjectRef> annotations) {
-  ObjectPtr<Conv2DIm2ColOpNode> node = make_object<Conv2DIm2ColOpNode>();
+Im2ColOp::Im2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ObjectPtr<Im2ColOpNode> node = make_object<Im2ColOpNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
   node->srcRegion_ = src_access.region;
@@ -444,15 +543,14 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args,
   data_ = std::move(node);
 }
 
-// Creates a shallow copy of this Conv2DIm2ColOpNode.
-TileOperator Conv2DIm2ColOpNode::Clone() const {
-  auto op = make_object<Conv2DIm2ColOpNode>(*this);
-  return Conv2DIm2ColOp(op);
+// Creates a shallow copy of this Im2ColOpNode.
+TileOperator Im2ColOpNode::Clone() const {
+  auto op = make_object<Im2ColOpNode>(*this);
+  return Im2ColOp(op);
 }
 
-Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
-                               arith::Analyzer *analyzer) const {
-  return LowerConv2DIm2ColForTarget(*this, T, analyzer);
+Stmt Im2ColOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  return LowerIm2ColForTarget(*this, T, analyzer);
 }
 
 // Register the Copy operation with TVM's TIR system
@@ -495,25 +593,38 @@ TVM_REGISTER_OP("tl.tileop.tma_copy")
                                Integer(CallEffectKind::kOpaque));
 
 // Layout inference hook - returns empty map (no layout suggestions).
-LayoutMap Conv2DIm2ColOpNode::InferLayout(const LayoutInferArgs &T,
-                                          InferLevel level) const {
+LayoutMap Im2ColOpNode::InferLayout(const LayoutInferArgs &T,
+                                    InferLevel level) const {
   return {};
 }
 
-// Register the Conv2DIm2Col operation with TVM's TIR system
+// Register the Im2Col operation with TVM's TIR system
 // This operation performs im2col transformation for 2D convolutions using a
 // target-specific lowering.
 // - Takes 9 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride,
 // dilation, padding, eviction_policy
 // - Marked as opaque since it has side effects (memory writes)
-TIR_REGISTER_TL_TILE_OP(Conv2DIm2ColOp, c2d_im2col)
+TIR_REGISTER_TL_TILE_OP(Im2ColOp, im2col)
+    .set_num_inputs(9)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+// Deprecated compatibility alias. Prefer tl.tileop.im2col; this alias is
+// scheduled for removal in TileLang 0.14.0.
+TVM_REGISTER_OP("tl.tileop.c2d_im2col")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "c2d_im2col")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               return Im2ColOp(args, annotations);
+                             })
     .set_num_inputs(9)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   CopyNode::RegisterReflection();
-  Conv2DIm2ColOpNode::RegisterReflection();
+  Im2ColOpNode::RegisterReflection();
 }
 } // namespace tl
 } // namespace tvm

@@ -55,7 +55,18 @@ from .allocate import (
     empty,  # noqa: F401
 )
 from tvm.tirx.script.builder.ir import alloc_buffer as allocate  # noqa: F401
-from .copy_op import copy, async_copy, tma_copy, tma_gather4, tma_gather4_bytes, tma_scatter4, transpose, c2d_im2col, copy_cluster  # noqa: F401
+from .copy_op import (  # noqa: F401
+    copy,
+    async_copy,
+    tma_copy,
+    tma_gather4,
+    tma_gather4_bytes,
+    tma_scatter4,
+    transpose,
+    im2col,
+    c2d_im2col,
+    copy_cluster,
+)
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
 from .gemm_op import (  # noqa: F401
     gemm,

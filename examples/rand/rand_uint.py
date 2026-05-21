@@ -11,18 +11,18 @@ def tilelang_rand_1d(M=1024, seed=42):
     threads = 1
     blk_M = num_per_thread * threads
 
-    @T.prim_func
-    def rand_kernel(A: T.Tensor((M,), "uint32")):
-        with T.Kernel(T.ceildiv(M, threads * num_per_thread), threads=threads) as bx:
-            tx = T.get_thread_binding()
-            T.rng_init(seed, 0, bx * blk_M + tx * num_per_thread)
-            for i, j in T.Parallel(threads, num_per_thread):
-                offsets = (bx * threads + i) * num_per_thread
-                idx = offsets + j
-                if idx < M:
-                    A[idx] = T.rng_rand()
+    A = T.empty((M,), "uint32")
 
-    return rand_kernel
+    with T.Kernel(T.ceildiv(M, threads * num_per_thread), threads=threads) as bx:
+        tx = T.get_thread_binding()
+        T.rng_init(seed, 0, bx * blk_M + tx * num_per_thread)
+        for i, j in T.Parallel(threads, num_per_thread):
+            offsets = (bx * threads + i) * num_per_thread
+            idx = offsets + j
+            if idx < M:
+                A[idx] = T.rng_rand()
+
+    return A
 
 
 @triton.jit
@@ -40,9 +40,7 @@ def triton_rand_1d(X, M, elements_per_thread, seed):
 
 
 def test_rand_1d(M, seed):
-    kernel = tilelang_rand_1d(M, seed)
-    tilelang_result = torch.empty(M, dtype=torch.uint32, device="cuda")
-    kernel(tilelang_result)
+    tilelang_result = tilelang_rand_1d(M, seed)
 
     triton_result = torch.empty(M, dtype=torch.uint32, device="cuda")
     grid = (triton.cdiv(M, 128),)

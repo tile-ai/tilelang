@@ -472,7 +472,7 @@ private:
   bool IsMbarPhaseConsumer(const Call &call) const {
     auto tile_op = ParseOperator(call);
     return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
-                                 tile_op.as<Conv2DIm2ColOpNode>() != nullptr ||
+                                 tile_op.as<Im2ColOpNode>() != nullptr ||
                                  tile_op.as<GemmNode>() != nullptr);
   }
 
@@ -2620,7 +2620,8 @@ public:
   PrimExpr VisitExpr_(const CallNode *op) final {
     static const Op &copy_op = Op::Get("tl.tileop.copy");
     static const Op &tma_copy_op = Op::Get("tl.tileop.tma_copy");
-    static const Op &im2col_op = Op::Get("tl.tileop.c2d_im2col");
+    static const Op &im2col_op = Op::Get("tl.tileop.im2col");
+    static const Op &deprecated_c2d_im2col_op = Op::Get("tl.tileop.c2d_im2col");
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(copy_op)) {
       auto new_annotations = call->annotations;
@@ -2631,9 +2632,10 @@ public:
       return Call(call->dtype, tma_copy_op, call->args, new_annotations,
                   call->span);
     }
-    // Annotate c2d_im2col with pipeline barrier so its Lower() uses it
+    // Annotate im2col with pipeline barrier so its Lower() uses it
     // instead of allocating a separate internal barrier.
-    if (call->op.same_as(im2col_op)) {
+    if (call->op.same_as(im2col_op) ||
+        call->op.same_as(deprecated_c2d_im2col_op)) {
       auto new_annotations = call->annotations;
       new_annotations.Set("barrier", MakeBarrierRef(barrier_buf_, barrier_id_));
       new_annotations.Set("emit_arrive",
