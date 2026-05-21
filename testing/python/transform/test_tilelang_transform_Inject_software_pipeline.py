@@ -532,6 +532,19 @@ def _collect_leading_bind_names(mod, block_names):
     return leading_binds
 
 
+def _collect_direct_bind_names(mod):
+    names = []
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.SBlock):
+            return
+        if isinstance(node.body, tvm.tirx.Bind):
+            names.append(str(node.body.var.name))
+
+    post_order_visit(mod["main"].body, _visit)
+    return names
+
+
 def test_inject_software_pipeline_replays_scalar_bind_without_annotation_slot():
     @T.prim_func
     def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
@@ -568,6 +581,89 @@ def test_inject_software_pipeline_replays_scalar_bind_without_annotation_slot():
     assert all(names[0].startswith("base") for names in leading_binds["copy"])
     assert all(names[0].startswith("base") for names in leading_binds["store"])
     assert "base = T.int32()" not in mod["main"].script()
+
+
+def test_inject_software_pipeline_replays_readonly_bufferload_bind():
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        Ids: T.Tensor((4,), T.int32),
+        B: T.Tensor((128,), T.float32),
+    ):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [1, 0],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 0],
+                    "software_pipeline_async_producer_groups": [0, -1],
+                },
+            ):
+                idx: T.int32 = Ids[i] * 16
+                with T.sblock("copy"):
+                    T.reads(A[idx + tx])
+                    T.writes(shared[tx])
+                    shared[tx] = A[idx + tx]
+                with T.sblock("store"):
+                    T.reads(shared[tx])
+                    T.writes(B[idx + tx])
+                    B[idx + tx] = shared[tx]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
+
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    assert all(names[0].startswith("idx") for names in leading_binds["copy"])
+    assert all(names[0].startswith("idx") for names in leading_binds["store"])
+    assert "idx = T.int32()" not in mod["main"].script()
+
+
+def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer():
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
+        for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+            for i in T.serial(
+                0,
+                4,
+                annotations={
+                    "software_pipeline_stage": [0, 1, 1],
+                    "software_pipeline_order": [0, 1, 2],
+                    "software_pipeline_async_stages": [0],
+                    "software_pipeline_async_producers": [1, 0, 0],
+                    "software_pipeline_async_producer_groups": [0, -1, -1],
+                },
+            ):
+                base: T.int32 = i * 16
+                with T.sblock("copy"):
+                    T.reads(A[base + tx])
+                    T.writes(shared[tx])
+                    shared[tx] = A[base + tx]
+                value: T.float32 = shared[tx]
+                with T.sblock("store"):
+                    T.reads()
+                    T.writes(B[base + tx])
+                    B[base + tx] = value
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+
+    leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
+    direct_binds = _collect_direct_bind_names(mod)
+
+    assert leading_binds["copy"]
+    assert leading_binds["store"]
+    assert all(names[0].startswith("base") for names in leading_binds["copy"])
+    assert all(names[0].startswith("base") for names in leading_binds["store"])
+    assert any(name.startswith("value") for name in direct_binds)
+    assert all(not any(name.startswith("value") for name in names) for names in leading_binds["store"])
 
 
 def test_inject_software_pipeline_ignores_legacy_scalar_bind_annotation_slot():

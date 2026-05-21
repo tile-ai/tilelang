@@ -147,9 +147,9 @@ def Pipelined(
 
     Notes
     -----
-    Scalar ``Bind`` statements created by local aliases are not scheduled
-    pipeline operations and should not consume entries in ``order`` or
-    ``stage``. For example, in the body below only the copy and store need
+    Replayable scalar ``Bind`` statements created by local aliases are not
+    scheduled pipeline operations and should not consume entries in ``order``
+    or ``stage``. For example, in the body below only the copy and store need
     annotation entries; ``base`` is replayed automatically at each use:
 
     .. code-block:: python
@@ -159,11 +159,18 @@ def Pipelined(
             T.copy(A[base], shared)
             T.copy(shared, B[base])
 
-    Older code that included scalar ``Bind`` entries in ``order``/``stage`` is
-    accepted for compatibility, but those entries are ignored by the pipeline
-    passes. New code should annotate only the scheduled statements. Avoid
-    setting ``num_stages`` together with manual ``order``/``stage`` unless you
-    intentionally need an explicit depth override.
+    A replayable ``Bind`` may also read a buffer that is not written by the
+    pipeline body, such as ``idx = Ids[i]``. If a ``Bind`` reads a buffer that
+    is written inside the same pipeline body, it is kept as a scheduled
+    statement because the load has a pipeline dependency and cannot be freely
+    replayed.
+
+    Older code that included replayable scalar ``Bind`` entries in
+    ``order``/``stage`` is accepted for compatibility, but those entries are
+    ignored by the pipeline passes. New code should annotate only the scheduled
+    statements. Avoid setting ``num_stages`` together with manual
+    ``order``/``stage`` unless you intentionally need an explicit depth
+    override.
     Returns
     -------
     res : frame.ForFrame

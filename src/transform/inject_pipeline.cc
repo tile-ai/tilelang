@@ -64,8 +64,27 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
   return false;
 }
 
-bool IsScalarBindBlock(const SBlock &block) {
-  return block->body.as<BindNode>() != nullptr;
+bool IsReplayableScalarBindBlock(const SBlock &block,
+                                 const BufferSet &pipeline_write_buffers) {
+  if (block->body.as<BindNode>() == nullptr) {
+    return false;
+  }
+  for (const BufferRegion &read : block->reads) {
+    if (pipeline_write_buffers.count(read->buffer)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+BufferSet CollectPipelineWriteBuffers(const Array<SBlock> &blocks) {
+  BufferSet write_buffers;
+  for (const SBlock &block : blocks) {
+    for (const BufferRegion &write : block->writes) {
+      write_buffers.insert(write->buffer);
+    }
+  }
+  return write_buffers;
 }
 
 bool GetIsTmaCopy(const CopyNode &op) {
@@ -682,7 +701,8 @@ public:
    * blocks and should not be re-allocated.
    * \param pipeline_loop The original loop to be software pipelined.
    * \param pipeline_info The pipeline annotation information.
-   * \param scalar_binding_blocks Scalar Bind statements from the pipeline body.
+   * \param scalar_binding_blocks Replayable scalar Bind statements from the
+   * pipeline body.
    * \param loop_var_if_wrappers If wrappers with conditions that depend on
    * the loop var.
    */
@@ -2364,9 +2384,6 @@ private:
     BufferCommitGroupMap buffer_to_commit_group;
 
     for (const SBlock &block : ordered_stmts_) {
-      if (block->body.as<BindNode>()) {
-        continue;
-      }
       const auto &pipeline_anno = pipeline_info_.at(block);
       int stage = pipeline_anno.stage;
       PrimExpr inbound = Bool(true);
@@ -3101,6 +3118,42 @@ private:
     }
   }
 
+  void ValidateScheduledBindDependencies(const PipelineInfo &pipeline_info,
+                                         const Array<SBlock> &scheduled_order) {
+    std::unordered_map<Var, SBlock, ObjectPtrHash, ObjectPtrEqual>
+        bind_producers;
+    for (const SBlock &block : scheduled_order) {
+      if (const auto *bind = block->body.as<BindNode>()) {
+        bind_producers.emplace(bind->var, block);
+      }
+    }
+    if (bind_producers.empty()) {
+      return;
+    }
+
+    for (const SBlock &consumer : scheduled_order) {
+      Array<Var> undefined_vars = UndefinedVars(consumer->body, Array<Var>{});
+      for (const Var &var : undefined_vars) {
+        auto it = bind_producers.find(var);
+        if (it == bind_producers.end() || it->second.same_as(consumer)) {
+          continue;
+        }
+
+        const PipelineAnnotation &producer_info = pipeline_info.at(it->second);
+        const PipelineAnnotation &consumer_info = pipeline_info.at(consumer);
+        ICHECK_EQ(producer_info.stage, consumer_info.stage)
+            << "ValueError: scheduled scalar Bind '" << var
+            << "' is used from a different pipeline stage. Scalar Bind "
+               "statements that cannot be replayed must be scheduled in the "
+               "same stage as their consumers.";
+        ICHECK_LT(producer_info.order, consumer_info.order)
+            << "ValueError: scheduled scalar Bind '" << var
+            << "' must be ordered before every consumer in the same pipeline "
+               "stage.";
+      }
+    }
+  }
+
   bool HasOverlappableStages(const PipelineInfo &pipeline_info) const {
     std::optional<int> first_stage;
     for (const auto &pair : pipeline_info) {
@@ -3370,10 +3423,17 @@ private:
     BufferUsageCollector collector(buffer_data_to_buffer_, allocated_buffers_);
     pipeline_allocs = collector.Collect(SeqStmt(pipeline_body_stmts));
 
+    BufferSet pipeline_write_buffers =
+        CollectPipelineWriteBuffers(original_order);
     Array<SBlock> scalar_binding_blocks;
     Array<SBlock> scheduled_order;
+    std::vector<char> is_replayable_bind;
+    is_replayable_bind.reserve(original_order.size());
     for (const SBlock &block : original_order) {
-      if (IsScalarBindBlock(block)) {
+      bool replayable =
+          IsReplayableScalarBindBlock(block, pipeline_write_buffers);
+      is_replayable_bind.push_back(replayable ? 1 : 0);
+      if (replayable) {
         scalar_binding_blocks.push_back(block);
       } else {
         scheduled_order.push_back(block);
@@ -3381,7 +3441,7 @@ private:
     }
     ICHECK(!scheduled_order.empty())
         << "ValueError: The body of the software pipeline has no schedulable "
-           "statements after removing scalar Bind statements";
+           "statements after removing replayable scalar Bind statements";
 
     auto pipeline_stages = Downcast<Array<Integer>>(
         op->annotations.at(s_tir::attr::software_pipeline_stage));
@@ -3393,11 +3453,11 @@ private:
         << " and software_pipeline_order annotation " << pipeline_orders
         << " with different sizes";
 
-    bool annotations_include_scalar_binds = false;
+    bool annotations_include_replayable_binds = false;
     if (pipeline_stages.size() == scheduled_order.size()) {
-      annotations_include_scalar_binds = false;
+      annotations_include_replayable_binds = false;
     } else if (pipeline_stages.size() == original_order.size()) {
-      annotations_include_scalar_binds = true;
+      annotations_include_replayable_binds = true;
     } else {
       LOG(FATAL) << "PrimFunc " << global_symbol_
                  << " has schedulable pipeline order "
@@ -3412,10 +3472,10 @@ private:
 
     std::vector<size_t> scheduled_annotation_indices;
     scheduled_annotation_indices.reserve(scheduled_order.size());
-    if (annotations_include_scalar_binds) {
+    if (annotations_include_replayable_binds) {
       size_t scheduled_index = 0;
       for (size_t i = 0; i < original_order.size(); ++i) {
-        if (IsScalarBindBlock(original_order[i])) {
+        if (is_replayable_bind[i]) {
           continue;
         }
         ICHECK(scheduled_index < scheduled_order.size());
@@ -3429,7 +3489,7 @@ private:
       }
     }
 
-    auto expected_annotation_size = annotations_include_scalar_binds
+    auto expected_annotation_size = annotations_include_replayable_binds
                                         ? original_order.size()
                                         : scheduled_order.size();
 
@@ -3493,7 +3553,7 @@ private:
       pipeline_info.emplace(scheduled_order[i], stage_order);
     }
 
-    if (annotations_include_scalar_binds) {
+    if (annotations_include_replayable_binds) {
       for (const SBlock &binding_block : scalar_binding_blocks) {
         const auto *bind = binding_block->body.as<BindNode>();
         ICHECK(bind != nullptr);
@@ -3532,6 +3592,7 @@ private:
       }
     }
 
+    ValidateScheduledBindDependencies(pipeline_info, scheduled_order);
     ValidatePipelineBody(pipeline_info, scheduled_order);
 
     if (!HasOverlappableStages(pipeline_info)) {

@@ -13,8 +13,8 @@ for ko in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
 
 For kernels whose loop body has unusual ordering, extra post-processing, or
 manual async-copy grouping, you can provide explicit pipeline annotations. This
-guide explains how to write those annotations and why scalar `Bind` statements
-are not part of the user-visible schedule.
+guide explains how to write those annotations and why replayable scalar `Bind`
+statements are not part of the user-visible schedule.
 
 ## The User Model
 
@@ -31,15 +31,15 @@ Annotate the statements that do work:
 - explicit waits, commits, or synchronization statements when they are part of
   the manual pipeline
 
-Do not annotate scalar aliases:
+Do not annotate replayable scalar aliases:
 
 ```python
 base: T.int32 = ko * BK
 offset: T.int32 = base + tx
 ```
 
-These scalar `Bind` statements are pure value definitions. The compiler places
-them automatically at each use.
+These `Bind` statements are value definitions, not materialized storage. The
+compiler places them automatically at each use.
 
 ## Stage and Order
 
@@ -113,9 +113,9 @@ order still determines which annotation entry belongs to which scheduled
 statement; `order` controls the emission order after the statements have been
 classified.
 
-## Scalar Bind Statements
+## Replayable Scalar Bind Statements
 
-A scalar `Bind` may appear as a statement in the loop body:
+A replayable scalar `Bind` may appear as a statement in the loop body:
 
 ```python
 for ko in T.Pipelined(
@@ -129,9 +129,9 @@ for ko in T.Pipelined(
 ```
 
 The `stage` and `order` arrays contain two entries, not three. They annotate the
-copy and the GEMM. The scalar `base` definition is intentionally omitted.
+copy and the GEMM. The `base` definition is intentionally omitted.
 
-This rule matters because a scalar `Bind` does not have a unique pipeline
+This rule matters because a replayable `Bind` does not have a unique pipeline
 position. It is closer to an SSA value or a local alias than to an executable
 operation. If the same scalar is used by statements in different stages, each
 consumer may need the value under a different logical pipeline iteration.
@@ -154,20 +154,62 @@ iteration while the store needs `base` for the current consumer iteration. A
 single user-selected stage/order for `base` would either be out of scope or
 would describe the wrong logical iteration for one of the uses.
 
-TileLang therefore treats scalar `Bind` as non-schedulable:
+TileLang therefore treats replayable scalar `Bind` as non-schedulable:
 
 ```text
 stage/order annotate only scheduled, effectful statements
-scalar Bind definitions are replayed at each consumer
+replayable Bind definitions are replayed at each consumer
 ```
 
 The replay is use-driven. If a consumer statement references a scalar bound in
 the pipeline body, the compiler recreates the needed `Bind` immediately before
 that consumer and substitutes the consumer's logical access index.
 
+A replayable scalar `Bind` may contain a read from a buffer that is not written
+inside the pipeline body:
+
+```python
+idx: T.int32 = Ids[ko]
+T.copy(A[idx], A_shared)
+B[idx] = A_shared[0]
+```
+
+Here `idx` is still a value alias. If both scheduled statements use it, TileLang
+replays `idx = Ids[logical_ko]` for each consumer. This may duplicate the load
+from `Ids`, but it preserves the alias semantics of `Bind`: the value is
+computed at the consumer's logical pipeline iteration.
+
+This is different from a materialized producer:
+
+```python
+idx_shared[tx] = Ids[ko]
+T.copy(A[idx_shared[tx]], A_shared)
+B[idx_shared[tx]] = A_shared[0]
+```
+
+The store to `idx_shared` creates storage and a real producer/consumer
+dependency. It should be counted as a scheduled statement and, when needed,
+versioned like other pipeline buffers.
+
+If a `Bind` reads a buffer that is written inside the same pipeline body, it is
+not treated as replayable:
+
+```python
+T.copy(A[ko * BK], A_shared)
+value: T.float32 = A_shared[tx]
+C[ko * BK + tx] = value
+```
+
+The load from `A_shared` depends on a pipeline producer. TileLang keeps this
+`Bind` in the scheduled statement list, so it needs a `stage` and `order` entry.
+Because a scalar `Bind` has no storage versioning, a scheduled `Bind` must be in
+the same stage as every consumer that uses its value. If the intended semantics
+are "load once and share across later stages", materialize the value explicitly
+with a buffer/register write instead of relying on `Bind` replay.
+
 ## Bind Dependencies
 
-Scalar binds can depend on earlier scalar binds:
+Replayable binds can depend on earlier replayable binds:
 
 ```python
 base: T.int32 = ko * BK
@@ -188,7 +230,8 @@ preserving the lexical scalar dependencies from the original loop body.
 
 ## Legacy Annotation Form
 
-Older code may include scalar `Bind` statements in the annotation arrays:
+Older code may include replayable scalar `Bind` statements in the annotation
+arrays:
 
 ```python
 for ko in T.Pipelined(
@@ -210,10 +253,10 @@ copy      -> stage 0, order 2
 store     -> stage 1, order 0
 ```
 
-When a legacy scalar `Bind` annotation is used by multiple scheduled statements,
-TileLang may warn that the scalar annotation is ignored and the bind is replayed
-at each use. New code should prefer the shorter annotation arrays that omit
-scalar binds entirely.
+When a legacy replayable scalar `Bind` annotation is used by multiple scheduled
+statements, TileLang may warn that the scalar annotation is ignored and the bind
+is replayed at each use. New code should prefer the shorter annotation arrays
+that omit replayable scalar binds entirely.
 
 ## Manual `T.serial` Annotations
 
@@ -236,8 +279,8 @@ for ko in T.serial(
 ```
 
 The same rule applies: `software_pipeline_stage` and
-`software_pipeline_order` describe only scheduled statements. Scalar `Bind`
-statements do not need entries.
+`software_pipeline_order` describe only scheduled statements. Replayable scalar
+`Bind` statements do not need entries.
 
 ## Design Rationale
 
@@ -245,7 +288,7 @@ The pipeline pass separates the loop body into two concepts:
 
 ```text
 scheduled statements: executable operations controlled by stage/order
-scalar bindings: pure local definitions placed by use-def analysis
+replayable scalar bindings: local value aliases placed by use-def analysis
 ```
 
 This split keeps the API stable for users and avoids ambiguous schedules. A
@@ -253,7 +296,7 @@ real pipeline operation has a clear execution point, can read or write buffers,
 and may require async-copy bookkeeping or synchronization. It is appropriate for
 the user to assign a stage and order to that operation.
 
-A scalar `Bind` has none of those properties:
+A replayable scalar `Bind` has none of those properties:
 
 - It has no side effect.
 - It owns no buffer storage.
@@ -262,7 +305,7 @@ A scalar `Bind` has none of those properties:
 
 Forcing users to annotate such a statement would require them to choose one
 stage/order even when there is no single correct answer. Replaying scalar binds
-at each consumer makes the intended semantics explicit in the generated IR and
+at each consumer makes the alias semantics explicit in the generated IR and
 keeps the user-facing schedule focused on real pipeline work.
 
 ## Checklist
@@ -270,11 +313,14 @@ keeps the user-facing schedule focused on real pipeline work.
 When writing manual pipeline annotations:
 
 - Count only scheduled statements when building `stage` and `order`.
-- Omit scalar aliases such as `base = ko * BK`.
+- Omit replayable scalar aliases such as `base = ko * BK` or
+  `idx = Ids[ko]` when `Ids` is not written in the pipeline.
+- Count a `Bind` as a scheduled statement if it reads a buffer written inside
+  the pipeline body.
 - Keep each scheduled statement's `order` unique.
 - Keep producers before consumers according to stage/order dependency rules.
 - Use `software_pipeline_async_producers` and
   `software_pipeline_async_producer_groups` with the same length as the
   scheduled statement list.
-- Prefer the bind-free form for new code; rely on legacy bind slots only when
-  maintaining old kernels.
+- Prefer the bind-free form for replayable aliases in new code; rely on legacy
+  bind slots only when maintaining old kernels.
