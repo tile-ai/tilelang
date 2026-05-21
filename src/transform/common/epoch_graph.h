@@ -41,11 +41,11 @@
 #include <utility>
 #include <vector>
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm::tl::epoch_graph {
 
@@ -135,8 +135,8 @@ struct SyncEpoch {
   SyncKind kind_in = SyncKind::kNone;
   SyncKind kind_out = SyncKind::kNone;
   /*! \brief First / last leaf stmt observed in this epoch (may be null). */
-  const tir::StmtNode *span_lo = nullptr;
-  const tir::StmtNode *span_hi = nullptr;
+  const tirx::StmtNode *span_lo = nullptr;
+  const tirx::StmtNode *span_hi = nullptr;
   /*! \brief Edge ids in EpochGraph::edges. */
   std::vector<int> in_edges;
   std::vector<int> out_edges;
@@ -156,7 +156,7 @@ struct Scope {
   int parent_scope_id = -1;
   ScopeKind kind = ScopeKind::kRoot;
   /*! \brief Anchor stmt: ForNode for kForBody, IfThenElseNode for branches. */
-  const tir::StmtNode *anchor = nullptr;
+  const tirx::StmtNode *anchor = nullptr;
   /*! \brief Ordered list of epoch ids in this scope. */
   std::vector<int> epoch_ids;
 };
@@ -234,9 +234,9 @@ struct EpochGraph {
  *   EpochGraphBuilder builder;
  *   EpochGraph g = builder.Build(stmt);
  */
-class EpochGraphBuilder : public tir::StmtVisitor {
+class EpochGraphBuilder : public tirx::StmtVisitor {
 public:
-  EpochGraph Build(const tir::Stmt &body) {
+  EpochGraph Build(const tirx::Stmt &body) {
     g_ = EpochGraph{};
     cur_scope_id_ =
         OpenScope(ScopeKind::kRoot, /*parent=*/-1, /*anchor=*/nullptr);
@@ -251,17 +251,17 @@ protected:
   // currently-open epoch *before* the type-specific visitor runs (which
   // may itself open/close epochs for control-flow nodes). This guarantees
   // that *every* stmt has a defined `EpochOf`.
-  void VisitStmt(const tir::Stmt &s) final {
+  void VisitStmt(const tirx::Stmt &s) final {
     if (s.defined()) {
       AttachLeaf(s.get());
     }
-    tir::StmtVisitor::VisitStmt(s);
+    tirx::StmtVisitor::VisitStmt(s);
   }
 
   // ---- Stmt overrides ---------------------------------------------------
 
-  void VisitStmt_(const tir::EvaluateNode *op) final {
-    if (const auto *call = op->value.as<tir::CallNode>()) {
+  void VisitStmt_(const tirx::EvaluateNode *op) final {
+    if (const auto *call = op->value.as<tirx::CallNode>()) {
       if (IsHardSync(call)) {
         BoundaryAt(op, SyncKind::kHard);
         return;
@@ -273,7 +273,7 @@ protected:
     }
   }
 
-  void VisitStmt_(const tir::ForNode *op) final {
+  void VisitStmt_(const tirx::ForNode *op) final {
     int parent_scope = cur_scope_id_;
     int parent_epoch = cur_epoch_id_;
     int body_scope = OpenScope(ScopeKind::kForBody, parent_scope, op);
@@ -292,7 +292,7 @@ protected:
     cur_epoch_id_ = after;
   }
 
-  void VisitStmt_(const tir::IfThenElseNode *op) final {
+  void VisitStmt_(const tirx::IfThenElseNode *op) final {
     int parent_scope = cur_scope_id_;
     int parent_epoch = cur_epoch_id_;
 
@@ -334,8 +334,8 @@ protected:
 
   // SeqStmt: visit children sequentially; epoch boundaries inside are
   // produced by EvaluateNode handlers, so just chain.
-  void VisitStmt_(const tir::SeqStmtNode *op) final {
-    for (const tir::Stmt &s : op->seq) {
+  void VisitStmt_(const tirx::SeqStmtNode *op) final {
+    for (const tirx::Stmt &s : op->seq) {
       this->VisitStmt(s);
     }
   }
@@ -344,24 +344,24 @@ protected:
   // The blanket `VisitStmt` override above already attached them as leaves.
 
 private:
-  static bool IsHardSync(const tir::CallNode *call) {
+  static bool IsHardSync(const tirx::CallNode *call) {
     if (!call)
       return false;
-    if (!call->op.same_as(tir::builtin::tvm_storage_sync()))
+    if (!call->op.same_as(tirx::builtin::tvm_storage_sync()))
       return false;
     if (call->args.empty())
       return false;
-    const auto *scope_str = call->args[0].as<tir::StringImmNode>();
+    const auto *scope_str = call->args[0].as<tirx::StringImmNode>();
     return scope_str != nullptr && scope_str->value == "shared";
   }
-  static bool IsCpAsyncWait(const tir::CallNode *call) {
+  static bool IsCpAsyncWait(const tirx::CallNode *call) {
     if (!call)
       return false;
-    return call->op.same_as(tir::builtin::ptx_wait_group()) ||
-           call->op.same_as(tir::builtin::ptx_cp_async_barrier());
+    return call->op.same_as(tirx::builtin::ptx_wait_group()) ||
+           call->op.same_as(tirx::builtin::ptx_cp_async_barrier());
   }
 
-  int OpenScope(ScopeKind kind, int parent, const tir::StmtNode *anchor) {
+  int OpenScope(ScopeKind kind, int parent, const tirx::StmtNode *anchor) {
     int sid = static_cast<int>(g_.scopes.size());
     Scope sc;
     sc.scope_id = sid;
@@ -401,7 +401,7 @@ private:
   }
 
   /*! \brief Open a new epoch in the current scope right after a sync stmt. */
-  void BoundaryAt(const tir::StmtNode *sync_stmt, SyncKind kind) {
+  void BoundaryAt(const tirx::StmtNode *sync_stmt, SyncKind kind) {
     AttachLeaf(sync_stmt); // sync stmt belongs to the *outgoing* epoch
     CloseEpoch(cur_epoch_id_, kind);
     int prev = cur_epoch_id_;
@@ -411,7 +411,7 @@ private:
   }
 
   /*! \brief Record that `s` is a leaf stmt of the current epoch. */
-  void AttachLeaf(const tir::StmtNode *s) {
+  void AttachLeaf(const tirx::StmtNode *s) {
     if (!s)
       return;
     g_.stmt_to_epoch.emplace(s, cur_epoch_id_);
@@ -476,7 +476,7 @@ struct EpochLiveness {
  * \brief Compute per-(buffer, epoch) liveness via backward dataflow.
  *
  * The buffer key type is left as a template parameter so callers can use
- * `std::string`, `const tir::VarNode*`, etc. without forcing a copy.
+ * `std::string`, `const tirx::VarNode*`, etc. without forcing a copy.
  *
  * Complexity: O(B · (E + edges) · iters) where iters is bounded by graph
  * depth in practice. Each buffer is solved independently.

@@ -1,11 +1,10 @@
 """Override the LetFrame to print a message when entering the frame."""
 
 from __future__ import annotations
-from tvm.ffi import register_object as _register_object
-from tvm.tir import Var, PrimExpr, BufferLoad, BufferRegion
+from tvm.tirx import Var, PrimExpr, BufferLoad, BufferRegion
 from tvm.ir import Range
 from tvm import DataType
-from tvm.script.ir_builder.tir.frame import TIRFrame
+from tvm.tirx.script.builder.frame import TIRFrame
 from collections import deque
 import threading
 
@@ -60,6 +59,14 @@ class FrameStack:
         """
         return self._var_value_map.get(var)
 
+    def set_value(self, var, value):
+        """Record a variable binding that is not represented by a scoped frame."""
+        self._var_value_map[var] = value
+
+    def clear_values(self):
+        """Clear all tracked variable bindings."""
+        self._var_value_map.clear()
+
     def has_value(self, var):
         """Check if a variable has an associated value.
 
@@ -107,7 +114,21 @@ def _get_let_stack() -> FrameStack:
     return _local_let.let_frame_stack
 
 
-@_register_object("script.ir_builder.tir.LetFrame")
+def register_let_value(var: Var, value: PrimExpr | BufferRegion):
+    """Record the value behind a flat tirx Bind.
+
+    The legacy LetFrame path updated FrameStack through __enter__/__exit__.
+    tirx emits flat Bind statements instead, so callers that need to recover
+    BufferRegion aliases must explicitly register the Python-side mapping.
+    """
+    _get_let_stack().set_value(var, value)
+
+
+def clear_let_values():
+    """Clear all Python-side bindings recorded for the current thread."""
+    _get_let_stack().clear_values()
+
+
 class LetFrame(TIRFrame):
     """A TIR frame for let bindings that manages variable scope and value tracking.
 

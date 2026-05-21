@@ -11,22 +11,22 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm::tl::shared_access_analysis {
 
 enum AccessType : uint8_t { kRead, kWrite, kSync, kAlloc, kReadAcquire };
 
 struct AccessEntry {
-  ffi::Array<tir::IterVar> threads;
+  ffi::Array<tirx::IterVar> threads;
   ffi::Array<PrimExpr> buffer_indices;
   ConstrSet cset;
   ffi::Array<Range> buffer_ranges;
-  tir::Var buffer = NullValue<tir::Var>();
-  tir::Buffer buffer_name;
+  tirx::Var buffer = NullValue<tirx::Var>();
+  tirx::Buffer buffer_name;
   DataType dtype;
   ffi::Array<arith::IntSet> touched;
   AccessType type;
@@ -67,15 +67,15 @@ inline bool PointerAccessIsDisjoint(const AccessEntry &lhs,
 
   for (unsigned idx = 0; idx != 3; ++idx) {
     auto &info = thread_vars[idx];
-    tir::Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
-    tir::Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
-    tir::Var prev_var(info.name_prev, old_prev_var.dtype());
-    tir::Var curr_var(info.name_curr, old_curr_var.dtype());
-    lhs_min = tir::Substitute(lhs_min, {{old_prev_var, prev_var}});
-    lhs_max = tir::Substitute(lhs_max, {{old_prev_var, prev_var}});
+    tirx::Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
+    tirx::Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
+    tirx::Var prev_var(info.name_prev, old_prev_var.dtype());
+    tirx::Var curr_var(info.name_curr, old_curr_var.dtype());
+    lhs_min = tirx::Substitute(lhs_min, {{old_prev_var, prev_var}});
+    lhs_max = tirx::Substitute(lhs_max, {{old_prev_var, prev_var}});
     prev_cset = prev_cset.Substitute({{old_prev_var, prev_var}});
-    rhs_min = tir::Substitute(rhs_min, {{old_curr_var, curr_var}});
-    rhs_max = tir::Substitute(rhs_max, {{old_curr_var, curr_var}});
+    rhs_min = tirx::Substitute(rhs_min, {{old_curr_var, curr_var}});
+    rhs_max = tirx::Substitute(rhs_max, {{old_curr_var, curr_var}});
     curr_cset = curr_cset.Substitute({{old_curr_var, curr_var}});
   }
 
@@ -94,7 +94,7 @@ inline bool PointerAccessIsDisjoint(const AccessEntry &lhs,
 }
 
 inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
-                         const tir::ForNode *loop) {
+                         const tirx::ForNode *loop) {
   if (prev.type == kWrite && curr.type == kWrite && prev.is_async_copy &&
       curr.is_async_copy) {
     return false;
@@ -120,9 +120,9 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
     return true;
   }
 
-  ffi::Map<tir::Var, PrimExpr> loop_shift_sub;
+  ffi::Map<tirx::Var, PrimExpr> loop_shift_sub;
   if (loop != nullptr) {
-    PrimExpr step = tir::make_const(loop->loop_var.dtype(), 1);
+    PrimExpr step = tirx::make_const(loop->loop_var.dtype(), 1);
     loop_shift_sub.Set(loop->loop_var, loop->loop_var + step);
   }
 
@@ -131,9 +131,9 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
     const auto &prev_indice = prev.buffer_indices[i];
     PrimExpr curr_indice = curr.buffer_indices[i];
     if (loop != nullptr) {
-      curr_indice = tir::Substitute(curr_indice, loop_shift_sub);
+      curr_indice = tirx::Substitute(curr_indice, loop_shift_sub);
     }
-    if (!tir::ExprDeepEqual()(prev_indice, curr_indice)) {
+    if (!tirx::ExprDeepEqual()(prev_indice, curr_indice)) {
       has_same_index = false;
       break;
     }
@@ -151,15 +151,15 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
     }
     if (loop != nullptr) {
       PrimExpr adjusted_extent =
-          loop->extent - tir::make_const(loop->extent.dtype(), 1);
+          loop->extent - tirx::make_const(loop->extent.dtype(), 1);
       analyzer.Bind(loop->loop_var,
                     Range::FromMinExtent(loop->min, adjusted_extent));
     }
 
     bool prev_implies_curr = analyzer.z3_prover.CanProve(
-        tir::Or(tir::Not(prev_constr), curr_constr));
+        tirx::Or(tirx::Not(prev_constr), curr_constr));
     bool curr_implies_prev = analyzer.z3_prover.CanProve(
-        tir::Or(tir::Not(curr_constr), prev_constr));
+        tirx::Or(tirx::Not(curr_constr), prev_constr));
 
     return !(prev_implies_curr && curr_implies_prev);
   }
@@ -173,7 +173,7 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
     const auto &prev_indice = prev.buffer_indices[i];
     PrimExpr curr_indice = curr.buffer_indices[i];
     if (loop != nullptr) {
-      curr_indice = tir::Substitute(curr_indice, loop_shift_sub);
+      curr_indice = tirx::Substitute(curr_indice, loop_shift_sub);
     }
 
     PrimExpr prev_indice_bytes = prev_indice * prev_dtype.bytes();
@@ -185,7 +185,7 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
 
     if (loop != nullptr) {
       PrimExpr adjusted_extent =
-          loop->extent - tir::make_const(loop->extent.dtype(), 1);
+          loop->extent - tirx::make_const(loop->extent.dtype(), 1);
       analyzer.Bind(loop->loop_var,
                     Range::FromMinExtent(loop->min, adjusted_extent));
     }
@@ -194,24 +194,24 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                             (prev.type == kRead && curr.type == kRead);
 
     PrimExpr thread_condition = Bool(false);
-    ffi::Map<tir::Var, PrimExpr> prev_sub, curr_sub;
+    ffi::Map<tirx::Var, PrimExpr> prev_sub, curr_sub;
 
     const char *thread_names[] = {"tx", "ty", "tz"};
     for (unsigned idx = 0; idx != 3; ++idx) {
-      tir::Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
-      tir::Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
+      tirx::Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
+      tirx::Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
 
       if (same_access_type) {
-        tir::Var shared_var(thread_names[idx], old_prev_var.dtype());
+        tirx::Var shared_var(thread_names[idx], old_prev_var.dtype());
         prev_sub.Set(old_prev_var, shared_var);
         curr_sub.Set(old_curr_var, shared_var);
       } else {
-        tir::Var prev_var(std::string(thread_names[idx]) + "1",
+        tirx::Var prev_var(std::string(thread_names[idx]) + "1",
                           old_prev_var.dtype());
-        tir::Var curr_var(std::string(thread_names[idx]) + "2",
+        tirx::Var curr_var(std::string(thread_names[idx]) + "2",
                           old_curr_var.dtype());
         thread_condition =
-            tir::Or(thread_condition, tir::NE(prev_var, curr_var));
+            tirx::Or(thread_condition, tirx::NE(prev_var, curr_var));
         prev_sub.Set(old_prev_var, prev_var);
         curr_sub.Set(old_curr_var, curr_var);
       }
@@ -224,20 +224,20 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
     bool provably_disjoint = false;
 
     prev_indice_bytes =
-        analyzer.Simplify(tir::Substitute(prev_indice_bytes, prev_sub));
+        analyzer.Simplify(tirx::Substitute(prev_indice_bytes, prev_sub));
     curr_indice_bytes =
-        analyzer.Simplify(tir::Substitute(curr_indice_bytes, curr_sub));
+        analyzer.Simplify(tirx::Substitute(curr_indice_bytes, curr_sub));
 
-    if (const auto *prev_ramp = prev_indice_bytes.as<tir::RampNode>()) {
+    if (const auto *prev_ramp = prev_indice_bytes.as<tirx::RampNode>()) {
       DataType prev_index_dtype = prev_ramp->base.dtype();
-      tir::Var prev_idx("prev_idx", prev_index_dtype);
+      tirx::Var prev_idx("prev_idx", prev_index_dtype);
       analyzer.Bind(prev_idx, Range::FromMinExtent(0, prev_ramp->lanes));
       prev_indice_bytes = prev_ramp->base + prev_idx * prev_ramp->stride;
     }
 
-    if (const auto *curr_ramp = curr_indice_bytes.as<tir::RampNode>()) {
+    if (const auto *curr_ramp = curr_indice_bytes.as<tirx::RampNode>()) {
       DataType curr_index_dtype = curr_ramp->base.dtype();
-      tir::Var curr_idx("curr_idx", curr_index_dtype);
+      tirx::Var curr_idx("curr_idx", curr_index_dtype);
       analyzer.Bind(curr_idx, Range::FromMinExtent(0, curr_ramp->lanes));
       curr_indice_bytes = curr_ramp->base + curr_idx * curr_ramp->stride;
     }
@@ -248,27 +248,27 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
         if (prev_indice_bytes.dtype().bits() <
             curr_indice_bytes.dtype().bits()) {
           prev_indice_bytes =
-              tir::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
+              tirx::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
         } else {
           curr_indice_bytes =
-              tir::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
+              tirx::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
         }
       }
       ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
       provably_disjoint =
-          analyzer.CanProve(tir::NE(prev_indice_bytes, curr_indice_bytes));
+          analyzer.CanProve(tirx::NE(prev_indice_bytes, curr_indice_bytes));
     } else {
       try {
-        auto prev_min = analyzer.Simplify(tir::Substitute(
+        auto prev_min = analyzer.Simplify(tirx::Substitute(
             prev.touched[i].min() * prev_dtype.bytes(), prev_sub));
-        auto prev_max = analyzer.Simplify(tir::Substitute(
+        auto prev_max = analyzer.Simplify(tirx::Substitute(
             prev.touched[i].max() * prev_dtype.bytes(), prev_sub));
-        auto curr_min = analyzer.Simplify(tir::Substitute(
+        auto curr_min = analyzer.Simplify(tirx::Substitute(
             curr.touched[i].min() * curr_dtype.bytes(), curr_sub));
-        auto curr_max = analyzer.Simplify(tir::Substitute(
+        auto curr_max = analyzer.Simplify(tirx::Substitute(
             curr.touched[i].max() * curr_dtype.bytes(), curr_sub));
         provably_disjoint = analyzer.CanProve(analyzer.Simplify(
-            tir::Or(prev_min > curr_max, curr_min > prev_max)));
+            tirx::Or(prev_min > curr_max, curr_min > prev_max)));
       } catch (const std::exception &) {
         auto prev_bound = analyzer.const_int_bound(prev_indice_bytes);
         auto curr_bound = analyzer.const_int_bound(curr_indice_bytes);
@@ -292,7 +292,7 @@ inline bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
 }
 
 inline bool FindConflict(const std::vector<AccessEntry> &prev,
-                         const AccessEntry &curr, const tir::ForNode *loop) {
+                         const AccessEntry &curr, const tirx::ForNode *loop) {
   for (const AccessEntry &x : prev) {
     if (FindConflict(x, curr, loop)) {
       return true;
@@ -302,13 +302,13 @@ inline bool FindConflict(const std::vector<AccessEntry> &prev,
 }
 
 inline SequenceSummaryResult SummarizeAccessSequence(
-    std::vector<StmtEntry> seq, const tir::ForNode *loop,
+    std::vector<StmtEntry> seq, const tirx::ForNode *loop,
     const runtime::StorageScope &sync_scope,
-    const ffi::Array<tir::IterVar> &env_threads, const ConstrSet &current_cset,
+    const ffi::Array<tirx::IterVar> &env_threads, const ConstrSet &current_cset,
     const std::unordered_set<const Object *> &initial_syncs = {},
     bool coalesce_dynamic_shared_buffers = false) {
   if (coalesce_dynamic_shared_buffers) {
-    tir::Var shared_dyn_buf;
+    tirx::Var shared_dyn_buf;
     for (StmtEntry &entry : seq) {
       for (AccessEntry &access : entry.access) {
         if (access.scope.rank == runtime::StorageRank::kShared &&

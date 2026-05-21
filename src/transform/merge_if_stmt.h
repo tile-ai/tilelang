@@ -5,13 +5,13 @@
 #ifndef TVM_TL_TRANSFORM_MERGE_IF_STMT_H_
 #define TVM_TL_TRANSFORM_MERGE_IF_STMT_H_
 
-#include <tvm/tir/function.h>
-#include <tvm/tir/stmt.h>
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 // Forward declaration
 class MergeIfStmtRewriter;

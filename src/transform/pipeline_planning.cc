@@ -1,10 +1,13 @@
+#include "support/check.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 #include "../op/copy.h"
@@ -13,8 +16,8 @@
 #include "../op/utils.h"
 #include "common/pipeline_utils.h"
 #include <algorithm>
-#include <functional>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <queue>
 #include <unordered_map>
@@ -27,7 +30,16 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
+
+using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
+                                           ObjectPtrHash, ObjectPtrEqual>;
+
+using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
+                                           ObjectPtrHash, ObjectPtrEqual>;
 
 /*!
  * \brief Check whether two regions have intersections.
@@ -86,11 +98,9 @@ public:
   AsyncDependencyChainBuilder(Map<Var, Buffer> buffer_data_to_buffer)
       : buffer_data_to_buffer_(buffer_data_to_buffer) {}
 
-  std::unordered_map<const BufferNode *, Array<BufferRegion>>
-      mbar_to_buffer_reads_;
+  BufferRegionMap mbar_to_buffer_reads_;
 
-  std::unordered_map<const BufferNode *, Array<BufferRegion>>
-      mbar_to_buffer_writes_;
+  BufferRegionMap mbar_to_buffer_writes_;
 
 private:
   Map<Var, Buffer> buffer_data_to_buffer_;
@@ -110,7 +120,7 @@ private:
     auto var = call->args[1].as<VarNode>();
     if (!var)
       return Optional<Buffer>();
-    auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+    auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
     if (it == buffer_data_to_buffer_.end())
       return Optional<Buffer>();
     return (*it).second;
@@ -135,7 +145,7 @@ private:
           ICHECK(call->op.same_as(builtin::tvm_access_ptr()));
           auto var = call->args[1].as<VarNode>();
           ICHECK(var);
-          auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
           ICHECK(it != buffer_data_to_buffer_.end());
           return (*it).second;
         };
@@ -151,15 +161,15 @@ private:
         Buffer c_buf = tmem_collector.result;
 
         PrimExpr clear_accum = args[5];
-        mbar_to_buffer_reads_[mbar_buf.get()].push_back(
+        mbar_to_buffer_reads_[mbar_buf].push_back(
             BufferRegion::FullRegion(a_buf));
-        mbar_to_buffer_reads_[mbar_buf.get()].push_back(
+        mbar_to_buffer_reads_[mbar_buf].push_back(
             BufferRegion::FullRegion(b_buf));
-        mbar_to_buffer_writes_[mbar_buf.get()].push_back(
+        mbar_to_buffer_writes_[mbar_buf].push_back(
             BufferRegion::FullRegion(c_buf));
         auto analyzer = std::make_shared<arith::Analyzer>();
         if (!analyzer->CanProveEqual(clear_accum, Bool(true))) {
-          mbar_to_buffer_reads_[mbar_buf.get()].push_back(
+          mbar_to_buffer_reads_[mbar_buf].push_back(
               BufferRegion::FullRegion(c_buf));
         }
       }
@@ -182,7 +192,7 @@ private:
       if (args.size() > 5) {
         auto var = args[5].as<VarNode>();
         if (var) {
-          auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
           if (it != buffer_data_to_buffer_.end()) {
             pending_tcgen05_c_buf_ = (*it).second;
           }
@@ -194,12 +204,11 @@ private:
       // Link accumulated shared memory reads to mbar.
       if (!args.empty()) {
         if (auto mbar_buf = TryGetBufFromAccessPtr(args[0])) {
-          const BufferNode *mbar_key = mbar_buf.value().get();
           for (const auto &region : pending_tcgen05_smem_reads_) {
-            mbar_to_buffer_reads_[mbar_key].push_back(region);
+            mbar_to_buffer_reads_[mbar_buf.value()].push_back(region);
           }
           if (pending_tcgen05_c_buf_.defined()) {
-            mbar_to_buffer_writes_[mbar_key].push_back(
+            mbar_to_buffer_writes_[mbar_buf.value()].push_back(
                 BufferRegion::FullRegion(pending_tcgen05_c_buf_.value()));
           }
         } else if (!pending_tcgen05_smem_reads_.empty() ||
@@ -217,7 +226,7 @@ private:
       pending_tcgen05_smem_reads_.clear();
       pending_tcgen05_c_buf_ = Optional<Buffer>();
       StmtExprVisitor::VisitExpr_(op);
-    } else if (op->op.same_as(tir::builtin::if_then_else())) {
+    } else if (op->op.same_as(tirx::builtin::if_then_else())) {
       const PrimExpr &then_expr = args[1];
       const PrimExpr &else_expr = args[2];
       this->VisitExpr(then_expr);
@@ -310,7 +319,7 @@ private:
       auto *var = call->args[1].as<VarNode>();
       if (!var)
         return Optional<Buffer>();
-      auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
+      auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
       if (it == buffer_data_to_buffer_.end())
         return Optional<Buffer>();
       return (*it).second;
@@ -367,8 +376,7 @@ private:
 
   void VisitExpr_(const CallNode *op) final {
     auto args = op->args;
-    if (auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(op));
-        tile_op.defined()) {
+    if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       HandleTileOp(tile_op);
       StmtExprVisitor::VisitExpr_(op);
       return;
@@ -378,7 +386,7 @@ private:
       if (const auto *load = op->args[0].as<BufferLoadNode>()) {
         buffer_region = BufferRegion::FullRegion(load->buffer);
       } else if (const auto *var_node = op->args[0].as<VarNode>()) {
-        Var data_var = tvm::ffi::GetRef<Var>(var_node);
+        Var data_var = GetRef<Var>(var_node);
         auto it = buffer_data_to_buffer_.find(data_var);
         if (it != buffer_data_to_buffer_.end()) {
           buffer_region = BufferRegion::FullRegion((*it).second);
@@ -391,7 +399,7 @@ private:
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       const VarNode *buffer_var = op->args[1].as<VarNode>();
       ICHECK(buffer_var);
-      auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(buffer_var));
+      auto it = buffer_data_to_buffer_.find(GetRef<Var>(buffer_var));
       if (it != buffer_data_to_buffer_.end()) {
         const Buffer &buffer = (*it).second;
         const BufferRegion buffer_region = BufferRegion::FullRegion(buffer);
@@ -443,19 +451,26 @@ private:
       // barriers.
       if (auto *buf_load = args[0].as<BufferLoadNode>()) {
         Buffer mbar_buf = buf_load->buffer;
-        auto buffer_reads =
-            chain_builder_.mbar_to_buffer_reads_.find(mbar_buf.get());
+        auto buffer_reads = chain_builder_.mbar_to_buffer_reads_.find(mbar_buf);
         auto buffer_writes =
-            chain_builder_.mbar_to_buffer_writes_.find(mbar_buf.get());
+            chain_builder_.mbar_to_buffer_writes_.find(mbar_buf);
         if (buffer_reads != chain_builder_.mbar_to_buffer_reads_.end()) {
           reads_.insert(reads_.end(), buffer_reads->second.begin(),
                         buffer_reads->second.end());
         }
         if (buffer_writes != chain_builder_.mbar_to_buffer_writes_.end()) {
-          writes_.insert(
-              writes_.end(),
-              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).begin(),
-              chain_builder_.mbar_to_buffer_writes_.at(mbar_buf.get()).end());
+          writes_.insert(writes_.end(), buffer_writes->second.begin(),
+                         buffer_writes->second.end());
+        }
+      } else {
+        // Handle-based mbarrier (e.g. get_mbarrier(id)): cannot resolve to a
+        // concrete Buffer.  Conservatively attach all known async buffer
+        // dependencies so the wait is not treated as dependency-free.
+        for (const auto &[_, regions] : chain_builder_.mbar_to_buffer_reads_) {
+          reads_.insert(reads_.end(), regions.begin(), regions.end());
+        }
+        for (const auto &[_, regions] : chain_builder_.mbar_to_buffer_writes_) {
+          writes_.insert(writes_.end(), regions.begin(), regions.end());
         }
       }
     } else {
@@ -529,6 +544,8 @@ private:
    */
   struct PipelineStageInfo {
     Array<BufferRegion> reads, writes;
+    std::unordered_set<const VarNode *> scalar_defs;
+    std::unordered_set<const VarNode *> scalar_uses;
     int original_stmt_index{};
     int order = -1, stage = -1;
     bool copy_stage = false;
@@ -563,6 +580,29 @@ private:
     bool is_last_use_stmt_index_valid() const {
       return last_use_stmt_index != -1;
     }
+  };
+
+  class ScalarUseDefCollector : public StmtExprVisitor {
+  public:
+    static std::pair<std::unordered_set<const VarNode *>,
+                     std::unordered_set<const VarNode *>>
+    Collect(const Stmt &stmt) {
+      ScalarUseDefCollector collector;
+      collector(stmt);
+      return {std::move(collector.scalar_defs_),
+              std::move(collector.scalar_uses_)};
+    }
+
+  private:
+    void VisitStmt_(const BindNode *op) final {
+      this->VisitExpr(op->value);
+      scalar_defs_.insert(op->var.get());
+    }
+
+    void VisitExpr_(const VarNode *op) final { scalar_uses_.insert(op); }
+
+    std::unordered_set<const VarNode *> scalar_defs_;
+    std::unordered_set<const VarNode *> scalar_uses_;
   };
 
   struct AsyncIntrinInfo {
@@ -612,7 +652,7 @@ private:
         conditional = true;
         return;
       }
-      if (const auto *realize = node.as<BlockRealizeNode>()) {
+      if (const auto *realize = node.as<SBlockRealizeNode>()) {
         if (!is_one(realize->predicate)) {
           conditional = true;
         }
@@ -673,7 +713,7 @@ private:
       if (call == nullptr) {
         return;
       }
-      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
         return;
       }
@@ -709,7 +749,7 @@ private:
       if (call == nullptr) {
         return;
       }
-      auto tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+      auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
         return;
       }
@@ -823,6 +863,100 @@ private:
     }
   }
 
+  std::unordered_map<const VarNode *, int> BuildScalarDefMap(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    std::unordered_map<const VarNode *, int> scalar_def_to_stmt;
+    for (int i = 0; i < static_cast<int>(pipeline_stage_infos.size()); ++i) {
+      for (const VarNode *var : pipeline_stage_infos[i].scalar_defs) {
+        scalar_def_to_stmt.emplace(var, i);
+      }
+    }
+    return scalar_def_to_stmt;
+  }
+
+  void PropagateScalarProducersForCopy(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    auto scalar_def_to_stmt = BuildScalarDefMap(*pipeline_stage_infos);
+    const size_t max_iterations = (pipeline_stage_infos->size() * 4) + 16;
+    size_t iter_count = 0;
+    bool updated = true;
+
+    auto update_producer = [](PipelineStageInfo *producer,
+                              int consumer_last_use) -> bool {
+      if (consumer_last_use < 0) {
+        return false;
+      }
+      bool changed = false;
+      if (!producer->producer_for_copy) {
+        producer->producer_for_copy = true;
+        producer->last_use_stmt_index = consumer_last_use;
+        changed = true;
+      } else if (!producer->is_last_use_stmt_index_valid() ||
+                 consumer_last_use < producer->last_use_stmt_index) {
+        producer->last_use_stmt_index = consumer_last_use;
+        changed = true;
+      }
+      return changed;
+    };
+
+    while (updated) {
+      updated = false;
+      for (int consumer_idx = 0;
+           consumer_idx < static_cast<int>(pipeline_stage_infos->size());
+           ++consumer_idx) {
+        const auto &consumer = (*pipeline_stage_infos)[consumer_idx];
+        if (!(consumer.is_first_stage() &&
+              consumer.is_last_use_stmt_index_valid())) {
+          continue;
+        }
+        for (const VarNode *var : consumer.scalar_uses) {
+          auto it = scalar_def_to_stmt.find(var);
+          if (it == scalar_def_to_stmt.end() || it->second == consumer_idx) {
+            continue;
+          }
+          auto &producer = (*pipeline_stage_infos)[it->second];
+          if (producer.is_copy_stage() || producer.is_cp_async_commit_stage()) {
+            continue;
+          }
+          updated |= update_producer(&producer, consumer.last_use_stmt_index);
+        }
+      }
+      if (++iter_count > max_iterations) {
+        LOG(FATAL) << "Pipeline planning: Exceeded maximum iterations while "
+                      "propagating scalar producers for copy stages.";
+      }
+    }
+  }
+
+  void ValidateScalarDependencies(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    auto scalar_def_to_stmt = BuildScalarDefMap(pipeline_stage_infos);
+    for (int consumer_idx = 0;
+         consumer_idx < static_cast<int>(pipeline_stage_infos.size());
+         ++consumer_idx) {
+      const auto &consumer = pipeline_stage_infos[consumer_idx];
+      for (const VarNode *var : consumer.scalar_uses) {
+        auto it = scalar_def_to_stmt.find(var);
+        if (it == scalar_def_to_stmt.end() || it->second == consumer_idx) {
+          continue;
+        }
+        const auto &producer = pipeline_stage_infos[it->second];
+        ICHECK_LE(producer.stage, consumer.stage)
+            << "Pipeline planning error: scalar dependency from statement "
+            << producer.original_stmt_index << " to statement "
+            << consumer.original_stmt_index
+            << " crosses from a later stage to an earlier stage.";
+        if (producer.stage == consumer.stage) {
+          ICHECK_LT(producer.order, consumer.order)
+              << "Pipeline planning error: scalar dependency from statement "
+              << producer.original_stmt_index << " to statement "
+              << consumer.original_stmt_index
+              << " is reordered within the same pipeline stage.";
+        }
+      }
+    }
+  }
+
   bool EmitImplicitAsyncAnnotations(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos,
       Map<String, Any> *annotations) const {
@@ -889,7 +1023,7 @@ private:
     for (int stage_id : sorted_async_stage_ids) {
       async_stages.push_back(Integer(stage_id));
     }
-    annotations->Set(tir::attr::software_pipeline_async_stages,
+    annotations->Set(s_tir::attr::software_pipeline_async_stages,
                      Array<Integer>(async_stages));
     return true;
   }
@@ -945,16 +1079,19 @@ private:
   PipelineStageInfo
   MakePipelineStageInfo(Stmt stmt, int idx,
                         AsyncDependencyChainBuilder &chain_builder) {
-    Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ std::move(stmt));
-    Array<Array<BufferRegion>> access =
-        GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                 /*name_hint=*/"",
+                 /*body*/ std::move(stmt));
     auto collector =
         BufferRegionCollector(buffer_data_to_buffer_, chain_builder, target_);
     collector(block);
     PipelineStageInfo pinfo;
     pinfo.reads = std::move(collector.GetReads());
     pinfo.writes = std::move(collector.GetWrites());
+    auto [scalar_defs, scalar_uses] =
+        ScalarUseDefCollector::Collect(block->body);
+    pinfo.scalar_defs = std::move(scalar_defs);
+    pinfo.scalar_uses = std::move(scalar_uses);
     pinfo.original_stmt_index = idx;
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
     bool pure_copy_stage =
@@ -971,6 +1108,112 @@ private:
     ClassifyCopyLikeStage(block->body, &pinfo);
     return std::move(pinfo);
   }
+
+  class PipelineBodySeqFinder
+      : public StmtFunctor<Optional<SeqStmt>(const Stmt &)> {
+  public:
+    static SeqStmt FindOrFatal(const Stmt &stmt) {
+      PipelineBodySeqFinder finder;
+      Optional<SeqStmt> seq = finder(stmt);
+      ICHECK(seq.defined());
+      return seq.value();
+    }
+
+    Optional<SeqStmt> VisitStmt_(const SeqStmtNode *op) final {
+      return GetRef<SeqStmt>(op);
+    }
+
+    Optional<SeqStmt> VisitStmt_(const IfThenElseNode *op) final {
+      ICHECK(!op->else_case.defined())
+          << "Pipeline_Planning: Can't handle the body of the loop because "
+             "the IfThenElse node has an else branch";
+      return VisitStmt(op->then_case);
+    }
+
+    Optional<SeqStmt> VisitStmtDefault_(const Object *op) final {
+      LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
+                 << "because it is not a SeqStmt, IfThenElse without else, "
+                 << "but got " << op->GetTypeKey();
+      return Optional<SeqStmt>();
+    }
+  };
+
+  class SeqStmtFlattener : public StmtFunctor<Array<Stmt>(const Stmt &)> {
+  public:
+    using Base = StmtFunctor<Array<Stmt>(const Stmt &)>;
+
+    static Array<Stmt> Flatten(const Array<Stmt> &stmts) {
+      SeqStmtFlattener flattener;
+      Array<Stmt> flattened;
+      for (const Stmt &stmt : stmts) {
+        Array<Stmt> nested = flattener(stmt);
+        flattened.insert(flattened.end(), nested.begin(), nested.end());
+      }
+      return flattened;
+    }
+
+    Array<Stmt> VisitStmt(const Stmt &stmt) final {
+      if (!stmt.as<SeqStmtNode>()) {
+        return Array<Stmt>{stmt};
+      }
+      return Base::VisitStmt(stmt);
+    }
+
+    Array<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      Array<Stmt> flattened;
+      for (const Stmt &stmt : op->seq) {
+        Array<Stmt> nested = VisitStmt(stmt);
+        flattened.insert(flattened.end(), nested.begin(), nested.end());
+      }
+      return flattened;
+    }
+
+    Array<Stmt> VisitStmtDefault_(const Object *) final {
+      return Array<Stmt>();
+    }
+  };
+
+  class BodyWrapperRebuilder
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    using Base = StmtFunctor<Optional<Stmt>(const Stmt &)>;
+
+    static Stmt ReplaceOrFatal(const Stmt &stmt, SeqStmt old_seq,
+                               Stmt new_seq) {
+      BodyWrapperRebuilder rebuilder(std::move(old_seq), std::move(new_seq));
+      Optional<Stmt> rebuilt = rebuilder(stmt);
+      ICHECK(rebuilt.defined());
+      return rebuilt.value();
+    }
+
+    BodyWrapperRebuilder(SeqStmt old_seq, Stmt new_seq)
+        : old_seq_(std::move(old_seq)), new_seq_(std::move(new_seq)) {}
+
+    Optional<Stmt> VisitStmt(const Stmt &stmt) final {
+      if (stmt.same_as(old_seq_)) {
+        return new_seq_;
+      }
+      return Base::VisitStmt(stmt);
+    }
+
+    Optional<Stmt> VisitStmt_(const IfThenElseNode *op) final {
+      Optional<Stmt> then_case = VisitStmt(op->then_case);
+      if (!then_case.defined()) {
+        return Optional<Stmt>();
+      }
+      return IfThenElse(op->condition, then_case.value(), op->else_case);
+    }
+
+    Optional<Stmt> VisitStmtDefault_(const Object *op) final {
+      LOG(FATAL) << "BodyWrapperRebuilder: unexpected node type "
+                 << op->GetTypeKey();
+      return Optional<Stmt>();
+    }
+
+  private:
+    SeqStmt old_seq_;
+    Stmt new_seq_;
+  };
 
   Stmt VisitStmt_(const ForNode *loop) final {
     auto order_anno = loop->annotations.Get("tl_pipeline_order");
@@ -1007,24 +1250,23 @@ private:
           annotations.Set(key, value);
         }
       }
-      annotations.Set(tir::attr::software_pipeline_order, order_anno.value());
+      annotations.Set(s_tir::attr::software_pipeline_order, order_anno.value());
 
       for (const auto &[key, value] : loop->annotations) {
         if (key != "tl_pipeline_stage") {
           annotations.Set(key, value);
         }
       }
-      annotations.Set(tir::attr::software_pipeline_stage, stage_anno.value());
+      annotations.Set(s_tir::attr::software_pipeline_stage, stage_anno.value());
       if (TargetHasAsyncCopy(target_) && use_async_copy_) {
         // Legacy explicit stage/order annotations do not carry per-statement
         // async producer metadata yet, so keep the previous stage-level
         // behavior as a fallback for these loops.
-        annotations.Set(tir::attr::software_pipeline_async_stages,
+        annotations.Set(s_tir::attr::software_pipeline_async_stages,
                         Array<Integer>{0});
       }
       Stmt pipeline_body_root{nullptr};
-      const SeqStmtNode *pipeline_body_seq = nullptr;
-      if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
+      if (const auto *realize = loop->body.as<SBlockRealizeNode>()) {
         const auto &block = realize->block;
         for (const auto &buffer : block->alloc_buffers) {
           ICHECK(buffer->IsInstance<BufferNode>());
@@ -1034,35 +1276,12 @@ private:
       } else {
         pipeline_body_root = loop->body;
       }
-      {
-        Stmt current = pipeline_body_root;
-        while (true) {
-          if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-            pipeline_body_seq = seq_stmt;
-            break;
-          }
-          if (const auto *if_then_else = current.as<IfThenElseNode>()) {
-            ICHECK(!if_then_else->else_case.defined())
-                << "Pipeline_Planning: Can't handle the body of the loop "
-                   "because the IfThenElse node has an else branch";
-            current = if_then_else->then_case;
-            continue;
-          }
-          if (const auto *let_stmt = current.as<LetStmtNode>()) {
-            current = let_stmt->body;
-            continue;
-          }
-          LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
-                     << "because it is not a SeqStmt, IfThenElse without else, "
-                     << "or LetStmt wrapping them, but got "
-                     << current->GetTypeKey();
-        }
-      }
-      ICHECK(pipeline_body_seq != nullptr);
+      SeqStmt pipeline_body_seq =
+          PipelineBodySeqFinder::FindOrFatal(pipeline_body_root);
       MaybeAnnotateLegacyAsyncPipelineLoop(pipeline_body_root,
                                            pipeline_body_seq->seq, order_array,
                                            stage_array, &annotations);
-      auto for_node = tvm::ffi::GetRef<For>(loop);
+      auto for_node = GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
     }
@@ -1083,7 +1302,7 @@ private:
       // would cause those passes to multi-version shared buffers and inject
       // cp.async / barrier code that is incompatible with the plain sequential
       // execution path chosen here.
-      auto stripped = tvm::ffi::GetRef<For>(loop);
+      auto stripped = GetRef<For>(loop);
       Map<String, Any> annotations;
       for (const auto &[key, value] : loop->annotations) {
         if (key != "num_stages") {
@@ -1094,7 +1313,7 @@ private:
       return StmtExprMutator::VisitStmt_(stripped.get());
     }
     Stmt pipeline_body_root{nullptr};
-    if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
+    if (const auto *realize = loop->body.as<SBlockRealizeNode>()) {
       const auto &block = realize->block;
       for (const auto &buffer : block->alloc_buffers) {
         ICHECK(buffer->IsInstance<BufferNode>());
@@ -1104,53 +1323,17 @@ private:
     } else {
       pipeline_body_root = loop->body;
     }
-    const SeqStmtNode *pipeline_body_seq = nullptr;
-    {
-      Stmt current = pipeline_body_root;
-      while (true) {
-        if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
-          pipeline_body_seq = seq_stmt;
-          break;
-        }
-        if (const auto *if_then_else = current.as<IfThenElseNode>()) {
-          ICHECK(!if_then_else->else_case.defined())
-              << "Pipeline_Planning: Can't handle the body of the loop because "
-                 "the IfThenElse node has an else branch";
-          current = if_then_else->then_case;
-          continue;
-        }
-        if (const auto *let_stmt = current.as<LetStmtNode>()) {
-          current = let_stmt->body;
-          continue;
-        }
-        LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
-                   << "because it is not a SeqStmt, IfThenElse without else, "
-                   << "or LetStmt wrapping them, but got "
-                   << current->GetTypeKey();
-      }
-    }
-    ICHECK(pipeline_body_seq != nullptr);
+    SeqStmt pipeline_body_seq =
+        PipelineBodySeqFinder::FindOrFatal(pipeline_body_root);
 
-    CHECK(num_stages >= 1);
-    CHECK(loop->kind == ForKind::kSerial);
+    ICHECK(num_stages >= 1);
+    ICHECK(loop->kind == ForKind::kSerial);
 
     // Flatten nested SeqStmts. TMA copy lowering emits
     // SeqStmt({produce, wait}) which creates nested SeqStmts when placed
     // inside the loop body. Flatten them so pipeline planning can assign
     // individual stages to the produce and wait statements.
-    Array<Stmt> flat_stmts;
-    std::function<void(const Stmt &)> flatten_seq = [&](const Stmt &s) {
-      if (auto *seq = s.as<SeqStmtNode>()) {
-        for (const auto &sub : seq->seq) {
-          flatten_seq(sub);
-        }
-      } else {
-        flat_stmts.push_back(s);
-      }
-    };
-    for (size_t i = 0; i < pipeline_body_seq->size(); i++) {
-      flatten_seq(pipeline_body_seq->seq[i]);
-    }
+    Array<Stmt> flat_stmts = SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
 
     AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
     chain_builder(pipeline_body_root);
@@ -1170,7 +1353,7 @@ private:
       int anchor_cp_async_stmt = -1;
       std::vector<int> cp_async_stmt_indices;
       std::vector<int> commit_stmt_indices;
-      std::unordered_set<const BufferNode *> written_buffers;
+      BufferSet written_buffers;
       int last_use_stmt_index = -1;
     };
     struct WaitDependencyInfo {
@@ -1205,7 +1388,7 @@ private:
           group.anchor_cp_async_stmt = static_cast<int>(i);
         }
         for (const auto &write : pinfo.writes) {
-          group.written_buffers.insert(write->buffer.get());
+          group.written_buffers.insert(write->buffer);
         }
       }
       if (pinfo.has_cp_async_commit()) {
@@ -1241,14 +1424,13 @@ private:
 
     const int pipeline_stmt_count =
         static_cast<int>(pipeline_stage_infos.size());
-    auto stmt_reads_buffer_set =
-        [&](int stmt_idx,
-            const std::unordered_set<const BufferNode *> &buffers) -> bool {
+    auto stmt_reads_buffer_set = [&](int stmt_idx,
+                                     const BufferSet &buffers) -> bool {
       if (buffers.empty() || stmt_idx < 0 || stmt_idx >= pipeline_stmt_count) {
         return false;
       }
       for (const BufferRegion &read : pipeline_stage_infos[stmt_idx].reads) {
-        if (buffers.count(read->buffer.get())) {
+        if (buffers.count(read->buffer)) {
           return true;
         }
       }
@@ -1257,7 +1439,7 @@ private:
 
     // Record earliest consumers for each cp.async group, and track all
     // cp.async-written buffers for wait remapping.
-    std::unordered_set<const BufferNode *> async_written_buffers;
+    BufferSet async_written_buffers;
     std::vector<int> cp_async_group_first_consumer(
         cp_async_groups.size(), std::numeric_limits<int>::max());
     for (size_t group_id = 0; group_id < cp_async_groups.size(); ++group_id) {
@@ -1479,6 +1661,8 @@ private:
       }
     }
 
+    PropagateScalarProducersForCopy(&pipeline_stage_infos);
+
     // Order explicit cp.async producer groups by the lifetime of the data they
     // introduce. Groups whose data dies earlier should be scheduled earlier in
     // the synthetic stage-0 producer schedule, which also matches the desired
@@ -1599,8 +1783,8 @@ private:
           if (pipeline_stage_infos[commit_stmt_idx].has_cp_async_call()) {
             continue;
           }
-          CHECK_GT(pipeline_stage_infos[commit_stmt_idx].order,
-                   max_cp_async_order)
+          ICHECK_GT(pipeline_stage_infos[commit_stmt_idx].order,
+                    max_cp_async_order)
               << "Pipeline planning error: cp.async commit is scheduled before "
                  "its cp.async calls. commit_stmt="
               << commit_stmt_idx << ", commit_order="
@@ -1650,7 +1834,7 @@ private:
       }
 
       int required_stage = pipeline_stage_infos[wait_dep.wait_stmt_index].stage;
-      std::unordered_set<const BufferNode *> waited_buffers;
+      BufferSet waited_buffers;
       for (int group_id : wait_dep.required_group_ids) {
         required_stage = std::max(required_stage, get_group_stage(group_id));
         if (group_id >= 0 &&
@@ -1672,7 +1856,7 @@ private:
           bool dependent_read = false;
           for (const BufferRegion &read :
                pipeline_stage_infos[stmt_idx].reads) {
-            if (waited_buffers.count(read->buffer.get())) {
+            if (waited_buffers.count(read->buffer)) {
               dependent_read = true;
               break;
             }
@@ -1685,7 +1869,7 @@ private:
       }
 
       if (dependent_consumer_stage >= 0) {
-        CHECK_GE(dependent_consumer_stage, required_stage)
+        ICHECK_GE(dependent_consumer_stage, required_stage)
             << "Pipeline planning error: wait_group stage cannot be after its "
                "dependent consumer stage. wait_stmt="
             << wait_dep.wait_stmt_index << ", required_stage=" << required_stage
@@ -1727,6 +1911,23 @@ private:
           indeg[v] += 1;
         }
       };
+
+      {
+        auto scalar_def_to_stmt = BuildScalarDefMap(pipeline_stage_infos);
+        for (int consumer_idx = 0; consumer_idx < n; ++consumer_idx) {
+          const auto &consumer = pipeline_stage_infos[consumer_idx];
+          for (const VarNode *var : consumer.scalar_uses) {
+            auto it = scalar_def_to_stmt.find(var);
+            if (it == scalar_def_to_stmt.end() || it->second == consumer_idx) {
+              continue;
+            }
+            int producer_idx = it->second;
+            if (pipeline_stage_infos[producer_idx].stage == consumer.stage) {
+              add_edge(producer_idx, consumer_idx);
+            }
+          }
+        }
+      }
 
       auto group_schedule_key = [&](const CPAsyncGroupInfo &group) {
         int key = std::numeric_limits<int>::max();
@@ -1816,7 +2017,7 @@ private:
           continue;
         }
 
-        std::unordered_set<const BufferNode *> waited_buffers;
+        BufferSet waited_buffers;
         for (int group_id : wait_dep.required_group_ids) {
           if (group_id < 0 ||
               group_id >= static_cast<int>(cp_async_groups.size())) {
@@ -1852,7 +2053,7 @@ private:
           bool dependent_read = false;
           for (const BufferRegion &read :
                pipeline_stage_infos[consumer_stmt_idx].reads) {
-            if (waited_buffers.count(read->buffer.get())) {
+            if (waited_buffers.count(read->buffer)) {
               dependent_read = true;
               break;
             }
@@ -1888,14 +2089,14 @@ private:
             }
             bool touches_waited_buffers = false;
             for (const BufferRegion &read : mid_stmt_info.reads) {
-              if (waited_buffers.count(read->buffer.get())) {
+              if (waited_buffers.count(read->buffer)) {
                 touches_waited_buffers = true;
                 break;
               }
             }
             if (!touches_waited_buffers) {
               for (const BufferRegion &write : mid_stmt_info.writes) {
-                if (waited_buffers.count(write->buffer.get())) {
+                if (waited_buffers.count(write->buffer)) {
                   touches_waited_buffers = true;
                   break;
                 }
@@ -1931,7 +2132,7 @@ private:
         }
       }
 
-      CHECK_EQ(static_cast<int>(topo_order.size()), n)
+      ICHECK_EQ(static_cast<int>(topo_order.size()), n)
           << "Pipeline planning error: cycle detected while enforcing cp.async "
              "ordering constraints.";
 
@@ -1939,6 +2140,8 @@ private:
         pipeline_stage_infos[topo_order[new_order]].order = new_order;
       }
     }
+
+    ValidateScalarDependencies(pipeline_stage_infos);
 
     // Finally, make the pipeline annotation
     Map<String, Any> annotations;
@@ -1962,8 +2165,10 @@ private:
       stages.push_back(pinfo.stage);
     }
 
-    annotations.Set(tir::attr::software_pipeline_stage, Array<Integer>(stages));
-    annotations.Set(tir::attr::software_pipeline_order, Array<Integer>(orders));
+    annotations.Set(s_tir::attr::software_pipeline_stage,
+                    Array<Integer>(stages));
+    annotations.Set(s_tir::attr::software_pipeline_order,
+                    Array<Integer>(orders));
 
     // Propagate per-statement TMA eligibility so InjectSoftwarePipeline can
     // rewrite TMA copies to use pipeline-level barrier management.
@@ -2047,7 +2252,7 @@ private:
         for (int stage_id : sorted_async_stage_ids) {
           async_stages.push_back(Integer(stage_id));
         }
-        annotations.Set(tir::attr::software_pipeline_async_stages,
+        annotations.Set(s_tir::attr::software_pipeline_async_stages,
                         Array<Integer>(async_stages));
       }
     }
@@ -2055,64 +2260,39 @@ private:
     // Reconstruct the loop body with the flattened SeqStmt so that
     // InjectSoftwarePipeline sees the correct number of pipeline stages.
     Stmt new_body_seq = SeqStmt(flat_stmts);
-    // Rebuild any wrapper layers (IfThenElse, LetStmt, BlockRealize)
+    // Rebuild any wrapper layers (IfThenElse, SBlockRealize)
     // between the loop body and the SeqStmt.
     Stmt new_loop_body;
-    if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
+    if (const auto *realize = loop->body.as<SBlockRealizeNode>()) {
       const auto &block = realize->block;
       // Rebuild: body_root → ... → new_body_seq
       // We need to reconstruct the chain from block->body to the SeqStmt.
-      Stmt rebuilt_inner =
-          RebuildBodyWrapper(block->body, pipeline_body_seq, new_body_seq);
-      Block new_block(block->iter_vars, block->reads, block->writes,
-                      block->name_hint, rebuilt_inner, block->init,
-                      block->alloc_buffers, block->match_buffers,
-                      block->annotations);
+      Stmt rebuilt_inner = BodyWrapperRebuilder::ReplaceOrFatal(
+          block->body, pipeline_body_seq, new_body_seq);
+      SBlock new_block(block->iter_vars, block->reads, block->writes,
+                       block->name_hint, rebuilt_inner, block->init,
+                       block->alloc_buffers, block->match_buffers,
+                       block->annotations);
       new_loop_body =
-          BlockRealize(realize->iter_values, realize->predicate, new_block);
+          SBlockRealize(realize->iter_values, realize->predicate, new_block);
     } else {
-      new_loop_body =
-          RebuildBodyWrapper(loop->body, pipeline_body_seq, new_body_seq);
+      new_loop_body = BodyWrapperRebuilder::ReplaceOrFatal(
+          loop->body, pipeline_body_seq, new_body_seq);
     }
 
     return For(loop->loop_var, loop->min, loop->extent, loop->kind,
                new_loop_body, loop->thread_binding, annotations);
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
-    Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
+    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.erase(buffer->data);
     }
     return std::move(block);
-  }
-
-  /*!
-   * \brief Rebuild the chain of wrapper statements (IfThenElse, LetStmt)
-   *        between the loop body root and the inner SeqStmt, replacing
-   *        the old SeqStmt with the new (flattened) one.
-   */
-  Stmt RebuildBodyWrapper(const Stmt &current, const SeqStmtNode *old_seq,
-                          const Stmt &new_seq) {
-    if (current.get() == old_seq) {
-      return new_seq;
-    }
-    if (const auto *if_node = current.as<IfThenElseNode>()) {
-      return IfThenElse(
-          if_node->condition,
-          RebuildBodyWrapper(if_node->then_case, old_seq, new_seq),
-          if_node->else_case);
-    }
-    if (const auto *let_node = current.as<LetStmtNode>()) {
-      return LetStmt(let_node->var, let_node->value,
-                     RebuildBodyWrapper(let_node->body, old_seq, new_seq));
-    }
-    LOG(FATAL) << "RebuildBodyWrapper: unexpected node type "
-               << current->GetTypeKey();
-    return current;
   }
 
   Map<Var, Buffer> buffer_data_to_buffer_;
@@ -2121,10 +2301,10 @@ private:
 };
 
 tvm::transform::Pass PipelinePlanning() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool use_async_copy =
-        ctx->GetConfig<Bool>("tir.use_async_copy", Bool(true)).value();
+        ctx->GetConfig<Bool>("tirx.use_async_copy", Bool(true)).value();
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = PipelinePlanner::Substitute(f, use_async_copy);
     return f;
@@ -2133,7 +2313,7 @@ tvm::transform::Pass PipelinePlanning() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.PipelinePlanning", PipelinePlanning);
 }
 

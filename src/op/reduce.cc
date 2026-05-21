@@ -4,11 +4,14 @@
  */
 
 #include "reduce.h"
+#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/cast.h>
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/stmt_functor.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -17,9 +20,9 @@
 #include "builtin.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
-#include "tvm/tir/expr.h"
-#include "tvm/tir/stmt.h"
 #include "utils.h"
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt.h>
 
 #include <sstream>
 #include <vector>
@@ -27,7 +30,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -48,7 +52,7 @@ const ReduceImpl &ResolveReduceImpl(Target target) {
     if (impl.match_target(target)) {
       ICHECK(matched_impl == nullptr)
           << "tl.reduce found multiple target-specific implementations for "
-          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << target->str() << ": " << matched_impl->name << " and "
           << impl.name;
       matched_impl = &impl;
     }
@@ -56,7 +60,7 @@ const ReduceImpl &ResolveReduceImpl(Target target) {
   ICHECK(matched_impl != nullptr)
       << "tl.reduce requires a target-specific implementation, but no reduce "
          "implementation is registered for "
-      << target->ToDebugString();
+      << target->str();
   return *matched_impl;
 }
 
@@ -67,7 +71,7 @@ const CumSumImpl &ResolveCumSumImpl(Target target) {
     if (impl.match_target(target)) {
       ICHECK(matched_impl == nullptr)
           << "tl.cumsum found multiple target-specific implementations for "
-          << target->ToDebugString() << ": " << matched_impl->name << " and "
+          << target->str() << ": " << matched_impl->name << " and "
           << impl.name;
       matched_impl = &impl;
     }
@@ -75,7 +79,7 @@ const CumSumImpl &ResolveCumSumImpl(Target target) {
   ICHECK(matched_impl != nullptr)
       << "tl.cumsum requires a target-specific implementation, but no cumsum "
          "implementation is registered for "
-      << target->ToDebugString();
+      << target->str();
   return *matched_impl;
 }
 
@@ -100,7 +104,7 @@ void RegisterCumSumImpl(CumSumImpl impl) {
 // MakeAccessPtrFromRegion moved to src/op/utils.{h,cc}
 
 ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
+  ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>();
   // Accept BufferRegion/BufferLoad for src/dst
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
@@ -118,7 +122,7 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   if (auto opt = annotations.Get("batch")) {
     if (auto i = opt.value().as<IntImm>()) {
       node->batch = static_cast<int>(i.value()->value);
-      CHECK_GE(node->batch, 1) << "ReduceOp: batch must be >= 1";
+      ICHECK_GE(node->batch, 1) << "ReduceOp: batch must be >= 1";
     }
   }
   // Optional annotation: "nan_propagate" — for fp16/bf16 max/min/absmax,
@@ -144,12 +148,12 @@ AccessRegions ReduceOpNode::GetAccessRegions() const {
 }
 
 TileOperator ReduceOpNode::Clone() const {
-  auto op = tvm::ffi::make_object<ReduceOpNode>(*this);
+  auto op = make_object<ReduceOpNode>(*this);
   return ReduceOp(op);
 }
 
 TileOperator CumSumOpNode::Clone() const {
-  auto op = tvm::ffi::make_object<CumSumOpNode>(*this);
+  auto op = make_object<CumSumOpNode>(*this);
   return CumSumOp(op);
 }
 
@@ -286,8 +290,8 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   /// - dst: output buffer
   /// - dim: dimension to cumsum
   /// - reverse: whether to cumsum in reverse order
-  CHECK_EQ(args.size(), 4);
-  ObjectPtr<CumSumOpNode> node = tvm::ffi::make_object<CumSumOpNode>();
+  ICHECK_EQ(args.size(), 4);
+  ObjectPtr<CumSumOpNode> node = make_object<CumSumOpNode>();
   // node->src = vmap[GetVarFromAccessPtr(args[0])];
   // node->dst = vmap[GetVarFromAccessPtr(args[1])];
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
@@ -299,7 +303,7 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->dst = node->dstRegion_->buffer;
   node->dim = args[2].as<IntImm>().value()->value;
   node->reverse = args[3].as<Bool>().value();
-  CHECK_LT(node->dim, static_cast<int>(node->src->shape.size()))
+  ICHECK_LT(node->dim, static_cast<int>(node->src->shape.size()))
       << "The dim of cumsum should be less than the number of dimensions. Got "
          "dim="
       << node->dim << ", but src has " << node->src->shape.size() << " dims.";

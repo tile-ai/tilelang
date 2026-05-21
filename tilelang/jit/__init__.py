@@ -10,19 +10,15 @@ from dataclasses import dataclass
 import inspect
 from typing import (
     Any,
-    Callable,
     Generic,
     TypeVar,
     overload,
     Literal,
+    ParamSpec,
 )
+from collections.abc import Callable
 from collections.abc import Iterable
 
-# Python 3.9 compatibility for ParamSpec
-try:
-    from typing import ParamSpec
-except ImportError:  # Python < 3.10
-    from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
 from tilelang.language.eager import PrimFunc, prim_func, JITFunc
 from tvm.target import Target
@@ -59,7 +55,7 @@ def compile(
 
     Parameters
     ----------
-    func : tvm.tir.PrimFunc, optional
+    func : tvm.tirx.PrimFunc, optional
         The TileLang TIR function to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
@@ -141,7 +137,7 @@ def par_compile(
 
     Parameters
     ----------
-    funcs : Iterable[tvm.tir.PrimFunc]
+    funcs : Iterable[tvm.tirx.PrimFunc]
         The TileLang TIR functions to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).

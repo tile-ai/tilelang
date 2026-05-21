@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from tilelang import language as T
-from tvm.tir import Buffer, BufferRegion, BufferLoad
-from tvm import tir
+from tvm.tirx import Buffer, BufferRegion, BufferLoad
+from tvm import tirx
 from tilelang.utils.language import get_buffer_elems
 from tilelang._typing import BufferLikeType
 
 
-def any_of(buffer: BufferLikeType) -> tir.PrimExpr:
+def any_of(buffer: BufferLikeType) -> tirx.PrimExpr:
     """Check if any element in the buffer is true.
 
     Args:
@@ -21,7 +21,7 @@ def any_of(buffer: BufferLikeType) -> tir.PrimExpr:
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems)
+        return T.call_intrin(return_type, tirx.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems)
     elif isinstance(buffer, BufferRegion):
         buffer, region = buffer.buffer, buffer.region
         new_region = []
@@ -40,7 +40,7 @@ def any_of(buffer: BufferLikeType) -> tir.PrimExpr:
         buffer_load = BufferLoad(buffer, new_region)
         return T.call_intrin(
             return_type,
-            tir.op.Op.get("tl.any_of"),
+            tirx.op.Op.get("tl.any_of"),
             T.access_ptr(buffer_load, "r", extent=extent),
             extent,
         )
@@ -48,7 +48,7 @@ def any_of(buffer: BufferLikeType) -> tir.PrimExpr:
         raise ValueError(f"Invalid buffer type: {type(buffer)}")
 
 
-def all_of(buffer: BufferLikeType) -> tir.PrimExpr:
+def all_of(buffer: BufferLikeType) -> tirx.PrimExpr:
     """Check if all elements in the buffer are true.
 
     Args:
@@ -60,7 +60,7 @@ def all_of(buffer: BufferLikeType) -> tir.PrimExpr:
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems)
+        return T.call_intrin(return_type, tirx.op.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems)
     elif isinstance(buffer, BufferRegion):
         buffer, region = buffer.buffer, buffer.region
         new_region = []
@@ -79,7 +79,7 @@ def all_of(buffer: BufferLikeType) -> tir.PrimExpr:
         buffer_load = BufferLoad(buffer, new_region)
         return T.call_intrin(
             return_type,
-            tir.op.Op.get("tl.all_of"),
+            tirx.op.Op.get("tl.all_of"),
             T.access_ptr(buffer_load, "r", extent=extent),
             extent,
         )

@@ -227,7 +227,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype=T.flo
         (128, 256, 256, determine_fp8_type(), T.float32, T.float32, False, False, 2),
     ],
 )
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_cdna
 def test_assert_tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack):
     assert_tl_matmul_correctness(
         M,

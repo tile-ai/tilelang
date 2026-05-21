@@ -1,6 +1,6 @@
 import tilelang.language as T
 from typing import Literal, Callable
-from tvm.tir import IndexMap
+from tvm.tirx import IndexMap
 from tilelang.rocm.intrinsics.utils import get_mma_micro_size
 
 from tilelang.rocm.intrinsics.mfma_layout import (

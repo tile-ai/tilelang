@@ -3,12 +3,15 @@
  * \brief Helper utility to match and bind arguments.
  */
 #include "arg_binder.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
 
 #include <tvm/runtime/device_api.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
 
 #include <sstream>
 #include <unordered_set>
@@ -16,15 +19,14 @@
 #include "../runtime/error_helpers.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/arith/int_solver.h"
-#include "tvm/ffi/cast.h"
-#include "tvm/ffi/container/array.h"
-#include "tvm/tir/stmt.h"
-#include "tvm/tir/stmt_functor.h"
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
                      const std::string &arg_name, std::vector<Stmt> *asserts,
@@ -53,12 +55,12 @@ void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
     }
 
     // If cond is an equality, prefer structured packed error with expect/got
-    if (const auto *eq = scond.as<tvm::tir::EQNode>()) {
+    if (const auto *eq = scond.as<tvm::tirx::EQNode>()) {
       PrimExpr lhs = eq->a;
       PrimExpr rhs = eq->b;
       // Choose rhs as expected and lhs as got for better semantics in most
       // binding cases
-      ffi::Array<PrimExpr> pargs;
+      Array<PrimExpr> pargs;
       pargs.push_back(StringImm(tvm_error_expect_eq));
       pargs.push_back(StringImm(kernel));
       pargs.push_back(StringImm(buffer));
@@ -76,7 +78,7 @@ void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
       asserts->emplace_back(SeqStmt({inner, Evaluate(0)}));
     } else {
       // Fallback: packed generic constraint violation without dumping cond
-      ffi::Array<PrimExpr> pargs;
+      Array<PrimExpr> pargs;
       pargs.push_back(StringImm(tvm_error_constraint_violation));
       pargs.push_back(StringImm(kernel));
       pargs.push_back(StringImm(buffer));
@@ -104,7 +106,7 @@ std::vector<Var> ArgBinder::getUndefVars(const std::vector<PrimExpr> &args) {
         auto it = def_map_->find(var);
         if (it == def_map_->end()) {
           // res.push_back(var);
-          res.push_back(ffi::GetRef<Var>(var));
+          res.push_back(GetRef<Var>(var));
         }
       }
     });
@@ -123,11 +125,11 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
   };
   ICHECK_EQ(arg.dtype(), value.dtype()) << "arg " << arg << " value " << value;
   auto BindVar = [&](const VarNode *v, PrimExpr value) {
-    auto v_arg = ffi::GetRef<Var>(v);
+    auto v_arg = GetRef<Var>(v);
     defs_.emplace_back(v_arg);
     if (with_lets) {
       (*def_map_)[v] = value;
-      init_nest_.emplace_back(LetStmt(v_arg, value, Evaluate(0)));
+      init_nest_.emplace_back(SeqStmt({tirx::Bind(v_arg, value), Evaluate(0)}));
     } else {
       (*def_map_)[v] = value;
     }
@@ -147,7 +149,7 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
   } else {
     // 2. complex binding expr = value
     //  get undefined variables
-    auto undefs = ffi::Array<Var>(getUndefVars({arg}));
+    auto undefs = Array<Var>(getUndefVars({arg}));
     if (!undefs.empty()) {
       // if value is not integer, such as float, we are unable to solve it
       if (!value.dtype().is_int() && !value.dtype().is_uint()) {
@@ -165,7 +167,7 @@ bool ArgBinder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
         ICHECK(value_opt->defined())
             << "Unable to solve variable `" << v << "` from expression `"
             << (value == arg) << "`";
-        auto value = ffi::GetRef<PrimExpr>(sol->src_to_dst.Get(v)->get());
+        auto value = GetRef<PrimExpr>(sol->src_to_dst.Get(v)->get());
         BindVar(v.as<VarNode>(), value);
       }
     }
@@ -190,7 +192,8 @@ bool ArgBinder::Bind_(const PrimExpr &arg, const PrimExpr &value,
       defs_.emplace_back(v_arg);
       if (with_lets) {
         (*def_map_)[v] = arg;
-        init_nest_.emplace_back(LetStmt(v_arg, value, Evaluate(0)));
+        init_nest_.emplace_back(
+            SeqStmt({tirx::Bind(v_arg, value), Evaluate(0)}));
       } else {
         (*def_map_)[v] = value;
       }
@@ -209,8 +212,8 @@ void ArgBinder::Bind(const PrimExpr &arg, const PrimExpr &value,
   Bind_(arg, value, arg_name, with_let);
 }
 
-void ArgBinder::BindArray(const ffi::Array<PrimExpr> &arg,
-                          const ffi::Array<PrimExpr> &value,
+void ArgBinder::BindArray(const Array<PrimExpr> &arg,
+                          const Array<PrimExpr> &value,
                           const std::string &arg_name) {
   ICHECK_EQ(arg.size(), value.size())
       << "Argument " << arg_name << " array size mismatch";
@@ -354,8 +357,8 @@ void ArgBinder::BindDLTensors(
     const std::string &func_name,
     const std::unordered_set<const VarNode *> &used_param_buffers,
     const std::unordered_set<const VarNode *> &used_shape_vars) {
-  ffi::Array<Buffer> buffers;
-  ffi::Array<Var> handles;
+  Array<Buffer> buffers;
+  Array<Var> handles;
 
   // First pass: collect shape var -> list of (buffer_name, dim_idx, handle_ptr)
   struct ShapeVarSource {
@@ -400,19 +403,19 @@ void ArgBinder::BindDLTensors(
 
     Var is_null_var(arg_name + "_is_null", DataType::Bool());
     init_nest_.emplace_back(
-        LetStmt(is_null_var,
-                Call(DataType::Bool(), builtin::isnullptr(), {handle}), nop));
+        SeqStmt({tirx::Bind(is_null_var, Call(DataType::Bool(),
+                                              builtin::isnullptr(), {handle})),
+                 nop}));
     const PrimExpr &is_null = is_used ? const_false() : is_null_var;
 
     is_null_map[arg_name] = is_null_var;
     is_null_expr_map[arg_name] = is_null;
 
     if (is_used) {
-      init_nest_.emplace_back(
-          AssertStmt(!is_null_var,
-                     tvm::tir::StringImm(
-                         arg_name + " is expected to have non-NULL pointer"),
-                     nop));
+      init_nest_.emplace_back(AssertStmt(
+          !is_null_var, tvm::tirx::StringImm("RuntimeError"),
+          Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(
+              arg_name + " is expected to have non-NULL pointer")})));
     }
   }
 
@@ -430,15 +433,15 @@ void ArgBinder::BindDLTensors(
                     tvm_shape_type, shape_handle_name());
     def_handle_dtype_.Set(buf_shape->data, make_const(tvm_shape_type, 0));
     // Use if_then_else for NULL guard on the shape pointer itself, avoiding
-    // dereferencing TVMStructGet(handle, kArrShape) when handle is NULL.
-    init_nest_.emplace_back(
-        LetStmt(buf_shape->data,
-                tvm::if_then_else(
-                    Not(is_null),
-                    TVMArrayGet(DataType::Handle(), handle, builtin::kArrShape),
-                    make_zero(DataType::Handle())),
-                nop));
-    init_nest_.emplace_back(DeclBuffer(buf_shape, nop));
+    // dereferencing TVMStructGet(handle, kDLTensorShape) when handle is NULL.
+    init_nest_.emplace_back(SeqStmt(
+        {tirx::Bind(buf_shape->data,
+                    tvm::if_then_else(Not(is_null),
+                                      TVMArrayGet(DataType::Handle(), handle,
+                                                  builtin::kDLTensorShape),
+                                      make_zero(DataType::Handle()))),
+         nop}));
+    init_nest_.emplace_back(DeclBuffer(buf_shape));
 
     // Save for later use in shape binding
     shape_buffer_map[arg_name] = buf_shape;
@@ -451,7 +454,8 @@ void ArgBinder::BindDLTensors(
     const PrimExpr &is_null = is_null_expr_map[arg_name];
 
     // dimension checks
-    PrimExpr v_ndim = TVMArrayGet(tvm_ndim_type, handle, builtin::kArrNDim);
+    PrimExpr v_ndim =
+        TVMArrayGet(tvm_ndim_type, handle, builtin::kDLTensorNDim);
 
     // Helper functions for shape/stride name formatting
     auto shape_handle_name = [&]() { return arg_name + ".shape"; };
@@ -480,7 +484,7 @@ void ArgBinder::BindDLTensors(
     }
     // Only check ndim when handle is non-NULL: use packed error helper
     PrimExpr ndim_ok = (a_ndim == v_ndim);
-    ffi::Array<PrimExpr> ndim_args;
+    Array<PrimExpr> ndim_args;
     ndim_args.push_back(StringImm(tvm_error_ndim_mismatch));
     ndim_args.push_back(StringImm(kernel_nm));
     ndim_args.push_back(StringImm(buf_nm));
@@ -496,15 +500,15 @@ void ArgBinder::BindDLTensors(
     // Guard all dtype field loads by `is_null` using if_then_else
     PrimExpr v_type_code = tvm::if_then_else(
         Not(is_null),
-        TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeCode),
+        TVMArrayGet(DataType::UInt(8), handle, builtin::kDLTensorTypeCode),
         IntImm(DataType::UInt(8), buffer->dtype.code()));
     PrimExpr v_type_bits = tvm::if_then_else(
         Not(is_null),
-        TVMArrayGet(DataType::UInt(8), handle, builtin::kArrTypeBits),
+        TVMArrayGet(DataType::UInt(8), handle, builtin::kDLTensorTypeBits),
         IntImm(DataType::UInt(8), buffer->dtype.bits()));
     PrimExpr v_type_lanes = tvm::if_then_else(
         Not(is_null),
-        TVMArrayGet(DataType::UInt(16), handle, builtin::kArrTypeLanes),
+        TVMArrayGet(DataType::UInt(16), handle, builtin::kDLTensorTypeLanes),
         IntImm(DataType::UInt(16), buffer->dtype.lanes()));
     PrimExpr expect_code = IntImm(DataType::UInt(8), buffer->dtype.code());
     PrimExpr expect_bits = IntImm(DataType::UInt(8), buffer->dtype.bits());
@@ -596,7 +600,7 @@ void ArgBinder::BindDLTensors(
     if (!data_is_subtype) {
       // Build FFI packed call to __tvm_error_dtype_mismatch when mismatch
       // occurs. Only issue the call when handle is non-NULL and cond is false.
-      ffi::Array<PrimExpr> packed_args;
+      Array<PrimExpr> packed_args;
       packed_args.push_back(StringImm(tvm_error_dtype_mismatch));
       // Split arg_name of the form "<kernel>.<buffer>" into parts for clearer
       // diagnostics
@@ -726,7 +730,7 @@ void ArgBinder::BindDLTensors(
 
                 std::ostringstream err_msg;
                 err_msg << "Symbolic shape variable "
-                        << ffi::GetRef<Var>(v)->name_hint
+                        << GetRef<Var>(v)->name_hint
                         << " requires at least one non-null buffer among: ";
                 bool first = true;
                 for (const auto &src : sources_it->second) {
@@ -737,7 +741,9 @@ void ArgBinder::BindDLTensors(
                 }
 
                 init_nest_.emplace_back(AssertStmt(
-                    any_nonnull, tvm::tir::StringImm(err_msg.str()), nop));
+                    any_nonnull, tvm::tirx::StringImm("RuntimeError"),
+                    Array<tvm::tirx::StringImm>(
+                        {tvm::tirx::StringImm(err_msg.str())})));
               }
 
               // Build cascaded if_then_else: if !is_null_a then a.shape[k] else
@@ -795,11 +801,11 @@ void ArgBinder::BindDLTensors(
               }
 
               // Bind the variable to the cascaded expression
-              Var v_arg = ffi::GetRef<Var>(v);
+              Var v_arg = GetRef<Var>(v);
               defs_.emplace_back(v_arg);
               (*def_map_)[v] = cascaded_value;
               init_nest_.emplace_back(
-                  LetStmt(v_arg, cascaded_value, Evaluate(0)));
+                  SeqStmt({tirx::Bind(v_arg, cascaded_value), Evaluate(0)}));
             } else {
               // Single source or no special handling needed, use nullable
               // binding. When the only source is NULL, bind m to 0 safely.
@@ -837,15 +843,16 @@ void ArgBinder::BindDLTensors(
             decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
                         tvm_shape_type, arg_name + ".strides");
         def_handle_dtype_.Set(buf_strides->data,
-                              tir::TypeAnnotation(tvm_shape_type));
+                              tirx::TypeAnnotation(tvm_shape_type));
         init_nest_.emplace_back(
-            LetStmt(buf_strides->data,
-                    tvm::if_then_else(Not(is_null),
-                                      TVMArrayGet(DataType::Handle(), handle,
-                                                  builtin::kArrStrides),
-                                      make_zero(DataType::Handle())),
-                    nop));
-        init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
+            SeqStmt({tirx::Bind(buf_strides->data,
+                                tvm::if_then_else(
+                                    Not(is_null),
+                                    TVMArrayGet(DataType::Handle(), handle,
+                                                builtin::kDLTensorStrides),
+                                    make_zero(DataType::Handle()))),
+                     nop}));
+        init_nest_.emplace_back(DeclBuffer(buf_strides));
         PrimExpr v_strides_is_null =
             Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
 
@@ -884,15 +891,15 @@ void ArgBinder::BindDLTensors(
           decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
                       tvm_shape_type, arg_name + ".strides");
       def_handle_dtype_.Set(buf_strides->data,
-                            tir::TypeAnnotation(tvm_shape_type));
-      init_nest_.emplace_back(
-          LetStmt(buf_strides->data,
-                  tvm::if_then_else(Not(is_null),
-                                    TVMArrayGet(DataType::Handle(), handle,
-                                                builtin::kArrStrides),
-                                    make_zero(DataType::Handle())),
-                  nop));
-      init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
+                            tirx::TypeAnnotation(tvm_shape_type));
+      init_nest_.emplace_back(SeqStmt(
+          {tirx::Bind(buf_strides->data,
+                      tvm::if_then_else(Not(is_null),
+                                        TVMArrayGet(DataType::Handle(), handle,
+                                                    builtin::kDLTensorStrides),
+                                        make_zero(DataType::Handle()))),
+           nop}));
+      init_nest_.emplace_back(DeclBuffer(buf_strides));
       PrimExpr v_strides_is_null =
           Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
 
@@ -900,7 +907,7 @@ void ArgBinder::BindDLTensors(
         // Assert the buffer is compact
         DataType stype = buffer->DefaultIndexType();
         PrimExpr expect_stride = make_const(stype, 1);
-        ffi::Array<PrimExpr> conds;
+        Array<PrimExpr> conds;
         for (size_t i = buffer->shape.size(); i != 0; --i) {
           size_t k = i - 1;
           PrimExpr svalue = cast(
@@ -932,7 +939,7 @@ void ArgBinder::BindDLTensors(
             kernel_nm3 = arg_name.substr(0, dot_pos3);
             buf_nm3 = arg_name.substr(dot_pos3 + 1);
           }
-          ffi::Array<PrimExpr> pargs4;
+          Array<PrimExpr> pargs4;
           pargs4.push_back(StringImm(tvm_error_constraint_violation));
           pargs4.push_back(StringImm(kernel_nm3));
           pargs4.push_back(StringImm(buf_nm3));
@@ -997,12 +1004,12 @@ void ArgBinder::BindDLTensors(
       // additional Var binding.
       PrimExpr actual_byte_offset = tvm::if_then_else(
           Not(is_null),
-          TVMArrayGet(DataType::UInt(64), handle, builtin::kArrByteOffset),
+          TVMArrayGet(DataType::UInt(64), handle, builtin::kDLTensorByteOffset),
           make_const(DataType::UInt(64), 0));
       PrimExpr expect_byte_offset =
           make_const(DataType::UInt(64), const_offset->value * data_bytes);
       PrimExpr ok = (expect_byte_offset == actual_byte_offset);
-      ffi::Array<PrimExpr> pargs;
+      Array<PrimExpr> pargs;
       pargs.push_back(StringImm(tvm_error_byte_offset_mismatch));
       pargs.push_back(StringImm(kernel_nm));
       pargs.push_back(StringImm(buf_nm));
@@ -1016,7 +1023,7 @@ void ArgBinder::BindDLTensors(
     } else {
       PrimExpr actual_byte_offset = tvm::if_then_else(
           Not(is_null),
-          TVMArrayGet(DataType::UInt(64), handle, builtin::kArrByteOffset),
+          TVMArrayGet(DataType::UInt(64), handle, builtin::kDLTensorByteOffset),
           make_const(DataType::UInt(64), 0));
       PrimExpr expect_elem_off = cast(
           buffer->elem_offset.dtype(),
@@ -1038,11 +1045,11 @@ void ArgBinder::BindDLTensors(
     // Define device_id from handle when available (so later passes can use it)
     PrimExpr actual_dev_type = tvm::if_then_else(
         Not(is_null),
-        TVMArrayGet(DataType::Int(32), handle, builtin::kArrDeviceType),
+        TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceType),
         make_zero(DataType::Int(32)));
     PrimExpr actual_dev_id = tvm::if_then_else(
         Not(is_null),
-        TVMArrayGet(DataType::Int(32), handle, builtin::kArrDeviceId),
+        TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceId),
         make_zero(DataType::Int(32)));
 
     // Bind device_id to a safe expression (0 when NULL handle)
@@ -1052,7 +1059,7 @@ void ArgBinder::BindDLTensors(
     // by binding above)
     {
       PrimExpr ok = (device_type == actual_dev_type);
-      ffi::Array<PrimExpr> pargs2;
+      Array<PrimExpr> pargs2;
       pargs2.push_back(StringImm(tvm_error_device_type_mismatch));
       pargs2.push_back(StringImm(kernel_nm));
       pargs2.push_back(StringImm(buf_nm));
@@ -1074,7 +1081,7 @@ void ArgBinder::BindDLTensors(
       Var vptr(buffer->data);
       PrimExpr data_ptr = tvm::if_then_else(
           Not(is_null),
-          TVMArrayGet(DataType::Handle(), handle, builtin::kArrData),
+          TVMArrayGet(DataType::Handle(), handle, builtin::kDLTensorData),
           make_zero(DataType::Handle()));
       BindNullable(buffer->data, data_ptr, arg_name + ".data", true, is_null);
 
@@ -1093,7 +1100,7 @@ void ArgBinder::BindDLTensors(
         buf_nm2 = arg_name.substr(dot_pos2 + 1);
       }
       // expand combined condition via nested IfThenElse for portability
-      ffi::Array<PrimExpr> pargs3;
+      Array<PrimExpr> pargs3;
       pargs3.push_back(StringImm(tvm_error_null_ptr));
       pargs3.push_back(StringImm(kernel_nm2));
       pargs3.push_back(StringImm(buf_nm2));
@@ -1112,10 +1119,10 @@ void ArgBinder::BindDLTensors(
 
       // mark alignment of external bufs
       init_nest_.emplace_back(
-          AttrStmt(vptr, tir::attr::storage_alignment,
+          AttrStmt(vptr, tirx::attr::storage_alignment,
                    IntImm(DataType::Int(32), buffer->data_alignment), nop));
 
-      def_handle_dtype_.Set(vptr, tir::TypeAnnotation(buffer->dtype));
+      def_handle_dtype_.Set(vptr, tirx::TypeAnnotation(buffer->dtype));
     }
   }
 }

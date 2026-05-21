@@ -8,31 +8,45 @@ __all__ = [
 ]
 
 import cutlass.cute as cute
-from cutlass.cute.typing import Constexpr
+
+try:
+    from cutlass import Constexpr
+except ImportError:
+    from cutlass.cute.typing import Constexpr
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class dim3:
+    """Three-dimensional CUDA index tuple."""
+
     x: int
     y: int
     z: int
 
 
 def ThreadIdx() -> dim3:
+    """Return the current CUDA thread index."""
+
     return dim3(*cute.arch.thread_idx())
 
 
 def BlockIdx() -> dim3:
+    """Return the current CUDA block index."""
+
     return dim3(*cute.arch.block_idx())
 
 
 def GridDim() -> dim3:
+    """Return the CUDA grid dimensions."""
+
     return dim3(*cute.arch.grid_dim())
 
 
 @cute.jit
 def rasterization2DRow(panel_width: Constexpr[int]) -> dim3:
+    """Map block indices to row-major swizzled rasterization coordinates."""
+
     blockIdx = BlockIdx()
     gridDim = GridDim()
     block_idx = blockIdx.x + blockIdx.y * gridDim.x
@@ -49,6 +63,8 @@ def rasterization2DRow(panel_width: Constexpr[int]) -> dim3:
 
 @cute.jit
 def rasterization2DColumn(panel_width: Constexpr[int]) -> dim3:
+    """Map block indices to column-major swizzled rasterization coordinates."""
+
     blockIdx = BlockIdx()
     gridDim = GridDim()
     block_idx = blockIdx.x + blockIdx.y * gridDim.x

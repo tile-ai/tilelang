@@ -3,19 +3,20 @@
  * \brief Bind the If Stmt to each Stmt in SeqStmt
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class IfStmtBindingRewriter : public StmtExprMutator {
 public:
@@ -33,21 +34,40 @@ private:
     auto then_case = VisitStmt(op->then_case);
     Optional<Stmt> else_case = op->else_case;
     if (else_case.defined()) {
-      return tvm::ffi::GetRef<Stmt>(op);
+      return GetRef<Stmt>(op);
     }
     ICHECK(then_case.defined()) << "then_case must be defined";
     ICHECK(!else_case.defined()) << "else_case must be undefined";
 
-    auto bind_if_stmt = [](const Optional<Stmt> &body,
-                           const PrimExpr &condition) -> Stmt {
+    auto make_seq = [](Array<Stmt> seq) -> Stmt {
+      ICHECK(!seq.empty());
+      return seq.size() == 1 ? seq[0] : SeqStmt(std::move(seq));
+    };
+
+    auto bind_if_stmt = [&make_seq](const Optional<Stmt> &body,
+                                    const PrimExpr &condition) -> Stmt {
       if (body.defined()) {
         auto stmt = body.value();
         if (auto seq_stmt = stmt.as<SeqStmtNode>()) {
-          Array<Stmt> seq_;
-          for (auto s : seq_stmt->seq) {
-            seq_.push_back(IfThenElse(condition, s, Stmt()));
+          Array<Stmt> seq;
+          const size_t n = seq_stmt->seq.size();
+          size_t i = 0;
+          for (; i < n && !seq_stmt->seq[i].as<BindNode>(); ++i) {
+            seq.push_back(IfThenElse(condition, seq_stmt->seq[i], Stmt()));
           }
-          return SeqStmt(std::move(seq_));
+
+          // A direct Bind is emitted as a C/CUDA declaration. Keep it and the
+          // following statements in one lexical block, matching old LetStmt
+          // scope semantics.
+          if (i < n) {
+            Array<Stmt> bind_scope;
+            for (; i < n; ++i) {
+              bind_scope.push_back(seq_stmt->seq[i]);
+            }
+            seq.push_back(
+                IfThenElse(condition, make_seq(std::move(bind_scope)), Stmt()));
+          }
+          return make_seq(std::move(seq));
         } else {
           return IfThenElse(condition, stmt, Stmt());
         }
@@ -73,7 +93,7 @@ private:
   }
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 tvm::transform::Pass IfStmtBinding() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return IfStmtBindingRewriter::Substitute(f);
@@ -82,7 +102,7 @@ tvm::transform::Pass IfStmtBinding() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.IfStmtBinding", IfStmtBinding);
 }
 
