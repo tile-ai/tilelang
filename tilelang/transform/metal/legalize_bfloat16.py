@@ -220,10 +220,7 @@ class LegalizeMetalBFloat16Mutator(PyStmtExprMutator):
     def visit_prim_func(self, func: PrimFunc) -> PrimFunc:
         params = [self.remap_var_def(param) for param in func.params]
         body = self.visit_stmt(func.body)
-        buffer_map = {
-            self.var_remap.get(var, var): self._remap_buffer(buffer)
-            for var, buffer in func.buffer_map.items()
-        }
+        buffer_map = {self.var_remap.get(var, var): self._remap_buffer(buffer) for var, buffer in func.buffer_map.items()}
         return PrimFunc(params, body, func.ret_type, buffer_map, func.attrs, getattr(func, "span", None))
 
 
