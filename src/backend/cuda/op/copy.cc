@@ -363,8 +363,8 @@ private:
                           arith::Analyzer *analyzer, CopyInst copy_inst);
 };
 
-struct Conv2DIm2Col {
-  static Stmt Lower(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
+struct Im2Col {
+  static Stmt Lower(const Im2ColOpNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer);
 };
 
@@ -2007,8 +2007,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   return tma_copy;
 }
 
-Stmt Conv2DIm2Col::Lower(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
-                         arith::Analyzer *analyzer) {
+Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &T,
+                   arith::Analyzer *analyzer) {
   const BufferRegion &dst_region = op.dstRegion_;
   const Buffer &src = op.src_;
   const Buffer &dst = op.dst_;
@@ -2209,17 +2209,19 @@ bool RegisterCudaCopy() {
 
 const bool cuda_copy_registered = RegisterCudaCopy();
 
-bool RegisterCudaConv2DIm2Col() {
-  RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl{
-      "cuda.Conv2DIm2Col",
-      MatchCudaCopyTarget,
+bool RegisterCudaIm2Col() {
+  RegisterIm2ColImpl(Im2ColImpl{
+      "cuda.Im2Col",
+      [](Target target) {
+        return MatchCudaCopyTarget(target) && TargetIsHopper(target);
+      },
       100,
-      cuda::Conv2DIm2Col::Lower,
+      cuda::Im2Col::Lower,
   });
   return true;
 }
 
-const bool cuda_conv2d_im2col_registered = RegisterCudaConv2DIm2Col();
+const bool cuda_im2col_registered = RegisterCudaIm2Col();
 
 } // namespace
 
