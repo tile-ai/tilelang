@@ -21,13 +21,15 @@ logger = logging.getLogger(__name__)
 
 
 class CuTeDSLKernelAdapter(BaseKernelAdapter):
+    """Runtime adapter for generated CuTeDSL Python modules."""
+
     pymodule = None
 
     def __init__(
         self,
         params: list[KernelParam],
         result_idx: list[int],
-        target: str | Target,
+        target: str | dict[str, object] | Target,
         func_or_mod: tirx.PrimFunc | tvm.IRModule,
         host_mod: tvm.IRModule | None = None,
         device_mod: tvm.IRModule | None = None,
@@ -37,12 +39,15 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
+        """Build a CuTeDSL adapter from freshly lowered TileLang artifacts."""
         check_cutedsl_available()
 
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
         self.host_kernel_source = host_kernel_source
         self.device_kernel_source = device_kernel_source
+        self.kernel_global_source = device_kernel_source
+        self.generated_module_source: str | None = None
 
         if isinstance(func_or_mod, tirx.PrimFunc):
             gsym = func_or_mod.attrs.get("global_symbol")
@@ -78,6 +83,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_device_module(device_mod)
         wrapper_result = self.wrapper.wrap(device_kernel_source)
         self.host_func = wrapper_result["host_func"]
+        self.host_kernel_source = self.host_func
         self.function_names = wrapper_result["function_names"]
         self.launcher_cpp_code = wrapper_result.get("launcher_cpp_code", None)
         self.launcher_lib_name = wrapper_result.get("launcher_lib_name", None)
@@ -92,8 +98,9 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         self.lib_generator.load_lib()
         self.libpath = self.lib_generator.libpath
         with open(self.libpath) as f:
-            self.device_kernel_source = f.read()
-        self.kernel_global_source = self.device_kernel_source
+            self.generated_module_source = f.read()
+        if self.kernel_global_source is None:
+            self.kernel_global_source = self.device_kernel_source
         self.pymodule = self.lib_generator.pymodule
 
         self._post_init()
@@ -103,7 +110,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         cls,
         params: list[KernelParam],
         result_idx: list[int],
-        target: str,
+        target: str | dict[str, object] | Target,
         func_or_mod: tirx.PrimFunc | tvm.IRModule,
         host_kernel_source: str,
         device_kernel_source: str,
@@ -112,11 +119,13 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
+        """Rebuild a CuTeDSL adapter from persisted cache artifacts."""
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.host_kernel_source = host_kernel_source
         adapter.device_kernel_source = device_kernel_source
+        adapter.generated_module_source = None
 
         if isinstance(func_or_mod, tirx.PrimFunc):
             gsym = func_or_mod.attrs.get("global_symbol")
@@ -150,6 +159,11 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.libpath = kernel_lib_path
         adapter.kernel_global_source = device_kernel_source
+        try:
+            with open(kernel_lib_path) as f:
+                adapter.generated_module_source = f.read()
+        except OSError:
+            adapter.generated_module_source = None
         adapter.pymodule = adapter.lib_generator.pymodule
 
         adapter._post_init()
@@ -180,6 +194,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         self._dynamic_symbolic_name_map: dict[str, tuple[int, int, int]] = {}
 
         def unique_push_back(v: tirx.Var, entry: tuple[int, int, int]):
+            """Append one symbolic variable unless it has already been seen."""
             if v in dynamic_symbolic_map:
                 return
             dynamic_symbolic_map[v] = entry
@@ -221,15 +236,30 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             return self._dynamic_symbolic_name_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
+    def get_host_source(self) -> str | None:
+        """Get the generated Python host wrapper source."""
+        return self.host_kernel_source
+
+    def get_generated_module_source(self) -> str | None:
+        """Get the importable generated CuTeDSL Python module source."""
+        return self.generated_module_source
+
     def get_kernel_source(self, kernel_only: bool = True) -> str | None:
-        """Get the CUDA kernel source code.
+        """Get the CuTeDSL device source, optionally with host wrapper source.
 
         Returns
         -------
         str | None
             The kernel source code, or None if not available
         """
-        return self.device_kernel_source
+        device_source = self.kernel_global_source or self.device_kernel_source
+        if kernel_only:
+            return device_source
+
+        sources = [source for source in (device_source, self.host_kernel_source) if source]
+        if sources:
+            return "\n\n".join(sources)
+        return self.generated_module_source
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None, device_id: int = 0):
         """Low-level function to call the compiled CUDA kernel.
