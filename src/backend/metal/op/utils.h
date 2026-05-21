@@ -12,11 +12,11 @@ namespace tvm {
 namespace tl {
 namespace metal {
 
-inline bool IsSIMDGroupBuffer(const tir::Buffer &buffer) {
+inline bool IsSIMDGroupBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "metal.simdgroup";
 }
 
-inline bool IsRegisterBuffer(const tir::Buffer &buffer) {
+inline bool IsRegisterBuffer(const Buffer &buffer) {
   return IsFragmentBuffer(buffer) || IsSIMDGroupBuffer(buffer);
 }
 

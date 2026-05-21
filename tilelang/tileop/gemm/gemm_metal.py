@@ -5,7 +5,7 @@ from tilelang.utils.language import is_shared, is_full_region, is_fragment, is_m
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
-from tvm import tir
+from tvm import tirx as tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 

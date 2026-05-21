@@ -7,6 +7,8 @@
 
 #include "target/utils.h"
 
+#include <tvm/runtime/logging.h>
+
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -14,7 +16,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace metal {
 
@@ -29,9 +31,9 @@ ComputeMetalWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   constexpr int kMPerWarp = 8;
   constexpr int kNPerWarp = 8;
 
-  ICHECK(M % kMPerWarp == 0)
+  TVM_FFI_ICHECK(M % kMPerWarp == 0)
       << "M must be divisible by " << kMPerWarp << ", but got " << M;
-  ICHECK(N % kNPerWarp == 0)
+  TVM_FFI_ICHECK(N % kNPerWarp == 0)
       << "N must be divisible by " << kNPerWarp << ", but got " << N;
 
   if (policy.isFullRow()) {
@@ -86,10 +88,10 @@ ComputeMetalWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
     m_warp = best_m;
     n_warp = best_n;
   } else {
-    ICHECK(0) << "Unknown GemmWarpPolicy";
+    TVM_FFI_ICHECK(0) << "Unknown GemmWarpPolicy";
   }
 
-  ICHECK(m_warp * n_warp == num_warps)
+  TVM_FFI_ICHECK(m_warp * n_warp == num_warps)
       << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
       << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
   policy.m_warp = m_warp;
@@ -113,7 +115,7 @@ struct Gemm {
   static std::pair<int, int>
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, String gemm_inst) {
-    ICHECK(gemm_inst == kMetalSIMDGroup)
+    TVM_FFI_ICHECK(gemm_inst == kMetalSIMDGroup)
         << "Unsupported Metal GEMM instruction: " << gemm_inst;
     int num_warps = block_size / TargetGetWarpSize(target);
     return ComputeMetalWarpPartition(policy, M, N, num_warps);

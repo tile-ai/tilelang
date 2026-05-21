@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import tilelang.language as T
-from tvm import tir
-from tvm.tir import Buffer, BufferRegion
+from tvm import tirx as tir
+from tvm.tirx import Buffer, BufferRegion
 
 
 class MPSIntrinEmitter:

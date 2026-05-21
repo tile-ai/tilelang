@@ -9,7 +9,7 @@
 #include "op/utils.h"
 #include "target/utils.h"
 
-#include <tvm/tir/builtin.h>
+#include <tvm/tirx/builtin.h>
 
 #include <algorithm>
 #include <cmath>
@@ -32,20 +32,20 @@ bool CheckSIMDGroupCopy(const CopyNode &op) {
 Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
                         arith::Analyzer *analyzer) {
   (void)analyzer;
-  ICHECK(IsSIMDGroupBuffer(op.src));
+  TVM_FFI_ICHECK(IsSIMDGroupBuffer(op.src));
 
   int total_elements = 1;
   for (auto s : op.src->shape) {
     auto imm = s.as<IntImmNode>();
-    ICHECK(imm) << "simdgroup buffer must have constant shape";
+    TVM_FFI_ICHECK(imm) << "simdgroup buffer must have constant shape";
     total_elements *= imm->value;
   }
-  ICHECK(total_elements % 64 == 0)
+  TVM_FFI_ICHECK(total_elements % 64 == 0)
       << "simdgroup buffer size must be multiple of 64 (8x8), got "
       << total_elements;
 
-  ICHECK(op.src_range.size() == 2) << "Expected 2D source for simdgroup store";
-  ICHECK(op.dst_range.size() == 2)
+  TVM_FFI_ICHECK(op.src_range.size() == 2) << "Expected 2D source for simdgroup store";
+  TVM_FFI_ICHECK(op.dst_range.size() == 2)
       << "Expected 2D destination for simdgroup store";
   PrimExpr dst_row_base = op.dst_range[0]->min;
   PrimExpr dst_col_base = op.dst_range[1]->min;
@@ -53,7 +53,7 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
 
   int warp_size = TargetGetWarpSize(T.target);
   const auto *block_size_imm = T.thread_bounds->extent.as<IntImmNode>();
-  ICHECK(block_size_imm)
+  TVM_FFI_ICHECK(block_size_imm)
       << "simdgroup copy requires constant thread bounds";
   int block_size = block_size_imm->value;
   int num_warps = block_size / warp_size;
@@ -61,7 +61,7 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
 
   const auto *m_imm = op.src_range[0]->extent.as<IntImmNode>();
   const auto *n_imm = op.src_range[1]->extent.as<IntImmNode>();
-  ICHECK(m_imm && n_imm) << "simdgroup copy requires constant extents";
+  TVM_FFI_ICHECK(m_imm && n_imm) << "simdgroup copy requires constant extents";
   int M = m_imm->value;
   int N = n_imm->value;
 
@@ -90,13 +90,13 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
     }
   }
 
-  ICHECK(M >= m_warp * kMPerWarp && N >= n_warp * kNPerWarp)
+  TVM_FFI_ICHECK(M >= m_warp * kMPerWarp && N >= n_warp * kNPerWarp)
       << "Cannot partition " << M << "x" << N << " matrix across " << m_warp
       << "x" << n_warp << " warps with 8x8 simdgroup tiles";
   int warp_row_tiles = M / m_warp / kMPerWarp;
   int warp_col_tiles = N / n_warp / kNPerWarp;
-  ICHECK(warp_row_tiles > 0 && warp_col_tiles > 0);
-  ICHECK(warp_row_tiles * warp_col_tiles * 64 <= total_elements)
+  TVM_FFI_ICHECK(warp_row_tiles > 0 && warp_col_tiles > 0);
+  TVM_FFI_ICHECK(warp_row_tiles * warp_col_tiles * 64 <= total_elements)
       << "Warp partition produces more tiles than buffer capacity";
 
   PrimExpr warp_m = FloorMod(warp_id, m_warp);

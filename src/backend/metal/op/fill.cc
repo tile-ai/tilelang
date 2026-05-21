@@ -12,12 +12,12 @@
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
 
-#include <tvm/tir/builtin.h>
+#include <tvm/tirx/builtin.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 namespace metal {
 
@@ -28,10 +28,10 @@ struct Fill {
       int region_elements = 1;
       for (auto r : op.region) {
         auto imm = r->extent.as<IntImmNode>();
-        ICHECK(imm) << "simdgroup fill region must have constant extents";
+        TVM_FFI_ICHECK(imm) << "simdgroup fill region must have constant extents";
         region_elements *= imm->value;
       }
-      ICHECK(region_elements % 64 == 0)
+      TVM_FFI_ICHECK(region_elements % 64 == 0)
           << "simdgroup buffer size must be multiple of 64 (8x8), got "
           << region_elements;
 

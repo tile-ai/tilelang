@@ -7,9 +7,11 @@ thread-level layout) are never seen by LayoutInference.
 
 from __future__ import annotations
 
-from tvm import tir, IRModule
+from tvm import tirx as tir
+from tvm import IRModule
 from tvm.ir import Op, PointerType
-from tvm.tir.transform import prim_func_pass
+from tvm.tirx import SBlock, AllocBuffer
+from tvm.tirx.transform import prim_func_pass
 
 _GEMM_OPS = None
 
@@ -74,7 +76,7 @@ def _rewrite_scope(body, var_map):
     buf_map = {}
 
     def _pre_order(stmt):
-        if isinstance(stmt, tir.Block):
+        if isinstance(stmt, SBlock):
             new_alloc_bufs = []
             changed = False
             for buf in stmt.alloc_buffers:
@@ -85,7 +87,7 @@ def _rewrite_scope(body, var_map):
                     changed = True
             if changed:
                 new_body = tir.stmt_functor.substitute(stmt.body, var_map)
-                return tir.Block(
+                return SBlock(
                     stmt.iter_vars,
                     stmt.reads,
                     stmt.writes,
@@ -96,14 +98,9 @@ def _rewrite_scope(body, var_map):
                     stmt.match_buffers,
                     stmt.annotations,
                 )
-        elif isinstance(stmt, tir.Allocate):
-            new_var = var_map.get(stmt.buffer_var, None)
-            if new_var is not None:
-                new_body = tir.stmt_functor.substitute(stmt.body, var_map)
-                return tir.Allocate(new_var, stmt.dtype, stmt.extents, stmt.condition, new_body, stmt.annotations)
         return None
 
-    return tir.stmt_functor.ir_transform(body, _pre_order, None, ["tir.Block", "tir.Allocate"])
+    return tir.stmt_functor.ir_transform(body, _pre_order, None, ["tirx.SBlock"])
 
 
 def _metal_fragment_to_simdgroup(func: tir.PrimFunc, mod: IRModule, ctx) -> tir.PrimFunc:
