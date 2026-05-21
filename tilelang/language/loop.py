@@ -129,6 +129,36 @@ def Pipelined(
     num_stages : int
         The max number of buffer used between pipeline producers and consumers.
         if num_stages is 0, pipeline will not be enabled.
+    order : Optional[List[int]]
+        Optional manual emission order for scheduled statements in the loop
+        body. This list should describe executable pipeline statements such as
+        copies, fills, GEMMs, reductions, stores, waits, or commits.
+    stage : Optional[List[int]]
+        Optional manual pipeline stage for each scheduled statement in the loop
+        body. The list is aligned with ``order`` and follows the same statement
+        counting rule.
+    sync : Optional[List[List[int]]]
+        Optional synchronization metadata for manual pipeline lowering.
+    group : Optional[List[List[int]]]
+        Optional producer grouping metadata for manual pipeline lowering.
+
+    Notes
+    -----
+    Scalar ``Bind`` statements created by local aliases are not scheduled
+    pipeline operations and should not consume entries in ``order`` or
+    ``stage``. For example, in the body below only the copy and store need
+    annotation entries; ``base`` is replayed automatically at each use:
+
+    .. code-block:: python
+
+        for i in T.Pipelined(n, num_stages=2, order=[1, 0], stage=[0, 1]):
+            base: T.int32 = i * block
+            T.copy(A[base], shared)
+            T.copy(shared, B[base])
+
+    Older code that included scalar ``Bind`` entries in ``order``/``stage`` is
+    accepted for compatibility, but those entries are ignored by the pipeline
+    passes. New code should annotate only the scheduled statements.
     Returns
     -------
     res : frame.ForFrame
