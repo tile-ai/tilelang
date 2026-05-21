@@ -4,13 +4,14 @@
  * of TL PrimFunc.
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/buffer.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/utils.h>
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/s_tir/utils.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <optional>
 #include <utility>
@@ -22,7 +23,7 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 using namespace ffi;
 using namespace arith;
 
@@ -35,7 +36,7 @@ struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
   bool enable_simplify_let_inline{true};
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<SimplifyConfigNode>()
         .def_ro("transitively_prove_inequalities",
                 &SimplifyConfigNode::transitively_prove_inequalities,
@@ -115,7 +116,7 @@ CollectUsedBuffers(const PrimFunc &func) {
       VisitBuffer(op->buffer);
       StmtExprVisitor::VisitStmt_(op);
     }
-    void VisitStmt_(const BlockNode *op) override {
+    void VisitStmt_(const SBlockNode *op) override {
       for (const auto &buffer : op->alloc_buffers) {
         for (const auto &it : func->buffer_map) {
           if (it.second.get()->data.same_as(buffer.get()->data)) {
@@ -200,7 +201,7 @@ CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
       }
       usage(buf->elem_offset);
 
-      // Track for use in LetStmtNode mutator
+      // Track for use in BindNode mutator
       for (const auto &var : usage.undefined_) {
         used_in_buffer_def_.insert(var.get());
       }
@@ -327,7 +328,7 @@ private:
     return Parent::VisitStmt_(op);
   }
 
-  bool CanInlineLetStmt(const LetStmtNode *op) {
+  bool CanInlineBind(const BindNode *op) {
     if (!config_->enable_simplify_let_inline)
       return false;
     if (is_const_number(op->value))
@@ -342,7 +343,7 @@ private:
     return SideEffect(op->value) <= CallEffectKind::kPure;
   }
 
-  Stmt VisitStmt_(const LetStmtNode *op) override {
+  Stmt VisitStmt_(const BindNode *op) override {
     PrimExpr value = this->VisitExpr(op->value);
     bool remove_buffer_alias = false;
     // TileLang emits aliases like `X_shared = buffer[0:128, 0:32]` to annotate
@@ -384,33 +385,25 @@ private:
       }
     }
     if (remove_buffer_alias) {
-      Stmt body = this->VisitStmt(op->body);
-      bool used = UsesVar(
-          body, [&](const VarNode *var) { return var == op->var.get(); });
-      ICHECK(!used) << "Let binding of BufferLoad is expected to be unused "
-                       "before removal "
-                    << op->var << " : " << op->value << " .";
-      return body;
+      return Evaluate(Integer(0));
     }
 
-    bool can_inline = CanInlineLetStmt(op);
+    bool can_inline = CanInlineBind(op);
     if (can_inline) {
       analyzer_->Bind(op->var, value);
     } else if (SideEffect(op->value) <= CallEffectKind::kPure) {
       non_inlined_bindings_.Set(op->var, value);
     }
-    Stmt body = this->VisitStmt(op->body);
 
     bool used_in_buffer_def = used_in_buffer_def_.count(op->var.get());
 
     if (can_inline && !used_in_buffer_def) {
-      return body;
-    } else if (value.same_as(op->value) && body.same_as(op->body)) {
-      return tvm::ffi::GetRef<Stmt>(op);
+      return Evaluate(Integer(0));
+    } else if (value.same_as(op->value)) {
+      return GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = std::move(value);
-      n->body = std::move(body);
       return Stmt(n);
     }
   }
@@ -461,8 +454,8 @@ private:
     if (const BufferLoadNode *load = store->value.as<BufferLoadNode>()) {
       if (load->buffer->data.same_as(store->buffer->data) &&
           ArrayDeepEqual(load->indices, store->indices) &&
-          tir::ExprDeepEqual()(load->buffer->elem_offset,
-                               store->buffer->elem_offset) &&
+          tirx::ExprDeepEqual()(load->buffer->elem_offset,
+                                store->buffer->elem_offset) &&
           ArrayDeepEqual(load->buffer->shape, store->buffer->shape) &&
           ArrayDeepEqual(load->buffer->strides, store->buffer->strides)) {
         return Evaluate(0);
@@ -491,7 +484,7 @@ private:
       return false;
     }
     for (size_t i = 0; i < lhs.size(); i++) {
-      if (!tir::ExprDeepEqual()(lhs[i], rhs[i])) {
+      if (!tirx::ExprDeepEqual()(lhs[i], rhs[i])) {
         return false;
       }
     }
@@ -535,7 +528,7 @@ private:
   std::unordered_set<const BufferNode *> used_buffers_;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass Simplify(bool simplify_arguments = true) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
@@ -548,7 +541,7 @@ tvm::transform::Pass Simplify(bool simplify_arguments = true) {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.Simplify", Simplify);
 }
 

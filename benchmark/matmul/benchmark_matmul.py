@@ -30,7 +30,7 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def get_configs(args, kwargs):
+def get_configs(*args, **kwargs):
     """
     Generate a list of configuration dictionaries that will be used for tuning.
 
@@ -45,16 +45,22 @@ def get_configs(args, kwargs):
         Each configuration dict includes various block sizes, pipeline stages,
         thread numbers, and other parameters to explore during autotuning.
     """
-    M, N, K, with_roller = args[:4]
+    # Support both the current autotuner calling convention
+    #   get_configs(M, N, K, with_roller, ...)
+    # and the historical/manual helper style
+    #   get_configs((M, N, K, with_roller), kwargs)
+    if len(args) == 2 and isinstance(args[0], (tuple, list)) and isinstance(args[1], dict):
+        M, N, K, with_roller = args[0][:4]
+    else:
+        M, N, K, with_roller = args[:4]
 
     if with_roller:
         from tilelang.carver.template import MatmulTemplate
-        from tilelang.carver.arch import CUDA
-        from tilelang.carver.arch import CDNA
+        from tilelang.carver.arch import CUDA, auto_infer_current_arch
         from tilelang.carver.roller.rasterization import NoRasterization
         import torch
 
-        arch = CUDA("cuda") if torch.version.hip is None else CDNA("hip")
+        arch = CUDA("cuda") if torch.version.hip is None else auto_infer_current_arch()
         topk = 10
 
         carve_template = MatmulTemplate(
@@ -78,15 +84,26 @@ def get_configs(args, kwargs):
         for hint in roller_hints:
             config = {}
             block_m, block_n = hint.block
-            warp_m, warp_n = hint.warp
-            # block_rows, block_cols represents warp partitioning
-            block_rows, block_cols = block_m // warp_m, block_n // warp_n
             config["block_M"] = block_m
             config["block_N"] = block_n
             config["block_K"] = hint.rstep[0]
             config["num_stages"] = hint.pipeline_stage
-            config["thread_num"] = block_rows * block_cols * 32
-            config["policy"] = T.GemmWarpPolicy.from_warp_partition(block_rows, block_cols)
+            if hint.warp:
+                warp_m, warp_n = hint.warp
+                # block_rows, block_cols represents warp partitioning
+                block_rows, block_cols = block_m // warp_m, block_n // warp_n
+                config["thread_num"] = block_rows * block_cols * arch.warp_size
+                config["policy"] = T.GemmWarpPolicy.from_warp_partition(block_rows, block_cols)
+            else:
+                # Some HIP/RDNA targets currently fall back to non-tensorcore Roller
+                # hints.  Keep these usable for benchmarking by deriving the thread
+                # count from the thread tiling and letting TileLang choose a square
+                # WMMA warp partition at T.gemm lowering time.
+                thread_num = 1
+                for extent in hint.thread:
+                    thread_num *= extent
+                config["thread_num"] = thread_num
+                config["policy"] = T.GemmWarpPolicy.Square
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
         for config in configs:

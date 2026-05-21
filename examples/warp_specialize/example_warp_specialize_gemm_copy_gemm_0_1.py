@@ -2,11 +2,7 @@ import tilelang
 import tilelang.language as T
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    },
-)
+@tilelang.jit(pass_configs={})
 def matmul_warp_specialize_copy_gemm_0_1(A, B, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     M, N, K = T.const("M, N, K")
 

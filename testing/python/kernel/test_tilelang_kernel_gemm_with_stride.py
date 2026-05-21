@@ -55,10 +55,7 @@ def run_gemm_with_stride_ss(M: int, N: int, K: int, block_M: int, block_N: int, 
         func,
         out_idx=[2],
         target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        },
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     # Create random input tensors on the GPU
     a = torch.randn(M, K, device="cuda", dtype=torch.float16)

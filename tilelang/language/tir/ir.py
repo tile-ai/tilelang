@@ -1,6 +1,6 @@
-import tvm.script.ir_builder.tir.ir as _ir
-from tvm.script.ir_builder.tir import frame
-from tvm.tir import PrimExpr
+import tvm.tirx.script.builder.ir as _ir
+from tvm.tirx.script.builder import frame
+from tvm.tirx import PrimExpr
 from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
@@ -290,9 +290,12 @@ ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
+ptx_wgmma_sp_ss = _dtype_forward(_tir_op.ptx_wgmma_sp_ss)
+ptx_wgmma_sp_rs = _dtype_forward(_tir_op.ptx_wgmma_sp_rs)
 ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
 ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
-ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
+ptx_tcgen05_mma_blockscaled_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_blockscaled_ss)
+ptx_ldmatrix = _tir_op.ptx_ldmatrix
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)
 mma_store = _dtype_forward(_tir_op.mma_store)

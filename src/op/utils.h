@@ -6,24 +6,25 @@
 #ifndef TVM_TL_OP_UTILS_H_
 #define TVM_TL_OP_UTILS_H_
 
-#include "../target/stubs/cuda.h"
 #include "./operator.h"
+#include "backend/cuda/stubs/cuda.h"
 #include "region.h"
+#include "support/check.h"
 #include "tvm/runtime/base.h"
-#include <tvm/tir/buffer.h>
-#include <tvm/tir/op.h>
+#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/op.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 TVM_DLL int to_CUtensorMapDataType(DataType dtype);
 
 // Reverses an array (used for row-major/column-major layout conversion).
-template <typename T> Array<T> ReverseArray(Array<T> array) {
-  return Array<T>{array.rbegin(), array.rend()};
+template <typename T> ffi::Array<T> ReverseArray(ffi::Array<T> array) {
+  return ffi::Array<T>{array.rbegin(), array.rend()};
 }
 
 // Check if an PrimExpr is a buffer-like (BufferRegion/BufferLoad/tl.region)
@@ -34,6 +35,12 @@ TVM_DLL bool IsBufferLikeExpr(const PrimExpr &expr);
 // to BufferRegion so ops can uniformly consume regions.
 // Note: tvm_access_ptr is no longer supported here.
 TVM_DLL BufferRegion NormalizeToBufferRegion(const PrimExpr &arg);
+
+// Normalize an argument to BufferRegion together with an access mask.
+// If the argument is a tl.region(...) bridge, preserve its encoded mask;
+// otherwise fall back to the provided default mask.
+TVM_DLL AccessRegion NormalizeToAccessRegion(
+    const PrimExpr &arg, int default_access_mask = kAccessReadWrite);
 
 // Build a tvm_access_ptr(handle) from a BufferRegion.
 // - If `require_2d` is true, checks buffer ndim >= 2.
@@ -68,7 +75,7 @@ inline Layout ExpandLayoutToMatchBuffer(const Layout &layout,
     return layout;
   }
 
-  Array<PrimExpr> leading_shape;
+  ffi::Array<PrimExpr> leading_shape;
   leading_shape.reserve(buffer_ndim - layout_ndim);
   for (size_t i = 0; i < buffer_ndim - layout_ndim; ++i) {
     leading_shape.push_back(buffer->shape[i]);

@@ -5,23 +5,57 @@
  */
 
 #include "fill.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
 
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 
-#include "../layout/tcgen05_layout.h"
-#include "../target/utils.h"
-#include "../transform/common/loop_fusion_utils.h"
-#include "../transform/loop_partition.h"
-#include "../transform/loop_vectorize.h"
-#include "builtin.h"
 #include "utils.h"
+
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
+
+namespace {
+
+std::vector<FillImpl> &FillImplRegistry() {
+  static std::vector<FillImpl> registry;
+  return registry;
+}
+
+const FillImpl &ResolveFillImpl(Target target) {
+  const auto &registry = FillImplRegistry();
+  const FillImpl *matched_impl = nullptr;
+  for (const FillImpl &impl : registry) {
+    if (impl.match_target(target)) {
+      ICHECK(matched_impl == nullptr)
+          << "tl.fill found multiple target-specific implementations for "
+          << target->str() << ": " << matched_impl->name << " and "
+          << impl.name;
+      matched_impl = &impl;
+    }
+  }
+  ICHECK(matched_impl != nullptr)
+      << "tl.fill requires a target-specific implementation, but no fill "
+         "implementation is registered for "
+      << target->str();
+  return *matched_impl;
+}
+
+} // namespace
+
+void RegisterFillImpl(FillImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.lower != nullptr);
+  FillImplRegistry().push_back(impl);
+}
 
 /**
  * @brief Construct a Fill operator node from call arguments and a buffer map.
@@ -54,15 +88,16 @@ using namespace tir;
  *
  * Notes:
  * - The constructor enforces constraints (e.g., stride == 1 ramps, constant
- * lanes) and will terminate (via CHECK/ICHECK) if inputs are unsupported or out
+ * lanes) and will terminate (via ICHECK) if inputs are unsupported or out
  * of bounds.
  */
 Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
+  ObjectPtr<FillNode> node = make_object<FillNode>();
 
-  BufferRegion region = NormalizeToBufferRegion(args[0]);
-  node->dst = region->buffer;
-  node->region = region->region;
+  AccessRegion dst_access = NormalizeToAccessRegion(args[0], kAccessWrite);
+  node->dst = dst_access.region->buffer;
+  node->region = dst_access.region->region;
+  node->SetAccessRegions({dst_access});
 
   if (args[1]->dtype != node->dst->dtype) {
     node->value = Cast(node->dst->dtype, args[1]);
@@ -102,7 +137,7 @@ Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
  * @return TileOperator A TileOperator that owns the copied FillNode.
  */
 TileOperator FillNode::Clone() const {
-  auto op = tvm::ffi::make_object<FillNode>(*this);
+  auto op = make_object<FillNode>(*this);
   return Fill(op);
 }
 
@@ -155,54 +190,7 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (IsFragmentBuffer(dst)) {
-    auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target,
-                         T.thread_bounds,
-                         T.layout_map,
-                         analyzer,
-                         false,
-                         T.buffer_remap,
-                         {}},
-                        InferLevel::kFree);
-    auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
-                                     par_op->GetLoopLayout());
-    auto vectorized_loop = VectorizeLoop(thread_loop, analyzer, T.layout_map);
-    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-
-    if (par_op->GetPredicate(T.thread_var).defined()) {
-      return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                        unrolled_loop);
-    }
-    return unrolled_loop;
-  } else if (IsLocalBuffer(dst) || IsLocalVarBuffer(dst)) {
-    auto init_loop = MakeSIMTLoop(analyzer);
-    auto vectorized_loop = VectorizeLoop(init_loop, analyzer, T.layout_map);
-    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-    return unrolled_loop;
-  } else if (IsSharedBuffer(dst) || IsGlobalBuffer(dst)) {
-    auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target,
-                         T.thread_bounds,
-                         T.layout_map,
-                         analyzer,
-                         false,
-                         T.buffer_remap,
-                         {}},
-                        InferLevel::kFree);
-    auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
-                                     par_op->GetLoopLayout());
-    auto vectorized_loop = VectorizeLoop(thread_loop, analyzer, T.layout_map);
-    auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-    if (par_op->GetPredicate(T.thread_var).defined()) {
-      return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                        unrolled_loop);
-    }
-    return unrolled_loop;
-  } else {
-    LOG(FATAL) << "Unsupported scope " << dst.scope();
-    return Stmt();
-  }
+  return ResolveFillImpl(T.target).lower(*this, T, analyzer);
 }
 
 /**

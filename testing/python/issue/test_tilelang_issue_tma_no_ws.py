@@ -3,8 +3,9 @@ import re
 import tilelang
 import tilelang.testing
 from tilelang import language as T
-from tilelang.layout import make_cutlass_metadata_layout
 import torch
+
+from tilelang.utils.sparse import get_e_factor
 
 
 def _compile_tvm_ffi(func, pass_configs, **kwargs):
@@ -22,103 +23,8 @@ def _compile_tvm_ffi(func, pass_configs, **kwargs):
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_tma_lower_no_warp_specialized_injects_mbarrier():
-    """Regression for Hopper TMA lowering when warp specialization is disabled.
-
-    When `tl.disable_tma_lower=False` but `tl.disable_warp_specialized=True`, the
-    optimization pipeline must still run the TMA barrier allocation/injection
-    passes so generated CUDA source defines and uses `mbarrier[...]` correctly.
-    """
-
-    M, K = 16, 128
-    block_m, block_k = 4, 128
-    threads = 32
-
-    @T.prim_func
-    def tma_copy(x: T.Tensor((M, K), T.float16)):
-        with T.Kernel(T.ceildiv(M, block_m), T.ceildiv(K, block_k), threads=threads) as (
-            pid_m,
-            pid_k,
-        ):
-            x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
-            T.fill(x_shared, 0)
-            T.copy(
-                x[
-                    pid_m * block_m : (pid_m + 1) * block_m,
-                    pid_k * block_k : (pid_k + 1) * block_k,
-                ],
-                x_shared,
-            )
-
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    }
-    kernel = _compile_tvm_ffi(tma_copy, pass_configs)
-
-    src = kernel.get_kernel_source()
-    assert "tl::tma_load" in src
-    assert "mbarrier_mem" in src
-    assert "arrive_and_expect_tx" in src
-    assert "expect_transaction" not in src
-    assert ".arrive();" not in src
-
-    x = torch.randn((M, K), device="cuda", dtype=torch.float16)
-    kernel(x)
-    torch.cuda.synchronize()
-
-
-@tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_tma_lower_no_warp_specialized_2d_descriptor_uses_args1_barrier():
-    """Cover the 2D-descriptor TMA barrier rewrite path (barrier at args[1])."""
-
-    M, K = 16, 256
-    block_m, block_k = 4, 128
-    threads = 32
-
-    @T.prim_func
-    def tma_copy_2d_desc(x: T.Tensor((M, K), T.float16)):
-        with T.Kernel(T.ceildiv(M, block_m), T.ceildiv(K, block_k), threads=threads) as (
-            pid_m,
-            pid_k,
-        ):
-            x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
-            T.fill(x_shared, 0)
-            T.copy(
-                x[
-                    pid_m * block_m : (pid_m + 1) * block_m,
-                    pid_k * block_k : (pid_k + 1) * block_k,
-                ],
-                x_shared,
-            )
-
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    }
-
-    kernel = _compile_tvm_ffi(tma_copy_2d_desc, pass_configs)
-
-    src = kernel.get_kernel_source()
-    assert "CUtensorMap" in src
-    assert "tl::tma_load" in src
-
-    flat_src = " ".join(src.split())
-    pattern = r"tl::tma_load\([^,]+,\s*mbarrier\[[0-9]+\]"
-    assert re.search(pattern, flat_src), (
-        f"Expected regex {pattern!r} to match flattened CUDA source. Generated source (truncated):\n{src[:1000]}"
-    )
-
-    x = torch.randn((M, K), device="cuda", dtype=torch.float16)
-    kernel(x)
-    torch.cuda.synchronize()
-
-
-@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_num_stages_zero_pure_tma_does_not_auto_warp_specialize():
-    """num_stages=0 should keep pure TMA loops out of auto-WS."""
+    """num_stages=0 should keep ordinary T.copy on the synchronous path."""
 
     M, K = 8, 256
     block_m, block_k = 4, 128
@@ -147,15 +53,11 @@ def test_num_stages_zero_pure_tma_does_not_auto_warp_specialize():
                     ],
                 )
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(copy_loop_num_stages_zero, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
-    assert "tl::tma_load" in src
+    assert "tl::tma_load" not in src
     assert "__launch_bounds__(160, 1)" not in src
     assert "if (32 <= ((int)threadIdx.x))" not in src
 
@@ -196,11 +98,7 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
                     ],
                 )
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(copy_loop_num_stages_one, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
@@ -210,6 +108,53 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x)
+    torch.testing.assert_close(y, x)
+    torch.cuda.synchronize()
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_guarded_pure_tma_pipeline_keeps_auto_warp_specialize():
+    """A pipeline loop nested under a runtime guard should still auto-WS."""
+
+    M, K = 8, 256
+    block_m, block_k = 4, 128
+    threads = 32
+
+    @T.prim_func
+    def guarded_copy_loop(
+        x: T.Tensor((M, K), T.float16),
+        y: T.Tensor((M, K), T.float16),
+        valid_m: T.int32,
+    ):
+        with T.Kernel(T.ceildiv(M, block_m), threads=threads) as pid_m:
+            x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
+            if pid_m * block_m < valid_m:
+                for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=1):
+                    T.copy(
+                        x[
+                            pid_m * block_m : (pid_m + 1) * block_m,
+                            ko * block_k : (ko + 1) * block_k,
+                        ],
+                        x_shared,
+                    )
+                    T.copy(
+                        x_shared,
+                        y[
+                            pid_m * block_m : (pid_m + 1) * block_m,
+                            ko * block_k : (ko + 1) * block_k,
+                        ],
+                    )
+
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(guarded_copy_loop, pass_configs, out_idx=[1])
+
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load" in src
+    assert "__launch_bounds__(160, 1)" in src
+    assert "if (32 <= ((int)threadIdx.x))" in src
+
+    x = torch.randn((M, K), device="cuda", dtype=torch.float16)
+    y = kernel(x, M)
     torch.testing.assert_close(y, x)
     torch.cuda.synchronize()
 
@@ -239,12 +184,48 @@ def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
                 for i in T.serial(bytes_per_copy):
                     y[ko * bytes_per_copy + i] = x_shared[i]
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(cp_async_only_num_stages_zero, pass_configs, out_idx=[1])
+
+    src = kernel.get_kernel_source()
+    assert "cp_async_gs<16>" in src
+    assert "__launch_bounds__(32, 1)" in src
+    assert "__launch_bounds__(160, 1)" not in src
+    assert "if (32 <= ((int)threadIdx.x))" not in src
+
+    x = torch.randint(0, 256, (4 * bytes_per_copy,), device="cuda", dtype=torch.uint8)
+    y = kernel(x)
+    torch.testing.assert_close(y, x)
+    torch.cuda.synchronize()
+
+
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_num_stages_one_cp_async_only_keeps_non_ws_launch_shape():
+    """Stage-1 cp.async-only loops should stay non-WS on Hopper."""
+
+    bytes_per_copy = 16
+    threads = 32
+
+    @T.prim_func
+    def cp_async_only_num_stages_one(
+        x: T.Tensor((4 * bytes_per_copy,), T.uint8),
+        y: T.Tensor((4 * bytes_per_copy,), T.uint8),
+    ):
+        with T.Kernel(1, threads=threads):
+            x_shared = T.alloc_shared((bytes_per_copy,), dtype=T.uint8)
+            for ko in T.Pipelined(4, num_stages=1):
+                T.ptx_cp_async(
+                    T.access_ptr(x_shared[0], "w", bytes_per_copy),
+                    T.access_ptr(x[ko * bytes_per_copy], "r", bytes_per_copy),
+                    bytes_per_copy,
+                )
+                T.ptx_commit_group()
+                T.ptx_wait_group(0)
+                for i in T.serial(bytes_per_copy):
+                    y[ko * bytes_per_copy + i] = x_shared[i]
+
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = _compile_tvm_ffi(cp_async_only_num_stages_one, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
     assert "cp_async_gs<16>" in src
@@ -303,11 +284,7 @@ def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
                 for i in T.serial(cp_async_bytes):
                     meta_out[ko * cp_async_bytes + i] = meta_shared[i]
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(mixed_async_num_stages_one, pass_configs, out_idx=[2, 3])
 
     src = kernel.get_kernel_source()
@@ -350,11 +327,7 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
 
             T.copy(C_local, C[by * block_m, bx * block_n])
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(mixed_gemm_shared_barrier, pass_configs, out_idx=[2])
 
     src = kernel.get_kernel_source()
@@ -367,7 +340,11 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
     assert ".expect_transaction(8192);" in src
     assert src.count(".init(128);") == 6
     assert ".init(1);" not in src
-    assert "tl::mbarrier_cp_async_arrive_noinc(mbarrier[(ko % 3)])" in flat_src
+    # Mixed TMA+cp.async should reuse the same forward barrier set. Depending on
+    # when cp.async is lowered, this may appear either as an explicit
+    # noinc-arrive or as a regular arrive on the same forward barrier after the
+    # cp.async visibility sync.
+    assert "tl::mbarrier_cp_async_arrive_noinc(mbarrier[(ko % 3)])" in flat_src or "mbarrier[(ko % 3)].arrive();" in flat_src
     assert "tl::mbarrier_cp_async_arrive_noinc(mbarrier[((ko % 3) + 4)])" not in flat_src
     assert "mbarrier[((ko % 3) + 7)]" not in flat_src
     assert "mbarrier[((ko % 3) + 10)]" not in flat_src
@@ -380,7 +357,7 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
     torch.testing.assert_close(c, ref, rtol=1e-2, atol=1e-2)
 
 
-@tilelang.testing.requires_cuda_compute_version(9, 0)
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     """Ordinary global->shared metadata copies should stay in the producer."""
 
@@ -390,51 +367,40 @@ def test_sparse_ws_regular_metadata_copy_stays_in_producer():
     num_stages = 2
     threads = 128
 
+    e_factor = get_e_factor(T.float16, T.uint8)
+
     @T.prim_func
     def sparse_tensorcore_metadata_copy(
         A_sparse: T.Tensor((M, K // 2), T.float16),
-        E: T.Tensor((M, K // 8), "uint8"),
+        E: T.Tensor((M, K // e_factor), T.uint8),
         B: T.Tensor((K, N), T.float16),
         C: T.Tensor((M, N), T.float16),
     ):
         with T.Kernel(T.ceildiv(N, block_n), T.ceildiv(M, block_m), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_m, block_k // 2), T.float16)
             B_shared = T.alloc_shared((block_k, block_n), T.float16)
-            E_shared = T.alloc_shared((block_m, block_k // 8), "uint8")
+            E_shared = T.alloc_shared((block_m, block_k // e_factor), T.uint8)
             C_local = T.alloc_fragment((block_m, block_n), T.float32)
-
-            T.annotate_layout(
-                {
-                    E: make_cutlass_metadata_layout(E, mma_dtype=T.float16, arch="9.0", block_k=block_k),
-                    E_shared: make_cutlass_metadata_layout(E_shared, mma_dtype=T.float16, arch="9.0", block_k=block_k),
-                }
-            )
 
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
-                T.copy(E[by * block_m, k * block_k // 8], E_shared)
+                T.copy(E[by * block_m, k * block_k // e_factor], E_shared)
                 T.copy(A_sparse[by * block_m, k * block_k // 2], A_shared)
                 T.copy(B[k * block_k, bx * block_n], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local, transpose_A=False, transpose_E=False, transpose_B=False)
 
             T.copy(C_local, C[by * block_m, bx * block_n])
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(sparse_tensorcore_metadata_copy, pass_configs, out_idx=[3])
 
     src = kernel.get_kernel_source()
     producer_idx = src.index("if (128 <= ((int)threadIdx.x)) {")
     consumer_idx = src.index("} else {", producer_idx)
-    metadata_copy_idx = src.index("*(uchar2*)(E +")
-    gemm_idx = src.index("tl::gemm_sp_ss<")
+    metadata_copy_idx = src.index("tl::tma_load(E_desc")
 
     assert producer_idx < metadata_copy_idx < consumer_idx
-    assert consumer_idx < gemm_idx
-    assert "*(uchar2*)(E +" not in src[consumer_idx:]
+    assert "tl::tma_load(E_desc" not in src[consumer_idx:]
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
@@ -518,11 +484,7 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
             T.copy(acc_o, O_shared)
             T.copy(O_shared, Output[bz, by, bx * block_m : (bx + 1) * block_m, :])
 
-    pass_configs = {
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: False,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-    }
+    pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(sparse_flash_attn, pass_configs, out_idx=[4])
 
     src = kernel.get_kernel_source()

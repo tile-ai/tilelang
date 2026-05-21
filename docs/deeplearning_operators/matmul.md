@@ -62,7 +62,7 @@ Below is a simplified code snippet for a 1024 x 1024 x 1024 matrix multiplicatio
 ```python
 import tilelang
 import tilelang.language as T
-from tilelang.intrinsics import make_mma_swizzle_layout
+from tilelang.cuda.intrinsics import make_mma_swizzle_layout
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     @T.prim_func

@@ -8,7 +8,7 @@ from tilelang.autotuner import *
 from example_fusedmoe_torch import *
 
 
-@tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
+@tilelang.jit(pass_configs={"tl.disable_warp_specialized": True})
 def moe_forward_tilelang_shared(
     input,
     shared_W_gate,
@@ -88,12 +88,7 @@ def moe_forward_tilelang_shared(
         T.copy(output_local, output[bx * block_token, by * block_dhidden])
 
 
-@tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    }
-)
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
 def moe_forward_tilelang_routed(
     input,
     routed_expert_gate,

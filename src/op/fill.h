@@ -8,22 +8,24 @@
 
 #include "operator.h"
 #include "parallel.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 /// Node class for fill operations
 class FillNode : public TileOperatorNode {
 public:
-  tir::Buffer dst;     ///< Destination buffer to fill
-  PrimExpr value;      ///< Value to fill with
-  Array<Range> region; ///< Region to fill within the buffer
+  tirx::Buffer dst;         ///< Destination buffer to fill
+  PrimExpr value;           ///< Value to fill with
+  ffi::Array<Range> region; ///< Region to fill within the buffer
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Fill", FillNode, TileOperatorNode);
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
   static const Op &Get();
 
   static void RegisterReflection() {
@@ -36,17 +38,29 @@ public:
 
   TileOperator Clone() const;
 
-private:
   /// Create SIMT-style parallel loop for filling
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
 };
+
+using FillTargetPredicate = bool (*)(Target target);
+
+struct FillImpl {
+  const char *name;
+  FillTargetPredicate match_target;
+
+  Stmt (*lower)(const FillNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterFillImpl(FillImpl impl);
 
 /// Wrapper class for fill operations
 class Fill : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fill, TileOperator, FillNode);
-  TVM_DLL Fill(Array<PrimExpr> args,
-               Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_DLL Fill(ffi::Array<PrimExpr> args,
+               ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                   ffi::Map<ffi::String, ffi::ObjectRef>());
   static const Op &Get();
 };
 

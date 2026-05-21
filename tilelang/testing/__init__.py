@@ -5,6 +5,7 @@ import random
 import torch
 import numpy as np
 from tilelang.contrib import nvcc
+from tilelang.utils.target import determine_target, target_is_cdna, target_is_cuda, target_is_gfx950
 from tvm.testing.utils import requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
@@ -16,11 +17,76 @@ __all__ = [
     "requires_metal",
     "requires_rocm",
     "requires_llvm",
+    "requires_cdna",
+    "requires_cuda_or_cdna",
+    "requires_gfx950",
     "main",
     "requires_cuda_compute_version",
     "process_func",
     "regression",
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
+
+
+def _check_is_gfx950() -> bool:
+    try:
+        target = determine_target("auto", return_object=True)
+        return target_is_gfx950(target)
+    except (ValueError, RuntimeError):
+        return False
+
+
+def _check_is_cdna() -> bool:
+    try:
+        target = determine_target("auto", return_object=True)
+        return target_is_cdna(target)
+    except (ValueError, RuntimeError):
+        return False
+
+
+def _check_is_cuda_or_cdna() -> bool:
+    try:
+        target = determine_target("auto", return_object=True)
+        return target_is_cuda(target) or target_is_cdna(target)
+    except (ValueError, RuntimeError):
+        return False
+
+
+def requires_cdna(func):
+    """Skip the test unless the ROCm device is a CDNA GPU."""
+    is_cdna = _check_is_cdna()
+    marks = [
+        pytest.mark.skipif(
+            not is_cdna,
+            reason="Requires CDNA ROCm target",
+        ),
+        *requires_rocm.marks(),
+    ]
+    return _compose([func], marks)
+
+
+def requires_cuda_or_cdna(func):
+    """Skip the test unless the device is CUDA or CDNA ROCm."""
+    is_cuda_or_cdna = _check_is_cuda_or_cdna()
+    marks = [
+        pytest.mark.skipif(
+            not is_cuda_or_cdna,
+            reason="Requires CUDA or CDNA ROCm target",
+        ),
+    ]
+    return _compose([func], marks)
+
+
+def requires_gfx950(func):
+    """Skip the test unless the ROCm device is gfx950 (CDNA4 / MI350)."""
+    is_gfx950 = _check_is_gfx950()
+    marks = [
+        pytest.mark.skipif(
+            not is_gfx950,
+            reason="Requires gfx950 (CDNA4/MI350)",
+        ),
+        *requires_rocm.marks(),
+    ]
+    return _compose([func], marks)
 
 
 # pytest.main() wrapper to allow running single test file

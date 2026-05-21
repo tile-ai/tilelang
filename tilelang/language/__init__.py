@@ -7,7 +7,7 @@ from __future__ import annotations
 # tir script
 # TODO(lei): remove this import once the
 # upstream tir script is fully compatible
-from tvm.script.parser.tir import *
+from tvm.tirx.script.parser import *
 from . import overrides as _overrides  # noqa: F401
 
 # from .tir import prim_func, macro,  # noqa: F401
@@ -30,6 +30,7 @@ from .frame import has_let_value, get_let_value  # noqa: F401
 from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
+    CUDASourceCodeKernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
     get_thread_binding,  # noqa: F401
     get_thread_bindings,  # noqa: F401
@@ -42,6 +43,7 @@ from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
+    alloc_global,  # noqa: F401
     alloc_barrier,  # noqa: F401
     alloc_cluster_barrier,  # noqa: F401
     alloc_tmem,  # noqa: F401
@@ -51,13 +53,22 @@ from .allocate import (
     alloc_tcgen05_smem_desc,  # noqa: F401
     alloc_tcgen05_instr_desc,  # noqa: F401
     empty,  # noqa: F401
-    alloc_global,  # noqa: F401
 )
-from tvm.script.parser.tir import allocate as allocate  # noqa: F401
-from .copy_op import copy, async_copy, tma_copy, transpose, c2d_im2col  # noqa: F401
+from tvm.tirx.script.builder.ir import alloc_buffer as allocate  # noqa: F401
+from .copy_op import copy, async_copy, tma_copy, tma_gather4, tma_gather4_bytes, tma_scatter4, transpose, c2d_im2col, copy_cluster  # noqa: F401
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
-from .gemm_op import gemm, gemm_v1, gemm_v2, wgmma_gemm, tcgen05_gemm  # noqa: F401
-from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401
+from .gemm_op import (  # noqa: F401
+    gemm,
+    wgmma_gemm,
+    tcgen05_gemm,
+    tcgen05_gemm_blockscaled,
+    make_blockscaled_gemm_layout,
+)
+from .experimental.gemm_sp_op import (  # noqa: F401
+    gemm_sp,
+    wgmma_gemm_sp,
+    tcgen05_gemm_sp,
+)
 from .fill_op import fill, clear  # noqa: F401
 from .reduce_op import (
     reduce,  # noqa: F401
@@ -95,6 +106,8 @@ from .customize import (
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 from .builtin import __ldg as __ldg  # noqa: F401
+from .builtin import ds_read_tr16_b64 as ds_read_tr16_b64  # noqa: F401
+from .builtin import ds_read_tr8_b64 as ds_read_tr8_b64  # noqa: F401
 from .builtin import ldg32 as ldg32  # noqa: F401
 from .builtin import ldg64 as ldg64  # noqa: F401
 from .builtin import ldg128 as ldg128  # noqa: F401
@@ -103,6 +116,14 @@ from .builtin import stg32 as stg32  # noqa: F401
 from .builtin import stg64 as stg64  # noqa: F401
 from .builtin import stg128 as stg128  # noqa: F401
 from .builtin import stg256 as stg256  # noqa: F401
+from .builtin import any_sync as any_sync  # noqa: F401
+from .builtin import all_sync as all_sync  # noqa: F401
+from .builtin import ballot_sync as ballot_sync  # noqa: F401
+from .builtin import ballot as ballot  # noqa: F401
+from .builtin import activemask as activemask  # noqa: F401
+from .builtin import syncthreads_count as syncthreads_count  # noqa: F401
+from .builtin import syncthreads_and as syncthreads_and  # noqa: F401
+from .builtin import syncthreads_or as syncthreads_or  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 
@@ -133,9 +154,17 @@ from .cluster import (
     cluster_wait,  # noqa: F401
     cluster_sync,  # noqa: F401
     block_rank_in_cluster,  # noqa: F401
+    clc_try_cancel,  # noqa: F401
+    clc_try_cancel_multicast,  # noqa: F401
+    clc_is_canceled,  # noqa: F401
+    clc_get_first_ctaid_x,  # noqa: F401
+    clc_get_first_ctaid_y,  # noqa: F401
+    clc_get_first_ctaid_z,  # noqa: F401
 )
 
 
 def import_source(source: str | None = None):
     # source is the source code to be imported
-    return block_attr({"pragma_import_c": source}) if source is not None else None
+    from tvm.tirx.script.builder.ir import sblock_attr
+
+    return sblock_attr({"pragma_import_c": source}) if source is not None else None

@@ -5,10 +5,7 @@ import tilelang.language as T
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    },
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def _buggy_kernel(S: T.Tensor((8), T.bfloat16), D: T.Tensor((4, 64), T.bfloat16)):
     with T.Kernel(1, threads=128):

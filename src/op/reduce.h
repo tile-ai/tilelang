@@ -7,12 +7,15 @@
 #define TVM_TL_OP_REDUCE_H_
 
 #include "operator.h"
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
 
 namespace tvm {
 
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /// Supported reduction operation types
 enum class ReduceTypeEnum : uint8_t {
@@ -33,7 +36,7 @@ public:
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceType", ReduceTypeNode, Object);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<ReduceTypeNode>().def_ro("type", &ReduceTypeNode::type);
   }
 
@@ -54,7 +57,7 @@ public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceType, ObjectRef,
                                              ReduceTypeNode);
   TVM_DLL ReduceType(std::string type) {
-    auto node = tvm::ffi::make_object<ReduceTypeNode>();
+    auto node = make_object<ReduceTypeNode>();
     if (type == "sum") {
       node->type = int(ReduceTypeEnum::kSum);
     } else if (type == "abssum") {
@@ -81,18 +84,30 @@ public:
 /// Node class for reduction operations
 class ReduceOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst; ///< Source and destination buffers
+  tirx::Buffer src, dst; ///< Source and destination buffers
   // Optional: keep the original regions used to construct this op
   BufferRegion srcRegion_, dstRegion_;
   int dim;         ///< Dimension to reduce along
   ReduceType type; ///< Type of reduction operation
   bool clear;      ///< Whether to clear destination before reduction
+  int batch{1};    ///< Number of output elements per batched AllReduce
+                   ///< call. Default 1 = scalar (current behaviour).
+                   ///< When batch > 1, the compiler emits
+                   ///< ceil(N/batch) batched AllReduce calls each
+                   ///< sharing a single pair of barriers across batch
+                   ///< elements. batch must evenly divide the
+                   ///< per-thread output element count N derived from
+                   ///< the fragment layout.
+  bool nan_propagate{false}; ///< For fp16/bf16 max/min/absmax: propagate NaN
+                             ///< (use __hmax_nan/__hmin_nan) instead of the
+                             ///< default __hmax/__hmin which return the
+                             ///< non-NaN operand.
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode,
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<ReduceOpNode>()
         .def_ro("src", &ReduceOpNode::src)
         .def_ro("dst", &ReduceOpNode::dst)
@@ -100,7 +115,9 @@ public:
         .def_ro("dstRegion", &ReduceOpNode::dstRegion_)
         .def_ro("dim", &ReduceOpNode::dim)
         .def_ro("type", &ReduceOpNode::type)
-        .def_ro("clear", &ReduceOpNode::clear);
+        .def_ro("clear", &ReduceOpNode::clear)
+        .def_ro("batch", &ReduceOpNode::batch)
+        .def_ro("nan_propagate", &ReduceOpNode::nan_propagate);
   }
 
   /// Lower the operator to TIR statements
@@ -108,17 +125,22 @@ public:
   /// Infer memory layout for buffers
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
+  AccessRegions GetAccessRegions() const override;
   static const Op &Get();
   TileOperator Clone() const;
-
-private:
-  /// Generate initial value for reduction
-  PrimExpr MakeInitValue() const;
-  /// Generate reduction expression
-  PrimExpr MakeReduce(const PrimExpr &acc, const PrimExpr &b) const;
-  /// Generate codegen reducer string
-  std::string MakeCodegenReducer() const;
 };
+
+using ReduceTargetPredicate = bool (*)(Target target);
+
+struct ReduceImpl {
+  const char *name;
+  ReduceTargetPredicate match_target;
+
+  Stmt (*lower)(const ReduceOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterReduceImpl(ReduceImpl impl);
 
 /// Wrapper class for reduction operations
 class ReduceOp : public TileOperator {
@@ -134,7 +156,7 @@ public:
 /// Node class for cumulative sum operations
 class CumSumOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst; ///< Source and destination buffers
+  tirx::Buffer src, dst; ///< Source and destination buffers
   // Optional: keep the original regions used to construct this op
   BufferRegion srcRegion_, dstRegion_;
   int dim;      ///< Dimension along which to compute cumulative sum
@@ -143,7 +165,7 @@ public:
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<CumSumOpNode>()
         .def_ro("src", &CumSumOpNode::src)
         .def_ro("dst", &CumSumOpNode::dst)
@@ -159,6 +181,18 @@ public:
   static const Op &Get();
   TileOperator Clone() const;
 };
+
+using CumSumTargetPredicate = bool (*)(Target target);
+
+struct CumSumImpl {
+  const char *name;
+  CumSumTargetPredicate match_target;
+
+  Stmt (*lower)(const CumSumOpNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterCumSumImpl(CumSumImpl impl);
 
 /// Wrapper class for cumulative sum operations
 class CumSumOp : public TileOperator {

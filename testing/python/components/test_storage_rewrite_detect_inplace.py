@@ -1,9 +1,6 @@
 import tilelang
 import tilelang.testing
 from tilelang import language as T
-from tilelang.utils.target import check_hip_availability
-
-_IS_HIP_AVAILABLE = check_hip_availability()
 
 
 @tilelang.jit
@@ -57,9 +54,11 @@ def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)
 
-    pattern = "read[0] = (read[0] * 2);" if _IS_HIP_AVAILABLE else "read = (read * 2);"
-    assert script_off.count(pattern) == 0
-    assert script_on.count(pattern) > 0
+    pattern_on = "read = (read * 2);"
+    pattern_off = "write = (read * 2);"
+    assert script_off.count(pattern_on) == 0, f"inplace pattern found when disabled:\n{script_off}"
+    assert script_on.count(pattern_on) > 0, f"inplace pattern not found when enabled:\n{script_on}"
+    assert script_off.count(pattern_off) > 0, f"separate-write pattern not found when disabled:\n{script_off}"
 
 
 if __name__ == "__main__":

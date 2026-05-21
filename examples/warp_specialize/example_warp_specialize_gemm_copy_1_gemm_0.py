@@ -81,8 +81,6 @@ def run_regression_perf(M=16384, N=16384, K=16384):
     a = torch.randn(M, K, device="cuda", dtype=torch.float16)
     b = torch.randn(K, N, device="cuda", dtype=torch.float16)
 
-    print(matmul_warp_specialize_copy_1_gemm_0.get_kernel_source(a, b, block_M, block_N, block_K))
-
     c = matmul_warp_specialize_copy_1_gemm_0(a, b, block_M, block_N, block_K)
 
     ref_c = a @ b

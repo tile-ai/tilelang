@@ -5,35 +5,36 @@ from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
 from tilelang.engine.phase import LowerAndLegalize
-from tvm import tir
+from tvm import tirx
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
 
 def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.LowerSharedBarrier()(mod)
     return mod
 
 
-def _collect_calls(stmt, op_name: str):
+def _collect_calls(stmt, op_name: str | set[str]):
+    op_names = {op_name} if isinstance(op_name, str) else op_name
     calls = []
 
     def visitor(node):
-        if isinstance(node, tvm.tir.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
+        if isinstance(node, tvm.tirx.Call) and hasattr(node, "op") and hasattr(node.op, "name") and str(node.op.name) in op_names:
             calls.append(node)
 
-    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
+    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
     return calls
 
 
 def _collect_storage_syncs(stmt):
-    return _collect_calls(stmt, "tir.tvm_storage_sync")
+    return _collect_calls(stmt, "tirx.tvm_storage_sync")
 
 
 def _collect_init_barrier_calls(stmt):
-    return _collect_calls(stmt, "tir.ptx_init_barrier_thread_count")
+    return _collect_calls(stmt, "tirx.ptx_init_barrier_thread_count")
 
 
 def _collect_fence_barrier_init(stmt):
@@ -48,12 +49,12 @@ def _collect_barrier_blocks(stmt):
     blocks = []
 
     def visitor(node):
-        if isinstance(node, tvm.tir.Block):
+        if isinstance(node, tvm.tirx.SBlock):
             barrier_bufs = [buf for buf in node.alloc_buffers if buf.scope() in ("shared.barrier", "shared.cluster_barrier")]
             if barrier_bufs:
                 blocks.append(node)
 
-    tvm.tir.stmt_functor.post_order_visit(stmt, visitor)
+    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
     return blocks
 
 
@@ -122,10 +123,7 @@ def test_no_barrier_is_noop():
 def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
     """Regression for tcgen05 no-TMA kernels after pass reordering."""
 
-    pass_configs = {
-        tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    }
+    pass_configs = {tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
 
     @T.prim_func
     def func(
@@ -157,7 +155,7 @@ def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
             T.copy(C_local, Y_shared)
             T.copy(Y_shared, Y[by * 128, bx * 128])
 
-    target = tvm.target.Target("cuda -arch=sm_100")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
     with tvm.transform.PassContext(config=pass_configs), target:
         mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
         mod = LowerAndLegalize(mod, target)

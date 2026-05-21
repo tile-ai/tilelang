@@ -1,16 +1,18 @@
+#include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include <tvm/ffi/function.h>
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/data_type_rewriter.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include "tir/transforms/ir_utils.h"
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/transform.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 using namespace arith;
 class ConfigIndexBitwidthRewriter : public IndexDataTypeRewriter {
 public:
@@ -38,7 +40,7 @@ protected:
     if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
       return IntImm(DataType::Int(_index_bitwidth_), op->value);
     }
-    return tvm::ffi::GetRef<PrimExpr>(op);
+    return GetRef<PrimExpr>(op);
   }
 
   PrimExpr VisitExpr_(const CastNode *op) final {
@@ -88,23 +90,23 @@ private:
 
     PrimExpr VisitExpr_(const VarNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
-        return cast(DataType::Int(64), tvm::ffi::GetRef<Var>(op));
+        return cast(DataType::Int(64), GetRef<Var>(op));
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const IntImmNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return IntImm(DataType::Int(64), op->value);
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     PrimExpr VisitExpr_(const CastNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return cast(DataType::Int(64), op->value);
       }
-      return tvm::ffi::GetRef<PrimExpr>(op);
+      return GetRef<PrimExpr>(op);
     }
 
     Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -165,7 +167,7 @@ private:
 };
 
 tvm::transform::Pass ConfigIndexBitwidth() {
-  using namespace tir::transform;
+  using namespace tirx::transform;
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     // Get pass config `tl.config_index_bitwidth`
@@ -184,7 +186,7 @@ tvm::transform::Pass ConfigIndexBitwidth() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.ConfigIndexBitwidth",
                         ConfigIndexBitwidth);
 }

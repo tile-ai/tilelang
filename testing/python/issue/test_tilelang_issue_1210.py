@@ -45,10 +45,7 @@ def _make_kernel_if_cond(M, N):
 def test_make_packed_api_no_free_loop_var():
     func, func_if_cond = _make_kernel(4, 4), _make_kernel_if_cond(4, 4)
     # Keep warp-specialization/TMA disabled to match the original repro
-    cfg = {
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    }
+    cfg = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
     tilelang.compile(func, pass_configs=cfg)
     tilelang.compile(func_if_cond, pass_configs=cfg)
 

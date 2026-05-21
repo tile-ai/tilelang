@@ -76,7 +76,7 @@ def get_configs():
 @autotune(configs=get_configs(), warmup=3, rep=5)
 @tilelang.jit(
     out_idx=[-5, -4, -3, -2, -1],
-    pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
 )
 def tilelang_wy_fast_bwd(
     # task config

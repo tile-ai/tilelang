@@ -1,15 +1,10 @@
 from __future__ import annotations
-from typing import Any, Callable, Generic, Literal, TypeVar
-
-# Python 3.9 compatibility for ParamSpec
-try:
-    from typing import ParamSpec
-except ImportError:  # Python < 3.10
-    from typing_extensions import ParamSpec
+from typing import Any, Generic, Literal, ParamSpec, TypeVar
+from collections.abc import Callable
 
 from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target
 from tvm.target import Target
-from tvm.tir import PrimFunc
+from tvm.tirx import PrimFunc
 
 import tilelang
 from tilelang import tvm
@@ -26,6 +21,7 @@ from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import determine_target
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.transform import PassConfigKey
+from tilelang.transform.pass_config import normalize_pass_configs
 import logging
 import os
 
@@ -76,7 +72,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        func : tvm.tir.PrimFunc, optional
+        func : tvm.tirx.PrimFunc, optional
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
@@ -99,9 +95,7 @@ class JITKernel(Generic[_P, _T]):
         self.target_host = target_host
         self.verbose = verbose
 
-        if pass_configs is None:
-            pass_configs = {}
-        self.pass_configs = pass_configs
+        self.pass_configs = normalize_pass_configs(pass_configs)
 
         self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
 
@@ -212,7 +206,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        tilelang_func : tvm.tir.PrimFunc
+        tilelang_func : tvm.tirx.PrimFunc
             The TileLang (TVM TIR) function to compile.
 
         Returns
@@ -413,7 +407,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        tilelang_func : tvm.tir.PrimFunc
+        tilelang_func : tvm.tirx.PrimFunc
             The TileLang (TVM TIR) function to compile.
         **kwargs : dict
             Additional keyword arguments to pass to the constructor.

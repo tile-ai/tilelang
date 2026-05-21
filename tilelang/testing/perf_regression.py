@@ -6,7 +6,8 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 from collections.abc import Sequence
 import warnings
 

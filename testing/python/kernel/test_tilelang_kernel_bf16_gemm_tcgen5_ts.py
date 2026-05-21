@@ -11,10 +11,7 @@ import tilelang.language as T
 
 tilelang.testing.set_random_seed(0)
 
-PASS_CFG = {
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-}
+PASS_CFG = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
 
 
 def matmul_ss(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype, threads):

@@ -2,14 +2,16 @@
  * \brief Lower eligible global->shared copies into PTX cp.async
  * \file lower_ptx_async_copy.cc
  */
-#include <tvm/ffi/reflection/registry.h>
+#include "support/check.h"
+#include <tvm/runtime/logging.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -22,12 +24,13 @@
 #include "../target/utils.h"
 #include "ptx_async_copy_injector.h"
 #include "tir/ir/buffer_common.h"
-#include "tvm/tir/stmt.h"
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
@@ -36,8 +39,10 @@ public:
       : enable_auto_async_copy_(enable_auto_async_copy),
         async_without_async_commit_wait_(async_without_async_commit_wait) {}
 
+  bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
+
   Stmt Finalize(Stmt body) {
-    if (!pending_sync_copies_ || async_without_async_commit_wait_) {
+    if (!pending_sync_copies_ || UseExplicitAsyncSemantics()) {
       pending_sync_copies_ = false;
       uncommitted_sync_copies_ = false;
       return body;
@@ -52,15 +57,27 @@ public:
     return SeqStmt(seq);
   }
 
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == s_tir::attr::async_scope) {
+      ++explicit_async_scope_depth_;
+      Stmt body = this->VisitStmt(op->body);
+      --explicit_async_scope_depth_;
+      // `async_scope` is a lowering-only marker for cp.async semantics.
+      return body;
+    }
+    return StmtMutator::VisitStmt_(op);
+  }
+
   Stmt VisitStmt_(const ForNode *op) final {
-    // Track nested vectorized loop extents so we can rewrite element-wise
-    // copies (e.g. float16 stores) into `tir.ptx_cp_async` with element bytes,
-    // relying on the later `tl.VectorizeLoop` pass to widen:
-    //   for v in T.vectorized(k): ptx_cp_async(dst, src, elem_bytes)
-    // => ptx_cp_async(dst_base, src_base, elem_bytes * k)
+    // Track nested vectorized loop extents so we can decide whether an
+    // element-wise copy has a legal final cp.async width after later loop
+    // vectorization:
+    //   for v in T.vectorized(k): tl.ptx_cp_async(dst, src, elem_count)
+    // => tl.ptx_cp_async(dst_base, src_base, elem_count * k)
     //
-    // This mirrors the logic in `CPAsyncStoreRewriter` used by `T.copy`
-    // lowering, and avoids duplicating vectorize-loop collapse here.
+    // TileLang records logical element counts in tl.ptx_cp_async. The final
+    // PTX byte width is derived later from the access_ptr dtype, so subbyte
+    // dtypes such as int4/fp4/int2/int1 remain representable here.
     int previous_vectorized_lanes = current_vectorized_lanes_;
     bool pushed_vectorized_loop = false;
     if (op->kind == ForKind::kVectorized) {
@@ -90,17 +107,10 @@ public:
                               const PrimExpr &predicate_value = PrimExpr()) {
     // Pipeline:
     // 1) Analyze source/destination indices and transfer width eligibility.
-    // 2) Validate pointer type metadata for access_ptr construction.
-    // 3) Build cp.async with scalar/vectorized offsets if representable.
+    // 2) Build tl.ptx_cp_async with scalar/vectorized base offsets when the
+    //    eventual PTX byte width is representable.
     std::optional<CopyIndexInfo> index_info = PrepareCopyIndexInfo(load, store);
     if (!index_info.has_value()) {
-      return Optional<Stmt>();
-    }
-
-    std::optional<PointerTypeInfo> ptr_info =
-        PreparePointerTypeInfo(load, store);
-    if (!ptr_info.has_value()) {
-      // Be conservative: if pointer metadata is missing, skip injection.
       return Optional<Stmt>();
     }
 
@@ -111,10 +121,11 @@ public:
         return Optional<Stmt>();
       }
       return MakeCPAsyncStmtFromLoads(
-          store, ptr_info.value(),
+          store,
           /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
           /*src_base_load=*/BufferLoad(load->buffer, load->indices),
-          /*bytes=*/index_info->transfer_bytes, predicated, predicate_value);
+          /*num_elems=*/index_info->per_access_num_elems, predicated,
+          predicate_value);
     }
 
     Optional<Array<PrimExpr>> src_base_indices =
@@ -131,14 +142,15 @@ public:
       return Optional<Stmt>();
     }
     return MakeCPAsyncStmtFromLoads(
-        store, ptr_info.value(),
+        store,
         /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
         /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
-        /*bytes=*/index_info->transfer_bytes, predicated, predicate_value);
+        /*num_elems=*/index_info->per_access_num_elems, predicated,
+        predicate_value);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
-    if (async_without_async_commit_wait_) {
+    if (UseExplicitAsyncSemantics()) {
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -212,7 +224,7 @@ public:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    if (async_without_async_commit_wait_) {
+    if (UseExplicitAsyncSemantics()) {
       return StmtMutator::VisitStmt_(op);
     }
 
@@ -244,7 +256,7 @@ public:
 
     if (then_case.same_as(op->then_case) &&
         (!else_case.defined() || else_case.same_as(op->else_case))) {
-      return tvm::ffi::GetRef<Stmt>(op);
+      return GetRef<Stmt>(op);
     }
     return IfThenElse(op->condition, then_case, else_case);
   }
@@ -266,7 +278,8 @@ public:
           TryInjectPTX(load, store, predicate.defined(),
                        predicate.defined() ? predicate.value() : PrimExpr());
       if (injected.defined()) {
-        if (!async_without_async_commit_wait_) {
+        injected_ptx_async_copy_ = true;
+        if (!UseExplicitAsyncSemantics()) {
           pending_sync_copies_ = true;
           uncommitted_sync_copies_ = true;
         }
@@ -278,18 +291,16 @@ public:
   }
 
 private:
+  bool UseExplicitAsyncSemantics() const {
+    return async_without_async_commit_wait_ || explicit_async_scope_depth_ > 0;
+  }
+
   // A copy candidate represented after flattening source/destination indexing.
   struct CopyIndexInfo {
     PrimExpr src_index;
     PrimExpr dst_index;
     int index_lanes{1};
-    int transfer_bytes{0};
-  };
-
-  // Pointer element type metadata extracted from buffer handle annotations.
-  struct PointerTypeInfo {
-    DataType dst_elem_type;
-    DataType src_elem_type;
+    int per_access_num_elems{0};
   };
 
   // Synchronization state for injected cp.async runs carried across statements.
@@ -344,11 +355,10 @@ private:
   }
 
   static Optional<PrimExpr>
-  FlattenToLinearOffset(const Buffer &buf,
-                        const ffi::Array<PrimExpr> &indices) {
+  FlattenToLinearOffset(const Buffer &buf, const Array<PrimExpr> &indices) {
     // Convert N-D indices (potentially with axis_separators) into a single
     // row-major linear element offset.
-    ffi::Array<PrimExpr> physical = buf.OffsetOf(indices);
+    Array<PrimExpr> physical = buf.OffsetOf(indices);
     Buffer flattened_buf = buf.GetFlattenedBuffer();
     if (physical.size() != flattened_buf->shape.size() || physical.empty()) {
       return Optional<PrimExpr>();
@@ -391,9 +401,16 @@ private:
     }
 
     const int effective_lanes = std::max(value_lanes, index_lanes);
-    const int elem_bytes = effective_lanes * load->dtype.bytes();
-    const int total_bytes = static_cast<int>(elem_bytes) *
-                            static_cast<int>(current_vectorized_lanes_);
+    const int per_access_bits = effective_lanes * load->dtype.bits();
+    const int total_bits = static_cast<int>(per_access_bits) *
+                           static_cast<int>(current_vectorized_lanes_);
+    // PTX cp.async is byte-granular. `tl.ptx_cp_async` stores logical element
+    // counts, but we still need to know that the eventual vectorized transfer
+    // can map to a legal byte width without over-copying packed subbyte data.
+    if (total_bits % 8 != 0) {
+      return std::nullopt;
+    }
+    const int total_bytes = total_bits / 8;
     if (!IsValidCPAsyncTransferBytes(total_bytes)) {
       return std::nullopt;
     }
@@ -402,19 +419,8 @@ private:
     info.src_index = src_index;
     info.dst_index = dst_index;
     info.index_lanes = index_lanes;
-    info.transfer_bytes = elem_bytes;
+    info.per_access_num_elems = effective_lanes;
     return info;
-  }
-
-  static std::optional<PointerTypeInfo>
-  PreparePointerTypeInfo(const BufferLoadNode *load,
-                         const BufferStoreNode *store) {
-    auto dst_elem_type = GetPointerType(store->buffer->data->type_annotation);
-    auto src_elem_type = GetPointerType(load->buffer->data->type_annotation);
-    if (!dst_elem_type.has_value() || !src_elem_type.has_value()) {
-      return std::nullopt;
-    }
-    return PointerTypeInfo{dst_elem_type.value(), src_elem_type.value()};
   }
 
   static PrimExpr ExtractVectorBase(const PrimExpr &index) {
@@ -447,7 +453,7 @@ private:
         return PrimExpr();
       }
       if (const auto *rhs_broadcast = rhs.as<BroadcastNode>()) {
-        return tir::Add(lhs_ramp->base, rhs_broadcast->value);
+        return tirx::Add(lhs_ramp->base, rhs_broadcast->value);
       }
     }
     if (const auto *rhs_ramp = rhs.as<RampNode>()) {
@@ -455,7 +461,7 @@ private:
         return PrimExpr();
       }
       if (const auto *lhs_broadcast = lhs.as<BroadcastNode>()) {
-        return tir::Add(rhs_ramp->base, lhs_broadcast->value);
+        return tirx::Add(rhs_ramp->base, lhs_broadcast->value);
       }
     }
     return PrimExpr();
@@ -482,30 +488,25 @@ private:
                  IntImm(DataType::Int(32), rw_mask)});
   }
 
-  static Optional<Stmt> MakeCPAsyncStmtFromLoads(
-      const BufferStoreNode *store, const PointerTypeInfo &ptr_info,
-      const BufferLoad &dst_base_load, const BufferLoad &src_base_load,
-      int bytes, bool predicated, const PrimExpr &predicate_value) {
-    int dst_elem_count = bytes / ptr_info.dst_elem_type.bytes();
-    int src_elem_count = bytes / ptr_info.src_elem_type.bytes();
-    if (dst_elem_count <= 0 || src_elem_count <= 0) {
-      return Optional<Stmt>();
-    }
-
+  static Optional<Stmt>
+  MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
+                           const BufferLoad &dst_base_load,
+                           const BufferLoad &src_base_load, int num_elems,
+                           bool predicated, const PrimExpr &predicate_value) {
     PrimExpr dst_access_ptr =
-        MakeAccessPtrFromLoad(dst_base_load, dst_elem_count, /*rw_mask=*/2);
+        MakeAccessPtrFromLoad(dst_base_load, num_elems, /*rw_mask=*/2);
     PrimExpr src_access_ptr =
-        MakeAccessPtrFromLoad(src_base_load, src_elem_count, /*rw_mask=*/1);
+        MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
 
-    ffi::Array<PrimExpr> cp_async_args;
+    Array<PrimExpr> cp_async_args;
     if (predicated) {
-      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes),
+      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems),
                        predicate_value};
     } else {
-      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(bytes)};
+      cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems)};
     }
-    return Evaluate(Call(store->buffer->dtype,
-                         tvm::tir::builtin::ptx_cp_async(), cp_async_args));
+    return Evaluate(
+        Call(store->buffer->dtype, tvm::tl::ptx_cp_async(), cp_async_args));
   }
 
   static Stmt MakeCommitGroupStmt() {
@@ -629,8 +630,10 @@ private:
       out.is_pure_copy_region = false;
       return out;
     }
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      return AnalyzeCopyRegion(let->body);
+    if (stmt.as<BindNode>()) {
+      CopyRegionAnalysis out;
+      out.is_pure_copy_region = false;
+      return out;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
       return AnalyzeCopyRegion(attr->body);
@@ -638,7 +641,7 @@ private:
     if (const auto *loop = stmt.as<ForNode>()) {
       return AnalyzeCopyRegion(loop->body);
     }
-    if (const auto *block = stmt.as<BlockNode>()) {
+    if (const auto *block = stmt.as<SBlockNode>()) {
       if (block->init.defined()) {
         out = MergeCopyRegionAnalysis(out,
                                       AnalyzeCopyRegion(block->init.value()));
@@ -646,11 +649,11 @@ private:
       out = MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(block->body));
       return out;
     }
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
       // Treat the predicate as pure control flow (no side effects). We only
       // care whether the realized body is a pure copy region so we can hoist
       // the final commit+wait out of sequential loop nests.
-      const BlockNode *block = realize->block.get();
+      const SBlockNode *block = realize->block.get();
       if (block->init.defined()) {
         out = MergeCopyRegionAnalysis(out,
                                       AnalyzeCopyRegion(block->init.value()));
@@ -688,20 +691,24 @@ private:
 
   bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
+  int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;
+  bool injected_ptx_async_copy_{false};
   bool pending_sync_copies_{false};
   bool uncommitted_sync_copies_{false};
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
-Stmt InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                        bool async_without_async_commit_wait) {
+PTXAsyncCopyInjectResult
+InjectPTXAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
+                   bool async_without_async_commit_wait) {
   PTXAsyncCopyInjector injector(enable_auto_async_copy,
                                 async_without_async_commit_wait);
-  return injector.Finalize(injector(body));
+  Stmt injected = injector(body);
+  return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }
 
 tvm::transform::Pass LowerPTXAsyncCopy() {
@@ -724,16 +731,17 @@ tvm::transform::Pass LowerPTXAsyncCopy() {
         ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
 
     auto *n = f.CopyOnWrite();
-    PTXAsyncCopyInjector injector(enable_auto_async_copy,
-                                  /*async_without_async_commit_wait=*/false);
-    n->body = injector.Finalize(injector(n->body));
+    auto inject_result =
+        InjectPTXAsyncCopy(n->body, enable_auto_async_copy,
+                           /*async_without_async_commit_wait=*/false);
+    n->body = inject_result.stmt;
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerPTXAsyncCopy", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.LowerPTXAsyncCopy", LowerPTXAsyncCopy);
 }
 

@@ -6,19 +6,18 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
+#include "support/check.h"
 #include <exception>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/ffi/object.h>
-#include <tvm/tir/buffer.h>
+#include <tvm/tirx/buffer.h>
 #include <utility>
-
-#include "../support/ffi_aliases.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 // Common layout-related exceptions
 class LayoutConflictException : public std::exception {
@@ -273,6 +272,14 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
 Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
                                     int elementsize);
 
+Layout makeSwizzledLayout(const Buffer &buffer, bool k_inner = true,
+                          bool allow_pad = true);
+Layout makeVoltaSwizzledLayout(const Buffer &buffer, bool is_a = true,
+                               bool k_inner = true);
+Layout makeWgmmaSwizzledLayout(const Buffer &buffer, int continuity = -1,
+                               bool k_inner = true);
+Layout makeTcgen05mmaSwizzledLayout(const Buffer &buffer, int continuity = -1,
+                                    bool k_inner = true);
 Layout makeFullBankSwizzleLayout(const Buffer &buffer);
 Layout makeHalfBankSwizzleLayout(const Buffer &buffer);
 Layout makeQuarterBankSwizzleLayout(const Buffer &buffer);

@@ -5,7 +5,7 @@
 **Prerequisites for installation via wheel or PyPI:**
 
 - **glibc**: 2.28 (Ubuntu 20.04 or later)
-- **Python Version**: >= 3.9
+- **Python Version**: >= 3.10
 - **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
 
 The easiest way to install tilelang is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
@@ -36,11 +36,11 @@ python -c "import tilelang; print(tilelang.__version__)"
 
 **Prerequisites for building from source:**
 
-- **Operating System**: Linux
-- **Python Version**: >= 3.9
+- **Operating System**: Linux or Windows
+- **Python Version**: >= 3.10
 - **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
 
-If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. This section focuses on building from source on a native Linux environment.
+If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. The commands below use Ubuntu/Debian as the Linux example; Windows-specific notes are called out where they differ.
 
 First, install the OS-level prerequisites on Ubuntu/Debian-based systems using the following commands:
 
@@ -48,6 +48,8 @@ First, install the OS-level prerequisites on Ubuntu/Debian-based systems using t
 apt-get update
 apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-essential cmake libedit-dev
 ```
+
+On Windows, install Python 3, CMake, and Visual Studio Build Tools with the MSVC C++ toolchain. Run the `pip install` commands below from a Visual Studio Developer Command Prompt (or `call VsDevCmd.bat` first) so that `cl.exe` is on `PATH` and CMake can detect the compiler.
 
 Then, clone the tilelang repository and install it using pip. The `-v` flag enables verbose output during the build process.
 

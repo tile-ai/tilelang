@@ -5,8 +5,7 @@ cimport cython
 import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
-from tvm import tir
-from tilelang.utils.tensor import map_torch_type
+from tvm import tirx
 
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
@@ -40,10 +39,10 @@ cdef class CythonKernelWrapper:
         for param in params:
             native_shape = []
             for dim in param.shape:
-                if isinstance(dim, tir.IntImm):
+                if isinstance(dim, tirx.IntImm):
                     native_shape.append(int(dim))
-                elif isinstance(dim, tir.Var):
-                    native_shape.append(dim)  # Keep tir.Var for dynamic dimensions
+                elif isinstance(dim, tirx.Var):
+                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
                 else:
                     native_shape.append(dim)
             self.param_shapes.append(native_shape)
@@ -196,10 +195,10 @@ cdef class CythonKernelWrapper:
                 shape = []
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
-                    if isinstance(s, tir.Var):
+                    if isinstance(s, tirx.Var):
                         for key in self.dynamic_symbolic_map:
                             if(str(s) == str(key)):
-                                ref_id, ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[key]
+                                ref_id, ref_tensor_idx, ref_shape_idx, _stride_scale = self.dynamic_symbolic_map[key]
                                 shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
@@ -266,11 +265,11 @@ cdef class CythonKernelWrapper:
             self._check_static_contiguous(tensor_list)
 
         # Add dynamic dimension values to kernel arguments
-        for _, (ref_id, buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
+        for _, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():
             if ref_id == 0:
                 call_args.append(ctypes.c_int64(tensor_list[buffer_idx].shape[shape_idx]))
             else:
-                call_args.append(ctypes.c_int64(tensor_list[buffer_idx].stride(shape_idx)))
+                call_args.append(ctypes.c_int64(tensor_list[buffer_idx].stride(shape_idx) * stride_scale))
 
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))

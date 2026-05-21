@@ -6,18 +6,9 @@ import argparse
 
 
 @tilelang.jit(
-    compile_flags=[
-        "-O3",
-        "-Wno-deprecated-declarations",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--ptxas-options=-v,--register-usage-level=10",
-        "-DNDEBUG",
-    ],
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
 )
 def sparse_mla_fwd(
     Q,
@@ -270,17 +261,17 @@ def sparse_mla_fwd(
                             T.ptx_cp_async(
                                 T.access_ptr(KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                             T.ptx_cp_async(
                                 T.access_ptr(KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                         T.ptx_cp_async(
                             T.access_ptr(K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
                             T.access_ptr(KV[b_i, indices_local, g_i, D + (tx - 256) % 8 * 8], "r", 8),
-                            16,
+                            8,
                         )
                 T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
@@ -295,17 +286,17 @@ def sparse_mla_fwd(
                             T.ptx_cp_async(
                                 T.access_ptr(KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, indices_local, g_i, 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                             T.ptx_cp_async(
                                 T.access_ptr(KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8], "w", 8),
                                 T.access_ptr(KV[b_i, indices_local, g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8], "r", 8),
-                                16,
+                                8,
                             )
                         T.ptx_cp_async(
                             T.access_ptr(K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8], "w", 8),
                             T.access_ptr(KV[b_i, indices_local, g_i, D + (tx - 256) % 8 * 8], "r", 8),
-                            16,
+                            8,
                         )
                 T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
@@ -403,7 +394,6 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, q_start_index_s, kv_stride=4, s
     v = kv[..., :dim]
 
     b, _, _, dim_v = v.shape
-    num_kv_per_index = 1
     g_index = g
     h_index = h // g
     compressed_casual_mask = torch.arange(q_start_index_s, sq + q_start_index_s, dtype=torch.int32, device="cuda").view(
@@ -456,21 +446,22 @@ def test_sparse_mla_fwd_pipelined(
             out[:, : KV_stride - 1, :, :] = 0
         return out, lse
 
-    tl_out, tl_lse = fn()
-    ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
+    if check_correctness:
+        tl_out, tl_lse = fn()
+        ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
 
-    torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
 
     from tilelang.profiler import do_bench
 
     ms = do_bench(
         fn,
-        rep=10,
         warmup=10,
+        rep=10,
     )
     print(f"Average time: {ms:.3f} ms")
-    print(f"fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
-    print(f"fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
+    print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
+    print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
 def run_regression_perf(B=1, S=4096, SKV=8192, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16, q_start_s_index=1024):

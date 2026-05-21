@@ -40,9 +40,9 @@ def get_heuristic_config() -> Tuple[Dict, int]:
     return cfg, sm_version
 
 
-# TODO(lei): fix warp specialized and tma lower pass
+# TODO(lei): fix warp specialized pass
 def get_pass_configs():
-    return {tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
+    return {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tilelang.language as T
 from tvm import ir
-from tvm.tir import PrimExpr, Buffer, op
+from tvm.tirx import PrimExpr, Buffer, op
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 from tilelang.language.utils import get_extent
 

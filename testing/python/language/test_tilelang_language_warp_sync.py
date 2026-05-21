@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.language as T
 import torch
-from tvm import tir
+from tvm import tirx
 import tilelang.testing
 
 
@@ -15,7 +15,7 @@ def kernel_with_warp_sync():
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
             if tx == 0:
-                tir.call_extern("void", "__nanosleep", 100)
+                tirx.call_extern("void", "__nanosleep", 100)
                 A[0] = -1
             T.sync_warp()
             if tx == 1:
@@ -43,7 +43,7 @@ def kernel_with_shfl_sync():
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
             val = tx * 10
-            broadcast = T.shfl_sync(0xFFFFFFFF, val, 31)
+            broadcast = T.shfl_sync(val, 31)
             A[tx] = broadcast
 
     return main

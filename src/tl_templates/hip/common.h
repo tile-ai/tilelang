@@ -90,8 +90,10 @@ typedef
     __attribute__((__vector_size__(8 * sizeof(short)))) short bfloat16x8_vec;
 
 using int32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
+using int32x16 = __attribute__((__vector_size__(16 * sizeof(int)))) int;
 using float32x4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 using float32x16 = __attribute__((__vector_size__(16 * sizeof(float)))) float;
+using float32x32 = __attribute__((__vector_size__(32 * sizeof(float)))) float;
 
 using int8x4 = __attribute__((__vector_size__(4 * sizeof(int8_t)))) int8_t;
 
@@ -107,6 +109,77 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   unsigned v0 = *((unsigned short *)&x);
   unsigned v1 = *((unsigned short *)&y);
   return (v1 << 16) | v0;
+}
+
+TL_DEVICE int tl_dp4a_fallback(const int a, const int b, int c) {
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int ai = static_cast<int8_t>((a >> (8 * i)) & 0xff);
+    const int bi = static_cast<int8_t>((b >> (8 * i)) & 0xff);
+    c += ai * bi;
+  }
+  return c;
+}
+
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) ||    \
+    defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__)
+#define TL_AMDGPU_HAS_SUDOT4 1
+#endif
+
+#if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) ||       \
+    defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__) ||       \
+    defined(__gfx950__) || defined(__gfx1011__) || defined(__gfx1012__) ||     \
+    defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) ||    \
+    defined(__gfx1034__) || defined(__gfx1035__) ||                            \
+    defined(TL_AMDGPU_HAS_SUDOT4)
+#define TL_AMDGPU_HAS_SDOT4 1
+#endif
+
+TL_DEVICE int tl_dp4a(const int a, const int b, const int c) {
+#if defined(TL_AMDGPU_HAS_SUDOT4)
+  return __builtin_amdgcn_sudot4(true, a, true, b, c, false);
+#elif defined(TL_AMDGPU_HAS_SDOT4)
+  return __builtin_amdgcn_sdot4(a, b, c, false);
+#else
+  return tl_dp4a_fallback(a, b, c);
+#endif
+}
+
+template <typename InDatatype, typename OutDatatype>
+TL_DEVICE void DP4A(const InDatatype *a, const InDatatype *b, OutDatatype *c) {
+  static_assert(sizeof(InDatatype) == 1,
+                "DP4A expects a pointer to packed int8 lanes");
+  static_assert(sizeof(OutDatatype) == sizeof(int),
+                "DP4A expects 4-byte accumulator/output type");
+  int a_int;
+  int b_int;
+  int c_int;
+  __builtin_memcpy(&a_int, a, sizeof(a_int));
+  __builtin_memcpy(&b_int, b, sizeof(b_int));
+  __builtin_memcpy(&c_int, c, sizeof(c_int));
+  const int out = tl_dp4a(a_int, b_int, c_int);
+  __builtin_memcpy(c, &out, sizeof(out));
+}
+
+// __habs overloads for hip_bfloat16 and float16_t to resolve ambiguity on ROCm.
+// hip_bfloat16 != __hip_bfloat16, and float16_t != __half, so the standard
+// __habs overloads don't match exactly, causing ambiguous overload errors.
+// Use __builtin_memcpy instead of reinterpret_cast to avoid strict-aliasing UB.
+__device__ __forceinline__ hip_bfloat16 __habs(hip_bfloat16 a) {
+  uint16_t bits;
+  __builtin_memcpy(&bits, &a, sizeof(bits));
+  bits &= 0x7FFFu;
+  hip_bfloat16 result;
+  __builtin_memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+__device__ __forceinline__ float16_t __habs(float16_t a) {
+  uint16_t bits;
+  __builtin_memcpy(&bits, &a, sizeof(bits));
+  bits &= 0x7FFFu;
+  float16_t result;
+  __builtin_memcpy(&result, &bits, sizeof(result));
+  return result;
 }
 
 namespace tl {
@@ -163,6 +236,59 @@ TL_DEVICE float2 abs2(float2 a) {
   out.x = (a.x >= 0.0f) ? a.x : -a.x;
   out.y = (a.y >= 0.0f) ? a.y : -a.y;
   return out;
+}
+
+// Packed bfloat16x2 overloads for uint1 carrier.
+// On HIP, uint1 = HIP_vector_type<unsigned int, 1> (32-bit), already defined
+// by ROCm via amd_hip_vector_types.h — no additional typedef needed.
+// A packed bfloat16x2 word layout:
+//   bits [15: 0] = first  bfloat16 (sign at bit 15)
+//   bits [31:16] = second bfloat16 (sign at bit 31)
+// These overloads are required by the HIP codegen's ShuffleNode packing path
+// (VisitExpr_ ShuffleNode emits uint1{__pack_bfloat162(a, b)}).
+TL_DEVICE uint1 abs2(uint1 val) {
+  // Clear both sign bits simultaneously.
+  return uint1{val.x & 0x7FFF7FFFu};
+}
+TL_DEVICE uint1 max2(uint1 a, uint1 b) {
+  bfloat16_t a0, a1, b0, b1;
+  __builtin_memcpy(&a0, &a.x, sizeof(a0));
+  __builtin_memcpy(&a1, (char *)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x, sizeof(b0));
+  __builtin_memcpy(&b1, (char *)&b.x + 2, sizeof(b1));
+  bfloat16_t r0 = (float)a0 > (float)b0 ? a0 : b0;
+  bfloat16_t r1 = (float)a1 > (float)b1 ? a1 : b1;
+  return uint1{__pack_bfloat162(r0, r1)};
+}
+TL_DEVICE uint1 min2(uint1 a, uint1 b) {
+  bfloat16_t a0, a1, b0, b1;
+  __builtin_memcpy(&a0, &a.x, sizeof(a0));
+  __builtin_memcpy(&a1, (char *)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x, sizeof(b0));
+  __builtin_memcpy(&b1, (char *)&b.x + 2, sizeof(b1));
+  bfloat16_t r0 = (float)a0 < (float)b0 ? a0 : b0;
+  bfloat16_t r1 = (float)a1 < (float)b1 ? a1 : b1;
+  return uint1{__pack_bfloat162(r0, r1)};
+}
+TL_DEVICE uint1 add2(uint1 a, uint1 b) {
+  bfloat16_t a0, a1, b0, b1;
+  __builtin_memcpy(&a0, &a.x, sizeof(a0));
+  __builtin_memcpy(&a1, (char *)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x, sizeof(b0));
+  __builtin_memcpy(&b1, (char *)&b.x + 2, sizeof(b1));
+  bfloat16_t r0 = (bfloat16_t)((float)a0 + (float)b0);
+  bfloat16_t r1 = (bfloat16_t)((float)a1 + (float)b1);
+  return uint1{__pack_bfloat162(r0, r1)};
+}
+TL_DEVICE uint1 mul2(uint1 a, uint1 b) {
+  bfloat16_t a0, a1, b0, b1;
+  __builtin_memcpy(&a0, &a.x, sizeof(a0));
+  __builtin_memcpy(&a1, (char *)&a.x + 2, sizeof(a1));
+  __builtin_memcpy(&b0, &b.x, sizeof(b0));
+  __builtin_memcpy(&b1, (char *)&b.x + 2, sizeof(b1));
+  bfloat16_t r0 = (bfloat16_t)((float)a0 * (float)b0);
+  bfloat16_t r1 = (bfloat16_t)((float)a1 * (float)b1);
+  return uint1{__pack_bfloat162(r0, r1)};
 }
 
 // Any

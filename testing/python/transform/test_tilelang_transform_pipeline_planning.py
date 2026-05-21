@@ -4,19 +4,20 @@ from tilelang.utils.target import determine_target
 import tilelang.language as T
 import tilelang.testing
 import torch
-from tvm.tir.stmt_functor import post_order_visit
+from tvm.tirx.stmt_functor import post_order_visit
 
 auto_target = tvm.target.Target(determine_target("auto"))
+sm80_target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
 
 def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     mod = tl.transform.Simplify()(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
-    transformed = tvm.tir.transform.BindTarget(auto_target)(transformed)
+    transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
@@ -24,11 +25,18 @@ def _collect_pipeline_loop_annotations(func):
     annos = []
 
     def _visit(node):
-        if isinstance(node, tvm.tir.For) and "software_pipeline_stage" in node.annotations:
+        if isinstance(node, tvm.tirx.For) and "software_pipeline_stage" in node.annotations:
             annos.append(node.annotations)
 
     post_order_visit(func.body, _visit)
     return annos
+
+
+def _run_pipeline_planning(func, target=auto_target):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    return mod
 
 
 def test_simple_pipeline():
@@ -49,8 +57,37 @@ def test_simple_pipeline():
 
             T.copy(C_local, C[by * 128, bx * 128])
 
+    func = before
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    mod = tl.transform.Simplify()(mod)
+
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    anno = annos[0]
+    assert "software_pipeline_stage" in anno
+    assert "software_pipeline_order" in anno
+    assert "tl_pipelined_num_stages" in anno
+    stages = [int(s) for s in anno["software_pipeline_stage"]]
+    orders = [int(o) for o in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 2]
+    assert orders == [0, 1, 2]
+    assert int(anno["tl_pipelined_num_stages"]) == 3
+    # tma_copies annotation depends on target TMA capability
+    if "software_pipeline_tma_copies" in anno:
+        tma_copies = [int(t) for t in anno["software_pipeline_tma_copies"]]
+        # On TMA-capable targets, copies are marked as TMA-eligible
+        assert tma_copies[2] == 0  # gemm is never TMA
+
+
+def test_pipeline_planning_recognizes_parallel_bufferstore_copy_stages():
     @T.prim_func
-    def after(A: T.Tensor((1024, 32), T.float32), B: T.Tensor((32, 1024), T.float32), C: T.Tensor((1024, 1024), T.float32)):
+    def before(
+        A: T.Tensor((1024, 32), T.float32),
+        B: T.Tensor((32, 1024), T.float32),
+        C: T.Tensor((1024, 1024), T.float32),
+    ):
         with T.Kernel(8, 8, threads=128) as (bx, by):
             A_shared = T.alloc_shared((128, 32), T.float32)
             B_shared = T.alloc_shared((32, 128), T.float32)
@@ -58,22 +95,59 @@ def test_simple_pipeline():
 
             T.clear(C_local)
 
-            for ko in T.serial(
-                32,
-                annotations={
-                    "software_pipeline_async_stages": [T.int32(0)],
-                    "software_pipeline_order": [T.int32(0), T.int32(1), T.int32(2)],
-                    "software_pipeline_stage": [T.int32(3), T.int32(3), T.int32(3)],
-                    "tl_pipelined_num_stages": T.int32(3),
-                },
-            ):
+            for ko in T.Pipelined(32, num_stages=3):
+                for i, k in T.Parallel(128, 32):
+                    A_shared[i, k] = A[by * 128 + i, ko * 32 + k]
+                for k, j in T.Parallel(32, 128):
+                    B_shared[k, j] = B[ko * 32 + k, bx * 128 + j]
+                T.gemm(A_shared, B_shared, C_local)
+
+            T.copy(C_local, C[by * 128, bx * 128])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+    async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
+    async_groups = [int(v) for v in anno["software_pipeline_async_producer_groups"]]
+    assert stages == [0, 0, 2]
+    assert orders == [0, 1, 2]
+    assert async_producers == [1, 1, 0]
+    assert async_groups == [0, 0, -1]
+
+
+def test_pipeline_planning_marks_async_producers_per_statement():
+    @T.prim_func
+    def before(A: T.Tensor((1024, 32), T.float32), B: T.Tensor((32, 1024), T.float32), C: T.Tensor((1024, 1024), T.float32)):
+        with T.Kernel(8, 8, threads=128) as (bx, by):
+            A_shared = T.alloc_shared((128, 32), T.float32)
+            B_shared = T.alloc_shared((32, 128), T.float32)
+            C_local = T.alloc_fragment((128, 128), T.float32)
+
+            T.clear(C_local)
+
+            for ko in T.Pipelined(32, num_stages=3):
                 T.copy(A[by * 128, ko * 32], A_shared)
                 T.copy(B[ko * 32, bx * 128], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
 
             T.copy(C_local, C[by * 128, bx * 128])
 
-    _check(before, after)
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    assert "software_pipeline_async_producers" in anno
+    assert "software_pipeline_async_producer_groups" in anno
+    assert "software_pipeline_async_stages" in anno
+    async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
+    async_groups = [int(v) for v in anno["software_pipeline_async_producer_groups"]]
+    async_stages = [int(v) for v in anno["software_pipeline_async_stages"]]
+    assert async_producers == [1, 1, 0]
+    assert async_groups == [0, 0, -1]
+    assert async_stages == [0]
 
 
 def test_pipeline_planning_recognizes_explicit_cp_async_copy_stage():
@@ -81,7 +155,7 @@ def test_pipeline_planning_recognizes_explicit_cp_async_copy_stage():
     def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
         S = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
         for i in T.Pipelined(4, num_stages=2):
-            with T.block():
+            with T.sblock():
                 T.ptx_cp_async(
                     T.access_ptr(S[i * 4], "w", 4),
                     T.access_ptr(A[i * 4], "r", 4),
@@ -89,11 +163,11 @@ def test_pipeline_planning_recognizes_explicit_cp_async_copy_stage():
                 )
                 T.ptx_commit_group()
                 T.ptx_wait_group(0)
-            with T.block():
+            with T.sblock():
                 B[i * 4] = S[i * 4]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
@@ -101,24 +175,173 @@ def test_pipeline_planning_recognizes_explicit_cp_async_copy_stage():
     assert 0 in stages, "Expected explicit cp.async producer to be recognized as stage-0 copy stage"
 
 
+def test_pipeline_planning_does_not_mark_fill_as_async_producer_for_predicated_cp_async():
+    @T.prim_func
+    def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
+        S = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
+        for i in T.Pipelined(4, num_stages=2):
+            with T.sblock():
+                for j in T.serial(16):
+                    S[j] = T.uint8(0)
+            with T.sblock():
+                T.ptx_cp_async(
+                    T.access_ptr(S[i * 4], "w", 4),
+                    T.access_ptr(A[i * 4], "r", 4),
+                    4,
+                    True,
+                )
+            with T.sblock():
+                T.ptx_commit_group()
+            with T.sblock():
+                T.ptx_wait_group(0)
+            with T.sblock():
+                B[i * 4] = S[i * 4]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    assert "software_pipeline_async_producers" in anno
+    assert "software_pipeline_async_producer_groups" in anno
+    async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
+    async_groups = [int(v) for v in anno["software_pipeline_async_producer_groups"]]
+    assert async_producers == [0, 1, 0, 0, 0]
+    assert async_groups == [-1, 0, -1, -1, -1]
+
+
+def test_pipeline_planning_keeps_plain_hopper_pipeline_copies_sync():
+    hopper_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((1024, 32), T.float32),
+        B: T.Tensor((32, 1024), T.float32),
+        C: T.Tensor((1024, 1024), T.float32),
+    ):
+        with T.Kernel(8, 8, threads=128) as (bx, by):
+            A_shared = T.alloc_shared((128, 32), T.float32)
+            B_shared = T.alloc_shared((32, 128), T.float32)
+            C_local = T.alloc_fragment((128, 128), T.float32)
+            T.clear(C_local)
+            for k in T.Pipelined(32, num_stages=2):
+                T.copy(A[by * 128, k * 32], A_shared)
+                T.copy(B[k * 32, bx * 128], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+
+    mod = _run_pipeline_planning(before, hopper_target)
+
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    tma_copies = [int(v) for v in anno["software_pipeline_tma_copies"]]
+    assert tma_copies[:2] == [0, 0]
+
+
+def test_pipeline_planning_stages_bind_with_dependent_copy():
+    @T.prim_func
+    def before(
+        KV: T.Tensor((4, 4), T.float16),
+        ids: T.Tensor((4,), T.int32),
+        C: T.Tensor((4,), T.float16),
+    ):
+        with T.Kernel(1, threads=1):
+            A = T.alloc_shared((4,), T.float16)
+            for i in T.Pipelined(4, num_stages=2):
+                _id = ids[i]
+                T.copy(KV[_id, :], A)
+                T.copy(A, C)
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+    async_producers = [int(v) for v in annos[0]["software_pipeline_async_producers"]]
+    replayable_binds = [int(v) for v in annos[0]["software_pipeline_replayable_scalar_binds"]]
+
+    assert len(stages) == 2, f"Expected copy and consumer stages, got {stages}"
+    assert stages == [0, 1]
+    assert orders == [0, 1]
+    assert async_producers == [1, 0]
+    assert replayable_binds == [1, 0, 0]
+
+
+def test_pipeline_planning_accepts_explicit_bind_free_annotations():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+        C: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            A_shared = T.alloc_shared((16,), T.float16)
+            for i in T.Pipelined(4, order=[1, 0], stage=[0, 1]):
+                base: T.int32 = i * 16
+                T.copy(A[base], A_shared)
+                T.copy(A_shared, C[base])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+    async_producers = [int(v) for v in anno["software_pipeline_async_producers"]]
+    async_groups = [int(v) for v in anno["software_pipeline_async_producer_groups"]]
+    replayable_binds = [int(v) for v in anno["software_pipeline_replayable_scalar_binds"]]
+
+    assert stages == [0, 1]
+    assert orders == [1, 0]
+    assert async_producers == [1, 0]
+    assert async_groups == [0, -1]
+    assert replayable_binds == [1, 0, 0]
+
+
+def test_pipeline_planning_keeps_bind_that_reads_pipeline_written_buffer():
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        C: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=16):
+            A_shared = T.alloc_shared((16,), T.float16)
+            for i in T.Pipelined(4, order=[0, 1, 2], stage=[0, 1, 1]):
+                base: T.int32 = i * 16
+                T.copy(A[base], A_shared)
+                value: T.float16 = A_shared[0]
+                C[base] = value
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    anno = annos[0]
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    orders = [int(v) for v in anno["software_pipeline_order"]]
+    replayable_binds = [int(v) for v in anno["software_pipeline_replayable_scalar_binds"]]
+
+    assert stages == [0, 1, 1]
+    assert orders == [0, 1, 2]
+    assert replayable_binds == [1, 0, 0, 0]
+
+
 def test_pipeline_planning_binds_commit_to_cp_async_stage():
     @T.prim_func
     def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
         S = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
         for i in T.Pipelined(4, num_stages=2):
-            with T.block():
+            with T.sblock():
                 T.ptx_cp_async(
                     T.access_ptr(S[i * 4], "w", 4),
                     T.access_ptr(A[i * 4], "r", 4),
                     4,
                 )
-            with T.block():
+            with T.sblock():
                 T.ptx_commit_group()
-            with T.block():
+            with T.sblock():
                 B[i * 4] = S[i * 4]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
@@ -134,21 +357,21 @@ def test_pipeline_planning_binds_wait_to_cp_async_consumer_stage():
     def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8)):
         S = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
         for i in T.Pipelined(4, num_stages=2):
-            with T.block():
+            with T.sblock():
                 T.ptx_cp_async(
                     T.access_ptr(S[i * 4], "w", 4),
                     T.access_ptr(A[i * 4], "r", 4),
                     4,
                 )
-            with T.block():
+            with T.sblock():
                 T.ptx_commit_group()
-            with T.block():
+            with T.sblock():
                 T.ptx_wait_group(0)
-            with T.block():
+            with T.sblock():
                 B[i * 4] = S[i * 4]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
@@ -166,24 +389,24 @@ def test_pipeline_planning_delays_wait_order_within_consumer_stage():
     def before(A: T.Tensor((16,), T.uint8), B: T.Tensor((16,), T.uint8), C: T.Tensor((16,), T.uint8)):
         S = T.alloc_buffer((16,), dtype=T.uint8, scope="shared")
         for i in T.Pipelined(4, num_stages=2):
-            with T.block():
+            with T.sblock():
                 T.ptx_cp_async(
                     T.access_ptr(S[i * 4], "w", 4),
                     T.access_ptr(A[i * 4], "r", 4),
                     4,
                 )
-            with T.block():
+            with T.sblock():
                 T.ptx_commit_group()
-            with T.block():
+            with T.sblock():
                 T.ptx_wait_group(0)
             # Independent prep work that does not touch waited shared buffers.
-            with T.block():
+            with T.sblock():
                 C[i * 4] = A[i * 4] + T.uint8(1)
-            with T.block():
+            with T.sblock():
                 B[i * 4] = S[i * 4]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
@@ -203,33 +426,33 @@ def test_pipeline_planning_prioritizes_groups_by_consumer_and_rebinds_wait0():
         SB = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
         TMP = T.alloc_buffer((64,), dtype=T.uint8, scope="local")
         for i in T.Pipelined(4, num_stages=2):
-            with T.block():
+            with T.sblock():
                 T.ptx_cp_async(
                     T.access_ptr(SA[(i + 1) * 4], "w", 4),
                     T.access_ptr(A[(i + 1) * 4], "r", 4),
                     4,
                 )
-            with T.block():
+            with T.sblock():
                 T.ptx_commit_group()
-            with T.block():
+            with T.sblock():
                 T.ptx_wait_group(0)
-            with T.block():
+            with T.sblock():
                 T.ptx_cp_async(
                     T.access_ptr(SB[(i + 1) * 4], "w", 4),
                     T.access_ptr(B[(i + 1) * 4], "r", 4),
                     4,
                 )
-            with T.block():
+            with T.sblock():
                 T.ptx_commit_group()
-            with T.block():
+            with T.sblock():
                 T.ptx_wait_group(0)
-            with T.block():
+            with T.sblock():
                 TMP[i * 4] = SB[i * 4]
-            with T.block():
+            with T.sblock():
                 C[i * 4] = SA[i * 4] + TMP[i * 4]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
@@ -258,37 +481,37 @@ def test_pipeline_planning_orders_cp_async_groups_by_group_last_use():
         SA = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
         SB = T.alloc_buffer((64,), dtype=T.uint8, scope="shared")
         for i in T.Pipelined(4, num_stages=2):
-            with T.block():
+            with T.sblock():
                 T.ptx_cp_async(
                     T.access_ptr(SA[(i + 1) * 4], "w", 4),
                     T.access_ptr(A[(i + 1) * 4], "r", 4),
                     4,
                 )
-            with T.block():
+            with T.sblock():
                 T.ptx_commit_group()
-            with T.block():
+            with T.sblock():
                 T.ptx_wait_group(0)
-            with T.block():
+            with T.sblock():
                 T.ptx_cp_async(
                     T.access_ptr(SB[(i + 1) * 4], "w", 4),
                     T.access_ptr(B[(i + 1) * 4], "r", 4),
                     4,
                 )
-            with T.block():
+            with T.sblock():
                 T.ptx_commit_group()
-            with T.block():
+            with T.sblock():
                 T.ptx_wait_group(0)
             # SA is consumed earlier, but it is also consumed again later.
-            with T.block():
+            with T.sblock():
                 C[i * 4] = SA[i * 4]
             # SB is only consumed once, between the two SA consumers.
-            with T.block():
+            with T.sblock():
                 C[i * 4 + 1] = SB[i * 4]
-            with T.block():
+            with T.sblock():
                 D[i * 4] = SA[i * 4 + 1]
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
@@ -325,13 +548,13 @@ def test_pipeline_predicated_copy_preserves_shared_fill_correctness():
                 T.ptx_cp_async(
                     T.access_ptr(S[0], "w", 16),
                     T.access_ptr(A[0], "r", 16),
-                    16,
+                    8,
                     True,
                 )
                 T.ptx_cp_async(
                     T.access_ptr(S[8], "w", 16),
                     T.access_ptr(A[0], "r", 16),
-                    16,
+                    8,
                     False,
                 )
                 T.ptx_commit_group()
@@ -351,4 +574,5 @@ def test_pipeline_predicated_copy_preserves_shared_fill_correctness():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_pipeline_predicated_copy_preserves_shared_fill_correctness()

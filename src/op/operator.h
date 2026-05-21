@@ -7,25 +7,62 @@
 #ifndef TVM_TL_OP_OP_H_
 #define TVM_TL_OP_OP_H_
 
+// Dependencies for operators
+#include "support/check.h"
+#include <array>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
-#include <tvm/tir/buffer.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/op_attr_types.h>
-#include <tvm/tir/stmt.h>
+#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt.h>
+#include <utility>
+#include <vector>
 
 #include "../layout/layout.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using AllocMBarrierCallback = std::function<int(int arrive_count)>;
+using UpdateBarrierArriveCallback = std::function<void(Var, PrimExpr)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
+
+enum AccessMask : int {
+  kAccessRead = 1,
+  kAccessWrite = 2,
+  kAccessReadWrite = kAccessRead | kAccessWrite,
+};
+
+struct AccessRegion {
+  BufferRegion region;
+  int access_mask{kAccessReadWrite};
+};
+
+struct AccessRegions {
+  Array<BufferRegion> reads;
+  Array<BufferRegion> writes;
+};
+
+inline void AppendAccessRegionByMask(const AccessRegion &access,
+                                     Array<BufferRegion> *reads,
+                                     Array<BufferRegion> *writes) {
+  if (!access.region.defined()) {
+    return;
+  }
+  if (access.access_mask & kAccessRead) {
+    reads->push_back(access.region);
+  }
+  if (access.access_mask & kAccessWrite) {
+    writes->push_back(access.region);
+  }
+}
 
 enum class InferLevel : uint8_t {
   kFree = 0,
@@ -53,25 +90,17 @@ struct LowerArgs {
   Var thread_var;
   AddWorkspaceCallback AddWorkspace;
   AllocMBarrierCallback AllocMBarrier;
+  UpdateBarrierArriveCallback UpdateBarrierArrive;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
   // Map from LetStmt variable to its bound expression, for resolving
   // fragment buffer accesses through let bindings
   Map<Var, PrimExpr> let_var_to_expr;
-  // Whether the current TileOp is nested inside a pipelined loop
-  // (i.e. a surrounding loop annotated with num_stages > 0).
-  bool in_pipeline = false;
-  // Expression for mbarrier wait parity.
-  // For pipeline_num_stages=1: ko % 2
-  // For pipeline_num_stages=N: (ko / N) % 2
-  // For non-loop contexts: 0
-  PrimExpr mbar_phase_expr;
-  // Number of pipeline stages (from T.Pipelined num_stages annotation).
-  // Determines how many mbarriers to allocate per TMA copy operation.
-  int pipeline_num_stages = 1;
-  // Expression for mbarrier stage index: ko % pipeline_num_stages.
-  // Used to cycle through multiple mbarriers in pipelined loops.
-  PrimExpr mbar_stage_expr;
+  // Fallback mbarrier parity for ops that do not carry an explicit
+  // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
+  // nearest enclosing serial loop so non-pipelined TMA loops still alternate
+  // barrier phase correctly.
+  PrimExpr mbar_phase_expr = IntImm(DataType::Int(32), 0);
   // Pointer to the shared.barrier buffer for compiler-generated mbarriers.
   // Points to the LowerTileOpPass member so copy.cc sees the buffer
   // even when created lazily by the AllocMBarrier callback.
@@ -108,7 +137,22 @@ public:
 
   virtual TileOperator Clone() const = 0;
 
+  virtual AccessRegions GetAccessRegions() const {
+    AccessRegions result;
+    for (const auto &access : access_regions_) {
+      AppendAccessRegionByMask(access, &result.reads, &result.writes);
+    }
+    return result;
+  }
+
+  void SetAccessRegions(std::vector<AccessRegion> access_regions) {
+    access_regions_ = std::move(access_regions);
+  }
+
   TVM_FFI_DECLARE_OBJECT_INFO("tl.TileOperator", TileOperatorNode, Object);
+
+protected:
+  std::vector<AccessRegion> access_regions_;
 };
 
 class TileOperator : public ObjectRef {
@@ -123,7 +167,7 @@ TileOperator ParseOperator(Call call);
 TileOperator ParseOperator(Stmt stmt);
 
 using OpBuilderFunc =
-    ffi::TypedFunction<TileOperator(Array<PrimExpr>, Map<String, ObjectRef>)>;
+    TypedFunction<TileOperator(Array<PrimExpr>, Map<String, ObjectRef>)>;
 
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \

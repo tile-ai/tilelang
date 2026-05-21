@@ -7,11 +7,12 @@
 #define TVM_TL_OP_ATOMIC_ADD_H_
 
 #include "atomic_reduce.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 /*!
  * \brief Node class for atomic addition operations.
@@ -43,34 +44,22 @@ public:
         .def_ro("dst_range", &AtomicAddNode::dst_range)
         .def_ro("annotations", &AtomicAddNode::annotations);
   }
-
-  /// Check if TMA should be used
-  bool GetUseTMA() const {
-    if (auto val = annotations.Get("use_tma")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        if (int_val->value != 0) {
-          ICHECK(!src_value.defined())
-              << "TMA is not supported when using TiledAtomicAdd with PrimExpr "
-                 "as value.";
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  /// Get vectorization length based on dst dtype and target SM version
-  int GetVectorizeLength(Target target) const;
-
-protected:
-  /// Override MakeSIMTLoop to handle AtomicAdd-specific logic
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
-
-  /// Return buffer indices and total size
-  std::pair<Array<PrimExpr>, PrimExpr> ReturnIndicesAndSize(int src_dst) const;
-  /// Compute linear layout for shared tensor (used in TMA atomic add)
-  Layout ComputeLinearLayout(const Buffer &shared_tensor) const;
 };
+
+using AtomicAddTargetPredicate = bool (*)(Target target);
+
+struct AtomicAddImpl {
+  const char *name;
+  AtomicAddTargetPredicate match_target;
+
+  LayoutMap (*infer_layout)(const AtomicAddNode &op, const LayoutInferArgs &T,
+                            InferLevel level);
+
+  Stmt (*lower)(const AtomicAddNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterAtomicAddImpl(AtomicAddImpl impl);
 
 /// Wrapper class for atomic addition operations
 class AtomicAdd : public TileOperator {
@@ -78,8 +67,9 @@ public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicAdd, TileOperator,
                                              AtomicAddNode);
   TVM_DLL
-  AtomicAdd(Array<PrimExpr> args,
-            Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  AtomicAdd(ffi::Array<PrimExpr> args,
+            ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                ffi::Map<ffi::String, ffi::ObjectRef>());
   static const Op &Get();
 };
 

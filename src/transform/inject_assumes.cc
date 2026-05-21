@@ -6,25 +6,26 @@
 
 #include "common/assume.h"
 #include "common/attr.h"
+#include "support/check.h"
 #include "tvm/arith/analyzer.h"
-#include "tvm/ffi/optional.h"
 #include "tvm/ir/expr.h"
 #include "tvm/ir/transform.h"
-#include "tvm/node/structural_hash.h"
-#include "tvm/tir/builtin.h"
-#include "tvm/tir/expr.h"
-#include "tvm/tir/op.h"
-#include "tvm/tir/stmt.h"
-#include "tvm/tir/stmt_functor.h"
-#include "tvm/tir/transform.h"
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_hash.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include <sstream>
 
 namespace tvm::tl {
-using namespace tir;
+using namespace tirx;
 
-class AssumeInjector : public tvm::tir::StmtExprMutator {
-  using Base = tvm::tir::StmtExprMutator;
+class AssumeInjector : public tvm::tirx::StmtExprMutator {
+  using Base = tvm::tirx::StmtExprMutator;
 
 public:
   AssumeInjector(PrimFunc f) : f(f) {}
@@ -41,8 +42,8 @@ private:
       std::vector<Buffer> buffers;
     };
 
-    tvm::StructuralHash sh;
-    tvm::StructuralEqual se;
+    ffi::StructuralHash sh;
+    ffi::StructuralEqual se;
     // grouped by expr, since the amount of variadic shape symbols is usually
     // much smaller than buffer
     std::vector<Item> items;
@@ -51,9 +52,8 @@ private:
     void addExpr(PrimExpr e, Buffer buffer) {
       size_t h = sh(e);
       auto &bucket = buckets[h];
-      auto it = std::find_if(bucket.begin(), bucket.end(), [&](size_t y) {
-        return se(e, items[y].expr, true);
-      });
+      auto it = std::find_if(bucket.begin(), bucket.end(),
+                             [&](size_t y) { return se(e, items[y].expr); });
       if (it == bucket.end()) {
         auto index = items.size();
         items.push_back({e, {buffer}});
@@ -71,6 +71,46 @@ private:
       }
     }
 
+    // --- Stride divisibility for sub-byte dtypes ---
+    struct StrideDivisibilityItem {
+      PrimExpr stride;
+      int pack_factor;
+      std::vector<Buffer> buffers;
+    };
+    std::vector<StrideDivisibilityItem> stride_div_items;
+    std::unordered_map<size_t, std::vector<size_t>> stride_div_buckets;
+
+    void addStrideExpr(PrimExpr stride, int pack_factor, Buffer buffer) {
+      size_t h = sh(stride);
+      auto &bucket = stride_div_buckets[h];
+      auto it = std::find_if(bucket.begin(), bucket.end(), [&](size_t y) {
+        return se(stride, stride_div_items[y].stride);
+      });
+      if (it == bucket.end()) {
+        auto index = stride_div_items.size();
+        stride_div_items.push_back({stride, pack_factor, {buffer}});
+        bucket.push_back(index);
+      } else {
+        auto &item = stride_div_items[*it];
+        item.buffers.push_back(buffer);
+        // Use the largest pack_factor (strongest constraint)
+        item.pack_factor = std::max(item.pack_factor, pack_factor);
+      }
+    }
+
+    void addBufferStrides(Buffer buf) {
+      int element_bits = buf->dtype.bits() * buf->dtype.lanes();
+      if (element_bits >= 8 || buf->strides.empty())
+        return;
+      int pack_factor = 8 / element_bits;
+      for (size_t k = 0; k + 1 < buf->strides.size(); ++k) {
+        auto stride = buf->strides[k];
+        if (stride->IsInstance<IntImmNode>())
+          continue;
+        addStrideExpr(stride, pack_factor, buf);
+      }
+    }
+
     Stmt build(Stmt body) {
       auto analyzer = arith::Analyzer{};
       for (const auto &e : items) {
@@ -84,18 +124,35 @@ private:
             ss << ", ";
           ss << "`" << e.buffers[i]->name << "`";
         }
-        body = AttrStmt(simplified, tir::attr::tilelang_assume,
+        body = AttrStmt(simplified, tirx::attr::tilelang_assume,
                         StringImm(ss.str()), body);
+      }
+      // Inject stride divisibility assumes for sub-byte dtypes.
+      // E.g. for fp4 (pack_factor=2), non-last-dim strides must be even.
+      for (const auto &e : stride_div_items) {
+        auto cond =
+            EQ(floormod(e.stride, make_const(e.stride.dtype(), e.pack_factor)),
+               make_zero(e.stride.dtype()));
+        std::stringstream ss;
+        ss << "Sub-byte buffer stride must be divisible by " << e.pack_factor
+           << ": stride `" << e.stride << "` from buffer ";
+        for (size_t i = 0; i < e.buffers.size(); i++) {
+          if (i)
+            ss << ", ";
+          ss << "`" << e.buffers[i]->name << "`";
+        }
+        body = AttrStmt(cond, tirx::attr::tilelang_assume, StringImm(ss.str()),
+                        body);
       }
       return body;
     }
   };
 
   Stmt VisitStmt_(const DeclBufferNode *op) final {
-    auto body = VisitStmt(op->body);
     AssumeCreator c;
     c.addBuffer(op->buffer);
-    return DeclBuffer(op->buffer, c.build(body), op->span);
+    c.addBufferStrides(op->buffer);
+    return SeqStmt({DeclBuffer(op->buffer, op->span), c.build(Evaluate(0))});
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -132,7 +189,7 @@ private:
         Stmt body = g.stmts.size() == 1 ? g.stmts[0] : SeqStmt(g.stmts);
         std::stringstream ss;
         ss << "Assume: " << *(g.e);
-        AttrStmt attr = AttrStmt(*g.e, tir::attr::tilelang_assume,
+        AttrStmt attr = AttrStmt(*g.e, tirx::attr::tilelang_assume,
                                  StringImm(ss.str()), body);
         groups[i - 1].stmts.push_back(attr);
       } else {
@@ -144,7 +201,7 @@ private:
     // return SeqStmt(groups[0].stmts);
   }
 
-  Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const SBlockNode *op) final {
     auto body = VisitStmt(op->body);
     AssumeCreator c;
 
@@ -153,24 +210,27 @@ private:
     if (IsHostMainBlock(op)) {
       for (auto item : f->buffer_map) {
         c.addBuffer(item.second);
+        c.addBufferStrides(item.second);
       }
     }
     for (auto item : op->alloc_buffers) {
       c.addBuffer(item);
+      c.addBufferStrides(item);
     }
     for (auto item : op->match_buffers) {
       c.addBuffer(item->buffer);
+      c.addBufferStrides(item->buffer);
     }
 
-    return Block(op->iter_vars, op->reads, op->writes, op->name_hint,
-                 c.build(body), op->init, op->alloc_buffers, op->match_buffers,
-                 op->annotations, op->span);
+    return SBlock(op->iter_vars, op->reads, op->writes, op->name_hint,
+                  c.build(body), op->init, op->alloc_buffers, op->match_buffers,
+                  op->annotations, op->span);
   }
 
   PrimFunc f;
 };
 
-using namespace tir::transform;
+using namespace tirx::transform;
 
 tvm::transform::Pass InjectAssumes() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {

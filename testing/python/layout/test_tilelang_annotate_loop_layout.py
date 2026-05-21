@@ -32,6 +32,7 @@ def test_loop_layout_fragment_vec4():
 
 
 @tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_lt(9, 0)
 def test_loop_layout_identity():
     def loop_layout_fn(i, j):
         forward_thread = i

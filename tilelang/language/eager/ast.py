@@ -2,16 +2,11 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Generic, Any, Literal, TypeVar
+from typing import Generic, Any, Literal, ParamSpec, TypeVar
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from collections.abc import Iterable
 
-
-# Python 3.9 compatibility for ParamSpec
-try:
-    from typing import ParamSpec
-except ImportError:  # Python < 3.10
-    from typing_extensions import ParamSpec
 import inspect
 
 # from .utils import get_ast, get_compiled_object
@@ -689,7 +684,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     #     a = 123
     #     def foo():
     #       x = foo.__globals__ # OK, globals are maintained by python
-    #       x = {**foo.__globals__, } # Not OK: globals are copied, and the original globals cannot be freed
+    #       x = {**foo.__globals__} # Not OK: globals are copied, and the original globals cannot be freed
     #       def bar(): x
     #       return bar
     #     ```

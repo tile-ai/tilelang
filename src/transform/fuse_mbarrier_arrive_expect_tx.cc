@@ -4,12 +4,12 @@
  *        arrive_and_expect_tx before LowerOpaqueBlock.
  */
 
-#include <tvm/ffi/reflection/registry.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include "support/check.h"
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
 #include "merge_if_stmt.h"
@@ -17,7 +17,8 @@
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -42,7 +43,7 @@ private:
   static Optional<Call> GetEvaluateCall(const Stmt &stmt) {
     if (const auto *eval = stmt.as<EvaluateNode>()) {
       if (const auto *call = eval->value.as<CallNode>()) {
-        return tvm::ffi::GetRef<Call>(call);
+        return GetRef<Call>(call);
       }
     }
     return std::nullopt;
@@ -178,12 +179,12 @@ tvm::transform::Pass FuseMBarrierArriveExpectTx() {
                       const tvm::transform::PassContext &) {
     return MBarrierArriveExpectTxFuser::Rewrite(std::move(f));
   };
-  return tir::transform::CreatePrimFuncPass(
+  return tirx::transform::CreatePrimFuncPass(
       pass_func, 0, "tl.FuseMBarrierArriveExpectTx", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
+  namespace refl = reflection;
   refl::GlobalDef().def("tl.transform.FuseMBarrierArriveExpectTx",
                         FuseMBarrierArriveExpectTx);
 }

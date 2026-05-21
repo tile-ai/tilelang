@@ -4,14 +4,17 @@
  */
 
 #include "utils.h"
-#include "tvm/tir/expr.h"
+#include "support/check.h"
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/expr.h>
 
-#include <tvm/tir/builtin.h>
+#include <tvm/tirx/builtin.h>
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
 
 bool IsBufferLikeExpr(const PrimExpr &expr) {
   if (expr.as<BufferLoadNode>() || expr.as<BufferRegionNode>()) {
@@ -32,7 +35,7 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
   // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
   // extent=1)
   if (const auto *load = arg.as<BufferLoadNode>()) {
-    Array<Range> ranges;
+    ffi::Array<Range> ranges;
     for (const PrimExpr &index : load->indices) {
       if (const auto *ramp = index.as<RampNode>()) {
         ICHECK(ramp->stride.as<IntImmNode>()) << "Ramp stride must be IntImm";
@@ -61,6 +64,18 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
 
   LOG(FATAL) << "Unsupported argument for BufferRegion: " << arg;
   throw; // Unreachable
+}
+
+AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
+                                     int default_access_mask) {
+  if (const auto *call = arg.as<CallNode>()) {
+    if (call->op.same_as(RegionOp::Get())) {
+      RegionOp region(call->args);
+      return {BufferRegion(region->GetBuffer(), region->GetRanges()),
+              region->GetAccessMask()};
+    }
+  }
+  return {NormalizeToBufferRegion(arg), default_access_mask};
 }
 
 PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
@@ -97,9 +112,9 @@ PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
   }
 
   // ptype and return handle
-  PrimExpr ptype = tir::TypeAnnotation(buf->dtype);
-  Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
-                           IntImm(DataType::Int(32), rw_mask)};
+  PrimExpr ptype = tirx::TypeAnnotation(buf->dtype);
+  ffi::Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
+                                IntImm(DataType::Int(32), rw_mask)};
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
@@ -127,14 +142,21 @@ PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
   PrimExpr extent = make_const(DataType::Int(32), 1);
 
   // Build access_ptr
-  PrimExpr ptype = tir::TypeAnnotation(buf->dtype);
-  Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
-                           IntImm(DataType::Int(32), rw_mask)};
+  PrimExpr ptype = tirx::TypeAnnotation(buf->dtype);
+  ffi::Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
+                                IntImm(DataType::Int(32), rw_mask)};
   return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
 }
 
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 int to_CUtensorMapDataType(DataType dtype) {
+  // CUDA 13 adds packed U4 TensorMap formats. The vendored CUDA stub may lag
+  // the installed toolkit, so keep the enum value by CUDA's documented order.
+  constexpr int kTensorMapDataType16U4Align8B = 13;
+  if (dtype.is_float4_e2m1fn()) {
+    return kTensorMapDataType16U4Align8B;
+  }
+
   CUtensorMapDataType tp;
   if (dtype.is_float()) {
     switch (dtype.bits()) {
@@ -155,6 +177,9 @@ int to_CUtensorMapDataType(DataType dtype) {
     }
   } else if (dtype.is_bfloat16()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+  } else if (dtype.is_tfloat32()) {
+    // tfloat32 uses same memory layout as float32
+    tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
   } else if (dtype.is_float8()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
   } else if (dtype.is_int()) {

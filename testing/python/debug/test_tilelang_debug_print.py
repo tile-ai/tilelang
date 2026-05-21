@@ -33,8 +33,8 @@ def test_debug_print_buffer_cuda_fp8():
 
 @tilelang.testing.requires_rocm
 def test_debug_print_buffer_rocm_fp8():
-    debug_print_buffer(dtype=getattr(T, determine_fp8_type("e4m3")))
-    debug_print_buffer(dtype=getattr(T, determine_fp8_type("e5m2")))
+    debug_print_buffer(dtype=determine_fp8_type("e4m3"))
+    debug_print_buffer(dtype=determine_fp8_type("e5m2"))
 
 
 def debug_print_buffer_conditional(M=16, N=16):

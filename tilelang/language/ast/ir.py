@@ -32,7 +32,7 @@ from tilelang._typing import ShapeType, DType
 
 import numpy as np  # type: ignore
 
-from tvm import tir
+from tvm import tirx
 from tvm import ir
 from tvm.ir import Type
 from tvm.ir.base import deprecated
@@ -41,12 +41,12 @@ from tvm.target import Target
 
 # pylint: disable=unused-import
 from tvm.target.codegen import llvm_lookup_intrinsic_id
-from tvm.tir import Buffer, BufferRegion, IndexMap, PrimExpr
-from tvm.tir import op as _tir_op
-from tvm.tir import type_annotation
+from tvm.tirx import Buffer, BufferRegion, IndexMap, PrimExpr
+from tvm.tirx import op as _tir_op
+from tvm.tirx import type_annotation
 
-# import tir.expr for direct ir construction to pass structural_equal comparison
-from tvm.tir.expr import (
+# import tirx.expr for direct ir construction to pass structural_equal comparison
+from tvm.tirx.expr import (
     EQ,
     GE,
     GT,
@@ -83,17 +83,17 @@ from tvm.tir.expr import (
     Sub,
     Var,
 )
-from tvm.tir.generic import cast
+from tvm.tirx.generic import cast
 
 from . import _ffi_api
-from tvm.script.ir_builder.tir import frame
+from tvm.tirx.script.builder import frame
 from tilelang.language import dtypes as _dtypes
 
 # pylint: enable=unused-import
 
 
 def buffer(
-    shape: ShapeType | tir.PrimExpr | Integral,
+    shape: ShapeType | tirx.PrimExpr | Integral,
     dtype: DType = _dtypes.float32,
     data: Optional[Var] = None,
     strides: Optional[List[PrimExpr]] = None,
@@ -341,7 +341,7 @@ def match_buffer(
     )
 
 
-def block(name: str = "", no_realize: bool = False) -> frame.BlockFrame:
+def block(name: str = "", no_realize: bool = False) -> frame.SBlockFrame:
     """The block declaration statement.
 
     Parameters
@@ -354,7 +354,7 @@ def block(name: str = "", no_realize: bool = False) -> frame.BlockFrame:
 
     Returns
     -------
-    res : frame.BlockFrame
+    res : frame.SBlockFrame
         The BlockFrame.
     """
     return _ffi_api.Block(name, no_realize)  # type: ignore[attr-defined] # pylint: disable=no-member
@@ -504,7 +504,7 @@ def alloc_buffer(
     args = [shape, dtype, data, strides, elem_offset, scope, align, offset_factor, buffer_type, axis_separators]
     if annotations is not None:
         args.append(annotations)
-    return _ffi_api.AllocBuffer(*args)  # type: ignore[attr-defined] # pylint: disable=no-member
+    return _ffi_api.SBlockAllocBuffer(*args)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def _as_range(dom: Union[ir.Range, List[PrimExpr]]) -> ir.Range:
@@ -908,7 +908,7 @@ def Let(  # pylint: disable=invalid-name
     """Create a Let expression binding"""
     assert len(where) == 1, "T.Let only allows `where` to have exactly one element"
     var, value = list(where.items())[0]  # pylint: disable=redefined-outer-name
-    return tir.Let(var, value, expr)
+    return tirx.Let(var, value, expr)
 
 
 def let(
@@ -937,7 +937,7 @@ def let(
 
     @deprecated("T.let", "T.Let")
     def let_expr(v: Var, value: PrimExpr, body: PrimExpr) -> PrimExpr:
-        return tir.Let(v, value, body)
+        return tirx.Let(v, value, body)
 
     @deprecated("T.let", "T.LetStmt")
     def let_stmt(v: Var, value: PrimExpr) -> frame.LetFrame:
@@ -1225,7 +1225,7 @@ def launch_thread(
 
     .. code-block:: python
 
-    from tvm.script.ir_builder import tir as T
+    from tvm.script.ir_builder import tirx as T
     brow = T.env_thread("blockIdx.y")
     T.launch_thread(brow, 1)
 
@@ -1443,7 +1443,7 @@ float8_e5m2x64 = func_gen(("E5M2Float8x64"))
 
 
 def boolean(expr: Optional[PrimExpr] = None, is_size_var: bool = False) -> PrimExpr:
-    """Construct a new tir.Var with type boolean or cast expression to type boolean.
+    """Construct a new tirx.Var with type boolean or cast expression to type boolean.
 
     Parameters
     ----------
@@ -1456,7 +1456,7 @@ def boolean(expr: Optional[PrimExpr] = None, is_size_var: bool = False) -> PrimE
     Returns
     -------
     res : PrimExpr
-        The new tir.Var with type boolean or casted expression with type boolean.
+        The new tirx.Var with type boolean or casted expression with type boolean.
     """
     return _ffi_api.Boolean(expr, is_size_var)  # type: ignore[attr-defined] # pylint: disable=no-member
 
@@ -1478,7 +1478,7 @@ def handle(dtype: Optional[str] = None, storage_scope: str = "global", *, is_siz
     Returns
     -------
     res : PrimExpr
-        The new tir.Var with type handle or casted expression with type handle.
+        The new tirx.Var with type handle or casted expression with type handle.
     """
     is_unknown_type = dtype is None
     if dtype is None:
@@ -1492,7 +1492,7 @@ def handle(dtype: Optional[str] = None, storage_scope: str = "global", *, is_siz
 
 
 def void(expr: Optional[PrimExpr] = None, *, is_size_var: bool = False) -> PrimExpr:
-    """Construct a new tir.Var with type void or cast expression to type void.
+    """Construct a new tirx.Var with type void or cast expression to type void.
 
     Parameters
     ----------
@@ -1502,14 +1502,14 @@ def void(expr: Optional[PrimExpr] = None, *, is_size_var: bool = False) -> PrimE
     Returns
     -------
     res : PrimExpr
-        The new tir.Var with type void or casted expression with type void.
+        The new tirx.Var with type void or casted expression with type void.
     """
     return _ffi_api.Void(expr, is_size_var)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 @deprecated("T.var", "T.{dtype}")
 def var(dtype: str, name: str = "") -> Var:
-    """Construct a new tir.Var.
+    """Construct a new tirx.Var.
 
     Parameters
     ----------
@@ -1522,7 +1522,7 @@ def var(dtype: str, name: str = "") -> Var:
     Returns
     -------
     res : Var
-        The result tir.Var.
+        The result tirx.Var.
     """
     return Var(name, dtype)  # pylint: disable=no-member
 
@@ -1884,8 +1884,11 @@ ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
 ptx_wgmma_ss = _dtype_forward(_tir_op.ptx_wgmma_ss)
 ptx_wgmma_rs = _dtype_forward(_tir_op.ptx_wgmma_rs)
+ptx_wgmma_sp_ss = _dtype_forward(_tir_op.ptx_wgmma_sp_ss)
+ptx_wgmma_sp_rs = _dtype_forward(_tir_op.ptx_wgmma_sp_rs)
 ptx_tcgen05_mma_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_ss)
 ptx_tcgen05_mma_ts = _dtype_forward(_tir_op.ptx_tcgen05_mma_ts)
+ptx_tcgen05_mma_blockscaled_ss = _dtype_forward(_tir_op.ptx_tcgen05_mma_blockscaled_ss)
 ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)
@@ -2137,7 +2140,10 @@ __all__ = [
     "ptx_mma_sp",
     "ptx_wgmma_ss",
     "ptx_wgmma_rs",
+    "ptx_wgmma_sp_ss",
+    "ptx_wgmma_sp_rs",
     "ptx_tcgen05_mma_ss",
+    "ptx_tcgen05_mma_blockscaled_ss",
     "ptx_ldmatrix",
     "ptx_cp_async",
     "ptx_cp_async_bulk",
@@ -2178,7 +2184,7 @@ __all__ = [
     "broadcast",
     "ramp",
     "cast",
-    # tvm.tir.expr
+    # tvm.tirx.expr
     "Var",
     "SizeVar",
     "Reduce",

@@ -9,6 +9,7 @@ from utils import assert_tensors_similar
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
 def sparse_mla_fwd(
@@ -146,7 +147,7 @@ def sparse_mla_fwd(
                 alpha[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
             for h_i, bi_i in T.Parallel(H_per_block, BI):
                 acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
-            T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
+            T.reduce_sum(acc_s, sumexp_i, dim=1)
             for h_i in T.Parallel(H_per_block):
                 sumexp[h_i] = sumexp[h_i] * alpha[h_i] + sumexp_i[h_i]
             for h_i, d_i in T.Parallel(H_per_block, D):
@@ -265,11 +266,7 @@ def test_sparse_mla_fwd(
 
     from tilelang.profiler import do_bench
 
-    ms = do_bench(
-        fn,
-        rep=100,
-        warmup=250,
-    )
+    ms = do_bench(fn, warmup=100, rep=250)
     print(f"Average time: {ms:.3f} ms")
     print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
     print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)

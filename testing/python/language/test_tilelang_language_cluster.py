@@ -59,6 +59,18 @@ def barrier_kernel():
     return main
 
 
+def _get_clc_query_codegen_source() -> str:
+    @T.prim_func
+    def main(A: T.Tensor((2,), T.int32)):
+        with T.Kernel(1, threads=1):
+            result = T.alloc_shared((4,), T.uint32)
+            A[0] = T.clc_is_canceled(result)
+            A[1] = T.Cast("int32", T.clc_get_first_ctaid_x(result))
+
+    artifact = tilelang.lower(main, target="cuda")
+    return artifact.kernel_source
+
+
 def run_cython_cluster_launch():
     kernel = matmul(1024, 1024, 1024, 128, 128, 32)
     mod = tilelang.compile(kernel, execution_backend="cython")
@@ -103,6 +115,17 @@ def test_cluster_launch_intrinsics(cluster_size=4):
 def test_cluster_barrier():
     kernel = barrier_kernel()
     kernel()
+
+
+@tilelang.testing.requires_cuda
+def test_clc_query_codegen_includes_cluster_header():
+    src = _get_clc_query_codegen_source()
+    print("=== clc query codegen ===")
+    print(src)
+
+    assert "#include <tl_templates/cuda/cluster.h>" in src
+    assert "tl::clc_is_canceled(" in src
+    assert "tl::clc_get_first_ctaid_x(" in src
 
 
 if __name__ == "__main__":

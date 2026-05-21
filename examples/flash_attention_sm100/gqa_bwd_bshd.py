@@ -12,11 +12,7 @@ import tilelang.language as T
 import argparse
 
 
-PASS_CFG = {
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
-}
+PASS_CFG = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
 
 
 @tilelang.jit(out_idx=[3, 4], pass_configs=PASS_CFG)

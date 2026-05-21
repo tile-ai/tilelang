@@ -27,6 +27,15 @@ bool CheckOutermostParenthesesMatch(const std::string &s);
  */
 std::string RemoveOutermostParentheses(const std::string &s);
 
+/*!
+ * \brief Format a floating point value as a C++ hexfloat literal.
+ *
+ * MSVC's std::hexfloat keeps trailing zero nybbles where libstdc++ emits the
+ * shorter form. Normalize the spelling to the libstdc++/Linux style while
+ * preserving the value represented by std::hexfloat.
+ */
+std::string FlexibleHexFormat(double value);
+
 } // namespace codegen
 } // namespace tvm
 

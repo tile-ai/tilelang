@@ -9,6 +9,7 @@ Available allocation functions:
     - alloc_local: Allocates local memory buffers for thread-private storage
     - alloc_fragment: Allocates fragment memory buffers for specialized operations
     - alloc_var: Allocates single-element variable buffers
+    - alloc_global: Allocates global memory buffers as workspace
 
 Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
@@ -18,16 +19,16 @@ from __future__ import annotations
 from typing import overload, Literal
 from tilelang._typing import DType, ShapeType
 from tilelang import tvm as tvm
-from tvm.script import tir as T
-from tvm.tir import PrimExpr
-from tvm.script.parser.tir import block_attr
-from tvm.tir.buffer import Buffer
-from tvm.tir.expr import FloatImm, IntImm
+from tvm.script import tirx as T
+from tvm.tirx import PrimExpr
+from tvm.tirx.script.builder.ir import sblock_attr
+from tvm.tirx.buffer import Buffer
+from tvm.tirx.expr import FloatImm, IntImm
 
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
-from .proxy import Tensor
+from .proxy import Tensor, ptr as _ptr_sentinel
 
 
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
@@ -45,7 +46,7 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
         # lei: This is a hack to handle bool type.
         # Because tilelang's merge smem pass cannot merge bool type currently.
         scope = "shared"
-    return T.alloc_buffer(shape, dtype, scope=scope)
+    return T.sblock_alloc_buffer(shape, dtype, scope=scope)
 
 
 def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
@@ -59,7 +60,7 @@ def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
     Returns:
         T.Buffer: A TVM buffer object allocated in local memory
     """
-    return T.alloc_buffer(shape, dtype, scope=scope)
+    return T.sblock_alloc_buffer(shape, dtype, scope=scope)
 
 
 def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Buffer:
@@ -73,7 +74,7 @@ def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Bu
     Returns:
         T.Buffer: A TVM buffer object allocated in fragment memory
     """
-    return T.alloc_buffer(shape, dtype, scope=scope)
+    return T.sblock_alloc_buffer(shape, dtype, scope=scope)
 
 
 @overload
@@ -132,13 +133,45 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
     if not isinstance(parsed_scope, str):
         raise TypeError("Scope must be a string in alloc_var.")
 
-    buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
+    if dtype is _ptr_sentinel:
+        dtype = _dtypes.int64
+
+    buffer = T.sblock_alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
+        # Always use T.buffer_store for reliable initialisation across all
+        # backends.  The sblock_attr("tl.local_var_init") path feeds into the
+        # flatten_buffer transform which does not reliably emit initialiser
+        # code on some backends (e.g. HIP codegen silently drops the
+        # annotation for integer/float literals, leaving the scalar
+        # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
+        # node that every backend lowers to an assignment statement.
         if isinstance(parsed_init, (int, float, IntImm, FloatImm)):
-            block_attr({"tl.local_var_init": {buffer.data: tl_dtype(dtype)(parsed_init)}})
-        else:
-            T.buffer_store(buffer, parsed_init, 0)
+            parsed_init = tl_dtype(dtype)(parsed_init)
+        T.buffer_store(buffer, parsed_init, 0)
     return buffer
+
+
+def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
+    """Allocate a global memory buffer as a global workspace.
+
+    NOTE(chaofan): Memory allocated in this way doesn't go through torch allocator. Instead,
+    it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
+    recommend allocating workspace in Torch side and pass it to the kernel via arguments,
+    which is managed under the hood by the framework. This API is mainly for testing
+    purposes and some specific purposes.
+
+    NOTE(chaofan): This API may not be available in all backends (e.g. CuteDSL).
+
+    Args:
+        shape (tuple): The shape of the buffer to allocate
+        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
+        scope (str, optional): The memory scope. Defaults to "global"
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated in global memory
+    """
+
+    return T.sblock_alloc_buffer(shape, dtype, scope=scope)
 
 
 def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
@@ -160,11 +193,11 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
         arrive_count = [arrive_count]
     else:
         arrive_count = list(arrive_count)
-    buffer = T.alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier")
+    buffer = T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier")
     # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
     # Use buffer.data as key to support multiple barrier buffer allocations
     arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
-    block_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+    sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
 
     return buffer
 
@@ -183,11 +216,11 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
         arrive_count = [arrive_count]
     else:
         arrive_count = list(arrive_count)
-    buffer = T.alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier")
+    buffer = T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier")
     # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
     # Use buffer.data as key to support multiple barrier buffer allocations
     arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
-    block_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+    sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
 
     return buffer
 
@@ -196,7 +229,7 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
 
-    TMEM is a dedicated on-chip memory introduced in Hopper GPUs, designed to reduce register pressure and enable asynchronous, single-threaded MMA operations. It is organized as a 2D array of 512 columns by 128 rows (lanes), with each cell being 32 bits. Allocation is performed in units of columns, and every lane of a column is allocated together.
+    TMEM is a dedicated on-chip memory introduced in Blackwell GPUs, designed to reduce register pressure and enable asynchronous, single-threaded MMA operations. It is organized as a 2D array of 512 columns by 128 rows (lanes), with each cell being 32 bits. Allocation is performed in units of columns, and every lane of a column is allocated together.
 
     Key properties and requirements:
         - The number of columns allocated must be a power of 2 and at least 32.
@@ -215,13 +248,13 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
         T.Buffer: A TVM buffer object allocated in TMEM scope, suitable for use as an accumulator or operand in TCGEN5.MMA operations.
 
     Note:
-        - TMEM is only available on supported architectures (e.g., Hopper and later).
+        - TMEM is only available on supported architectures (e.g., Blackwell and later).
         - The buffer returned should be used according to TMEM access restrictions.
           Use ``T.deallocate_tmem`` only when you need an earlier, explicit release.
     """
 
     assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"
-    return T.alloc_buffer(shape, dtype, scope="shared.tmem")
+    return T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem")
 
 
 ReducerOp = Literal["sum", "max", "min"]
@@ -257,8 +290,8 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
         replication = "none"
     assert replication in ["all", "none"]
 
-    reducer = T.alloc_buffer(shape, dtype, scope="local.fragment")
-    block_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+    reducer = T.sblock_alloc_buffer(shape, dtype, scope="local.fragment")
+    sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
 
     return reducer
 
@@ -282,7 +315,7 @@ def alloc_descriptor(
     scope = "local.descriptor." + kind
     # Buffer naming via `name` is not supported by this TVM builder signature;
     # keep parameter for forward-compat, but do not pass it.
-    return T.alloc_buffer([1], dtype, scope=scope)
+    return T.sblock_alloc_buffer([1], dtype, scope=scope)
 
 
 def alloc_wgmma_desc(dtype: DType = _dtypes.uint64) -> Buffer:
@@ -327,24 +360,3 @@ def empty(*shape, dtype: DType = _dtypes.float32) -> Tensor:
         return OutTensor(shape, dtype)
     else:
         raise TypeError(f"Invalid shape {shape}")
-
-
-def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
-    """Allocate a global memory buffer as a global workspace.
-
-    NOTE: Memory allocated in this way doesn't go through torch allocator. Instead,
-    it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
-    recommend allocating workspace in Torch side and pass it to the kernel via arguments,
-    which is managed under the hood by the framework. This API is mainly for testing
-    purposes and some specific purposes.
-
-    Args:
-        shape (tuple): The shape of the buffer to allocate
-        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
-        scope (str, optional): The memory scope. Defaults to "global"
-
-    Returns:
-        T.Buffer: A TVM buffer object allocated in global memory
-    """
-
-    return T.alloc_buffer(shape, dtype, scope=scope)

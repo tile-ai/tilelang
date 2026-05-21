@@ -1,3 +1,4 @@
+import pytest
 import tilelang
 import tilelang.language as T
 import torch
@@ -43,39 +44,12 @@ def bitwise_reduce(
 def run_single_bitwise_reduce(
     name,
     func,
+    a,
     clear=True,
 ):
     M, N = 32, 32
     block_M, block_N = 32, 32
     kernel = bitwise_reduce(M, N, block_M, block_N, name, func, clear)
-
-    # Generate test data that exercises all bit patterns for robust bitwise reduce testing
-    a = torch.zeros((M, N), device="cuda", dtype=torch.int32)
-
-    # Fill with patterns that will produce meaningful results for bitwise operations:
-    # - Different bit patterns across rows/columns
-    # - Mix of 0s and 1s in various positions
-    # - Some all-1s and all-0s patterns for edge cases
-    for i in range(M):
-        for j in range(N):
-            # Create varied bit patterns:
-            # Row-based pattern: alternating bits based on row index
-            row_pattern = (i & 0xF) << (i % 4)  # 4-bit patterns shifted by row
-
-            # Column-based pattern: different bit positions set based on column
-            col_pattern = 1 << (j % 31)  # Single bit set at different positions
-
-            # Combine patterns with XOR to create diverse bit distributions
-            # Add some deterministic "noise" based on position
-            position_factor = (i * N + j) % 256
-
-            # Final value combines all patterns
-            a[i, j] = (row_pattern ^ col_pattern ^ position_factor) & 0xFFFFFFFF
-
-            if i % 4 == 0:
-                a[i, j] &= ~(0x1 << (i // 4))
-            elif i % 2 == 0:
-                a[i, j] |= 0x1 << (i // 2)
 
     if name == "reduce_bitand":
         expected = torch.full((M,), -1, device="cuda", dtype=torch.int32)
@@ -86,28 +60,73 @@ def run_single_bitwise_reduce(
 
     output = kernel(a, expected)
 
-    for i in range(M):
-        for j in range(N):
-            if name == "reduce_bitand":
-                expected[i] = expected[i] & a[i, j]
-            elif name == "reduce_bitor":
-                expected[i] = expected[i] | a[i, j]
-            elif name == "reduce_bitxor":
-                expected[i] = expected[i] ^ a[i, j]
-            else:
-                raise ValueError("Invalid name: {}".format(name))
+    expected = reference_bitwise_reduce(name, a)
     assert torch.all(output == expected)
     print("✓ {} with clear={} test passed".format(name, clear))
 
 
+def reference_bitwise_reduce(name, a):
+    if name == "reduce_bitand":
+        op = torch.bitwise_and
+        identity = -1
+    elif name == "reduce_bitor":
+        op = torch.bitwise_or
+        identity = 0
+    elif name == "reduce_bitxor":
+        op = torch.bitwise_xor
+        identity = 0
+    else:
+        raise ValueError("Invalid name: {}".format(name))
+
+    reduced = a
+    while reduced.shape[1] > 1:
+        if reduced.shape[1] % 2:
+            padding = torch.full(
+                (reduced.shape[0], 1),
+                identity,
+                device=reduced.device,
+                dtype=reduced.dtype,
+            )
+            reduced = torch.cat([reduced, padding], dim=1)
+        reduced = op(reduced[:, 0::2], reduced[:, 1::2])
+    return reduced[:, 0]
+
+
+@pytest.fixture(scope="module")
+def bitwise_reduce_input():
+    M, N = 32, 32
+    rows = torch.arange(M, dtype=torch.int32)[:, None]
+    cols = torch.arange(N, dtype=torch.int32)[None, :]
+
+    row_pattern = (rows & 0xF) << (rows % 4)
+    col_pattern = torch.bitwise_left_shift(torch.ones_like(cols), cols % 31)
+    position_factor = (rows * N + cols) % 256
+
+    a = row_pattern ^ col_pattern ^ position_factor
+
+    clear_rows = (rows % 4) == 0
+    clear_bits = torch.bitwise_left_shift(torch.ones_like(rows), rows // 4)
+    a = torch.where(clear_rows, a & torch.bitwise_not(clear_bits), a)
+
+    set_rows = ((rows % 4) != 0) & ((rows % 2) == 0)
+    set_bits = torch.bitwise_left_shift(torch.ones_like(rows), rows // 2)
+    a = torch.where(set_rows, a | set_bits, a)
+
+    return a.to(device="cuda")
+
+
+BITWISE_REDUCE_OPS = [
+    ("reduce_bitand", T.reduce_bitand),
+    ("reduce_bitor", T.reduce_bitor),
+    ("reduce_bitxor", T.reduce_bitxor),
+]
+
+
 @tilelang.testing.requires_cuda
-def test_bitwise_reduce_ops():
-    run_single_bitwise_reduce("reduce_bitand", T.reduce_bitand, clear=True)
-    run_single_bitwise_reduce("reduce_bitor", T.reduce_bitor, clear=True)
-    run_single_bitwise_reduce("reduce_bitxor", T.reduce_bitxor, clear=True)
-    run_single_bitwise_reduce("reduce_bitand", T.reduce_bitand, clear=False)
-    run_single_bitwise_reduce("reduce_bitor", T.reduce_bitor, clear=False)
-    run_single_bitwise_reduce("reduce_bitxor", T.reduce_bitxor, clear=False)
+@pytest.mark.parametrize(("name", "func"), BITWISE_REDUCE_OPS, ids=[name for name, _ in BITWISE_REDUCE_OPS])
+@pytest.mark.parametrize("clear", [True, False], ids=["clear", "no-clear"])
+def test_bitwise_reduce_ops(bitwise_reduce_input, name, func, clear):
+    run_single_bitwise_reduce(name, func, bitwise_reduce_input, clear=clear)
 
 
 if __name__ == "__main__":

@@ -7,11 +7,13 @@
 #define TVM_TL_OP_TRANSPOSE_H_
 
 #include "operator.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
-using namespace tir;
+using namespace tirx;
+using namespace ffi;
 
 /// Node class for transpose operations: dst[j, i] = src[i, j]
 class TransposeNode : public TileOperatorNode {
@@ -23,7 +25,7 @@ public:
                                     TileOperatorNode);
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
+    namespace refl = reflection;
     refl::ObjectDef<TransposeNode>()
         .def_ro("src", &TransposeNode::src)
         .def_ro("dst", &TransposeNode::dst)
@@ -35,6 +37,9 @@ public:
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
   TileOperator Clone() const override;
+
+  /// Build a SIMT-style nested parallel loop implementing the transpose.
+  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
 
 private:
   /// Create iterator variables for dimensions with extent > 1.
@@ -48,10 +53,19 @@ private:
   /// Build boundary predicate with transposed index mapping for dst.
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
-
-  /// Build a SIMT-style nested parallel loop implementing the transpose.
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
 };
+
+using TransposeTargetPredicate = bool (*)(Target target);
+
+struct TransposeImpl {
+  const char *name;
+  TransposeTargetPredicate match_target;
+
+  Stmt (*lower)(const TransposeNode &op, const LowerArgs &T,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterTransposeImpl(TransposeImpl impl);
 
 /// Wrapper class for transpose operations
 class Transpose : public TileOperator {
