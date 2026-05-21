@@ -37,6 +37,24 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float32, accum_dtype=T.fl
     return main
 
 
+def local_var_conditional_store(n=128):
+    @T.prim_func
+    def main(
+        A: T.Tensor((n,), T.float32),
+        B: T.Tensor((n,), T.float32),
+    ):
+        with T.Kernel(n, threads=128) as i:
+            x = T.alloc_var(T.float32)
+            x = A[i]
+            if A[i] > 0:
+                x = x + 1.0
+            else:
+                x = x - 1.0
+            B[i] = x
+
+    return main
+
+
 def assert_metal_codegen(
     M,
     N,
@@ -54,6 +72,7 @@ def assert_metal_codegen(
     src_code = artifact.kernel_source
     assert src_code is not None
     assert "metal" in src_code or "kernel void" in src_code
+    return src_code
 
 
 def test_metal_codegen_float32():
@@ -66,6 +85,25 @@ def test_metal_codegen_float16():
 
 def test_metal_codegen_int32():
     assert_metal_codegen(1024, 1024, 1024, 16, 16, 16, dtype=T.int32)
+
+
+def test_metal_codegen_bfloat16_storage_legalized():
+    src_code = assert_metal_codegen(1024, 1024, 1024, 16, 16, 16, dtype=T.bfloat16)
+
+    assert "bfloat" not in src_code
+    assert "ushort" in src_code
+    assert "as_type<float>" in src_code
+
+
+def test_metal_codegen_local_var_conditional_store():
+    func = local_var_conditional_store()
+    with tvm.transform.PassContext(), tvm.target.Target("metal"):
+        artifact = tilelang.lower(func, target="metal")
+
+    src_code = artifact.kernel_source
+    assert src_code is not None
+    assert "local.var" not in src_code
+    assert "thread float" in src_code
 
 
 if __name__ == "__main__":

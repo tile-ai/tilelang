@@ -63,6 +63,25 @@ def assert_gemm(
     assert jit_kernel.kernel_source is not None
 
 
+@tilelang.jit
+def local_var_conditional_store(n=128):
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((n,), T.float32),
+        B: T.Tensor((n,), T.float32),
+    ):
+        with T.Kernel(n, threads=128) as i:
+            x = T.alloc_var(T.float32)
+            x = A[i]
+            if A[i] > 0:
+                x = x + 1.0
+            else:
+                x = x - 1.0
+            B[i] = x
+
+    return kernel
+
+
 @tilelang.testing.requires_metal
 def test_gemm_float32():
     assert_gemm(1024, 1024, 1024, 16, 16, 16)
@@ -76,6 +95,22 @@ def test_gemm_float16():
 @tilelang.testing.requires_metal
 def test_gemm_int32():
     assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.int32, atol=1)
+
+
+@tilelang.testing.requires_metal
+def test_gemm_bfloat16():
+    assert_gemm(256, 256, 256, 16, 16, 16, dtype=T.bfloat16, accum_dtype=T.float32, atol=2)
+
+
+@tilelang.testing.requires_metal
+def test_local_var_conditional_store():
+    kernel = local_var_conditional_store()
+    a = torch.randn(128, dtype=torch.float32, device="mps")
+    b = torch.empty_like(a)
+
+    kernel(a, b)
+
+    torch.testing.assert_close(b, torch.where(a > 0, a + 1.0, a - 1.0))
 
 
 if __name__ == "__main__":
