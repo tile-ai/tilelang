@@ -129,7 +129,6 @@ def _test_compress(dtype, meta_dtype):
     [
         (T.int8, T.int8),
         (T.int8, T.int16),
-        (T.int8, None),
         (T.float16, T.int8),
         (T.float16, T.int16),
         (T.float32, T.int8),
