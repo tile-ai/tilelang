@@ -1492,7 +1492,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       DLOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
                        "with inner_box_dim_ > "
                     << check.max_dim << ", will be fallback to normal copy";
-      return fallback_to_normal("swizzled shared box exceeds swizzle byte width");
+      return fallback_to_normal(
+          "swizzled shared box exceeds swizzle byte width");
     }
   }
 
