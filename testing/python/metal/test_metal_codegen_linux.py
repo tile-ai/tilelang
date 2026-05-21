@@ -72,6 +72,7 @@ def assert_metal_codegen(
     src_code = artifact.kernel_source
     assert src_code is not None
     assert "metal" in src_code or "kernel void" in src_code
+    return src_code
 
 
 def test_metal_codegen_float32():
@@ -84,6 +85,14 @@ def test_metal_codegen_float16():
 
 def test_metal_codegen_int32():
     assert_metal_codegen(1024, 1024, 1024, 16, 16, 16, dtype=T.int32)
+
+
+def test_metal_codegen_bfloat16_storage_legalized():
+    src_code = assert_metal_codegen(1024, 1024, 1024, 16, 16, 16, dtype=T.bfloat16)
+
+    assert "bfloat" not in src_code
+    assert "ushort" in src_code
+    assert "as_type<float>" in src_code
 
 
 def test_metal_codegen_local_var_conditional_store():

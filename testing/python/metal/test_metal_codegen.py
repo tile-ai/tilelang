@@ -98,6 +98,11 @@ def test_gemm_int32():
 
 
 @tilelang.testing.requires_metal
+def test_gemm_bfloat16():
+    assert_gemm(256, 256, 256, 16, 16, 16, dtype=T.bfloat16, accum_dtype=T.float32, atol=2)
+
+
+@tilelang.testing.requires_metal
 def test_local_var_conditional_store():
     kernel = local_var_conditional_store()
     a = torch.randn(128, dtype=torch.float32, device="mps")

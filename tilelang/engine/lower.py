@@ -13,7 +13,7 @@ from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 from tilelang.transform import PassConfigKey
-from tilelang.transform.metal import MarkHostMetalContext, NormalizeMetalLocalVar
+from tilelang.transform.metal import LegalizeMetalBFloat16, MarkHostMetalContext, NormalizeMetalLocalVar
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target, target_get_mcpu
 from tilelang.engine.phase import (
@@ -241,6 +241,7 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
     elif target.kind.name == "metal":
         device_mod = NormalizeMetalLocalVar()(device_mod)
+        device_mod = LegalizeMetalBFloat16()(device_mod)
         device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
@@ -266,6 +267,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
         device_mod = tvm.ffi.get_global_func("target.build.webgpu")(device_mod, target)
     elif target.kind.name == "metal":
         device_mod = NormalizeMetalLocalVar()(device_mod)
+        device_mod = LegalizeMetalBFloat16()(device_mod)
         device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
