@@ -276,7 +276,7 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
             elif check_metal_availability():
                 return_var = "metal"
             elif check_hexagon_availability():
-                return_var = "llvm -mtriple=hexagon -mcpu=hexagonv73"
+                return_var = {"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"}
             else:
                 raise ValueError("No CUDA, HIP, MPS, or Hexagon available on this system.")
     else:
@@ -284,14 +284,11 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
 
     # Handle Backend-Specific Normalization (Shorthands)
     if isinstance(return_var, str) and "hexagon" in return_var.lower():
-        s = return_var.strip()
-        if s.lower() == "hexagon":
-            s = "llvm"
-        if "-mtriple" not in s:
-            s += " -mtriple=hexagon"
-        if "-mcpu" not in s:
-            s += " -mcpu=hexagonv73"
-        return_var = s.strip()
+        return_var = {"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"}
+
+    elif isinstance(return_var, dict) and return_var.get("mtriple") == "hexagon":
+        return_var.setdefault("kind", "llvm")
+        return_var.setdefault("mcpu", "hexagonv73")
 
     # Handle CuTeDSL special case
     possible_cutedsl_target = normalize_cutedsl_target(return_var)

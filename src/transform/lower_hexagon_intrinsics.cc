@@ -1,15 +1,14 @@
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/target/target_info.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/expr.h>
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
 
 namespace tvm {
 namespace tilelang {
 
-using namespace tir;
+using namespace tirx;
 using tvm::ffi::Array;
 
 class HexagonIntrinsicLowerer : public StmtExprMutator {
@@ -54,44 +53,14 @@ tvm::transform::Pass LowerHexagonIntrinsics() {
     n->body = HexagonIntrinsicLowerer().Run(std::move(n->body));
     return f;
   };
-  return tvm::tir::transform::CreatePrimFuncPass(
+  return tvm::tirx::transform::CreatePrimFuncPass(
       pass_func, 0, "tilelang.transform.LowerHexagonIntrinsics", {});
-}
-
-// Memory scope descriptors
-// These are queried by TVM's storage analysis to understand capacity/alignment.
-// Fields confirmed from tvm/target/target_info.h:
-//   unit_bits     — addressable unit size in bits
-//   max_num_bits  — total memory capacity in bits
-//   max_simd_bits — widest SIMD operation in bits (HVX = 1024-bit)
-//   head_address  — base address PrimExpr (IntImm 0 = no fixed mapping)
-
-static MemoryInfo GetHmxAccMem() {
-  auto n = tvm::ffi::make_object<MemoryInfoNode>();
-  // HMX accumulator register file: 32×32 int32 = 32768 bits
-  n->unit_bits = 32;                // 32-bit int32 elements
-  n->max_num_bits = 32LL * 32 * 32; // 32768 bits total
-  n->max_simd_bits = 1024;          // HVX vector width
-  n->head_address = IntImm(DataType::Int(32), 0);
-  return MemoryInfo(n);
-}
-
-static MemoryInfo GetVtcmMem() {
-  auto n = tvm::ffi::make_object<MemoryInfoNode>();
-  // VTCM on Hexagon v73: 8 MB
-  n->unit_bits = 8;                        // byte-addressable
-  n->max_num_bits = 8LL * 1024 * 1024 * 8; // 8 MB in bits
-  n->max_simd_bits = 1024;                 // HVX vector width
-  n->head_address = IntImm(DataType::Int(32), 0);
-  return MemoryInfo(n);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-      .def("tilelang.transform.LowerHexagonIntrinsics", LowerHexagonIntrinsics)
-      .def("tvm.info.mem.global.hmx.acc", GetHmxAccMem)
-      .def("tvm.info.mem.global.vtcm", GetVtcmMem);
+  refl::GlobalDef().def("tilelang.transform.LowerHexagonIntrinsics",
+                        LowerHexagonIntrinsics);
 }
 
 } // namespace transform

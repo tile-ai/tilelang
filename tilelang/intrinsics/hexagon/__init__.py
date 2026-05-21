@@ -1,30 +1,30 @@
 from __future__ import annotations
 
-from tvm import tir
+from tvm import tirx
 
 
 def mma(
-    A: tir.Buffer,
-    B: tir.Buffer,
-    C: tir.Buffer,
+    A: tirx.Buffer,
+    B: tirx.Buffer,
+    C: tirx.Buffer,
     *,
     extern_name: str = "hmx_mma_placeholder",
 ) -> None:
     """
     Emit an HMX matrix-multiply-accumulate intrinsic: C += A × B.
 
-    The function emits a ``T.evaluate(tir.call_extern(...))`` that lowers
+    The function emits a ``T.evaluate(tirx.call_extern(...))`` that lowers
     to an ``hmx_mma_*`` C/C++ extern call.  When targeting a real device
     you can implement that extern using the Qualcomm Hexagon Kernel Library
     (HKL) or inline assembly.
 
     Parameters
     ----------
-    A : tir.Buffer
+    A : tirx.Buffer
         Input buffer in VTCM (int8 / uint8 / float16).
-    B : tir.Buffer
+    B : tirx.Buffer
         Weight buffer in VTCM (int8 / uint8 / float16).
-    C : tir.Buffer
+    C : tirx.Buffer
         Accumulator buffer in HMX accumulator scope (int32 / float32).
     extern_name : str
         Name of the C extern to call.  Defaults to ``hmx_mma_i8i8i32``.
@@ -33,32 +33,32 @@ def mma(
     from tilelang import language as T
 
     T.evaluate(
-        tir.call_extern(
+        tirx.call_extern(
             "handle",
             extern_name,
-            A.data,
-            B.data,
-            C.data,
+            A.access_ptr("r"),
+            B.access_ptr("r"),
+            C.access_ptr("rw"),
         )
     )
 
 
-def mma_fp16(A: tir.Buffer, B: tir.Buffer, C: tir.Buffer) -> None:
+def mma_fp16(A: tirx.Buffer, B: tirx.Buffer, C: tirx.Buffer) -> None:
     """
     FP16 × FP16 → FP32 HMX MMA (requires Hexagon v75+ with HMX-FP).
     """
     mma(A, B, C, extern_name="hmx_mma_f16f16f32")
 
 
-def vtcm_dma_copy(src: tir.Buffer, dst: tir.Buffer) -> None:
+def vtcm_dma_copy(src: tirx.Buffer, dst: tirx.Buffer) -> None:
     """
     Emit an async DMA copy from DDR (*src*) to VTCM (*dst*).
 
     In a real kernel this maps to a ``dma_move`` or similar HKL call.
     The placeholder keeps the TIR graph well-formed during development.
     """
-    tir.Evaluate(
-        tir.call_extern(
+    tirx.evaluate(
+        tirx.call_extern(
             "handle",
             "hexagon_dma_copy",
             src.access_ptr("r"),

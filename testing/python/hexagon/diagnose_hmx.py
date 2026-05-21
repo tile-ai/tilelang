@@ -9,7 +9,7 @@ def has_hexagon_codegen():
     try:
         if not tvm.runtime.enabled("llvm"):
             return False
-        tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
+        tvm.target.Target({"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"})
         return True
     except Exception:
         return False
@@ -54,7 +54,7 @@ def test_000_environment():
     print(f"  has_hexagon_codegen(): {has_hexagon_codegen()}")
 
     try:
-        t = tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
+        t = tvm.target.Target({"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"})
         print(f"  hexagon target       : OK → {t}")
     except Exception as e:
         print(f"  hexagon target       : FAILED → {e}")
@@ -66,7 +66,7 @@ def test_001_ir_dump():
     """Dump the full kernel_source so we can see what was actually generated."""
     M, N, K = 32, 32, 32
     func = build_hmx_matmul(M, N, K)
-    target = tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
+    target = tvm.target.Target({"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"})
     kernel = tl.compile(func, target=target)
     ir = kernel.kernel_source
 
@@ -106,7 +106,7 @@ def test_002_hmx_lowering_status():
     """Specifically check whether HMX intrinsics were lowered or are still placeholders."""
     M, N, K = 32, 32, 32
     func = build_hmx_matmul(M, N, K)
-    target = tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
+    target = tvm.target.Target({"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"})
     kernel = tl.compile(func, target=target)
     ir = kernel.kernel_source
 

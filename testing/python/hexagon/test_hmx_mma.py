@@ -22,7 +22,7 @@ def has_hexagon_codegen():
         if not tvm.runtime.enabled("llvm"):
             return False
         # Try to construct a Hexagon target object
-        tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
+        tvm.target.Target({"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"})
         return True
     except Exception:
         return False
@@ -67,7 +67,7 @@ def build_hmx_matmul(M, N, K):
 def test_hmx_mma_compilation(M, N, K):
     """Verify that HMX MMA kernels lower to the correct Hexagon hardware intrinsics."""
     func = build_hmx_matmul(M, N, K)
-    target = tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
+    target = tvm.target.Target({"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"})
 
     # Compile the kernel
     kernel = tl.compile(func, target=target)
@@ -87,7 +87,7 @@ def test_hmx_mma_compilation(M, N, K):
 def test_hmx_host_execution_guard():
     """Verify that attempting to run Hexagon code on host raises a clear error."""
     func = build_hmx_matmul(32, 32, 32)
-    target = tvm.target.Target("llvm -mtriple=hexagon -mcpu=hexagonv73")
+    target = tvm.target.Target({"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"})
 
     kernel = tl.compile(func, target=target)
 

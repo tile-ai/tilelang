@@ -341,11 +341,15 @@ if(USE_LLVM STREQUAL "ON")
   if(LLVM_CONFIG_PATH)
     set(USE_LLVM ${LLVM_CONFIG_PATH} CACHE STRING "Path to llvm-config" FORCE)
   else()
-    message(WARNING "USE_LLVM is ON but llvm-config was not found in PATH.")
+    message(FATAL_ERROR "USE_LLVM is ON but llvm-config was not found in PATH. "
+                        "Install LLVM (llvm-config must be on PATH) or set USE_LLVM=OFF.")
   endif()
 endif()
 
-set(_TILELANG_USE_LLVM_SAVED ${USE_LLVM})
+# Save user's USE_LLVM before TVM's config.cmake overwrites it.
+# TVM's config.cmake unconditionally sets USE_LLVM to OFF, so we
+# save the value here and restore it after the include.
+set(_TILELANG_USE_LLVM_SAVED "${USE_LLVM}")
 
 # Load TVM sources and base configs
 include(cmake/load_tvm.cmake)
@@ -356,16 +360,13 @@ else()
   message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
 endif()
 
-# Restore USE_LLVM — TVM's config.cmake may have reset it
-if(_TILELANG_USE_LLVM_SAVED AND NOT _TILELANG_USE_LLVM_SAVED STREQUAL "OFF")
-  set(USE_LLVM ${_TILELANG_USE_LLVM_SAVED} CACHE STRING "LLVM config path" FORCE)
-  message(STATUS "TileLang: restored USE_LLVM=${USE_LLVM}")
-endif()
+set(USE_LLVM "${_TILELANG_USE_LLVM_SAVED}" CACHE STRING "LLVM config path" FORCE)
+set(USE_LLVM "${_TILELANG_USE_LLVM_SAVED}")
+
 unset(_TILELANG_USE_LLVM_SAVED)
 
 if(USE_LLVM AND NOT USE_LLVM STREQUAL "OFF")
   message(STATUS "TileLang Build with LLVM: ${USE_LLVM}")
-  add_definitions(-DTILELANG_HEXAGON_ENABLED)
 endif()
 
 # Re-apply TileLang's preferred backend settings after TVM's config may have
@@ -390,9 +391,10 @@ set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
 # can use paths relative to src/ (e.g. "target/utils.h", "op/builtin.h").
 list(INSERT TILE_LANG_INCLUDES 0 "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-# Include TVM 'src' directory to resolve "tvm/runtime/hexagon/hexagon_htp.h"
+# Include TVM public 'include' and private 'src' directories using absolute paths
 list(APPEND TILE_LANG_INCLUDES
-  ${TVM_SOURCE}/src
+  "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/src"
 )
 
 # Collect source files

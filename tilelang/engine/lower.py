@@ -259,9 +259,9 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
 
     if _is_hex:
         # Use SkipAssert (plural) and LowerTVMBuiltin to clean the IR for LLVM
-        device_mod = tvm.tir.transform.SkipAssert()(device_mod)
-        device_mod = tvm.tir.transform.LowerTVMBuiltin()(device_mod)
-        device_mod = tvm.tir.transform.Simplify()(device_mod)
+        device_mod = tvm.tirx.transform.SkipAssert()(device_mod)
+        device_mod = tvm.tirx.transform.LowerTVMBuiltin()(device_mod)
+        device_mod = tvm.tirx.transform.Simplify()(device_mod)
 
     if target.kind.name == "cuda":
         global_func = "target.build.tilelang_" + ("cutedsl" if "cutedsl" in target.keys else "cuda") + "_without_compile"

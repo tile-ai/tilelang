@@ -129,7 +129,10 @@ def get_hexagon_arch(target: Target) -> HexagonArch:
         If *target* is not a Hexagon target.
     """
     if not is_hexagon_target(target):
-        raise ValueError(f"Expected a Hexagon target, got: {target}. Use e.g. tvm.target.Target('llvm -mtriple=hexagon -mcpu=hexagonv73')")
+        raise ValueError(
+            f"Expected a Hexagon target, got: {target}. "
+            'Use e.g. tvm.target.Target({"kind": "llvm", "mtriple": "hexagon", "mcpu": "hexagonv73"})'
+        )
 
     attrs = target.attrs if hasattr(target, "attrs") else {}
     mcpu = str(attrs.get("mcpu", "hexagonv73")).lower()

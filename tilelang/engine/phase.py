@@ -235,7 +235,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    
+
     mod = tirx.transform.NarrowDataType(32)(mod)
     _lower_hex = tvm.get_global_func("tilelang.transform.LowerHexagonIntrinsics", True)
     if _lower_hex is not None:
