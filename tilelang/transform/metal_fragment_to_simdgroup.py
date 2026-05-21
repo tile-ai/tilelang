@@ -72,22 +72,6 @@ def _remap_buffer(buf, var_map):
     )
 
 
-def _remap_buffer(buf, var_map):
-    old_data = buf.data
-    new_data = var_map.get(old_data, None)
-    if new_data is None:
-        return buf
-    return tir.decl_buffer(
-        buf.shape,
-        buf.dtype,
-        buf.name,
-        data=new_data,
-        scope="metal.simdgroup",
-        data_alignment=buf.data_alignment,
-        offset_factor=buf.offset_factor,
-    )
-
-
 def _remap_buffer_region(region, buf_map):
     """Remap buffer inside a BufferRegion using buf_map."""
     if region is None:
@@ -113,6 +97,13 @@ def _remap_match_buffer(match, buf_map):
 
 
 def _rewrite_scope(body, var_map):
+    # Phase 1: Substitute Var references in the entire body, including inside
+    # BufferRegion objects nested within call_intrin arguments (e.g., gemm op
+    # calls).  The ir_transform approach below only visits SBlock/AllocBuffer
+    # nodes and the per-SBlock substitute() does not reach buffer vars embedded
+    # inside opaque Call args processed by subsequent lowering passes.
+    body = tir.stmt_functor.substitute(body, var_map)
+
     buf_map = {}
 
     def _pre_order(stmt):
@@ -126,7 +117,6 @@ def _rewrite_scope(body, var_map):
                     buf_map[buf] = new_buf
                     changed = True
             if changed:
-                new_body = tir.stmt_functor.substitute(stmt.body, var_map)
                 new_reads = [_remap_buffer_region(r, buf_map) for r in (stmt.reads or [])]
                 new_writes = [_remap_buffer_region(w, buf_map) for w in (stmt.writes or [])]
                 new_match_bufs = [_remap_match_buffer(m, buf_map) for m in (stmt.match_buffers or [])]
@@ -135,7 +125,7 @@ def _rewrite_scope(body, var_map):
                     new_reads,
                     new_writes,
                     stmt.name_hint,
-                    new_body,
+                    stmt.body,
                     stmt.init,
                     new_alloc_bufs,
                     new_match_bufs,
