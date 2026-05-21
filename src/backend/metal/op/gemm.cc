@@ -24,9 +24,8 @@ namespace {
 
 constexpr const char *kMetalSIMDGroup = "metal.simdgroup";
 
-std::pair<int, int>
-ComputeMetalWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
-                          int num_warps) {
+std::pair<int, int> ComputeMetalWarpPartition(const GemmWarpPolicyNode &policy,
+                                              int M, int N, int num_warps) {
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 8;
   constexpr int kNPerWarp = 8;

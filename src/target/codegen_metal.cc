@@ -334,7 +334,8 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   size_t constant_size = 1;
   for (const auto &dim : op->buffer->shape) {
     const IntImmNode *dim_imm = dim.as<IntImmNode>();
-    TVM_FFI_ICHECK(dim_imm) << "Can only handle constant size stack allocation for now";
+    TVM_FFI_ICHECK(dim_imm)
+        << "Can only handle constant size stack allocation for now";
     constant_size *= dim_imm->value;
   }
   TVM_FFI_ICHECK_GT(constant_size, 0)
@@ -345,12 +346,13 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   alloc_storage_scope_[op->buffer->data.get()] = scope;
   if (scope == "metal.simdgroup") {
     TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
-           dtype == DataType::Float(32) ||
-           dtype == DataType::BFloat(16))
+                   dtype == DataType::Float(32) ||
+                   dtype == DataType::BFloat(16))
         << "Only float16, float32, and bfloat16 are supported, but got "
         << dtype;
-    TVM_FFI_ICHECK(constant_size % 64 == 0) << "Only 8x8 matrix is supported, but got "
-                                    << constant_size << " bytes\n";
+    TVM_FFI_ICHECK(constant_size % 64 == 0)
+        << "Only 8x8 matrix is supported, but got " << constant_size
+        << " bytes\n";
 
     std::ostringstream dtype_os;
     PrintType(dtype, dtype_os);
@@ -404,7 +406,8 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
       << "but expression " << ffi::GetRef<Call>(op) << " calls PrimFunc "
       << op->op;
   auto f_check_simdgroup_shape = [](PrimExpr col, PrimExpr row) {
-    TVM_FFI_ICHECK(col->IsInstance<IntImmNode>() && row->IsInstance<IntImmNode>())
+    TVM_FFI_ICHECK(col->IsInstance<IntImmNode>() &&
+                   row->IsInstance<IntImmNode>())
         << "Only constant shape is supported for simdgroup matrix, but got "
         << col << "x" << row;
     int col_val = col.as<IntImmNode>()->value;
@@ -516,7 +519,7 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
   }
 
   return MetalModuleCreate(std::move(smap), ExtractFuncInfo(mod),
-                            ffi::String(fmt), ffi::String(source_maker.str()));
+                           ffi::String(fmt), ffi::String(source_maker.str()));
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

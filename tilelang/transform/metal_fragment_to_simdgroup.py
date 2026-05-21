@@ -10,7 +10,7 @@ from __future__ import annotations
 from tvm import tirx as tir
 from tvm import IRModule
 from tvm.ir import Op, PointerType
-from tvm.tirx import SBlock, AllocBuffer
+from tvm.tirx import SBlock
 from tvm.tirx.transform import prim_func_pass
 
 _GEMM_OPS = None

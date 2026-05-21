@@ -28,7 +28,8 @@ struct Fill {
       int region_elements = 1;
       for (auto r : op.region) {
         auto imm = r->extent.as<IntImmNode>();
-        TVM_FFI_ICHECK(imm) << "simdgroup fill region must have constant extents";
+        TVM_FFI_ICHECK(imm)
+            << "simdgroup fill region must have constant extents";
         region_elements *= imm->value;
       }
       TVM_FFI_ICHECK(region_elements % 64 == 0)

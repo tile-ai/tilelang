@@ -24,9 +24,7 @@ class GemmMetal(GemmBase):
         self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tir.Var, mbar_phase_expr: tir.PrimExpr | None = None
     ):
         thread_nums = thread_bounds.extent
-        m_warp, n_warp = self.policy.compute_warp_partition(
-            self.M, self.N, thread_nums, target, GEMM_INST_METAL
-        )
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
 

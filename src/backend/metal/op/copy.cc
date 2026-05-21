@@ -44,7 +44,8 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
       << "simdgroup buffer size must be multiple of 64 (8x8), got "
       << total_elements;
 
-  TVM_FFI_ICHECK(op.src_range.size() == 2) << "Expected 2D source for simdgroup store";
+  TVM_FFI_ICHECK(op.src_range.size() == 2)
+      << "Expected 2D source for simdgroup store";
   TVM_FFI_ICHECK(op.dst_range.size() == 2)
       << "Expected 2D destination for simdgroup store";
   PrimExpr dst_row_base = op.dst_range[0]->min;
@@ -112,12 +113,12 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &T,
           dst_col_base + warp_n * (warp_col_tiles * kNPerWarp) + j * kNPerWarp;
       PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
                           {BufferLoad(op.dst, {row, col})});
-      stmts.push_back(Evaluate(Call(
-          DataType::Handle(), builtin::simdgroup_store(),
-          {op.src->data, IntImm(DataType::Int(32), tile_idx), ptr, dst_stride,
-           IntImm(DataType::Int(32), kMPerWarp),
-           IntImm(DataType::Int(32), kNPerWarp),
-           Cast(DataType::Bool(), IntImm(DataType::Int(32), 0))})));
+      stmts.push_back(Evaluate(
+          Call(DataType::Handle(), builtin::simdgroup_store(),
+               {op.src->data, IntImm(DataType::Int(32), tile_idx), ptr,
+                dst_stride, IntImm(DataType::Int(32), kMPerWarp),
+                IntImm(DataType::Int(32), kNPerWarp),
+                Cast(DataType::Bool(), IntImm(DataType::Int(32), 0))})));
     }
   }
   if (stmts.size() == 1) {
