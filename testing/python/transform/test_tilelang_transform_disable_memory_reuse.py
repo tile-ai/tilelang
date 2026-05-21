@@ -128,9 +128,7 @@ def test_disable_reuse_no_overlap():
         """Extract merged shared-memory offsets from generated code."""
         # Alias-preserving lowering emits:
         #   void* a_shared = ((void*)((char*)buf_dyn_shmem + 0));
-        alias_pattern = (
-            r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);"
-        )
+        alias_pattern = r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);"
         # Direct merged-buffer lowering emits access patterns such as:
         #   buf_dyn_shmem)[1024])
         direct_pattern = r"buf_dyn_shmem\)\[(\d+)\]"
