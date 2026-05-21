@@ -47,6 +47,7 @@
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -505,20 +506,20 @@ private:
     PrimExpr total_size = make_const(offset_dtype, 0);
 
     for (const VarNode *var : sorted_vars) {
-      const AllocateNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem =
-          static_cast<int64_t>(alloc->dtype.bytes() * alloc->dtype.lanes());
+      const AllocBufferNode *alloc = shmem_allocs_.at(var);
+      int64_t bytes_per_elem = static_cast<int64_t>(
+          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
 
       DataType size_dtype = DataType::Int(32);
-      if (!alloc->extents.empty()) {
-        size_dtype = alloc->extents[0].dtype();
+      if (!alloc->buffer->shape.empty()) {
+        size_dtype = alloc->buffer->shape[0].dtype();
       }
       if (!size_dtype.is_int() && !size_dtype.is_uint()) {
         size_dtype = DataType::Int(32);
       }
 
       PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->extents) {
+      for (const PrimExpr &extent : alloc->buffer->shape) {
         PrimExpr e = extent;
         if (e.dtype() != size_dtype) {
           e = cast(size_dtype, e);
