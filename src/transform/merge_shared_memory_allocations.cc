@@ -449,13 +449,20 @@ public:
       const std::unordered_map<const VarNode *, const AllocBufferNode *>
           &shmem_allocs,
       bool is_dynamic = true, bool verbose = false, int align_bytes = 0,
-      bool preserve_aliases = true)
-      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
-        align_bytes_{align_bytes}, preserve_aliases_{preserve_aliases} {
-    if (!is_dynamic) {
-      merged_buf_var_ =
-          Var("buf_shmem", PointerType(PrimType(DataType::UInt(8)), "shared"));
-    }
+      bool preserve_aliases = true, bool use_static_scope_for_dynamic = false,
+      bool preserve_single_allocation = false)
+      : is_dynamic_{is_dynamic}, verbose_{verbose},
+        preserve_single_allocation_{preserve_single_allocation},
+        align_bytes_{align_bytes}, shmem_allocs_{shmem_allocs},
+        preserve_aliases_{preserve_aliases} {
+    ICHECK(!preserve_single_allocation_ || shmem_allocs_.size() == 1);
+    std::string scope =
+        is_dynamic && !use_static_scope_for_dynamic ? "shared.dyn" : "shared";
+    std::string name = is_dynamic ? "buf_dyn_shmem" : "buf_shmem";
+    DataType pointer_dtype = preserve_single_allocation_
+                                 ? shmem_allocs_.begin()->second->buffer->dtype
+                                 : DataType::UInt(8);
+    merged_buf_var_ = Var(name, PointerType(PrimType(pointer_dtype), scope));
   }
 
   /*!
@@ -623,9 +630,15 @@ private:
       }
 
       allocated_ = true;
-      Buffer merged_buf(merged_buf_var_, DataType::UInt(8),
-                        {merged_alloc_size_}, {}, PrimExpr(),
-                        merged_buf_var_->name_hint, 0, 0, kDefault);
+      DataType alloc_dtype = DataType::UInt(8);
+      Array<PrimExpr> alloc_extents = {merged_alloc_size_};
+      if (preserve_single_allocation_) {
+        const auto *alloc = shmem_allocs_.begin()->second;
+        alloc_dtype = alloc->buffer->dtype;
+        alloc_extents = alloc->buffer->shape;
+      }
+      Buffer merged_buf(merged_buf_var_, alloc_dtype, alloc_extents, {},
+                        PrimExpr(), merged_buf_var_->name_hint, 0, 0, kDefault);
       Array<Stmt> seq;
       seq.push_back(AllocBuffer(merged_buf));
       if (preserve_aliases_) {
@@ -804,7 +817,9 @@ private:
   // Wrapper function to determine if the shared memory allocation for a
   // variable is appropriate.
   bool IsAppropriateSharedMemory(const Var &var) {
-    return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
+    if (!(is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var)))
+      return false;
+    return shmem_allocs_.count(var.get()) != 0;
   }
 
   using StmtEntry = SharedMemLinearAccessPatternFinder::StmtEntry;
@@ -1598,11 +1613,12 @@ private:
 
   // Whether enable verbose logging.
   bool verbose_{false};
+  // Whether to preserve dtype/extents while converting one allocation's scope.
+  bool preserve_single_allocation_{false};
   // The alignment bytes for the merged buffer
   int align_bytes_{16};
   // The var for the merged buffer
-  Var merged_buf_var_{"buf_dyn_shmem",
-                      PointerType(PrimType(DataType::UInt(8)), "shared.dyn")};
+  Var merged_buf_var_;
   // The mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocBufferNode *> shmem_allocs_;
   // The size of the merged buffer
@@ -1628,12 +1644,18 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
                                   int align_bytes = 16, bool verbose = false,
                                   bool preserve_aliases = true,
-                                  bool disable_reuse = false) {
+                                  bool disable_reuse = false,
+                                  bool use_static_scope_for_dynamic = false) {
   AllocateCollector collector;
   collector(stmt);
-  if (collector.dyn_shmem_allocs_.size() > 1) {
+  if (collector.dyn_shmem_allocs_.size() > 1 ||
+      (use_static_scope_for_dynamic && !collector.dyn_shmem_allocs_.empty())) {
+    bool preserve_single_allocation =
+        use_static_scope_for_dynamic && collector.dyn_shmem_allocs_.size() == 1;
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
-                                  align_bytes, preserve_aliases);
+                                  align_bytes, preserve_aliases,
+                                  use_static_scope_for_dynamic,
+                                  preserve_single_allocation);
     rewriter.PlanReuse(stmt, true,
                        disable_reuse ? false : enable_aggressive_merge, false,
                        disable_reuse);
@@ -1664,16 +1686,27 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     bool debug_merge_shared_memory_allocations =
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
+    auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     bool preserve_aliases = true;
-    if (auto target = f->GetAttr<Target>(tvm::attr::kTarget)) {
-      preserve_aliases = target.value()->kind->name != "webgpu";
+    bool use_static_scope_for_dynamic = false;
+    if (target.defined()) {
+      use_static_scope_for_dynamic = TargetIsMetal(target.value());
+      preserve_aliases = target.value()->kind->name != "webgpu" &&
+                         !use_static_scope_for_dynamic;
     }
-    auto *n = f.CopyOnWrite();
-    n->body = tl::MergeSharedMemoryAllocations(
-        std::move(n->body), merge_static_smem, enable_aggressive_merge,
-        align_bytes, debug_merge_shared_memory_allocations, preserve_aliases,
-        disable_reuse);
-    return f;
+    auto run = [&]() {
+      auto *n = f.CopyOnWrite();
+      n->body = tl::MergeSharedMemoryAllocations(
+          std::move(n->body), merge_static_smem, enable_aggressive_merge,
+          align_bytes, debug_merge_shared_memory_allocations, preserve_aliases,
+          disable_reuse, use_static_scope_for_dynamic);
+      return f;
+    };
+    if (target.defined()) {
+      With<Target> target_scope(target.value());
+      return run();
+    }
+    return run();
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",
                             {});

@@ -366,10 +366,34 @@ def run_cutedsl_dynamic_shape(
 def test_cutedsl_dynamic_shape():
     run_cutedsl_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
-    run_cutedsl_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_cutedsl_dynamic_shape(
+        T.dynamic("m"),
+        T.dynamic("n"),
+        768,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        128,
+        256,
+        32,
+        2,
+    )
 
     run_cutedsl_dynamic_shape(
-        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16", "float16", 128, 256, 32, 2
+        T.dynamic("m"),
+        T.dynamic("n"),
+        T.dynamic("k"),
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        128,
+        256,
+        32,
+        2,
     )
 
 

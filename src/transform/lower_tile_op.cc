@@ -1420,7 +1420,7 @@ private:
         DataType from_ty = cast->value.dtype();
         DataType target_ty = cast->dtype;
         if (IsCudaVectorizableCast(from_ty, target_ty) &&
-            TargetIsCuda(Target::Current())) {
+            TargetIsCuda(target_)) {
           has_cast_operations = true;
         }
       }
@@ -1506,6 +1506,11 @@ using namespace tirx::transform;
 
 tvm::transform::Pass LowerTileOp() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    auto target = f->GetAttr<Target>(tvm::attr::kTarget);
+    if (target.defined()) {
+      With<Target> target_scope(target.value());
+      return LowerTileOpPass::Substitute(std::move(f));
+    }
     return LowerTileOpPass::Substitute(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});

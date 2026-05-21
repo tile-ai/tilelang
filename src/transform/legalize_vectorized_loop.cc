@@ -25,6 +25,7 @@
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/utils.h>
+#include <tvm/target/target.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -83,6 +84,11 @@ tvm::transform::Pass LegalizeVectorizedLoop() {
   using namespace tirx::transform;
   // Define the transformation function to be applied
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    auto target = f->GetAttr<Target>(tvm::attr::kTarget);
+    if (target.defined()) {
+      With<Target> target_scope(target.value());
+      return LoopVectorizedLegalizer::Substitute(std::move(f));
+    }
     return LoopVectorizedLegalizer::Substitute(std::move(f));
   };
   // Create and return a PrimFunc pass with the transformation function

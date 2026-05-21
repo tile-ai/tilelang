@@ -16,6 +16,7 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/parallel.h"
+#include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"
 #include "tir/transforms/ir_utils.h"
@@ -191,6 +192,30 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
   return reducer_layout;
 }
 
+static Array<PrimExpr> ComputeReducerShape(const Fragment &src_layout,
+                                           int dim) {
+  auto reducer_shape = src_layout->InputShape();
+  reducer_shape.erase(reducer_shape.begin() + dim);
+  if (reducer_shape.empty()) {
+    reducer_shape.push_back(1);
+  }
+  return reducer_shape;
+}
+
+static Fragment ComputeMetalReplicatedReducerLayout(const Fragment &src_layout,
+                                                    int dim,
+                                                    Range thread_bounds) {
+  auto reducer_shape = ComputeReducerShape(src_layout, dim);
+  auto forward_index = InputPlaceholders(reducer_shape.size());
+  auto thread_range = src_layout->ThreadRange();
+  if (!thread_range.defined()) {
+    thread_range = thread_bounds;
+  }
+  return Fragment(reducer_shape, forward_index, ReplicationPlaceholder(),
+                  src_layout->ReplicateExtent(), std::nullopt)
+      ->BindThreadRange(thread_range);
+}
+
 /**
  * @brief Lower the Reduce operator to a TIR statement.
  *
@@ -232,39 +257,47 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
 LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
                                     InferLevel level) const {
-  if (level >= InferLevel::kStrict)
+  if (!(IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
+        T.layout_map.count(src))) {
     return {};
+  }
 
-  if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
-      T.layout_map.count(src)) {
-    auto src_layout = T.layout_map[src].as<Fragment>().value();
-    auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
+  auto src_layout = T.layout_map[src].as<Fragment>().value();
+  bool use_metal_replicated_layout =
+      TargetIsMetal(T.target) && src_layout->IsCompletedReplicated();
+  if (level >= InferLevel::kStrict && !use_metal_replicated_layout) {
+    return {};
+  }
 
-    if (!T.layout_map.count(dst)) {
-      return {{dst, reducer_layout}};
-    }
+  Fragment reducer_layout = use_metal_replicated_layout
+                                ? ComputeMetalReplicatedReducerLayout(
+                                      src_layout, this->dim, T.thread_bounds)
+                                : ComputeReducerLayout(src_layout, this->dim);
 
-    auto orig_dst_layout = T.layout_map.Get(dst).value().as<Fragment>().value();
-    ICHECK(reducer_layout->InputDim() == orig_dst_layout->InputDim());
+  if (!T.layout_map.count(dst)) {
+    return {{dst, reducer_layout}};
+  }
 
-    auto indices = InputPlaceholders(reducer_layout->InputDim());
-    arith::Analyzer analyzer;
-    for (size_t i = 0; i < indices.size(); i++) {
-      analyzer.Bind(Downcast<Var>(indices[i]),
-                    Range(0, reducer_layout->InputShape()[i]));
-    }
-    if (!ProveFragmentContains(orig_dst_layout, reducer_layout, indices,
-                               indices, analyzer)) {
-      std::ostringstream oss;
-      oss << "Layout may conflict with ReduceOp for buffer " << dst << " vs. "
-          << src << "\n"
-          << "src_layout = " << src_layout << "\n"
-          << "reducer_layout = " << reducer_layout << "\n"
-          << "orig_dst_layout = " << orig_dst_layout << "\n"
-          << "You may need to use a shared memory to transform the "
-             "layout";
-      throw LayoutConflictException(oss.str());
-    }
+  auto orig_dst_layout = T.layout_map.Get(dst).value().as<Fragment>().value();
+  ICHECK(reducer_layout->InputDim() == orig_dst_layout->InputDim());
+
+  auto indices = InputPlaceholders(reducer_layout->InputDim());
+  arith::Analyzer analyzer;
+  for (size_t i = 0; i < indices.size(); i++) {
+    analyzer.Bind(Downcast<Var>(indices[i]),
+                  Range(0, reducer_layout->InputShape()[i]));
+  }
+  if (!ProveFragmentContains(orig_dst_layout, reducer_layout, indices, indices,
+                             analyzer)) {
+    std::ostringstream oss;
+    oss << "Layout may conflict with ReduceOp for buffer " << dst << " vs. "
+        << src << "\n"
+        << "src_layout = " << src_layout << "\n"
+        << "reducer_layout = " << reducer_layout << "\n"
+        << "orig_dst_layout = " << orig_dst_layout << "\n"
+        << "You may need to use a shared memory to transform the "
+           "layout";
+    throw LayoutConflictException(oss.str());
   }
   return {};
 }
