@@ -205,8 +205,7 @@ public:
   }
 
   runtime::StorageScope GetSummaryScope(const VarNode *buf) const {
-    return runtime::StorageScope::Create(
-        GetPtrStorageScope(GetRef<Var>(buf)));
+    return runtime::StorageScope::Create(GetPtrStorageScope(GetRef<Var>(buf)));
   }
 
   void RecordPreciseAccess(size_t scope_index,
@@ -511,8 +510,8 @@ public:
         if (it != alloc_info_.end() && it->second.alloc &&
             IsAppropriateSharedMemory(GetRef<Var>(buffer_var))) {
           Buffer buffer;
-          if (auto buffer_opt = buffer_data_to_buffer_.Get(
-                  GetRef<Var>(buffer_var))) {
+          if (auto buffer_opt =
+                  buffer_data_to_buffer_.Get(GetRef<Var>(buffer_var))) {
             buffer = buffer_opt.value();
           }
           size_t access_level =
@@ -1381,8 +1380,7 @@ private:
     if (access_node->IsInstance<StmtNode>()) {
       probe(GetRef<Stmt>(static_cast<const StmtNode *>(access_node)));
     } else if (access_node->IsInstance<PrimExprNode>()) {
-      probe(GetRef<PrimExpr>(
-          static_cast<const PrimExprNode *>(access_node)));
+      probe(GetRef<PrimExpr>(static_cast<const PrimExprNode *>(access_node)));
     }
     return probe.Result();
   }

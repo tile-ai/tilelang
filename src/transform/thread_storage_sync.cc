@@ -776,9 +776,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       allow_append_ = false;
 
       scope_.push_back(std::vector<StmtEntry>());
-      {
-        this->VisitStmt(op->then_case);
-      }
+      { this->VisitStmt(op->then_case); }
 
       s.stmt = op;
       s.access = Summarize(std::move(scope_.back()), nullptr);
@@ -799,9 +797,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     if (op->else_case) {
       auto guard = MakeGuard(tirx::Not(op->condition));
       scope_.push_back(std::vector<StmtEntry>());
-      {
-        this->VisitStmt(op->else_case.value());
-      }
+      { this->VisitStmt(op->else_case.value()); }
       auto v = Summarize(std::move(scope_.back()), nullptr);
       scope_.pop_back();
       s.access.insert(s.access.end(), v.begin(), v.end());
@@ -870,9 +866,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       allow_append_ = false;
 
       scope_.push_back(std::vector<StmtEntry>());
-      {
-        this->VisitStmt(op->body);
-      }
+      { this->VisitStmt(op->body); }
       s.stmt = op;
       s.access = Summarize(std::move(scope_.back()), nullptr);
       scope_.pop_back();
