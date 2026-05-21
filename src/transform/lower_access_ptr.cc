@@ -79,20 +79,22 @@ PrimExpr LinearOffsetFromLoad(const BufferLoad &load) {
 class AccessPtrLowerer : public StmtExprMutator {
 public:
   PrimExpr VisitExpr_(const CallNode *op) final {
-    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (!call->op.same_as(tl::access_ptr())) {
-      return std::move(call);
+    if (!op->op.same_as(tl::access_ptr())) {
+      return StmtExprMutator::VisitExpr_(op);
     }
 
-    ICHECK_EQ(call->args.size(), 3U)
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
 
-    BufferLoad base_load = Downcast<BufferLoad>(call->args[0]);
+    PrimExpr base = StmtExprMutator::VisitExpr(op->args[0]);
+    ICHECK(base.as<BufferLoadNode>())
+        << "tl.access_ptr arg0 must be BufferLoad, but got " << base;
+    BufferLoad base_load = Downcast<BufferLoad>(base);
     Buffer buffer = base_load->buffer;
     ICHECK(buffer.defined());
 
-    PrimExpr extent = call->args[1];
-    PrimExpr rw_mask = call->args[2];
+    PrimExpr extent = StmtExprMutator::VisitExpr(op->args[1]);
+    PrimExpr rw_mask = StmtExprMutator::VisitExpr(op->args[2]);
 
     PrimExpr ptype = tirx::TypeAnnotation(buffer->dtype);
     PrimExpr data = buffer->data;

@@ -239,6 +239,20 @@ private:
       : arith::IRMutatorWithAnalyzer(analyzer) {}
   // Constructor initializing the base class with the analyzer
 
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (!op->op.same_as(tl::access_ptr())) {
+      return IRMutatorWithAnalyzer::VisitExpr_(op);
+    }
+
+    // Arg0 is address metadata. Rewriting its BufferLoad into a safe-value
+    // expression destroys the pointer source needed by LowerAccessPtr.
+    ICHECK_EQ(op->args.size(), 3U)
+        << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
+    Array<PrimExpr> args{op->args[0], VisitExpr(op->args[1]),
+                         VisitExpr(op->args[2])};
+    return Call(op->dtype, op->op, args, op->annotations, op->span);
+  }
+
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
 
