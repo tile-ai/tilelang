@@ -711,6 +711,7 @@ public:
     for (const auto &[block, anno] : pipeline_info_) {
       ordered_stmts_.Set(anno.order, block);
     }
+    CollectScalarBindings();
 
     // Step 2: Emit the pipeline prologue, body and epilogue.
     Optional<Integer> pipeline_num_stages =
@@ -770,6 +771,127 @@ public:
   const Map<Buffer, Buffer> &GetBufferRemap() const { return buffer_remap_; }
 
 private:
+  struct ScalarBinding {
+    Var var;
+    PrimExpr value;
+    Span span;
+  };
+
+  using ScalarBindingMap =
+      std::unordered_map<Var, size_t, ObjectPtrHash, ObjectPtrEqual>;
+
+  void CollectScalarBindings() {
+    scalar_bindings_.clear();
+    scalar_binding_map_.clear();
+    for (const SBlock &block : ordered_stmts_) {
+      if (const auto *bind = block->body.as<BindNode>()) {
+        if (!scalar_binding_map_.count(bind->var)) {
+          scalar_binding_map_.emplace(bind->var, scalar_bindings_.size());
+          scalar_bindings_.push_back({bind->var, bind->value, bind->span});
+        }
+      }
+    }
+  }
+
+  VarSet FindScalarBindingUses(const Array<Var> &undefined_vars) const {
+    VarSet uses;
+    for (const Var &var : undefined_vars) {
+      if (scalar_binding_map_.count(var)) {
+        uses.insert(var);
+      }
+    }
+    return uses;
+  }
+
+  VarSet FindScalarBindingUses(const Stmt &stmt) const {
+    return FindScalarBindingUses(UndefinedVars(stmt, Array<Var>{}));
+  }
+
+  VarSet FindScalarBindingUses(const PrimExpr &expr) const {
+    return FindScalarBindingUses(UndefinedVars(expr));
+  }
+
+  void AppendScalarBinding(size_t binding_index, VarSet *emitted,
+                           VarSet *visiting,
+                           std::vector<size_t> *binding_indices) const {
+    const ScalarBinding &binding = scalar_bindings_[binding_index];
+    if (emitted->count(binding.var)) {
+      return;
+    }
+    ICHECK(!visiting->count(binding.var))
+        << "InjectSoftwarePipeline: cyclic scalar Bind dependency involving "
+        << binding.var;
+
+    visiting->insert(binding.var);
+    VarSet deps = FindScalarBindingUses(binding.value);
+    for (const ScalarBinding &candidate : scalar_bindings_) {
+      if (!deps.count(candidate.var)) {
+        continue;
+      }
+      auto it = scalar_binding_map_.find(candidate.var);
+      ICHECK(it != scalar_binding_map_.end());
+      AppendScalarBinding(it->second, emitted, visiting, binding_indices);
+    }
+    visiting->erase(binding.var);
+
+    emitted->insert(binding.var);
+    binding_indices->push_back(binding_index);
+  }
+
+  std::vector<size_t> RequiredScalarBindings(const Stmt &stmt) const {
+    std::vector<size_t> binding_indices;
+    if (scalar_bindings_.empty()) {
+      return binding_indices;
+    }
+
+    VarSet uses = FindScalarBindingUses(stmt);
+    if (uses.empty()) {
+      return binding_indices;
+    }
+
+    VarSet emitted;
+    VarSet visiting;
+    for (const ScalarBinding &binding : scalar_bindings_) {
+      if (!uses.count(binding.var)) {
+        continue;
+      }
+      auto it = scalar_binding_map_.find(binding.var);
+      ICHECK(it != scalar_binding_map_.end());
+      AppendScalarBinding(it->second, &emitted, &visiting, &binding_indices);
+    }
+    return binding_indices;
+  }
+
+  Stmt RewriteScalarBindingForAccess(size_t binding_index,
+                                     const PrimExpr &access_index) {
+    const ScalarBinding &binding = scalar_bindings_[binding_index];
+    Stmt bind = Bind(binding.var, binding.value, binding.span);
+    bind = PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
+                                pipeline_loop_, max_stage_ != 1)(bind);
+    bind = Substitute(bind, {{pipeline_loop_->loop_var, access_index}});
+    return bind;
+  }
+
+  SBlock ReplayScalarBindings(SBlock block, const PrimExpr &access_index) {
+    std::vector<size_t> binding_indices = RequiredScalarBindings(block->body);
+    if (binding_indices.empty()) {
+      return block;
+    }
+
+    Array<Stmt> seq;
+    for (size_t binding_index : binding_indices) {
+      seq.push_back(RewriteScalarBindingForAccess(binding_index, access_index));
+    }
+    for (const Stmt &stmt : FlattenTopLevelSeq(block->body)) {
+      seq.push_back(stmt);
+    }
+
+    SBlockNode *n = block.CopyOnWrite();
+    n->body = SeqStmt(seq);
+    return MakeBlock(SBlockRealize({}, Bool(true), block),
+                     buffer_data_to_buffer_);
+  }
+
   /*!
    * \brief Analyze accesses to the buffers in the software pipeline.
    *
@@ -1230,45 +1352,66 @@ private:
                     attr->span);
   }
 
-  HeadAsyncSyncInfo AnalyzeHeadAsyncSync(const Stmt &stmt,
-                                         HeadSeqMode seq_mode) const {
-    if (stmt.as<BindNode>()) {
-      return {};
+  class HeadAsyncSyncAnalyzer
+      : public StmtFunctor<HeadAsyncSyncInfo(const Stmt &)> {
+  public:
+    static HeadAsyncSyncInfo Analyze(const PipelineRewriter *rewriter,
+                                     const Stmt &stmt, HeadSeqMode seq_mode) {
+      HeadAsyncSyncAnalyzer analyzer(rewriter, seq_mode);
+      return analyzer(stmt);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        if (auto wait_n = TryGetStaticAsyncWaitCount(attr)) {
+
+    HeadAsyncSyncAnalyzer(const PipelineRewriter *rewriter,
+                          HeadSeqMode seq_mode)
+        : rewriter_(rewriter), seq_mode_(seq_mode) {}
+
+    HeadAsyncSyncInfo VisitStmt_(const AttrStmtNode *op) final {
+      if (IsAsyncWaitQueueScope(op)) {
+        if (auto wait_n = rewriter_->TryGetStaticAsyncWaitCount(op)) {
           return {HeadAsyncSyncKind::kWaitStatic, *wait_n};
         }
         return {HeadAsyncSyncKind::kWaitDynamic, 0};
       }
-      if (IsAsyncCommitQueueScope(attr)) {
+      if (IsAsyncCommitQueueScope(op)) {
         return {HeadAsyncSyncKind::kCommit, 0};
       }
-      if (IsAsyncWaitInflightCount(attr)) {
+      if (IsAsyncWaitInflightCount(op)) {
         return {HeadAsyncSyncKind::kBlocked, 0};
       }
-      return AnalyzeHeadAsyncSync(attr->body, seq_mode);
+      return VisitStmt(op->body);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.empty()) {
+
+    HeadAsyncSyncInfo VisitStmt_(const SeqStmtNode *op) final {
+      if (op->seq.empty()) {
         return {};
       }
-      if (seq_mode == HeadSeqMode::kSingletonOnly && seq->seq.size() != 1) {
+      if (seq_mode_ == HeadSeqMode::kSingletonOnly && op->seq.size() != 1) {
         return {HeadAsyncSyncKind::kBlocked, 0};
       }
-      return AnalyzeHeadAsyncSync(seq->seq[0], seq_mode);
+      return VisitStmt(op->seq[0]);
     }
-    if (const auto *block = stmt.as<SBlockNode>()) {
-      return AnalyzeHeadAsyncSync(block->body, seq_mode);
+
+    HeadAsyncSyncInfo VisitStmt_(const SBlockNode *op) final {
+      return VisitStmt(op->body);
     }
-    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        return AnalyzeHeadAsyncSync(realize->block->body, seq_mode);
+
+    HeadAsyncSyncInfo VisitStmt_(const SBlockRealizeNode *op) final {
+      if (is_one(op->predicate)) {
+        return VisitStmt(op->block->body);
       }
       return {HeadAsyncSyncKind::kBlocked, 0};
     }
-    return {};
+
+    HeadAsyncSyncInfo VisitStmtDefault_(const Object *) final { return {}; }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    HeadSeqMode seq_mode_;
+  };
+
+  HeadAsyncSyncInfo AnalyzeHeadAsyncSync(const Stmt &stmt,
+                                         HeadSeqMode seq_mode) const {
+    return HeadAsyncSyncAnalyzer::Analyze(this, stmt, seq_mode);
   }
 
   ClassifiedAsyncSyncStmt ClassifySimpleAsyncSyncStmt(const Stmt &stmt) const {
@@ -1359,64 +1502,81 @@ private:
     return guaranteed_groups;
   }
 
-  Stmt RewriteWaitStaticInSimpleWrapper(const Stmt &stmt, int new_wait_n,
-                                        bool *changed) const {
-    ClassifiedAsyncSyncStmt cls = ClassifySimpleAsyncSyncStmt(stmt);
-    if (cls.kind != AsyncSyncStmtKind::kWaitStatic) {
-      return stmt;
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        *changed = true;
-        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+  class WaitStaticInSimpleWrapperRewriter
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
+                                  const Stmt &stmt, int new_wait_n) {
+      if (rewriter->ClassifySimpleAsyncSyncStmt(stmt).kind !=
+          AsyncSyncStmtKind::kWaitStatic) {
+        return Optional<Stmt>();
       }
+      WaitStaticInSimpleWrapperRewriter rewrite(rewriter, new_wait_n);
+      return rewrite(stmt);
     }
-    if (stmt.as<BindNode>()) {
-      return stmt;
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      Stmt new_body =
-          RewriteWaitStaticInSimpleWrapper(attr->body, new_wait_n, changed);
-      if (*changed) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                        attr->span);
+
+    WaitStaticInSimpleWrapperRewriter(const PipelineRewriter *rewriter,
+                                      int new_wait_n)
+        : rewriter_(rewriter), new_wait_n_(new_wait_n) {}
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      if (IsAsyncWaitQueueScope(op)) {
+        return rewriter_->MakeStaticAsyncWaitStmtLike(op, new_wait_n_);
       }
-      return stmt;
-    }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.size() == 1) {
-        Stmt inner =
-            RewriteWaitStaticInSimpleWrapper(seq->seq[0], new_wait_n, changed);
-        if (*changed) {
-          return SeqStmt({inner});
-        }
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
+                      op->span);
     }
-    if (const auto *block = stmt.as<SBlockNode>()) {
-      Stmt inner =
-          RewriteWaitStaticInSimpleWrapper(block->body, new_wait_n, changed);
-      if (*changed) {
-        SBlock new_block = Downcast<SBlock>(stmt);
-        new_block.CopyOnWrite()->body = inner;
-        return new_block;
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      if (op->seq.size() != 1) {
+        return Optional<Stmt>();
       }
-      return stmt;
-    }
-    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        Stmt inner = RewriteWaitStaticInSimpleWrapper(realize->block->body,
-                                                      new_wait_n, changed);
-        if (*changed) {
-          SBlock new_block = realize->block;
-          new_block.CopyOnWrite()->body = inner;
-          return SBlockRealize(realize->iter_values, realize->predicate,
-                               new_block, realize->span);
-        }
+      Optional<Stmt> inner = VisitStmt(op->seq[0]);
+      if (!inner.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return SeqStmt({inner.value()});
     }
-    return stmt;
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
+    }
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (!is_one(op->predicate)) {
+        return Optional<Stmt>();
+      }
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = op->block;
+      new_block.CopyOnWrite()->body = body.value();
+      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
+    }
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    int new_wait_n_;
+  };
+
+  Optional<Stmt> RewriteWaitStaticInSimpleWrapper(const Stmt &stmt,
+                                                  int new_wait_n) const {
+    return WaitStaticInSimpleWrapperRewriter::Rewrite(this, stmt, new_wait_n);
   }
 
   std::optional<int> TryGetHeadStaticWaitCount(const Stmt &stmt) const {
@@ -1428,161 +1588,220 @@ private:
     return std::nullopt;
   }
 
-  std::optional<int> TryGetFirstStaticWaitCount(const Stmt &stmt) const {
-    if (stmt.as<BindNode>()) {
-      return std::nullopt;
+  class FirstStaticWaitCounter
+      : public StmtFunctor<std::optional<int>(const Stmt &)> {
+  public:
+    static std::optional<int> Find(const PipelineRewriter *rewriter,
+                                   const Stmt &stmt) {
+      FirstStaticWaitCounter finder(rewriter);
+      return finder(stmt);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      HeadAsyncSyncInfo info =
-          AnalyzeHeadAsyncSync(stmt, HeadSeqMode::kTakeFirstElement);
+
+    explicit FirstStaticWaitCounter(const PipelineRewriter *rewriter)
+        : rewriter_(rewriter) {}
+
+    std::optional<int> VisitStmt_(const AttrStmtNode *op) final {
+      HeadAsyncSyncInfo info = rewriter_->AnalyzeHeadAsyncSync(
+          GetRef<Stmt>(op), HeadSeqMode::kTakeFirstElement);
       if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
         return info.wait_n;
       }
       if (info.IsBoundary()) {
         return std::nullopt;
       }
-      return TryGetFirstStaticWaitCount(attr->body);
+      return VisitStmt(op->body);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const Stmt &elem : seq->seq) {
-        HeadAsyncSyncInfo info =
-            AnalyzeHeadAsyncSync(elem, HeadSeqMode::kTakeFirstElement);
+
+    std::optional<int> VisitStmt_(const SeqStmtNode *op) final {
+      for (const Stmt &elem : op->seq) {
+        HeadAsyncSyncInfo info = rewriter_->AnalyzeHeadAsyncSync(
+            elem, HeadSeqMode::kTakeFirstElement);
         if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
           return info.wait_n;
         }
-        if (info.IsBoundary() || ContainsAsyncSyncScopes(elem)) {
+        if (info.IsBoundary() || rewriter_->ContainsAsyncSyncScopes(elem)) {
           return std::nullopt;
         }
       }
       return std::nullopt;
     }
-    if (const auto *block = stmt.as<SBlockNode>()) {
-      return TryGetFirstStaticWaitCount(block->body);
+
+    std::optional<int> VisitStmt_(const SBlockNode *op) final {
+      return VisitStmt(op->body);
     }
-    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        return TryGetFirstStaticWaitCount(realize->block->body);
+
+    std::optional<int> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (is_one(op->predicate)) {
+        return VisitStmt(op->block->body);
       }
+      return std::nullopt;
     }
-    return std::nullopt;
+
+    std::optional<int> VisitStmtDefault_(const Object *) final {
+      return std::nullopt;
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+  };
+
+  std::optional<int> TryGetFirstStaticWaitCount(const Stmt &stmt) const {
+    return FirstStaticWaitCounter::Find(this, stmt);
   }
 
-  Stmt RewriteHeadStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
-                                      bool *changed) const {
-    if (stmt.as<BindNode>()) {
-      return stmt;
+  class HeadStaticWaitInWrapperRewriter
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
+                                  const Stmt &stmt, int new_wait_n) {
+      HeadStaticWaitInWrapperRewriter rewrite(rewriter, new_wait_n);
+      return rewrite(stmt);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        *changed = true;
-        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+
+    HeadStaticWaitInWrapperRewriter(const PipelineRewriter *rewriter,
+                                    int new_wait_n)
+        : rewriter_(rewriter), new_wait_n_(new_wait_n) {}
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      if (IsAsyncWaitQueueScope(op)) {
+        return rewriter_->MakeStaticAsyncWaitStmtLike(op, new_wait_n_);
       }
-      Stmt new_body =
-          RewriteHeadStaticWaitInWrapper(attr->body, new_wait_n, changed);
-      if (*changed) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                        attr->span);
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
+                      op->span);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.empty()) {
-        return stmt;
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      if (op->seq.empty()) {
+        return Optional<Stmt>();
       }
-      Array<Stmt> new_seq = seq->seq;
-      new_seq.Set(
-          0, RewriteHeadStaticWaitInWrapper(seq->seq[0], new_wait_n, changed));
-      if (*changed) {
-        return SeqStmt(new_seq);
+      Optional<Stmt> first = VisitStmt(op->seq[0]);
+      if (!first.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      Array<Stmt> new_seq = op->seq;
+      new_seq.Set(0, first.value());
+      return SeqStmt(new_seq);
     }
-    if (const auto *block = stmt.as<SBlockNode>()) {
-      Stmt new_body =
-          RewriteHeadStaticWaitInWrapper(block->body, new_wait_n, changed);
-      if (*changed) {
-        SBlock new_block = Downcast<SBlock>(stmt);
-        new_block.CopyOnWrite()->body = new_body;
-        return new_block;
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
     }
-    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        Stmt new_body = RewriteHeadStaticWaitInWrapper(realize->block->body,
-                                                       new_wait_n, changed);
-        if (*changed) {
-          SBlock new_block = realize->block;
-          new_block.CopyOnWrite()->body = new_body;
-          return SBlockRealize(realize->iter_values, realize->predicate,
-                               new_block, realize->span);
-        }
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (!is_one(op->predicate)) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = op->block;
+      new_block.CopyOnWrite()->body = body.value();
+      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
     }
-    return stmt;
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    int new_wait_n_;
+  };
+
+  Optional<Stmt> RewriteHeadStaticWaitInWrapper(const Stmt &stmt,
+                                                int new_wait_n) const {
+    return HeadStaticWaitInWrapperRewriter::Rewrite(this, stmt, new_wait_n);
   }
 
-  Stmt RewriteFirstStaticWaitInWrapper(const Stmt &stmt, int new_wait_n,
-                                       bool *changed) const {
-    if (stmt.as<BindNode>()) {
-      return stmt;
+  class FirstStaticWaitInWrapperRewriter
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
+                                  const Stmt &stmt, int new_wait_n) {
+      FirstStaticWaitInWrapperRewriter rewrite(rewriter, new_wait_n);
+      return rewrite(stmt);
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (IsAsyncWaitQueueScope(attr)) {
-        *changed = true;
-        return MakeStaticAsyncWaitStmtLike(attr, new_wait_n);
+
+    FirstStaticWaitInWrapperRewriter(const PipelineRewriter *rewriter,
+                                     int new_wait_n)
+        : rewriter_(rewriter), new_wait_n_(new_wait_n) {}
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      if (IsAsyncWaitQueueScope(op)) {
+        return rewriter_->MakeStaticAsyncWaitStmtLike(op, new_wait_n_);
       }
-      if (IsAsyncCommitQueueScope(attr) || IsAsyncWaitInflightCount(attr)) {
-        return stmt;
+      if (IsAsyncCommitQueueScope(op) || IsAsyncWaitInflightCount(op)) {
+        return Optional<Stmt>();
       }
-      Stmt new_body =
-          RewriteFirstStaticWaitInWrapper(attr->body, new_wait_n, changed);
-      if (*changed) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                        attr->span);
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
+                      op->span);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      Array<Stmt> new_seq = seq->seq;
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      Array<Stmt> new_seq = op->seq;
       for (int i = 0, n = static_cast<int>(new_seq.size()); i < n; ++i) {
-        Stmt updated =
-            RewriteFirstStaticWaitInWrapper(new_seq[i], new_wait_n, changed);
-        if (*changed) {
-          new_seq.Set(i, updated);
+        Optional<Stmt> updated = VisitStmt(new_seq[i]);
+        if (updated.defined()) {
+          new_seq.Set(i, updated.value());
           return SeqStmt(new_seq);
         }
-        if (ContainsAsyncSyncScopes(new_seq[i])) {
-          return stmt;
+        if (rewriter_->ContainsAsyncSyncScopes(new_seq[i])) {
+          return Optional<Stmt>();
         }
       }
-      return stmt;
+      return Optional<Stmt>();
     }
-    if (const auto *block = stmt.as<SBlockNode>()) {
-      Stmt new_body =
-          RewriteFirstStaticWaitInWrapper(block->body, new_wait_n, changed);
-      if (*changed) {
-        SBlock new_block = Downcast<SBlock>(stmt);
-        new_block.CopyOnWrite()->body = new_body;
-        return new_block;
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
     }
-    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        Stmt new_body = RewriteFirstStaticWaitInWrapper(realize->block->body,
-                                                        new_wait_n, changed);
-        if (*changed) {
-          SBlock new_block = realize->block;
-          new_block.CopyOnWrite()->body = new_body;
-          return SBlockRealize(realize->iter_values, realize->predicate,
-                               new_block, realize->span);
-        }
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (!is_one(op->predicate)) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = op->block;
+      new_block.CopyOnWrite()->body = body.value();
+      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
     }
-    return stmt;
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    int new_wait_n_;
+  };
+
+  Optional<Stmt> RewriteFirstStaticWaitInWrapper(const Stmt &stmt,
+                                                 int new_wait_n) const {
+    return FirstStaticWaitInWrapperRewriter::Rewrite(this, stmt, new_wait_n);
   }
 
   Stmt MaybeRelaxLoopWaits(const For &loop, int pre_outstanding_lb) const {
@@ -1631,10 +1850,10 @@ private:
               !uses_head_fallback || outstanding_lb >= (candidate_wait_n + 1);
           if (candidate_wait_n > 0 && enough_pre_outstanding &&
               (!uses_head_fallback || groups_after_wait_lb > 0)) {
-            bool changed_wait = false;
-            body.Set(i, RewriteWaitStaticInSimpleWrapper(
-                            body[i], candidate_wait_n, &changed_wait));
-            if (changed_wait) {
+            Optional<Stmt> rewritten_wait =
+                RewriteWaitStaticInSimpleWrapper(body[i], candidate_wait_n);
+            if (rewritten_wait.defined()) {
+              body.Set(i, rewritten_wait.value());
               changed = true;
               effective_wait_n = candidate_wait_n;
             }
@@ -1669,60 +1888,84 @@ private:
     return new_loop;
   }
 
-  Stmt RelaxLoopWaitsInSimpleWrapper(const Stmt &stmt, int pre_outstanding_lb,
-                                     bool *changed) const {
-    if (const auto *loop = stmt.as<ForNode>()) {
-      Stmt relaxed =
-          MaybeRelaxLoopWaits(Downcast<For>(stmt), pre_outstanding_lb);
-      *changed = !relaxed.same_as(stmt);
+  class LoopWaitsInSimpleWrapperRelaxer
+      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
+  public:
+    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
+                                  const Stmt &stmt, int pre_outstanding_lb) {
+      LoopWaitsInSimpleWrapperRelaxer relaxer(rewriter, pre_outstanding_lb);
+      return relaxer(stmt);
+    }
+
+    LoopWaitsInSimpleWrapperRelaxer(const PipelineRewriter *rewriter,
+                                    int pre_outstanding_lb)
+        : rewriter_(rewriter), pre_outstanding_lb_(pre_outstanding_lb) {}
+
+    Optional<Stmt> VisitStmt_(const ForNode *op) final {
+      For loop = GetRef<For>(op);
+      Stmt relaxed = rewriter_->MaybeRelaxLoopWaits(loop, pre_outstanding_lb_);
+      if (relaxed.same_as(loop)) {
+        return Optional<Stmt>();
+      }
       return relaxed;
     }
-    if (stmt.as<BindNode>()) {
-      return stmt;
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
-          attr->body, pre_outstanding_lb, changed);
-      if (*changed) {
-        return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                        attr->span);
+
+    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
+                      op->span);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      if (seq->seq.size() == 1) {
-        Stmt inner = RelaxLoopWaitsInSimpleWrapper(seq->seq[0],
-                                                   pre_outstanding_lb, changed);
-        if (*changed) {
-          return SeqStmt({inner});
-        }
+
+    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
+      if (op->seq.size() != 1) {
+        return Optional<Stmt>();
       }
-      return stmt;
-    }
-    if (const auto *block = stmt.as<SBlockNode>()) {
-      Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
-          block->body, pre_outstanding_lb, changed);
-      if (*changed) {
-        SBlock new_block = Downcast<SBlock>(stmt);
-        new_block.CopyOnWrite()->body = new_body;
-        return new_block;
+      Optional<Stmt> inner = VisitStmt(op->seq[0]);
+      if (!inner.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      return SeqStmt({inner.value()});
     }
-    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-      if (is_one(realize->predicate)) {
-        Stmt new_body = RelaxLoopWaitsInSimpleWrapper(
-            realize->block->body, pre_outstanding_lb, changed);
-        if (*changed) {
-          SBlock new_block = realize->block;
-          new_block.CopyOnWrite()->body = new_body;
-          return SBlockRealize(realize->iter_values, realize->predicate,
-                               new_block, realize->span);
-        }
+
+    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
       }
-      return stmt;
+      SBlock new_block = GetRef<SBlock>(op);
+      new_block.CopyOnWrite()->body = body.value();
+      return new_block;
     }
-    return stmt;
+
+    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
+      if (!is_one(op->predicate)) {
+        return Optional<Stmt>();
+      }
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      SBlock new_block = op->block;
+      new_block.CopyOnWrite()->body = body.value();
+      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
+    }
+
+    Optional<Stmt> VisitStmtDefault_(const Object *) final {
+      return Optional<Stmt>();
+    }
+
+  private:
+    const PipelineRewriter *rewriter_;
+    int pre_outstanding_lb_;
+  };
+
+  Optional<Stmt> RelaxLoopWaitsInSimpleWrapper(const Stmt &stmt,
+                                               int pre_outstanding_lb) const {
+    return LoopWaitsInSimpleWrapperRelaxer::Rewrite(this, stmt,
+                                                    pre_outstanding_lb);
   }
 
   class AsyncPipelineLoopWaitRelaxer : public StmtExprMutator {
@@ -1740,10 +1983,10 @@ private:
       int outstanding_lb = 0;
       for (int i = 0, n = static_cast<int>(visited.size()); i < n; ++i) {
         Stmt current = visited[i];
-        bool changed_loop = false;
-        current = rewriter_->RelaxLoopWaitsInSimpleWrapper(
-            current, outstanding_lb, &changed_loop);
-        if (changed_loop) {
+        Optional<Stmt> relaxed =
+            rewriter_->RelaxLoopWaitsInSimpleWrapper(current, outstanding_lb);
+        if (relaxed.defined()) {
+          current = relaxed.value();
           visited.Set(i, current);
         }
         ClassifiedAsyncSyncStmt cls =
@@ -1805,15 +2048,17 @@ private:
       return seq;
     }
     for (size_t pos = 1; pos < suffix_wait_indices.size(); ++pos) {
-      bool changed = false;
       int idx = suffix_wait_indices[pos];
       // Tail consumers drain the final committed groups with no new commits in
       // between. Relax them progressively from the end so the suffix becomes
       // ..., wait<2>, wait<1>, wait<0> instead of rewriting every drain wait to
       // the same retain count.
       int new_wait_n = std::min(retain, static_cast<int>(pos));
-      seq.Set(idx,
-              RewriteFirstStaticWaitInWrapper(seq[idx], new_wait_n, &changed));
+      Optional<Stmt> rewritten =
+          RewriteFirstStaticWaitInWrapper(seq[idx], new_wait_n);
+      if (rewritten.defined()) {
+        seq.Set(idx, rewritten.value());
+      }
     }
     return seq;
   }
@@ -2104,6 +2349,9 @@ private:
     BufferCommitGroupMap buffer_to_commit_group;
 
     for (const SBlock &block : ordered_stmts_) {
+      if (block->body.as<BindNode>()) {
+        continue;
+      }
       const auto &pipeline_anno = pipeline_info_.at(block);
       int stage = pipeline_anno.stage;
       PrimExpr inbound = Bool(true);
@@ -2136,6 +2384,7 @@ private:
       }
       new_block = Downcast<SBlock>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
+      new_block = ReplayScalarBindings(new_block, normalized_access_index);
 
       Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
       rewritten_stmt = WrapLoopDependentWrappers(std::move(rewritten_stmt),
@@ -2276,6 +2525,8 @@ private:
   Map<Buffer, Buffer> buffer_remap_;
   Optional<Target> target_;
   Array<SBlock> ordered_stmts_;
+  std::vector<ScalarBinding> scalar_bindings_;
+  ScalarBindingMap scalar_binding_map_;
   std::vector<IfWrapper> loop_var_if_wrappers_;
   std::map<int, AsyncStateGlobal> async_states_;
 };

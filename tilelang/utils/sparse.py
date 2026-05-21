@@ -257,7 +257,7 @@ def compress(
     assert A.is_contiguous(), "Input must be contiguous"
     assert A.dim() == 2, "Input must be 2D"
 
-    tl_meta_dtype = _to_tl_dtype(meta_dtype) if meta_dtype is not None else _DEFAULT_META_DTYPE
+    tl_meta_dtype = _to_tl_dtype(meta_dtype) if meta_dtype is not None else (T.int32 if A.dtype == torch.int8 else _DEFAULT_META_DTYPE)
     S, D = A.shape
     block_m = min(_BLOCK_M, S) if block_m is None else block_m
     block_k = min(_BLOCK_K, D) if block_k is None else block_k
