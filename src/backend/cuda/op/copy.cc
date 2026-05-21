@@ -363,8 +363,8 @@ private:
                           arith::Analyzer *analyzer, CopyInst copy_inst);
 };
 
-struct Conv2DIm2Col {
-  static Stmt Lower(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
+struct Im2Col {
+  static Stmt Lower(const Im2ColOpNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer);
 };
 
@@ -1283,10 +1283,19 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
 
+  auto fallback_to_normal = [&](const char *reason) -> Stmt {
+    if (GetIsTmaCopy(op)) {
+      LOG(FATAL) << "T.tma_copy() cannot fall back to normal copy in "
+                 << "LowerBulk: " << reason << ", src=" << src->name
+                 << ", dst=" << dst->name;
+    }
+    return LowerNormal(op, T, analyzer);
+  };
+
   if (T.layout_map.count(global_tensor)) {
     DLOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
                      "layout, fallback to normal copy.";
-    return LowerNormal(op, T, analyzer);
+    return fallback_to_normal("non-swizzled global layout");
   }
 
   auto linear_layout = ComputeLinearLayout(shared_tensor);
@@ -1360,7 +1369,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       if (stride->value % 16 != 0 || stride->value >= (1ULL << 40)) {
         DLOG(WARNING) << "TMA bulk copy cannot support a global stride of "
                       << desc.global_stride[i] << ", fallback to normal copy.";
-        return LowerNormal(op, T, analyzer);
+        return fallback_to_normal("unsupported global stride");
       }
     }
   }
@@ -1413,7 +1422,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       DLOG(WARNING) << "TMA bulk copy cannot support shared layout with input "
                     << "dimension " << shared_layout->InputDim()
                     << ", fallback to normal copy.";
-      return LowerNormal(op, T, analyzer);
+      return fallback_to_normal("shared layout input dimension is less than 2");
     }
     const int ndim = static_cast<int>(shared_layout->InputDim());
     auto stride = as_const_int(shared_layout->InputShape()[ndim - 2]);
@@ -1434,12 +1443,12 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       DLOG(WARNING) << "Bulk copy cannot support a padded layout for src: "
                     << src->name << ", dst: " << dst->name
                     << ", fallback to normal copy";
-      return LowerNormal(op, T, analyzer);
+      return fallback_to_normal("padded shared layout");
     } else {
       DLOG(WARNING) << "Came across unsupported swizzle layout for src: "
                     << src->name << ", dst: " << dst->name
                     << ", fallback to normal copy";
-      return LowerNormal(op, T, analyzer);
+      return fallback_to_normal("unsupported shared swizzle layout");
     }
   }
 
@@ -1448,7 +1457,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
     DLOG(WARNING) << "inner_box_dim " << desc.smem_box[0]
                   << " can only be a constant integer for TMA bulk copy, "
                      "fallback to normal copy";
-    return LowerNormal(op, T, analyzer);
+    return fallback_to_normal("non-constant inner box dimension");
   }
   int instruction_dim = *inner_box_dim;
   if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B)) {
@@ -1483,7 +1492,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &T,
       DLOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
                        "with inner_box_dim_ > "
                     << check.max_dim << ", will be fallback to normal copy";
-      return LowerNormal(op, T, analyzer);
+      return fallback_to_normal(
+          "swizzled shared box exceeds swizzle byte width");
     }
   }
 
@@ -1997,8 +2007,8 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &T,
   return tma_copy;
 }
 
-Stmt Conv2DIm2Col::Lower(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
-                         arith::Analyzer *analyzer) {
+Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &T,
+                   arith::Analyzer *analyzer) {
   const BufferRegion &dst_region = op.dstRegion_;
   const Buffer &src = op.src_;
   const Buffer &dst = op.dst_;
@@ -2199,17 +2209,19 @@ bool RegisterCudaCopy() {
 
 const bool cuda_copy_registered = RegisterCudaCopy();
 
-bool RegisterCudaConv2DIm2Col() {
-  RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl{
-      "cuda.Conv2DIm2Col",
-      MatchCudaCopyTarget,
+bool RegisterCudaIm2Col() {
+  RegisterIm2ColImpl(Im2ColImpl{
+      "cuda.Im2Col",
+      [](Target target) {
+        return MatchCudaCopyTarget(target) && TargetIsHopper(target);
+      },
       100,
-      cuda::Conv2DIm2Col::Lower,
+      cuda::Im2Col::Lower,
   });
   return true;
 }
 
-const bool cuda_conv2d_im2col_registered = RegisterCudaConv2DIm2Col();
+const bool cuda_im2col_registered = RegisterCudaIm2Col();
 
 } // namespace
 

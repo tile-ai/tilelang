@@ -45,6 +45,9 @@ static constexpr const char *kPipelineAsyncProducers =
 /*! Per-statement async producer group id (-1 = not an async producer). */
 static constexpr const char *kPipelineAsyncProducerGroups =
     "software_pipeline_async_producer_groups";
+/*! Per-original-statement replayable scalar Bind flag (1 = replayable). */
+static constexpr const char *kPipelineReplayableScalarBinds =
+    "software_pipeline_replayable_scalar_binds";
 
 // ---------------------------------------------------------------------------
 // GetPipelineNumStages

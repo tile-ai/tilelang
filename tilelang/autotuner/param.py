@@ -60,6 +60,7 @@ class CompileArgs:
     pass_configs: dict[str, Any] | None = None
 
     def compile_program(self, program: PrimFunc):
+        """Compile one candidate program using this compile configuration."""
         return tilelang.compile(
             program,
             out_idx=self.out_idx,
@@ -71,6 +72,7 @@ class CompileArgs:
         )
 
     def __hash__(self):
+        """Return a stable hash for cache key construction."""
         data = {
             "execution_backend": self.execution_backend,
             "target": str(self.target),
@@ -122,6 +124,7 @@ class ProfileArgs:
     cache_input_tensors: bool = True
 
     def __hash__(self):
+        """Return a stable hash for profiling configuration reuse."""
         data = {
             "warmup": self.warmup,
             "rep": self.rep,
@@ -158,12 +161,14 @@ class AutotuneResult:
 
     @staticmethod
     def _load_binary(path: str):
+        """Load binary content from a cache artifact."""
         with open(path, "rb") as file:
             binary = file.read()
         return binary
 
     @staticmethod
     def _safe_write_file(path: str, mode: str, operation: Callable[[Any], None]):
+        """Atomically write one cache file through a temporary sibling file."""
         # Random a temporary file within the same FS as the cache directory
         tmp_dir = env.TILELANG_TMP_DIR
         os.makedirs(tmp_dir, exist_ok=True)
@@ -175,6 +180,7 @@ class AutotuneResult:
 
     @staticmethod
     def _safe_write_executable(executable: Executable, path: str):
+        """Atomically export one runtime executable to disk."""
         tmp_dir = env.TILELANG_TMP_DIR
         os.makedirs(tmp_dir, exist_ok=True)
         temp_path = os.path.join(tmp_dir, f"{os.getpid()}_{uuid.uuid4()}.so")
@@ -203,15 +209,18 @@ class AutotuneResult:
         device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
         if verbose:
             logger.debug(f"Saving kernel source code to file: {device_kernel_path}")
-        if kernel.kernel_source is not None:
-            self._safe_write_file(device_kernel_path, "w", lambda f: f.write(kernel.kernel_source))
+        device_kernel_source = kernel.kernel_source
+        if kernel.execution_backend == "cutedsl":
+            device_kernel_source = kernel.adapter.get_kernel_source(kernel_only=True)
+        if device_kernel_source is not None:
+            self._safe_write_file(device_kernel_path, "w", lambda f: f.write(device_kernel_source))
 
         # Save host kernel source code (wrapped)
         host_kernel_path = os.path.join(cache_path, HOST_KERNEL_PATH)
         if verbose:
             logger.debug(f"Saving wrapped kernel source code to file: {host_kernel_path}")
         # Match kernel_cache behavior: use host source for tvm_ffi, otherwise wrapped kernel
-        if kernel.execution_backend == "tvm_ffi":
+        if kernel.execution_backend == "tvm_ffi" or kernel.execution_backend == "cutedsl":
             self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_host_source()))
         else:
             self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_kernel_source()))
@@ -458,6 +467,7 @@ class AutotuneResult:
 
     @classmethod
     def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> AutotuneResult:
+        """Load a complete autotune result and its compiled kernel from disk."""
         if not os.path.exists(path):
             return None
 
@@ -527,6 +537,7 @@ class AutotuneResult:
 
     @staticmethod
     def _get_kernel_lib_file(execution_backend: str) -> str:
+        """Return the cache filename for one backend's executable artifact."""
         if execution_backend == "nvrtc":
             return KERNEL_CUBIN_PATH
         if execution_backend == "tvm_ffi":
@@ -537,6 +548,7 @@ class AutotuneResult:
 
     @classmethod
     def _get_required_kernel_files(cls, path: Path, execution_backend: str) -> list[Path]:
+        """Return backend-specific files required to reload a kernel."""
         files = [path / cls._get_kernel_lib_file(execution_backend)]
         if execution_backend == "nvrtc":
             files.append(path / KERNEL_PY_PATH)
@@ -544,6 +556,7 @@ class AutotuneResult:
 
     @classmethod
     def _get_complete_result_files(cls, path: Path, execution_backend: str) -> list[Path]:
+        """Return the full file set that marks an autotune result complete."""
         return list(
             dict.fromkeys(
                 [
@@ -560,14 +573,17 @@ class AutotuneResult:
 
     @classmethod
     def _get_missing_complete_result_files(cls, path: Path, execution_backend: str) -> list[Path]:
+        """Return complete-result files missing from a candidate cache path."""
         return [file for file in cls._get_complete_result_files(path, execution_backend) if not file.exists()]
 
     @classmethod
     def _is_complete_result_dir(cls, path: Path, execution_backend: str) -> bool:
+        """Return whether a cache directory contains all required files."""
         return path.is_dir() and not cls._get_missing_complete_result_files(path, execution_backend)
 
     @classmethod
     def _remove_incomplete_result_dir(cls, path: Path, execution_backend: str) -> bool:
+        """Remove a stale incomplete result directory when present."""
         if not path.is_dir() or cls._is_complete_result_dir(path, execution_backend):
             return False
         shutil.rmtree(path)
@@ -575,4 +591,5 @@ class AutotuneResult:
 
     @staticmethod
     def _is_rename_collision(exc: OSError) -> bool:
+        """Return whether a rename failure came from a benign race."""
         return exc.errno in {errno.EEXIST, errno.ENOTEMPTY}

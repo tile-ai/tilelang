@@ -37,10 +37,6 @@ using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
                                            ObjectPtrHash, ObjectPtrEqual>;
 
-using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
-using BufferRegionMap = std::unordered_map<Buffer, Array<BufferRegion>,
-                                           ObjectPtrHash, ObjectPtrEqual>;
-
 /*!
  * \brief Check whether two regions have intersections.
  * \param region1 The first region.
@@ -294,8 +290,8 @@ private:
         is_global_copy_pattern_ = true;
       }
     }
-    // Conv2D im2col always uses TMA on Hopper.
-    if (const auto *im2col = tile_op.as<Conv2DIm2ColOpNode>()) {
+    // Im2Col always uses TMA on Hopper.
+    if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
       if (IsGlobalLikeBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
         is_global_copy_pattern_ = true;
         if (TargetIsHopper(target_)) {
@@ -728,7 +724,7 @@ private:
         }
         return;
       }
-      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
         saw_copy = true;
       } else {
         saw_non_copy_tile_op = true;
@@ -756,7 +752,7 @@ private:
       if (tile_op.as<RegionOpNode>()) {
         return;
       }
-      if (tile_op.as<CopyNode>() || tile_op.as<Conv2DIm2ColOpNode>()) {
+      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
         if (copy_tile_op.defined()) {
           saw_multiple_copy_ops = true;
           copy_tile_op = Optional<TileOperator>();
@@ -809,7 +805,7 @@ private:
       return;
     }
 
-    if (const auto *im2col = copy_tile_op.value().as<Conv2DIm2ColOpNode>()) {
+    if (const auto *im2col = copy_tile_op.value().as<Im2ColOpNode>()) {
       if (!IsGlobalLikeBuffer(im2col->src_) || !IsSharedBuffer(im2col->dst_)) {
         return;
       }
@@ -941,11 +937,12 @@ private:
           continue;
         }
         const auto &producer = pipeline_stage_infos[it->second];
-        ICHECK_LE(producer.stage, consumer.stage)
+        ICHECK_EQ(producer.stage, consumer.stage)
             << "Pipeline planning error: scalar dependency from statement "
             << producer.original_stmt_index << " to statement "
             << consumer.original_stmt_index
-            << " crosses from a later stage to an earlier stage.";
+            << " crosses pipeline stages. Scheduled scalar Bind statements "
+               "must stay in the same stage as their consumers.";
         if (producer.stage == consumer.stage) {
           ICHECK_LT(producer.order, consumer.order)
               << "Pipeline planning error: scalar dependency from statement "
@@ -1106,7 +1103,95 @@ private:
     pinfo.cp_async_wait_min_inflight = async_info.cp_async_wait_min_inflight;
     pinfo.cp_async_wait_has_dynamic = async_info.cp_async_wait_has_dynamic;
     ClassifyCopyLikeStage(block->body, &pinfo);
-    return std::move(pinfo);
+    return pinfo;
+  }
+
+  std::pair<Array<BufferRegion>, Array<BufferRegion>> CollectStmtAccessRegions(
+      const Stmt &stmt,
+      const AsyncDependencyChainBuilder &chain_builder) const {
+    SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                 /*name_hint=*/"", /*body*/ stmt);
+    auto collector =
+        BufferRegionCollector(buffer_data_to_buffer_, chain_builder, target_);
+    collector(block);
+    return {collector.GetReads(), collector.GetWrites()};
+  }
+
+  BufferSet CollectPipelineWriteBuffers(
+      const Array<Stmt> &stmts,
+      const AsyncDependencyChainBuilder &chain_builder) const {
+    BufferSet write_buffers;
+    for (const Stmt &stmt : stmts) {
+      auto [_, writes] = CollectStmtAccessRegions(stmt, chain_builder);
+      for (const BufferRegion &write : writes) {
+        write_buffers.insert(write->buffer);
+      }
+    }
+    return write_buffers;
+  }
+
+  bool IsReplayableScalarBindStmt(
+      const Stmt &stmt, const BufferSet &pipeline_write_buffers,
+      const AsyncDependencyChainBuilder &chain_builder) const {
+    if (stmt.as<BindNode>() == nullptr) {
+      return false;
+    }
+    auto [reads, _] = CollectStmtAccessRegions(stmt, chain_builder);
+    for (const BufferRegion &read : reads) {
+      if (pipeline_write_buffers.count(read->buffer)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  struct ScheduledStmtAnalysis {
+    size_t original_stmt_count{0};
+    Array<Stmt> scheduled_stmts;
+    std::vector<size_t> scheduled_indices;
+    Array<Integer> replayable_bind_mask;
+  };
+
+  ScheduledStmtAnalysis AnalyzeScheduledStmts(
+      const Array<Stmt> &stmts,
+      const AsyncDependencyChainBuilder &chain_builder) const {
+    BufferSet pipeline_write_buffers =
+        CollectPipelineWriteBuffers(stmts, chain_builder);
+    ScheduledStmtAnalysis analysis;
+    analysis.original_stmt_count = stmts.size();
+    analysis.replayable_bind_mask.reserve(stmts.size());
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      const Stmt &stmt = stmts[i];
+      bool replayable = IsReplayableScalarBindStmt(stmt, pipeline_write_buffers,
+                                                   chain_builder);
+      analysis.replayable_bind_mask.push_back(Integer(replayable ? 1 : 0));
+      if (replayable) {
+        continue;
+      }
+      analysis.scheduled_indices.push_back(i);
+      analysis.scheduled_stmts.push_back(stmt);
+    }
+    return analysis;
+  }
+
+  Array<Integer> FilterAnnotationsForScheduledStmts(
+      const Array<Integer> &annotations,
+      const ScheduledStmtAnalysis &analysis) const {
+    if (annotations.size() == analysis.scheduled_stmts.size()) {
+      return annotations;
+    }
+
+    ICHECK_EQ(annotations.size(), analysis.original_stmt_count)
+        << "PipelinePlanning: expected pipeline annotation size to match "
+           "either the scheduled statement count or the original statement "
+           "count";
+
+    Array<Integer> filtered;
+    for (size_t index : analysis.scheduled_indices) {
+      filtered.push_back(annotations[index]);
+    }
+    ICHECK_EQ(filtered.size(), analysis.scheduled_stmts.size());
+    return filtered;
   }
 
   class PipelineBodySeqFinder
@@ -1246,18 +1331,10 @@ private:
 
       Map<String, Any> annotations;
       for (const auto &[key, value] : loop->annotations) {
-        if (key != "tl_pipeline_order") {
+        if (key != "tl_pipeline_order" && key != "tl_pipeline_stage") {
           annotations.Set(key, value);
         }
       }
-      annotations.Set(s_tir::attr::software_pipeline_order, order_anno.value());
-
-      for (const auto &[key, value] : loop->annotations) {
-        if (key != "tl_pipeline_stage") {
-          annotations.Set(key, value);
-        }
-      }
-      annotations.Set(s_tir::attr::software_pipeline_stage, stage_anno.value());
       if (TargetHasAsyncCopy(target_) && use_async_copy_) {
         // Legacy explicit stage/order annotations do not carry per-statement
         // async producer metadata yet, so keep the previous stage-level
@@ -1278,9 +1355,40 @@ private:
       }
       SeqStmt pipeline_body_seq =
           PipelineBodySeqFinder::FindOrFatal(pipeline_body_root);
-      MaybeAnnotateLegacyAsyncPipelineLoop(pipeline_body_root,
-                                           pipeline_body_seq->seq, order_array,
-                                           stage_array, &annotations);
+      Array<Stmt> pipeline_stmts =
+          SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
+      AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
+      chain_builder(pipeline_body_root);
+      ScheduledStmtAnalysis analysis =
+          AnalyzeScheduledStmts(pipeline_stmts, chain_builder);
+      ICHECK(!analysis.scheduled_stmts.empty())
+          << "PipelinePlanning: explicit pipeline annotations have no "
+             "schedulable statements after removing replayable scalar Bind "
+             "statements";
+      Array<Integer> filtered_order_array =
+          FilterAnnotationsForScheduledStmts(order_array, analysis);
+      Array<Integer> filtered_stage_array =
+          FilterAnnotationsForScheduledStmts(stage_array, analysis);
+      annotations.Set(s_tir::attr::software_pipeline_order,
+                      filtered_order_array);
+      annotations.Set(s_tir::attr::software_pipeline_stage,
+                      filtered_stage_array);
+      if (pipeline_stmts.size() == pipeline_body_seq->seq.size()) {
+        bool flatten_preserved_original_order = true;
+        for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
+          if (!pipeline_stmts[i].same_as(pipeline_body_seq->seq[i])) {
+            flatten_preserved_original_order = false;
+            break;
+          }
+        }
+        if (flatten_preserved_original_order) {
+          annotations.Set(kPipelineReplayableScalarBinds,
+                          analysis.replayable_bind_mask);
+        }
+      }
+      MaybeAnnotateLegacyAsyncPipelineLoop(
+          pipeline_body_root, analysis.scheduled_stmts, filtered_order_array,
+          filtered_stage_array, &annotations);
       auto for_node = GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
@@ -1334,13 +1442,18 @@ private:
     // inside the loop body. Flatten them so pipeline planning can assign
     // individual stages to the produce and wait statements.
     Array<Stmt> flat_stmts = SeqStmtFlattener::Flatten(pipeline_body_seq->seq);
-
     AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
     chain_builder(pipeline_body_root);
+    ScheduledStmtAnalysis analysis =
+        AnalyzeScheduledStmts(flat_stmts, chain_builder);
+    ICHECK(!analysis.scheduled_stmts.empty())
+        << "PipelinePlanning: loop has no schedulable statements after "
+           "removing replayable scalar Bind statements";
 
     std::vector<PipelineStageInfo> pipeline_stage_infos;
-    for (size_t i = 0; i < flat_stmts.size(); i++) {
-      auto pinfo = MakePipelineStageInfo(flat_stmts[i], i, chain_builder);
+    for (size_t i = 0; i < analysis.scheduled_stmts.size(); i++) {
+      auto pinfo =
+          MakePipelineStageInfo(analysis.scheduled_stmts[i], i, chain_builder);
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
@@ -2169,6 +2282,8 @@ private:
                     Array<Integer>(stages));
     annotations.Set(s_tir::attr::software_pipeline_order,
                     Array<Integer>(orders));
+    annotations.Set(kPipelineReplayableScalarBinds,
+                    analysis.replayable_bind_mask);
 
     // Propagate per-statement TMA eligibility so InjectSoftwarePipeline can
     // rewrite TMA copies to use pipeline-level barrier management.
@@ -2292,7 +2407,7 @@ private:
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.erase(buffer->data);
     }
-    return std::move(block);
+    return block;
   }
 
   Map<Var, Buffer> buffer_data_to_buffer_;

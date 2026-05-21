@@ -19,11 +19,11 @@ using namespace tirx;
 using namespace ffi;
 
 /*!
- * \brief Get TVM Op handle for Conv2DIm2Col.
+ * \brief Get TVM Op handle for Im2Col.
  */
 
 /*!
- * \brief Clone this Conv2DIm2Col operator.
+ * \brief Clone this Im2Col operator.
  *
  * Returns a TileOperator reference that is a shallow clone of this operator.
  */
@@ -113,12 +113,12 @@ protected:
 
   /**
    * \brief Constructor.
-   * \param args Expression arguments for the Conv2D im2col operator.
+   * \param args Expression arguments for the Im2Col operator.
    * \param vmap Buffer variable mapping.
    */
 
   /**
-   * \brief Get the TVM Op handle corresponding to this Conv2DIm2Col operator.
+   * \brief Get the TVM Op handle corresponding to this Im2Col operator.
    * @return Reference to the singleton TVM Op representing this operator.
    */
   TileOperator Clone() const;
@@ -162,12 +162,12 @@ public:
 };
 
 /*!
- * \brief Special operator for Conv2D im2col transformation.
+ * \brief Special operator for Im2Col transformation.
  *
  * This operator converts input image layout into columnar format suitable
  * for matrix multiplication-based convolution lowering.
  */
-class Conv2DIm2ColOpNode : public TileOperatorNode {
+class Im2ColOpNode : public TileOperatorNode {
 public:
   BufferRegion srcRegion_, dstRegion_;
   Buffer src_,
@@ -181,21 +181,21 @@ public:
   PrimExpr c_step_;                    // Step size in channel dimension
   Map<String, ObjectRef> annotations_; // Annotations from Call node
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Conv2DIm2Col", Conv2DIm2ColOpNode,
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Im2Col", Im2ColOpNode,
                                     TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = reflection;
-    refl::ObjectDef<Conv2DIm2ColOpNode>()
-        .def_ro("srcRegion", &Conv2DIm2ColOpNode::srcRegion_)
-        .def_ro("dstRegion", &Conv2DIm2ColOpNode::dstRegion_)
-        .def_ro("src", &Conv2DIm2ColOpNode::src_)
-        .def_ro("dst", &Conv2DIm2ColOpNode::dst_)
-        .def_ro("stride", &Conv2DIm2ColOpNode::stride_)
-        .def_ro("padding", &Conv2DIm2ColOpNode::padding_)
-        .def_ro("dilation", &Conv2DIm2ColOpNode::dilation_)
-        .def_ro("kernel", &Conv2DIm2ColOpNode::kernel_)
-        .def_ro("eviction_policy", &Conv2DIm2ColOpNode::eviction_policy_);
+    refl::ObjectDef<Im2ColOpNode>()
+        .def_ro("srcRegion", &Im2ColOpNode::srcRegion_)
+        .def_ro("dstRegion", &Im2ColOpNode::dstRegion_)
+        .def_ro("src", &Im2ColOpNode::src_)
+        .def_ro("dst", &Im2ColOpNode::dst_)
+        .def_ro("stride", &Im2ColOpNode::stride_)
+        .def_ro("padding", &Im2ColOpNode::padding_)
+        .def_ro("dilation", &Im2ColOpNode::dilation_)
+        .def_ro("kernel", &Im2ColOpNode::kernel_)
+        .def_ro("eviction_policy", &Im2ColOpNode::eviction_policy_);
   }
 
   /*!
@@ -216,24 +216,24 @@ public:
   TileOperator Clone() const;
 };
 
-struct Conv2DIm2ColImpl {
+struct Im2ColImpl {
   const char *name;
   CopyTargetPredicate match_target;
   int priority;
 
-  Stmt (*lower)(const Conv2DIm2ColOpNode &op, const LowerArgs &T,
+  Stmt (*lower)(const Im2ColOpNode &op, const LowerArgs &T,
                 arith::Analyzer *analyzer);
 };
 
-void RegisterConv2DIm2ColImpl(Conv2DIm2ColImpl impl);
+void RegisterIm2ColImpl(Im2ColImpl impl);
 
-class Conv2DIm2ColOp : public TileOperator {
+class Im2ColOp : public TileOperator {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Conv2DIm2ColOp, TileOperator,
-                                             Conv2DIm2ColOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Im2ColOp, TileOperator,
+                                             Im2ColOpNode);
   TVM_DLL
-  Conv2DIm2ColOp(Array<PrimExpr> args,
-                 Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  Im2ColOp(Array<PrimExpr> args,
+           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

@@ -93,6 +93,21 @@ def _rocm_target_from_arch(arch: str | None) -> Target | str:
     return Target(target_dict)
 
 
+def _detect_torch_cuda_arch() -> str | None:
+    """Return the CUDA SM architecture detected from PyTorch, if available."""
+    if not torch.cuda.is_available():
+        return None
+    cap = torch.cuda.get_device_capability(0)
+    return f"sm_{nvcc.get_target_arch(cap)}" if cap else None
+
+
+def _cuda_target_from_arch(arch: str | None) -> Target | str:
+    """Build a CUDA target while preserving the legacy bare string fallback."""
+    if arch is None:
+        return "cuda"
+    return Target({"kind": "cuda", "arch": arch})
+
+
 def describe_supported_targets() -> dict[str, str]:
     """
     Return a mapping of supported target names to usage descriptions.
@@ -165,7 +180,9 @@ def determine_torch_fp8_type(fp8_format: Literal["e4m3", "e5m2"] = "e4m3") -> to
     return torch_dtype
 
 
-def _with_cutedsl_key(target: Target) -> Target:
+def _with_cutedsl_key(target: Target | str) -> Target:
+    if not isinstance(target, Target):
+        target = Target(target)
     target_dict = dict(target.export())
     target_dict["keys"] = list(dict.fromkeys([*target_dict.get("keys", ()), "cutedsl"]))
     return Target(target_dict)
@@ -195,7 +212,7 @@ def normalize_cutedsl_target(target: TargetLike) -> Target | None:
 
     if target.strip() == "cutedsl":
         try:
-            return _with_cutedsl_key(Target("cuda"))
+            return _with_cutedsl_key(_cuda_target_from_arch(_detect_torch_cuda_arch()))
         except Exception:
             return None
 
@@ -237,10 +254,7 @@ def determine_target(target: TargetLike | Literal["auto"] = "auto", return_objec
 
             # Determine the target based on availability
             if is_cuda_available:
-                if torch.cuda.is_available() and (cap := torch.cuda.get_device_capability(0)):
-                    return_var = Target({"kind": "cuda", "arch": f"sm_{nvcc.get_target_arch(cap)}"})
-                else:
-                    return_var = "cuda"
+                return_var = _cuda_target_from_arch(_detect_torch_cuda_arch())
             elif is_hip_available:
                 return_var = _rocm_target_from_arch(_detect_torch_rocm_arch())
             elif check_metal_availability():

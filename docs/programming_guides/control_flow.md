@@ -99,6 +99,10 @@ for ko in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
     T.gemm(A_s, B_s, C_f)             # stage: compute
 ```
 
+For manual `stage` / `order` annotations and the rule that scalar `Bind`
+statements do not consume annotation slots, see
+[Software Pipeline Annotations](software_pipeline.md).
+
 ### Persistent (advanced)
 
 `T.Persistent(domain, wave_size, index, group_size=...)` exposes persistent

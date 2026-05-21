@@ -26,7 +26,7 @@ public:
   using A_type = conditional_t<std::is_same<A_type_cute, float>::value,
                                tfloat32_t, A_type_cute>;
   using B_type = conditional_t<std::is_same<B_type_cute, float>::value,
-                               tfloat32_t, A_type_cute>;
+                               tfloat32_t, B_type_cute>;
   using C_type = C_type_raw;
 
   static constexpr GMMA::Major GmmaMajorA =
