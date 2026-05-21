@@ -18,6 +18,8 @@ def _is_cutedsl_available():
 
 pytestmark = pytest.mark.skipif(not _is_cutedsl_available(), reason="CuTeDSL not installed")
 
+_CUTEDSL_GEMM_ACCUM_DTYPE = "float32"
+
 
 def matmul(
     M,
@@ -226,7 +228,7 @@ def test_gemm_jit_kernel():
         False,
         "float16",
         "float16",
-        "float16",
+        _CUTEDSL_GEMM_ACCUM_DTYPE,
         128,
         256,
         32,
@@ -271,7 +273,7 @@ def run_cutedsl_kernel_do_bench(
 @tilelang.testing.requires_cuda
 @pytest.mark.perf
 def test_cutedsl_kernel_do_bench():
-    run_cutedsl_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_cutedsl_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", _CUTEDSL_GEMM_ACCUM_DTYPE, 128, 256, 32, 2)
 
 
 def run_cutedsl_kernel_multi_stream(
@@ -314,7 +316,7 @@ def run_cutedsl_kernel_multi_stream(
 
 @tilelang.testing.requires_cuda
 def test_cutedsl_kernel_multi_stream():
-    run_cutedsl_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_cutedsl_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", _CUTEDSL_GEMM_ACCUM_DTYPE, 128, 256, 32, 2)
 
 
 def run_cutedsl_dynamic_shape(
@@ -364,12 +366,36 @@ def run_cutedsl_dynamic_shape(
 
 @tilelang.testing.requires_cuda
 def test_cutedsl_dynamic_shape():
-    run_cutedsl_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
-
-    run_cutedsl_dynamic_shape(T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_cutedsl_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, "float16", "float16", _CUTEDSL_GEMM_ACCUM_DTYPE, 128, 256, 32, 2)
 
     run_cutedsl_dynamic_shape(
-        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16", "float16", 128, 256, 32, 2
+        T.dynamic("m"),
+        T.dynamic("n"),
+        768,
+        False,
+        False,
+        "float16",
+        "float16",
+        _CUTEDSL_GEMM_ACCUM_DTYPE,
+        128,
+        256,
+        32,
+        2,
+    )
+
+    run_cutedsl_dynamic_shape(
+        T.dynamic("m"),
+        T.dynamic("n"),
+        T.dynamic("k"),
+        False,
+        False,
+        "float16",
+        "float16",
+        _CUTEDSL_GEMM_ACCUM_DTYPE,
+        128,
+        256,
+        32,
+        2,
     )
 
 
